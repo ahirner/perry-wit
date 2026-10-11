@@ -18,6 +18,8 @@ import read each `package.json`: `description` supplies the explanation, `main` 
 TypeScript, and `perryWit` supplies the WIT file, world, default export, and argument presets.
 Adding a package requires no changes to the site builder. The build compiles its contents
 and verifies the default export. Imported exports are discovered during compilation.
+Cargo example tests, SDK checks, and Nix example builds use these same per-example
+`world.wit` contracts. The root `wit/world.wit` defines only the CLI command world.
 
 ```json
 {

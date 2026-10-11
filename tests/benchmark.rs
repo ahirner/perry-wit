@@ -578,8 +578,8 @@ fn examples() -> Result<Vec<Row>> {
         (
             "example: merge_task",
             "examples/merge_task/index.ts",
-            "wit",
-            "task-runner",
+            "examples/merge_task",
+            "merge-task",
         ),
         (
             "example: template task",

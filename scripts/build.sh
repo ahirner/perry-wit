@@ -6,6 +6,6 @@ cd "$SCRIPT_DIR/.."
 
 mkdir -p dist
 cargo run --bin perry-wit -- examples/merge_docs/index.ts \
-  --world merge-docs -o dist/perry_merge_docs.wasm
+  --wit examples/merge_docs --world merge-docs -o dist/perry_merge_docs.wasm
 cargo run --bin perry-wit -- examples/merge_task/index.ts \
-  --world task-runner -o dist/perry_merge_task.wasm
+  --wit examples/merge_task --world merge-task -o dist/perry_merge_task.wasm

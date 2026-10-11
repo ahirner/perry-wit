@@ -112,8 +112,7 @@ pub(crate) fn exports(
             });
         }
     }
-    // Exported functions outside the world stay internal, so one module can serve several
-    // worlds (`examples/merge_task/index.ts` implements both `task-runner` and `merge-task`).
+    // Exported functions outside the selected world stay internal.
     Ok(bound)
 }
 

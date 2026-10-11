@@ -154,7 +154,8 @@ struct MergeError {
 
 #[tokio::test(flavor = "current_thread")]
 async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() -> Result<()> {
-    let (resolve, package) = perry_wit::component::wit::resolve_wit(std::path::Path::new("wit"))?;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_wit(std::path::Path::new("examples/merge_docs"))?;
     let world = resolve.select_world(&[package], Some("merge-docs"))?;
     let compiled = perry_wit::compile_for_world(
         include_str!("../../examples/merge_docs/index.ts"),
@@ -266,47 +267,41 @@ struct Document {
 
 #[test]
 fn checked_in_markdown_example_counts_unicode_code_points() -> Result<()> {
-    for world in ["task-runner", "merge-task"] {
-        let compiled = perry_wit::compile_file(
-            std::path::Path::new("examples/merge_task/index.ts"),
-            &perry_wit::CompileOptions {
-                wit_dir: "wit".into(),
-                world: Some(world.into()),
-                core_only: false,
-            },
-        )?;
-        let engine = Engine::default();
-        let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-        let render = instance
-            .get_typed_func::<(&str, Vec<&str>), (Document,)>(&mut store, "render-markdown")?;
-        for (title, paragraphs, markdown) in [
-            (
-                "  Field notes 🍄  ",
-                vec![" First ", "  ", "Café 🙂 "],
-                "# Field notes 🍄\n\nFirst\n\nCafé 🙂",
-            ),
-            (" ", vec![" ", ""], ""),
-            ("Title", vec![], "# Title"),
-            ("", vec![" e\u{301} ", "👩‍💻"], "e\u{301}\n\n👩‍💻"),
-        ] {
-            assert_eq!(
-                render.call(&mut store, (title, paragraphs))?.0,
-                Document {
-                    markdown: markdown.into(),
-                    code_points: markdown.chars().count() as u32
-                }
-            );
-        }
-        if world == "merge-task" {
-            let count =
-                instance.get_typed_func::<(&str,), (u32,)>(&mut store, "count-code-points")?;
-            for (text, expected) in [("", 0), ("Café 🙂", 6), ("e\u{301}", 2), ("👩‍💻", 3)]
-            {
-                assert_eq!(count.call(&mut store, (text,))?.0, expected);
+    let compiled = perry_wit::compile_file(
+        std::path::Path::new("examples/merge_task/index.ts"),
+        &perry_wit::CompileOptions {
+            wit_dir: "examples/merge_task".into(),
+            world: Some("merge-task".into()),
+            core_only: false,
+        },
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let render =
+        instance.get_typed_func::<(&str, Vec<&str>), (Document,)>(&mut store, "render-markdown")?;
+    for (title, paragraphs, markdown) in [
+        (
+            "  Field notes 🍄  ",
+            vec![" First ", "  ", "Café 🙂 "],
+            "# Field notes 🍄\n\nFirst\n\nCafé 🙂",
+        ),
+        (" ", vec![" ", ""], ""),
+        ("Title", vec![], "# Title"),
+        ("", vec![" e\u{301} ", "👩‍💻"], "e\u{301}\n\n👩‍💻"),
+    ] {
+        assert_eq!(
+            render.call(&mut store, (title, paragraphs))?.0,
+            Document {
+                markdown: markdown.into(),
+                code_points: markdown.chars().count() as u32
             }
-        }
+        );
+    }
+    let count = instance.get_typed_func::<(&str,), (u32,)>(&mut store, "count-code-points")?;
+    for (text, expected) in [("", 0), ("Café 🙂", 6), ("e\u{301}", 2), ("👩‍💻", 3)] {
+        assert_eq!(count.call(&mut store, (text,))?.0, expected);
     }
     Ok(())
 }

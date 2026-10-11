@@ -135,11 +135,11 @@ export function runTask(input: string): string {
 }
 ```
 
-Compile then invoke the library export:
+Compile and invoke the checked-in Markdown example:
 
 ```sh
-perry-wit src/index.ts --wit wit --world task-runner -o dist/task.wasm
-wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("hello")' dist/task.wasm
+perry-wit examples/merge_task/index.ts --wit examples/merge_task --world merge-task -o dist/task.wasm
+wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'render-markdown("Notes", ["First paragraph"])' dist/task.wasm
 ```
 
 - **Export Mapping**: WIT kebab-case export names map to TypeScript camelCase functions. Unexported functions remain internal.

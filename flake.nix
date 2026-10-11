@@ -220,8 +220,8 @@
             export WASI_WIT_PATH="${wasiP3Wit}"
             mkdir -p dist
             perry-wit examples/merge_task/index.ts \
-              --wit wit \
-              --world task-runner \
+              --wit examples/merge_task \
+              --world merge-task \
               -o dist/perry_merge_task.wasm
             wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'render-markdown("hermetic-build", ["First", "Second"])' dist/perry_merge_task.wasm
           '';
@@ -303,7 +303,7 @@
           export HOME="$TMPDIR"
           export WASI_WIT_PATH="${wasiP3Wit}"
           mkdir -p work/src work/wit work/.perry/types
-          cp -r ${./wit}/* work/wit/
+          cp ${./examples/merge_task/world.wit} work/wit/
           cp ${./examples/merge_task/index.ts} work/src/merge_task.ts
           cd work
           perry-wit gen-types --wit wit --world merge-task --entry src/merge_task.ts
@@ -385,7 +385,8 @@
 
         devShells.sdk = mkSdkShell {
           entry = "examples/merge_task/index.ts";
-          world = "task-runner";
+          wit = "examples/merge_task";
+          world = "merge-task";
         };
 
         devShells.browser = pkgs.mkShell {

@@ -12,6 +12,51 @@ use wasmtime::{
 struct Peak(usize);
 
 #[test]
+fn included_worlds_share_types_and_preserve_selected_exports() -> Result<()> {
+    let wit = r#"
+package test:world-selection;
+interface shared {
+  record value { count: u32, label: string }
+}
+world base {
+  use shared.{value};
+  export snapshot: func(count: u32) -> value;
+}
+world composed {
+  include base;
+  export double: func(count: u32) -> u32;
+}
+"#;
+    let source = "
+interface Value { count: number; label: string }
+export function snapshot(count: number): Value { return { count, label: 'snapshot' }; }
+export function double(count: number): number { return count * 2; }
+";
+    let engine = Engine::default();
+    for world in ["base", "composed"] {
+        let bytes = crate::world::component(wit, world, "selection.ts", source)?;
+        let (mut store, instance) = crate::world::instantiate(&engine, &bytes)?;
+        let snapshot = instance.get_func(&mut store, "snapshot").unwrap();
+        let mut result = [Val::Bool(false)];
+        snapshot.call(&mut store, &[Val::U32(7)], &mut result)?;
+        assert_eq!(
+            result[0],
+            record([
+                ("count", Val::U32(7)),
+                ("label", Val::String("snapshot".into()))
+            ])
+        );
+        let double = instance.get_func(&mut store, "double");
+        assert_eq!(double.is_some(), world == "composed");
+        if let Some(double) = double {
+            double.call(&mut store, &[Val::U32(7)], &mut result)?;
+            assert_eq!(result[0], Val::U32(14));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
     let mut component = Instance::compile(
         "package test:reachability; world boundary {export run:func()->u32;}",

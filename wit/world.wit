@@ -4,29 +4,3 @@ world command {
   include wasi:cli/command@0.3.0;
   import wasi:http/client@0.3.0;
 }
-
-world merge-docs {
-  import wasi:http/client@0.3.0;
-  record merge-error {
-    name: string,
-    message: string,
-  }
-  export merge-docs: async func(first-url: string, second-url: string) -> result<string, merge-error>;
-}
-
-interface document-types {
-  record document {
-    markdown: string,
-    code-points: u32,
-  }
-}
-
-world task-runner {
-  use document-types.{document};
-  export render-markdown: func(title: string, paragraphs: list<string>) -> document;
-}
-
-world merge-task {
-  include task-runner;
-  export count-code-points: func(text: string) -> u32;
-}

@@ -204,7 +204,7 @@ fn test_generate_sdk_files_for_merge_task() {
     fs::create_dir_all(&temp_dir).unwrap();
 
     let options = SdkOptions {
-        wit_dir: PathBuf::from("wit"),
+        wit_dir: PathBuf::from("examples/merge_task"),
         world: Some("merge-task".to_string()),
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
@@ -246,27 +246,30 @@ fn test_generate_sdk_files_for_merge_task() {
 
 #[test]
 fn test_typecheck_examples_against_generated_declarations() {
-    let directory = tempfile::tempdir().unwrap();
-    let temp_dir = directory.path().to_path_buf();
-    let src_dir = temp_dir.join("src");
-    fs::create_dir_all(&src_dir).unwrap();
+    for (example, world) in [("merge_task", "merge-task"), ("merge_docs", "merge-docs")] {
+        let directory = tempfile::tempdir().unwrap();
+        let temp_dir = directory.path().to_path_buf();
+        let src_dir = temp_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
 
-    // 1. Generate types for merge-task
-    let options = SdkOptions {
-        wit_dir: PathBuf::from("wit"),
-        world: Some("merge-task".to_string()),
-        out_dir: temp_dir.join(".perry/types"),
-        project_root: Some(temp_dir.clone()),
-        entry: PathBuf::from("src/index.ts"),
-        initialize_tsconfig: true,
-    };
-    generate_sdk_files(&options).unwrap();
+        let options = SdkOptions {
+            wit_dir: PathBuf::from(format!("examples/{example}")),
+            world: Some(world.to_string()),
+            out_dir: temp_dir.join(".perry/types"),
+            project_root: Some(temp_dir.clone()),
+            entry: PathBuf::from("src/index.ts"),
+            initialize_tsconfig: true,
+        };
+        generate_sdk_files(&options).unwrap();
 
-    // 2. Copy examples/merge_task/index.ts to src/merge_task.ts
-    fs::copy("examples/merge_task/index.ts", src_dir.join("index.ts")).unwrap();
-    fs::write(
-        src_dir.join("temporal.ts"),
-        r#"
+        fs::copy(
+            format!("examples/{example}/index.ts"),
+            src_dir.join("index.ts"),
+        )
+        .unwrap();
+        fs::write(
+            src_dir.join("temporal.ts"),
+            r#"
 function formatTemporal(epoch: number): string {
     const instant: Temporal.Instant = Temporal.Instant.fromEpochMilliseconds(epoch);
     const date: Temporal.PlainDate = Temporal.PlainDate.from('2024-02-28').add({ days: 1 });
@@ -274,17 +277,18 @@ function formatTemporal(epoch: number): string {
     return instant.toJSON() + date.toJSON() + time.toJSON();
 }
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
-    let output = std::process::Command::new("tsc")
-        .current_dir(&temp_dir)
-        .arg("--noEmit")
-        .output()
-        .expect("Run SDK checks through nix develop");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+        let output = std::process::Command::new("tsc")
+            .current_dir(&temp_dir)
+            .arg("--noEmit")
+            .output()
+            .expect("Run SDK checks through nix develop");
+        assert!(
+            output.status.success(),
+            "{example}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
