@@ -1,27 +1,25 @@
 //! Dense arrays with 8-byte element slots.
 //!
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
-//! `data: u32` at 8. Elements are `f64` or a 32-bit reference in the low half of a slot.
+//! `data: u32` at 8, traced provenance at 12. Elements are `f64` or a 32-bit reference in the low half of a slot.
 //! `cap` is never 0, so compiled code may read slot 0 unconditionally (branch-free bounds
 //! checks select the result afterwards). Growth doubles capacity and preserves live elements.
 //! Collectible arrays release old storage through tracing; proven bounded task allocations
 //! retain their storage until task completion.
 use crate::region::perry_alloc;
 
-pub const LEN: u32 = 0;
-pub const CAP: u32 = 4;
-pub const DATA: u32 = 8;
-pub const SLOT: u32 = 8;
+pub use crate::layout::array::*;
 const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(core::mem::size_of::<Array>() == 12);
+const _: () = assert!(core::mem::size_of::<Array>() == 16);
 
 #[repr(C)]
 struct Array {
     len: u32,
     cap: u32,
     data: *mut u64,
+    source: *mut u8,
 }
 
 /// A new array with room for at least `capacity` elements and length 0.
@@ -31,7 +29,14 @@ pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
     let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
     let data = perry_alloc(slot_bytes(cap)) as *mut u64;
     // SAFETY: both blocks were just allocated with sufficient size and alignment.
-    unsafe { array.write(Array { len: 0, cap, data }) };
+    unsafe {
+        array.write(Array {
+            len: 0,
+            cap,
+            data,
+            source: core::ptr::null_mut(),
+        })
+    };
     array as *mut u8
 }
 
@@ -63,7 +68,12 @@ fn slot_bytes(cap: u32) -> u32 {
     cap.checked_mul(SLOT).expect("array capacity overflow")
 }
 
-const ARRAY_SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Array, data) as u32];
+const ARRAY_SHAPE: [u32; 4] = [
+    0,
+    2,
+    core::mem::offset_of!(Array, data) as u32,
+    core::mem::offset_of!(Array, source) as u32,
+];
 const REFERENCE_SLOTS: [u32; 3] = [SLOT, 1, 0];
 
 /// The element shape of a collectible array: precise reference slots or opaque numbers.
@@ -88,7 +98,12 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
         ) as *mut Array;
         let data =
             crate::roots::perry_gc_alloc(slot_bytes(cap), element_shape(references)) as *mut u64;
-        array.write(Array { len: 0, cap, data });
+        array.write(Array {
+            len: 0,
+            cap,
+            data,
+            source: core::ptr::null_mut(),
+        });
         array as *mut u8
     }
 }

@@ -360,16 +360,63 @@ pub unsafe extern "C" fn perry_string_offset(string: *mut u8, position: u32) -> 
 pub unsafe extern "C" fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
     unsafe {
         let source = &*(string as *const Str);
-        let data = source.data.add(from as usize);
+        let count = scalars_length(core::slice::from_raw_parts(
+            source.data.add(from as usize),
+            (to - from) as usize,
+        ));
+        perry_string_view_counted(string, from, to, count)
+    }
+}
+
+/// A byte-range view with a scalar count computed by its caller.
+///
+/// # Safety
+/// The range is valid UTF-8 in `string`, containing exactly `scalars` Unicode scalars.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_view_counted(
+    string: *mut u8,
+    from: u32,
+    to: u32,
+    scalars: u32,
+) -> *mut u8 {
+    unsafe {
+        let source = &*(string as *const Str);
         let view = new(
             to - from,
-            scalars_length(core::slice::from_raw_parts(data, (to - from) as usize)),
-            data,
+            scalars,
+            source.data.add(from as usize),
             source.buffer,
         ) as *mut Str;
-        (*view).owner = source.owner;
-        (*view).offset = source.offset + from;
+        perry_string_view_into(view.cast(), string, from, to, scalars);
         view.cast()
+    }
+}
+
+/// Initialize a view in caller-owned, traced header storage.
+///
+/// # Safety
+/// `out` is aligned storage for a string header, tracing its owner field. The range is
+/// valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_view_into(
+    out: *mut u8,
+    string: *mut u8,
+    from: u32,
+    to: u32,
+    scalars: u32,
+) {
+    unsafe {
+        let source = &*string.cast::<Str>();
+        out.cast::<Str>().write(Str {
+            len: to - from,
+            scalars,
+            data: source.data.add(from as usize),
+            buffer: source.buffer,
+            owner: source.owner,
+            offset: source.offset + from,
+            cursor_scalar: 0,
+            cursor_byte: 0,
+        });
     }
 }
 

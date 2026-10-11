@@ -43,6 +43,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
     pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
     pub(super) controls: Vec<Control>,
+    pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
     pub(super) handlers: Vec<Handler>,
     pub(super) finallies: Vec<Finally>,
     pub(super) signatures: &'s HashMap<FuncId, Signature>,
@@ -150,6 +151,7 @@ impl<'s> FunctionBuilder<'s> {
             false_guards: HashSet::new(),
             variant_guards: Vec::new(),
             controls: Vec::new(),
+            callback_returns: Vec::new(),
             handlers: Vec::new(),
             finallies: Vec::new(),
             signatures,

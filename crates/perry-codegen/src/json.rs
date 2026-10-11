@@ -182,10 +182,31 @@ impl FunctionLowering<'_, '_> {
         } else {
             ('[', ']')
         };
+        let done = b.new_block(ctx, vec![]);
+        let source = if b.state.json_provenance {
+            let source = b.load(
+                ctx,
+                MemKind::I32,
+                value,
+                if record.is_some() {
+                    perry_abi::layout::record::SOURCE
+                } else if variant.is_some() {
+                    perry_abi::layout::variant::SOURCE
+                } else {
+                    layout::SOURCE
+                },
+            );
+            let copied = b.runtime(ctx, Runtime::StdJsonSourceCopy, vec![source, writer]);
+            let write = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, copied, (done, vec![]), (write, vec![]));
+            b.block = write;
+            Some(source)
+        } else {
+            None
+        };
         let bracket = b.i32_const(ctx, open as i32);
         let opened = b.runtime(ctx, Runtime::StdJsonOpen, vec![writer, bracket]);
         let body = b.new_block(ctx, vec![]);
-        let done = b.new_block(ctx, vec![]);
         b.cond_br(ctx, opened, (body, vec![]), (done, vec![]));
         b.block = body;
         if let Some(record) = record {
@@ -196,12 +217,63 @@ impl FunctionLowering<'_, '_> {
                 .iter()
                 .map(|(n, t)| (n.to_string(), *t))
                 .collect();
+            let tuple_source = if tuple { source } else { None };
+            let tuple_count = b.i32_const(ctx, fields.len() as i32);
+            let tuple_length = tuple_source.map(|source| {
+                b.runtime(
+                    ctx,
+                    Runtime::StdJsonSourceTupleLength,
+                    vec![source, tuple_count],
+                )
+            });
+            let ordered = if !tuple && b.state.json_provenance {
+                let source = b.load(ctx, MemKind::I32, value, perry_abi::layout::record::SOURCE);
+                let members = b.runtime(ctx, Runtime::StdJsonSourceBegin, vec![source]);
+                let header = b.new_block(ctx, vec![i32]);
+                let zero = b.i32_const(ctx, 0);
+                b.br(ctx, header, vec![zero]);
+                b.block = header;
+                let index = header.deref(ctx).get_argument(0);
+                let count = b.i32_const(ctx, fields.len() as i32);
+                let field = b.runtime(
+                    ctx,
+                    Runtime::StdJsonSourceNext,
+                    vec![members, writer, index, count],
+                );
+                Some((header, index, field, b.new_block(ctx, vec![])))
+            } else {
+                None
+            };
             for (index, (field, field_ty)) in fields.into_iter().enumerate() {
+                let dispatch_next = if let Some((_, _, actual, _)) = ordered {
+                    let wanted = b.i32_const(ctx, index as i32);
+                    let matches = b.num(ctx, NumOpcode::I32Eq, vec![actual, wanted]);
+                    let selected = b.new_block(ctx, vec![]);
+                    let next = b.new_block(ctx, vec![]);
+                    b.cond_br(ctx, matches, (selected, vec![]), (next, vec![]));
+                    b.block = selected;
+                    Some(next)
+                } else {
+                    None
+                };
                 let kind = slot_kind(ctx, field_ty)?;
-                let slot = b.load(ctx, kind, value, 8 + 8 * index as u32);
+                let slot = b.load(ctx, kind, value, perry_abi::layout::record::field(index));
                 if tuple {
+                    let next = tuple_length.map(|length| {
+                        let index = b.i32_const(ctx, index as i32);
+                        let present = b.num(ctx, NumOpcode::I32LtU, vec![index, length]);
+                        let write = b.new_block(ctx, vec![]);
+                        let next = b.new_block(ctx, vec![]);
+                        b.cond_br(ctx, present, (write, vec![]), (next, vec![]));
+                        b.block = write;
+                        next
+                    });
                     b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
                     b.json_value(ctx, writer, slot, field_ty)?;
+                    if let Some(next) = next {
+                        b.br(ctx, next, vec![]);
+                        b.block = next;
+                    }
                     continue;
                 }
                 let mut key = String::new();
@@ -229,6 +301,23 @@ impl FunctionLowering<'_, '_> {
                 b.json_value(ctx, writer, slot, field_ty)?;
                 b.br(ctx, next, vec![]);
                 b.block = next;
+                if let Some((header, index, _, _)) = ordered {
+                    let one = b.i32_const(ctx, 1);
+                    let advanced = b.num(ctx, NumOpcode::I32Add, vec![index, one]);
+                    b.br(ctx, header, vec![advanced]);
+                    b.block = dispatch_next.expect("ordered dispatch");
+                }
+            }
+            if let Some((_, _, _, finished)) = ordered {
+                b.br(ctx, finished, vec![]);
+                b.block = finished;
+            }
+            if let Some(source) = tuple_source {
+                b.runtime_void(
+                    ctx,
+                    Runtime::StdJsonSourceTupleTail,
+                    vec![source, writer, tuple_count],
+                );
             }
         } else if let Some(variant) = variant {
             b.json_variant(ctx, writer, value, variant)?;
@@ -250,6 +339,9 @@ impl FunctionLowering<'_, '_> {
         }
         let bracket = b.i32_const(ctx, close as i32);
         b.runtime_void(ctx, Runtime::StdJsonClose, vec![writer, bracket]);
+        if let Some(source) = source {
+            b.runtime_void(ctx, Runtime::StdJsonSourceRemember, vec![source, writer]);
+        }
         b.br(ctx, done, vec![]);
         b.block = done;
         let ret = ReturnOp::new(ctx, vec![]).get_operation();

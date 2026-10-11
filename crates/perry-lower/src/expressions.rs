@@ -167,7 +167,12 @@ impl FunctionBuilder<'_> {
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                if let Some(target) = expected {
+                    self.parse_typed(ctx, text, target)?
+                        .unwrap_or_else(|| self.intrinsic(ctx, Intrinsic::JsonParse, vec![text]))
+                } else {
+                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                }
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
@@ -333,6 +338,34 @@ impl FunctionBuilder<'_> {
                 self.record_literal(ctx, &names, items, expected)?
             }
             Expr::Array(items) => self.array_literal(ctx, items, expected)?,
+            Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
+                let array = self.expression(ctx, array)?;
+                self.array_transform(
+                    ctx,
+                    array,
+                    callback,
+                    matches!(expr, Expr::ArrayFilter { .. }),
+                )?
+            }
+            Expr::ArrayIncludes {
+                array,
+                value,
+                from_index,
+            }
+            | Expr::ArrayIndexOf {
+                array,
+                value,
+                from_index,
+            } => {
+                let array = self.expression(ctx, array)?;
+                self.array_search(
+                    ctx,
+                    array,
+                    value,
+                    from_index.as_deref(),
+                    matches!(expr, Expr::ArrayIncludes { .. }),
+                )?
+            }
             Expr::ArrayPush {
                 array_id, value, ..
             } => self.array_push(ctx, *array_id, value)?,

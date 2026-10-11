@@ -507,7 +507,12 @@ impl FunctionLowering<'_, '_> {
                     crate::repr(ctx, field)? == crate::Repr::Bool,
                     "result ok field must be boolean"
                 );
-                let ok = self.load(ctx, MemKind::I32, value, 8 + 8 * index as u32);
+                let ok = self.load(
+                    ctx,
+                    MemKind::I32,
+                    value,
+                    perry_abi::layout::record::field(index),
+                );
                 self.num(ctx, NumOpcode::I32Eqz, vec![ok])
             }
             AbiType::Variant(cases) => {
@@ -559,7 +564,7 @@ impl FunctionLowering<'_, '_> {
         let name = if case == 0 { "value" } else { "error" };
         let (index, field) = record_field(ctx, record, name)?;
         let kind = crate::slot_kind(ctx, field)?;
-        let value = self.load(ctx, kind, value, 8 + 8 * index as u32);
+        let value = self.load(ctx, kind, value, perry_abi::layout::record::field(index));
         if !matches!(ty.cases()[case], Some(AbiType::Option(_)))
             && optional_value(ctx, field).is_some()
         {

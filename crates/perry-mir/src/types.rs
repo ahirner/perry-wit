@@ -565,6 +565,17 @@ impl OptionalType {
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct DecoderType;
 
+/// Cursor of a typed `JSON.parse` over its input text (perry-std `json_read`). Internal to
+/// generated decoders; never reaches program values.
+#[pliron_type(
+    name = "perry.json_reader",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct JsonReaderType;
+
 /// Immutable, statically compiled regex program; no mutable lastIndex state.
 #[pliron_type(name = "perry.regex", generate_get = true, format, verifier = "succ")]
 #[derive(Hash, PartialEq, Eq, Debug)]

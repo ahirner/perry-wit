@@ -175,7 +175,7 @@ impl FunctionLowering<'_, '_> {
                         ctx,
                     )?;
                     self.frame_slots.insert(op, bytes);
-                    bytes += 8 + 8 * record.deref(ctx).fields()?.len() as u32;
+                    bytes += perry_abi::layout::record::field(record.deref(ctx).fields()?.len());
                 }
             }
         }
@@ -476,7 +476,7 @@ impl FunctionLowering<'_, '_> {
             shape
         } else {
             let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
-            let offsets: Vec<_> = record
+            let mut offsets: Vec<_> = record
                 .deref(ctx)
                 .fields()?
                 .iter()
@@ -484,9 +484,10 @@ impl FunctionLowering<'_, '_> {
                 .filter_map(|(index, (_, ty))| {
                     repr(ctx, *ty)
                         .is_ok_and(|kind| kind == Repr::Ref)
-                        .then_some(8 + 8 * index as u32)
+                        .then_some(perry_abi::layout::record::field(index))
                 })
                 .collect();
+            offsets.push(perry_abi::layout::record::SOURCE);
             let shape = self.pointer_shape(&offsets);
             self.state.pointer_maps.insert(ty, shape);
             shape

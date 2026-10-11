@@ -67,7 +67,7 @@ impl FunctionLowering<'_, '_> {
             let next_shape = self.state.shapes.len() as i32 + 1;
             let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
-            let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
+            let size = self.i32_const(ctx, perry_abi::layout::record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self.local_frame.expect("frame storage");
                 let offset = self.i32_const(ctx, offset as i32);
@@ -77,9 +77,23 @@ impl FunctionLowering<'_, '_> {
             };
             let shape = self.i32_const(ctx, shape);
             self.store(ctx, MemKind::I32, object, 0, shape);
+            let empty = self.i32_const(ctx, 0);
+            self.store(
+                ctx,
+                MemKind::I32,
+                object,
+                perry_abi::layout::record::SOURCE,
+                empty,
+            );
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
-                self.store(ctx, kind, object, 8 + 8 * index as u32, value);
+                self.store(
+                    ctx,
+                    kind,
+                    object,
+                    perry_abi::layout::record::field(index),
+                    value,
+                );
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -98,6 +112,17 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
+            if self.state.json_provenance {
+                let source = self.load(
+                    ctx,
+                    MemKind::I32,
+                    operands[0],
+                    perry_abi::layout::record::SOURCE,
+                );
+                let field = self.state.data.string(&set.field(ctx));
+                let field = self.i32_const(ctx, field as i32);
+                self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+            }
             self.store(ctx, kind, operands[0], offset, operands[1]);
             return Ok(true);
         }
@@ -183,6 +208,11 @@ impl FunctionLowering<'_, '_> {
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
+            if self.state.json_provenance {
+                let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
+                let field = self.i32_const(ctx, 0);
+                self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+            }
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, i);
             self.store(ctx, kind, address, 0, value);
@@ -239,6 +269,11 @@ impl FunctionLowering<'_, '_> {
         kind: MemKind,
         references: bool,
     ) {
+        if self.state.json_provenance {
+            let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
+            let field = self.i32_const(ctx, 0);
+            self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+        }
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
@@ -279,6 +314,6 @@ impl FunctionLowering<'_, '_> {
         let (index, field_ty) = ty
             .field(field)
             .ok_or_else(|| anyhow!("record has no field {field}"))?;
-        Ok((8 + 8 * index as u32, field_ty))
+        Ok((perry_abi::layout::record::field(index), field_ty))
     }
 }

@@ -25,10 +25,14 @@ use pliron::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
+mod generics;
+
 pub(crate) struct Shapes<'h> {
     pub(crate) module: pliron::builtin::ops::ModuleOp,
     pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
     pub(crate) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
+    /// Generated typed `JSON.parse` decoders (`json_read`), by target type.
+    pub(crate) readers: RefCell<HashMap<TypeHandle, Identifier>>,
     pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
     pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
@@ -96,6 +100,7 @@ impl<'h> Shapes<'h> {
         Shapes {
             module,
             decoders: RefCell::new(HashMap::new()),
+            readers: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
             global_ids: if hir.functions.iter().any(|f| f.is_exported) {
@@ -199,6 +204,7 @@ impl<'h> Shapes<'h> {
                 let settled = self.settled_type(ctx, inner)?;
                 PromiseType::get(ctx, settled).into()
             }
+            HirType::Generic { base, type_args } => self.generic(ctx, base, type_args)?,
             HirType::Object(object) => {
                 ensure!(
                     object.index_signature.is_none(),
@@ -468,6 +474,9 @@ impl<'h> Shapes<'h> {
             }
         }
         if let Some(interface) = self.hir.interfaces.iter().find(|i| i.name == name) {
+            if !interface.type_params.is_empty() {
+                return self.generic(ctx, name, &[]);
+            }
             ensure!(
                 interface.type_params.is_empty()
                     && interface.extends.is_empty()
@@ -482,6 +491,9 @@ impl<'h> Shapes<'h> {
             return Ok(self.hir_record(ctx, Some(name), fields)?.into());
         }
         if let Some(alias) = self.hir.type_aliases.iter().find(|a| a.name == name) {
+            if !alias.type_params.is_empty() {
+                return self.generic(ctx, name, &[]);
+            }
             ensure!(
                 alias.type_params.is_empty(),
                 "generic type alias {name} is not supported yet"

@@ -12,6 +12,7 @@
 //! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
 //! Unsupported constructs are rejected with a diagnostic.
 mod aggregates;
+mod array_methods;
 mod builder;
 mod builtins;
 mod calls;
@@ -22,6 +23,7 @@ mod decoder;
 mod expressions;
 mod foreign;
 mod json;
+mod json_read;
 mod modules;
 mod operators;
 mod program;
@@ -119,6 +121,7 @@ pub fn lower_source_with(
     source::validate(&ast)?;
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
+    array_methods::preserve_arguments(&mut ast);
     let hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
     let spans = source::inferred_bindings(&ast);

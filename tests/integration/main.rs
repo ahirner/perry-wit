@@ -36,6 +36,7 @@ mod http_handler_test;
 mod import_test;
 mod io_cancellation_test;
 mod json_helper_test;
+mod json_read_test;
 mod memory_growth_test;
 mod mir_codegen_test;
 mod mir_collection_test;

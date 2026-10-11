@@ -5,6 +5,86 @@ use anyhow::Result;
 use crate::core_program::Program;
 
 #[test]
+fn dense_array_iteration_callbacks_and_search() {
+    let source = r#"
+function twice(n:number):number {return n*2;}
+export function run():number {
+ const words:string[] = [];
+ words.push('a'); words.push('b');
+ let text = '';
+ for (const word of words) {text += word;}
+ for (const word of 'c,d'.split(',')) {text += word;}
+ if(text !== 'abcd' || !words.includes('b') || words.indexOf('b',-1)!==1) return 1;
+ let calls = 0;
+ const numbers:number[] = [1,2,3];
+ const mapped = numbers.map((n,i,a) => {calls++; if(i === 0) a.push(4); return n+i;});
+ const filtered = mapped.filter(n => n>1).map(twice);
+ if(calls !== 3 || mapped.length !== 3 || filtered[0] !== 6 || filtered[1] !== 10) return 2;
+ const special:number[] = [NaN,0];
+ if(!special.includes(NaN) || special.indexOf(NaN)!==-1 || !special.includes(-0)) return 3;
+ return 0;
+}
+
+"#;
+    assert_eq!(
+        Program::checked(source, "array-consumer.ts")
+            .call("run", &[])
+            .0[0]
+            .unwrap_f64(),
+        0.0
+    );
+}
+
+#[test]
+fn array_callbacks_preserve_effects_identity_exceptions_and_loop_exits() {
+    let source = r#"
+interface Item {n:number}
+export function run():number {
+ const item:Item={n:1};
+ const other:Item={n:1};
+ const objects:Item[]=[item];
+ if(!objects.includes(item) || objects.includes(other) || objects.indexOf(other)!==-1) return 1;
+ const values:number[]=[1,2];
+ let visits=0;
+ for(const n of values) {
+   visits++;
+   if(n===1) {values.push(3);continue;}
+   if(n===3) break;
+ }
+ if(visits!==3) return 2;
+ let trace=0;
+ try {values.map((n,i,a)=>{trace=trace*10+n;if(i===1)throw new Error('stop');a[1]=4;return n;});return 3;}
+ catch(e){if(e.message!=='stop')return 4;}
+ if(trace!==14) return 5;
+ const mapped=values.map(n=>{try {return n*2;}finally {trace++;}});
+ if(mapped[1]!==8 || trace!==17) return 6;
+ if(!values.includes(1,NaN) || values.includes(1,Infinity) || !values.includes(1,-Infinity)) return 7;
+ if(values.indexOf(4,-2.8)!==1 || values.indexOf(1,0.8)!==0 || values.includes(1,-1)) return 8;
+ return 0;
+}
+"#;
+    let mut program = Program::checked(source, "array-effects.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn number_coercion_uses_javascript_notation() {
+    let source = r#"
+export function run():number {
+ const values:number[]=[-0,NaN,Infinity,-Infinity,1e-7,1e-6,1e20,1e21];
+ const expected:string[]=['0','NaN','Infinity','-Infinity','1e-7','0.000001','100000000000000000000','1e+21'];
+ for(let i=0;i<values.length;i++) {
+   const value=values[i];
+   if(String(value)!==expected[i] || ''+value!==expected[i] || `${value}`!==expected[i])return i+1;
+ }
+ return 0;
+}
+"#;
+    assert_eq!(Program::new(source).call("run", &[]).0[0].unwrap_f64(), 0.0);
+}
+
+#[test]
 fn checked_json_tuples_are_arrays_and_preserve_numeric_element_order() {
     let source = r#"
 interface Rule {filter:Array<[string,string]>}
@@ -192,4 +272,36 @@ export function run(): number {
 }
 "#;
     assert_eq!(Program::new(source).outcome("run", &[]), (21.0, 0));
+}
+
+#[test]
+fn array_search_arguments_and_optional_callbacks_match_javascript() {
+    let source = r#"
+const values:number[]=[1];
+function start():number {values.push(2);return 0;}
+function nothing(n:number):void {}
+function failArgument():string {throw new Error('argument');}
+export function run():number {
+ if(!values.includes(2,start()))return 1;
+ const optional:(number|undefined)[]=[undefined,NaN,1];
+ if(!optional.includes(NaN) || !optional.includes(undefined) || optional.indexOf(NaN)!==-1)return 2;
+ const mixed:(string|number)[]=['x',NaN];
+ if(!mixed.includes(NaN) || mixed.indexOf(NaN)!==-1)return 3;
+ const mapped=values.map(n=>{if(n===1)return 'yes';});
+ if(mapped[0]!=='yes' || mapped[1]!==undefined)return 4;
+ if(values.filter(nothing).length!==0)return 5;
+ const bare=values.map(n=>{if(n===1)return;return 'value';});
+ if(bare[0]!==undefined || bare[1]!=='value')return 6;
+ const pushed:number[]=[];
+ if(pushed.push(1,pushed.length)!==2 || pushed[1]!==0 || pushed.push()!==2)return 7;
+ const holder:{items:string[]}={items:[]};
+ try {holder.items.push('first',failArgument());}catch(e){}
+ if(holder.items.length!==0)return 8;
+ return 0;
+}
+"#;
+    assert_eq!(
+        Program::checked(source, "array-optionals.ts").outcome("run", &[]),
+        (0.0, 0)
+    );
 }

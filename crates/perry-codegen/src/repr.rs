@@ -97,6 +97,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<UrlType>()
         || deref.is::<SearchParamsType>()
         || deref.is::<JsonType>()
+        || deref.is::<perry_mir::types::JsonReaderType>()
         || deref.is::<TransferType>()
         || deref.is::<SlotType>()
     {

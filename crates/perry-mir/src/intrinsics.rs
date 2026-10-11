@@ -57,6 +57,8 @@ pub enum Ty {
     Url,
     SearchParams,
     Json,
+    JsonReader,
+    Aggregate,
     Date,
     Decoder,
     Regex,
@@ -112,6 +114,8 @@ impl Ty {
             Ty::Url => crate::types::UrlType::get(ctx).into(),
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
+            Ty::JsonReader => crate::types::JsonReaderType::get(ctx).into(),
+            Ty::Aggregate => panic!("aggregate is an operand-only intrinsic kind"),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -217,6 +221,12 @@ impl Ty {
             Ty::Url => deref.is::<crate::types::UrlType>(),
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
+            Ty::JsonReader => deref.is::<crate::types::JsonReaderType>(),
+            Ty::Aggregate => {
+                deref.is::<crate::types::RecordType>()
+                    || deref.is::<crate::types::ArrayType>()
+                    || deref.is::<crate::types::VariantType>()
+            }
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -400,6 +410,27 @@ intrinsics! {
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
     JsonUndefined = "json_undefined" () -> (Json), pure;
+    // Typed `JSON.parse`: generated decoders pull values from a reader (perry-std
+    // `json_read`). Only `end` and `fail` throw; the rest record errors for them.
+    JsonReadVariant = "json_read_variant" (JsonReader, String) -> (Index), atomic;
+    JsonReadPayload = "json_read_payload" (JsonReader) -> (Bool), noalloc;
+    JsonReadResume = "json_read_resume" (JsonReader, Index) -> (), noalloc;
+    JsonReadPosition = "json_read_position" (JsonReader) -> (Index), noalloc;
+    JsonReadAttach = "json_read_attach" (JsonReader, Aggregate, Index, String, Index) -> (), atomic;
+    JsonReadBegin = "json_read_begin" (String) -> (JsonReader), atomic;
+    JsonReadEnd = "json_read_end" (JsonReader) -> (), throws, atomic;
+    JsonReadFail = "json_read_fail" (JsonReader, Index) -> (), noalloc;
+    JsonReadTakeError = "json_read_take_error" (JsonReader) -> (Index), noalloc;
+    JsonReadKind = "json_read_kind" (JsonReader) -> (Index), noalloc;
+    JsonReadSkip = "json_read_skip" (JsonReader) -> (), noalloc;
+    JsonReadRaw = "json_read_raw" (JsonReader) -> (String), atomic;
+    JsonReadNumber = "json_read_number" (JsonReader) -> (Number), noalloc;
+    JsonReadBool = "json_read_bool" (JsonReader) -> (Bool), noalloc;
+    JsonReadString = "json_read_string" (JsonReader) -> (String), atomic;
+    JsonReadObject = "json_read_object" (JsonReader) -> (Bool), noalloc;
+    JsonReadArray = "json_read_array" (JsonReader) -> (Bool), noalloc;
+    JsonReadElement = "json_read_element" (JsonReader) -> (Bool), noalloc;
+    JsonReadField = "json_read_field" (JsonReader, String, Index) -> (Index), atomic;
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
@@ -520,15 +551,6 @@ impl Intrinsic {
         Self::ALL.iter().copied().find(|i| i.name() == name)
     }
 
-    /// (operands, results) as MIR types.
-    pub fn signature(self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
-        let (operands, results) = self.types();
-        (
-            operands.iter().map(|t| t.get(ctx)).collect(),
-            results.iter().map(|t| t.get(ctx)).collect(),
-        )
-    }
-
     /// Pure services can be removed when unused.
     pub fn pure(self) -> bool {
         self.flags().contains(&"pure")
@@ -567,7 +589,12 @@ pub struct IntrinsicOp;
 
 impl IntrinsicOp {
     pub fn new(ctx: &mut Context, intrinsic: Intrinsic, args: Vec<Value>) -> Self {
-        let (_, results) = intrinsic.signature(ctx);
+        let results = intrinsic
+            .types()
+            .1
+            .iter()
+            .map(|ty| ty.get(ctx))
+            .collect::<Vec<_>>();
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
@@ -675,7 +702,14 @@ impl Verify for JsonStringifyOp {
 #[op_interface_impl]
 impl SideEffects for JsonStringifyOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
+        true
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for JsonStringifyOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
     }
 }
 

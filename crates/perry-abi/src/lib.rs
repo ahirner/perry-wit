@@ -82,6 +82,19 @@ mod imports {
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
         pub(crate) fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
+        pub(crate) fn perry_string_view_into(
+            out: *mut u8,
+            string: *mut u8,
+            from: u32,
+            to: u32,
+            scalars: u32,
+        );
+        pub(crate) fn perry_string_view_counted(
+            string: *mut u8,
+            from: u32,
+            to: u32,
+            scalars: u32,
+        ) -> *mut u8;
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
@@ -140,7 +153,10 @@ mod imports {
             perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
             perry_operation_pin, perry_operation_unpin, perry_task_current,
         },
-        string::{perry_string_offset, perry_string_view},
+        string::{
+            perry_string_offset, perry_string_view, perry_string_view_counted,
+            perry_string_view_into,
+        },
     };
 
     pub(crate) unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
@@ -215,6 +231,14 @@ pub fn unpin(token: u32) {
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     unsafe { imports::perry_string_adopt(data, len) }
+}
+
+/// A view of byte boundaries in a string, with a previously computed scalar count.
+///
+/// # Safety
+/// The range is valid UTF-8 in `string` and contains exactly `scalars` scalars.
+pub unsafe fn string_view_counted(string: *mut u8, from: u32, to: u32, scalars: u32) -> *mut u8 {
+    unsafe { imports::perry_string_view_counted(string, from, to, scalars) }
 }
 
 /// # Safety
@@ -515,3 +539,14 @@ impl Default for Buffer {
         Self::new()
     }
 }
+
+/// Initialize a string view in traced caller-owned header storage.
+///
+/// # Safety
+/// `out` has the size, alignment and owner pointer map of the runtime string header;
+/// `from..to` is valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
+pub unsafe fn string_view_into(out: *mut u8, string: *mut u8, from: u32, to: u32, scalars: u32) {
+    unsafe { imports::perry_string_view_into(out, string, from, to, scalars) };
+}
+
+pub mod layout;

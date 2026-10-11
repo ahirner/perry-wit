@@ -768,3 +768,39 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
     }
     Ok(())
 }
+
+#[test]
+fn generic_pages_and_results_use_concrete_wit_records() -> Result<()> {
+    let wit = r#"package test:generics;
+world boundary {
+  record page { data: list<f64>, next: option<string> }
+  export echo: func(value: page) -> result<page, string>;
+  export parsed: func() -> page;
+  export stringify: func(value: page) -> string;
+}"#;
+    let source = r#"
+interface Page<T> {data:T[];next:string|null}
+type Result<T>={ok:true;value:T}|{ok:false;error:string};
+export function echo(value:Page<number>):Result<Page<number>> {return {ok:true,value};}
+export function parsed():Page<number> {return JSON.parse('{"extra":true,"data":[1,2],"next":null}');}
+export function stringify(value:Page<number>):string {return JSON.stringify(value);}
+"#;
+    let mut instance = Instance::compile(wit, source)?;
+    let page = Val::Record(vec![
+        (
+            "data".into(),
+            Val::List(vec![Val::Float64(1.0), Val::Float64(2.0)]),
+        ),
+        ("next".into(), Val::Option(None)),
+    ]);
+    assert_eq!(instance.call("parsed", &[])?, page);
+    assert_eq!(
+        instance.call("echo", std::slice::from_ref(&page))?,
+        Val::Result(Ok(Some(Box::new(page.clone()))))
+    );
+    assert_eq!(
+        instance.call("stringify", &[page])?,
+        Val::String("{\"data\":[1,2],\"next\":null}".into())
+    );
+    Ok(())
+}

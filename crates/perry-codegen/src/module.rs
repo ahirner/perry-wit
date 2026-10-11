@@ -97,6 +97,7 @@ pub(crate) struct ModuleState<'e> {
     /// Async functions in dispatch-kind order.
     pub(crate) async_functions: Vec<Identifier>,
     pub(crate) shapes: HashMap<String, i32>,
+    pub(crate) json_provenance: bool,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
     /// Whether any function starts a `node:fs` operation (callbacks pass it events).
@@ -197,6 +198,13 @@ pub(crate) fn lower(
         foreign_transfers: Vec::new(),
         async_functions,
         shapes: HashMap::new(),
+        json_provenance: functions.iter().any(|f| {
+            crate::analysis::function_ops(ctx, f).iter().any(|&op| {
+                Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                    op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonReadAttach)
+                })
+            })
+        }),
         uses_io: false,
         uses_fs: false,
         uses_streams: false,

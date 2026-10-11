@@ -1,4 +1,4 @@
-//! Lower byte-stream async iteration to the supported reader API before HIR erases types.
+//! Lower array/string iteration and byte-stream async iteration before HIR erases types.
 use anyhow::{Result, anyhow, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use std::collections::HashSet;
@@ -38,12 +38,13 @@ struct Loops {
 
 impl Loops {
     fn rewrite(&mut self, iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
+        let asynchronous = iteration.is_await;
         let ast::ForHead::VarDecl(declaration) = iteration.left else {
-            return Err(anyhow!("for await requires a const or let binding"));
+            return Err(anyhow!("iteration requires a const or let binding"));
         };
         ensure!(
             declaration.decls.len() == 1 && declaration.kind != ast::VarDeclKind::Var,
-            "for await requires one const or let binding"
+            "iteration requires one const or let binding"
         );
         let kind = declaration.kind;
         let binding = declaration
@@ -59,8 +60,9 @@ impl Loops {
                 break prefix;
             }
         };
-        let template = format!(
-            r#"{{
+        let template = if asynchronous {
+            format!(
+                r#"{{
             const {prefix}reader = {prefix}source.getReader();
             let {prefix}done = false;
             try {{
@@ -75,7 +77,18 @@ impl Loops {
                 finally {{ {prefix}reader.releaseLock(); }}
             }}
         }}"#
-        );
+            )
+        } else {
+            format!(
+                r#"{{
+            const {prefix}items = {prefix}source;
+            for (let {prefix}index = 0; {prefix}index < {prefix}items.length; {prefix}index++) {{
+                const {prefix}item = {prefix}items[{prefix}index];
+                {prefix}body();
+            }}
+        }}"#
+            )
+        };
         let mut parsed = perry_parser::parse_typescript(&template, "stream-iteration.ts")
             .map_err(|e| anyhow!("{e:?}"))?;
         struct SyntheticSpans;
@@ -103,7 +116,7 @@ impl Loops {
 impl VisitMut for Loops {
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
-        if !matches!(statement, ast::Stmt::ForOf(iteration) if iteration.is_await) {
+        if !matches!(statement, ast::Stmt::ForOf(_)) {
             return;
         }
         let ast::Stmt::ForOf(iteration) = std::mem::replace(

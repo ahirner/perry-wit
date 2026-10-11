@@ -12,6 +12,8 @@ mod decoder;
 mod exception;
 mod integers;
 mod json;
+mod json_read;
+mod json_source;
 mod random;
 mod regex;
 mod text;

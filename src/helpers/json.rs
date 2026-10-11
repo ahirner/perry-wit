@@ -1,11 +1,13 @@
 //! Allocation-free JSON parsing into caller-owned typed nodes.
 
-#[path = "json/number.rs"]
-mod number;
+use pull::number;
 #[path = "json/parse.rs"]
 mod parse;
 #[path = "json/storage.rs"]
 mod storage;
+
+#[path = "json/pull.rs"]
+pub mod pull;
 
 pub use parse::{measure, populate};
 

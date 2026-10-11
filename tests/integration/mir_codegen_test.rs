@@ -453,7 +453,7 @@ export function run(n: number): number {
     const nullable: Options = { value: null, next: { label: 'abc', value: n } };
     const parsed: Options = JSON.parse('{"value":null,"next":{"label":"é"}}');
     if (JSON.stringify(empty) !== '{}') return -1;
-    if (JSON.stringify(parsed) !== '{"next":{"label":"é"},"value":null}') return -2;
+    if (JSON.stringify(parsed) !== '{"value":null,"next":{"label":"é"}}') return -2;
     empty.label = 'x';
     empty.value = 5;
     empty.label = undefined;

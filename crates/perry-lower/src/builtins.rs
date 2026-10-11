@@ -19,10 +19,48 @@ impl FunctionBuilder<'_> {
         let arg = |index: usize| args.get(index);
         let method = if method == decoder::DECODE {
             "decode"
+        } else if method == array_methods::PUSH {
+            "push"
         } else {
             method
         };
         let value = match (kind(ctx, receiver)?, method) {
+            (Kind::Array, "push") => {
+                let element = self.array_element(ctx, receiver)?;
+                let values = args
+                    .iter()
+                    .map(|argument| {
+                        let value = self.expression_with(ctx, argument, Some(element))?;
+                        self.fit(ctx, value, element)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for value in values {
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, receiver, value));
+                }
+                let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, receiver));
+                Some(self.emit_value(ctx, |ctx| {
+                    ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+                }))
+            }
+            (Kind::Array, "map" | "filter") => {
+                let [callback] = args else {
+                    bail!("array.{method} requires one static callback")
+                };
+                Some(self.array_transform(ctx, receiver, callback, method == "filter")?)
+            }
+            (Kind::Array, "includes" | "indexOf") => {
+                ensure!(
+                    (1..=2).contains(&args.len()),
+                    "array.{method} requires a value and optional starting index"
+                );
+                Some(self.array_search(
+                    ctx,
+                    receiver,
+                    &args[0],
+                    args.get(1),
+                    method == "includes",
+                )?)
+            }
             (Kind::String, "split") => {
                 let [separator] = args else {
                     bail!("string.split requires one string separator");

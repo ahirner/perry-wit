@@ -320,18 +320,18 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
 #[repr(C)]
-struct Writer {
-    text: Buffer,
+pub(super) struct Writer {
+    pub(super) text: Buffer,
     /// Bit `d` set: the container at depth `d` already has an element.
     started: [u64; 2],
-    depth: u32,
-    failed: bool,
+    pub(super) depth: u32,
+    pub(super) failed: bool,
 }
 
 /// Nesting deeper than this means a cycle (or absurd data): `TypeError`, as for cycles.
 const MAX_DEPTH: u32 = 128;
 
-fn writer(w: *mut u8) -> &'static mut Writer {
+pub(super) fn writer(w: *mut u8) -> &'static mut Writer {
     // SAFETY: compiled code passes writers from [std_json_writer].
     unsafe { &mut *(w as *mut Writer) }
 }
@@ -362,7 +362,7 @@ pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
     }
     w.text.push(bracket as u8);
     w.depth += 1;
-    let (word, bit) = ((w.depth / 64) as usize, w.depth % 64);
+    let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
     w.started[word] &= !(1 << bit);
     1
 }
@@ -379,7 +379,7 @@ pub(crate) extern "C" fn std_json_close(w: *mut u8, bracket: u32) {
 }
 
 fn separate(w: &mut Writer) {
-    let (word, bit) = ((w.depth / 64) as usize, w.depth % 64);
+    let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
     if w.started[word] & (1 << bit) != 0 {
         w.text.push(b',');
     }

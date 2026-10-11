@@ -12,6 +12,26 @@ impl FunctionBuilder<'_> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if let Ok(record) = TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
+            && record.deref(ctx).is_tuple()
+        {
+            let field = match index {
+                Expr::Number(index) if *index >= 0.0 && index.fract() == 0.0 => {
+                    format!("_{}", *index as u64)
+                }
+                Expr::Integer(index) if *index >= 0 => format!("_{index}"),
+                _ => bail!("tuples require literal positions"),
+            };
+            let ty = record
+                .deref(ctx)
+                .field(&field)
+                .map(|(_, ty)| ty)
+                .context("tuple index is outside its declared shape")?;
+            let value = self.expression_with(ctx, value, Some(ty))?;
+            let value = self.fit(ctx, value, ty)?;
+            self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
+            return Ok(value);
+        }
         ensure!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"

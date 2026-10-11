@@ -144,6 +144,9 @@ impl FunctionBuilder<'_> {
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
+            Stmt::Return(value) if !self.callback_returns.is_empty() => {
+                self.callback_return(ctx, value.as_ref())?;
+            }
             Stmt::Return(value) => {
                 let mut adopts_promise = false;
                 let mut values = match value {

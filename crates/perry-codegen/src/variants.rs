@@ -90,9 +90,20 @@ impl FunctionLowering<'_, '_> {
         tag: &str,
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Value> {
-        let size = self.i32_const(ctx, 16);
+        let size = self.i32_const(
+            ctx,
+            if self.state.json_provenance {
+                perry_abi::layout::variant::SIZE as i32
+            } else {
+                16
+            },
+        );
         let object = if self.state.collectible {
-            let shape = self.pointer_shape(&[4]);
+            let shape = self.pointer_shape(if self.state.json_provenance {
+                &[4, perry_abi::layout::variant::SOURCE]
+            } else {
+                &[4]
+            });
             let shape = self.i32_const(ctx, shape as i32);
             self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
         } else {
@@ -106,6 +117,16 @@ impl FunctionLowering<'_, '_> {
             _ => self.i32_const(ctx, 0),
         };
         self.store(ctx, MemKind::I32, object, 4, owner);
+        if self.state.json_provenance {
+            let zero = self.i32_const(ctx, 0);
+            self.store(
+                ctx,
+                MemKind::I32,
+                object,
+                perry_abi::layout::variant::SOURCE,
+                zero,
+            );
+        }
         if let Some((ty, value)) = payload {
             self.store(ctx, slot_kind(ctx, ty)?, object, 8, value);
         }
@@ -121,10 +142,45 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<()> {
         let cases = variant.deref(ctx).cases().to_vec();
         let tag = self.load(ctx, MemKind::I32, value, 0);
+        let ordered = if self.state.json_provenance {
+            let source = self.load(ctx, MemKind::I32, value, perry_abi::layout::variant::SOURCE);
+            let members = self.runtime(ctx, Runtime::StdJsonSourceBegin, vec![source]);
+            let i32 = crate::i32_type(ctx);
+            let header = self.new_block(ctx, vec![i32]);
+            let advance = self.new_block(ctx, vec![]);
+            let finished = self.new_block(ctx, vec![]);
+            let zero = self.i32_const(ctx, 0);
+            self.br(ctx, header, vec![zero]);
+            self.block = header;
+            let index = header.deref(ctx).get_argument(0);
+            let count = self.i32_const(ctx, 2);
+            let field = self.runtime(
+                ctx,
+                Runtime::StdJsonSourceNext,
+                vec![members, writer, index, count],
+            );
+            let tag_case = self.new_block(ctx, vec![]);
+            let rest = self.new_block(ctx, vec![]);
+            let is_tag = self.num(ctx, NumOpcode::I32Eqz, vec![field]);
+            self.cond_br(ctx, is_tag, (tag_case, vec![]), (rest, vec![]));
+            self.block = tag_case;
+            Some((header, index, field, advance, finished, rest))
+        } else {
+            None
+        };
         let key = self.state.data.string("\"tag\":");
         let key = self.i32_const(ctx, key as i32);
         self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
         self.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, tag]);
+        if let Some((_, _, field, advance, finished, rest)) = ordered {
+            self.br(ctx, advance, vec![]);
+            self.block = rest;
+            let one = self.i32_const(ctx, 1);
+            let is_payload = self.num(ctx, NumOpcode::I32Eq, vec![field, one]);
+            let payload = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, is_payload, (payload, vec![]), (finished, vec![]));
+            self.block = payload;
+        }
         let done = self.new_block(ctx, vec![]);
         for (name, payload) in cases {
             let Some(payload) = payload else {
@@ -154,6 +210,14 @@ impl FunctionLowering<'_, '_> {
         }
         self.br(ctx, done, vec![]);
         self.block = done;
+        if let Some((header, index, _, advance, finished, _)) = ordered {
+            self.br(ctx, advance, vec![]);
+            self.block = advance;
+            let one = self.i32_const(ctx, 1);
+            let index = self.num(ctx, NumOpcode::I32Add, vec![index, one]);
+            self.br(ctx, header, vec![index]);
+            self.block = finished;
+        }
         Ok(())
     }
 

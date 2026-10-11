@@ -537,14 +537,28 @@ impl FunctionLowering<'_, '_> {
         );
         let next_shape = self.state.shapes.len() as i32 + 1;
         let shape = *self.state.shapes.entry(name).or_insert(next_shape);
-        let size = self.i32_const(ctx, 8 + 8 * field_count as i32);
+        let size = self.i32_const(ctx, perry_abi::layout::record::field(field_count) as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
         let shape = self.i32_const(ctx, shape);
         self.store(ctx, MemKind::I32, object, 0, shape);
+        let empty = self.i32_const(ctx, 0);
+        self.store(
+            ctx,
+            MemKind::I32,
+            object,
+            perry_abi::layout::record::SOURCE,
+            empty,
+        );
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, field)?;
             let kind = crate::slot_kind(ctx, field_mir)?;
-            self.store(ctx, kind, object, 8 + 8 * index as u32, value);
+            self.store(
+                ctx,
+                kind,
+                object,
+                perry_abi::layout::record::field(index),
+                value,
+            );
         }
         Ok(object)
     }
@@ -625,7 +639,8 @@ impl FunctionLowering<'_, '_> {
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (index, field_mir) = record_field(ctx, record, name)?;
                     let kind = crate::slot_kind(ctx, field_mir)?;
-                    let field = self.load(ctx, kind, value, 8 + 8 * index as u32);
+                    let field =
+                        self.load(ctx, kind, value, perry_abi::layout::record::field(index));
                     self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
                 }
             }
@@ -751,7 +766,8 @@ impl FunctionLowering<'_, '_> {
                 for (name, field_ty) in fields {
                     let (index, field_mir) = record_field(ctx, record, name)?;
                     let kind = crate::slot_kind(ctx, field_mir)?;
-                    let field = self.load(ctx, kind, value, 8 + 8 * index as u32);
+                    let field =
+                        self.load(ctx, kind, value, perry_abi::layout::record::field(index));
                     self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
                 }
             }
