@@ -15,9 +15,7 @@ For runtime boundaries, memory layouts, compilation pipeline details, see [ARCHI
 
 ## Embedding
 
-The Rust `api` module and [compiler WIT interface](wit/compiler/world.wit) expose `compile`,
-`compile-core`, and `generate-sdk`. Inputs are byte buffers; anonymous single-source calls
-need no filenames, filesystem mounts, or encoded packages:
+The Rust `api` module and `perry:compiler/api` WIT interface compile in-memory TypeScript and WIT buffers directly to WebAssembly components:
 
 ```rust
 use perry_wit::api::{self, Options, Program, Wit};
@@ -31,39 +29,7 @@ let wit = Wit {
     dependencies: vec![],
 };
 let compiled = api::compile(&program, &wit, &Options::default())?;
-let declarations = api::generate_sdk(&wit, None)?;
 ```
-
-For multiple modules, `Program.modules` contains `Module { name: String, contents: Vec<u8> }`.
-Each dependency requires a unique package-relative identifier such as `src/util.ts`.
-The entrypoint's `Source.name` stays optional; when supplied, it also establishes the base
-for relative imports. WIT source names are optional diagnostic labels.
-Relative imports resolve only within the supplied bundle. Group WIT files
-by package using `Package::Sources`; `Package::Encoded` accepts a binary WIT package.
-Pinned WASI 0.3 definitions are embedded. Text inputs must be UTF-8. Compilation errors
-are returned; declarations return logical artifact names and bytes. Upstream dependencies
-retain their environment settings and diagnostic output. In the compiler component these
-use the host's WASI interfaces; the playground captures output in its diagnostics panel.
-
-`compile` returns required `core` bytes, `component: Option<ComponentOutput>`, and an
-`allocation_report`. A component output always contains both `bytes` and `stripped` bytes.
-With `core_only`, the component record is absent; the core still implements the selected
-WIT world's canonical ABI, and WIT validation still applies. `compile-core` accepts no WIT
-and exports all exported TypeScript functions with raw core signatures. File-oriented Rust
-functions and the CLI keep their input adapters around the same compiler implementation.
-
-Compiler API `perry:compiler/api@0.1.0` exposes the same content-based operations in Rust and WIT.
-
-```sh
-nix build .#perry-wit-wasm  # result/lib/perry-wit.wasm
-nix build .#site           # static homepage, playground, downloads, sizes.json
-nix run .#site             # build and update site/dist for the existing local preview
-```
-
-The same compiler component exposes the byte API and `wasi:cli/run`. Its host interface is
-WASI 0.2 (`wasm32-wasip2`); generated applications target WASI 0.3. Library calls need no
-filesystem grants. See [site development](site/README.md) for builds, browser tests, and
-GitHub Pages deployment.
 
 ## Development
 
@@ -135,11 +101,11 @@ export function runTask(input: string): string {
 }
 ```
 
-Compile and invoke the checked-in Markdown example:
+Compile then invoke the library export:
 
 ```sh
-perry-wit examples/merge_task/index.ts --wit examples/merge_task --world merge-task -o dist/task.wasm
-wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'render-markdown("Notes", ["First paragraph"])' dist/task.wasm
+perry-wit src/index.ts --wit wit --world task-runner -o dist/task.wasm
+wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("hello")' dist/task.wasm
 ```
 
 - **Export Mapping**: WIT kebab-case export names map to TypeScript camelCase functions. Unexported functions remain internal.

@@ -13,10 +13,10 @@
   <header><a class="brand" href="./">Perry-WIT</a></header>
   <main class="home">
     <h1>TypeScript to WebAssembly</h1>
-    <p class="lead">Compile a subset of TypeScript into WASI 0.3 components.</p>
+    <p class="lead">Compile static TypeScript ahead-of-time into WASI 0.3 WebAssembly components.</p>
     <p><a class="button primary" href="play/">Try the playground</a></p>
-    <p>Perry-WIT emits WebAssembly instructions without an embedded JavaScript engine. WIT defines the types and
-      functions a component exposes, so other languages and compatible hosts can call it.</p>
+    <p>Perry-WIT emits native WebAssembly instructions without an embedded JavaScript engine. WIT definitions specify
+      exported interfaces, enabling direct interoperation across languages and WebAssembly hosts.</p>
     <section class="editors" aria-label="Example">
       <div>
         <h2>TypeScript</h2>
@@ -32,14 +32,15 @@ world greeting {
 }</code></pre>
       </div>
     </section>
-    <p>Async exports, promises and fetch use WASI 0.3. Conformance tests compare supported behaviour with Node.js.</p>
+    <p>Asynchronous exports, promises, and HTTP fetch run on native WASI 0.3 primitives. Conformance tests verify
+      behavior against Node.js.</p>
     <h2 id="build">Build</h2>
     <ul class="build">
       <li><strong>CLI</strong> — build the compiler from its Nix flake.
         <pre><code>nix build github:ahirner/perry-wit</code></pre>
       </li>
-      <li><strong>Rust library</strong> — compile source bytes from Rust. <a href="rust/perry_wit/api/index.html">API
-          docs and examples</a>.</li>
+      <li><strong>Rust library</strong> — compile in-memory source buffers from Rust. <a href="rust/perry_wit/api/index.html">API
+          documentation</a>.</li>
       <li><strong>Wasm compiler</strong> — the compiler itself, packaged as a portable component.
         <a href="downloads/perry-wit.wasm">Download .wasm</a> · <a href="downloads/compiler.wit">Compiler API (WIT)</a>
         · <a href="downloads/THIRD-PARTY-NOTICES.txt">Wasm distribution notices</a>.
