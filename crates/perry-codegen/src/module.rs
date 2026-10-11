@@ -45,7 +45,7 @@ pub(crate) struct Data {
 }
 
 impl Data {
-    /// A static string object followed by its bytes (layout of [perry_runtime::string]).
+    /// A static string object followed by its bytes (layout of [perry_abi::layout::string]).
     pub(crate) fn string(&mut self, text: &str) -> u32 {
         if let Some(&address) = self.strings.get(text) {
             return address;
@@ -55,7 +55,7 @@ impl Data {
         for word in [
             text.len() as u32,
             scalars,
-            address + perry_runtime::string::SIZE,
+            address + perry_abi::layout::string::SIZE,
             0,
             0,
             0,
@@ -411,12 +411,22 @@ fn async_export_wrapper(
     b.insert(ctx, call);
     let promise = call.deref(ctx).get_result(0);
     b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
-    let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
-    let fulfilled_state = b.i32_const(ctx, perry_runtime::promise::FULFILLED as i32);
-    let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
+    let settled = b.load(
+        ctx,
+        MemKind::I32,
+        promise,
+        perry_abi::layout::promise::STATE,
+    );
+    let fulfilled_state = b.i32_const(ctx, perry_abi::layout::promise::FULFILLED as i32);
+    let rejected_state = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
     let fulfilled = b.num(ctx, NumOpcode::I32Eq, vec![settled, fulfilled_state]);
     let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-    let reason = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATUS);
+    let reason = b.load(
+        ctx,
+        MemKind::I32,
+        promise,
+        perry_abi::layout::promise::STATUS,
+    );
     let pending = b.i32_const(ctx, 99);
     let failure = b.select(ctx, rejected, reason, pending);
     let zero = b.i32_const(ctx, 0);
@@ -425,7 +435,7 @@ fn async_export_wrapper(
         ctx,
         slot_kind(ctx, value_ty)?,
         promise,
-        perry_runtime::promise::VALUE,
+        perry_abi::layout::promise::VALUE,
     );
     b.task_free(ctx);
     let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();

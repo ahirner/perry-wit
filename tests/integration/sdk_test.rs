@@ -225,13 +225,13 @@ fn test_generate_sdk_files_for_merge_task() {
 
     let types_content = fs::read_to_string(&types_file).unwrap();
     assert!(
-        types_content.contains("export declare function runTask(input: string): string;"),
-        "Missing runTask signature: {}",
+        types_content.contains("export declare function renderMarkdown(title: string, paragraphs: Array<string>): Document;"),
+        "Missing renderMarkdown signature: {}",
         types_content
     );
     assert!(
-        types_content.contains("export declare function mergeTask(input: string): string;"),
-        "Missing mergeTask signature: {}",
+        types_content.contains("export declare function countCodePoints(text: string): number;"),
+        "Missing countCodePoints signature: {}",
         types_content
     );
 
@@ -262,8 +262,8 @@ fn test_typecheck_examples_against_generated_declarations() {
     };
     generate_sdk_files(&options).unwrap();
 
-    // 2. Copy examples/merge_task.ts to src/merge_task.ts
-    fs::copy("examples/merge_task.ts", src_dir.join("index.ts")).unwrap();
+    // 2. Copy examples/merge_task/index.ts to src/merge_task.ts
+    fs::copy("examples/merge_task/index.ts", src_dir.join("index.ts")).unwrap();
     fs::write(
         src_dir.join("temporal.ts"),
         r#"

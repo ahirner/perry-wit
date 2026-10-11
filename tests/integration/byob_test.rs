@@ -19,7 +19,7 @@ async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, 
         source, "byob.ts", &resolve, world,
     )?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut store = Store::new(
         &engine,
         StoreLimitsBuilder::new().memory_size(65536).build(),

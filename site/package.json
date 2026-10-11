@@ -1,0 +1,19 @@
+{
+  "name": "perry-wit-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node check-browser.mjs"
+  },
+  "dependencies": {
+    "@bytecodealliance/jco": "1.37.0",
+    "@bytecodealliance/preview2-shim": "0.28.0",
+    "@bytecodealliance/preview3-shim": "0.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "1.63.0"
+  }
+}

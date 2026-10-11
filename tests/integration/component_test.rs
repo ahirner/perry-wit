@@ -202,7 +202,7 @@ impl Instance {
         let world = resolve.select_world(&[package], Some("boundary"))?;
         let compiled = compile_for_world(source, "boundary.ts", &resolve, world, true)?;
         let engine = Engine::default();
-        let component = Component::new(&engine, compiled.stripped.unwrap())?;
+        let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
         let mut store = Store::new(&engine, Peak::default());
         store.limiter(|peak| peak);
         let instance = Linker::new(&engine).instantiate(&mut store, &component)?;

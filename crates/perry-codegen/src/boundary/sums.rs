@@ -171,7 +171,7 @@ impl FunctionLowering<'_, '_> {
         completion: Completion<'_>,
         exception: Value,
     ) -> Result<Option<(TypeHandle, Value)>> {
-        use perry_runtime::exception as exception_layout;
+        use perry_abi::layout::exception as exception_layout;
         let Some(err) = completion.err else {
             return Ok(None);
         };

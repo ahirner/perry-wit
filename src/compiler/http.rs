@@ -7,7 +7,7 @@
 //! `wasi:http` response from the returned one through the services of `perry:http-server`
 //! (`perry-web`'s `serve` module). The response body is written after `task.return`, so the
 //! export runs until the host has read it.
-use super::{Compiled, bind, finish, lower, wit_types};
+use super::{Compiled, ComponentOutput, bind, finish, lower, wit_types};
 use crate::component;
 use anyhow::{Context as _, Result};
 use perry_codegen::{
@@ -100,6 +100,7 @@ export async function __perryHttpHandle(__perryHandle: number): Promise<number> 
 pub(crate) fn compile(
     source: &str,
     file_name: &str,
+    modules: &std::collections::BTreeMap<String, String>,
     types: &Resolve,
     componentize: bool,
     memory_checks: bool,
@@ -108,8 +109,15 @@ pub(crate) fn compile(
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
     let program = format!("{source}\n{adapter}");
     let ctx = &mut Context::new();
-    let mir = lower(ctx, &program, file_name, &wit_types::foreign(types))?;
-    let (resolve, package) = component::wit::resolve_source("perry-http-handler.wit", NATIVE)?;
+    let mir = lower(
+        ctx,
+        &program,
+        file_name,
+        modules,
+        &wit_types::foreign(types),
+    )?;
+    let (resolve, package) =
+        component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;
     let world = resolve.select_world(&[package], Some("handler"))?;
     let (key, interface) = resolve.worlds[world]
         .exports
@@ -142,21 +150,16 @@ pub(crate) fn compile(
         bindings: vec![],
         resources: vec![],
     };
-    let tiers = perry_codegen::explain_tiers(ctx, &mir, &exports);
+    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
     let core = perry_codegen::compile(ctx, &mir, &exports)?;
     let core = finish(core, streams.as_ref())?;
-    let (component, stripped) = if componentize {
-        let component = component::encode_resolved(&core, &resolve, world)?;
-        let stripped = crate::strip::component(&component)?;
-        (Some(component), Some(stripped))
-    } else {
-        (None, None)
-    };
+    let component = componentize
+        .then(|| ComponentOutput::encode(&core, &resolve, world))
+        .transpose()?;
     Ok(Compiled {
         core,
         component,
-        stripped,
-        tiers,
+        allocation_report,
     })
 }
 

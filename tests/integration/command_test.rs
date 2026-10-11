@@ -55,7 +55,7 @@ async fn execute_output(
     let world = resolve.select_world(&[package], Some("command"))?;
     let compiled = compile_for_world(source, "main.ts", &resolve, world, true)?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let (stdout, stderr) = (MemoryOutput::new(output_limit), MemoryOutput::new(1 << 20));

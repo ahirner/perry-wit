@@ -12,6 +12,20 @@ pub(super) struct Read {
     next: *mut Read,
 }
 
+pub(super) fn has_detached_read(reader: &Reader) -> bool {
+    let mut read = reader.reads;
+    // SAFETY: the reader retains its queued requests.
+    unsafe {
+        while !read.is_null() {
+            if !perry_abi::cancellation_owned((*read).promise) {
+                return true;
+            }
+            read = (*read).next;
+        }
+    }
+    false
+}
+
 /// `reader.read(view, {min})`: validate first, then transfer the complete buffer.
 #[unsafe(no_mangle)]
 pub(super) extern "C" fn web_reader_read_byob(r: *mut u8, view: *mut u8, minimum: f64) -> *mut u8 {

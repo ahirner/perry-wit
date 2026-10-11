@@ -483,7 +483,8 @@ pub(crate) extern "C" fn perry_task_cancel() -> u32 {
         while !(*task).subtasks.is_null() {
             let entry = (*task).subtasks;
             let handle = (*entry).handle;
-            count += u32::from(!crate::promise::cancellation_owned((*entry).promise));
+            count +=
+                u32::from(crate::promise::perry_promise_cancellation_owned((*entry).promise) == 0);
             crate::host::waitable_join(handle, 0);
             let status = crate::host::subtask_cancel(handle);
             perry_task_resume(task);

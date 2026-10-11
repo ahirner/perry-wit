@@ -383,7 +383,12 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<StringLenOp>(op, ctx).is_some() {
             let string = self.operands(ctx, op)?[0];
-            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::SCALARS);
+            let value = self.load(
+                ctx,
+                MemKind::I32,
+                string,
+                perry_abi::layout::string::SCALARS,
+            );
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -442,7 +447,7 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(read) = Operation::get_op::<SettledFieldOp>(op, ctx) {
             // A settled view is the input promise itself (`perry_promise_all_settled`).
-            use perry_runtime::promise::{FULFILLED, STATE, VALUE};
+            use perry_abi::layout::promise::{FULFILLED, STATE, VALUE};
             let promise = self.operand(ctx, op, 0)?;
             let state = self.load(ctx, MemKind::I32, promise, STATE);
             let fulfilled_state = self.i32_const(ctx, FULFILLED as i32);

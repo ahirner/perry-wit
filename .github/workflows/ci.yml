@@ -111,7 +111,7 @@ jobs:
         if-no-files-found: error
 
   release:
-    needs: [flake-checks, conformance-and-tests, build-artifacts]
+    needs: [flake-checks, conformance-and-tests, build-artifacts, site]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -119,9 +119,69 @@ jobs:
     steps:
     - uses: actions/download-artifact@v8
       with:
+        pattern: perry-wit-*
         merge-multiple: true
         path: dist
     - uses: softprops/action-gh-release@v3
       with:
         files: dist/*
         generate_release_notes: true
+
+  site:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: cachix/install-nix-action@v31
+    - uses: cachix/cachix-action@v17
+      with:
+        name: cybertreiber
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - run: nix build -L .#site --out-link result-site
+    - run: nix develop .#browser -c npm ci --prefix site --ignore-scripts --no-audit --no-fund
+    - run: nix develop .#browser -c env SITE_OUTPUT=result-site node site/check-browser.mjs
+    - run: |
+        mkdir -p dist
+        cp result-site/downloads/perry-wit.wasm dist/
+        cp result-site/downloads/compiler.wit dist/
+        cp result-site/downloads/perry-wit-interfaces.tar.gz dist/
+        cp result-site/downloads/compiler.metadata.json dist/
+    - uses: actions/upload-artifact@v7
+      with:
+        name: perry-wit-compiler
+        path: dist/*
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v7
+      if: failure()
+      with:
+        name: browser-results
+        path: site/test-results
+    - uses: actions/upload-pages-artifact@v4
+      if: github.ref == 'refs/heads/main'
+      with:
+        path: result-site
+
+  deploy-pages:
+    needs: [site, flake-checks, conformance-and-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - uses: actions/configure-pages@v5
+    - uses: actions/deploy-pages@v4
+      id: deployment
+    - name: Smoke check public assets
+      env:
+        SITE_URL: ${{ steps.deployment.outputs.page_url }}
+      run: |
+        curl --fail --retry 5 --retry-delay 5 "$SITE_URL"
+        curl --fail --retry 5 --retry-delay 5 "${SITE_URL}play/"
+        curl --fail --retry 5 --retry-delay 5 "${SITE_URL}examples/merge_docs/doc1.json"
+        curl --fail --retry 5 --retry-delay 5 "${SITE_URL}sizes.json"

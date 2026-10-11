@@ -114,7 +114,7 @@ async fn handlers_serve_exchanges_and_report_exceptions() -> Result<()> {
     let world = resolve.select_world(&[package], Some("handler"))?;
     let compiled = compile_for_world(SOURCE, "handler.ts", &resolve, world, true)?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;

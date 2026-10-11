@@ -150,8 +150,9 @@ fn component(source: &str, wit: &str, world: &str) -> Result<Vec<u8>> {
     let world = resolve.select_world(&[package], Some(world))?;
     Ok(
         compile_for_world(source, "bench.ts", &resolve, world, true)?
-            .stripped
-            .unwrap(),
+            .component
+            .unwrap()
+            .stripped,
     )
 }
 
@@ -576,7 +577,7 @@ fn examples() -> Result<Vec<Row>> {
     for (workload, source, wit, world) in [
         (
             "example: merge_task",
-            "examples/merge_task.ts",
+            "examples/merge_task/index.ts",
             "wit",
             "task-runner",
         ),
@@ -591,8 +592,9 @@ fn examples() -> Result<Vec<Row>> {
         let world = resolve.select_world(&[package], Some(world))?;
         let source_text = std::fs::read_to_string(source)?;
         let bytes = compile_for_world(&source_text, source, &resolve, world, true)?
-            .stripped
-            .unwrap();
+            .component
+            .unwrap()
+            .stripped;
         rows.push(Row {
             workload: workload.into(),
             bytes: Some(bytes.len()),

@@ -739,10 +739,21 @@ pub(crate) fn decode(contents: &[u8]) -> *mut u8 {
     unsafe { perry_abi::adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
-/// Whether a fetched body's final read still awaits its completion acknowledgement.
-pub(crate) fn pending_completion(stream: *mut Readable) -> bool {
+/// Whether a final read awaits acknowledgement without a completed combinator owning it.
+pub(crate) fn detached_completion(stream: *mut Readable) -> bool {
     // SAFETY: fetch operations retain their body, or have not received one yet.
-    !stream.is_null() && unsafe { !(*stream).parked.is_null() }
+    !stream.is_null() && unsafe { !(*stream).parked.is_null() && detached_read(&*(*stream).parked) }
+}
+
+fn detached_read(reader: &Reader) -> bool {
+    if !reader.drain.is_null() {
+        // SAFETY: the reader retains its drain.
+        !perry_abi::cancellation_owned(unsafe { (*reader.drain).promise })
+    } else if !reader.reads.is_null() {
+        byob::has_detached_read(reader)
+    } else {
+        !perry_abi::cancellation_owned(reader.pending)
+    }
 }
 
 /// Outstanding read promises owned by this task. Open, unread streams are not work.
@@ -754,7 +765,7 @@ pub(crate) extern "C" fn web_streams_pending() -> u32 {
     // SAFETY: waiting readers and their streams are pinned until acknowledgement.
     unsafe {
         while !reader.is_null() {
-            pending += u32::from((*(*reader).stream).task == task);
+            pending += u32::from((*(*reader).stream).task == task && detached_read(&*reader));
             reader = (*reader).next;
         }
     }

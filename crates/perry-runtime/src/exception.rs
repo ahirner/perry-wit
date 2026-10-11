@@ -12,21 +12,12 @@
 use crate::region::current;
 use core::ptr;
 
-pub const KIND: u32 = 0;
-pub const TAG: u32 = 4;
-pub const VALUE: u32 = 8;
-pub const CAUSE: u32 = 16;
+pub use crate::layout::exception::{
+    CAUSE, ERROR, KIND, RANGE_ERROR, TAG, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING,
+    THROWN_VALUE, TYPE_ERROR, VALUE,
+};
 
-pub const TYPE_ERROR: u32 = 1;
-pub const RANGE_ERROR: u32 = 2;
-pub const ERROR: u32 = 3;
-pub const THROWN_VALUE: u32 = 4;
 pub(crate) const EXIT: u32 = 5;
-
-pub const TAG_NUMBER: u32 = 1;
-pub const TAG_BOOLEAN: u32 = 2;
-pub const TAG_STRING: u32 = 3;
-pub const TAG_BIGINT: u32 = 4;
 
 #[repr(C)]
 struct Exception {

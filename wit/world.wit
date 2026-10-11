@@ -11,14 +11,22 @@ world merge-docs {
     name: string,
     message: string,
   }
-  export merge-docs: async func() -> result<string, merge-error>;
+  export merge-docs: async func(first-url: string, second-url: string) -> result<string, merge-error>;
+}
+
+interface document-types {
+  record document {
+    markdown: string,
+    code-points: u32,
+  }
 }
 
 world task-runner {
-  export run-task: func(input: string) -> string;
+  use document-types.{document};
+  export render-markdown: func(title: string, paragraphs: list<string>) -> document;
 }
 
 world merge-task {
-  export run-task: func(input: string) -> string;
-  export merge-task: func(input: string) -> string;
+  include task-runner;
+  export count-code-points: func(text: string) -> u32;
 }

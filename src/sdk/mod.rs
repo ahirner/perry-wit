@@ -44,7 +44,7 @@ pub struct SdkResult {
 pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
     let world = resolve.select_world(&[package], options.world.as_deref())?;
-    let dts = codegen::generate_world_declarations(&resolve, &resolve.worlds[world])?;
+    let artifacts = declarations(&resolve, world)?;
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
             "Failed to create SDK output directory at {}",
@@ -52,19 +52,12 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         )
     })?;
 
-    let imports_path = options.out_dir.join("imports.d.ts");
-    fs::write(
-        &imports_path,
-        codegen::generate_import_declarations(&resolve, &resolve.worlds[world]),
-    )?;
-    write_runtime_declarations(&options.out_dir)?;
-    let dts = format!(
-        "/// <reference path=\"./runtime.d.ts\" />\n/// <reference path=\"./imports.d.ts\" />\n{dts}"
-    );
-
+    for artifact in artifacts {
+        let path = options.out_dir.join(artifact.name);
+        fs::write(&path, artifact.contents)
+            .with_context(|| format!("Failed to write declaration file at {}", path.display()))?;
+    }
     let dts_path = options.out_dir.join("world.d.ts");
-    fs::write(&dts_path, dts)
-        .with_context(|| format!("Failed to write declaration file at {}", dts_path.display()))?;
 
     // Determine project root for tsconfig.json
     let project_root = options.project_root.clone().unwrap_or_else(|| {
@@ -127,6 +120,29 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         check_path,
         tsconfig_path: generated_tsconfig,
     })
+}
+
+/// Generate portable declaration contents independently of a project layout.
+pub(crate) fn declarations(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> Result<Vec<crate::api::Artifact>> {
+    let world = &resolve.worlds[world];
+    let dts = codegen::generate_world_declarations(resolve, world)?;
+    Ok(vec![
+        crate::api::Artifact {
+            name: "world.d.ts".into(),
+            contents: format!("/// <reference path=\"./runtime.d.ts\" />\n/// <reference path=\"./imports.d.ts\" />\n{dts}").into_bytes(),
+        },
+        crate::api::Artifact {
+            name: "imports.d.ts".into(),
+            contents: codegen::generate_import_declarations(resolve, world).into_bytes(),
+        },
+        crate::api::Artifact {
+            name: "runtime.d.ts".into(),
+            contents: include_bytes!("runtime.d.ts").to_vec(),
+        },
+    ])
 }
 
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.

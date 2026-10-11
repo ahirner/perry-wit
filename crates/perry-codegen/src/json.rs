@@ -51,7 +51,7 @@ fn json_key(name: &str) -> String {
 
 impl FunctionLowering<'_, '_> {
     fn static_text(&mut self, ctx: &mut Context, text: &str) -> (Value, Value) {
-        let address = self.state.data.string(text) + perry_runtime::string::SIZE;
+        let address = self.state.data.string(text) + perry_abi::layout::string::SIZE;
         (
             self.i32_const(ctx, address as i32),
             self.i32_const(ctx, text.len() as i32),

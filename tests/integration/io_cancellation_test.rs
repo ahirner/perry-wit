@@ -53,7 +53,7 @@ fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("filesystem"))?;
     let compiled = compile_for_world_with_memory_checks(source, "filesystem.ts", &resolve, world)?;
-    Ok(compiled.stripped.unwrap())
+    Ok(compiled.component.unwrap().stripped)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -237,8 +237,9 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
         );
         let worker =
             compile_for_world_with_memory_checks(&source, "cancel-output.ts", &resolve, world)?
-                .stripped
-                .unwrap();
+                .component
+                .unwrap()
+                .stripped;
         let caller = cancellation::cancellation_caller(&worker, false)?;
         wasmparser::Validator::new().validate_all(&caller)?;
         let component = Component::new(&engine, caller)?;

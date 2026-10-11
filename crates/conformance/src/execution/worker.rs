@@ -34,10 +34,7 @@ pub fn worker(request: &Path, destination: &Path) -> Result<()> {
                 let wasm = directory.join("case.wasm");
                 fs::write(
                     &wasm,
-                    compiled
-                        .stripped
-                        .or(compiled.component)
-                        .context("component output")?,
+                    compiled.component.context("component output")?.stripped,
                 )?;
                 Outcome::Command(command(
                     Command::new("wasmtime")
@@ -171,7 +168,8 @@ fn execute_function(
     let engine = Engine::new(&config)?;
     let bytes = compiled
         .component
-        .context("component compilation produced no component")?;
+        .context("component compilation produced no component")?
+        .bytes;
     let component_bytes = bytes.len();
     let component = match Component::new(&engine, bytes) {
         Ok(component) => component,

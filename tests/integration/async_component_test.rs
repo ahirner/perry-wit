@@ -234,7 +234,7 @@ fn compile(check_memory: bool) -> Result<Vec<u8>> {
     } else {
         compile_for_world(SOURCE, "timers.ts", &resolve, world, true)?
     };
-    Ok(compiled.stripped.unwrap())
+    Ok(compiled.component.unwrap().stripped)
 }
 
 fn store(engine: &Engine) -> Store<Host> {

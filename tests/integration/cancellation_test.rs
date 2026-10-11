@@ -63,8 +63,9 @@ async fn cancelled_exports_release_pending_host_calls_before_acknowledging() -> 
             "import {{wait}} from 'test:cancel/host'; export async function run(mode:number):Promise<number>{{{body}}}"
         );
         let callee = perry_wit::compile_for_world(&source, "cancel.ts", &resolve, world, true)?
-            .stripped
-            .unwrap();
+            .component
+            .unwrap()
+            .stripped;
         let component = Component::new(
             &engine,
             composition::compose_with_interface(&callee, &caller, Some("test:cancel/host"))?,
