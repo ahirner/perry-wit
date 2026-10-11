@@ -170,16 +170,16 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
-        names: &[String],
+        names: &[&str],
         args: &[Expr],
     ) -> Result<Value> {
         ensure!(
-            names.iter().all(|n| n == "tag" || n == "val"),
+            names.iter().all(|&n| n == "tag" || n == "val"),
             "variants have tag and val only"
         );
         let tag = names
             .iter()
-            .position(|n| n == "tag")
+            .position(|&n| n == "tag")
             .context("variant literal needs a tag")?;
         let Expr::String(tag) = &args[tag] else {
             bail!("variant construction needs a literal tag");
@@ -192,7 +192,7 @@ impl FunctionBuilder<'_> {
             .find(|(name, _)| name == tag)
             .map(|(_, payload)| *payload)
             .context("literal tag is not a case of this variant")?;
-        let argument = names.iter().position(|n| n == "val");
+        let argument = names.iter().position(|&n| n == "val");
         let value = match (argument, payload) {
             (Some(index), Some(payload)) => {
                 let value = self.expression_with(ctx, &args[index], Some(payload))?;

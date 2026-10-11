@@ -116,7 +116,7 @@ impl AbiType {
     }
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     /// A completion-style result branch, stored or flattened by the export wrapper.
     pub(super) fn completion_store(
         &mut self,
@@ -207,11 +207,7 @@ impl FunctionLowering<'_> {
             .into();
             let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
             let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
-            let value = self.build_record(
-                ctx,
-                mir,
-                vec![("name".into(), name), ("message".into(), message)],
-            )?;
+            let value = self.build_record(ctx, mir, vec![("name", name), ("message", message)])?;
             return Ok(Some((mir, value)));
         }
         let (expected, mir, kind) = match err {
@@ -370,10 +366,10 @@ impl FunctionLowering<'_> {
                     .map_err(|_| anyhow!("record without fields"))?
                     .to_vec();
                 let mut values = Vec::new();
-                for (name, field) in fields {
+                for (name, field) in &fields {
                     let value = if name.as_str() == "ok" {
                         ensure!(
-                            crate::repr(ctx, field)? == crate::Repr::Bool,
+                            crate::repr(ctx, *field)? == crate::Repr::Bool,
                             "result ok field must be boolean"
                         );
                         self.i32_const(ctx, i32::from(case == 0))
@@ -383,12 +379,12 @@ impl FunctionLowering<'_> {
                         })?
                     } else {
                         ensure!(
-                            absence(ctx, field).is_some_and(|a| a.admits_undefined()),
+                            absence(ctx, *field).is_some_and(|a| a.admits_undefined()),
                             "inactive result field {name} must admit undefined"
                         );
-                        self.undefined(ctx, field)?
+                        self.undefined(ctx, *field)?
                     };
-                    values.push((name.to_string(), value));
+                    values.push((name.as_str(), value));
                 }
                 self.build_record(ctx, mir, values)
             }

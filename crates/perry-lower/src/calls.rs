@@ -1,0 +1,349 @@
+//! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
+use super::*;
+
+impl FunctionBuilder<'_> {
+    pub(super) fn call(
+        &mut self,
+        ctx: &mut Context,
+        callee: &Expr,
+        args: &[Expr],
+    ) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
+            match (name.as_str(), args) {
+                (TDZ_CHECK, [Expr::LocalGet(id), Expr::String(_)]) => {
+                    self.load(ctx, self.local(*id)?)?;
+                    return Ok(None);
+                }
+                (TDZ_CHECK_THEN, [Expr::LocalGet(id), Expr::String(_), value]) => {
+                    let value = self.expression(ctx, value)?;
+                    self.load(ctx, self.local(*id)?)?;
+                    return Ok(Some(value));
+                }
+                _ => {}
+            }
+        }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+            && let Expr::PropertyGet {
+                object: namespace,
+                property: class,
+                ..
+            } = &**object
+            && let Expr::PropertyGet {
+                object: global,
+                property: name,
+                ..
+            } = &**namespace
+            && matches!(**global, Expr::GlobalGet(_))
+            && name == "Temporal"
+        {
+            return self.temporal_factory(ctx, class, property, args).map(Some);
+        }
+
+        if let Expr::Closure { params, body, .. } = callee
+            && let [param] = params.as_slice()
+            && param.name == "__perry_obj_iife"
+        {
+            ensure!(
+                matches!(args, [Expr::Object(fields)] if fields.is_empty()),
+                "object literals with methods are not supported yet"
+            );
+            return self.object_spread(ctx, param.id, body).map(Some);
+        }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+            && matches!(**object, Expr::GlobalGet(0))
+        {
+            if property == "fetch" {
+                return self.fetch(ctx, args).map(Some);
+            }
+            let intrinsic = match property.as_str() {
+                "log" | "info" | "debug" => Intrinsic::PrintOut,
+                "error" | "warn" => Intrinsic::PrintErr,
+                other => bail!("console.{other} is not supported yet"),
+            };
+            let line = self.console_line(ctx, args)?;
+            self.call_intrinsic(ctx, intrinsic, vec![line]);
+            return Ok(None);
+        }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+        {
+            if let Expr::PropertyGet {
+                object: global,
+                property: class,
+                ..
+            } = &**object
+                && matches!(**global, Expr::GlobalGet(_))
+                && class == "Promise"
+            {
+                if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
+                    return self.promise_settled(ctx, property, value, None).map(Some);
+                }
+                let combinator = match property.as_str() {
+                    "all" => Combinator::All,
+                    "race" => Combinator::Race,
+                    "allSettled" => Combinator::AllSettled,
+                    other => bail!("Promise.{other} is not supported yet"),
+                };
+                let [inputs] = args else {
+                    bail!("Promise.{property} takes one array");
+                };
+                let inputs = match inputs {
+                    Expr::Array(items) => self.combinator_inputs(ctx, items)?,
+                    inputs => self.expression(ctx, inputs)?,
+                };
+                let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
+                    .context("Promise combinators take an array of promises of one type")?;
+                return Ok(Some(self.append_value(ctx, &op)));
+            }
+            return self.method(ctx, object, property, args);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && name == "js_process_exit_code_set"
+        {
+            ensure!(args.len() == 1, "process.exitCode takes one value");
+            let code = self.expression(ctx, &args[0])?;
+            let code = self.arithmetic(ctx, code);
+            ensure!(
+                kind(ctx, code)? == Kind::Number,
+                "process.exitCode must be a number"
+            );
+            self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
+            return Ok(None);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && name == "js_native_module_named_esm_export_value"
+        {
+            // Module initialization of a named built-in import (`Writable`): nothing to run.
+            return Ok(None);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some(builtin) = self.builtins.get(name)
+        {
+            return match builtin {
+                Builtin::SetTimeout => self.timer(ctx, args).map(Some),
+                Builtin::Writable => bail!("Writable is a class; only Writable.toWeb is supported"),
+                Builtin::Serve(intrinsic) => {
+                    let mut operands = Vec::with_capacity(args.len());
+                    for arg in args {
+                        let value = self.expression(ctx, arg)?;
+                        operands.push(self.defined(ctx, value)?);
+                    }
+                    Ok(Some(match self.call_intrinsic(ctx, *intrinsic, operands) {
+                        Some(value) => value,
+                        None => {
+                            let number = FP64Type::get(ctx).into();
+                            self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+                        }
+                    }))
+                }
+                fs => self.fs(ctx, *fs, args).map(Some),
+            };
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some((binding, signature)) = self.shapes.foreign_function(name)
+        {
+            ensure!(
+                args.len() == signature.params.len(),
+                "WIT import {binding} expects {} arguments",
+                signature.params.len()
+            );
+            let mut values = Vec::new();
+            for (arg, (_, ty, _)) in args.iter().zip(&signature.params) {
+                let ty = self.shapes.value_type(ctx, ty)?;
+                let value = self.expression_with(ctx, arg, Some(ty))?;
+                let actual = value.get_type(ctx);
+                let value = if foreign::accepts_input(ctx, ty, actual) {
+                    value
+                } else if optional_value(ctx, ty).is_none()
+                    && optional_value(ctx, actual)
+                        .is_some_and(|inner| foreign::accepts_input(ctx, ty, inner))
+                {
+                    self.defined(ctx, value)?
+                } else if optional_value(ctx, actual).is_none()
+                    && optional_value(ctx, ty)
+                        .is_some_and(|inner| foreign::accepts_input(ctx, inner, actual))
+                {
+                    let wrapped = perry_mir::types::OptionalType::get_with(
+                        ctx,
+                        actual,
+                        absence(ctx, ty).expect("optional"),
+                    )
+                    .into();
+                    self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
+                } else {
+                    self.fit(ctx, value, ty)?
+                };
+                values.push(value);
+            }
+            let results = if *signature.return_type == HirType::Void {
+                vec![]
+            } else {
+                vec![self.shapes.value_type(ctx, &signature.return_type)?]
+            };
+            if signature.is_async {
+                let payload = self.shapes.settled_type(ctx, &signature.return_type)?;
+                let params = values.iter().map(|v| v.get_type(ctx)).collect();
+                let wrapper = foreign::wrapper(ctx, self.shapes, &binding, params, payload)?;
+                let op = AsyncCallOp::new(ctx, wrapper, values, payload);
+                return Ok(Some(self.append_value(ctx, &op)));
+            }
+            let op = perry_mir::foreign::ForeignOp::new(
+                ctx,
+                perry_mir::foreign::Phase::Call,
+                &binding,
+                values,
+                results,
+            );
+            self.append(ctx, &op);
+            return Ok(op.get_operation().deref(ctx).results().next());
+        }
+        let Expr::FuncRef(id) = callee else {
+            bail!("only direct calls to module functions are supported yet");
+        };
+        let signature = self
+            .signatures
+            .get(id)
+            .context("call to an unknown function")?;
+        let name = &signature.name;
+        let params = &signature.params;
+        ensure!(
+            args.len() == params.len(),
+            "call to {name} with {} arguments, expected {}",
+            args.len(),
+            params.len()
+        );
+        let values = args
+            .iter()
+            .zip(params)
+            .map(|(arg, param)| {
+                let value = self.expression_with(ctx, arg, Some(*param))?;
+                self.fit(ctx, value, *param)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if signature.is_async {
+            let value = signature.results[0];
+            let promise = self.emit_value(ctx, |ctx| {
+                AsyncCallOp::new(ctx, name.clone(), values, value)
+            });
+            return Ok(Some(promise));
+        }
+        let op = CallOp::new(ctx, name.clone(), values, signature.results.clone());
+        self.append(ctx, &op);
+        let operation = op.get_operation().deref(ctx);
+        Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
+    }
+
+    /// The array literal given to a promise combinator: plain values among promises of `T`
+    /// become promises fulfilled with them, as `Promise.all` treats them.
+    pub(super) fn combinator_inputs(&mut self, ctx: &mut Context, items: &[Expr]) -> Result<Value> {
+        // `Promise.reject(e)` takes its settled type from the other inputs: lower it last.
+        let mut lowered: Vec<Option<Value>> = Vec::with_capacity(items.len());
+        for item in items {
+            lowered.push(
+                if promise_call(item).is_some_and(|(name, _)| name == "reject") {
+                    None
+                } else {
+                    let value = self.expression(ctx, item)?;
+                    Some(self.defined(ctx, value)?)
+                },
+            );
+        }
+        let known: Vec<Value> = lowered.iter().flatten().copied().collect();
+        let promised = known.iter().find_map(|value| {
+            TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
+                .ok()
+                .map(|promise| promise.deref(ctx).value())
+        });
+        let settled = match promised {
+            Some(settled) => settled,
+            None => match known.first() {
+                Some(first) => first.get_type(ctx),
+                None => self.void_type(ctx),
+            },
+        };
+        let promise: TypeHandle = PromiseType::get(ctx, settled).into();
+        let mut values = Vec::with_capacity(items.len());
+        for (item, value) in items.iter().zip(lowered) {
+            values.push(match value {
+                Some(value) => value,
+                None => {
+                    let (name, reason) = promise_call(item).expect("checked");
+                    self.promise_settled(ctx, name, reason, Some(settled))?
+                }
+            });
+        }
+        let mut inputs = Vec::with_capacity(values.len());
+        for value in values {
+            let value = if value.get_type(ctx) == promise {
+                value
+            } else {
+                let value = self.fit(ctx, value, settled)?;
+                self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value))
+            };
+            inputs.push(value);
+        }
+        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, inputs)))
+    }
+
+    /// `Promise.resolve(value)` (a promise passes through) or `Promise.reject(reason)`, a
+    /// promise of `settled` (`undefined` when nothing says).
+    pub(super) fn promise_settled(
+        &mut self,
+        ctx: &mut Context,
+        name: &str,
+        value: &Expr,
+        settled: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let value = self.expression(ctx, value)?;
+        let value = self.defined(ctx, value)?;
+        if name == "resolve" {
+            if TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx).is_ok() {
+                return Ok(value);
+            }
+            return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));
+        }
+        let settled = match settled {
+            Some(settled) => settled,
+            None => self.void_type(ctx),
+        };
+        Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
+    }
+
+    /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
+    pub(super) fn void_type(&self, ctx: &mut Context) -> TypeHandle {
+        let number = FP64Type::get(ctx).into();
+        perry_mir::types::OptionalType::get(ctx, number).into()
+    }
+}
+
+/// `Promise.<name>(argument)`: the name and the argument.
+fn promise_call(expr: &Expr) -> Option<(&str, &Expr)> {
+    let Expr::Call { callee, args, .. } = expr else {
+        return None;
+    };
+    let Expr::PropertyGet {
+        object, property, ..
+    } = &**callee
+    else {
+        return None;
+    };
+    let Expr::PropertyGet {
+        object: global,
+        property: class,
+        ..
+    } = &**object
+    else {
+        return None;
+    };
+    let [argument] = args.as_slice() else {
+        return None;
+    };
+    (matches!(**global, Expr::GlobalGet(_)) && class == "Promise")
+        .then_some((property.as_str(), argument))
+}

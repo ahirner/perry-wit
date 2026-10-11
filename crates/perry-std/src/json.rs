@@ -105,7 +105,7 @@ fn checked(value: *mut u8) -> bool {
 /// # Safety
 /// `name` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_member(value: *mut u8, name: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_json_member(value: *mut u8, name: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     property(value, unsafe { crate::runtime::bytes(name) })
 }
@@ -155,7 +155,7 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
 
 /// `value[index]` of an array, or `undefined`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_index(value: *mut u8, index: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_json_index(value: *mut u8, index: f64) -> *mut u8 {
     if !checked(value) {
         return core::ptr::null_mut();
     }
@@ -183,7 +183,7 @@ fn array_element(value: *mut u8, index: u32) -> *mut u8 {
 
 /// Own enumerable keys of an immutable JSON snapshot, in ECMAScript property order.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
     if !checked(value) {
         return crate::runtime::array(&[]);
     }
@@ -223,7 +223,7 @@ pub extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
 
 /// `value.length`: a string's Unicode scalar count or an array's count, else `undefined` (bits).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_length(value: *mut u8) -> u64 {
+pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     if !checked(value) {
         return 0;
     }
@@ -248,7 +248,7 @@ fn expected(value: *mut u8, kind: u32, what: &'static str) -> bool {
 /// # Safety
 /// `value` must be a JSON node or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
     if value.is_null() {
         return f64::NAN;
     }
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
 /// # Safety
 /// `value` is null (undefined) or a live JSON node.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
     if !expected(value, NUMBER, "JSON value is not a number") {
         return 0.0;
     }
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
 
 /// A JSON string used as `string`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_to_string(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_to_string(value: *mut u8) -> *mut u8 {
     if !expected(value, STRING, "JSON value is not a string") {
         return from_static("");
     }
@@ -290,7 +290,7 @@ pub extern "C" fn std_json_to_string(value: *mut u8) -> *mut u8 {
 
 /// A JSON boolean used as `boolean`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_to_bool(value: *mut u8) -> u32 {
+pub(crate) extern "C" fn std_json_to_bool(value: *mut u8) -> u32 {
     if !expected(value, BOOLEAN, "JSON value is not a boolean") {
         return 0;
     }
@@ -299,7 +299,7 @@ pub extern "C" fn std_json_to_bool(value: *mut u8) -> u32 {
 
 /// ECMAScript truthiness within the immutable JSON value domain.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
+pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
     if value.is_null() {
         return 0;
     }
@@ -320,7 +320,7 @@ pub extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
 #[repr(C)]
-pub struct Writer {
+struct Writer {
     text: Buffer,
     /// Bit `d` set: the container at depth `d` already has an element.
     started: [u64; 2],
@@ -338,7 +338,7 @@ fn writer(w: *mut u8) -> &'static mut Writer {
 
 /// A new writer in the task region.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_writer() -> *mut u8 {
+pub(crate) extern "C" fn std_json_writer() -> *mut u8 {
     let w = perry_abi::object!(Writer; text);
     // SAFETY: freshly allocated.
     unsafe {
@@ -354,7 +354,7 @@ pub extern "C" fn std_json_writer() -> *mut u8 {
 
 /// Enter a container value; returns 0 (and fails the writer) when nesting is too deep.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
+pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
     let w = writer(w);
     if w.failed || w.depth >= MAX_DEPTH {
         w.failed = true;
@@ -369,7 +369,7 @@ pub extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
 
 /// Leave a container value.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_close(w: *mut u8, bracket: u32) {
+pub(crate) extern "C" fn std_json_close(w: *mut u8, bracket: u32) {
     let w = writer(w);
     if w.failed {
         return;
@@ -388,7 +388,7 @@ fn separate(w: &mut Writer) {
 
 /// Start an array element.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_item(w: *mut u8) {
+pub(crate) extern "C" fn std_json_item(w: *mut u8) {
     let w = writer(w);
     if !w.failed {
         separate(w);
@@ -400,7 +400,7 @@ pub extern "C" fn std_json_item(w: *mut u8) {
 /// # Safety
 /// `key` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_key(w: *mut u8, key: *mut u8) {
+pub(crate) unsafe extern "C" fn std_json_key(w: *mut u8, key: *mut u8) {
     let w = writer(w);
     if !w.failed {
         separate(w);
@@ -414,7 +414,7 @@ pub unsafe extern "C" fn std_json_key(w: *mut u8, key: *mut u8) {
 /// # Safety
 /// `data` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u32) {
+pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u32) {
     let w = writer(w);
     if !w.failed && len > 0 {
         // SAFETY: compiled code passes `len` readable bytes.
@@ -428,7 +428,7 @@ pub unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u32) {
 /// # Safety
 /// `string` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
+pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     let w = writer(w);
     if w.failed {
         return;
@@ -469,7 +469,7 @@ pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
 
 /// The text written, or null after a failure (with a `TypeError` raised).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
     let w = writer(w);
     if w.failed {
         raise(TYPE_ERROR, "Converting circular structure to JSON");
@@ -480,7 +480,7 @@ pub extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
 
 /// `typeof value`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         return from_static("undefined");
     }
@@ -494,7 +494,7 @@ pub extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
 
 /// Whether a JSON node is the explicit `null` value, distinct from an absent property.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_is_null(value: *mut u8) -> u32 {
+pub(crate) extern "C" fn std_json_is_null(value: *mut u8) -> u32 {
     u32::from(!value.is_null() && word(value, 0) == NULL)
 }
 
@@ -588,7 +588,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
 /// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output; `undefined` writes
 /// nothing, so callers check it first).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
+pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     let w = writer(w);
     if w.failed || value.is_null() {
         return;
@@ -788,14 +788,14 @@ fn index_key(index: u32) -> *mut u8 {
 
 /// `{}`: the object a spread literal starts from.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_object() -> *mut u8 {
+pub(crate) extern "C" fn std_json_object() -> *mut u8 {
     new_node(OBJECT)
 }
 
 /// `...source` in an object literal: an object's members, an array's elements or a string's
 /// characters under their indices; other values add nothing.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
+pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
     if source.is_null() {
         return;
     }
@@ -835,7 +835,7 @@ pub extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
 /// # Safety
 /// `key` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, value: *mut u8) {
+pub(crate) unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, value: *mut u8) {
     // SAFETY: guaranteed by the caller; strings live in the task region.
     let key = string_node(unsafe { crate::runtime::bytes(key) });
     append(object, value, key);
@@ -843,7 +843,7 @@ pub unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, value: *mut
 
 /// A number as a JSON value.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
     let node = new_node(NUMBER);
     // SAFETY: number nodes hold an f64 at 8.
     unsafe { *(node.add(8) as *mut f64) = value };
@@ -855,14 +855,14 @@ pub extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
 /// # Safety
 /// `value` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_json_from_string(value: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_json_from_string(value: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller; strings live in the task region.
     string_node(unsafe { crate::runtime::bytes(value) })
 }
 
 /// A boolean (`kind` 2) or `null` (`kind` 1) as a JSON value.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 {
+pub(crate) extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 {
     let node = new_node(kind);
     set_word(node, 8, truth);
     node
@@ -870,13 +870,13 @@ pub extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 {
 
 /// Check the container before a closed schema reads its declared fields.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_require_object(value: *mut u8) {
+pub(crate) extern "C" fn std_json_require_object(value: *mut u8) {
     expected(value, OBJECT, "JSON value is not an object");
 }
 
 /// Start linear traversal of a checked JSON array.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
     if !expected(value, ARRAY, "JSON value is not an array") {
         return core::ptr::null_mut();
     }
@@ -885,7 +885,7 @@ pub extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
 
 /// Advance a checked array traversal. Null marks the end, without allocating iterator state.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         core::ptr::null_mut()
     } else {

@@ -3,7 +3,7 @@ use crate::runtime;
 
 /// Native and guest layout is identical; no pointer fields are stored here.
 #[repr(C)]
-pub struct Integer {
+pub(crate) struct Integer {
     pub magnitude: u64,
     pub negative: u32,
     padding: u32,
@@ -11,7 +11,7 @@ pub struct Integer {
 
 /// Convert an integral finite number within the signed-magnitude transport domain.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bigint_from_number(value: f64) -> *mut Integer {
+pub(crate) extern "C" fn std_bigint_from_number(value: f64) -> *mut Integer {
     let magnitude = libm::fabs(value);
     if !value.is_finite() || libm::trunc(value) != value || magnitude >= 18446744073709551616.0 {
         runtime::raise(
@@ -35,7 +35,7 @@ pub extern "C" fn std_bigint_from_number(value: f64) -> *mut Integer {
 /// # Safety
 /// `value` is a live integer owned by compiled code.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bigint_negate(value: *const Integer) -> *mut Integer {
+pub(crate) unsafe extern "C" fn std_bigint_negate(value: *const Integer) -> *mut Integer {
     let value = unsafe { &*value };
     let result = runtime::alloc(16).cast::<Integer>();
     unsafe {
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn std_bigint_negate(value: *const Integer) -> *mut Intege
 /// # Safety
 /// Both operands are live integers owned by compiled code.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bigint_compare(a: *const Integer, b: *const Integer) -> i32 {
+pub(crate) unsafe extern "C" fn std_bigint_compare(a: *const Integer, b: *const Integer) -> i32 {
     let (a, b) = unsafe { (&*a, &*b) };
     let order = b.negative.cmp(&a.negative).then_with(|| {
         if a.negative != 0 {
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn std_bigint_compare(a: *const Integer, b: *const Integer
 /// # Safety
 /// `value` is a live integer owned by compiled code.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bigint_to_number(value: *const Integer) -> f64 {
+pub(crate) unsafe extern "C" fn std_bigint_to_number(value: *const Integer) -> f64 {
     let value = unsafe { &*value };
     let magnitude = value.magnitude as f64;
     if value.negative == 0 {
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn std_bigint_to_number(value: *const Integer) -> f64 {
 /// # Safety
 /// `value` is a live integer owned by compiled code.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bigint_to_string(value: *const Integer) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bigint_to_string(value: *const Integer) -> *mut u8 {
     let value = unsafe { &*value };
     let mut digits = [0; 21];
     let mut at = digits.len();

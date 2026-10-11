@@ -5,6 +5,8 @@ use wasmtime::{
     component::{Component, Linker, Resource, ResourceAny, ResourceType},
 };
 
+use crate::engine::async_engine;
+
 fn compile(source: &str, wit: &str) -> Result<Vec<u8>> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str("resources.wit", wit)?;
@@ -174,13 +176,7 @@ async fn async_resource_borrows_release_only_after_acknowledgement() -> Result<(
         let source = format!(
             "import {{get,work,dropSecret}} from 'test:boundary/secrets'; export async function run(value:number):Promise<number> {{const a=get(value);const p=work(a);{body}}}"
         );
-        let mut config = wasmtime::Config::new();
-        config
-            .wasm_component_model_async(true)
-            .wasm_component_model_async_stackful(false)
-            .wasm_component_model_more_async_builtins(false)
-            .wasm_component_model_threading(false);
-        let engine = Engine::new(&config)?;
+        let engine = async_engine()?;
         let component = Component::new(&engine, compile(&source, wit)?)?;
         let mut linker = Linker::<Counts>::new(&engine);
         let ack = Arc::new(AtomicU32::new(0));
@@ -248,13 +244,7 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
         interface service {use secrets.{secret};get:func(value:u32)->secret;run:async func(value:borrow<secret>)->u32;}
         world boundary {import secrets;export service;}";
     let source = "import type {Secret} from 'test:boundary/secrets'; import {get,inspect} from 'test:boundary/secrets'; export function serviceGet(value:number):Secret {return get(value);} export async function serviceRun(value:Secret):Promise<number> {return await inspect(value);}";
-    let mut config = wasmtime::Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compile(source, wit)?)?;
     let mut store = Store::new(&engine, 0u32);
     let mut linker = Linker::new(&engine);

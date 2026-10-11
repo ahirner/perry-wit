@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use wasmparser::Operator;
 
 pub(super) struct RelocatedData {
-    pub function: u32,
-    pub segments: Vec<(u32, Cow<'static, [u8]>)>,
+    pub(super) function: u32,
+    pub(super) segments: Vec<(u32, Cow<'static, [u8]>)>,
 }
 
 /// Fold only straight-line stores of placed addresses into disjoint initialized segments.

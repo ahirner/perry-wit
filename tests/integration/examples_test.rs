@@ -9,12 +9,14 @@ use std::{
     },
 };
 use wasmtime::{
-    Config, Engine, Store,
+    Engine, Store,
     component::{Component, ComponentType, Lift, Linker, ResourceTable},
 };
 use wasmtime_wasi_http::{
     Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
 };
+
+use crate::engine::async_engine;
 
 #[derive(Default)]
 struct Documents {
@@ -93,13 +95,7 @@ async fn detached_fetch_is_cancelled_before_task_boundary_failure() -> Result<()
         world,
         true,
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
@@ -164,13 +160,7 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
         world,
         true,
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;

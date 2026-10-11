@@ -1,11 +1,13 @@
 //! BYOB regressions ported from main: transferred storage, queued reads and cancellation.
 use anyhow::Result;
 use wasmtime::{
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
+    Store, StoreLimits, StoreLimitsBuilder,
     component::{Component, Instance, Linker, StreamReader},
 };
 #[path = "../support/p3_input.rs"]
 mod input;
+
+use crate::engine::async_engine;
 
 async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, Instance)> {
     let wit = format!(
@@ -16,13 +18,7 @@ async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, 
     let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
         source, "byob.ts", &resolve, world,
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut store = Store::new(
         &engine,
@@ -109,12 +105,11 @@ async fn byob_minimum_and_short_eof_preserve_transferred_bytes() -> Result<()> {
     let run = instance.get_typed_func::<(StreamReader<u8>,), (Vec<u8>,)>(&mut store, "run")?;
     for size in [0, 1, 7, 8, 9] {
         let bytes: Vec<u8> = (1..=size).collect();
-        let input = StreamReader::new(&mut store, bytes.clone())?;
-        let mut expected = vec![0; 10];
-        expected[0] = u8::from(size < 8);
-        expected[1] = size.min(8);
-        expected[2..2 + usize::from(size.min(8))]
-            .copy_from_slice(&bytes[..usize::from(size.min(8))]);
+        let read = usize::from(size.min(8));
+        let mut expected = vec![u8::from(size < 8), size.min(8)];
+        expected.extend_from_slice(&bytes[..read]);
+        expected.resize(10, 0);
+        let input = StreamReader::new(&mut store, bytes)?;
         assert_eq!(run.call_async(&mut store, (input,)).await?.0, expected);
         store.assert_concurrent_state_empty();
     }

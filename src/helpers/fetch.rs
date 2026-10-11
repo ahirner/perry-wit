@@ -302,21 +302,24 @@ impl HeaderInput {
     }
 
     fn ranges(&self) -> impl Iterator<Item = Result<[guest_memory::GuestRange; 2], ()>> {
+        self.records().map(|record| {
+            let [name, name_length, value, value_length] = record_words(record);
+            Ok([
+                guest_memory::GuestRange::new(name, name_length)?,
+                guest_memory::GuestRange::new(value, value_length)?,
+            ])
+        })
+    }
+
+    /// The canonical 16-byte `(name, name length, value, value length)` field records.
+    fn records(&self) -> impl Iterator<Item = &[u8; 16]> {
         // SAFETY: the canonical field list is initialized, immutable, and validated by construction.
-        unsafe { self.fields.bytes() }
-            .chunks_exact(16)
-            .map(|record| {
-                let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
-                Ok([
-                    guest_memory::GuestRange::new(word(0), word(4))?,
-                    guest_memory::GuestRange::new(word(8), word(12))?,
-                ])
-            })
+        unsafe { self.fields.bytes() }.as_chunks::<16>().0.iter()
     }
 
     fn fields(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         self.ranges().map(|ranges| {
-            let [name, value] = ranges.unwrap();
+            let [name, value] = ranges.expect("HeaderInput::new validated every field range");
             // SAFETY: construction validated every initialized input; neither traversal allocates nor suspends.
             unsafe { (name.bytes(), value.bytes()) }
         })
@@ -338,6 +341,15 @@ impl HeaderInput {
         }
         Ok(())
     }
+}
+
+/// The four little-endian words of one canonical header field record.
+#[cfg(target_arch = "wasm32")]
+fn record_words(record: &[u8; 16]) -> [u32; 4] {
+    core::array::from_fn(|word| {
+        let at = word * 4;
+        u32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -459,14 +471,10 @@ pub extern "C" fn fetch_header_edit(
         if value_range.overlaps(target) {
             return Err(());
         }
-        // SAFETY: the canonical list is initialized and immutable; target is disjoint.
-        let fields = unsafe { input.fields.bytes() }
-            .chunks_exact(16)
+        let fields = input
+            .records()
             .zip(input.fields())
-            .map(|(record, (key, _))| {
-                let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
-                ([word(0), word(4), word(8), word(12)], key)
-            });
+            .map(|(record, (key, _))| (record_words(record), key));
         // SAFETY: all input ranges were validated and output is exclusively borrowed and disjoint.
         edit_headers(
             fields,

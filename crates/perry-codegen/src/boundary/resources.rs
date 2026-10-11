@@ -75,7 +75,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
         return;
     }
     let ty = FunctionType::get(ctx, vec![], vec![]);
-    let function = FuncOp::new(ctx, "perry_resources_drain".try_into().unwrap(), ty);
+    let function = FuncOp::new(ctx, pliron::ident!("perry_resources_drain"), ty);
     let mut b = FunctionLowering::glue(state, ctx, &function);
     let next = b.new_block(ctx, vec![]);
     let dispatch = b.new_block(ctx, vec![]);
@@ -91,7 +91,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
     let shift = b.i64_const(ctx, 32);
     let kind = b.num(ctx, NumOpcode::I64ShrU, vec![drop, shift]);
     let kind = b.num(ctx, NumOpcode::I32WrapI64, vec![kind]);
-    let mut resources: Vec<_> = b.state.resources.values().cloned().collect();
+    let mut resources: Vec<_> = b.state.resources.values().copied().collect();
     resources.sort_by_key(|r| r.key);
     for resource in resources {
         let key = b.i32_const(ctx, resource.key as i32 + 1);
@@ -114,7 +114,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
         .append_operation(ctx, function.get_operation(), 0);
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn return_resources(&mut self, ctx: &mut Context) {
         if self.state.resources.is_empty() {
             return;
@@ -128,13 +128,8 @@ impl FunctionLowering<'_> {
             return;
         }
         // This is a generated function, not a runtime helper import.
-        let call = CallOp::new(
-            ctx,
-            "perry_resources_drain".try_into().unwrap(),
-            vec![],
-            vec![],
-        )
-        .get_operation();
+        let call = CallOp::new(ctx, pliron::ident!("perry_resources_drain"), vec![], vec![])
+            .get_operation();
         self.insert(ctx, call);
     }
 

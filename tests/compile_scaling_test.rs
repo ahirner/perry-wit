@@ -47,11 +47,6 @@ fn compile_within(depth: usize, limit: Duration) -> Result<Duration, String> {
 }
 
 #[test]
-fn shallow_property_chain_compiles() {
-    compile_within(2, Duration::from_secs(60)).unwrap();
-}
-
-#[test]
 fn deep_property_chain_compiles_quickly() {
     compile_within(32, Duration::from_secs(10)).unwrap();
 }

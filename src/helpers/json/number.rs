@@ -195,6 +195,10 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
         }
     }
     value.mul_add(chunk_scale, chunk);
+    // A positive `5^e` scales D once; a negative one scales each midpoint.
+    if exponent10 >= 0 {
+        value.mul_pow5(exponent10 as u32);
+    }
     // `D × 10^e` against `low_mid × 2^k`: compare D × 5^e × 2^e and the midpoint scaled.
     let compare = |low: u64| -> core::cmp::Ordering {
         let (m0, k0) = decompose(low);
@@ -204,14 +208,12 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
         let exponent2 = k - 1;
         let mut left = value.clone();
         let mut right = Big::from_u64(midpoint);
-        let (mut left_shift, mut right_shift) = (0i32, 0i32);
-        if exponent10 >= 0 {
-            left.mul_pow5(exponent10 as u32);
-            left_shift += exponent10;
+        let (mut left_shift, mut right_shift) = if exponent10 >= 0 {
+            (exponent10, 0)
         } else {
             right.mul_pow5(exponent10.unsigned_abs());
-            right_shift -= exponent10;
-        }
+            (0, -exponent10)
+        };
         if exponent2 >= 0 {
             right_shift += exponent2;
         } else {

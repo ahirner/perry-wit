@@ -1,7 +1,7 @@
 //! Value-level ops of the `wasm` dialect: numerics, memory, calls and imports.
 use crate::{
     attrs::{Effect, MemKind, NumOpcode},
-    types::val_type,
+    types::{I32_BITS, integer_attr, pliron_type, val_type},
 };
 use pliron::{
     builtin::{
@@ -12,7 +12,7 @@ use pliron::{
         },
         ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
-        types::{FunctionType, IntegerType, Signedness},
+        types::FunctionType,
     },
     combine::{Parser, parser::char::string, token},
     common_traits::Verify,
@@ -36,12 +36,12 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use std::num::NonZeroUsize;
 use thiserror::Error;
 use wasm_encoder::ValType;
 
+/// Verification failures of the value-level ops.
 #[derive(Debug, Error)]
-pub enum OpErr {
+enum OpErr {
     #[error("{0} operand or result types do not match its signature")]
     Signature(String),
     #[error("callee {0} is neither a function nor an import of the enclosing module")]
@@ -76,7 +76,7 @@ pub struct NumOp;
 
 impl NumOp {
     pub fn new(ctx: &mut Context, opcode: NumOpcode, operands: Vec<Value>) -> Self {
-        let result = crate::types::pliron_type(ctx, opcode.signature().1);
+        let result = pliron_type(ctx, opcode.signature().1);
         let op = NumOp {
             op: Operation::new(
                 ctx,
@@ -91,8 +91,10 @@ impl NumOp {
         op
     }
 
-    pub fn opcode(&self, ctx: &Context) -> NumOpcode {
-        *self.get_attr_wasm_num(ctx).expect("opcode")
+    pub(crate) fn opcode(&self, ctx: &Context) -> NumOpcode {
+        *self
+            .get_attr_wasm_num(ctx)
+            .expect("wasm.num gets its opcode from NumOp::new or its parsed format")
     }
 }
 
@@ -163,13 +165,10 @@ impl Verify for SelectOp {
 effect_free!(SelectOp);
 
 fn offset_attr(ctx: &mut Context, offset: u32) -> IntegerAttr {
-    let i32 = IntegerType::get(ctx, 32, Signedness::Signless);
-    IntegerAttr::new(
-        i32,
-        APInt::from_u64(offset.into(), const { NonZeroUsize::new(32).unwrap() }),
-    )
+    integer_attr(ctx, I32_BITS, offset.into())
 }
 
+/// The `u32` offset of a memory access.
 fn offset_of(attr: &IntegerAttr) -> u32 {
     let value: APInt = attr.clone().into();
     value.to_u64() as u32
@@ -186,7 +185,7 @@ pub struct LoadOp;
 
 impl LoadOp {
     pub fn new(ctx: &mut Context, kind: MemKind, address: Value, offset: u32) -> Self {
-        let ty = crate::types::pliron_type(ctx, kind.value());
+        let ty = pliron_type(ctx, kind.value());
         let op = LoadOp {
             op: Operation::new(
                 ctx,
@@ -203,12 +202,18 @@ impl LoadOp {
         op
     }
 
-    pub fn kind(&self, ctx: &Context) -> MemKind {
-        *self.get_attr_wasm_load_kind(ctx).expect("kind")
+    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
+        *self
+            .get_attr_wasm_load_kind(ctx)
+            .expect("wasm.load gets its kind from LoadOp::new or its parsed format")
     }
 
-    pub fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(&self.get_attr_wasm_load_offset(ctx).expect("offset"))
+    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
+        offset_of(
+            &self
+                .get_attr_wasm_load_offset(ctx)
+                .expect("wasm.load gets its offset from LoadOp::new or its parsed format"),
+        )
     }
 }
 
@@ -257,12 +262,18 @@ impl StoreOp {
         op
     }
 
-    pub fn kind(&self, ctx: &Context) -> MemKind {
-        *self.get_attr_wasm_store_kind(ctx).expect("kind")
+    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
+        *self
+            .get_attr_wasm_store_kind(ctx)
+            .expect("wasm.store gets its kind from StoreOp::new or its parsed format")
     }
 
-    pub fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(&self.get_attr_wasm_store_offset(ctx).expect("offset"))
+    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
+        offset_of(
+            &self
+                .get_attr_wasm_store_offset(ctx)
+                .expect("wasm.store gets its offset from StoreOp::new or its parsed format"),
+        )
     }
 }
 
@@ -278,55 +289,24 @@ impl Verify for StoreOp {
     }
 }
 
-/// `memory.size` of memory 0, in 64 KiB pages.
+/// `memory.size` of memory 0, in 64 KiB pages. Built only by the text parser.
 #[pliron_op(
     name = "wasm.memory_size",
     format = "` : ` type($0)",
     interfaces = [OneResultInterface, NOpdsInterface<0>],
     verifier = "succ"
 )]
-pub struct MemorySizeOp;
-
-impl MemorySizeOp {
-    pub fn new(ctx: &mut Context) -> Self {
-        let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        MemorySizeOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i32],
-                vec![],
-                vec![],
-                0,
-            ),
-        }
-    }
-}
+pub(crate) struct MemorySizeOp;
 
 /// `memory.grow` of memory 0 by a number of pages; the previous size, or -1 on failure.
+/// Built only by the text parser.
 #[pliron_op(
     name = "wasm.memory_grow",
     format = "$0 ` : ` type($0)",
     interfaces = [OneResultInterface, NOpdsInterface<1>],
     verifier = "succ"
 )]
-pub struct MemoryGrowOp;
-
-impl MemoryGrowOp {
-    pub fn new(ctx: &mut Context, pages: Value) -> Self {
-        let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        MemoryGrowOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i32],
-                vec![pages],
-                vec![],
-                0,
-            ),
-        }
-    }
-}
+pub(crate) struct MemoryGrowOp;
 
 /// A function imported from the host as `module`.`name`; callable with [CallOp].
 #[pliron_op(
@@ -354,25 +334,28 @@ impl ImportFuncOp {
         op
     }
 
-    pub fn module(&self, ctx: &Context) -> String {
+    pub(crate) fn module(&self, ctx: &Context) -> String {
         self.get_attr_wasm_import_module(ctx)
-            .expect("module")
+            .expect(IMPORT_ATTRS_SET)
             .clone()
             .into()
     }
 
-    pub fn name(&self, ctx: &Context) -> String {
+    pub(crate) fn name(&self, ctx: &Context) -> String {
         self.get_attr_wasm_import_name(ctx)
-            .expect("name")
+            .expect(IMPORT_ATTRS_SET)
             .clone()
             .into()
     }
 }
 
+/// Why [ImportFuncOp]'s attributes are present: both its constructor and its parser set all three.
+const IMPORT_ATTRS_SET: &str = "ImportFuncOp::new and ImportFuncOp::parse set every attribute";
+
 impl Typed for ImportFuncOp {
     fn get_type(&self, ctx: &Context) -> TypeHandle {
         self.get_attr_wasm_import_type(ctx)
-            .expect("type")
+            .expect(IMPORT_ATTRS_SET)
             .get_type(ctx)
     }
 }
@@ -444,7 +427,7 @@ impl Parsable for ImportFuncOp {
 }
 
 /// The signature of a callable symbol (a `builtin.func` or a [ImportFuncOp]) visible from `op`.
-pub fn callee_type(
+fn callee_type(
     ctx: &Context,
     op: Ptr<Operation>,
     callee: &Identifier,
@@ -488,9 +471,9 @@ impl CallOp {
         op
     }
 
-    pub fn callee(&self, ctx: &Context) -> Identifier {
+    pub(crate) fn callee(&self, ctx: &Context) -> Identifier {
         self.get_attr_wasm_callee(ctx)
-            .expect("callee")
+            .expect("wasm.call gets its callee from CallOp::new or its parsed format")
             .clone()
             .into()
     }
@@ -513,26 +496,28 @@ impl Verify for CallOp {
     }
 }
 
-/// Function attribute naming its export.
-pub const EXPORT_KEY: &str = "wasm_export";
+/// The function attribute naming its export.
+fn export_key() -> Identifier {
+    "wasm_export"
+        .try_into()
+        .expect("wasm_export is a valid identifier")
+}
 
 /// Export `function` from the emitted module under `name`.
 pub fn set_export(ctx: &mut Context, function: &FuncOp, name: &str) {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
     function
         .get_operation()
         .deref_mut(ctx)
         .attributes
-        .set(key, StringAttr::new(name.to_string()));
+        .set(export_key(), StringAttr::new(name.to_string()));
 }
 
 /// The export name of `function`, if it is exported.
-pub fn export_name(ctx: &Context, function: &FuncOp) -> Option<String> {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
+pub(crate) fn export_name(ctx: &Context, function: &FuncOp) -> Option<String> {
     function
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<StringAttr>(&key)
+        .get::<StringAttr>(&export_key())
         .map(|name| name.clone().into())
 }

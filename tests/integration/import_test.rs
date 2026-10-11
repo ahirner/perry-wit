@@ -6,6 +6,8 @@ use wasmtime::{
     component::{Component, ComponentType, Lift, Linker, Lower},
 };
 
+use crate::engine::async_engine;
+
 #[derive(ComponentType, Lift, Lower, Debug, PartialEq)]
 #[component(record)]
 struct Packet {
@@ -169,13 +171,7 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
         &resolve,
         world,
     )?;
-    let mut config = wasmtime::Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     struct State {
         text: String,
@@ -261,13 +257,7 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
         &resolve,
         world,
     )?;
-    let mut config = wasmtime::Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     for immediate in [false, true] {
         let mut linker = Linker::<()>::new(&engine);

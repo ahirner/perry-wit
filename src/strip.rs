@@ -33,7 +33,7 @@ impl ReencodeComponent for Strip {
 }
 
 /// Strips descriptive custom sections (names, producers) from a component.
-pub fn component(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn component(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut component = Component::new();
     let mut parser = Parser::new(0);
     parser.set_features(WasmFeatures::all());

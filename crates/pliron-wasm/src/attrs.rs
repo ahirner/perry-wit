@@ -6,7 +6,7 @@ use ValType::{F32, F64, I32, I64};
 
 /// How an opcode may be moved by the emitter's stack scheduler.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Effect {
+pub(crate) enum Effect {
     /// No side effects and cannot trap: may be evaluated anywhere its operands are available.
     Pure,
     /// Can trap (integer division by zero, out-of-range truncation): keeps its order relative
@@ -28,19 +28,19 @@ macro_rules! numeric {
 
         impl NumOpcode {
             /// Operand types and result type.
-            pub fn signature(self) -> (&'static [ValType], ValType) {
+            pub(crate) fn signature(self) -> (&'static [ValType], ValType) {
                 match self {
                     $(NumOpcode::$name => (&[$($operand),*], $result),)*
                 }
             }
 
-            pub fn effect(self) -> Effect {
+            pub(crate) fn effect(self) -> Effect {
                 match self {
                     $(NumOpcode::$name => Effect::$effect,)*
                 }
             }
 
-            pub fn instruction(self) -> Instruction<'static> {
+            pub(crate) fn instruction(self) -> Instruction<'static> {
                 match self {
                     $(NumOpcode::$name => Instruction::$name,)*
                 }
@@ -157,26 +157,26 @@ macro_rules! memory {
 
         impl MemKind {
             /// The value type loaded or stored.
-            pub fn value(self) -> ValType {
+            pub(crate) fn value(self) -> ValType {
                 match self {
                     $(MemKind::$name => $value,)*
                 }
             }
 
             /// Access width in bytes, which is also the natural alignment.
-            pub fn bytes(self) -> u32 {
+            pub(crate) fn bytes(self) -> u32 {
                 match self {
                     $(MemKind::$name => $bytes,)*
                 }
             }
 
-            pub fn load(self, memarg: MemArg) -> Instruction<'static> {
+            pub(crate) fn load(self, memarg: MemArg) -> Instruction<'static> {
                 match self {
                     $(MemKind::$name => Instruction::$load(memarg),)*
                 }
             }
 
-            pub fn store(self, memarg: MemArg) -> Instruction<'static> {
+            pub(crate) fn store(self, memarg: MemArg) -> Instruction<'static> {
                 match self {
                     $(MemKind::$name => Instruction::$store(memarg),)*
                 }

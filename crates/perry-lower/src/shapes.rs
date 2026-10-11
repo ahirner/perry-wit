@@ -16,6 +16,7 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use pliron::printable::Printable as _;
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -562,8 +563,8 @@ impl<'h> Shapes<'h> {
         if !tuple {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }
-        let names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
-        let base = record_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        let base = record_name(&names);
         let base = if tuple { format!("tuple_{base}") } else { base };
         let get = if tuple {
             RecordType::get_tuple
@@ -586,13 +587,11 @@ impl<'h> Shapes<'h> {
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.
-    pub(crate) fn literal_fields(&self, class_name: &str) -> Option<Vec<String>> {
+    pub(crate) fn literal_fields(&self, class_name: &str) -> Option<Vec<&'h str>> {
         if !class_name.starts_with("__AnonShape_") {
             return None;
         }
         let class = self.hir.classes.iter().find(|c| c.name == class_name)?;
-        Some(class.fields.iter().map(|f| f.name.clone()).collect())
+        Some(class.fields.iter().map(|f| f.name.as_str()).collect())
     }
 }
-
-use pliron::printable::Printable as _;

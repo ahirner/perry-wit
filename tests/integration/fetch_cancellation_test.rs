@@ -13,7 +13,7 @@ use std::{
     task::{Context, Poll},
 };
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store,
+    ResourceLimiter, Store,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi_http::{
@@ -21,6 +21,7 @@ use wasmtime_wasi_http::{
 };
 
 use crate::cancellation;
+use crate::engine::async_engine;
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
@@ -156,13 +157,7 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
         &resolve,
         world,
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(
         &engine,
         cancellation::cancellation_caller(&compiled.stripped.unwrap(), true)?,

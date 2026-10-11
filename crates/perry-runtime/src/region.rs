@@ -21,7 +21,7 @@ use core::ptr;
 /// Size of the largest standard chunk, including its header. A task's chunks start at
 /// [MIN_CHUNK] and double up to this size, so a task that allocates little claims little
 /// memory (components can run in a single 64 KiB page).
-pub const CHUNK: usize = 64 * 1024;
+pub(crate) const CHUNK: usize = 64 * 1024;
 const MIN_CHUNK: usize = 4 * 1024;
 /// Standard chunk sizes: 4, 8, 16, 32 and 64 KiB, each with a free list.
 const CLASSES: usize = 5;
@@ -175,9 +175,8 @@ pub(crate) fn current() -> &'static mut Task {
 
 #[cfg(target_arch = "wasm32")]
 fn layout(size: usize) -> Layout {
-    assert!(size <= isize::MAX as usize - (ALIGN - 1), "chunk layout");
-    // SAFETY: ALIGN is a fixed power of two and the rounded size fits isize.
-    unsafe { Layout::from_size_align_unchecked(size, ALIGN) }
+    // A size beyond the address space cannot be allocated either.
+    Layout::from_size_align(size, ALIGN).unwrap_or_else(|_| out_of_memory())
 }
 
 fn new_chunk(size: usize, previous: *mut Chunk) -> *mut Chunk {
@@ -415,31 +414,31 @@ pub extern "C" fn perry_task_free() {
 
 /// The current task's waitable set, or 0.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_set() -> u32 {
+pub(crate) extern "C" fn perry_task_set() -> u32 {
     current().set
 }
 
 /// Record the waitable set created for the current task.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_set_set(set: u32) {
+pub(crate) extern "C" fn perry_task_set_set(set: u32) {
     current().set = set;
 }
 
 /// The promise the current async export settles.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_result() -> *mut u8 {
+pub(crate) extern "C" fn perry_task_result() -> *mut u8 {
     current().result
 }
 
 /// Record the promise the current async export settles.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_set_result(promise: *mut u8) {
+pub(crate) extern "C" fn perry_task_set_result(promise: *mut u8) {
     current().result = promise;
 }
 
 /// The next frame ready to run in the current task, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_ready_pop() -> *mut u8 {
+pub(crate) extern "C" fn perry_ready_pop() -> *mut u8 {
     let task = current();
     let node = task.ready_head;
     if node.is_null() {
@@ -461,13 +460,13 @@ pub extern "C" fn perry_ready_pop() -> *mut u8 {
 
 /// Settle `promise` with `value` when host subtask `handle` returns.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u64) {
+pub(crate) extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u64) {
     register_subtask(handle, promise, value, false);
 }
 
 /// Register a typed canonical transfer whose cancelled result needs compiler-generated disposal.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_foreign_register(handle: u32, promise: *mut u8, value: u64) {
+pub(crate) extern "C" fn perry_foreign_register(handle: u32, promise: *mut u8, value: u64) {
     register_subtask(handle, promise, value, true);
 }
 
@@ -500,7 +499,7 @@ fn register_subtask(handle: u32, promise: *mut u8, value: u64, foreign: bool) {
 
 /// Host subtask `handle` returned: settle its promise. Returns 0 if `handle` is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_subtask_done(handle: u32) -> u32 {
+pub(crate) extern "C" fn perry_subtask_done(handle: u32) -> u32 {
     if let Some((promise, value)) = take_subtask(handle) {
         crate::promise::perry_promise_resolve(promise, value);
         1
@@ -535,7 +534,7 @@ pub(crate) fn take_subtask(handle: u32) -> Option<(*mut u8, u64)> {
 
 /// Cancel unobserved host calls before their task storage is reclaimed.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_cancel() -> u32 {
+pub(crate) extern "C" fn perry_task_cancel() -> u32 {
     let task = perry_task_current();
     let mut count = 0;
     // SAFETY: cancellation acknowledges each host call; the task remains live throughout.
@@ -571,7 +570,7 @@ pub extern "C" fn perry_task_cancel() -> u32 {
 
 /// Take a cancelled transfer after acknowledgement. Disposal does not introduce safe points.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_foreign_cancelled() -> *mut u8 {
+pub(crate) extern "C" fn perry_foreign_cancelled() -> *mut u8 {
     let task = current();
     let entry = task.cancelled;
     if entry.is_null() {
@@ -597,7 +596,7 @@ pub extern "C" fn perry_foreign_cancelled() -> *mut u8 {
 /// # Safety
 /// `old` must be null or a block of `old_size` bytes from this function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_cabi_realloc(
+pub(crate) unsafe extern "C" fn perry_cabi_realloc(
     old: *mut u8,
     old_size: u32,
     _align: u32,
@@ -719,7 +718,8 @@ pub extern "C" fn perry_operation_unpin(token: u32) {
 
 /// Chunks in use and dedicated chunks of the current task (0, 0 without one), and chunks on
 /// the free list.
-pub fn chunk_counts() -> (usize, usize, usize) {
+#[cfg(test)]
+pub(crate) fn chunk_counts() -> (usize, usize, usize) {
     let count = |mut chunk: *mut Chunk| {
         let mut n = 0;
         while !chunk.is_null() {

@@ -1,8 +1,11 @@
+//! Regressions from consumer programs: checked JSON shapes, narrowing, truthiness and type
+//! resolution across modules.
 use anyhow::Result;
-use wasmtime::{Engine, Instance, Module, Store};
+
+use crate::core_program::Program;
 
 #[test]
-fn checked_json_tuples_are_arrays_and_preserve_numeric_element_order() -> Result<()> {
+fn checked_json_tuples_are_arrays_and_preserve_numeric_element_order() {
     let source = r#"
 interface Rule {filter:Array<[string,string]>}
 export function run():number {
@@ -16,22 +19,11 @@ export function run():number {
     return 0;
 }
 "#;
-    let wasm = perry_wit::compile_core(source, "tuple.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
-        (0.0, 0)
-    );
-    Ok(())
+    assert_eq!(Program::new(source).outcome("run", &[]), (0.0, 0));
 }
 
 #[test]
-fn closed_aggregate_widening_preserves_aliases_and_null() -> Result<()> {
+fn closed_aggregate_widening_preserves_aliases_and_null() {
     let source = r#"
 interface Row {name:string}
 interface Native {rows:Array<{row:Row|null}>}
@@ -51,18 +43,10 @@ export function run():number {
     return boundary.rows[0].row.name.length;
 }
 "#;
-    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "widen.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
     assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
+        Program::checked(source, "widen.ts").outcome("run", &[]),
         (3.0, 0)
     );
-    Ok(())
 }
 
 #[test]
@@ -88,7 +72,7 @@ fn existing_source_types_take_precedence_over_sdk_name_matches() -> Result<()> {
 }
 
 #[test]
-fn early_returns_narrow_variants_and_optional_records_are_truthy() -> Result<()> {
+fn early_returns_narrow_variants_and_optional_records_are_truthy() {
     let source = r#"
 type Choice = {tag:'text';val:string} | {tag:'number';val:number};
 function size(value:Choice):number {
@@ -100,22 +84,11 @@ function size(value:Choice):number {
 function present(value:{n:number} | null | undefined):number { return value ? value.n : 10; }
 export function run():number {return size({tag:'text',val:'abc'}) + size({tag:'number',val:4}) + present({n:7}) + present(null) + present(undefined);}
 "#;
-    let wasm = perry_wit::compile_core(source, "guards.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
-        (35.0, 0)
-    );
-    Ok(())
+    assert_eq!(Program::new(source).outcome("run", &[]), (35.0, 0));
 }
 
 #[test]
-fn json_scalar_equality_does_not_coerce_types() -> Result<()> {
+fn json_scalar_equality_does_not_coerce_types() {
     let source = r#"
 function matches(text: string, expected: string | null | undefined): boolean {
     return JSON.parse(text).value === expected;
@@ -133,22 +106,11 @@ export function run(): number {
     return 0;
 }
 "#;
-    let wasm = perry_wit::compile_core(source, "equality.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
-        (0.0, 0)
-    );
-    Ok(())
+    assert_eq!(Program::new(source).outcome("run", &[]), (0.0, 0));
 }
 
 #[test]
-fn header_splitting_and_scalar_truthiness_preserve_values() -> Result<()> {
+fn header_splitting_and_scalar_truthiness_preserve_values() {
     let source = r#"
 function present(value: string | undefined): number { return !value ? 0 : value.length; }
 function splitHeader(header: { value: string }): string[] { return header.value.split(','); }
@@ -165,19 +127,13 @@ export function run(n: number): number {
     return result + parts.length * 1000 + characters.length * 10000 + blank.length + whole.length;
 }
 "#;
-    let wasm = perry_wit::compile_core(source, "consumer.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let run = instance.get_typed_func::<f64, (f64, i32)>(&mut store, "run")?;
+    let mut program = Program::new(source);
     for input in [0.0, -0.0, f64::NAN] {
-        assert_eq!(run.call(&mut store, input)?, (24115.0, 0));
+        assert_eq!(program.throwing("run", input), (24115.0, 0));
     }
     for input in [1.0, -1.0, f64::INFINITY] {
-        assert_eq!(run.call(&mut store, input)?, (24015.0, 0));
+        assert_eq!(program.throwing("run", input), (24015.0, 0));
     }
-    Ok(())
 }
 
 #[test]
@@ -198,7 +154,7 @@ fn wit_interface_type_aliases_resolve_in_their_own_modules() -> Result<()> {
 }
 
 #[test]
-fn quoted_closed_record_fields_survive_checked_json_conversion() -> Result<()> {
+fn quoted_closed_record_fields_survive_checked_json_conversion() {
     let source = r#"
 interface Days { "0"?: number[]; "a-b": number; "": string; "漢": number }
 export function run(): number {
@@ -210,22 +166,11 @@ export function run(): number {
     return first[0] + copy["a-b"] + copy[""].length + copy["漢"];
 }
 "#;
-    let wasm = perry_wit::compile_core(source, "quoted.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
-        (34.0, 0)
-    );
-    Ok(())
+    assert_eq!(Program::new(source).outcome("run", &[]), (34.0, 0));
 }
 
 #[test]
-fn json_pointer_lookup_and_optional_tuple_literals() -> Result<()> {
+fn json_pointer_lookup_and_optional_tuple_literals() {
     let source = r#"
 interface Options { extra?: Array<[string, { jsonText: string }]> }
 function length(options: Options): number {
@@ -246,16 +191,5 @@ export function run(): number {
     return raw[0] + first[''] + a['length'] + length({extra: [['status', {jsonText: 'ok'}]]});
 }
 "#;
-    let wasm = perry_wit::compile_core(source, "lookup.ts")?;
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm)?;
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    assert_eq!(
-        instance
-            .get_typed_func::<(), (f64, i32)>(&mut store, "run")?
-            .call(&mut store, ())?,
-        (21.0, 0)
-    );
-    Ok(())
+    assert_eq!(Program::new(source).outcome("run", &[]), (21.0, 0));
 }

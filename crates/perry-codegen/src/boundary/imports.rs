@@ -3,7 +3,7 @@ use super::*;
 use perry_runtime::foreign as transfer;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(crate) fn foreign_call(
         &mut self,
         ctx: &mut Context,
@@ -14,7 +14,7 @@ impl FunctionLowering<'_> {
             .state
             .bindings
             .get(binding)
-            .cloned()
+            .copied()
             .ok_or_else(|| anyhow!("WIT import {binding} is absent from the selected world"))?;
         if let ImportKind::Resource { key, operation } = import.kind {
             return self.resource_helper(ctx, op, key, operation);
@@ -46,15 +46,14 @@ impl FunctionLowering<'_> {
                 MAX_FLAT_PARAMS
             }
         {
-            let aggregate = parameters::record(&import.params);
-            let size = self.i32_const(ctx, aggregate.size() as i32);
+            let size = self.i32_const(ctx, record_size(import.params.iter()) as i32);
             let area = self.alloc(ctx, size);
             for (((abi, mir), value), offset) in import
                 .params
                 .iter()
                 .zip(&operands)
                 .zip(&values)
-                .zip(aggregate.field_offsets())
+                .zip(record_offsets(import.params.iter()))
             {
                 self.lower_store(ctx, abi, mir.get_type(ctx), *value, area, offset)?;
             }
@@ -70,8 +69,10 @@ impl FunctionLowering<'_> {
             .as_ref()
             .map(AbiType::flat)
             .unwrap_or_default();
-        let area = if result_flat.len() > 1 || (import.asynchronous && import.result.is_some()) {
-            let size = self.i32_const(ctx, import.result.as_ref().unwrap().size() as i32);
+        let area = if let Some(result) = &import.result
+            && (result_flat.len() > 1 || import.asynchronous)
+        {
+            let size = self.i32_const(ctx, result.size() as i32);
             let area = self.alloc(ctx, size);
             args.push(area);
             params.push(Flat::I32);
@@ -89,11 +90,11 @@ impl FunctionLowering<'_> {
                 .state
                 .foreign_transfers
                 .iter()
-                .position(|name| name == binding)
+                .position(|import| import.binding == binding)
             {
                 index
             } else {
-                self.state.foreign_transfers.push(binding.to_owned());
+                self.state.foreign_transfers.push(import);
                 self.state.foreign_transfers.len() - 1
             };
             let kind = self.i32_const(ctx, index as i32);
@@ -123,12 +124,13 @@ impl FunctionLowering<'_> {
         } else {
             import.name.clone()
         };
-        let host = crate::Host::Foreign(import.module.clone(), name, params, results.clone());
-        self.state.host.insert(host.clone());
         let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
+        let host = crate::Host::Foreign(import.module.clone(), name, params, results);
+        let symbol = host.symbol();
+        self.state.host.insert(host);
         self.commit_resources(ctx);
         let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
-        let call = CallOp::new(ctx, host.symbol(), args, result_types).get_operation();
+        let call = CallOp::new(ctx, symbol, args, result_types).get_operation();
         self.insert(ctx, call);
         self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
         self.canonical_borrows = false;
@@ -191,7 +193,12 @@ impl FunctionLowering<'_> {
         op: Ptr<Operation>,
         binding: &str,
     ) -> Result<()> {
-        let import = std::rc::Rc::clone(&self.state.bindings[binding]);
+        let import = self
+            .state
+            .bindings
+            .get(binding)
+            .copied()
+            .ok_or_else(|| anyhow!("WIT import {binding} is absent from the selected world"))?;
         let transfer = self.operand(ctx, op, 0)?;
         let mir = op.deref(ctx).get_result(0).get_type(ctx);
         let value = if let Some(abi) = &import.result {
@@ -230,8 +237,7 @@ impl FunctionLowering<'_> {
         let kind = self.load(ctx, MemKind::I32, transfer, transfer::KIND);
         let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
         for index in 0..self.state.foreign_transfers.len() {
-            let import =
-                std::rc::Rc::clone(&self.state.bindings[&self.state.foreign_transfers[index]]);
+            let import = self.state.foreign_transfers[index];
             let selected = self.new_block(ctx, vec![]);
             let other = self.new_block(ctx, vec![]);
             let index = self.i32_const(ctx, index as i32);

@@ -78,7 +78,7 @@ fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
 /// # Safety
 /// Both arguments must be live runtime strings containing valid UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
     let view = view(string);
     let separator = self::view(separator).text;
     let text = view.text;
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -
 
 /// Scalar index access; invalid, fractional and out-of-range indices yield undefined.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_index(string: *mut u8, index: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_index(string: *mut u8, index: f64) -> *mut u8 {
     let view = view(string);
     if !(index >= 0.0 && index < view.scalars as f64 && libm::trunc(index) == index) {
         return core::ptr::null_mut();
@@ -139,7 +139,7 @@ pub extern "C" fn std_string_index(string: *mut u8, index: f64) -> *mut u8 {
 
 /// `s.charAt(position)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 {
     let view = view(string);
     let position = integer(position);
     if position < 0 || position as u64 >= view.scalars {
@@ -157,7 +157,7 @@ pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 
 
 /// The scalar at `position`, or -1 for an empty `charAt` result. Internal MIR operation.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) -> i32 {
+pub(crate) extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) -> i32 {
     let view = view(string);
     let position = integer(position);
     if position < 0 || position as u64 >= view.scalars {
@@ -173,7 +173,7 @@ pub extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) -> i32 {
 
 /// The scalar at `position`, or undefined outside the string.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f64 {
+pub(crate) extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f64 {
     let scalar = std_string_scalar_at(string, position);
     if scalar < 0 {
         f64::from_bits(crate::runtime::UNDEFINED_BITS)
@@ -184,7 +184,7 @@ pub extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f6
 
 /// `s.slice(start, end)` (pass `+Infinity` for a missing end).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_slice(string: *mut u8, start: f64, end: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_slice(string: *mut u8, start: f64, end: f64) -> *mut u8 {
     let view = view(string);
     let (start, end) = (relative(start, view.scalars), relative(end, view.scalars));
     substring(&view, start, end)
@@ -192,7 +192,7 @@ pub extern "C" fn std_string_slice(string: *mut u8, start: f64, end: f64) -> *mu
 
 /// `s.substring(start, end)` (pass `+Infinity` for a missing end).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_substring(string: *mut u8, start: f64, end: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_substring(string: *mut u8, start: f64, end: f64) -> *mut u8 {
     let view = view(string);
     let (a, b) = (clamp(start, view.scalars), clamp(end, view.scalars));
     substring(&view, a.min(b), a.max(b))
@@ -200,7 +200,11 @@ pub extern "C" fn std_string_substring(string: *mut u8, start: f64, end: f64) ->
 
 /// `s.indexOf(needle, position)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_index_of(string: *mut u8, needle: *mut u8, position: f64) -> f64 {
+pub(crate) extern "C" fn std_string_index_of(
+    string: *mut u8,
+    needle: *mut u8,
+    position: f64,
+) -> f64 {
     let view = view(string);
     let needle = self::view(needle).text;
     let start = clamp(position, view.scalars);
@@ -288,7 +292,11 @@ fn position_of(view: &View, offset: usize) -> u64 {
 
 /// `s.lastIndexOf(needle, position)` (pass `+Infinity` for a missing position).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_last_index_of(string: *mut u8, needle: *mut u8, position: f64) -> f64 {
+pub(crate) extern "C" fn std_string_last_index_of(
+    string: *mut u8,
+    needle: *mut u8,
+    position: f64,
+) -> f64 {
     let view = view(string);
     let needle = self::view(needle).text;
     let start = if position.is_nan() {
@@ -311,7 +319,11 @@ pub extern "C" fn std_string_last_index_of(string: *mut u8, needle: *mut u8, pos
 
 /// `s.startsWith(needle, position)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_starts_with(string: *mut u8, needle: *mut u8, position: f64) -> u32 {
+pub(crate) extern "C" fn std_string_starts_with(
+    string: *mut u8,
+    needle: *mut u8,
+    position: f64,
+) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
     let from = offset(&view, clamp(position, view.scalars));
@@ -320,7 +332,7 @@ pub extern "C" fn std_string_starts_with(string: *mut u8, needle: *mut u8, posit
 
 /// `s.endsWith(needle, end)` (pass `+Infinity` for a missing end).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, end: f64) -> u32 {
+pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, end: f64) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
     let to = offset(&view, clamp(end, view.scalars));
@@ -347,7 +359,7 @@ fn space(scalar: char) -> bool {
 /// # Safety
 /// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
     let view = view(string);
     let trimmed = view.text.trim_matches(space);
     if trimmed.len() == view.text.len() {
@@ -359,7 +371,7 @@ pub unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
 
 /// `s.repeat(count)`; a negative or infinite count throws `RangeError`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut u8 {
     let view = view(string);
     let count = integer(count);
     let total = (view.text.len() as u64).saturating_mul(count.max(0) as u64);
@@ -428,7 +440,7 @@ static ASCII_STRINGS: AsciiStrings = {
 };
 /// Static ASCII headers used by compiled character reads.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_ascii_strings() -> *const u8 {
+pub(crate) extern "C" fn std_ascii_strings() -> *const u8 {
     (&raw const ASCII_STRINGS.0).cast()
 }
 
@@ -440,7 +452,7 @@ fn ascii_character(byte: u8) -> *mut u8 {
 
 /// `String.fromCodePoint(value)`: one Unicode scalar; surrogate code points are rejected.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     if value < 0.0 || value > 0x10ffff as f64 || value != value as u32 as f64 {
         crate::runtime::raise(crate::runtime::RANGE_ERROR, "Invalid Unicode scalar value");
         return from_static("");

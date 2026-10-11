@@ -4,7 +4,7 @@ use core::ptr;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Decoder {
+pub(crate) struct Decoder {
     fatal: u32,
     ignore_bom: u32,
     streaming: bool,
@@ -114,7 +114,7 @@ impl Decoder {
 
 /// Allocate only the decoder's bounded scalar state; no input buffer is retained.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut Decoder {
+pub(crate) extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut Decoder {
     let decoder = runtime::alloc(core::mem::size_of::<Decoder>() as u32).cast::<Decoder>();
     // SAFETY: fresh, aligned storage with no pointer fields.
     unsafe {
@@ -134,7 +134,7 @@ pub extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut Decoder {
 /// `decoder` is a live, exclusively accessed decoder; `bytes` is a live byte view.
 /// No collection occurs while this helper holds temporary output storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_decoder_decode(
+pub(crate) unsafe extern "C" fn std_decoder_decode(
     decoder: *mut Decoder,
     bytes: *const runtime::Bytes,
     stream: u32,

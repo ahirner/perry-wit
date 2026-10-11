@@ -1,5 +1,12 @@
-use crate::lower_source;
-use pliron::{context::Context, op::Op, operation::Operation, printable::Printable};
+use pliron::{
+    builtin::ops::ModuleOp, context::Context, op::Op, operation::Operation, printable::Printable,
+};
+use std::collections::HashMap;
+
+/// Lower a source without foreign (WIT) types.
+fn lower_source(ctx: &mut Context, source: &str, file: &str) -> anyhow::Result<ModuleOp> {
+    crate::lower_source_with(ctx, source, file, &HashMap::new())
+}
 
 /// Lower, verify, promote slots, clean up, verify again; return the printed module.
 fn lowered(source: &str) -> String {

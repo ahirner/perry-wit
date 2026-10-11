@@ -21,7 +21,7 @@ pub const TYPE_ERROR: u32 = 1;
 pub const RANGE_ERROR: u32 = 2;
 pub const ERROR: u32 = 3;
 pub const THROWN_VALUE: u32 = 4;
-pub const EXIT: u32 = 5;
+pub(crate) const EXIT: u32 = 5;
 
 pub const TAG_NUMBER: u32 = 1;
 pub const TAG_BOOLEAN: u32 = 2;
@@ -39,7 +39,7 @@ struct Exception {
 
 /// A new exception object in the current task.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
+pub(crate) extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
     static SHAPE: [u32; 4] = [
         0,
         2,
@@ -72,7 +72,7 @@ pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u
 /// # Safety
 /// `exception` must be an exception object of the current task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_exception_raise(exception: *mut u8) -> u32 {
+pub(crate) unsafe extern "C" fn perry_exception_raise(exception: *mut u8) -> u32 {
     current().exception = exception;
     // SAFETY: guaranteed by the caller.
     unsafe { (*(exception as *mut Exception)).kind }
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn perry_exception_raise(exception: *mut u8) -> u32 {
 
 /// `catch`: take the pending exception, or materialize one for `status`.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_exception_catch(status: u32) -> *mut u8 {
+pub(crate) extern "C" fn perry_exception_catch(status: u32) -> *mut u8 {
     let task = current();
     let pending = core::mem::replace(&mut task.exception, ptr::null_mut());
     if !pending.is_null() {
@@ -100,7 +100,7 @@ pub extern "C" fn perry_exception_catch(status: u32) -> *mut u8 {
 /// # Safety
 /// `exception` must be an exception object of the current task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let exception = unsafe { &*(exception as *mut Exception) };
     if (TYPE_ERROR..=ERROR).contains(&exception.kind) && exception.tag == TAG_STRING {

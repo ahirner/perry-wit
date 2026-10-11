@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
 
-pub const INPUTS: [f64; 24] = [
+pub(crate) const INPUTS: [f64; 24] = [
     -0.0,
     0.0,
     -1.0,
@@ -29,8 +29,8 @@ pub const INPUTS: [f64; 24] = [
     8640000000000001.0,
     -8640000000000001.0,
 ];
-pub const FIXTURE: &str = "é\0abc";
-pub const WIT: &str = "package test:generated; world generated {
+pub(crate) const FIXTURE: &str = "é\0abc";
+pub(crate) const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
     export run: func(x: f64) -> observation;
 }";
@@ -131,7 +131,8 @@ pub enum Form {
 }
 
 impl Form {
-    pub const ALL: [Self; 7] = [
+    /// The metamorphic forms of a direct program; [Form::Direct] comes first.
+    pub(crate) const ALL: [Self; 7] = [
         Self::Direct,
         Self::Local,
         Self::Branch,
@@ -141,7 +142,7 @@ impl Form {
         Self::LastCompletion,
     ];
 
-    pub fn is_async(self) -> bool {
+    pub(crate) fn is_async(self) -> bool {
         matches!(
             self,
             Self::Timer
@@ -165,9 +166,9 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         let expression = &self.expression;
-        let fixture = serde_json::to_string(FIXTURE).unwrap();
+        let fixture = literal(FIXTURE);
         let body = match self.form {
             Form::FileByteRoundTrip => format!(
                 "const bytes = new Uint8Array([19,0,255,128,42,20]); const view = bytes.subarray(1,5); const pending = writeFile('view.bin',view); const value = {expression}; await pending; view[0] = 99; const restored = await readFile('view.bin'); if(restored.byteLength !== 4 || restored[0] !== 0 || restored[1] !== 255 || restored[2] !== 128 || restored[3] !== 42 || bytes[1] !== 99) {{throw 95;}} await writeFile('view.bin',view.subarray(2,2)); const empty = await readFile('view.bin'); if(empty.byteLength !== 0) {{throw 96;}}"
@@ -333,7 +334,7 @@ impl Display for Condition {
 impl Display for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Literal(value) => f.write_str(&serde_json::to_string(value).unwrap()),
+            Self::Literal(value) => f.write_str(&literal(value)),
             Self::Concat(a, b) => write!(f, "({a} + {b})"),
             Self::Choose(c, a, b) => write!(f, "({c} ? {a} : {b})"),
             Self::Lower(value) => write!(f, "({value}.toLowerCase())"),
@@ -342,4 +343,9 @@ impl Display for Text {
             Self::Slice(value, a, b) => write!(f, "({value}.slice({a}, {b}))"),
         }
     }
+}
+
+/// The JSON text of a string or byte list, which is also its TypeScript literal.
+pub(crate) fn literal(value: &(impl Serialize + ?Sized)) -> String {
+    serde_json::to_string(value).expect("strings and byte lists always serialize to JSON")
 }

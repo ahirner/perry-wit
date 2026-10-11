@@ -2,7 +2,7 @@
 //! declarations (which the parser does not read). The mapping mirrors the SDK's TypeScript:
 //! records are object types, variants unions of `{ tag, val }` objects, options
 //! `T | null | undefined`, tuples tuples and `list<u8>` a `Uint8Array`.
-use crate::sdk::codegen::{to_camel_case, to_pascal_case, type_name};
+use crate::sdk::{to_camel_case, to_pascal_case, type_name};
 use perry_lower::hir::{ObjectType, PropertyInfo, Type as HirType};
 use std::collections::HashMap;
 use wit_parser::{Resolve, Type, TypeDefKind};

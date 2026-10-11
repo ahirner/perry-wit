@@ -25,6 +25,16 @@ pub(crate) struct Resource {
     borrows: u32,
 }
 
+impl Resource {
+    /// The host destruction this descriptor owes.
+    fn drop_handle(&self) -> DropHandle {
+        DropHandle {
+            kind: self.kind,
+            handle: self.handle,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DropHandle {
     kind: u32,
@@ -95,10 +105,7 @@ impl Registry {
                     representation: false,
                     ..
                 } => {
-                    self.drops.push(DropHandle {
-                        kind: owner.kind,
-                        handle: owner.handle,
-                    });
+                    self.drops.push(owner.drop_handle());
                 }
                 State::Moving(_) => panic!("a preparing resource transfer was not rooted"),
                 _ => {}
@@ -126,10 +133,7 @@ impl Registry {
                 );
                 owner.state = State::Consumed;
                 if !representation {
-                    self.drops.push(DropHandle {
-                        kind: owner.kind,
-                        handle: owner.handle,
-                    });
+                    self.drops.push(owner.drop_handle());
                 }
             }
         }
@@ -243,7 +247,10 @@ pub(crate) unsafe extern "C" fn perry_resource_lower(
 ) -> u32 {
     let scope_ref = unsafe { &mut *scope };
     let owner_ref = unsafe { &mut *owner };
-    assert!(scope_ref.phase == Phase::Preparing);
+    assert!(
+        scope_ref.phase == Phase::Preparing,
+        "resource transfer already committed"
+    );
     if owned != 0 {
         if owner_ref.state != State::Owned || owner_ref.borrows != 0 {
             invalid();
@@ -300,10 +307,7 @@ pub(crate) unsafe extern "C" fn perry_resource_drop(owner: *mut Resource) {
         return;
     }
     owner.state = State::Consumed;
-    registry().drops.push(DropHandle {
-        kind: owner.kind,
-        handle: owner.handle,
-    });
+    registry().drops.push(owner.drop_handle());
 }
 
 /// # Safety
@@ -311,7 +315,10 @@ pub(crate) unsafe extern "C" fn perry_resource_drop(owner: *mut Resource) {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_resource_scope_commit(scope: *mut Scope) {
     let scope_ref = unsafe { &mut *scope };
-    assert!(scope_ref.phase == Phase::Preparing);
+    assert!(
+        scope_ref.phase == Phase::Preparing,
+        "resource transfer already committed"
+    );
     for movement in &scope_ref.movements {
         if let Movement::Move(owner) = *movement {
             let owner = unsafe { &mut *owner };

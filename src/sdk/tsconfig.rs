@@ -1,7 +1,7 @@
 //! TypeScript configuration generator for zero-config IDE integration.
 
 /// Generates a standard `tsconfig.json` content configured for Perry TypeScript components.
-pub fn generate_default_tsconfig() -> String {
+pub(crate) fn generate_default_tsconfig() -> String {
     r#"{
   "compilerOptions": {
     "target": "ES2022",

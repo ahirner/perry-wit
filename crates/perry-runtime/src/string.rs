@@ -9,7 +9,6 @@ pub const SCALARS: u32 = 4;
 pub const DATA: u32 = 8;
 pub const BUFFER: u32 = 12;
 pub const SIZE: u32 = 32;
-pub const OWNER: u32 = 16;
 pub const CURSOR_SCALAR: u32 = 24;
 pub const CURSOR_BYTE: u32 = 28;
 
@@ -38,7 +37,7 @@ const MIN_BUFFER: u32 = 32;
 const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);
 
 /// Unicode scalar count in valid UTF-8.
-pub fn scalars_length(bytes: &[u8]) -> u32 {
+fn scalars_length(bytes: &[u8]) -> u32 {
     bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
 }
 
@@ -115,7 +114,7 @@ fn append_buffer(len: u32) -> *mut Buffer {
 /// # Safety
 /// Both arguments must be strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
     // SAFETY: both inputs are live; their headers remain immutable.
     unsafe {
         let (s, t) = (a as *mut Str, b as *mut Str);
@@ -154,7 +153,7 @@ unsafe fn shared(string: *mut Str) -> *mut u8 {
 /// Both arguments must be strings. The caller owns `a`'s header exclusively and must not
 /// read its old value afterwards.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *mut u8 {
     // SAFETY: the caller owns a's header; b's payload remains readable until copying finishes.
     unsafe {
         let (s, t) = (a as *mut Str, b as *mut Str);
@@ -249,7 +248,10 @@ unsafe fn append_scalar<const REUSE: bool>(string: *mut u8, scalar: i32) -> *mut
 /// # Safety
 /// `string` is live and `scalar` is a Unicode scalar or -1 for empty text.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_scalar_concat(string: *mut u8, scalar: i32) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_string_scalar_concat(
+    string: *mut u8,
+    scalar: i32,
+) -> *mut u8 {
     unsafe { append_scalar::<false>(string, scalar) }
 }
 
@@ -258,7 +260,10 @@ pub unsafe extern "C" fn perry_string_scalar_concat(string: *mut u8, scalar: i32
 /// # Safety
 /// `string` obeys `perry_string_append`'s ownership contract; `scalar` is a scalar or -1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_scalar_append(string: *mut u8, scalar: i32) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_string_scalar_append(
+    string: *mut u8,
+    scalar: i32,
+) -> *mut u8 {
     unsafe { append_scalar::<true>(string, scalar) }
 }
 
@@ -268,7 +273,7 @@ pub unsafe extern "C" fn perry_string_scalar_append(string: *mut u8, scalar: i32
 /// # Safety
 /// Both arguments must be strings or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_compare(a: *mut u8, b: *mut u8) -> i32 {
+pub(crate) unsafe extern "C" fn perry_string_compare(a: *mut u8, b: *mut u8) -> i32 {
     if a == b {
         return 0;
     }

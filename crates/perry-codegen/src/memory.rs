@@ -86,7 +86,7 @@ pub(crate) fn needs_collector(
     >,
 ) -> bool {
     use pliron::{builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList};
-    !crate::boundary::resources::used_keys(ctx, functions).is_empty()
+    !crate::boundary::used_keys(ctx, functions).is_empty()
         || summaries
             .values()
             .any(|summary| summary.repeated || summary.unknown_helper_bound)
@@ -119,7 +119,7 @@ pub fn explain_tiers(
         linked_list::ContainsLinkedList,
     };
     use std::fmt::Write;
-    let functions = crate::reachable_functions(ctx, module, exports);
+    let functions = crate::analysis::reachable_functions(ctx, module, exports);
     let summaries = perry_mir::effects::summarize(ctx, &functions);
     let collectible = needs_collector(ctx, &functions, &summaries);
     let tier = if collectible {
@@ -154,7 +154,7 @@ pub fn explain_tiers(
     report
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn prepare_frame_storage(
         &mut self,
         ctx: &mut Context,
@@ -235,18 +235,11 @@ impl FunctionLowering<'_> {
     }
 
     fn root_stack(&mut self, ctx: &mut Context) -> Value {
-        use pliron::{linked_list::ContainsLinkedList, op::Op};
         if let Some(stack) = self.root_stack {
             return stack;
         }
-        let runtime = Runtime::RootsState;
-        self.state.runtime.insert(runtime);
-        let ty = crate::i32_type(ctx);
-        let call =
-            pliron_wasm::ops::CallOp::new(ctx, runtime.symbol(), vec![], vec![ty]).get_operation();
         // Late-discovered boundary roots must also dominate every exit and branch.
-        call.insert_at_front(self.region.deref(ctx).get_head().expect("entry"), ctx);
-        let stack = call.deref(ctx).get_result(0);
+        let stack = self.entry_runtime(ctx, Runtime::RootsState);
         self.root_stack = Some(stack);
         stack
     }
@@ -483,8 +476,9 @@ impl FunctionLowering<'_> {
             shape
         } else {
             let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
-            let fields = record.deref(ctx).fields()?.to_vec();
-            let offsets: Vec<_> = fields
+            let offsets: Vec<_> = record
+                .deref(ctx)
+                .fields()?
                 .iter()
                 .enumerate()
                 .filter_map(|(index, (_, ty))| {

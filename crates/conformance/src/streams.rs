@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamCase {
-    pub bytes: Vec<u8>,
-    pub cancel: bool,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) cancel: bool,
     #[serde(default)]
-    pub byob: bool,
+    pub(crate) byob: bool,
 }
 impl StreamCase {
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         if self.byob {
             return self.byob_source();
         }
@@ -88,7 +88,7 @@ export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:numb
             cancel = self.cancel
         )
     }
-    pub fn expected_bytes(&self) -> &[u8] {
+    pub(crate) fn expected_bytes(&self) -> &[u8] {
         if self.cancel {
             &self.bytes[..self.bytes.len().min(8192)]
         } else {
@@ -128,7 +128,7 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-pub fn contract() -> Contract {
+pub(crate) fn contract() -> Contract {
     let case = |length, cancel| {
         Case::Stream(StreamCase {
             bytes: (0..length).map(|i| (i * 37 + i / 251) as u8).collect(),
@@ -176,7 +176,7 @@ pub fn contract() -> Contract {
     }
 }
 
-pub fn byob_contract() -> Contract {
+pub(crate) fn byob_contract() -> Contract {
     let mut contract = contract();
     contract.id = "web.streams.byob_reader";
     contract.description = "BYOB readers transfer shared buffers and fill visible views directly";

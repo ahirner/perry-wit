@@ -42,11 +42,11 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 /// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`), the
 /// value of `Promise<void>`.
-pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 
 /// ECMAScript `%` on numbers: the IEEE remainder truncated toward zero (C `fmod`).
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_f64_rem(dividend: f64, divisor: f64) -> f64 {
+pub(crate) extern "C" fn perry_f64_rem(dividend: f64, divisor: f64) -> f64 {
     libm::fmod(dividend, divisor)
 }
 

@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum TimerModel {
     #[default]
     Idle,
@@ -63,26 +63,22 @@ impl ReferenceStateMachine for TimerModel {
         )
     }
     fn apply(state: Self, action: &Action) -> Self {
-        assert!(Self::preconditions(&state, action));
-        match action {
-            Action::Start => Self::Pending,
-            Action::HostRelease => Self::Completing { cancelled: false },
-            Action::Cancel => Self::Completing { cancelled: true },
-            Action::Complete => match state {
-                Self::Completing { cancelled } => Self::Settled {
-                    cancelled,
-                    observed: false,
-                },
-                _ => unreachable!(),
+        match (state, action) {
+            (Self::Idle, Action::Start) => Self::Pending,
+            (Self::Pending, Action::HostRelease) => Self::Completing { cancelled: false },
+            (Self::Pending, Action::Cancel) => Self::Completing { cancelled: true },
+            (Self::Completing { cancelled }, Action::Complete) => Self::Settled {
+                cancelled,
+                observed: false,
             },
-            Action::Observe => match state {
-                Self::Settled { cancelled, .. } => Self::Settled {
-                    cancelled,
-                    observed: true,
-                },
-                _ => unreachable!(),
+            (Self::Settled { cancelled, .. }, Action::Observe) => Self::Settled {
+                cancelled,
+                observed: true,
             },
-            Action::Reuse => Self::Idle,
+            (Self::Settled { observed: true, .. }, Action::Reuse) => Self::Idle,
+            (state, action) => {
+                unreachable!("callers apply only enabled transitions, not {action:?} in {state:?}")
+            }
         }
     }
 }
@@ -112,13 +108,13 @@ pub fn expected_trace(actions: &[Action]) -> Vec<String> {
                     }
                 }
             };
-            state = TimerModel::apply(state.clone(), action);
+            state = TimerModel::apply(state, action);
             number(value)
         })
         .collect()
 }
 
-pub fn check(case: &Case, evidence: &Evidence) -> Result<()> {
+pub(crate) fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     check_equivalence(case, evidence)?;
     let Case::Lifecycle(actions) = case else {
         anyhow::bail!("lifecycle checker requires an action trace")
@@ -173,18 +169,17 @@ pub fn source(actions: &[Action]) -> String {
 /// Complete the generated prefix before compilation, including cancellation acknowledgement.
 pub fn complete_trace(mut actions: Vec<Action>) -> Vec<Action> {
     let mut state = actions.iter().fold(TimerModel::Idle, TimerModel::apply);
-    while !matches!(state, TimerModel::Idle) {
+    loop {
         let action = match state {
+            TimerModel::Idle => return actions,
             TimerModel::Pending => Action::HostRelease,
             TimerModel::Completing { .. } => Action::Complete,
             TimerModel::Settled {
                 observed: false, ..
             } => Action::Observe,
             TimerModel::Settled { observed: true, .. } => Action::Reuse,
-            TimerModel::Idle => unreachable!(),
         };
         state = TimerModel::apply(state, &action);
         actions.push(action);
     }
-    actions
 }

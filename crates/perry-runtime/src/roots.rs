@@ -1,6 +1,6 @@
 //! Precise roots at generated safe points. Callers keep a stack segment while a callee can
 //! collect; suspended operations use independent pin tokens until acknowledgement.
-use crate::collectible::{Collector, Counters};
+use crate::collectible::Collector;
 use crate::instance::instance_state;
 use alloc::{boxed::Box, vec::Vec};
 #[cfg(target_arch = "wasm32")]
@@ -52,17 +52,13 @@ impl RootStack {
             .checked_next_power_of_two()
             .expect("root stack overflow")
             .max(4);
-        assert!(capacity as usize <= isize::MAX as usize / core::mem::size_of::<*mut u8>());
-        let layout =
-            core::alloc::Layout::array::<*mut u8>(capacity as usize).expect("root stack layout");
+        let layout = Self::layout(capacity);
         // SAFETY: only this descriptor owns its buffer; reallocation never collects.
         let data = unsafe {
             if self.capacity == 0 {
                 alloc::alloc::alloc(layout)
             } else {
-                let old = core::alloc::Layout::array::<*mut u8>(self.capacity as usize)
-                    .expect("root stack layout");
-                alloc::alloc::realloc(self.data.cast(), old, layout.size())
+                alloc::alloc::realloc(self.data.cast(), Self::layout(self.capacity), layout.size())
             }
         };
         if data.is_null() {
@@ -70,6 +66,11 @@ impl RootStack {
         }
         self.data = data.cast();
         self.capacity = capacity;
+    }
+
+    /// The layout of `capacity` slots; an allocated capacity always has one.
+    fn layout(capacity: u32) -> core::alloc::Layout {
+        core::alloc::Layout::array::<*mut u8>(capacity as usize).expect("root stack overflow")
     }
 
     fn live(&self) -> &[*mut u8] {
@@ -91,10 +92,8 @@ impl RootStack {
 impl Drop for RootStack {
     fn drop(&mut self) {
         if self.capacity != 0 {
-            let layout = core::alloc::Layout::array::<*mut u8>(self.capacity as usize)
-                .expect("root stack layout");
             // SAFETY: this descriptor exclusively owns this allocation and its layout.
-            unsafe { alloc::alloc::dealloc(self.data.cast(), layout) };
+            unsafe { alloc::alloc::dealloc(self.data.cast(), Self::layout(self.capacity)) };
         }
     }
 }
@@ -227,12 +226,16 @@ impl Roots {
     }
 
     fn unpin(&mut self, token: u32) {
-        let index = token.checked_sub(1).expect("invalid pin token") as usize;
-        let pinned = self.pins.get_mut(index).expect("invalid pin token");
+        // Token 0 wraps to an index no pin table reaches.
+        let index = token.wrapping_sub(1);
+        let pinned = self
+            .pins
+            .get_mut(index as usize)
+            .expect("invalid pin token");
         assert!(!pinned.object.is_null(), "pin released twice");
         pinned.object = ptr::null_mut();
         pinned.task = ptr::null_mut();
-        self.free_pins.push(index as u32);
+        self.free_pins.push(index);
     }
 }
 
@@ -263,7 +266,7 @@ fn initialize_roots() -> Box<Roots> {
 /// # Safety
 /// `shape` obeys [Collector::allocate]'s static shape contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_gc_alloc(size: u32, shape: *const u32) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_gc_alloc(size: u32, shape: *const u32) -> *mut u8 {
     // SAFETY: shape validity is the caller's contract.
     unsafe { roots().heap.allocate(size as usize, shape) }
 }
@@ -271,7 +274,7 @@ pub unsafe extern "C" fn perry_gc_alloc(size: u32, shape: *const u32) -> *mut u8
 /// # Safety
 /// `frame` has the nonescaping lifetime established by the MIR frame-storage pass.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_frame_free(frame: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_frame_free(frame: *mut u8) {
     unsafe { roots().heap.release_frame(frame) };
 }
 
@@ -283,25 +286,25 @@ pub extern "C" fn perry_roots_state() -> *mut RootStack {
 
 /// Grow the root stack without collecting. Generated code publishes slots afterward.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_roots_reserve(additional: u32) {
+pub(crate) extern "C" fn perry_roots_reserve(additional: u32) {
     roots().stack.reserve(additional);
 }
 
 /// The current stack boundary, used to release exactly one generated activation's roots.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_roots_mark() -> u32 {
+pub(crate) extern "C" fn perry_roots_mark() -> u32 {
     roots().stack.length
 }
 
 /// Keep an exact compiled pointer live across calls. Null and static pointers are accepted.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_roots_push(object: *mut u8) {
+pub(crate) extern "C" fn perry_roots_push(object: *mut u8) {
     roots().stack.push(object);
 }
 
 /// Release roots established after `mark`, including roots of unwound activations.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_roots_reset(mark: u32) {
+pub(crate) extern "C" fn perry_roots_reset(mark: u32) {
     let roots = roots();
     assert!(mark <= roots.stack.length, "invalid root stack boundary");
     roots.stack.length = mark;
@@ -312,7 +315,7 @@ pub extern "C" fn perry_roots_reset(mark: u32) {
 /// # Safety
 /// Every live reference is in the root stack, a pin, or reachable through a precise shape.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_gc_check() {
+pub(crate) unsafe extern "C" fn perry_gc_check() {
     let roots = roots();
     if roots.force_collection || roots.heap.due() {
         // SAFETY: the caller established a safe point.
@@ -323,7 +326,7 @@ pub unsafe extern "C" fn perry_gc_check() {
 /// Test the existing collection policy before publishing roots for an atomic helper.
 /// This function neither allocates nor collects.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_gc_due() -> u32 {
+pub(crate) extern "C" fn perry_gc_due() -> u32 {
     // SAFETY: the single guest thread owns the state; an absent heap cannot require GC.
     let roots = unsafe { (*roots_state()).as_ref() };
     u32::from(roots.is_some_and(|roots| roots.force_collection || roots.heap.due()))
@@ -334,7 +337,7 @@ pub extern "C" fn perry_gc_due() -> u32 {
 /// # Safety
 /// All surviving compiled values are pinned or registered roots; helpers have completed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_gc_boundary() {
+pub(crate) unsafe extern "C" fn perry_gc_boundary() {
     unsafe { roots().collect() };
 }
 
@@ -345,7 +348,7 @@ pub unsafe extern "C" fn perry_gc_boundary() {
 /// The completed task has released its results after lifting/acknowledgement, and all other
 /// instance references are represented by the root stack or pins.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_gc_task_end() {
+pub(crate) unsafe extern "C" fn perry_gc_task_end() {
     let roots = roots();
     if roots.stack.length == 0
         && roots.pins.iter().all(|p| p.object.is_null())
@@ -362,7 +365,7 @@ pub unsafe extern "C" fn perry_gc_task_end() {
 
 /// Register the current task's scheduler roots once, including canonical argument lowering.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_gc_task_enter() {
+pub(crate) extern "C" fn perry_gc_task_enter() {
     let task = crate::region::perry_task_current();
     assert!(!task.is_null(), "collectible task requires an active task");
     let roots = roots();
@@ -373,7 +376,7 @@ pub extern "C" fn perry_gc_task_enter() {
 
 /// Detach scheduler roots after all host transfers and cancellation acknowledgements finish.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_gc_task_leave() {
+pub(crate) extern "C" fn perry_gc_task_leave() {
     let task = crate::region::perry_task_current();
     #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
     unsafe {
@@ -391,7 +394,7 @@ pub extern "C" fn perry_gc_task_leave() {
 
 /// Pin an owner independently of the current task's activation stack.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_gc_pin(owner: *mut u8) -> u32 {
+pub(crate) extern "C" fn perry_gc_pin(owner: *mut u8) -> u32 {
     roots().pin(owner)
 }
 
@@ -406,7 +409,7 @@ pub(crate) fn pin_external(owner: *mut u8) -> u32 {
 
 /// Release a pin after the host acknowledged completion or cancellation.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_gc_unpin(token: u32) {
+pub(crate) extern "C" fn perry_gc_unpin(token: u32) {
     roots().unpin(token);
 }
 
@@ -415,7 +418,7 @@ pub extern "C" fn perry_gc_unpin(token: u32) {
 /// # Safety
 /// `cell` contains an exact pointer at byte 0 and a zero-initialized registration flag at 12.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_gc_global(cell: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_gc_global(cell: *mut u8) {
     // SAFETY: the compiler allocates sixteen static bytes for each module cell.
     unsafe {
         let registered = cell.add(12).cast::<u32>();
@@ -426,7 +429,8 @@ pub unsafe extern "C" fn perry_gc_global(cell: *mut u8) {
     }
 }
 
-pub fn counters() -> Counters {
+#[cfg(all(test, feature = "collectible"))]
+pub(crate) fn counters() -> crate::collectible::Counters {
     roots().heap.counters()
 }
 
@@ -470,7 +474,7 @@ pub(crate) fn transfer_copied(bytes: u32) {
 
 /// Copy one temporary root segment into collectible owner storage for suspension.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_roots_capture(mark: u32) -> *mut u8 {
+pub(crate) extern "C" fn perry_roots_capture(mark: u32) -> *mut u8 {
     const STRIDE: u32 = core::mem::size_of::<*mut u8>() as u32;
     static SHAPE: [u32; 3] = [STRIDE, 1, 0];
     let roots = roots();

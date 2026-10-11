@@ -5,12 +5,14 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use wasmtime::{
-    Config, Engine, Store,
+    Store,
     component::{Component, Linker},
 };
 
 #[path = "../support/cancellation_composition.rs"]
 mod composition;
+
+use crate::engine::async_engine;
 
 const CALLER: &str = r#"(module
   (import "$root" "[async-lower]operation" (func $start (param i32 i32) (result i32)))
@@ -52,13 +54,7 @@ async fn cancelled_exports_release_pending_host_calls_before_acknowledging() -> 
         directory.path(),
         Some("caller"),
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     for body in [
         "return await wait(mode);",
         "const a=wait(mode);const b=wait(mode);return (await Promise.all([a,b]))[0];",

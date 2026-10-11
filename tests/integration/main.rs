@@ -3,6 +3,10 @@
 
 #[path = "../support/cancellation_caller.rs"]
 mod cancellation;
+#[path = "../support/core_program.rs"]
+mod core_program;
+#[path = "../support/engine.rs"]
+mod engine;
 #[allow(dead_code)]
 #[path = "../support/http_fixture.rs"]
 mod http_fixture;
@@ -34,6 +38,8 @@ mod io_cancellation_test;
 mod json_helper_test;
 mod memory_growth_test;
 mod mir_codegen_test;
+mod mir_collection_test;
+mod mir_string_test;
 mod module_test;
 mod regex_test;
 mod resource_test;

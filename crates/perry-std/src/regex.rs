@@ -4,7 +4,7 @@ use crate::runtime;
 /// # Safety
 /// `text` is a live immutable string; `program` is a compiler-generated DFA table.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const u8) -> f64 {
+pub(crate) unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const u8) -> f64 {
     let text = unsafe { runtime::bytes(text) };
     let rows = unsafe { program.add(260) };
     let mut state = rows;

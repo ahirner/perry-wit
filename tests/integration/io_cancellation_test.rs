@@ -2,7 +2,7 @@
 use anyhow::Result;
 use perry_wit::{compiler::compile_for_world_with_memory_checks, component::wit::resolve_wit};
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store,
+    ResourceLimiter, Store,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 #[path = "../support/cancellable_output.rs"]
 mod cancellable_output;
 use crate::cancellation;
+use crate::engine::async_engine;
 #[path = "../support/filesystem_transfers.rs"]
 mod transfers;
 
@@ -58,13 +59,7 @@ fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
 #[tokio::test(flavor = "current_thread")]
 async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> Result<()> {
     use transfers::{Behavior, Kind};
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     for (kind, call) in [
         (Kind::Read, "readFile('/sandbox/input')"),
         (
@@ -227,13 +222,7 @@ async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> R
 async fn caller_cancellation_releases_output_buffers_and_completion_futures() -> Result<()> {
     use cancellable_output::BlockAt;
     use std::sync::atomic::Ordering;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     for (channel, method) in [("stdout", "log"), ("stderr", "error")] {
         let directory = tempfile::tempdir()?;
         std::fs::write(
@@ -330,13 +319,7 @@ async fn metadata_results_release_unused_payloads_and_cancelled_borrows() -> Res
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     for cancelled in [false, true] {
         let body = if cancelled {
             "stat('/sandbox/first');try{await stat('/sandbox/second');}finally{throw new Error('cancelled continuation ran');}"

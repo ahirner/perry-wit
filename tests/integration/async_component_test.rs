@@ -4,10 +4,12 @@
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Config, Engine, Store,
+    Engine, Store,
     component::{Component, ComponentType, Lift, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+use crate::engine::async_engine;
 
 const WIT: &str = r#"
 package test:timers;
@@ -155,16 +157,6 @@ fn compile(check_memory: bool) -> Result<Vec<u8>> {
     Ok(compiled.stripped.unwrap())
 }
 
-fn engine() -> Result<Engine> {
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    Ok(Engine::new(&config)?)
-}
-
 fn store(engine: &Engine) -> Store<Host> {
     let mut store = Store::new(
         engine,
@@ -181,7 +173,7 @@ fn store(engine: &Engine) -> Store<Host> {
 #[tokio::test(flavor = "current_thread")]
 async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let wasm = compile(false)?;
-    let engine = engine()?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, &wasm)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
@@ -287,7 +279,7 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Result<()> {
-    let engine = engine()?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compile(true)?)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;

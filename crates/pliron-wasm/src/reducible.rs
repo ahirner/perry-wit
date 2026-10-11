@@ -15,31 +15,33 @@ use crate::{
     attrs::NumOpcode,
     control::{BrOp, CondBrOp},
     ops::NumOp,
-    types::val_type,
+    types::{I32_BITS, I64_BITS, integer_attr, val_type},
 };
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
         attr_interfaces::TypedAttrInterface,
-        attributes::{FPDoubleAttr, FPSingleAttr, IntegerAttr},
+        attributes::{FPDoubleAttr, FPSingleAttr},
         op_interfaces::{BranchOpInterface, OneRegionInterface},
         ops::{ConstantOp, FuncOp},
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
+    region::Region,
     r#type::{TypeHandle, Typed},
-    utils::apint::APInt,
     value::Value,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZeroUsize,
-};
+use std::collections::{HashMap, HashSet};
 use wasm_encoder::ValType;
 
 /// Make the CFG of `function` reducible. Returns the number of guard blocks inserted.
+///
+/// # Panics
+///
+/// If a `wasm.br_table` branches to an entry of a multi-entry cycle; such a target must be
+/// reached through an intermediate block.
 pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
     let entry = function.get_entry_block(ctx);
     let region = function.get_region(ctx);
@@ -151,9 +153,9 @@ fn components(
                 }
             }
             if self.low[&block] == self.index[&block] {
+                // `block` is on the stack, so this pops exactly its component.
                 let mut component = Vec::new();
-                loop {
-                    let member = self.stack.pop().unwrap();
+                while let Some(member) = self.stack.pop() {
                     self.on_stack.remove(&member);
                     component.push(member);
                     if member == block {
@@ -192,22 +194,10 @@ fn i32_type(ctx: &mut Context) -> TypeHandle {
 /// A zero constant of `ty`, inserted before `mark`.
 fn zero_before(ctx: &mut Context, ty: TypeHandle, mark: Ptr<Operation>) -> Value {
     let attr: Box<dyn TypedAttrInterface> = match val_type(ctx, ty) {
-        Some(ValType::I64) => {
-            let ty = IntegerType::get(ctx, 64, Signedness::Signless);
-            Box::new(IntegerAttr::new(
-                ty,
-                APInt::from_u64(0, const { NonZeroUsize::new(64).unwrap() }),
-            ))
-        }
+        Some(ValType::I64) => Box::new(integer_attr(ctx, I64_BITS, 0)),
         Some(ValType::F32) => Box::new(FPSingleAttr::from(0.0f32)),
         Some(ValType::F64) => Box::new(FPDoubleAttr::from(0.0f64)),
-        _ => {
-            let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-            Box::new(IntegerAttr::new(
-                ty,
-                APInt::from_u64(0, const { NonZeroUsize::new(32).unwrap() }),
-            ))
-        }
+        _ => Box::new(integer_attr(ctx, I32_BITS, 0)),
     };
     let op = ConstantOp::new(ctx, attr).get_operation();
     op.insert_before(ctx, mark);
@@ -215,11 +205,7 @@ fn zero_before(ctx: &mut Context, ty: TypeHandle, mark: Ptr<Operation>) -> Value
 }
 
 fn i32_const(ctx: &mut Context, value: u32) -> Ptr<Operation> {
-    let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-    let attr = IntegerAttr::new(
-        ty,
-        APInt::from_u64(value as u64, const { NonZeroUsize::new(32).unwrap() }),
-    );
+    let attr = integer_attr(ctx, I32_BITS, value.into());
     ConstantOp::new(ctx, Box::new(attr)).get_operation()
 }
 
@@ -238,7 +224,7 @@ fn i32_const_before(ctx: &mut Context, value: u32, mark: Ptr<Operation>) -> Valu
 /// Insert the guard for `entries` and redirect every edge into them through it.
 fn insert_guard(
     ctx: &mut Context,
-    region: Ptr<pliron::region::Region>,
+    region: Ptr<Region>,
     entries: &[Ptr<BasicBlock>],
     preds: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
 ) -> Ptr<BasicBlock> {
@@ -299,54 +285,51 @@ fn insert_guard(
             }
         }
     }
-    for source in sources {
-        let terminator = source
-            .deref(ctx)
-            .get_terminator(ctx)
-            .expect("block with successors has a terminator");
-        let successors: Vec<_> = terminator.deref(ctx).successors().collect();
-        let branch = Operation::get_op_dyn(terminator, ctx);
-        let branch = op_cast::<dyn BranchOpInterface>(branch.as_ref())
-            .expect("wasm terminators with successors are branches");
-        let operands: Vec<Vec<Value>> = (0..successors.len())
-            .map(|i| branch.successor_operands(ctx, i))
-            .collect();
-        let mut edges = Vec::new();
-        for (succ, args) in successors.into_iter().zip(operands) {
+    // The edge to `succ` with `args`, through the guard if `succ` is an entry.
+    let redirect =
+        |ctx: &mut Context, succ: Ptr<BasicBlock>, args: Vec<Value>, terminator: Ptr<Operation>| {
             let Some(index) = entries.iter().position(|e| *e == succ) else {
-                edges.push((succ, args));
-                continue;
+                return (succ, args);
             };
-            let mut guard_args = Vec::new();
-            let label = i32_const_before(ctx, index as u32, terminator);
-            guard_args.push(label);
+            let mut guard_args = vec![i32_const_before(ctx, index as u32, terminator)];
             let mut supplied = args.into_iter();
             for (other, range) in ranges.iter().enumerate() {
                 for position in range.clone() {
                     guard_args.push(if other == index {
-                        supplied.next().unwrap()
+                        supplied
+                            .next()
+                            .expect("a verified branch passes one operand per block argument")
                     } else {
                         zero_before(ctx, types[position], terminator)
                     });
                 }
             }
-            edges.push((guard, guard_args));
-        }
+            (guard, guard_args)
+        };
+    for source in sources {
+        let terminator = source
+            .deref(ctx)
+            .get_terminator(ctx)
+            .expect("a predecessor block ends in a terminator");
         let replacement = if let Some(cond_br) = Operation::get_op::<CondBrOp>(terminator, ctx) {
             let condition = cond_br.get_operand_condition(ctx);
-            let mut edges = edges.into_iter();
-            let (then_dest, then_args) = edges.next().unwrap();
-            let (else_dest, else_args) = edges.next().unwrap();
+            let [(then_dest, then_args), (else_dest, else_args)] = [0, 1].map(|succ| {
+                let dest = terminator.deref(ctx).get_successor(succ);
+                let args = cond_br.successor_operands(ctx, succ);
+                redirect(ctx, dest, args, terminator)
+            });
             CondBrOp::new(ctx, condition, then_dest, then_args, else_dest, else_args)
                 .get_operation()
+        } else if Operation::get_op::<BrOp>(terminator, ctx).is_some() {
+            let dest = terminator.deref(ctx).get_successor(0);
+            let args = terminator.deref(ctx).operands().collect();
+            let (dest, args) = redirect(ctx, dest, args, terminator);
+            BrOp::new(ctx, dest, args).get_operation()
         } else {
-            assert!(
-                Operation::get_op::<BrOp>(terminator, ctx).is_some(),
+            panic!(
                 "unexpected branch kind (a wasm.br_table must not target an irreducible loop \
                  entry; branch to a block that does)"
-            );
-            let (dest, args) = edges.into_iter().next().unwrap();
-            BrOp::new(ctx, dest, args).get_operation()
+            )
         };
         replacement.insert_before(ctx, terminator);
         Operation::erase(terminator, ctx);

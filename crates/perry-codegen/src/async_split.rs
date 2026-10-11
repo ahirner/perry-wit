@@ -59,16 +59,14 @@ pub(crate) struct Frame {
 }
 
 pub(crate) fn step_name(name: &Identifier) -> Identifier {
-    format!("step_{name}").try_into().expect("identifier")
+    pliron::ident!("step_") + name.clone()
 }
 
-pub(crate) fn drive_name() -> Identifier {
-    "drive".try_into().expect("identifier")
-}
+pub(super) const DRIVE: Identifier = pliron::ident!("drive");
 
 /// MIR values live across some `await` of `function`, in a deterministic order.
 fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
-    let order = crate::value_order(ctx, function);
+    let order = crate::analysis::value_order(ctx, function);
     let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
     let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
     let transfer = |ctx: &Context, ops: &[Ptr<Operation>], mut live: HashSet<Value>| {
@@ -262,9 +260,9 @@ pub(crate) fn lower(
 }
 
 /// `drive()`: run queued frames of the current task until none is ready.
-pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identifier]) {
+pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState) {
     let ty = FunctionType::get(ctx, vec![], vec![]);
-    let function = FuncOp::new(ctx, drive_name(), ty);
+    let function = FuncOp::new(ctx, DRIVE, ty);
     let mut b = FunctionLowering::glue(state, ctx, &function);
     let header = b.new_block(ctx, vec![]);
     b.br(ctx, header, vec![]);
@@ -295,10 +293,11 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
     b.br(ctx, header, vec![]);
     b.block = step_function;
     let mut calls = Vec::new();
-    for name in kinds {
+    for index in 0..b.state.async_functions.len() {
+        let step = step_name(&b.state.async_functions[index]);
         let call_block = b.new_block(ctx, vec![]);
         let saved = std::mem::replace(&mut b.block, call_block);
-        let call = CallOp::new(ctx, step_name(name), vec![frame], vec![]).get_operation();
+        let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
         b.br(ctx, header, vec![]);
         b.block = saved;
@@ -314,7 +313,7 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
         .append_operation(ctx, function.get_operation(), 0);
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     /// The 8-byte slot bits of a value, as promises store it.
     pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
         if value.get_type(ctx).deref(ctx).is::<FP64Type>() {

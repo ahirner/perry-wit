@@ -33,7 +33,7 @@ fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
         "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}",
         "import type { Input } from './types/world'; export function run(value:Input):string {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
     )?;
-    let value = record(&[
+    let value = record([
         ("a", Val::String("a".into())),
         ("b", Val::String("b".into())),
         ("c", Val::String("c".into())),
@@ -216,7 +216,8 @@ impl Instance {
             .unwrap_or_else(|| panic!("missing export {name}"));
         let mut results = [Val::Bool(false)];
         function.call(&mut self.store, args, &mut results)?;
-        Ok(results[0].clone())
+        let [result] = results;
+        Ok(result)
     }
 }
 
@@ -286,7 +287,7 @@ export function encode(text: string): Payload { return { text, parts: [text, "é
     let bytes = |s: &str| Val::List(s.bytes().map(Val::U8).collect());
     assert_eq!(
         component.call("encode", &[Val::String("a✓".into())])?,
-        record(&[
+        record([
             ("text", bytes("a✓")),
             ("parts", Val::List(vec![bytes("a✓"), bytes("é🙂")]))
         ])
@@ -294,13 +295,9 @@ export function encode(text: string): Payload { return { text, parts: [text, "é
     Ok(())
 }
 
-fn record(fields: &[(&str, Val)]) -> Val {
-    Val::Record(
-        fields
-            .iter()
-            .map(|(n, v)| (n.to_string(), v.clone()))
-            .collect(),
-    )
+/// A WIT record value from `(field, value)` pairs.
+fn record<const N: usize>(fields: [(&str, Val); N]) -> Val {
+    Val::Record(fields.map(|(name, value)| (name.to_owned(), value)).into())
 }
 
 #[test]
@@ -310,11 +307,11 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
         component.call(
             "scale",
             &[
-                record(&[("x", Val::Float64(1.5)), ("y-coord", Val::Float64(-2.0))]),
+                record([("x", Val::Float64(1.5)), ("y-coord", Val::Float64(-2.0))]),
                 Val::Float64(4.0)
             ]
         )?,
-        record(&[("x", Val::Float64(6.0)), ("y-coord", Val::Float64(-8.0))])
+        record([("x", Val::Float64(6.0)), ("y-coord", Val::Float64(-8.0))])
     );
     assert_eq!(
         component.call(
@@ -328,7 +325,7 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
                 ])
             ]
         )?,
-        record(&[
+        record([
             ("count", Val::U32(3)),
             ("total", Val::Float64(2.5)),
             ("label", Val::String("sum ✓!".into())),
@@ -385,19 +382,16 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
 #[test]
 fn repeated_calls_do_not_grow_memory() -> Result<()> {
     let mut component = Instance::new()?;
-    let big: Vec<Val> = (0..20_000).map(|i| Val::Float64(f64::from(i))).collect();
+    let args = [
+        Val::String("warm".into()),
+        Val::List((0..20_000).map(|i| Val::Float64(f64::from(i))).collect()),
+    ];
     for _ in 0..3 {
-        component.call(
-            "describe",
-            &[Val::String("warm".into()), Val::List(big.clone())],
-        )?;
+        component.call("describe", &args)?;
     }
     let before = component.store.data().0;
     for _ in 0..50 {
-        component.call(
-            "describe",
-            &[Val::String("again".into()), Val::List(big.clone())],
-        )?;
+        component.call("describe", &args)?;
     }
     assert_eq!(component.store.data().0, before, "memory grew across tasks");
     Ok(())
@@ -431,7 +425,7 @@ export function finish(ok: boolean): Nothing { if (ok) return { ok: true }; retu
         Val::Option(None),
         Val::Option(Some(Box::new(Val::String("note".into())))),
     ] {
-        let packet = record(&[
+        let packet = record([
             ("answer", err.clone()),
             ("color", Val::Enum("blue".into())),
             ("note", note),
@@ -522,7 +516,7 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean): Pay
                     Val::Bool(text_first)
                 ]
             )?,
-            record(&[
+            record([
                 ("text", bytes(if text_first { "é🙂" } else { "xyz" })),
                 ("parts", Val::List(vec![bytes("é🙂"), bytes("xyz")]))
             ])
@@ -659,7 +653,7 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         Val::Variant("text".into(), Some(Box::new(Val::String("héllo".into())))),
         Val::Variant(
             "point".into(),
-            Some(Box::new(record(&[
+            Some(Box::new(record([
                 ("x", Val::Float64(7.0)),
                 ("label", Val::String("seven".into())),
             ]))),
@@ -682,7 +676,7 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             Val::String(expected.into())
         );
     }
-    let packet = record(&[
+    let packet = record([
         ("values", Val::List(values.clone())),
         ("optional", Val::Option(Some(Box::new(values[2].clone())))),
     ]);

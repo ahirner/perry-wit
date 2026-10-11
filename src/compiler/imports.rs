@@ -1,6 +1,6 @@
 //! World imports described once for source typing and canonical lowering.
 use super::{bind::abi_type, wit_types};
-use crate::sdk::codegen::to_camel_case;
+use crate::sdk::to_camel_case;
 use perry_codegen::boundary::Import;
 use perry_lower::hir::{FunctionType, Type as HirType};
 use std::collections::HashMap;

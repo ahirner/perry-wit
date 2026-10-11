@@ -1,7 +1,7 @@
 //! Binding WIT world exports to exported TypeScript functions.
 use crate::{
     abi::export_names::{core_export_name, interface_implementation_name},
-    sdk::codegen::to_camel_case,
+    sdk::to_camel_case,
 };
 use anyhow::{Result, bail, ensure};
 use perry_codegen::boundary::{AbiType, Export};

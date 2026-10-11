@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchCase {
-    pub bytes: Vec<u8>,
-    pub status: u16,
-    pub limit: usize,
-    pub truncated: bool,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) status: u16,
+    pub(crate) limit: usize,
+    pub(crate) truncated: bool,
     #[serde(default)]
-    pub byob: bool,
+    pub(crate) byob: bool,
 }
 impl FetchCase {
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         format!(
             r#"{reader}
 
@@ -66,7 +66,7 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-pub fn contract() -> Contract {
+pub(crate) fn contract() -> Contract {
     let case = |bytes, status, limit, truncated| {
         Case::Fetch(FetchCase {
             bytes,
@@ -122,7 +122,7 @@ pub fn contract() -> Contract {
     }
 }
 
-pub fn byob_contract() -> Contract {
+pub(crate) fn byob_contract() -> Contract {
     let mut contract = contract();
     contract.id = "web.fetch.bounded_byob_body";
     contract.description = "BYOB bounded Fetch consumes directly into its final buffer";

@@ -1,7 +1,7 @@
 //! WIT s64/u64 transport never passes through a floating-point representation.
 use super::*;
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn lift_integer(
         &mut self,
         ctx: &mut Context,

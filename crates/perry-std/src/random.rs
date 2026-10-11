@@ -3,7 +3,7 @@ use crate::runtime::{from_bytes, insecure_random_u64, random_u64};
 
 /// `Math.random()`: 53 random bits from the insecure generator, in `[0, 1)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_math_random() -> f64 {
+pub(crate) extern "C" fn std_math_random() -> f64 {
     let bits = insecure_random_u64() >> 11;
     bits as f64 * (1.0 / (1u64 << 53) as f64)
 }
@@ -12,7 +12,7 @@ pub extern "C" fn std_math_random() -> f64 {
 /// # Safety
 /// `bytes` must be a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_fill_random(bytes: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_fill_random(bytes: *mut u8) -> *mut u8 {
     // SAFETY: Uint8Array layout of crate::bytes.
     let (len, data) = unsafe { (*(bytes as *const u32), *(bytes.add(4) as *const *mut u8)) };
     let mut index = 0;
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn std_bytes_fill_random(bytes: *mut u8) -> *mut u8 {
 
 /// `crypto.randomUUID()`: a version 4 UUID in lowercase hex.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_random_uuid() -> *mut u8 {
+pub(crate) extern "C" fn std_random_uuid() -> *mut u8 {
     let (high, low) = (random_u64(), random_u64());
     let mut bytes = [0u8; 16];
     bytes[..8].copy_from_slice(&high.to_be_bytes());

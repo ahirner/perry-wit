@@ -7,27 +7,27 @@
 //! ([perry_abi]), so a program that uses none of it carries none of its code or data.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-pub mod bytes;
-pub mod decoder;
-pub mod exception;
-pub mod integers;
-pub mod json;
-pub mod random;
-pub mod regex;
-pub mod text;
+mod bytes;
+mod decoder;
+mod exception;
+mod integers;
+mod json;
+mod random;
+mod regex;
+mod text;
 
-pub use perry_abi as runtime;
+use perry_abi as runtime;
 
 /// `JSON.parse` of text the JSON helper rejected.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_raise_syntax() -> u32 {
+pub(crate) extern "C" fn std_raise_syntax() -> u32 {
     runtime::raise(runtime::ERROR, "SyntaxError: Unexpected token in JSON");
     runtime::ERROR
 }
 
 /// `toISOString` of an invalid date.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_raise_invalid_date() -> u32 {
+pub(crate) extern "C" fn std_raise_invalid_date() -> u32 {
     runtime::raise(runtime::RANGE_ERROR, "Invalid time value");
     runtime::RANGE_ERROR
 }

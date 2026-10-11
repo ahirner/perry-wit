@@ -19,7 +19,7 @@ pub mod control;
 pub mod emit;
 pub mod ops;
 pub mod reducible;
-pub mod types;
+mod types;
 
 #[cfg(test)]
 mod tests;

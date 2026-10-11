@@ -2,17 +2,6 @@
 use super::*;
 use anyhow::Context as _;
 
-pub(super) fn record(params: &[AbiType]) -> AbiType {
-    AbiType::Record(
-        params
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, ty)| (i.to_string(), ty))
-            .collect(),
-    )
-}
-
 pub(super) fn export_signature(params: &[AbiType]) -> Vec<Flat> {
     let flat: Vec<_> = params.iter().flat_map(AbiType::flat).collect();
     if flat.len() > MAX_FLAT_PARAMS {
@@ -22,7 +11,7 @@ pub(super) fn export_signature(params: &[AbiType]) -> Vec<Flat> {
     }
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn lift_parameters(
         &mut self,
         ctx: &mut Context,
@@ -39,7 +28,7 @@ impl FunctionLowering<'_> {
         }
         let area = flat.pop().context("missing indirect parameter record")?;
         let mut args = Vec::with_capacity(params.len());
-        for ((ty, mir), offset) in params.iter().zip(mir).zip(record(params).field_offsets()) {
+        for ((ty, mir), offset) in params.iter().zip(mir).zip(record_offsets(params.iter())) {
             args.push(self.lift_load(ctx, ty, *mir, area, offset)?);
         }
         if self.state.collectible {

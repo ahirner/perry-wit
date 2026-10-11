@@ -7,31 +7,29 @@
 
 /// `stream.write` / `future.read` result: the operation is pending; an event follows.
 pub const BLOCKED: u32 = 0xffff_ffff;
-/// Low four bits of a copy result.
-pub const COMPLETED: u32 = 0;
-pub const DROPPED: u32 = 1;
+/// Low four bits of a copy result: the reader dropped its end.
+pub(crate) const DROPPED: u32 = 1;
 
 /// Callback events.
-pub const EVENT_SUBTASK: u32 = 1;
-pub const EVENT_STREAM_WRITE: u32 = 3;
-pub const EVENT_FUTURE_READ: u32 = 4;
+pub(crate) const EVENT_STREAM_WRITE: u32 = 3;
+pub(crate) const EVENT_FUTURE_READ: u32 = 4;
 /// Subtask state after its function returned.
-pub const SUBTASK_RETURNED: u32 = 2;
+pub(crate) const SUBTASK_RETURNED: u32 = 2;
 
 #[cfg(target_arch = "wasm32")]
 mod imports {
     #[link(wasm_import_module = "$root")]
     unsafe extern "C" {
         #[link_name = "[waitable-set-new]"]
-        pub fn waitable_set_new() -> u32;
+        pub(crate) fn waitable_set_new() -> u32;
         #[link_name = "[waitable-set-drop]"]
-        pub fn waitable_set_drop(set: u32);
+        pub(crate) fn waitable_set_drop(set: u32);
         #[link_name = "[waitable-join]"]
-        pub fn waitable_join(waitable: u32, set: u32);
+        pub(crate) fn waitable_join(waitable: u32, set: u32);
         #[link_name = "[subtask-drop]"]
-        pub fn subtask_drop(subtask: u32);
+        pub(crate) fn subtask_drop(subtask: u32);
         #[link_name = "[subtask-cancel]"]
-        pub fn subtask_cancel(subtask: u32) -> u32;
+        pub(crate) fn subtask_cancel(subtask: u32) -> u32;
     }
 
     macro_rules! output {
@@ -39,21 +37,21 @@ mod imports {
             #[link(wasm_import_module = $module)]
             unsafe extern "C" {
                 #[link_name = "[stream-new-0]write-via-stream"]
-                pub fn $new() -> u64;
+                pub(crate) fn $new() -> u64;
                 #[link_name = "write-via-stream"]
-                pub fn $start(readable: u32) -> u32;
+                pub(crate) fn $start(readable: u32) -> u32;
                 #[link_name = "[async-lower][stream-write-0]write-via-stream"]
-                pub fn $write(writable: u32, data: *const u8, len: u32) -> u32;
+                pub(crate) fn $write(writable: u32, data: *const u8, len: u32) -> u32;
                 #[link_name = "[stream-drop-writable-0]write-via-stream"]
-                pub fn $drop_writer(writable: u32);
+                pub(crate) fn $drop_writer(writable: u32);
                 #[link_name = "[async-lower][future-read-1]write-via-stream"]
-                pub fn $read(future: u32, result: *mut u8) -> u32;
+                pub(crate) fn $read(future: u32, result: *mut u8) -> u32;
                 #[link_name = "[future-drop-readable-1]write-via-stream"]
-                pub fn $drop_future(future: u32);
+                pub(crate) fn $drop_future(future: u32);
                 #[link_name = "[stream-cancel-write-0]write-via-stream"]
-                pub fn $cancel_write(writable: u32) -> u32;
+                pub(crate) fn $cancel_write(writable: u32) -> u32;
                 #[link_name = "[future-cancel-read-1]write-via-stream"]
-                pub fn $cancel_read(future: u32) -> u32;
+                pub(crate) fn $cancel_read(future: u32) -> u32;
             }
         };
     }
@@ -83,37 +81,37 @@ mod imports {
     #[link(wasm_import_module = "wasi:cli/environment@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-environment"]
-        pub fn get_environment(result: *mut u32);
+        pub(crate) fn get_environment(result: *mut u32);
     }
 
     #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.3.0")]
     unsafe extern "C" {
         #[link_name = "now"]
-        pub fn monotonic_now() -> u64;
+        pub(crate) fn monotonic_now() -> u64;
     }
 
     #[link(wasm_import_module = "wasi:clocks/system-clock@0.3.0")]
     unsafe extern "C" {
         #[link_name = "now"]
-        pub fn system_now(result: *mut u64);
+        pub(crate) fn system_now(result: *mut u64);
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use imports::*;
+pub(crate) use imports::*;
 
 /// Output stream functions of `stdout` (0) or `stderr` (1). Buffers passed to `write` and
 /// `read` must stay valid until the operation completes (immediately or by its event).
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub mod output {
+pub(crate) mod output {
     use super::imports::*;
 
-    pub fn new(fd: usize) -> u64 {
+    pub(crate) fn new(fd: usize) -> u64 {
         // SAFETY: canonical built-ins of the imported interface.
         unsafe { if fd == 0 { stdout_new() } else { stderr_new() } }
     }
-    pub fn start(fd: usize, readable: u32) -> u32 {
+    pub(crate) fn start(fd: usize, readable: u32) -> u32 {
         unsafe {
             if fd == 0 {
                 stdout_start(readable)
@@ -122,7 +120,7 @@ pub mod output {
             }
         }
     }
-    pub fn write(fd: usize, writable: u32, data: *const u8, len: u32) -> u32 {
+    pub(crate) fn write(fd: usize, writable: u32, data: *const u8, len: u32) -> u32 {
         unsafe {
             if fd == 0 {
                 stdout_write(writable, data, len)
@@ -131,7 +129,7 @@ pub mod output {
             }
         }
     }
-    pub fn drop_writer(fd: usize, writable: u32) {
+    pub(crate) fn drop_writer(fd: usize, writable: u32) {
         unsafe {
             if fd == 0 {
                 stdout_drop_writer(writable)
@@ -140,7 +138,7 @@ pub mod output {
             }
         }
     }
-    pub fn read(fd: usize, future: u32, result: *mut u8) -> u32 {
+    pub(crate) fn read(fd: usize, future: u32, result: *mut u8) -> u32 {
         unsafe {
             if fd == 0 {
                 stdout_read(future, result)
@@ -149,7 +147,7 @@ pub mod output {
             }
         }
     }
-    pub fn drop_future(fd: usize, future: u32) {
+    pub(crate) fn drop_future(fd: usize, future: u32) {
         unsafe {
             if fd == 0 {
                 stdout_drop_future(future)
@@ -158,7 +156,7 @@ pub mod output {
             }
         }
     }
-    pub fn cancel_write(fd: usize, writable: u32) {
+    pub(crate) fn cancel_write(fd: usize, writable: u32) {
         unsafe {
             if fd == 0 {
                 stdout_cancel_write(writable);
@@ -167,7 +165,7 @@ pub mod output {
             }
         }
     }
-    pub fn cancel_read(fd: usize, future: u32) {
+    pub(crate) fn cancel_read(fd: usize, future: u32) {
         unsafe {
             if fd == 0 {
                 stdout_cancel_read(future);
@@ -200,12 +198,14 @@ pub mod mock {
     pub(crate) fn with<R>(access: impl FnOnce(&mut Host) -> R) -> R {
         crate::instance::native::with(|instance| access(&mut instance.host.borrow_mut()))
     }
-    pub const LIMIT: u32 = 5;
+    const LIMIT: u32 = 5;
+    /// Low four bits of a copy result that completed normally.
+    const COMPLETED: u32 = 0;
 
-    pub unsafe fn waitable_set_new() -> u32 {
+    pub(crate) unsafe fn waitable_set_new() -> u32 {
         77
     }
-    pub unsafe fn waitable_set_drop(_: u32) {}
+    pub(crate) unsafe fn waitable_set_drop(_: u32) {}
     pub unsafe fn waitable_join(waitable: u32, set: u32) {
         with(|host| host.joined.push((waitable, set)));
     }
@@ -213,16 +213,16 @@ pub mod mock {
     pub unsafe fn subtask_cancel(_: u32) -> u32 {
         3
     }
-    pub unsafe fn get_environment(result: *mut u32) {
+    pub(crate) unsafe fn get_environment(result: *mut u32) {
         unsafe {
             *result = 0;
             *result.add(1) = 0;
         }
     }
-    pub unsafe fn monotonic_now() -> u64 {
+    pub(crate) unsafe fn monotonic_now() -> u64 {
         1_500_000
     }
-    pub unsafe fn system_now(result: *mut u64) {
+    pub(crate) unsafe fn system_now(result: *mut u64) {
         unsafe {
             *result = 1_700_000_000;
             *(result.add(1) as *mut u32) = 5_000_000;
@@ -241,10 +241,10 @@ pub mod mock {
 
     pub mod output {
         use super::*;
-        pub fn new(fd: usize) -> u64 {
+        pub(crate) fn new(fd: usize) -> u64 {
             (10 + fd as u64 * 2) | ((11 + fd as u64 * 2) << 32)
         }
-        pub fn start(fd: usize, _: u32) -> u32 {
+        pub(crate) fn start(fd: usize, _: u32) -> u32 {
             20 + fd as u32
         }
         pub fn write(fd: usize, _: u32, data: *const u8, len: u32) -> u32 {
@@ -261,14 +261,14 @@ pub mod mock {
             with(|host| host.written[fd].extend_from_slice(bytes));
             len << 4
         }
-        pub fn drop_writer(_: usize, _: u32) {}
-        pub fn read(_: usize, _: u32, _: *mut u8) -> u32 {
-            super::super::COMPLETED
+        pub(crate) fn drop_writer(_: usize, _: u32) {}
+        pub(crate) fn read(_: usize, _: u32, _: *mut u8) -> u32 {
+            COMPLETED
         }
-        pub fn drop_future(_: usize, _: u32) {}
-        pub fn cancel_write(_: usize, _: u32) {
+        pub(crate) fn drop_future(_: usize, _: u32) {}
+        pub(crate) fn cancel_write(_: usize, _: u32) {
             with(|host| host.pending = None);
         }
-        pub fn cancel_read(_: usize, _: u32) {}
+        pub(crate) fn cancel_read(_: usize, _: u32) {}
     }
 }

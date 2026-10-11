@@ -15,7 +15,7 @@ pub(super) enum Character {
     Scalar,
 }
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn string_literal_comparison(
         &mut self,
         ctx: &mut Context,
@@ -362,17 +362,10 @@ impl FunctionLowering<'_> {
         if matches!(representation, Character::Scalar) {
             return byte;
         }
-        use pliron::{linked_list::ContainsLinkedList, op::Op};
         let table = match self.ascii_strings {
             Some(table) => table,
             None => {
-                let runtime = Runtime::StdAsciiStrings;
-                self.state.runtime.insert(runtime);
-                let ty = i32_type(ctx);
-                let call = pliron_wasm::ops::CallOp::new(ctx, runtime.symbol(), vec![], vec![ty])
-                    .get_operation();
-                call.insert_at_front(self.region.deref(ctx).get_head().expect("entry"), ctx);
-                let table = call.deref(ctx).get_result(0);
+                let table = self.entry_runtime(ctx, Runtime::StdAsciiStrings);
                 self.ascii_strings = Some(table);
                 table
             }

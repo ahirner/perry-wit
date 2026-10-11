@@ -180,6 +180,19 @@ struct Directory {
 }
 
 impl Directory {
+    const fn new() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self { tables: Vec::new() }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                pages: alloc::collections::BTreeMap::new(),
+            }
+        }
+    }
+
     fn get(&self, address: usize) -> *mut Page {
         let number = address / PAGE;
         #[cfg(target_arch = "wasm32")]
@@ -221,11 +234,11 @@ impl Directory {
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-pub struct Counters {
-    pub allocations: u64,
-    pub collections: u64,
-    pub live_bytes: usize,
-    pub reserved_bytes: usize,
+pub(crate) struct Counters {
+    pub(crate) allocations: u64,
+    pub(crate) collections: u64,
+    pub(crate) live_bytes: usize,
+    pub(crate) reserved_bytes: usize,
 }
 
 /// Shapes are static arrays `[stride, number_of_offsets, offsets…]`. A zero stride traces
@@ -340,21 +353,30 @@ impl Collector {
 
     /// Payload size at an exact live allocation start.
     pub(crate) fn allocation_size(&self, allocation: *mut u8) -> Option<usize> {
-        let page = self.directory.get(allocation as usize);
+        self.allocated_slot(allocation)?;
+        // SAFETY: an allocated slot starts with an initialized header.
+        Some(unsafe { (*allocation.sub(HEADER).cast::<Header>()).size })
+    }
+
+    /// The page and slot index of an exact payload start, allocated or not.
+    fn exact_slot(&self, object: *mut u8) -> Option<(*mut Page, usize)> {
+        let page = self.directory.get(object as usize);
         if page.is_null() {
             return None;
         }
-        // SAFETY: the directory refers to stable owned pages; validate the slot before its header.
-        let page = unsafe { &*page };
-        let offset = (allocation as usize).wrapping_sub(page.memory.as_ptr() as usize + HEADER);
-        let index = offset / page.cell;
-        if index >= page.slots
-            || !offset.is_multiple_of(page.cell)
-            || page.allocated[0] & (1 << index) == 0
-        {
-            return None;
-        }
-        Some(unsafe { (*allocation.sub(HEADER).cast::<Header>()).size })
+        // SAFETY: the directory refers to stable pages owned by this collector.
+        let (memory, cell, slots) = unsafe { ((*page).memory, (*page).cell, (*page).slots) };
+        let offset = (object as usize).wrapping_sub(memory.as_ptr() as usize + HEADER);
+        let index = offset / cell;
+        (index < slots && offset.is_multiple_of(cell)).then_some((page, index))
+    }
+
+    /// [Self::exact_slot] of a currently allocated payload.
+    fn allocated_slot(&self, object: *mut u8) -> Option<(*mut Page, usize)> {
+        self.exact_slot(object).filter(|&(page, index)| {
+            // SAFETY: as in `exact_slot`; small pages have at most 64 slots.
+            unsafe { (*page).allocated[0] & (1 << index) != 0 }
+        })
     }
 
     /// Enlarge an exclusive payload without collecting or moving it. Newly exposed bytes are zero.
@@ -363,19 +385,11 @@ impl Collector {
     /// `object` is the exact start of a live allocation, with no interior aliases or host borrows.
     /// Its shape remains valid for `size` bytes. Failure preserves its pointer, size and contents.
     pub(crate) unsafe fn grow_in_place(&mut self, object: *mut u8, size: usize) -> bool {
-        let page = self.directory.get(object as usize);
-        if page.is_null() {
+        let Some((page, _)) = self.allocated_slot(object) else {
             return false;
-        }
+        };
+        // SAFETY: directory pages are owned by this collector; no other page reference is live.
         let page = unsafe { &mut *page };
-        let offset = (object as usize).wrapping_sub(page.memory.as_ptr() as usize + HEADER);
-        let index = offset / page.cell;
-        if index >= page.slots
-            || !offset.is_multiple_of(page.cell)
-            || page.allocated[0] & (1 << index) == 0
-        {
-            return false;
-        }
         let header = unsafe { &mut *object.sub(HEADER).cast::<Header>() };
         let old_size = header.size;
         if size <= old_size {
@@ -525,17 +539,10 @@ impl Collector {
     /// The exact allocation was marked in this collection. Only valid between marking and sweep.
     #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
     pub(crate) fn is_marked(&self, object: *mut u8) -> bool {
-        let page = self.directory.get(object as usize);
-        if page.is_null() {
-            return false;
-        }
-        // SAFETY: directory entries refer to stable, allocated pages.
-        let page = unsafe { &*page };
-        let offset = (object as usize).wrapping_sub(page.memory.as_ptr() as usize + HEADER);
-        let index = offset / page.cell;
-        index < page.slots
-            && offset.is_multiple_of(page.cell)
-            && page.marked[index / 64] & (1 << (index % 64)) != 0
+        self.exact_slot(object).is_some_and(|(page, index)| {
+            // SAFETY: directory entries refer to stable, allocated pages.
+            unsafe { (*page).marked[index / 64] & (1 << (index % 64)) != 0 }
+        })
     }
 
     /// Finalize weak external owners after tracing and before any dead storage is reclaimed.
@@ -622,21 +629,6 @@ impl Collector {
         self.threshold = live.max(MIN_THRESHOLD);
         self.counters.collections += 1;
         self.counters.live_bytes = live;
-    }
-}
-
-impl Directory {
-    const fn new() -> Self {
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self { tables: Vec::new() }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self {
-                pages: alloc::collections::BTreeMap::new(),
-            }
-        }
     }
 }
 

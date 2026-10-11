@@ -123,7 +123,7 @@ impl CondBrOp {
 }
 
 #[derive(Debug, Error)]
-pub enum CondBrErr {
+enum CondBrErr {
     #[error("wasm.cond_br condition must be a signless i32")]
     Condition,
     #[error("wasm.cond_br needs exactly one condition operand, found {0}")]
@@ -316,7 +316,7 @@ impl BrTableOp {
 }
 
 #[derive(Debug, Error)]
-pub enum BrTableErr {
+enum BrTableErr {
     #[error("wasm.br_table needs a default successor")]
     Default,
     #[error("wasm.br_table index must be a signless i32")]

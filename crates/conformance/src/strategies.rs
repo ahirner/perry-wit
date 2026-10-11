@@ -2,7 +2,7 @@
 use crate::program::{Binary, Condition, Math, Number, Text};
 use proptest::prelude::*;
 
-pub fn numbers(depth: u32) -> BoxedStrategy<Number> {
+pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
     let leaf = prop_oneof![
         Just(Number::Input),
         Just(Number::NegativeZero),
@@ -39,7 +39,7 @@ pub fn numbers(depth: u32) -> BoxedStrategy<Number> {
     ].boxed()
 }
 
-pub fn conditions(depth: u32) -> BoxedStrategy<Condition> {
+pub(crate) fn conditions(depth: u32) -> BoxedStrategy<Condition> {
     let literal = any::<bool>().prop_map(Condition::Literal);
     if depth == 0 {
         return literal.boxed();
@@ -65,7 +65,7 @@ pub fn conditions(depth: u32) -> BoxedStrategy<Condition> {
     .boxed()
 }
 
-pub fn texts(depth: u32) -> BoxedStrategy<Text> {
+pub(crate) fn texts(depth: u32) -> BoxedStrategy<Text> {
     let leaf = prop::sample::select(vec!["", "a", "  abc  ", "é漢", "é", "a\0b", "\n\t"])
         .prop_map(|s| Text::Literal(s.into()))
         .boxed();

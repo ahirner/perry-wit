@@ -5,10 +5,11 @@ use crate::{
     strategies,
     transitions::{Action, TimerModel},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,7 +18,7 @@ pub enum ExitStatus {
     Failure,
 }
 impl ExitStatus {
-    pub fn code(self) -> i32 {
+    pub(crate) fn code(self) -> i32 {
         match self {
             Self::Success => 0,
             Self::Failure => 1,
@@ -58,14 +59,14 @@ pub enum Case {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExpectedOutcome {
+pub(crate) enum ExpectedOutcome {
     EquivalentExecution,
     CompilerRejection,
     InjectedFaultDetection,
     BoundedGrowth,
 }
 impl Case {
-    pub fn expected_outcome(&self) -> ExpectedOutcome {
+    pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
         match self {
             Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
             Self::Fault { .. } => ExpectedOutcome::InjectedFaultDetection,
@@ -73,21 +74,26 @@ impl Case {
             _ => ExpectedOutcome::EquivalentExecution,
         }
     }
-    pub fn variants(&self) -> Vec<Self> {
+    /// The case followed by its metamorphic forms, which must observe identically.
+    pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
         if let Self::Program(program) = self
             && program.form == Form::Direct
         {
             Form::ALL
                 .into_iter()
                 .map(|form| {
-                    Self::Program(Program {
-                        expression: program.expression.clone(),
-                        form,
-                    })
+                    if form == Form::Direct {
+                        Cow::Borrowed(self)
+                    } else {
+                        Cow::Owned(Self::Program(Program {
+                            expression: program.expression.clone(),
+                            form,
+                        }))
+                    }
                 })
                 .collect()
         } else {
-            vec![self.clone()]
+            vec![Cow::Borrowed(self)]
         }
     }
     pub fn source(&self) -> String {
@@ -103,7 +109,7 @@ impl Case {
             | Self::Scaling { source, .. } => source.clone(),
         }
     }
-    pub fn asynchronous(&self) -> bool {
+    pub(crate) fn asynchronous(&self) -> bool {
         match self {
             Self::Program(program) | Self::Fault { program, .. } => program.form.is_async(),
             Self::Function { asynchronous, .. } => *asynchronous,
@@ -114,26 +120,26 @@ impl Case {
 }
 
 pub struct Witness {
-    pub partition: &'static str,
+    pub(crate) partition: &'static str,
     pub case: Case,
 }
 pub struct Contract {
     pub id: &'static str,
-    pub description: &'static str,
-    pub specification: &'static str,
-    pub domain: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) specification: &'static str,
+    pub(crate) domain: &'static str,
     pub witnesses: Vec<Witness>,
-    pub strategy: BoxedStrategy<Case>,
-    pub check: fn(&Case, &Evidence) -> Result<()>,
+    pub(crate) strategy: BoxedStrategy<Case>,
+    pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
 }
 #[derive(Serialize)]
 pub struct CatalogEntry {
     pub id: &'static str,
-    pub description: &'static str,
-    pub specification: &'static str,
-    pub domain: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) specification: &'static str,
+    pub(crate) domain: &'static str,
     pub partitions: Vec<&'static str>,
-    pub expected_outcomes: Vec<ExpectedOutcome>,
+    pub(crate) expected_outcomes: Vec<ExpectedOutcome>,
 }
 impl Contract {
     pub fn catalog(&self) -> CatalogEntry {
@@ -411,7 +417,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         contracts
             .iter_mut()
             .find(|c| c.id == id)
-            .unwrap()
+            .with_context(|| format!("regression {partition} names unknown contract {id}"))?
             .witnesses
             .push(Witness {
                 partition,

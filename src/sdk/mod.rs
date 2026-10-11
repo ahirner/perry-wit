@@ -1,7 +1,8 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
-pub mod codegen;
-pub mod tsconfig;
+mod codegen;
+pub(crate) use codegen::{to_camel_case, to_pascal_case, type_name};
+mod tsconfig;
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -35,7 +36,6 @@ impl Default for SdkOptions {
 #[derive(Debug, Clone)]
 pub struct SdkResult {
     pub types_path: PathBuf,
-    pub imports_path: PathBuf,
     pub check_path: PathBuf,
     pub tsconfig_path: Option<PathBuf>,
 }
@@ -124,7 +124,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
 
     Ok(SdkResult {
         types_path: dts_path,
-        imports_path,
+
         check_path,
         tsconfig_path: generated_tsconfig,
     })

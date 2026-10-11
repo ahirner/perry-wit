@@ -9,6 +9,8 @@ use wasmtime::{
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
+use crate::{engine::async_engine, output_capture};
+
 struct BlockedRead {
     acknowledged: std::sync::Arc<std::sync::atomic::AtomicBool>,
     dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -57,13 +59,7 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
         world,
         true,
     )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_threading(false)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
     for mode in [0, 1, 2] {
         let mut store = Store::new(&engine, ());
@@ -233,14 +229,15 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
             .sum()
     };
     let small: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + i / 300) as u8).collect();
-    let input = StreamReader::new(&mut store, small.clone())?;
+    let expected = weighted(&small);
+    let input = StreamReader::new(&mut store, small)?;
     assert_eq!(
         kept.call_async(&mut store, (input,))
             .await
             .map_err(anyhow::Error::from)
             .context("retained chunks")?
             .0,
-        weighted(&small)
+        expected
     );
     // 2 MiB through 64 KiB of memory.
     let large: Vec<u8> = (0..(2u32 << 20))
@@ -271,8 +268,8 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     Ok(())
 }
 
-use crate::output_capture;
-
+/// The plain build of this program is the `web.streams.byob_reader` conformance contract; here
+/// forced collection and poisoning run while transferred buffers and writes are in flight.
 #[tokio::test(flavor = "current_thread")]
 async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
     let source = r#"
@@ -301,50 +298,37 @@ async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
     )?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("echo"))?;
-    for poison in [false, true] {
-        let compiled = if poison {
-            perry_wit::compiler::compile_for_world_with_memory_checks(
-                source, "echo.ts", &resolve, world,
-            )?
-        } else {
-            compile_for_world(source, "echo.ts", &resolve, world, true)?
-        };
-        let mut config = Config::new();
-        config
-            .wasm_component_model_async(true)
-            .wasm_component_model_threading(false)
-            .wasm_component_model_async_stackful(false)
-            .wasm_component_model_more_async_builtins(false);
-        let engine = Engine::new(&config)?;
-        let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-        let bytes: Vec<u8> = (0..4 * 1024 * 1024)
-            .map(|i| (i * 37 + i / 251) as u8)
-            .collect();
-        let output = output_capture::MemoryOutput::new(bytes.len() * 3);
-        let mut store = Store::new(
-            &engine,
-            Host {
-                ctx: WasiCtx::builder().stdout(output.clone()).build(),
-                table: ResourceTable::new(),
-                limits: StoreLimitsBuilder::new().memory_size(65536).build(),
-            },
+    let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
+        source, "echo.ts", &resolve, world,
+    )?;
+    let engine = async_engine()?;
+    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let bytes: Vec<u8> = (0..4 * 1024 * 1024)
+        .map(|i| (i * 37 + i / 251) as u8)
+        .collect();
+    let output = output_capture::MemoryOutput::new(bytes.len() * 3);
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx: WasiCtx::builder().stdout(output.clone()).build(),
+            table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new().memory_size(65536).build(),
+        },
+    );
+    store.limiter(|host| &mut host.limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        let input = StreamReader::new(&mut store, bytes.clone())?;
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0,
+            bytes.len() as f64
         );
-        store.limiter(|host| &mut host.limits);
-        let instance = linker.instantiate_async(&mut store, &component).await?;
-        let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
-        for _ in 0..3 {
-            let input = StreamReader::new(&mut store, bytes.clone())?;
-            assert_eq!(
-                run.call_async(&mut store, (input,)).await?.0,
-                bytes.len() as f64,
-                "poison={poison}"
-            );
-            store.assert_concurrent_state_empty();
-            assert!(store.data().table.is_empty());
-        }
-        assert_eq!(output.contents().as_ref(), bytes.repeat(3));
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
     }
+    assert_eq!(output.contents().as_ref(), bytes.repeat(3));
     Ok(())
 }

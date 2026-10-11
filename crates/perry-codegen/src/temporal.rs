@@ -1,7 +1,10 @@
 //! Temporal codec calls with opaque collectible payloads.
-use super::*;
+use crate::{function::FunctionLowering, runtime::Runtime};
+use perry_mir::intrinsics::Intrinsic;
+use pliron::{context::Context, value::Value};
+use pliron_wasm::attrs::{MemKind, NumOpcode};
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     /// A string's UTF-8 bytes: `[data, len]`.
     fn string_parts(&mut self, ctx: &mut Context, string: Value) -> Vec<Value> {
         use perry_runtime::string::{DATA, LEN};

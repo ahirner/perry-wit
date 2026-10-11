@@ -12,7 +12,7 @@ pub const STATE: u32 = 0;
 pub const STATUS: u32 = 4;
 pub const VALUE: u32 = 8;
 
-pub const PENDING: u32 = 0;
+const PENDING: u32 = 0;
 pub const FULFILLED: u32 = 1;
 pub const REJECTED: u32 = 2;
 
@@ -28,7 +28,7 @@ struct Promise {
 
 /// A pending promise in the current task.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_new() -> *mut u8 {
+pub(crate) extern "C" fn perry_promise_new() -> *mut u8 {
     perry_promise_new_typed(0)
 }
 
@@ -42,29 +42,28 @@ pub extern "C" fn perry_promise_new_typed(references: u32) -> *mut u8 {
     {
         let promise = current().allocate(core::mem::size_of::<Promise>()) as *mut Promise;
         // SAFETY: freshly allocated.
-        unsafe {
-            promise.write(Promise {
-                state: PENDING,
-                status: 0,
-                value: 0,
-                waiters: ptr::null_mut(),
-                owner: ptr::null_mut(),
-                references: references != 0,
-            })
-        };
-        promise as *mut u8
+        unsafe { pending(promise, references) }
     }
 }
 
 /// A typed promise whose settled reference payload is traced precisely.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_new_collectible(references: u32) -> *mut u8 {
+pub(crate) extern "C" fn perry_promise_new_collectible(references: u32) -> *mut u8 {
     static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Promise, owner) as u32];
     // SAFETY: the static shape describes the owner field, independently of value-slot bits.
     let promise = unsafe {
         crate::roots::perry_gc_alloc(core::mem::size_of::<Promise>() as u32, SHAPE.as_ptr())
     } as *mut Promise;
     // SAFETY: freshly allocated; allocation never collects within this helper.
+    unsafe { pending(promise, references) }
+}
+
+/// Initialize fresh storage as a pending promise; `references` types its settled value.
+///
+/// # Safety
+/// `promise` points to writable storage for a [Promise].
+unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
+    // SAFETY: guaranteed by the caller.
     unsafe {
         promise.write(Promise {
             state: PENDING,
@@ -144,7 +143,7 @@ pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
 
 /// `await` of the rejected `promise`: make its exception pending again; returns its status.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
+pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     let promise = promise as *mut Promise;
     // SAFETY: compiled code passes a live, rejected promise.
     unsafe {
@@ -155,7 +154,7 @@ pub extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
 
 /// Queue `frame` when the pending `promise` settles.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
+pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
     let promise = promise as *mut Promise;
     let node = current().node(frame);
     // SAFETY: `promise` is live; `node` is ours. Waiters run in registration order.
@@ -238,26 +237,26 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
 
 /// `Promise.all(inputs)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_all(inputs: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn perry_promise_all(inputs: *mut u8) -> *mut u8 {
     combine(ALL, inputs, false, false)
 }
 
 /// `Promise.race(inputs)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_race(inputs: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn perry_promise_race(inputs: *mut u8) -> *mut u8 {
     combine(RACE, inputs, false, false)
 }
 
 /// `Promise.allSettled(inputs)`: fulfils with the settled inputs themselves, which compiled
 /// code reads as `{ status, value, reason }` (the promise layout above).
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_all_settled(inputs: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn perry_promise_all_settled(inputs: *mut u8) -> *mut u8 {
     combine(ALL_SETTLED, inputs, false, false)
 }
 
 /// Typed combinator; `references` describes fulfilled input payloads.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_combine_collectible(
+pub(crate) extern "C" fn perry_promise_combine_collectible(
     mode: u32,
     inputs: *mut u8,
     references: u32,
@@ -278,7 +277,7 @@ fn reject_with(result: *mut u8, input: *mut Promise) {
 /// # Safety
 /// `frame` must be a combinator frame.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_combinator_step(frame: *mut u8) {
+pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
     let frame = frame as *mut Combinator;
     // SAFETY: guaranteed by the caller; inputs are live promises of the task.
     unsafe {

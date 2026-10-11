@@ -7,9 +7,6 @@ use crate::{
 };
 use core::ptr;
 
-pub const LEN: u32 = 0;
-pub const DATA: u32 = 4;
-
 use perry_abi::Bytes;
 
 /// Largest supported typed-array length.
@@ -50,7 +47,7 @@ fn attached(bytes: *mut u8) -> bool {
 /// # Safety
 /// `view` is a live byte view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_boundary(view: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_boundary(view: *mut u8) -> *mut u8 {
     unsafe { perry_abi::normalize_bytes(view) }
 }
 
@@ -59,7 +56,7 @@ pub unsafe extern "C" fn std_bytes_boundary(view: *mut u8) -> *mut u8 {
 /// # Safety
 /// `view` is a live byte view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_buffer(view: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_buffer(view: *mut u8) -> *mut u8 {
     unsafe { (*view.cast::<Bytes>()).owner.cast() }
 }
 
@@ -68,7 +65,7 @@ pub unsafe extern "C" fn std_bytes_buffer(view: *mut u8) -> *mut u8 {
 /// # Safety
 /// `view` is a live byte view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_offset(view: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn std_bytes_offset(view: *mut u8) -> f64 {
     unsafe {
         let view = &*view.cast::<Bytes>();
         if view.detached() {
@@ -84,7 +81,7 @@ pub unsafe extern "C" fn std_bytes_offset(view: *mut u8) -> f64 {
 /// # Safety
 /// `buffer` is a live buffer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_buffer_length(buffer: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn std_buffer_length(buffer: *mut u8) -> f64 {
     unsafe { f64::from((*buffer.cast::<perry_abi::ByteBuffer>()).len) }
 }
 
@@ -93,7 +90,7 @@ pub unsafe extern "C" fn std_buffer_length(buffer: *mut u8) -> f64 {
 /// # Safety
 /// `buffer` is a live buffer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u8 {
     let buffer = buffer.cast::<perry_abi::ByteBuffer>();
     unsafe {
         if (*buffer).detached {
@@ -128,7 +125,7 @@ fn index(index: f64, len: usize) -> Option<usize> {
 
 /// `new Uint8Array(length)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_new(length: f64) -> *mut u8 {
+pub(crate) extern "C" fn std_bytes_new(length: f64) -> *mut u8 {
     let length = integer(length);
     if !(0..=MAX as i64).contains(&length) {
         raise(RANGE_ERROR, "Invalid typed array length");
@@ -142,7 +139,7 @@ pub extern "C" fn std_bytes_new(length: f64) -> *mut u8 {
 /// # Safety
 /// `array` must be an array of numbers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_from_array(array: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_from_array(array: *mut u8) -> *mut u8 {
     // SAFETY: array layout of `perry_runtime::array`.
     let (len, data) = unsafe {
         (
@@ -161,7 +158,7 @@ pub unsafe extern "C" fn std_bytes_from_array(array: *mut u8) -> *mut u8 {
 
 /// `new Uint8Array(bytes)` and `bytes.slice()`: a copy.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_copy(bytes: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_bytes_copy(bytes: *mut u8) -> *mut u8 {
     if !attached(bytes) {
         return core::ptr::null_mut();
     }
@@ -173,7 +170,7 @@ pub extern "C" fn std_bytes_copy(bytes: *mut u8) -> *mut u8 {
 
 /// `bytes[index]`: the bits of a number, or of `undefined` (an `f64` sNaN payload).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_get(bytes: *mut u8, position: f64) -> u64 {
+pub(crate) extern "C" fn std_bytes_get(bytes: *mut u8, position: f64) -> u64 {
     let bytes = slice(bytes);
     match index(position, bytes.len()) {
         Some(i) => f64::from(bytes[i]).to_bits(),
@@ -183,7 +180,7 @@ pub extern "C" fn std_bytes_get(bytes: *mut u8, position: f64) -> u64 {
 
 /// `bytes[index] = value`; ignored outside the view, as for typed arrays.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_set(bytes: *mut u8, position: f64, value: f64) {
+pub(crate) extern "C" fn std_bytes_set(bytes: *mut u8, position: f64, value: f64) {
     let bytes = slice(bytes);
     if let Some(i) = index(position, bytes.len()) {
         bytes[i] = to_uint8(value);
@@ -192,7 +189,7 @@ pub extern "C" fn std_bytes_set(bytes: *mut u8, position: f64, value: f64) {
 
 /// `bytes.length` and `bytes.byteLength`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_length(bytes: *mut u8) -> f64 {
+pub(crate) extern "C" fn std_bytes_length(bytes: *mut u8) -> f64 {
     slice(bytes).len() as f64
 }
 
@@ -207,7 +204,11 @@ fn range(bytes: *mut u8, start: f64, end: f64) -> (usize, usize) {
 /// # Safety
 /// `bytes` is a live mutable byte view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_subarray(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_subarray(
+    bytes: *mut u8,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
     if !attached(bytes) {
         return core::ptr::null_mut();
     }
@@ -221,7 +222,7 @@ pub unsafe extern "C" fn std_bytes_subarray(bytes: *mut u8, start: f64, end: f64
 /// # Safety
 /// `bytes` is a live mutable byte view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
     if !attached(bytes) {
         return core::ptr::null_mut();
     }
@@ -231,7 +232,7 @@ pub unsafe extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end: f64) -
 /// `target.set(source, offset)`; throws `RangeError` when `source` does not fit. Overlapping
 /// views copy as if through a temporary, as the specification requires.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, offset: f64) {
+pub(crate) extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, offset: f64) {
     if !attached(target) || !attached(source) {
         return;
     }
@@ -254,7 +255,7 @@ pub extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, offset: f
 
 /// `bytes.fill(value, start, end)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_fill(bytes: *mut u8, value: f64, start: f64, end: f64) {
+pub(crate) extern "C" fn std_bytes_fill(bytes: *mut u8, value: f64, start: f64, end: f64) {
     if !attached(bytes) {
         return;
     }
@@ -267,7 +268,7 @@ pub extern "C" fn std_bytes_fill(bytes: *mut u8, value: f64, start: f64, end: f6
 /// # Safety
 /// `string` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_text_encode(string: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_text_encode(string: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let text = unsafe { string_bytes(string) };
     let bytes = zeroed(text.len() as u32);
@@ -280,7 +281,7 @@ pub unsafe extern "C" fn std_text_encode(string: *mut u8) -> *mut u8 {
 /// # Safety
 /// `data` is owned storage of at least `len` initialized bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_bytes_adopt(len: u32, data: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_bytes_adopt(len: u32, data: *mut u8) -> *mut u8 {
     perry_abi::bytes_view(len, data)
 }
 
@@ -290,7 +291,7 @@ pub unsafe extern "C" fn std_bytes_adopt(len: u32, data: *mut u8) -> *mut u8 {
 /// # Safety
 /// `text` is a live Perry string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn std_string_byte_input(text: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_string_byte_input(text: *mut u8) -> *mut u8 {
     let bytes = unsafe { string_bytes(text) };
     perry_abi::bytes_view(bytes.len() as u32, bytes.as_ptr().cast_mut())
 }

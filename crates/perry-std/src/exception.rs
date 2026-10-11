@@ -18,7 +18,7 @@ fn parts(exception: *mut u8) -> (u32, u32, u64) {
 
 /// A thrown number; `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
+pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
     match parts(exception) {
         (THROWN_VALUE, TAG_NUMBER, bits) => f64::from_bits(bits),
         _ => {
@@ -30,7 +30,7 @@ pub extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
 
 /// A thrown string; `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
     match parts(exception) {
         (THROWN_VALUE, TAG_STRING, value) => value as usize as *mut u8,
         _ => {
@@ -42,7 +42,7 @@ pub extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
 
 /// `error.name`: the constructor's name of an `Error` object (thrown values have none).
 #[unsafe(no_mangle)]
-pub extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
     from_static(match parts(exception).0 {
         TYPE_ERROR => "TypeError",
         2 => "RangeError",

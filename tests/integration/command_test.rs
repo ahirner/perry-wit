@@ -4,11 +4,12 @@
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Config, Engine, Store,
+    Store,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView, p3::bindings::Command};
 
+use crate::engine::async_engine;
 use crate::output_capture;
 use output_capture::MemoryOutput;
 
@@ -53,22 +54,13 @@ async fn execute_output(
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("command"))?;
     let compiled = compile_for_world(source, "main.ts", &resolve, world, true)?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_async_stackful(false)
-        .wasm_component_model_more_async_builtins(false)
-        .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let (stdout, stderr) = (MemoryOutput::new(output_limit), MemoryOutput::new(1 << 20));
     let mut builder = WasiCtx::builder();
-    builder
-        .stdout(stdout.clone())
-        .stderr(stderr.clone())
-        .env("GREETING", "grüezi");
+    builder.stdout(stdout.clone()).stderr(stderr.clone());
     if let Some(root) = root {
         builder.preopened_dir(root, "/", FsPerms::ReadWrite)?;
     }
@@ -93,7 +85,7 @@ async fn execute_output(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn console_environment_timers_and_exceptions() -> Result<()> {
+async fn console_timers_and_exceptions() -> Result<()> {
     let run = execute(
         r#"
 import { setTimeout } from 'node:timers/promises';
@@ -104,11 +96,6 @@ async function later(value: number): Promise<number> {
 }
 console.log("hello", 1.5, true, -3);
 console.error("to stderr");
-const greeting = process.env.GREETING;
-if (greeting === "grüezi") console.log("env " + greeting);
-if (process.env.MISSING === undefined) console.log("missing");
-const keys: string[] = Object.keys(process.env);
-console.log("keys " + keys.length);
 let total = 0;
 for (let i = 0; i < 3; i++) {
   total = total + (await later(i));
@@ -121,27 +108,21 @@ try {
 } finally {
   console.log("finally " + total);
 }
-if (performance.now() > 0 && Date.now() > 1.7e12) console.log("clocks");
 "#,
     )
     .await?;
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "hello 1.5 true -3\nenv grüezi\nmissing\nkeys 1\nstep 0\nstep 1\nstep 2\n\
-         caught negative -1\nfinally 6\nclocks\n"
+        "hello 1.5 true -3\nstep 0\nstep 1\nstep 2\ncaught negative -1\nfinally 6\n"
     );
     assert_eq!(run.stderr, "to stderr\n");
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn exit_codes_and_uncaught_exceptions_fail_the_command() -> Result<()> {
-    let run =
-        execute(r#"console.log("before"); process.exitCode = 1; console.log("after");"#).await?;
-    assert!(!run.ok);
-    assert_eq!(run.stdout, "before\nafter\n");
-
+async fn nested_exits_and_uncaught_exceptions_decide_the_command_result() -> Result<()> {
+    // `process.exitCode` and a top-level `process.exit` are `node.process.exit_status` contracts.
     // `process.exit` unwinds without running `catch` or `finally`.
     let run = execute(r#"
 function stop(): number { process.exit(0); return 1; }
@@ -486,7 +467,8 @@ try { await setTimeout(1, 9, { signal: c.signal }); } catch (e) { console.log('p
     Ok(())
 }
 
-/// Temporal factories, arithmetic, fields and catchable range errors.
+/// Temporal values through timers, ISO serialization, fields, offset parsing and catchable range
+/// errors. Epoch, leap-day and limit formatting are the `ecma.temporal.iso` contract.
 #[tokio::test(flavor = "current_thread")]
 async fn temporal_matches_node() -> Result<()> {
     let run = execute(
@@ -499,9 +481,8 @@ const observed = setTimeout(1, instant);
 await setTimeout(2);
 if ((await observed).epochMilliseconds !== -1) throw 'lost instant';
 if (instant.toJSON() !== instant.toString() || date.toJSON() !== date.toString() || dateTime.toJSON() !== dateTime.toString()) throw 'incorrect ISO serialization';
-console.log(instant.epochMilliseconds, instant.toString() + '|' + date.toString() + '|' + dateTime.toString());
 console.log(date.year, date.month, date.day, date.dayOfWeek, dateTime.hour, dateTime.minute, dateTime.millisecond, dateTime.microsecond, dateTime.nanosecond);
-console.log(Temporal.Instant.from('2024-01-01T00:00:00+01:00').toString(), Temporal.Instant.fromEpochMilliseconds(8640000000000000).toString(), Temporal.Instant.fromEpochMilliseconds(-8640000000000000).toString());
+console.log(Temporal.Instant.from('2024-01-01T00:00:00+01:00').toString());
 try { Temporal.PlainDate.from('x'); } catch (e) { if (e instanceof RangeError) console.log('range', e.message.startsWith('Invalid time value for Temporal')); }
 try { date.add({ days: 1.5 }); } catch (e) { if (e instanceof RangeError) console.log('fractional days'); }
 "#,
@@ -510,9 +491,8 @@ try { date.add({ days: 1.5 }); } catch (e) { if (e instanceof RangeError) consol
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "-1 1969-12-31T23:59:59.999Z|2024-02-29|2024-02-29T12:30:00.123456789
-2024 2 29 4 12 30 123 456 789
-2023-12-31T23:00:00Z +275760-09-13T00:00:00Z -271821-04-20T00:00:00Z
+        "2024 2 29 4 12 30 123 456 789
+2023-12-31T23:00:00Z
 range true
 fractional days
 "

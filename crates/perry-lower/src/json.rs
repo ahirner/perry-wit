@@ -239,3 +239,115 @@ impl FunctionBuilder<'_> {
         )
     }
 }
+
+impl FunctionBuilder<'_> {
+    /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
+    /// `{}`: `js_object_literal_spread` copies each spread and `js_object_literal_define`
+    /// defines each static member. Over JSON values it builds a JSON object; typed records
+    /// do not spread yet.
+    pub(super) fn object_spread(
+        &mut self,
+        ctx: &mut Context,
+        target: LocalId,
+        body: &[Stmt],
+    ) -> Result<Value> {
+        const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
+            response.json()) with static keys; computed keys, methods and accessors are not";
+        let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
+        let is_target = |expr: &Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
+        for statement in body {
+            match statement {
+                Stmt::Let {
+                    id,
+                    init: Some(value),
+                    ..
+                } => {
+                    let value = self.json_value(ctx, value)?;
+                    let slot = self.entry_slot(ctx, value.get_type(ctx));
+                    self.store(ctx, slot, value);
+                    self.locals.insert(*id, slot);
+                }
+                Stmt::Expr(Expr::Call { callee, args, .. })
+                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
+                        if name == "js_object_literal_spread")
+                        && args.len() == 2
+                        && is_target(&args[0]) =>
+                {
+                    let source = self.expression(ctx, &args[1])?;
+                    // An `Error` has no own enumerable properties: it adds nothing.
+                    if matches!(kind(ctx, source), Ok(Kind::Exception)) {
+                        continue;
+                    }
+                    let Some(source) = self.json_operand(ctx, source)? else {
+                        bail!("{UNSUPPORTED}");
+                    };
+                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                }
+                Stmt::Expr(Expr::Call { callee, args, .. })
+                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
+                        if name == "js_object_literal_define")
+                        && args.len() == 3
+                        && is_target(&args[0]) =>
+                {
+                    let Expr::String(key) = &args[1] else {
+                        bail!("{UNSUPPORTED}");
+                    };
+                    let key = self.string(ctx, key);
+                    let value = self.json_value(ctx, &args[2])?;
+                    self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+                }
+                Stmt::Return(Some(result)) if is_target(result) => {}
+                _ => bail!("{UNSUPPORTED}"),
+            }
+        }
+        Ok(object)
+    }
+
+    /// A JSON value, or `Json | undefined` (an array element) as one: the JSON `undefined` is
+    /// the null address. `None` for other types.
+    pub(super) fn json_operand(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+    ) -> Result<Option<Value>> {
+        let ty = value.get_type(ctx);
+        if ty.deref(ctx).is::<JsonType>() {
+            return Ok(Some(value));
+        }
+        if !optional_value(ctx, ty).is_some_and(|inner| inner.deref(ctx).is::<JsonType>()) {
+            return Ok(None);
+        }
+        let json = JsonType::get(ctx).into();
+        let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+        self.choose(
+            ctx,
+            json,
+            undefined,
+            |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
+            |b, ctx| b.defined(ctx, value),
+        )
+        .map(Some)
+    }
+
+    /// A member value of a JSON object literal: a JSON value, or a number, string, boolean
+    /// or `null` converted to one.
+    pub(super) fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        if matches!(expr, Expr::Null) {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonNull, vec![]));
+        }
+        let value = self.expression(ctx, expr)?;
+        if let Some(json) = self.json_operand(ctx, value)? {
+            return Ok(json);
+        }
+        let intrinsic = match kind(ctx, value)? {
+            Kind::Number => Intrinsic::JsonFromNumber,
+            Kind::String => Intrinsic::JsonFromString,
+            Kind::Boolean => Intrinsic::JsonFromBool,
+            _ => bail!(
+                "members of a spread object literal are JSON values, numbers, strings, \
+                 booleans or null so far"
+            ),
+        };
+        Ok(self.intrinsic(ctx, intrinsic, vec![value]))
+    }
+}

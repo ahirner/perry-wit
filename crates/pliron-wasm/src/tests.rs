@@ -576,12 +576,6 @@ fn regex_lite(text: &str) -> String {
     out
 }
 
-#[test]
-#[ignore]
-fn dump_loops() {
-    println!("{}", wat(&compile(&loops())));
-}
-
 /// `wasm.br_table`: targets in and out of range (the default), a shared target, and a target
 /// reached from the table and from another branch.
 #[test]

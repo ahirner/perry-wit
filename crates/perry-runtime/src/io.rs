@@ -11,7 +11,9 @@
 //! `process.exitCode` and `process.exit` are instance state ([perry_exit_code_set],
 //! [perry_exit]); `process.exit` unwinds with status 5, which no handler catches.
 use crate::{
-    exception::{EXIT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING},
+    exception::{
+        ERROR, EXIT, KIND, RANGE_ERROR, TAG, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING, TYPE_ERROR, VALUE,
+    },
     host::{self, BLOCKED, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_WRITE},
     instance::instance_state,
     region::current,
@@ -21,14 +23,14 @@ use core::cell::UnsafeCell;
 
 /// A growable byte buffer in the task region: released with the task, so a component that
 /// prints never needs the buffer allocator's `free` path.
-pub(crate) struct Bytes {
+struct Bytes {
     ptr: *mut u8,
     len: usize,
     cap: usize,
 }
 
 impl Bytes {
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Bytes {
             ptr: core::ptr::null_mut(),
             len: 0,
@@ -190,7 +192,7 @@ impl Output {
 /// # Safety
 /// `string` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_print(fd: u32, string: *mut u8, newline: u32) {
+pub(crate) unsafe extern "C" fn perry_print(fd: u32, string: *mut u8, newline: u32) {
     // SAFETY: guaranteed by the caller.
     let bytes = unsafe { crate::string::bytes(string) };
     print_bytes(fd as usize, bytes, newline != 0);
@@ -202,7 +204,7 @@ pub unsafe extern "C" fn perry_print(fd: u32, string: *mut u8, newline: u32) {
 /// # Safety
 /// `data` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_write(fd: u32, data: *const u8, len: u32) {
+pub(crate) unsafe extern "C" fn perry_write(fd: u32, data: *const u8, len: u32) {
     if len == 0 {
         return;
     }
@@ -326,14 +328,14 @@ fn pump(fd: usize) {
 
 /// Start writing buffered output of the current task.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_io_pump() {
+pub(crate) extern "C" fn perry_io_pump() {
     pump(0);
     pump(1);
 }
 
 /// Handle a stream or future event of the current task's output. Returns 1 if it was one.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_io_event(event: u32, handle: u32, code: u32) -> u32 {
+pub(crate) extern "C" fn perry_io_event(event: u32, handle: u32, code: u32) -> u32 {
     for fd in 0..2 {
         let output = &mut current().outputs[fd];
         if event == EVENT_STREAM_WRITE && output.writable == handle && output.blocked {
@@ -356,7 +358,7 @@ pub extern "C" fn perry_io_event(event: u32, handle: u32, code: u32) -> u32 {
 /// Flush and close the current task's outputs. Returns 1 once everything reached the host;
 /// otherwise the task waits on its set for the events that finish it.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_io_close() -> u32 {
+pub(crate) extern "C" fn perry_io_close() -> u32 {
     let mut done = 1;
     for fd in 0..2 {
         pump(fd);
@@ -387,7 +389,7 @@ pub extern "C" fn perry_io_close() -> u32 {
 
 /// Cancel output transfers before their task-owned buffers are released.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_io_cancel() {
+pub(crate) extern "C" fn perry_io_cancel() {
     let task = crate::region::perry_task_current();
     for fd in 0..2 {
         let output = &mut current().outputs[fd];
@@ -434,7 +436,7 @@ pub extern "C" fn perry_task_join(waitable: u32) {
 
 /// A host subtask event: settle its promise and drop it once it returned.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_subtask_event(handle: u32, state: u32) {
+pub(crate) extern "C" fn perry_task_subtask_event(handle: u32, state: u32) {
     if state == host::SUBTASK_RETURNED {
         crate::region::perry_subtask_done(handle);
         // SAFETY: canonical built-in on a returned subtask of this task.
@@ -444,7 +446,7 @@ pub extern "C" fn perry_task_subtask_event(handle: u32, state: u32) {
 
 /// Drop the current task's waitable set, if it has one.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_task_close_set() {
+pub(crate) extern "C" fn perry_task_close_set() {
     let task = current();
     if task.set != 0 {
         // SAFETY: canonical built-in; nothing is joined any more.
@@ -482,7 +484,7 @@ fn exit_code(code: f64) -> i32 {
 
 /// `process.exitCode = code`.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_exit_code_set(code: f64) {
+pub(crate) extern "C" fn perry_exit_code_set(code: f64) {
     process().exit_code = exit_code(code);
 }
 
@@ -491,7 +493,7 @@ pub extern "C" fn perry_exit_code_set(code: f64) {
 /// # Safety
 /// `message` is a live UTF-8 runtime string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_task_detached(count: u32, message: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_task_detached(count: u32, message: *mut u8) {
     if count != 0 {
         // SAFETY: compiled code passes a static diagnostic string.
         print_bytes(1, unsafe { crate::string::bytes(message) }, true);
@@ -502,7 +504,7 @@ pub unsafe extern "C" fn perry_task_detached(count: u32, message: *mut u8) {
 /// `process.exit(code)`: record the code and return the exit status that unwinds to the
 /// export.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_exit(code: f64) -> i32 {
+pub(crate) extern "C" fn perry_exit(code: f64) -> i32 {
     process().exit_code = exit_code(code);
     EXIT as i32
 }
@@ -513,7 +515,7 @@ pub extern "C" fn perry_exit(code: f64) -> i32 {
 /// # Safety
 /// `promise` must be a settled promise of the current task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
+pub(crate) unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
     let task = current();
     if let Some(outcome) = task.outcome {
         return outcome;
@@ -545,7 +547,7 @@ pub unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
 /// # Safety
 /// `promise` must be a rejected promise of the current task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let (status, value) = unsafe {
         (
@@ -563,19 +565,15 @@ pub unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
 
 unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
     if exception.is_null() {
-        text.push_str(match status {
-            1 => "TypeError",
-            2 => "RangeError",
-            _ => "Error",
-        });
+        text.push_str(error_name(status));
         return;
     }
     // SAFETY: exception objects have the layout of crate::exception.
     let (kind, tag, value) = unsafe {
         (
-            *(exception as *const u32),
-            *(exception.add(4) as *const u32),
-            *(exception.add(8) as *const u64),
+            *(exception.add(KIND as usize) as *const u32),
+            *(exception.add(TAG as usize) as *const u32),
+            *(exception.add(VALUE as usize) as *const u64),
         )
     };
     let string = |value: u64| -> &'static [u8] {
@@ -583,8 +581,8 @@ unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
         unsafe { crate::string::bytes(value as usize as *mut u8) }
     };
     match (kind, tag) {
-        (1..=3, _) => {
-            text.push_str(["TypeError", "RangeError", "Error"][kind as usize - 1]);
+        (TYPE_ERROR..=ERROR, _) => {
+            text.push_str(error_name(kind));
             let message = string(value);
             if !message.is_empty() {
                 text.push_str(": ");
@@ -631,6 +629,15 @@ unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
         (_, TAG_BOOLEAN) => text.push_str(if value != 0 { "true" } else { "false" }),
         (_, TAG_STRING) => text.extend_from_slice(string(value)),
         _ => text.push_str("exception"),
+    }
+}
+
+/// The constructor name of an `Error` status.
+fn error_name(status: u32) -> &'static str {
+    match status {
+        TYPE_ERROR => "TypeError",
+        RANGE_ERROR => "RangeError",
+        _ => "Error",
     }
 }
 
@@ -683,7 +690,7 @@ fn release_environment(entries: &[[u32; 4]]) {
 /// # Safety
 /// `name` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let name = unsafe { crate::string::bytes(name) };
     let entries = environment();
@@ -702,7 +709,7 @@ pub unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
 
 /// `Object.keys(process.env)`: an array of strings.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_env_keys() -> *mut u8 {
+pub(crate) extern "C" fn perry_env_keys() -> *mut u8 {
     let entries = environment();
     let array = crate::array::perry_array_new_typed(entries.len().max(1) as u32, 1);
     for (index, [key, key_len, ..]) in entries.iter().enumerate() {
@@ -721,14 +728,14 @@ pub extern "C" fn perry_env_keys() -> *mut u8 {
 
 /// `performance.now()`: milliseconds on the monotonic clock.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_performance_now() -> f64 {
+pub(crate) extern "C" fn perry_performance_now() -> f64 {
     // SAFETY: WASI import.
     unsafe { host::monotonic_now() as f64 / 1e6 }
 }
 
 /// `Date.now()`: integral milliseconds since the epoch.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_date_now() -> f64 {
+pub(crate) extern "C" fn perry_date_now() -> f64 {
     let mut instant = [0u64; 2];
     // SAFETY: WASI import writing `{ seconds: s64, nanoseconds: u32 }`.
     unsafe { host::system_now(instant.as_mut_ptr()) };

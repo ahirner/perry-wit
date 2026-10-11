@@ -9,7 +9,7 @@ use pliron::{
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
-impl FunctionLowering<'_> {
+impl FunctionLowering<'_, '_> {
     pub(super) fn number_string_equal(
         &mut self,
         ctx: &mut Context,
@@ -19,7 +19,7 @@ impl FunctionLowering<'_> {
     ) -> Result<Value> {
         let result_type = crate::i32_type(ctx);
         let done = self.new_block(ctx, vec![result_type]);
-        if crate::optional_inner(ctx, ty).is_some() {
+        if crate::repr::optional_inner(ctx, ty).is_some() {
             let absent_a = self.is_absent(ctx, a, ty)?;
             let absent_b = self.is_absent(ctx, b, ty)?;
             let either = self.num(ctx, NumOpcode::I32Or, vec![absent_a, absent_b]);

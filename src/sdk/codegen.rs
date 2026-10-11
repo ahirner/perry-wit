@@ -5,14 +5,13 @@
 
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::Path;
 use wit_parser::{
     Function, Resolve, Result_ as WitResult, Type, TypeDefKind, TypeId, TypeOwner, World,
     WorldItem, WorldKey,
 };
 
 /// Converts a kebab-case or snake_case string into camelCase.
-pub fn to_camel_case(s: &str) -> String {
+pub(crate) fn to_camel_case(s: &str) -> String {
     let mut result = String::new();
     let mut capitalize_next = false;
     for (i, c) in s.chars().enumerate() {
@@ -31,7 +30,7 @@ pub fn to_camel_case(s: &str) -> String {
 }
 
 /// Converts a kebab-case or snake_case string into PascalCase.
-pub fn to_pascal_case(s: &str) -> String {
+pub(crate) fn to_pascal_case(s: &str) -> String {
     let mut result = String::new();
     let mut capitalize_next = true;
     for c in s.chars() {
@@ -88,7 +87,7 @@ pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
 }
 
 /// Formats a WIT Type into its corresponding TypeScript representation.
-pub fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
+pub(crate) fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
     match ty {
         Type::Bool => "boolean".to_string(),
         Type::U8
@@ -213,7 +212,7 @@ fn implementation_signature(resolve: &Resolve, function: &Function, allow_promis
 }
 
 /// Formats a WIT function return type into TypeScript.
-pub fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
+pub(crate) fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     let result = match &func.result {
         None => "void".to_string(),
         Some(ty) => wit_type_to_ts(resolve, ty),
@@ -261,7 +260,7 @@ pub(crate) fn world_type_declarations(resolve: &Resolve, world: &World) -> Strin
 }
 
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
-pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
+pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
     let mut out = String::new();
 
@@ -663,40 +662,12 @@ fn emit_type_def(
     });
 }
 
-/// Generates declarations for a WIT directory and target world name.
-pub fn generate_declarations_from_wit_dir(
-    wit_dir: &Path,
-    world_name: Option<&str>,
-) -> Result<(String, String)> {
-    let (resolve, pkg_id) = crate::component::wit::resolve_wit(wit_dir)?;
-    let pkg = &resolve.packages[pkg_id];
-
-    let target_world_id = if let Some(wname) = world_name {
-        pkg.worlds
-            .get(wname)
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("World `{wname}` not found in WIT package"))?
-    } else if let Some((_, &first_world)) = pkg.worlds.iter().next() {
-        first_world
-    } else {
-        anyhow::bail!("No worlds found in WIT package at {}", wit_dir.display());
-    };
-
-    let world = &resolve.worlds[target_world_id];
-    let dts = generate_world_declarations(&resolve, world)?;
-    Ok((world.name.clone(), dts))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_generate_declarations_with_complex_types() {
-        let directory = tempfile::tempdir().unwrap();
-        let tmp = directory.path().to_path_buf();
-        std::fs::create_dir_all(&tmp).unwrap();
-
         let wit_code = r#"
 package test:complex;
 
@@ -725,12 +696,12 @@ world complex-processor {
     export process: func(data: payload, stat: status) -> output-result;
 }
 "#;
-        std::fs::write(tmp.join("world.wit"), wit_code).unwrap();
-
-        let (world_name, dts) = generate_declarations_from_wit_dir(&tmp, Some("complex-processor"))
-            .expect("Failed to generate declarations for complex types");
-
-        assert_eq!(world_name, "complex-processor");
+        let (resolve, package) =
+            crate::component::wit::resolve_source("world.wit", wit_code).unwrap();
+        let world = resolve
+            .select_world(&[package], Some("complex-processor"))
+            .unwrap();
+        let dts = generate_world_declarations(&resolve, &resolve.worlds[world]).unwrap();
         assert!(dts.contains("export interface Payload {"));
         assert!(dts.contains("id: number;"));
         assert!(dts.contains("title: string;"));

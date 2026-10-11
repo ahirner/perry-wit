@@ -1,5 +1,5 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use crate::sdk::codegen::{to_camel_case, to_pascal_case};
+use crate::sdk::{to_camel_case, to_pascal_case};
 use anyhow::{Result, ensure};
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
 use perry_lower::hir::{FunctionType, Type as HirType};
