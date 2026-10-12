@@ -160,7 +160,7 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
     let engine = async_engine()?;
     let component = Component::new(
         &engine,
-        cancellation::cancellation_caller(&compiled.stripped.unwrap(), true)?,
+        cancellation::cancellation_caller(&compiled.component.unwrap().stripped, true)?,
     )?;
     for phase in [Phase::Request, Phase::Body] {
         let observations = Arc::new(Observations::default());

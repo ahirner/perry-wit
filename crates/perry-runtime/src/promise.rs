@@ -9,13 +9,9 @@
 use crate::{host, region::current};
 use core::ptr;
 
-pub const STATE: u32 = 0;
-pub const STATUS: u32 = 4;
-pub const VALUE: u32 = 8;
+pub use crate::layout::promise::{FULFILLED, REJECTED, STATE, STATUS, VALUE};
 
 const PENDING: u32 = 0;
-pub const FULFILLED: u32 = 1;
-pub const REJECTED: u32 = 2;
 
 #[repr(C)]
 struct Promise {
@@ -570,9 +566,14 @@ pub(crate) fn prepare_cancellation() {
     }
 }
 
-/// Whether a settled combinator, marked by [prepare_cancellation], cancels `promise`'s operation.
-pub(crate) unsafe fn cancellation_owned(promise: *mut u8) -> bool {
-    unsafe { (*promise.cast::<Promise>()).cancellation_owned }
+/// Whether a completed combinator owns cancellation of this promise's pending work.
+/// Call after task cancellation has propagated ownership through the observer graph.
+///
+/// # Safety
+/// A non-null pointer must identify a live promise of the current task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_promise_cancellation_owned(promise: *mut u8) -> u32 {
+    u32::from(!promise.is_null() && unsafe { (*promise.cast::<Promise>()).cancellation_owned })
 }
 
 /// Close every native completion and drop every registration of the current task.
@@ -592,7 +593,7 @@ pub(crate) fn cancel_observers() {
 }
 
 /// Frame kind of runtime combinators; the P3 dispatcher passes such frames to [perry_combinator_step].
-pub const COMBINATOR_KIND: u32 = u32::MAX;
+pub use crate::layout::promise::COMBINATOR_KIND;
 
 const ALL: u32 = 0;
 const RACE: u32 = 1;

@@ -5,12 +5,11 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::Result;
-use perry_abi::layout::record;
+use perry_abi::layout::{record, roots as root_stack};
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
     types::RecordType,
 };
-use perry_runtime::roots as root_stack;
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,

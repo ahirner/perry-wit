@@ -7,6 +7,7 @@ use crate::{
     status_code,
 };
 use anyhow::{Result, bail};
+use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
 use perry_mir::{
     attrs::ErrorKind,
     exceptions::{
@@ -14,7 +15,6 @@ use perry_mir::{
     },
     types::{BigIntType, ExceptionType, StringType},
 };
-use perry_runtime::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
 use pliron::{
     basic_block::BasicBlock,
     builtin::types::FP64Type,

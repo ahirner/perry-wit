@@ -2,9 +2,10 @@
 //!
 //! Pipeline: TypeScript → Perry HIR → perry MIR (pliron, `crates/perry-mir`, built by
 //! `crates/perry-lower`) → `wasm` dialect (`crates/perry-codegen`, `crates/pliron-wasm`) →
-//! core Wasm → linked with `perry-runtime` and the helper libraries ([link]) → component.
+//! core Wasm → linked with `perry-runtime` and the helper libraries → component.
 
 mod abi;
+pub mod api;
 mod audit;
 pub mod compiler;
 pub mod component;
@@ -13,6 +14,7 @@ pub mod sdk;
 mod strip;
 
 pub use compiler::{
-    CompileOptions, Compiled, compile_core, compile_file, compile_for_world, compile_typescript,
+    CompileOptions, Compiled, ComponentOutput, compile_core, compile_file, compile_for_world,
+    compile_typescript,
 };
 pub use sdk::{SdkOptions, SdkResult, generate_sdk_files};

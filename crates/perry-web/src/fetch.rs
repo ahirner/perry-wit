@@ -638,8 +638,9 @@ pub(crate) extern "C" fn web_fetch_pending() -> u32 {
         while !op.is_null() {
             let fetch = &*op;
             if fetch.task == task {
-                pending += u32::from(fetch.sending != 0);
-                pending += u32::from(crate::readable::pending_completion(fetch.body));
+                pending +=
+                    u32::from(fetch.sending != 0 && !perry_abi::cancellation_owned(fetch.promise));
+                pending += u32::from(crate::readable::detached_completion(fetch.body));
             }
             op = fetch.next;
         }

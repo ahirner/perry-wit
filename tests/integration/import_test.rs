@@ -87,7 +87,7 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
         world,
     )?;
     let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::<(u32, String)>::new(&engine);
     let mut host = linker.instance("test:imports/service")?;
     host.func_wrap("initialize", |mut store, (): ()| {
@@ -172,7 +172,7 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
         world,
     )?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     struct State {
         text: String,
         limits: wasmtime::StoreLimits,
@@ -258,7 +258,7 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
         world,
     )?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     for immediate in [false, true] {
         let mut linker = Linker::<()>::new(&engine);
         let dropped = Arc::new(AtomicUsize::new(0));

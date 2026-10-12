@@ -85,7 +85,8 @@ async fn run(source: &str, server: &http_fixture::HttpFixture) -> Result<String>
     let world = resolve.select_world(&[package], Some("fetch"))?;
     let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
     let engine = async_engine()?;
-    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    let component =
+        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
@@ -133,7 +134,7 @@ async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
     Ok(())
 }
 
-/// `examples/merge_docs.ts` with the server's address: concurrent requests, `json()` and an
+/// `examples/merge_docs/index.ts` with the server's address: concurrent requests, `json()` and an
 /// object spread of the parsed documents. A body that is not JSON rejects.
 const MERGE: &str = r#"
 export async function run(url: string): Promise<string> {

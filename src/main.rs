@@ -1,5 +1,8 @@
 //! Command-line interface for compiling TypeScript into WASI 0.3 WebAssembly components.
 
+#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+mod wasm;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -77,9 +80,7 @@ fn run() -> Result<()> {
                 println!(
                     "      --world <NAME>    WIT world (required when the package has multiple worlds)"
                 );
-                println!(
-                    "      --core-only       Output Core WebAssembly without component encoding"
-                );
+                println!("      --core-only       Output the selected WIT world’s core module");
                 println!("      --explain-tiers   Explain allocation lifetimes and stream reuse");
                 println!("      --keep-names      Preserve function names for guest profiling");
                 println!("  -h, --help            Print help information");
@@ -117,7 +118,7 @@ fn run() -> Result<()> {
     println!("Compiling {}...", ts_file.display());
     let compiled = compile_file(ts_file, &options)?;
     if explain_tiers {
-        print!("{}", compiled.tiers);
+        print!("{}", compiled.allocation_report);
     }
     perry_wit::sdk::write_runtime_declarations(Path::new(".perry/types"))?;
 
@@ -135,24 +136,20 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let stripped_bytes = compiled
-        .stripped
+    let component = compiled
+        .component
         .as_ref()
-        .context("Missing stripped component bytes")?;
-
+        .context("Missing component output")?;
     let output = if keep_names {
-        compiled
-            .component
-            .as_ref()
-            .context("Missing component bytes")?
+        &component.bytes
     } else {
-        stripped_bytes
+        &component.stripped
     };
     fs::write(&out_file_path, output)?;
     println!(
         "Component built: raw = {} bytes, stripped = {} bytes, written = {} bytes -> {}",
-        compiled.component.as_ref().map(|c| c.len()).unwrap_or(0),
-        stripped_bytes.len(),
+        component.bytes.len(),
+        component.stripped.len(),
         output.len(),
         out_file_path
     );

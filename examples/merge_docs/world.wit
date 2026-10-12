@@ -1,0 +1,10 @@
+package perry:demo@0.1.0;
+
+world merge-docs {
+  import wasi:http/client@0.3.0;
+  record merge-error {
+    name: string,
+    message: string,
+  }
+  export merge-docs: async func(first-url: string, second-url: string) -> result<string, merge-error>;
+}

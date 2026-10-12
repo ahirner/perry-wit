@@ -237,7 +237,12 @@ fn async_export(
             b.runtime_void(ctx, Runtime::IoPump, vec![]);
         }
         let promise = b.runtime(ctx, Runtime::TaskResult, vec![]);
-        let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
+        let settled = b.load(
+            ctx,
+            MemKind::I32,
+            promise,
+            perry_abi::layout::promise::STATE,
+        );
         let wait = b.new_block(ctx, vec![]);
         let done = b.new_block(ctx, vec![]);
         b.cond_br(ctx, settled, (done, vec![]), (wait, vec![]));
@@ -263,7 +268,8 @@ fn async_export(
         // Settled: a rejection without a WIT error type traps (a command reports it and
         // fails); otherwise return the value once the output reached the host.
         b.block = done;
-        let mut detached = b.i32_const(ctx, 0);
+        // Propagate combinator cancellation ownership before checking helper-owned work.
+        let mut detached = b.runtime(ctx, Runtime::TaskCancel, vec![]);
         for (used, function) in [
             (b.state.uses_fetch, Runtime::WebFetchPending),
             (b.state.uses_streams, Runtime::WebStreamsPending),
@@ -273,8 +279,6 @@ fn async_export(
                 detached = b.num(ctx, NumOpcode::I32Add, vec![detached, pending]);
             }
         }
-        let cancelled = b.runtime(ctx, Runtime::TaskCancel, vec![]);
-        detached = b.num(ctx, NumOpcode::I32Add, vec![detached, cancelled]);
         b.cleanup_foreign(ctx)?;
         if b.state.uses_fs {
             let filesystem = b.runtime(ctx, Runtime::FsClose, vec![]);
@@ -300,7 +304,7 @@ fn async_export(
         let outcome = if export.command {
             Some(b.runtime(ctx, Runtime::CommandOutcome, vec![promise]))
         } else {
-            let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
+            let rejected_state = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
             let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
             let trap = b.new_block(ctx, vec![]);
             let fulfilled = b.new_block(ctx, vec![]);
@@ -311,8 +315,12 @@ fn async_export(
                 let mut values = Vec::new();
                 if let Some(completion) = completion {
                     let ty = completion.result;
-                    let exception =
-                        b.load(ctx, MemKind::I32, promise, perry_runtime::promise::VALUE);
+                    let exception = b.load(
+                        ctx,
+                        MemKind::I32,
+                        promise,
+                        perry_abi::layout::promise::VALUE,
+                    );
                     let payload = b.completion_error(ctx, completion, exception)?;
                     if indirect {
                         let size = b.i32_const(ctx, ty.size() as i32);
@@ -382,7 +390,7 @@ fn async_export(
             flat.push(outcome);
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
             let kind = slot_kind(ctx, *mir_ty)?;
-            let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);
+            let value = b.load(ctx, kind, promise, perry_abi::layout::promise::VALUE);
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);

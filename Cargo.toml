@@ -3,6 +3,11 @@ name = "perry-wit"
 version = "0.1.0"
 edition = "2024"
 default-run = "perry-wit"
+description = "Compile TypeScript into WASI 0.3 WebAssembly components"
+authors = ["Alexander Hirner"]
+license = "Apache-2.0"
+repository = "https://github.com/ahirner/perry-wit"
+homepage = "https://ahirner.github.io/perry-wit/"
 
 [lints]
 workspace = true
@@ -43,7 +48,7 @@ perry-hir = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1
 perry-mir = { path = "crates/perry-mir" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
 perry-runtime = { path = "crates/perry-runtime" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97", default-features = false }
 serde = "1.0"
 serde_json = "1.0"
 tempfile = "3.27.0"
@@ -84,14 +89,17 @@ wasmparser.workspace = true
 wit-parser.workspace = true
 wit-component = "0.261"
 anyhow.workspace = true
-serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-wat = "1.261.0"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "wasi"))'.dependencies]
+wit-bindgen = "0.62"
 
 [build-dependencies]
 wasmparser.workspace = true
 
 [dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+wat = "1.261.0"
 bytes.workspace = true
 http.workspace = true
 http-body = "1"

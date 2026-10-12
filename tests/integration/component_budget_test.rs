@@ -24,7 +24,7 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         ),
     ] {
         let compiled = compile_for_world(source, name, &resolve, world, true)?;
-        let bytes = compiled.stripped.as_ref().unwrap().len() as u64;
+        let bytes = compiled.component.as_ref().unwrap().stripped.len() as u64;
         assert!(
             bytes <= max_bytes,
             "{name}: {bytes} bytes exceeds {max_bytes}-byte limit"

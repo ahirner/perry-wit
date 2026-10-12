@@ -12,9 +12,7 @@ struct Pin {
     task: *mut crate::region::Task,
 }
 
-pub const DATA: u32 = 0;
-pub const LENGTH: u32 = 4;
-pub const CAPACITY: u32 = 8;
+pub use crate::layout::roots::{CAPACITY, DATA, LENGTH};
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {

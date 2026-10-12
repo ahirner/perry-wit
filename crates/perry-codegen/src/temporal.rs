@@ -7,7 +7,7 @@ use pliron_wasm::attrs::{MemKind, NumOpcode};
 impl FunctionLowering<'_, '_> {
     /// A string's UTF-8 bytes: `[data, len]`.
     fn string_parts(&mut self, ctx: &mut Context, string: Value) -> Vec<Value> {
-        use perry_runtime::string::{DATA, LEN};
+        use perry_abi::layout::string::{DATA, LEN};
         let data = self.load(ctx, MemKind::I32, string, DATA);
         let len = self.load(ctx, MemKind::I32, string, LEN);
         vec![data, len]
@@ -39,8 +39,8 @@ impl FunctionLowering<'_, '_> {
         self.block = failed;
         let message = self.state.data.string("Invalid time value for Temporal");
         let message = self.i64_const(ctx, u64::from(message));
-        let kind = self.i32_const(ctx, perry_runtime::exception::RANGE_ERROR as i32);
-        let tag = self.i32_const(ctx, perry_runtime::exception::TAG_STRING as i32);
+        let kind = self.i32_const(ctx, perry_abi::layout::exception::RANGE_ERROR as i32);
+        let tag = self.i32_const(ctx, perry_abi::layout::exception::TAG_STRING as i32);
         let exception = self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message]);
         let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
         let (target, throw_args) = self.throw_target(ctx, status);

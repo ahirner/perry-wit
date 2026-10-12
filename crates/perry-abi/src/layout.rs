@@ -66,3 +66,42 @@ pub mod async_frame {
     pub const OBSERVER_SIZE: u32 = 32;
     pub const SLOTS: u32 = OBSERVER + OBSERVER_SIZE;
 }
+
+pub mod promise {
+    pub const STATE: u32 = 0;
+    pub const STATUS: u32 = 4;
+    pub const VALUE: u32 = 8;
+    pub const FULFILLED: u32 = 1;
+    pub const REJECTED: u32 = 2;
+    pub const COMBINATOR_KIND: u32 = u32::MAX;
+}
+
+pub mod exception {
+    pub const KIND: u32 = 0;
+    pub const TAG: u32 = 4;
+    pub const VALUE: u32 = 8;
+    pub const CAUSE: u32 = 16;
+    pub const TYPE_ERROR: u32 = 1;
+    pub const RANGE_ERROR: u32 = 2;
+    pub const ERROR: u32 = 3;
+    pub const THROWN_VALUE: u32 = 4;
+    pub const TAG_NUMBER: u32 = 1;
+    pub const TAG_BOOLEAN: u32 = 2;
+    pub const TAG_STRING: u32 = 3;
+    pub const TAG_BIGINT: u32 = 4;
+}
+
+pub mod foreign {
+    pub const AREA: u32 = 0;
+    pub const OWNERS: u32 = 4;
+    pub const KIND: u32 = 8;
+    pub const RETURNED: u32 = 12;
+    pub const SCOPE: u32 = 16;
+    pub const SIZE: u32 = 20;
+}
+
+pub mod roots {
+    pub const DATA: u32 = 0;
+    pub const LENGTH: u32 = 4;
+    pub const CAPACITY: u32 = 8;
+}

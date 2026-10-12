@@ -823,8 +823,7 @@ pub(crate) fn link_helpers_with(
 
     let result = module.finish();
     if let Err(e) = Validator::new().validate_all(&result) {
-        std::fs::write("/tmp/debug_linked.wasm", &result).ok();
-        anyhow::bail!("Validating linked Wasm output: {e:?} (wrote /tmp/debug_linked.wasm)");
+        anyhow::bail!("Validating linked Wasm output: {e:?}");
     }
     Ok(result)
 }

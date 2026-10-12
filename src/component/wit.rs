@@ -3,8 +3,73 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use wit_parser::{PackageId, Resolve, UnresolvedPackageGroup};
+use anyhow::{Context, Result, ensure};
+use wit_parser::{PackageId, Resolve, SourceMap, UnresolvedPackageGroup};
+
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/wasi_packages.rs"));
+}
+
+fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGroup> {
+    ensure!(!sources.is_empty(), "WIT package has no sources");
+    let mut map = SourceMap::new();
+    for (index, source) in sources.iter().enumerate() {
+        map.push_str(
+            source
+                .name
+                .as_deref()
+                .unwrap_or(&format!("source-{index}.wit")),
+            crate::api::text(&source.contents, source.name.as_deref())?,
+        );
+    }
+    map.parse()
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))
+}
+
+/// Resolve only supplied package contents and the compiler's pinned standard packages.
+pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, PackageId)> {
+    let mut resolve = Resolve::new();
+    let mut groups = Vec::new();
+    let mut application = None;
+    for (index, package) in std::iter::once(&input.application)
+        .chain(&input.dependencies)
+        .enumerate()
+    {
+        match package {
+            crate::api::Package::Sources(sources) => groups.push(source_package(sources)?),
+            crate::api::Package::Encoded(bytes) => {
+                let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) =
+                    wit_parser::decoding::decode(bytes)?
+                else {
+                    anyhow::bail!("expected an encoded WIT package, not an application component");
+                };
+                let remap = resolve.merge(decoded)?;
+                if index == 0 {
+                    application = Some(remap.packages[package.index()]);
+                }
+            }
+        }
+    }
+    let main = if application.is_none() {
+        groups.remove(0)
+    } else {
+        // push_groups needs a main package; the marker only anchors explicit dependencies.
+        UnresolvedPackageGroup::parse("dependencies.wit", "package perry:compiler-dependencies;")
+            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?
+    };
+    let package = resolve_embedded(main, &mut resolve, &mut groups)?;
+    Ok((resolve, application.unwrap_or(package)))
+}
+
+pub(crate) fn resolve_embedded_source(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
+    resolve_contents(&crate::api::Wit {
+        application: crate::api::Package::Sources(vec![crate::api::Source {
+            name: Some(name.into()),
+            contents: source.as_bytes().to_vec(),
+        }]),
+        dependencies: Vec::new(),
+    })
+}
 
 fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<UnresolvedPackageGroup>> {
     if !dir.exists() {
@@ -78,5 +143,33 @@ fn resolve_packages(
         }
     }
 
+    resolve_embedded(main, resolve, deps)
+}
+
+fn resolve_embedded(
+    main: UnresolvedPackageGroup,
+    resolve: &mut Resolve,
+    deps: &mut Vec<UnresolvedPackageGroup>,
+) -> Result<PackageId> {
+    let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
+    for group in std::iter::once(&main).chain(deps.iter()) {
+        available.insert(group.main.name.clone());
+        available.extend(group.nested.iter().map(|package| package.name.clone()));
+    }
+    for files in embedded::PACKAGES {
+        let mut map = SourceMap::new();
+        for (name, source) in *files {
+            map.push_str(name, *source);
+        }
+        let mut group = map
+            .parse()
+            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+        if available.insert(group.main.name.clone()) {
+            group
+                .nested
+                .retain(|package| available.insert(package.name.clone()));
+            deps.push(group);
+        }
+    }
     Ok(resolve.push_groups(main, std::mem::take(deps))?)
 }

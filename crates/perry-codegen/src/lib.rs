@@ -16,7 +16,7 @@
 //!   declaration order; arrays and variants use the layouts in [perry_abi::layout].
 //! - Unproven and repeated allocations use precise collectible storage. Bounded task storage
 //!   remains available for small synchronous exports and task-owned handle tables.
-//! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_runtime::string]);
+//! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_abi::layout::string]);
 //!   constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
 //!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on

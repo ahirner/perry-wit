@@ -17,8 +17,9 @@ fn compile(source: &str, wit: &str) -> Result<Vec<u8>> {
         &resolve,
         world,
     )?
-    .stripped
-    .unwrap())
+    .component
+    .unwrap()
+    .stripped)
 }
 const WIT: &str = "package test:boundary;
 interface secrets {

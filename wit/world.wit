@@ -4,21 +4,3 @@ world command {
   include wasi:cli/command@0.3.0;
   import wasi:http/client@0.3.0;
 }
-
-world merge-docs {
-  import wasi:http/client@0.3.0;
-  record merge-error {
-    name: string,
-    message: string,
-  }
-  export merge-docs: async func() -> result<string, merge-error>;
-}
-
-world task-runner {
-  export run-task: func(input: string) -> string;
-}
-
-world merge-task {
-  export run-task: func(input: string) -> string;
-  export merge-task: func(input: string) -> string;
-}

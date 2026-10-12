@@ -116,7 +116,7 @@ impl FunctionLowering<'_, '_> {
                 Some(self.load(ctx, MemKind::I32, args[0], offset))
             }
             Intrinsic::StringLower | Intrinsic::StringUpper => {
-                use perry_runtime::string::{DATA, LEN};
+                use perry_abi::layout::string::{DATA, LEN};
                 let string = args[0];
                 let data = self.load(ctx, MemKind::I32, string, DATA);
                 let len = self.load(ctx, MemKind::I32, string, LEN);
@@ -204,7 +204,7 @@ impl FunctionLowering<'_, '_> {
                 None
             }
             Intrinsic::JsonParse => {
-                use perry_runtime::string::{DATA, LEN};
+                use perry_abi::layout::string::{DATA, LEN};
                 let string = args[0];
                 let data = self.load(ctx, MemKind::I32, string, DATA);
                 let len = self.load(ctx, MemKind::I32, string, LEN);
@@ -258,14 +258,17 @@ impl FunctionLowering<'_, '_> {
                     ctx,
                     MemKind::I32,
                     exception,
-                    perry_runtime::exception::CAUSE,
+                    perry_abi::layout::exception::CAUSE,
                     cause,
                 );
                 None
             }
-            Intrinsic::ExceptionCause => {
-                Some(self.load(ctx, MemKind::I32, args[0], perry_runtime::exception::CAUSE))
-            }
+            Intrinsic::ExceptionCause => Some(self.load(
+                ctx,
+                MemKind::I32,
+                args[0],
+                perry_abi::layout::exception::CAUSE,
+            )),
             // The null address is the JSON `undefined`.
             Intrinsic::JsonUndefined => Some(self.i32_const(ctx, 0)),
             Intrinsic::JsonFromBool | Intrinsic::JsonNull => {
