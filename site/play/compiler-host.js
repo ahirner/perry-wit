@@ -1,3 +1,5 @@
+import { instantiate } from '../.generated/compiler/compiler.js';
+import { imports, coreModules } from '../.generated/compiler-manifest.js';
 import * as clocks from '@bytecodealliance/preview2-shim/clocks';
 import * as random from '@bytecodealliance/preview2-shim/random';
 import * as io from '@bytecodealliance/preview2-shim/io';
@@ -5,6 +7,14 @@ import * as cli from '@bytecodealliance/preview2-shim/cli';
 import * as filesystem from '@bytecodealliance/preview2-shim/filesystem';
 
 const camel = name => name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+
+/** Instantiate the compiler using core modules embedded in the original component bytes. */
+export function instantiateCompiler(bytes) {
+  return instantiate(name => {
+    const { start, end } = coreModules[name];
+    return WebAssembly.compile(bytes.subarray(start, end));
+  }, compilerHost(imports));
+}
 
 /** Standard WASI interfaces with no filesystem grants. */
 export function compilerHost(names) {

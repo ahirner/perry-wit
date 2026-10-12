@@ -5,7 +5,6 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { transpileBytes } from '@bytecodealliance/jco-transpile';
-import { compilerHost } from './play/compiler-host.js';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -24,10 +23,10 @@ if (apiVersion !== packageVersion) throw new Error('Compiler package and WIT API
 if (!extracted.includes(`export ${packageName}/api@${apiVersion}`) || !extracted.includes('export wasi:cli/run@0.2.')) throw new Error('Compiler artifact must export the current API and CLI.');
 const output = resolve(process.env.SITE_OUTPUT || join(root, 'dist'));
 const generated = join(root, '.generated');
+await rm(generated, { recursive: true, force: true });
 await mkdir(generated, { recursive: true });
 await rm(output, { recursive: true, force: true });
 await mkdir(join(output, 'play/assets/engine'), { recursive: true });
-await mkdir(join(output, 'play/assets/compiler'), { recursive: true });
 await mkdir(join(output, 'downloads'), { recursive: true });
 for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
 const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
@@ -41,14 +40,21 @@ await writeFile(join(output, 'downloads/compiler.metadata.json'), metadata);
 await cp(rustdoc, join(output, 'rust'), { recursive: true });
 await writeFile(join(output, '.nojekyll'), '');
 
-const bindings = await transpileBytes(await readFile(compiler), { name: 'compiler', instantiation: 'async', base64Cutoff: 0, nodejsCompat: false, noComponentErrorWrapping: false });
+const compilerBytes = await readFile(compiler);
+const bindings = await transpileBytes(compilerBytes, { name: 'compiler', instantiation: 'async', base64Cutoff: 0, nodejsCompat: false, noComponentErrorWrapping: false });
+const coreModules = {};
 for (const [name, contents] of Object.entries(bindings.files)) {
+  if (name.endsWith('.wasm')) {
+    const start = compilerBytes.indexOf(contents);
+    if (start < 0) throw new Error(`Generated ${name} is not embedded in the compiler component; review the Jco module loader.`);
+    coreModules[name] = { start, end: start + contents.length };
+    continue;
+  }
   const target = join(generated, 'compiler', name);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, contents);
-  if (name.endsWith('.wasm')) await writeFile(join(output, 'play/assets/compiler', name), contents);
 }
-await writeFile(join(generated, 'compiler-imports.js'), `export const imports = ${JSON.stringify(bindings.imports)};\n`);
+await writeFile(join(generated, 'compiler-manifest.js'), `export const imports = ${JSON.stringify(bindings.imports)};\nexport const coreModules = ${JSON.stringify(coreModules)};\n`);
 
 const vendor = dirname(fileURLToPath(import.meta.resolve('@bytecodealliance/jco-transpile/component')));
 for (const name of await readdir(vendor)) if (name.endsWith('.wasm')) await cp(join(vendor, name), join(output, 'play/assets/engine', name));
@@ -70,8 +76,8 @@ await build({
   } }],
 });
 
-const { instantiate } = await import(new URL('./.generated/compiler/compiler.js', import.meta.url));
-const { api } = await instantiate(async name => WebAssembly.compile(await readFile(join(generated, 'compiler', name))), compilerHost(bindings.imports));
+const { instantiateCompiler } = await import('./play/compiler-host.js');
+const { api } = await instantiateCompiler(compilerBytes);
 const exampleFiles = new Map();
 for (const name of await readdir(join(repository, 'examples'), { recursive: true })) {
   if (/\.(ts|wit|json|wasm)$/.test(name)) exampleFiles.set(name, new Uint8Array(await readFile(join(repository, 'examples', name))));
@@ -108,7 +114,7 @@ for (const name of packages) {
 }
 await writeFile(join(output, 'downloads/THIRD-PARTY-NOTICES.txt'), notices);
 const revision = createHash('sha256');
-revision.update(await readFile(compiler));
+revision.update(compilerBytes);
 for (const name of ['style.css', 'play/app.js', 'play/workspace.js', 'play/examples.json', 'play/assets/worker.js']) revision.update(await readFile(join(output, name)));
 const version = revision.digest('hex').slice(0, 12);
 for (const [name, references] of [
@@ -126,7 +132,6 @@ const report = {
   htmlAndCss: await size(['index.html', 'play/index.html', 'style.css']),
   uiJavaScript: await size(['play/app.js', 'play/workspace.js']),
   compilerComponent: await size(['downloads/perry-wit.wasm']),
-  browserCompiler: await size(await assets('play/assets/compiler')),
   workerJavaScript: await size(['play/assets/worker.js']),
   jcoEngines: await size(await assets('play/assets/engine')),
 };

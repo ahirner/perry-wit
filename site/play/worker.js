@@ -1,6 +1,4 @@
-import { instantiate } from '../.generated/compiler/compiler.js';
-import { imports as compilerImports } from '../.generated/compiler-imports.js';
-import { compilerHost } from './compiler-host.js';
+import { instantiateCompiler } from './compiler-host.js';
 import * as compilerCli from '@bytecodealliance/preview2-shim/cli';
 import { $init as bindgenReady, generate } from '@bytecodealliance/jco-transpile/component';
 import { $init as toolsReady, tools } from '@perry/wasm-tools';
@@ -59,11 +57,9 @@ self.onmessage = async ({ data }) => {
   compilerCli._setStdout(output);
   compilerCli._setStderr(output);
   try {
-    const compiler = await instantiate(async name => {
-      const response = await fetch(new URL(`./compiler/${name}${new URL(import.meta.url).search}`, import.meta.url));
-      if (!response.ok) throw new Error(`Could not load compiler: HTTP ${response.status}`);
-      return WebAssembly.compile(await response.arrayBuffer());
-    }, compilerHost(compilerImports));
+    const response = await fetch(new URL(`../../downloads/perry-wit.wasm${new URL(import.meta.url).search}`, import.meta.url));
+    if (!response.ok) throw new Error(`Could not load compiler: HTTP ${response.status}`);
+    const compiler = await instantiateCompiler(new Uint8Array(await response.arrayBuffer()));
     progress('Compiling…');
     phase = 'compile';
     const started = performance.now();

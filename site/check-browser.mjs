@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFile, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, readdir, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { resolve, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { chromium, webkit } from 'playwright-core';
 
 const directory = resolve(process.env.SITE_OUTPUT || 'site/dist');
+const wasmFiles = (await readdir(directory, { recursive: true })).filter(name => name.endsWith('.wasm'));
+assert.deepEqual(wasmFiles.filter(name => !name.startsWith('play/assets/engine/')), ['downloads/perry-wit.wasm'], 'The distribution must contain only one compiler binary');
 const compilerVersion = JSON.parse(await readFile(join(directory, 'downloads/compiler.metadata.json'), 'utf8')).version;
 const origin = 'https://playground.test';
 const prefix = '/perry-wit/';
@@ -30,11 +32,13 @@ try {
       const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, acceptDownloads: true, serviceWorkers: 'block' });
       const requests = [];
       const assetVersions = [];
+      let compilerFailure = false;
       // Route static files directly: no development server is started or changed.
       await context.route(`${origin}/**`, async route => {
         const url = new URL(route.request().url()); requests.push(url.pathname);
-        if (url.pathname.includes('/assets/')) assetVersions.push(url.searchParams.get('v'));
+        if (url.pathname.includes('/assets/') || url.pathname.endsWith('/downloads/perry-wit.wasm')) assetVersions.push(url.searchParams.get('v'));
         if (!url.pathname.startsWith(prefix)) return route.fulfill({ status: 404, body: 'Outside repository path' });
+        if (compilerFailure && url.pathname.endsWith('/downloads/perry-wit.wasm')) return route.fulfill({ status: 503 });
         let path = decodeURIComponent(url.pathname.slice(prefix.length));
         if (path.endsWith('/') || !path) path += 'index.html';
         if (path.split('/').includes('..')) return route.abort();
@@ -99,8 +103,15 @@ try {
       finally { clearInterval(tracking); }
       shifts.push(await page.locator('#run').evaluate(element => { const box = element.getBoundingClientRect(); return { x: box.x, y: box.y, scroll: scrollY }; }));
       for (const position of shifts) assert.deepEqual(position, beforeRun, 'Running must not move controls or scroll the page');
+      assert.equal(requests.filter(path => path === `${prefix}downloads/perry-wit.wasm`).length, 1, 'Compilation must load the downloadable compiler once');
+      assert(!requests.some(path => path.includes('/assets/compiler/')), 'Compilation must not fetch separate compiler modules');
       assert(assetVersions.length > 1 && assetVersions.every(version => version && version === assetVersions[0]), 'Worker, compiler and engine assets must share a build version');
       await page.screenshot({ path: `site/test-results/${name}-example.png`, fullPage: true });
+      compilerFailure = true;
+      await page.locator('#compile').click();
+      await page.waitForFunction(() => document.getElementById('status').dataset.state === 'error');
+      assert.match(await page.locator('#output').textContent(), /Could not load compiler: HTTP 503/);
+      compilerFailure = false;
       await page.locator('#args').fill('{bad json');
       await page.locator('#run').click();
       assert.match(await page.locator('#status').textContent(), /arguments/);

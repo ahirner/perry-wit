@@ -16,6 +16,8 @@ nix run .#site
 
 The build compiles the compiler WebAssembly component, validates compiler metadata, generates browser bindings, and bundles API documentation into the static distribution.
 
+The playground loads `downloads/perry-wit.wasm` on compilation. Generated bindings read the core modules directly from byte ranges verified during the build, so the distribution contains one compiler binary. Separate Jco engine assets provide component inspection and application bindings.
+
 ## Verification
 
 Run verification suites for compiler parity, workspace handling, and browser execution:
