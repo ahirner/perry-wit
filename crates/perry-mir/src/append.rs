@@ -3,10 +3,16 @@ use crate::aggregates::{functions, operations};
 use pliron::{
     basic_block::BasicBlock,
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    irbuild::{
+        inserter::Inserter,
+        match_rewrite::{MatchRewrite, MatchRewriter, PassWrapper},
+        rewriter::Rewriter,
+    },
     linked_list::{ContainsLinkedList, LinkedList},
     op::Op,
     operation::Operation,
+    pass::{Analysis, AnalysisManager, Pass, PassResult, Passes},
+    result::Result,
     r#type::Typed,
     value::Value,
 };
@@ -22,7 +28,8 @@ struct Transfer {
 fn reuse_candidates(
     root: Ptr<Operation>,
     ctx: &Context,
-) -> Vec<(Ptr<Operation>, crate::attrs::ReuseOperands)> {
+    live: &crate::liveness::LiveValues,
+) -> HashMap<Ptr<Operation>, crate::attrs::ReuseOperands> {
     use crate::{calls::CallOp, views::AggregateViewOp};
     use crate::{
         collections::{
@@ -37,7 +44,7 @@ fn reuse_candidates(
     use pliron::builtin::op_interfaces::{
         BranchOpInterface, OneRegionInterface, SymbolOpInterface,
     };
-    let mut candidates = Vec::new();
+    let mut candidates = HashMap::new();
     let functions = functions(root, ctx);
     let mut fresh_returns = HashSet::new();
     loop {
@@ -50,13 +57,11 @@ fn reuse_candidates(
             // of their operands is passed to.
             let mut incoming: HashMap<Value, Vec<Value>> = HashMap::new();
             let mut passed: HashMap<(Ptr<Operation>, Value), Vec<Transfer>> = HashMap::new();
-            let mut successors: HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>> = HashMap::new();
             for &block in &blocks {
                 let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
                     continue;
                 };
                 let dests: Vec<Ptr<BasicBlock>> = terminator.deref(ctx).successors().collect();
-                successors.insert(block, dests.clone());
                 let dyn_op = Operation::get_op_dyn(terminator, ctx);
                 let Some(branch) = pliron::op::op_cast::<dyn BranchOpInterface>(dyn_op.as_ref())
                 else {
@@ -205,16 +210,11 @@ fn reuse_candidates(
                             let Some(arguments) = passed.get(&(user, value)) else {
                                 return !alias_set(value)
                                     .iter()
-                                    .any(|&alias| live_after(ctx, &successors, alias, user));
+                                    .any(|&alias| live.after(user).contains(&alias));
                             };
                             arguments.len() == 1
                                 && owned.contains(&arguments[0].argument)
-                                && !live_in_blocks(
-                                    ctx,
-                                    &successors,
-                                    value,
-                                    vec![arguments[0].block],
-                                )
+                                && !live.on_entry(arguments[0].block, value)
                         })
                     })
                     .collect();
@@ -258,9 +258,7 @@ fn reuse_candidates(
                             .filter(|&&other| aliases.contains(&other))
                             .count()
                             == 1
-                            && !aliases
-                                .iter()
-                                .any(|&alias| live_after(ctx, &successors, alias, op)))
+                            && !aliases.iter().any(|&alias| live.after(op).contains(&alias)))
                         .then_some(index as u32)
                     })
                     .collect::<Vec<_>>();
@@ -268,7 +266,7 @@ fn reuse_candidates(
                     continue;
                 }
                 let reuse = crate::attrs::ReuseOperands(indices);
-                candidates.push((op, reuse));
+                candidates.insert(op, reuse);
             }
         }
         if !gained {
@@ -347,77 +345,105 @@ fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
     changed
 }
 
-pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
-    let fused = fuse_arrays(root, ctx);
-    let candidates = reuse_candidates(root, ctx);
-    let changed = fused || !candidates.is_empty();
-    for (op, reuse) in candidates {
+struct ReusableSequences {
+    candidates: HashMap<Ptr<Operation>, crate::attrs::ReuseOperands>,
+}
+
+impl Analysis for ReusableSequences {
+    fn name(&self) -> &str {
+        "reusable-sequences"
+    }
+    fn compute(
+        root: Ptr<Operation>,
+        ctx: &Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<Self> {
+        let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+        Ok(Self {
+            candidates: reuse_candidates(root, ctx, &live),
+        })
+    }
+}
+
+struct ReusePass;
+
+impl Pass for ReusePass {
+    fn name(&self) -> &str {
+        "owned-append"
+    }
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let candidates = analyses
+            .get_analysis::<ReusableSequences>(root, ctx)?
+            .candidates
+            .clone();
+        PassWrapper::new("owned-append", ReusableSequences { candidates }).run(root, ctx, analyses)
+    }
+}
+
+impl MatchRewrite for ReusableSequences {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        self.candidates.contains_key(&op)
+            && Operation::get_op::<crate::collections::ConcatOp>(op, ctx).is_some()
+    }
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut MatchRewriter,
+        op: Ptr<Operation>,
+    ) -> Result<()> {
         let operands = op.deref(ctx).operands().collect();
+        let reuse = self
+            .candidates
+            .remove(&op)
+            .expect("matched reuse candidate");
         let append =
             crate::collections::ConcatReuseOp::from_sources(ctx, operands, reuse).get_operation();
-        append.insert_before(ctx, op);
-        let (old, new) = (op.deref(ctx).get_result(0), append.deref(ctx).get_result(0));
-        old.replace_all_uses_with(ctx, &new);
-        Operation::erase(op, ctx);
-    }
-    if changed {
-        IRStatus::Changed
-    } else {
-        IRStatus::Unchanged
+        rewriter.insert_operation(ctx, append);
+        rewriter.replace_operation(ctx, op, append);
+        Ok(())
     }
 }
 
-/// Whether `value` may be used after `op`: later in its block, or in a block reachable from
-/// there before `value` is defined again.
-fn live_after(
-    ctx: &Context,
-    successors: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-    value: Value,
-    op: Ptr<Operation>,
-) -> bool {
-    let block = op.deref(ctx).get_parent_block().expect("in a block");
-    let users: HashSet<Ptr<Operation>> = value.uses(ctx).iter().map(|u| u.user_op()).collect();
-    let mut next = op.deref(ctx).get_next();
-    while let Some(later) = next {
-        if users.contains(&later) {
-            return true;
-        }
-        next = later.deref(ctx).get_next();
+struct ArrayFusion;
+
+impl Pass for ArrayFusion {
+    fn name(&self) -> &str {
+        "fuse-array-concats"
     }
-    live_in_blocks(
-        ctx,
-        successors,
-        value,
-        successors.get(&block).cloned().unwrap_or_default(),
-    )
+
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        _: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let mut result = PassResult::default();
+        result.ir_changed = fuse_arrays(root, ctx).into();
+        Ok(result)
+    }
 }
 
-/// Direct observations on paths entered through these blocks, before the next definition.
-/// A branch transfer checks only its receiving edge; other edges remain independent.
-fn live_in_blocks(
-    ctx: &Context,
-    successors: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-    value: Value,
-    mut work: Vec<Ptr<BasicBlock>>,
-) -> bool {
-    let Some(defined) = value.get_defining_block(ctx) else {
-        return true;
-    };
-    let user_blocks: HashSet<Ptr<BasicBlock>> = value
-        .uses(ctx)
-        .iter()
-        .filter_map(|usage| usage.user_op().deref(ctx).get_parent_block())
-        .collect();
-    let mut seen = HashSet::new();
-    while let Some(next) = work.pop() {
-        // Reaching the definition again starts a new value.
-        if next == defined || !seen.insert(next) {
-            continue;
-        }
-        if user_blocks.contains(&next) {
-            return true;
-        }
-        work.extend(successors.get(&next).into_iter().flatten().copied());
+pub(crate) struct AppendPass;
+
+impl Pass for AppendPass {
+    fn name(&self) -> &str {
+        "owned-append"
     }
-    false
+
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let mut passes = Passes::default();
+        passes.add_pass(ArrayFusion);
+        passes.add_pass(ReusePass);
+        passes.run(root, ctx, analyses)
+    }
 }

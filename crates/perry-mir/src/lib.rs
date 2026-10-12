@@ -25,6 +25,7 @@ pub mod heap;
 pub mod integers;
 pub mod intrinsics;
 mod lifetimes;
+pub mod liveness;
 pub mod locals;
 pub mod numeric;
 pub mod optional;

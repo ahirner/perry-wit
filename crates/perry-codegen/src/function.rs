@@ -2,7 +2,7 @@
 //! and the translation of its ops in reverse post-order.
 use crate::{
     analysis::value_order,
-    async_split, lease,
+    async_split,
     module::ModuleState,
     repr::{i32_type, wasm_type},
 };
@@ -180,7 +180,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             pliron::graph::traversals::region::DFSTraversal::new(ctx, &mir.get_region(ctx))
                 .reverse_post_order()
                 .collect();
-        let live = lease::live_after_ops(ctx, mir);
+        let live = self.state.live;
         let order = value_order(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
@@ -190,8 +190,8 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             let mut index = 0;
             while index < ops.len() {
                 let op = ops[index];
-                self.clear_dead_frame_slots(ctx, op, &live[&op]);
-                let root_mark = self.safe_point(ctx, op, &live[&op], &order)?;
+                self.clear_dead_frame_slots(ctx, op, live.after(op));
+                let root_mark = self.safe_point(ctx, op, live.after(op), &order)?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops
                     .get(index + 1)

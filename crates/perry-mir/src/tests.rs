@@ -45,6 +45,53 @@ fn parse(ctx: &mut Context, input: &str) -> Ptr<Operation> {
         .unwrap_or_else(|error| panic!("{}", error.disp(ctx)))
 }
 
+#[test]
+fn shared_liveness_distinguishes_edges_and_block_definitions() -> Result<()> {
+    use pliron::{
+        builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList,
+        pass::AnalysisManager,
+    };
+    let ctx = &mut Context::new();
+    let root = parse(
+        ctx,
+        r#"
+        builtin.module @live { ^module():
+          builtin.func @run: builtin.function <(builtin.integer i1, builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
+            ^entry(flag: builtin.integer i1, x: builtin.fp64, y: builtin.fp64):
+              perry.cond_br if flag ^left(x) else ^right()
+            ^left(argument: builtin.fp64):
+              sum = perry.binary Add argument, y : builtin.fp64;
+              perry.return sum
+            ^right():
+              perry.return x
+          }
+        }
+    "#,
+    );
+    verify_operation(root, ctx)?;
+    let function = crate::aggregates::functions(root, ctx)[0];
+    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
+    let args: Vec<_> = blocks[0].deref(ctx).arguments().collect();
+    let branch = blocks[0].deref(ctx).get_terminator(ctx).unwrap();
+    let addition = blocks[1].deref(ctx).iter(ctx).next().unwrap();
+    let argument = blocks[1].deref(ctx).get_argument(0);
+    let sum = addition.deref(ctx).get_result(0);
+    let mut analyses = AnalysisManager::default();
+    let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+    assert!(live.after(branch).contains(&args[1]));
+    assert!(live.after(branch).contains(&args[2]));
+    assert!(!live.after(branch).contains(&args[0]));
+    assert!(!live.on_entry(blocks[1], args[1]));
+    assert!(live.on_entry(blocks[1], args[2]));
+    assert!(!live.on_entry(blocks[1], argument));
+    assert!(live.on_entry(blocks[2], args[1]));
+    assert_eq!(
+        live.after(addition),
+        &std::collections::HashSet::from([sum])
+    );
+    Ok(())
+}
+
 fn print(ctx: &Context, op: Ptr<Operation>) -> String {
     Operation::get_op_dyn(op, ctx).disp(ctx).to_string()
 }

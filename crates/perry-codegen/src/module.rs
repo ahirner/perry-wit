@@ -127,6 +127,7 @@ pub(crate) struct ModuleState<'e> {
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
     pub(crate) call_effects: &'e HashMap<Identifier, perry_mir::effects::Summary>,
+    pub(crate) live: &'e perry_mir::liveness::LiveValues,
     /// Address of the compiled-roots counter of [Exports::RawChecked].
     pub(crate) root_metrics: Option<u32>,
     pub(crate) memory_checks: bool,
@@ -167,9 +168,18 @@ pub(crate) fn lower(
         .filter(|f| perry_mir::calls::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
-    let effects = analyses
+    analyses
         .get_analysis::<perry_mir::effects::RuntimeEffects>(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    analyses
+        .get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation(), ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    let effects = analyses
+        .try_get_analysis::<perry_mir::effects::RuntimeEffects>(mir.get_operation())
+        .expect("runtime effects");
+    let live = analyses
+        .try_get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation())
+        .expect("liveness");
     let resource_keys = boundary::used_keys(ctx, &functions);
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
     let memory_checks = matches!(
@@ -241,6 +251,7 @@ pub(crate) fn lower(
             || memory::needs_collector(ctx, &functions, &effects.functions),
         memory_checks,
         call_effects: &effects.functions,
+        live: &live,
         root_metrics: matches!(exports, Exports::RawChecked).then_some(DATA_BASE),
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),
@@ -255,7 +266,7 @@ pub(crate) fn lower(
         state.collectible = true;
     }
     for function in &functions {
-        state.leased.extend(lease::leased(ctx, function));
+        state.leased.extend(lease::leased(ctx, function, &live));
     }
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);

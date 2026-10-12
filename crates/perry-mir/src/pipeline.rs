@@ -55,9 +55,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
 
     let mut ownership = Passes::default();
-    ownership.add_pass(Transform("owned-append", |root, ctx| {
-        Ok(crate::append::append_in_place(root, ctx))
-    }));
+    ownership.add_pass(crate::append::AppendPass);
     ownership.add_pass(Transform("scalar-characters", |root, ctx| {
         Ok(crate::characters::scalar_replace(root, ctx))
     }));

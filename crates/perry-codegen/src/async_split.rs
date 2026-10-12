@@ -66,55 +66,28 @@ pub(crate) fn step_name(name: &Identifier) -> Identifier {
 pub(super) const RESUME: Identifier = pliron::ident!("resume");
 
 /// MIR values live across some `await` of `function`, in a deterministic order.
-fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
+fn live_across_awaits(
+    ctx: &Context,
+    function: &FuncOp,
+    liveness: &perry_mir::liveness::LiveValues,
+) -> Vec<Value> {
     let order = crate::analysis::value_order(ctx, function);
     let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-    let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
-    let transfer = |ctx: &Context, ops: &[Ptr<Operation>], mut live: HashSet<Value>| {
-        for op in ops.iter().rev() {
-            for result in op.deref(ctx).results() {
-                live.remove(&result);
-            }
-            live.extend(op.deref(ctx).operands());
-        }
-        live
-    };
-    loop {
-        let mut changed = false;
-        for &block in blocks.iter().rev() {
-            let mut live: HashSet<Value> = HashSet::new();
-            for succ in block.deref(ctx).succs(ctx) {
-                live.extend(live_in.get(&succ).into_iter().flatten().copied());
-            }
-            let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-            let mut live = transfer(ctx, &ops, live);
-            for arg in block.deref(ctx).arguments() {
-                live.remove(&arg);
-            }
-            if live_in.get(&block) != Some(&live) {
-                live_in.insert(block, live);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     let mut across: Vec<Value> = Vec::new();
     let mut seen = HashSet::new();
     for &block in &blocks {
         let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-        let mut live_out: HashSet<Value> = HashSet::new();
-        for succ in block.deref(ctx).succs(ctx) {
-            live_out.extend(live_in.get(&succ).into_iter().flatten().copied());
-        }
-        for (index, &op) in ops.iter().enumerate() {
+        for op in ops {
             if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
                 continue;
             }
-            let mut live = transfer(ctx, &ops[index + 1..], live_out.clone());
-            live.remove(&op.deref(ctx).get_result(0));
-            let mut live: Vec<_> = live.into_iter().collect();
+            let result = op.deref(ctx).get_result(0);
+            let mut live: Vec<_> = liveness
+                .after(op)
+                .iter()
+                .copied()
+                .filter(|value| *value != result)
+                .collect();
             // Order by definition position for deterministic frame layouts.
             live.sort_unstable_by_key(|value| order[value]);
             for value in live {
@@ -151,7 +124,7 @@ pub(crate) fn lower(
         slots.insert(*param, (offset, slot_kind(ctx, *ty)?));
         offset += 8;
     }
-    for value in live_across_awaits(ctx, mir) {
+    for value in live_across_awaits(ctx, mir, state.live) {
         if let std::collections::hash_map::Entry::Vacant(slot) = slots.entry(value) {
             slot.insert((offset, slot_kind(ctx, value.get_type(ctx))?));
             offset += 8;

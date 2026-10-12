@@ -132,10 +132,19 @@ pub fn explain_tiers(
     };
     use std::fmt::Write;
     let functions = crate::analysis::reachable_functions(ctx, module, exports);
-    let effects = analyses
+    analyses
+        .get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation(), ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    analyses
         .get_analysis::<perry_mir::effects::RuntimeEffects>(module.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    let effects = analyses
+        .try_get_analysis::<perry_mir::effects::RuntimeEffects>(module.get_operation())
+        .expect("runtime effects");
     let summaries = &effects.functions;
+    let live = analyses
+        .try_get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation())
+        .expect("liveness");
     let collectible = needs_collector(ctx, &functions, summaries);
     let tier = if collectible {
         "instance (precise collection)"
@@ -161,7 +170,7 @@ pub fn explain_tiers(
             .filter_map(|op| Operation::get_op::<perry_mir::heap::AllocOp>(op, ctx))
             .filter(|allocation| allocation.tier(ctx) == perry_mir::attrs::Tier::Frame)
             .count();
-        let leases = crate::lease::leased(ctx, function).len();
+        let leases = crate::lease::leased(ctx, function, &live).len();
         writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
             summary.repeated, summary.unknown_helper_bound, summary.escapes).expect("string write");
     }
