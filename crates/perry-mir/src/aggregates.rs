@@ -200,52 +200,6 @@ fn inline_call(ctx: &mut Context, call: Ptr<Operation>, callee: &FuncOp) {
     Operation::erase(call, ctx);
 }
 
-/// Functions that may write a record field while they run: those with a `perry.field_set`
-/// or an `await` (other tasks run meanwhile), and, to a fixpoint, those calling one.
-fn writers(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier> {
-    let mut calls: HashMap<Identifier, Vec<Identifier>> = HashMap::new();
-    let summaries = crate::effects::summarize(ctx, functions);
-    let mut writers: HashSet<_> = summaries
-        .iter()
-        .filter(|(_, s)| s.may_suspend || s.may_reenter)
-        .map(|(name, _)| name.clone())
-        .collect();
-    for function in functions {
-        let name = function.get_symbol_name(ctx);
-        for op in operations(ctx, function) {
-            if Operation::get_op::<FieldSetOp>(op, ctx).is_some()
-                || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-            {
-                writers.insert(name.clone());
-            } else if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                calls
-                    .entry(name.clone())
-                    .or_default()
-                    .push(call.callee(ctx));
-            } else if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
-                calls
-                    .entry(name.clone())
-                    .or_default()
-                    .push(call.callee(ctx));
-            }
-        }
-    }
-    loop {
-        let before = writers.len();
-        for (caller, callees) in &calls {
-            if callees
-                .iter()
-                .any(|callee| writers.contains(callee) || !summaries.contains_key(callee))
-            {
-                writers.insert(caller.clone());
-            }
-        }
-        if writers.len() == before {
-            return writers;
-        }
-    }
-}
-
 /// The fields a record parameter is read through, when those reads are its only uses (the
 /// parameter's escape summary: it does not escape and is not written through).
 fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
@@ -264,9 +218,12 @@ fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
 /// write the record while the callee runs: the callee writes no record field, directly or
 /// through a call, and does not await. The caller's record then often no longer escapes, so
 /// `scalar_replace` dissolves it.
-pub(crate) fn promote_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn promote_arguments(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    effects: &crate::effects::RuntimeEffects,
+) -> IRStatus {
     let functions = functions(root, ctx);
-    let writers = writers(ctx, &functions);
     // Direct call sites per callee; callees also called asynchronously are left alone.
     let mut sites: HashMap<Identifier, Vec<Ptr<Operation>>> = HashMap::new();
     let mut async_callees: HashSet<Identifier> = HashSet::new();
@@ -284,7 +241,7 @@ pub(crate) fn promote_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRSt
         let name = function.get_symbol_name(ctx);
         if is_exported(ctx, function)
             || is_async(ctx, function)
-            || writers.contains(&name)
+            || effects.functions[&name].may_mutate_records()
             || async_callees.contains(&name)
         {
             continue;

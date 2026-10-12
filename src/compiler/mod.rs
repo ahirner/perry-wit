@@ -9,7 +9,7 @@ mod wit_types;
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
-use pliron::{context::Context, op::Op, printable::Printable};
+use pliron::{context::Context, op::Op, pass::AnalysisManager, printable::Printable};
 use std::{
     collections::BTreeMap,
     fs,
@@ -147,7 +147,7 @@ pub(crate) fn compile_sources(
     let mut foreign = wit_types::foreign(resolve);
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir = lower(ctx, source, identity, modules, &foreign)?;
+    let (mir, mut analyses) = lower(ctx, source, identity, modules, &foreign)?;
     let exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
@@ -169,8 +169,11 @@ pub(crate) fn compile_sources(
         bindings,
         resources,
     };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)
+        .map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
     let core = finish(core, streams.as_ref()).map_err(|error| {
@@ -218,13 +221,13 @@ pub(crate) fn compile_core_sources(
     memory_checks: bool,
 ) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, identity, modules, &Default::default())?;
+    let (mir, mut analyses) = lower(ctx, source, identity, modules, &Default::default())?;
     let exports = if memory_checks {
         Exports::RawChecked
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
     link::raw::without_p3(finish(core, None)?)
@@ -237,18 +240,18 @@ fn lower(
     file_name: &str,
     modules: &BTreeMap<String, String>,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
-) -> Result<pliron::builtin::ops::ModuleOp> {
+) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let mir =
         perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
-    perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
+    let analyses = perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
         })?;
-    Ok(mir)
+    Ok((mir, analyses))
 }
 
 fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {

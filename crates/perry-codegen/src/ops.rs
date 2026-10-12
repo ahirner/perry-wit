@@ -337,7 +337,7 @@ impl FunctionLowering<'_, '_> {
                 .into_iter()
                 .map(|t| wasm_type(ctx, t))
                 .collect::<Result<Vec<_>>>()?;
-            let callee_throws = self.state.throws.contains(&callee);
+            let callee_throws = self.state.may_throw(&callee);
             if callee_throws {
                 results.push(i32_type(ctx));
             }

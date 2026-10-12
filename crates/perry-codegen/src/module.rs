@@ -2,7 +2,7 @@
 //! functions, drivers and boundary glue are emitted, and the raw (test) export wrappers.
 use crate::{
     DATA_BASE, Exports, HELPER_MODULE,
-    analysis::{reachable_functions, throwing_functions},
+    analysis::reachable_functions,
     async_split, boundary,
     function::FunctionLowering,
     host::Host,
@@ -24,6 +24,8 @@ use pliron::{
     identifier::Identifier,
     op::Op,
     operation::Operation,
+    pass::AnalysisManager,
+    printable::Printable,
     r#type::{TypeHandle, TypedHandle},
 };
 use pliron_wasm::{
@@ -90,7 +92,6 @@ impl Data {
 pub(crate) struct ModuleState<'e> {
     pub(crate) data: Data,
     pub(crate) wasm: ModuleOp,
-    pub(crate) throws: HashSet<Identifier>,
     pub(crate) runtime: BTreeSet<Runtime>,
     pub(crate) host: BTreeSet<Host>,
     /// Interfaces the WIT world imports; `None` when compiling without a world.
@@ -125,7 +126,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
-    pub(crate) call_effects: HashMap<Identifier, perry_mir::effects::Summary>,
+    pub(crate) call_effects: &'e HashMap<Identifier, perry_mir::effects::Summary>,
     /// Address of the compiled-roots counter of [Exports::RawChecked].
     pub(crate) root_metrics: Option<u32>,
     pub(crate) memory_checks: bool,
@@ -138,6 +139,12 @@ pub(crate) struct ModuleState<'e> {
 }
 
 impl ModuleState<'_> {
+    pub(crate) fn may_throw(&self, function: &Identifier) -> bool {
+        self.call_effects
+            .get(function)
+            .is_none_or(|summary| summary.failure == perry_mir::effects::Failure::Throws)
+    }
+
     /// Whether the WIT world imports `interface` (always, without a world).
     pub(crate) fn can_import(&self, interface: &str) -> bool {
         self.imports
@@ -151,6 +158,7 @@ pub(crate) fn lower(
     ctx: &mut Context,
     mir: &ModuleOp,
     exports: &Exports,
+    analyses: &mut AnalysisManager,
 ) -> Result<(ModuleOp, Vec<u8>)> {
     let name = mir.get_symbol_name(ctx);
     let functions = reachable_functions(ctx, mir, exports);
@@ -159,7 +167,9 @@ pub(crate) fn lower(
         .filter(|f| perry_mir::calls::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
-    let effects = perry_mir::effects::summarize(ctx, &functions);
+    let effects = analyses
+        .get_analysis::<perry_mir::effects::RuntimeEffects>(mir.get_operation(), ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     let resource_keys = boundary::used_keys(ctx, &functions);
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
     let memory_checks = matches!(
@@ -179,7 +189,6 @@ pub(crate) fn lower(
             ..Data::default()
         },
         wasm: ModuleOp::new(ctx, name),
-        throws: throwing_functions(ctx, &functions),
         runtime: BTreeSet::new(),
         host: BTreeSet::new(),
         imports: match exports {
@@ -229,9 +238,9 @@ pub(crate) fn lower(
         collectible: !resource_keys.is_empty()
             || matches!(exports, Exports::RawChecked)
             || memory_checks
-            || memory::needs_collector(ctx, &functions, &effects),
+            || memory::needs_collector(ctx, &functions, &effects.functions),
         memory_checks,
-        call_effects: effects,
+        call_effects: &effects.functions,
         root_metrics: matches!(exports, Exports::RawChecked).then_some(DATA_BASE),
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),

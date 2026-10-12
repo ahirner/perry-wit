@@ -109,7 +109,7 @@ pub(crate) fn compile(
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
     let program = format!("{source}\n{adapter}");
     let ctx = &mut Context::new();
-    let mir = lower(
+    let (mir, mut analyses) = lower(
         ctx,
         &program,
         file_name,
@@ -150,8 +150,8 @@ pub(crate) fn compile(
         bindings: vec![],
         resources: vec![],
     };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports)?;
+    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
     let core = finish(core, streams.as_ref())?;
     let component = componentize
         .then(|| ComponentOutput::encode(&core, &resolve, world))

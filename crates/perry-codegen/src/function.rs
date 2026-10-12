@@ -99,7 +99,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         mir: &FuncOp,
     ) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
-        let throws = state.throws.contains(&symbol);
+        let throws = state.may_throw(&symbol);
         let may_collect = state.call_effects[&symbol].may_collect;
         let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
             .map_err(|_| anyhow!("function type"))?;

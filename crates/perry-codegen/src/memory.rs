@@ -4,7 +4,7 @@ use crate::{
     repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use perry_abi::layout::{record, roots as root_stack};
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
@@ -14,6 +14,8 @@ use pliron::{
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
+    pass::AnalysisManager,
+    printable::Printable,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
@@ -90,10 +92,14 @@ pub(crate) fn needs_collector(
         perry_mir::effects::Summary,
     >,
 ) -> bool {
-    use pliron::{builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList};
+    use pliron::{
+        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
+        linked_list::ContainsLinkedList,
+    };
     !crate::boundary::used_keys(ctx, functions).is_empty()
-        || summaries
-            .values()
+        || functions
+            .iter()
+            .map(|f| &summaries[&f.get_symbol_name(ctx)])
             .any(|summary| summary.repeated || summary.unknown_helper_bound)
         || functions.iter().any(|function| {
             perry_mir::calls::is_async(ctx, function)
@@ -118,15 +124,19 @@ pub fn explain_tiers(
     ctx: &Context,
     module: &pliron::builtin::ops::ModuleOp,
     exports: &crate::Exports,
-) -> String {
+    analyses: &mut AnalysisManager,
+) -> Result<String> {
     use pliron::{
         builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
         linked_list::ContainsLinkedList,
     };
     use std::fmt::Write;
     let functions = crate::analysis::reachable_functions(ctx, module, exports);
-    let summaries = perry_mir::effects::summarize(ctx, &functions);
-    let collectible = needs_collector(ctx, &functions, &summaries);
+    let effects = analyses
+        .get_analysis::<perry_mir::effects::RuntimeEffects>(module.get_operation(), ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    let summaries = &effects.functions;
+    let collectible = needs_collector(ctx, &functions, summaries);
     let tier = if collectible {
         "instance (precise collection)"
     } else {
@@ -156,7 +166,7 @@ pub fn explain_tiers(
             summary.repeated, summary.unknown_helper_bound, summary.escapes).expect("string write");
     }
     report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use instance storage\n  buffer: host operations pin owners until acknowledgement\n");
-    report
+    Ok(report)
 }
 
 impl FunctionLowering<'_, '_> {
@@ -258,7 +268,7 @@ impl FunctionLowering<'_, '_> {
         self.block = start;
         let one = self.i32_const(ctx, 1);
         self.store(ctx, MemKind::I32, cell, 0, one);
-        let throws = self.state.throws.contains(&function);
+        let throws = self.state.may_throw(&function);
         let results = if throws { vec![i32] } else { vec![] };
         let call = CallOp::new(ctx, function, vec![], results).get_operation();
         self.insert(ctx, call);

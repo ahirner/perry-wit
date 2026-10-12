@@ -69,9 +69,8 @@ fn frame_candidates(
         .collect()
 }
 
-pub(crate) fn assign(root: Ptr<Operation>, ctx: &Context) {
+pub(crate) fn assign(root: Ptr<Operation>, ctx: &Context, summaries: &effects::RuntimeEffects) {
     let functions = crate::aggregates::functions(root, ctx);
-    let summaries = effects::summarize(ctx, &functions);
     for function in &functions {
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
@@ -83,7 +82,7 @@ pub(crate) fn assign(root: Ptr<Operation>, ctx: &Context) {
                 }
             }
         }
-        for allocation in frame_candidates(ctx, function, &summaries) {
+        for allocation in frame_candidates(ctx, function, &summaries.functions) {
             allocation.set_tier(ctx, Tier::Frame);
         }
     }

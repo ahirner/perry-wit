@@ -94,7 +94,7 @@ pub(crate) fn export(
         joined
     });
     let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
-    let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
+    let throws = b.state.may_throw(&function.get_symbol_name(ctx));
     let mut call_results = mir_results
         .iter()
         .map(|t| wasm_type(ctx, *t))

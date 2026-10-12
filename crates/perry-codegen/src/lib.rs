@@ -29,7 +29,7 @@ use anyhow::{Context as _, Result, anyhow};
 use perry_mir::attrs::ErrorKind;
 use pliron::{
     builtin::ops::ModuleOp, context::Context, op::Op, operation::verify_operation,
-    printable::Printable,
+    pass::AnalysisManager, printable::Printable,
 };
 use pliron_wasm::emit::{DataSegment, EmitOptions, Memory, emit_module};
 
@@ -90,8 +90,13 @@ pub enum Exports {
 
 /// Lower a canonicalized MIR module and encode it as a core Wasm module that still imports
 /// runtime functions from `HELPER_MODULE`.
-pub fn compile(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<Vec<u8>> {
-    let (wasm, data) = module::lower(ctx, mir, exports)?;
+pub fn compile(
+    ctx: &mut Context,
+    mir: &ModuleOp,
+    exports: &Exports,
+    analyses: &mut AnalysisManager,
+) -> Result<Vec<u8>> {
+    let (wasm, data) = module::lower(ctx, mir, exports, analyses)?;
     // Resuming an `await` inside a loop enters the loop at a second block.
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);

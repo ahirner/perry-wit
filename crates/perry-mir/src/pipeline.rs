@@ -12,7 +12,7 @@ use pliron::{
 };
 
 /// Promote locals and simplify to a fixed point before ownership and lifetime lowering.
-pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
+pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisManager> {
     verify_operation(root, ctx)?;
     let mut analyses = AnalysisManager::default();
     analyses.set_config(PMConfig {
@@ -24,9 +24,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
     preparation.add_pass(Transform("inline-leaves", |root, ctx| {
         Ok(crate::aggregates::inline_leaves(root, ctx))
     }));
-    preparation.add_pass(Transform("promote-arguments", |root, ctx| {
-        Ok(crate::aggregates::promote_arguments(root, ctx))
-    }));
+    preparation.add_pass(PromoteArguments);
     preparation.run(root, ctx, &mut analyses)?;
 
     let mut cleanup = Passes::default();
@@ -69,12 +67,52 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
         crate::fast_paths::expand(root, ctx);
         Ok(IRStatus::Changed)
     }));
-    ownership.add_pass(Transform("assign-lifetimes", |root, ctx| {
-        crate::lifetimes::assign(root, ctx);
-        Ok(IRStatus::Changed)
-    }));
+    ownership.add_pass(AssignLifetimes);
     ownership.run(root, ctx, &mut analyses)?;
-    verify_operation(root, ctx)
+    verify_operation(root, ctx)?;
+    Ok(analyses)
+}
+
+struct PromoteArguments;
+
+impl Pass for PromoteArguments {
+    fn name(&self) -> &str {
+        "promote-arguments"
+    }
+
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let effects = analyses.get_analysis::<crate::effects::RuntimeEffects>(root, ctx)?;
+        let mut result = PassResult::default();
+        result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects);
+        Ok(result)
+    }
+}
+
+struct AssignLifetimes;
+
+impl Pass for AssignLifetimes {
+    fn name(&self) -> &str {
+        "assign-lifetimes"
+    }
+
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let effects = analyses.get_analysis::<crate::effects::RuntimeEffects>(root, ctx)?;
+        crate::lifetimes::assign(root, ctx, &effects);
+        let mut result = PassResult::default();
+        result.ir_changed = IRStatus::Changed;
+        result.set_preserved::<crate::effects::RuntimeEffects>();
+        Ok(result)
+    }
 }
 
 /// Adapt Perry-specific transformations to the shared verifier and analysis invalidation.

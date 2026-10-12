@@ -372,6 +372,112 @@ fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
 }
 
 #[test]
+fn runtime_effects_propagate_recursion_mutation_escape_and_async_failure() -> Result<()> {
+    use crate::effects::{Failure, RuntimeEffects};
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @effects {
+  ^module():
+    builtin.func @left: builtin.function <(perry.record <Cell { value: builtin.fp64 }>) -> (perry.record <Cell>)> {
+      ^entry(cell: perry.record <Cell>):
+        result = perry.call right (cell) : perry.record <Cell>;
+        perry.return result
+    };
+    builtin.func @right: builtin.function <(perry.record <Cell>) -> (perry.record <Cell>)> {
+      ^entry(cell: perry.record <Cell>):
+        result = perry.call left (cell) : perry.record <Cell>;
+        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        maybe = perry.wrap zero : perry.optional <builtin.fp64,Undefined>;
+        value = perry.unwrap maybe : builtin.fp64;
+        perry.field_set result."value" = value;
+        perry.return result
+    };
+    builtin.func @worker: builtin.function <(perry.record <Cell>) -> (perry.record <Cell>)> {
+      ^entry(cell: perry.record <Cell>):
+        result = perry.call left (cell) : perry.record <Cell>;
+        perry.return result
+    };
+    builtin.func @launch: builtin.function <(perry.record <Cell>) -> (perry.promise <perry.record <Cell>>)> {
+      ^entry(cell: perry.record <Cell>):
+        pending = perry.async_call worker (cell) : perry.promise <perry.record <Cell>>;
+        perry.return pending
+    };
+    builtin.func @wait: builtin.function <(perry.promise <perry.record <Cell>>) -> (perry.record <Cell>)> {
+      ^entry(pending: perry.promise <perry.record <Cell>>):
+        result = perry.await pending : perry.record <Cell>;
+        perry.return result
+    }
+}
+"#,
+    );
+    let functions = crate::aggregates::functions(module, ctx);
+    let worker = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "worker")
+        .unwrap();
+    crate::calls::set_async(ctx, worker);
+    verify_operation(module, ctx)?;
+    let mut analyses = AnalysisManager::default();
+    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+    for name in ["left", "right", "worker", "launch"] {
+        let summary = &effects.functions[&name.try_into().unwrap()];
+        assert!(summary.writes_record, "{name}");
+        assert!(summary.escapes.contains(&0), "{name}");
+        assert_eq!(
+            summary.failure,
+            match name {
+                "worker" => Failure::Rejects,
+                "launch" => Failure::None,
+                _ => Failure::Throws,
+            },
+            "{name}"
+        );
+    }
+    let wait = &effects.functions[&pliron::ident!("wait")];
+    assert!(wait.may_mutate_records());
+    assert_eq!(wait.failure, Failure::Throws);
+    let launch = &effects.functions[&pliron::ident!("launch")];
+    assert!(launch.allocates && launch.may_collect && launch.may_suspend);
+    Ok(())
+}
+
+#[test]
+fn runtime_effects_cache_tracks_mir_mutations() -> Result<()> {
+    use crate::effects::{Failure, RuntimeEffects};
+    use pliron::{
+        builtin::op_interfaces::SymbolOpInterface,
+        pass::{AnalysisManager, PassResult},
+    };
+    let ctx = &mut Context::new();
+    let module = parse(ctx, ASYNC_STEP);
+    let mut analyses = AnalysisManager::default();
+    let run = pliron::ident!("run");
+    {
+        let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+        assert_eq!(effects.functions[&run].failure, Failure::Throws);
+    }
+    let function = crate::aggregates::functions(module, ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx) == run)
+        .unwrap();
+    crate::calls::set_async(ctx, &function);
+    let mut changed = PassResult::default();
+    changed.ir_changed = IRStatus::Changed;
+    analyses.retain_preserved(&changed);
+    assert!(
+        analyses
+            .try_get_analysis::<RuntimeEffects>(module)
+            .is_none()
+    );
+    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+    assert_eq!(effects.functions[&run].failure, Failure::Rejects);
+    Ok(())
+}
+
+#[test]
 fn verifier_rejects_mismatched_calls_and_awaits() {
     let mismatched_call = RETAINED_RECORDS.replace(
         "point = perry.call make (i) : perry.record <Point>;",

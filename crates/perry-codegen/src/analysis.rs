@@ -1,17 +1,13 @@
-//! Whole-module analyses over MIR functions: reachability, exception classification and a
+//! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use perry_mir::{
-    calls::{AsyncCallOp, CallOp, is_exported},
-    intrinsics::may_throw,
-};
+use perry_mir::calls::{AsyncCallOp, CallOp, is_exported};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
     },
     context::{Context, Ptr},
-    identifier::Identifier,
     linked_list::ContainsLinkedList,
     operation::Operation,
     value::Value,
@@ -97,38 +93,4 @@ pub(crate) fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, us
         }
     }
     order
-}
-
-/// Functions that may complete with an exception: those with a throwing op other than a call,
-/// and, to a fixpoint, those calling one of them.
-pub(crate) fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier> {
-    let mut throws = HashSet::new();
-    let mut calls: Vec<(Identifier, Vec<Identifier>)> = Vec::new();
-    for function in functions {
-        let name = function.get_symbol_name(ctx);
-        // An async function rejects its promise instead of returning a status.
-        if perry_mir::calls::is_async(ctx, function) {
-            continue;
-        }
-        let mut callees = Vec::new();
-        for op in function_ops(ctx, function) {
-            if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                callees.push(call.callee(ctx));
-            } else if may_throw(ctx, op) {
-                throws.insert(name.clone());
-            }
-        }
-        calls.push((name, callees));
-    }
-    loop {
-        let before = throws.len();
-        for (name, callees) in &calls {
-            if callees.iter().any(|callee| throws.contains(callee)) {
-                throws.insert(name.clone());
-            }
-        }
-        if throws.len() == before {
-            return throws;
-        }
-    }
 }
