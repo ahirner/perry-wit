@@ -1,0 +1,32 @@
+{
+  "name": "merge_task",
+  "description": "Render a Markdown heading and paragraphs, then count Unicode code points, including Markdown syntax and line breaks.",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "perryWit": {
+    "title": "Markdown renderer",
+    "wit": "world.wit",
+    "world": "merge-task",
+    "export": "renderMarkdown",
+    "functions": {
+      "renderMarkdown": {
+        "args": [
+          "  Field notes 🍄  ",
+          [
+            "  Found chanterelles under the birch trees.  ",
+            "",
+            "  Café stop on the way home. ☕  "
+          ]
+        ],
+        "hint": "A title and an array of paragraphs. Whitespace and empty paragraphs are removed."
+      },
+      "countCodePoints": {
+        "args": [
+          "Café 🙂"
+        ],
+        "hint": "Unicode code points: 🙂 counts as one; combining marks count separately. This is not a byte or visual glyph count."
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "merge_docs",
+  "description": "Fetch Ditto’s Pokémon and species data from PokéAPI concurrently, then merge the JSON objects. The second response wins on shared keys.",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "perryWit": {
+    "title": "Merge Pokémon data",
+    "wit": "world.wit",
+    "world": "merge-docs",
+    "export": "mergeDocs",
+    "functions": {
+      "mergeDocs": {
+        "urls": [
+          "https://pokeapi.co/api/v2/pokemon/ditto",
+          "https://pokeapi.co/api/v2/pokemon-species/ditto"
+        ],
+        "hint": "Two JSON URLs. Try replacing ditto with another Pokémon name in both URLs. Other APIs must allow browser requests (CORS)."
+      }
+    }
+  }
+}

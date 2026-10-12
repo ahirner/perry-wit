@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Compile TypeScript into small WASI 0.3 WebAssembly components with Perry-WIT.">
+  <title>Perry-WIT · TypeScript to WebAssembly</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <header><a class="brand" href="./">Perry-WIT</a></header>
+  <main class="home">
+    <h1>TypeScript to WebAssembly</h1>
+    <p class="lead">Compile static TypeScript ahead-of-time into WASI 0.3 WebAssembly components.</p>
+    <p><a class="button primary" href="play/">Try the playground</a></p>
+    <p>Perry-WIT emits native WebAssembly instructions without an embedded JavaScript engine. WIT definitions specify
+      exported interfaces, enabling direct interoperation across languages and WebAssembly hosts.</p>
+    <section class="editors" aria-label="Example">
+      <div>
+        <h2>TypeScript</h2>
+        <pre><code>export function greet(name: string): string {
+  return "Hello, " + name;
+}</code></pre>
+      </div>
+      <div>
+        <h2>WIT</h2>
+        <pre><code>package example:greeting;
+world greeting {
+  export greet: func(name: string) -> string;
+}</code></pre>
+      </div>
+    </section>
+    <p>Asynchronous exports, promises, and HTTP fetch run on native WASI 0.3 primitives. Conformance tests verify
+      behavior against Node.js.</p>
+    <h2 id="build">Build</h2>
+    <ul class="build">
+      <li><strong>CLI</strong> — build the compiler from its Nix flake.
+        <pre><code>nix build github:ahirner/perry-wit</code></pre>
+      </li>
+      <li><strong>Rust library</strong> — compile in-memory source buffers from Rust. <a href="rust/perry_wit/api/index.html">API
+          documentation</a>.</li>
+      <li><strong>Wasm compiler</strong> — the compiler itself, packaged as a portable component.
+        <a href="downloads/perry-wit.wasm">Download .wasm</a> · <a href="downloads/compiler.wit">Compiler API (WIT)</a>
+        · <a href="downloads/THIRD-PARTY-NOTICES.txt">Wasm distribution notices</a>.
+      </li>
+    </ul>
+  </main>
+  <!-- footer -->
+</body>
+
+</html>

@@ -12,3 +12,9 @@ wit/deps/
 
 # Perry SDK generated types
 .perry/
+
+# Static playground build dependencies and generated compiler bindings
+site/node_modules/
+site/dist/
+site/.generated/
+site/test-results/

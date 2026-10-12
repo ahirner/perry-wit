@@ -1,0 +1,14 @@
+package perry:demo@0.1.0;
+
+interface document-types {
+  record document {
+    markdown: string,
+    code-points: u32,
+  }
+}
+
+world merge-task {
+  use document-types.{document};
+  export render-markdown: func(title: string, paragraphs: list<string>) -> document;
+  export count-code-points: func(text: string) -> u32;
+}

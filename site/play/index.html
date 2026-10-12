@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perry-WIT · Playground</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header><a class="brand" href="../">Perry-WIT</a><h1>Playground</h1></header>
+<main>
+<div class="workspace"><label id="example-label" for="example">Example</label><select id="example"></select><button id="open-folder" title="Load TypeScript and WIT from a local folder">Open folder…</button><input id="folder-input" type="file" webkitdirectory multiple hidden><button id="close-folder" hidden>Back to examples</button><button id="reset">Reset</button></div>
+<p id="folder-description" class="hint"></p>
+<section class="editors" aria-label="Source editors">
+<div><h2><label for="source">TypeScript</label></h2><label id="source-file-picker" hidden>File <select id="source-file" aria-label="TypeScript file"></select></label><label id="entry-picker" hidden>Entrypoint <select id="entry" aria-label="Entrypoint"></select></label><textarea id="source" spellcheck="false" wrap="off"></textarea></div>
+<div><h2><label for="wit">WIT</label><span id="world-description" class="note"></span></h2><label id="wit-file-picker" hidden>File <select id="wit-file" aria-label="WIT file"></select></label><p id="world-help" class="hint" hidden>Choose the world whose exports this TypeScript implements.</p><label id="world-picker" hidden>World <select id="world" aria-label="World" aria-describedby="world-help"></select></label><textarea id="wit" spellcheck="false" wrap="off"></textarea></div>
+</section>
+<div class="split">
+<section class="invocation" aria-label="Function call"><h2><label for="function">Function</label></h2><select id="function" disabled></select><h2><label for="args">Arguments</label></h2><p id="args-help" class="hint"></p><textarea id="args" aria-describedby="args-help" rows="4" spellcheck="false"></textarea>
+<div id="run-controls" class="toolbar"><span id="status" role="status" aria-live="polite">Ready</span><div class="actions"><button id="cancel" hidden>Cancel</button><button id="compile">Compile</button><button id="run" class="primary" title="Ctrl/⌘+Enter">Compile &amp; run</button></div></div></section>
+<section id="results" aria-label="Compiler output"><div class="tabs" role="tablist" aria-label="Output views"><button id="tab-result" role="tab" aria-selected="true" aria-controls="output-panel" data-tab="result">Result</button><button id="tab-wat" role="tab" aria-selected="false" aria-controls="output-panel" tabindex="-1" data-tab="wat">WAT</button><button id="tab-interface" role="tab" aria-selected="false" aria-controls="output-panel" tabindex="-1" data-tab="interface">Interface</button><button id="tab-log" role="tab" aria-selected="false" aria-controls="output-panel" tabindex="-1" data-tab="log">Diagnostics</button></div><div id="output-panel" role="tabpanel" aria-labelledby="tab-result" tabindex="0"><pre id="output">Compile &amp; run to see the result.</pre></div><div class="toolbar"><span id="metrics" class="hint"></span><div class="actions"><button id="download-wasm" disabled>Download .wasm</button><button id="download-wat" disabled>Download .wat</button></div></div></section>
+</div>
+<noscript>JavaScript is required to run the compiler.</noscript>
+</main>
+<!-- footer -->
+<script type="module" src="app.js"></script>
+</body>
+</html>

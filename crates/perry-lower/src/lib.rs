@@ -29,6 +29,7 @@ mod operators;
 mod program;
 mod shapes;
 mod source;
+pub mod source_files;
 mod statements;
 mod streams;
 mod temporal;
@@ -95,7 +96,7 @@ use pliron::{
     value::Value,
 };
 use shapes::{Shapes, identifier};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// HIR types, for callers that describe foreign (WIT) types.
 pub mod hir {
@@ -116,13 +117,25 @@ pub fn lower_source(
     file: &str,
     foreign: &HashMap<String, HirType>,
 ) -> Result<ModuleOp> {
-    let mut ast = modules::load(source, file, foreign)?;
+    let modules = source_files::load(source, file)?;
+    lower_sources(ctx, source, file, &modules, foreign)
+}
+
+/// Lower only supplied contents; module identities never acquire host files.
+pub fn lower_sources(
+    ctx: &mut Context,
+    source: &str,
+    identity: &str,
+    modules: &BTreeMap<String, String>,
+    foreign: &HashMap<String, HirType>,
+) -> Result<ModuleOp> {
+    let mut ast = modules::load(source, identity, modules, foreign)?;
     source::validate(&ast)?;
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
     array_methods::preserve_arguments(&mut ast);
-    let hir = perry_hir::lower_module(&ast, "main", file)
-        .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
+    let hir = perry_hir::lower_module(&ast, "main", "input.mts")
+        .map_err(|error| anyhow!("failed to lower {identity}: {error:?}"))?;
     let spans = source::inferred_bindings(&ast);
     let inferred = hir
         .local_source_spans

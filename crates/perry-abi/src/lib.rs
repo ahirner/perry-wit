@@ -16,7 +16,7 @@ pub mod utf8;
 /// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
 pub use utf8::scalars_length_wide as scalars_length;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
@@ -87,6 +87,7 @@ mod imports {
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
+        pub(crate) fn perry_promise_cancellation_owned(promise: *mut u8) -> u32;
         pub(crate) fn perry_task_current() -> *mut u8;
         pub(crate) fn perry_task_resume(task: *mut u8);
         pub(crate) fn perry_promise_resolve(promise: *mut u8, value: u64);
@@ -135,8 +136,8 @@ mod imports {
         host::{subtask_cancel, subtask_drop, waitable_join},
         io::{perry_task_join, perry_write_acknowledged},
         promise::{
-            perry_promise_new_typed, perry_promise_reject, perry_promise_resolve,
-            perry_promise_reuse,
+            perry_promise_cancellation_owned, perry_promise_new_typed, perry_promise_reject,
+            perry_promise_resolve, perry_promise_reuse,
         },
         region::{
             perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
@@ -321,6 +322,13 @@ pub fn promise_typed(references: bool) -> *mut u8 {
 pub fn promise_reuse(promise: *mut u8) -> *mut u8 {
     // SAFETY: a runtime service; a non-null argument is a promise of the current task.
     unsafe { imports::perry_promise_reuse(promise) }
+}
+
+/// Whether task cancellation assigned this promise's work to a completed combinator.
+#[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
+pub fn cancellation_owned(promise: *mut u8) -> bool {
+    // SAFETY: runtime services pass null or a live promise of the current task.
+    unsafe { imports::perry_promise_cancellation_owned(promise) != 0 }
 }
 
 /// The current task's identity.

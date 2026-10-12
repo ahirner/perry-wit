@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
 use pliron::{context::Context, op::Op, printable::Printable};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -35,9 +36,27 @@ impl Default for CompileOptions {
 #[derive(Debug, Clone)]
 pub struct Compiled {
     pub core: Vec<u8>,
-    pub component: Option<Vec<u8>>,
-    pub stripped: Option<Vec<u8>>,
-    pub tiers: String,
+    pub component: Option<ComponentOutput>,
+    pub allocation_report: String,
+}
+
+/// Both forms of the same component, present together when componentization is requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentOutput {
+    pub bytes: Vec<u8>,
+    pub stripped: Vec<u8>,
+}
+
+impl ComponentOutput {
+    fn encode(
+        core: &[u8],
+        resolve: &wit_parser::Resolve,
+        world: wit_parser::WorldId,
+    ) -> Result<Self> {
+        let bytes = component::encode_resolved(core, resolve, world)?;
+        let stripped = strip::component(&bytes)?;
+        Ok(Self { bytes, stripped })
+    }
 }
 
 pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
@@ -88,16 +107,44 @@ fn compile_world(
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
+    let modules = perry_lower::source_files::load(source, file_name)?;
+    compile_sources(
+        source,
+        file_name,
+        &modules,
+        resolve,
+        world,
+        componentize,
+        memory_checks,
+    )
+}
+
+pub(crate) fn compile_sources(
+    source: &str,
+    identity: &str,
+    modules: &BTreeMap<String, String>,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    componentize: bool,
+    memory_checks: bool,
+) -> Result<Compiled> {
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .context("LLVM audit verification failed")?;
     if http::is_handler_world(resolve, world) {
-        return http::compile(source, file_name, resolve, componentize, memory_checks);
+        return http::compile(
+            source,
+            identity,
+            modules,
+            resolve,
+            componentize,
+            memory_checks,
+        );
     }
     let ctx = &mut Context::new();
     let mut foreign = wit_types::foreign(resolve);
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir = lower(ctx, source, file_name, &foreign)?;
+    let mir = lower(ctx, source, identity, modules, &foreign)?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
@@ -109,21 +156,16 @@ fn compile_world(
         bindings,
         resources,
     };
-    let tiers = perry_codegen::explain_tiers(ctx, &mir, &exports);
+    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
     let core = perry_codegen::compile(ctx, &mir, &exports)?;
     let core = finish(core, streams.as_ref())?;
-    let (component, stripped) = if componentize {
-        let component = component::encode_resolved(&core, resolve, world)?;
-        let stripped = strip::component(&component)?;
-        (Some(component), Some(stripped))
-    } else {
-        (None, None)
-    };
+    let component = componentize
+        .then(|| ComponentOutput::encode(&core, resolve, world))
+        .transpose()?;
     Ok(Compiled {
         core,
         component,
-        stripped,
-        tiers,
+        allocation_report,
     })
 }
 
@@ -131,12 +173,8 @@ fn compile_world(
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
 /// functions that may throw). For tests and inspection; components use [compile_for_world].
 pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name, &Default::default())?;
-    link::raw::without_p3(finish(
-        perry_codegen::compile(ctx, &mir, &Exports::Raw)?,
-        None,
-    )?)
+    let modules = perry_lower::source_files::load(source, file_name)?;
+    compile_core_sources(source, file_name, &modules, false)
 }
 
 /// Compile a raw test module with `__perry_gc_debug(flags)` and
@@ -146,21 +184,34 @@ pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
 /// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
 /// bytes (10). Canonical production components omit these exports.
 pub fn compile_core_with_memory_checks(source: &str, file_name: &str) -> Result<Vec<u8>> {
+    let modules = perry_lower::source_files::load(source, file_name)?;
+    compile_core_sources(source, file_name, &modules, true)
+}
+
+pub(crate) fn compile_core_sources(
+    source: &str,
+    identity: &str,
+    modules: &BTreeMap<String, String>,
+    memory_checks: bool,
+) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name, &Default::default())?;
-    link::raw::without_p3(finish(
-        perry_codegen::compile(ctx, &mir, &Exports::RawChecked)?,
-        None,
-    )?)
+    let mir = lower(ctx, source, identity, modules, &Default::default())?;
+    let exports = if memory_checks {
+        Exports::RawChecked
+    } else {
+        Exports::Raw
+    };
+    link::raw::without_p3(finish(perry_codegen::compile(ctx, &mir, &exports)?, None)?)
 }
 
 fn lower(
     ctx: &mut Context,
     source: &str,
     file_name: &str,
+    modules: &BTreeMap<String, String>,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
 ) -> Result<pliron::builtin::ops::ModuleOp> {
-    let mir = perry_lower::lower_source(ctx, source, file_name, foreign)?;
+    let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)?;
     perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")?;

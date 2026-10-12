@@ -13,7 +13,8 @@ pub(crate) fn component(wit: &str, world: &str, file: &str, source: &str) -> Res
     let world = resolve.select_world(&[package], Some(world))?;
     let compiled = perry_wit::compile_for_world(source, file, &resolve, world, true)?;
     compiled
-        .stripped
+        .component
+        .map(|component| component.stripped)
         .ok_or_else(|| anyhow::anyhow!("no component for {file}"))
 }
 

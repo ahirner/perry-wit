@@ -21,8 +21,8 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow};
+use perry_abi::layout::promise as promises;
 use perry_mir::calls::AwaitOp;
-use perry_runtime::promise as promises;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -275,7 +275,7 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     b.block = entry;
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
     // Runtime combinators (`Promise.all`, `Promise.race`) step in the runtime.
-    let combinator_kind = b.i32_const(ctx, perry_runtime::promise::COMBINATOR_KIND as i32);
+    let combinator_kind = b.i32_const(ctx, perry_abi::layout::promise::COMBINATOR_KIND as i32);
     let is_combinator = b.num(ctx, NumOpcode::I32Eq, vec![kind, combinator_kind]);
     let step_combinator = b.new_block(ctx, vec![]);
     let step_function = b.new_block(ctx, vec![]);

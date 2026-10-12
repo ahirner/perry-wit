@@ -1,6 +1,6 @@
 //! Canonical lowering of statically bound host calls.
 use super::*;
-use perry_runtime::foreign as transfer;
+use perry_abi::layout::foreign as transfer;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 
 impl FunctionLowering<'_, '_> {

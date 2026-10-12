@@ -11,6 +11,26 @@ Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as 
 
 For runtime boundaries, memory layouts, compilation pipeline details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+[Homepage](https://ahirner.github.io/perry-wit/) · [Browser playground](https://ahirner.github.io/perry-wit/play/)
+
+## Embedding
+
+The Rust `api` module and `perry:compiler/api` WIT interface compile in-memory TypeScript and WIT buffers directly to WebAssembly components:
+
+```rust
+use perry_wit::api::{self, Options, Program, Wit};
+
+let program = Program {
+    source: b"export function greet(name: string): string { return 'Hello, ' + name; }".as_slice().into(),
+    modules: vec![],
+};
+let wit = Wit {
+    application: b"package example:greeting; world app { export greet: func(name: string) -> string; }".as_slice().into(),
+    dependencies: vec![],
+};
+let compiled = api::compile(&program, &wit, &Options::default())?;
+```
+
 ## Development
 
 For compiler development, enter the pinned development shell with direnv or Nix:

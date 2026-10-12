@@ -12,9 +12,8 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow, bail, ensure};
-use perry_abi::layout::record;
+use perry_abi::layout::{array as layout, record, string as strings};
 use perry_mir::types::{ArrayType, RecordType};
-use perry_runtime::{array as layout, string as strings};
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},

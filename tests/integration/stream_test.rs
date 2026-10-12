@@ -53,15 +53,34 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
     )?;
     let world = resolve.select_world(&[package], Some("run"))?;
     let compiled = compile_for_world(
-        "export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise<number> {const reader=input.getReader(); const pending=reader.read(); if(mode===1){await reader.cancel();const result=await pending;if(!result.done)throw 1;} if(mode===2){reader.releaseLock();try{await pending;throw 1;}catch(e){if(!(e instanceof TypeError))throw e;}} return 7;}",
+        r#"
+export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise<number> {
+  if(mode>=4){
+    const reader=input.getReader({mode:"byob"});
+    const first=reader.read(new Uint8Array(4));
+    const second=reader.read(new Uint8Array(4));
+    try{
+      if(mode===4) await Promise.all([first,second,Promise.reject(new Error('stop'))]);
+      else await Promise.all([first,Promise.reject(new Error('stop'))]);
+    }catch{}
+    return 7;
+  }
+  const reader=input.getReader();const pending=reader.read();
+  if(mode===1){await reader.cancel();const result=await pending;if(!result.done)throw 1;}
+  if(mode===2){reader.releaseLock();try{await pending;throw 1;}catch(e){if(!(e instanceof TypeError))throw e;}}
+  if(mode===3){try{await Promise.all([pending,Promise.reject(new Error('stop'))]);}catch{}}
+  return 7;
+}
+"#,
         "detached.ts",
         &resolve,
         world,
         true,
     )?;
     let engine = async_engine()?;
-    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
-    for mode in [0, 1, 2] {
+    let component =
+        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
+    for mode in [0, 1, 2, 3, 4, 5] {
         let mut store = Store::new(&engine, ());
         let instance = Linker::new(&engine)
             .instantiate_async(&mut store, &component)
@@ -81,7 +100,7 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
             run.call_async(&mut store, (input, mode)),
         )
         .await?;
-        if mode == 0 {
+        if mode == 0 || mode == 5 {
             assert!(
                 result.is_err(),
                 "unresolved detached read must fail the task"
@@ -190,7 +209,8 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let world = resolve.select_world(&[package], Some("streams"))?;
     let compiled = compile_for_world(SOURCE, "streams.ts", &resolve, world, true)?;
     let engine = async_engine()?;
-    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    let component =
+        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let mut store = Store::new(
@@ -300,7 +320,8 @@ async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
         source, "echo.ts", &resolve, world,
     )?;
     let engine = async_engine()?;
-    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    let component =
+        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let bytes: Vec<u8> = (0..4 * 1024 * 1024)
