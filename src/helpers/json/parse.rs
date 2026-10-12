@@ -7,11 +7,10 @@ pub fn measure(input: &str) -> Result<usize, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        output: Storage {
+        output: Storage::<false> {
             bytes: &mut [],
             length: 0,
             base: 0,
-            stores: false,
         },
     };
     parser.document()?;
@@ -26,21 +25,20 @@ pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error>
     let mut parser = Parser {
         input,
         position: 0,
-        output: Storage {
+        output: Storage::<true> {
             bytes: output,
             length: 0,
             base,
-            stores: true,
         },
     };
     let root = parser.document()?;
     parser.output.address(root)
 }
 
-struct Parser<'a> {
+struct Parser<'a, const STORE: bool> {
     input: &'a str,
     position: usize,
-    output: Storage<'a>,
+    output: Storage<'a, STORE>,
 }
 
 /// An array or object being parsed: its node, the last member linked, the member count and
@@ -54,7 +52,7 @@ struct Open {
     object: bool,
 }
 
-impl Parser<'_> {
+impl<const STORE: bool> Parser<'_, STORE> {
     /// One loop over values with an explicit stack of open containers instead of recursion:
     /// the frame is fixed, so the linker can bound the stack of programs that parse JSON.
     /// Nodes are reserved in document order (a container, then each member's key and value).
@@ -175,7 +173,7 @@ impl Parser<'_> {
                     self.digits()?;
                 }
                 self.word(node, Kind::Number as u32)?;
-                if self.output.stores {
+                if STORE {
                     let literal = &self.input.as_bytes()[start..self.position];
                     let value = super::number::parse_number(literal);
                     self.output.write(node + 8, &value.to_le_bytes())?;
@@ -246,7 +244,7 @@ impl Parser<'_> {
                     byte_length = byte_length
                         .checked_add(run.len() as u32)
                         .ok_or(Error::Capacity)?;
-                    if self.output.stores {
+                    if STORE {
                         scalar_length = scalar_length
                             .checked_add(perry_abi::utf8::scalars_length_wide(run))
                             .ok_or(Error::Capacity)?;
