@@ -109,6 +109,26 @@ Function invocations, native capability calls, and Promise observations follow e
 
 Runtime builders assemble scheduling hooks, combinators, scalar capabilities, process context, and date codecs. Referenced pure Rust guest helpers link into the module's shared memory.
 
+#### Optimization
+
+Pliron's `Passes` and `AnalysisManager` schedule verified transformations and cache analyses for each unchanged MIR snapshot. Mutating passes invalidate affected analyses. The optimizer first promotes locals to SSA, specializes WIT numeric domains, then runs canonicalization, SCCP, CFG simplification and DCE to convergence. Ownership rewrites follow this cleanup; append fast-path expansion runs once in its late phase.
+
+| Responsibility | Pliron contribution | Perry contribution |
+| --- | --- | --- |
+| Arithmetic and comparison folding | SCCP propagation, materialization, DCE; `APInt` arithmetic | `ConstFoldInterface` semantics for scalar operations and conversions |
+| Constant branches | SCCP reachability and CFG simplification | `BranchOpFoldInterface` for MIR terminators; unused block-argument adapter |
+| Async frames, leases, GC roots, append liveness | Cached SSA liveness and dominance | Program-point sets derived by local reverse scans; deterministic frame layout, root selection, ownership transfer rules |
+| Optional/conversion simplification, record decomposition, character scalarization, owned append, append fast paths | `MatchRewrite` traversal and `IRRewriter` mutation | Rewrite patterns and semantic predicates |
+| Record promotion | `Mem2RegPass` | Record-to-slot decomposition |
+| Successful-unwrap reuse | Cached dominance and rewriting | Exception-aware availability rules |
+| Numeric specialization and bounds | Integer types, cloning, analysis caching | Numeric worklist, context selection, range widening, buffer-detachment rules |
+| Allocation and boundary scopes | Analysis caching | Interprocedural runtime-effects worklist |
+| Leaf inlining and argument promotion | Cloning, rewriting, cached call effects | Legality and profitability rules |
+
+WIT constraints enter before arithmetic folding. One numeric worklist propagates domains and ranges forward and result-width requirements backward through SSA values, CFG edges, synchronous and asynchronous calls, and returns. Function contexts are keyed by argument domains and result requirements. Finite domain choices, recursive context reuse and conservative range widening ensure termination. Representation rewriting fixes integer wrap points before algebraic optimization. The numeric analysis also supplies bounds-check facts. The [numeric semantics](README.md#semantics) define wrapping, widening, exact 64-bit values and floating-point boundaries.
+
+One cached runtime-effects analysis propagates allocation, collection, suspension, reentry, record mutation, escape and failure information through the call graph. Async rejection remains distinct from synchronous throwing. Allocation reports, argument promotion, lifetime assignment, GC roots and export scopes consume this shared analysis. Boundary scopes account for initializers and canonical marshalling before lowering inserts runtime calls.
+
 ### 5. Code Generation
 
 The code generator translates typed MIR into WebAssembly instructions:
@@ -125,9 +145,9 @@ The component wrapper binds native WASI 0.3 imports, generates canonical ABI ada
 
 Interface glue implements the [Canonical ABI] around exported entry points:
 
-- **Synchronous Exports**: Emits flat Canonical ABI entry points, lifts arguments, invokes the MIR body, lowers results, and provides `cabi_post_<export>`.
+- **Synchronous Exports**: Emits flat Canonical ABI entry points, lifts arguments, invokes the MIR body and lowers results. Task scopes provide `cabi_post_<export>` for cleanup; independent scalar scopes call the implementation directly.
 - **Asynchronous Exports**: Synthesizes the stackless WASI 0.3 callback trio: `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`.
-- **Memory Allocation**: Exposes `cabi_realloc`, binding Canonical ABI dynamic allocations directly to the guest `talc` allocator.
+- **Memory Allocation**: Exposes `cabi_realloc` when export lowering or a reachable canonical import requires host allocation. The export binds directly to the linked guest allocator. Surviving memory operations, data and helpers determine whether the core module needs memory.
 
 ## Memory
 
@@ -196,7 +216,7 @@ Complex algorithmic operations—including JSON serialization, date calculations
 Helper libraries compile to standalone `wasm32-unknown-unknown` binaries without allocators or system runtimes. The resulting bytecode artifacts embed directly into the compiler binary during build time, removing any runtime dependency on Rust or LLVM.
 
 ### Capability Pruning
-When compiling a user component, the compiler scans AST capability requirements to identify only the helper functions actually referenced by the program. Unreferenced helper functions and unused data sections are pruned completely.
+The linker computes transitive function reachability from surviving core calls and required ABI exports. Reachable canonical imports contribute allocator roots when their ABI requires host allocation. Ordinary calls carry helper dependencies; unreferenced functions and data are pruned.
 
 ### Static Relocation
 During code generation, the compiler relocates helper functions, signatures, and element tables directly into the target WebAssembly module. Instructions are re-encoded to target local function indices, allowing pure helper routines to execute with zero call overhead.
@@ -228,6 +248,10 @@ Verification rests on two complementary boundaries:
 
 1. **Source Equivalence**: Conformance fixtures run under both Node.js and compiled WASI 0.3 components. These checks compare evaluation order, lexical scope, runtime values, exception unwinding, and standard library behaviors.
 2. **Host Integration**: Controlled Wasmtime hosts verify Canonical ABI marshalling, stackless coroutine suspension, cancellation signal propagation, fuel scaling bounds, and deterministic resource cleanup across serial invocations.
+
+The benchmark harness compares every unchanged-semantics workload against the checked-in baseline. Named core size, stripped component size, guest fuel, initial memory and peak memory must each stay within 105% of their baseline; zero baselines remain zero. Input hashes and locked Wasmtime versions are verified before comparison. Allocation counters, function and helper counts, specialization and convergence statistics, compilation time and execution time appear in the JSON report. Timing is informational. Linux CI runs the comparison using its existing test build and uploads the report.
+
+The scalar artifact test inspects Wasm sections and instructions: WIT integer addition requires typed integer arithmetic, at most two defined functions and zero runtime helpers, memory, allocator or post-return exports. Native/Wasm library and CLI parity checks cover every WIT integer width, widening, exact 64-bit arithmetic and unconstrained raw compilation.
 
 ## References
 
