@@ -75,14 +75,14 @@ impl StreamAnchor {
 /// [link_helpers_with] without byte streams (helper tests link core modules directly).
 #[allow(dead_code)] // Used by the helper tests, which include this module.
 pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
-    link_helpers_with(core_wasm, None)
+    Ok(link_helpers_with(core_wasm, None)?.0)
 }
 
 /// [link_helpers] for a module of a WIT world whose byte streams use `streams`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, u32)> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
     for payload in Parser::new(0).parse_all(&core_wasm) {
@@ -98,7 +98,7 @@ pub(crate) fn link_helpers_with(
     }
 
     if !has_helper_imports {
-        return Ok(core_wasm);
+        return Ok((core_wasm, 0));
     }
 
     // 2. Parse core module sections
@@ -825,5 +825,5 @@ pub(crate) fn link_helpers_with(
     if let Err(e) = Validator::new().validate_all(&result) {
         anyhow::bail!("Validating linked Wasm output: {e:?}");
     }
-    Ok(result)
+    Ok((result, current_helper_func_idx - helper_func_start_idx))
 }

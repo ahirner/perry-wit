@@ -11,6 +11,17 @@ use pliron::{
     result::Result,
 };
 
+pliron::dict_key!(STATISTICS, "perry_optimization_statistics");
+
+/// Compilation measurements attached by the optimizer, without process-global state.
+pub fn statistics(root: Ptr<Operation>, ctx: &Context) -> crate::attrs::OptimizationStatistics {
+    root.deref(ctx)
+        .attributes
+        .get::<crate::attrs::OptimizationStatistics>(&STATISTICS)
+        .copied()
+        .unwrap_or_default()
+}
+
 /// Promote locals and simplify to a fixed point before ownership and lifetime lowering.
 pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisManager> {
     verify_operation(root, ctx)?;
@@ -44,13 +55,24 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     cleanup.add_pass(Mem2RegPass);
     cleanup.add_pass(DCEPass);
     cleanup.add_pass(SimplifyCFGPass);
-    while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        if cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Unchanged {
+            break;
+        }
+    }
 
     let mut bounds = Passes::default();
     bounds.add_pass(crate::unwraps::ReuseUnwraps);
     bounds.add_pass(ProveBounds);
     bounds.run(root, ctx, &mut analyses)?;
-    while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
+    loop {
+        rounds += 1;
+        if cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Unchanged {
+            break;
+        }
+    }
 
     let mut ownership = Passes::default();
     ownership.add_pass(crate::append::AppendPass);
@@ -65,6 +87,11 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     ));
     ownership.add_pass(AssignLifetimes);
     ownership.run(root, ctx, &mut analyses)?;
+    let mut measured = statistics(root, ctx);
+    measured.cleanup_rounds = rounds;
+    root.deref_mut(ctx)
+        .attributes
+        .set(STATISTICS.clone(), measured);
     verify_operation(root, ctx)?;
     Ok(analyses)
 }

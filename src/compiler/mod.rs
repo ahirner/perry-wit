@@ -177,19 +177,20 @@ pub(crate) fn compile_sources(
         bindings,
         resources,
     };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)
+    let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)
         .map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
         })?;
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    let core = finish(core, streams.as_ref()).map_err(|error| {
+    let (core, helpers) = finish(core, streams.as_ref()).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
     let core = link::raw::available_stdio(core, stdout, stderr).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
+    allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
     let component = componentize
         .then(|| ComponentOutput::encode(&core, resolve, world))
         .transpose()
@@ -238,7 +239,7 @@ pub(crate) fn compile_core_sources(
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    link::raw::without_p3(finish(core, None)?)
+    link::raw::without_p3(finish(core, None)?.0)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
 }
 
@@ -267,12 +268,12 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
     Ok(analyses)
 }
 
-fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {
-    let core =
+fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<(Vec<u8>, u32)> {
+    let (core, helpers) =
         link::link_helpers_with(core, streams).context("linking perry-runtime and helpers")?;
     let core = link::compact(&core).context("interning core function signatures")?;
     audit::validate_guest(&core).context("validating stackless core Wasm")?;
-    Ok(core)
+    Ok((core, helpers))
 }
 
 pub fn compile_file(

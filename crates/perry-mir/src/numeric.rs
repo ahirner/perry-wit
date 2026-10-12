@@ -920,17 +920,31 @@ impl Pass for Specialize {
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
         let analysis = analyses.get_analysis::<NumericAnalysis>(root, ctx)?;
-        if analysis.roots.is_empty() {
-            return Ok(PassResult::default());
-        }
-        rewrite(ctx, &analysis);
+        let specializations = if analysis.roots.is_empty() {
+            0
+        } else {
+            rewrite(ctx, &analysis)
+        };
+        root.deref_mut(ctx).attributes.set(
+            crate::pipeline::STATISTICS.clone(),
+            crate::attrs::OptimizationStatistics {
+                numeric_contexts: analysis.keys.len() as u64,
+                constraint_visits: analysis.constraint_visits as u64,
+                specializations: specializations as u64,
+                cleanup_rounds: 0,
+            },
+        );
         let mut result = PassResult::default();
-        result.ir_changed = IRStatus::Changed;
+        result.ir_changed = if specializations == 0 {
+            IRStatus::Unchanged
+        } else {
+            IRStatus::Changed
+        };
         Ok(result)
     }
 }
 
-fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) {
+fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     let mut reachable = HashSet::new();
     let mut pending: Vec<_> = analysis.roots.iter().map(|(_, id)| *id).collect();
@@ -1148,4 +1162,5 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) {
             .attributes
             .set(SPECIALIZATION.clone(), IdentifierAttr::new(name));
     }
+    reachable.len()
 }

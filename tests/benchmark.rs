@@ -126,6 +126,8 @@ struct Row {
     bytes: Option<usize>,
     core_bytes: Option<usize>,
     defined_functions: Option<u32>,
+    helper_functions: Option<u32>,
+    optimization: Option<std::collections::BTreeMap<String, u64>>,
     fuel: Option<u64>,
     memory: Option<usize>,
     milliseconds: Option<f64>,
@@ -189,12 +191,45 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
     Ok(store)
 }
 
-fn component(source: &str, wit: &str, world: &str) -> Result<perry_wit::Compiled> {
+struct Compilation {
+    output: perry_wit::Compiled,
+    milliseconds: f64,
+}
+
+fn component(source: &str, wit: &str, world: &str) -> Result<Compilation> {
+    let started = Instant::now();
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), wit)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some(world))?;
-    compile_for_world(source, "bench.ts", &resolve, world, true)
+    let output = compile_for_world(source, "bench.ts", &resolve, world, true)?;
+    Ok(Compilation {
+        output,
+        milliseconds: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn optimization_statistics(report: &str) -> Result<std::collections::BTreeMap<String, u64>> {
+    let line = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Optimization statistics: "))
+        .ok_or_else(|| anyhow::anyhow!("missing optimization statistics"))?;
+    line.split(", ")
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("invalid statistic {entry}"))?;
+            Ok((key.to_string(), value.parse()?))
+        })
+        .collect()
+}
+
+fn helper_functions(report: &str) -> Result<u32> {
+    Ok(report
+        .lines()
+        .find_map(|line| line.strip_prefix("Linked helper functions: "))
+        .ok_or_else(|| anyhow::anyhow!("missing helper count"))?
+        .parse()?)
 }
 
 fn defined_functions(core: &[u8]) -> Result<u32> {
@@ -210,7 +245,7 @@ fn defined_functions(core: &[u8]) -> Result<u32> {
 /// warm-up call, and the median of `SAMPLES` timed calls.
 async fn measure<F, Fut>(
     workload: &str,
-    compiled: &perry_wit::Compiled,
+    compilation: &Compilation,
     root: Option<&std::path::Path>,
     call: F,
 ) -> Result<Row>
@@ -218,6 +253,7 @@ where
     F: Fn(Store<Host>, Component, Linker<Host>) -> Fut,
     Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64)>>,
 {
+    let compiled = &compilation.output;
     let bytes = &compiled
         .component
         .as_ref()
@@ -249,6 +285,9 @@ where
         bytes: Some(bytes.len()),
         core_bytes: Some(compiled.core.len()),
         defined_functions: Some(defined_functions(&compiled.core)?),
+        helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+        optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+        compile_milliseconds: Some(compilation.milliseconds),
         fuel,
         memory,
         milliseconds,
@@ -531,6 +570,30 @@ export function run(n: number): number {
             ..Row::default()
         };
         row.compile_milliseconds = Some(compile_ms);
+        // Inspect the same raw pipeline separately, outside the compilation timing.
+        // The linked-minus-emitted function count measures helpers without naming heuristics.
+        {
+            use pliron::{context::Context, op::Op, printable::Printable};
+            let ctx = &mut Context::new();
+            let mir = perry_lower::lower_sources(
+                ctx,
+                source,
+                "bench.ts",
+                &Default::default(),
+                &Default::default(),
+            )?;
+            let mut analyses = perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
+                .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+            let exports = perry_codegen::Exports::Raw;
+            row.optimization = Some(optimization_statistics(&perry_codegen::explain_tiers(
+                ctx,
+                &mir,
+                &exports,
+                &mut analyses,
+            )?)?);
+            let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+            row.helper_functions = Some(defined_functions(&wasm)? - defined_functions(&emitted)?);
+        }
         for metered in [true, false] {
             let mut config = Config::new();
             config.consume_fuel(metered);
@@ -644,6 +707,7 @@ fn examples() -> Result<Vec<Row>> {
             "task",
         ),
     ] {
+        let started = Instant::now();
         let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
         let world = resolve.select_world(&[package], Some(world))?;
         let source_text = std::fs::read_to_string(source)?;
@@ -653,6 +717,9 @@ fn examples() -> Result<Vec<Row>> {
             bytes: Some(compiled.component.unwrap().stripped.len()),
             core_bytes: Some(compiled.core.len()),
             defined_functions: Some(defined_functions(&compiled.core)?),
+            helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+            optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+            compile_milliseconds: Some(started.elapsed().as_secs_f64() * 1000.0),
             fuel: None,
             memory: None,
             milliseconds: None,
@@ -665,6 +732,7 @@ fn examples() -> Result<Vec<Row>> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "performance campaign; run explicitly"]
 async fn benchmark_baseline() -> Result<()> {
+    verify_baseline_inputs()?;
     let mut rows = components().await?;
     rows.extend(microbenchmarks()?);
     rows.push(compile_time()?);
@@ -685,6 +753,42 @@ async fn benchmark_baseline() -> Result<()> {
     Ok(())
 }
 
+/// The capture metadata keeps the original harness hash; comparison pins the reviewed
+/// measurement harness separately so reporting changes never overwrite baseline results.
+fn verify_baseline_inputs() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("baselines/pliron.metadata.json"))?;
+    for (path, hash) in metadata["inputs_sha256"].as_object().unwrap() {
+        if matches!(path.as_str(), "tests/benchmark.rs" | "Cargo.lock") {
+            continue;
+        }
+        let actual = format!("{:x}", Sha256::digest(std::fs::read(path)?));
+        ensure!(
+            Some(actual.as_str()) == hash.as_str(),
+            "benchmark input changed: {path}; baseline review is required"
+        );
+    }
+    let harness = format!("{:x}", Sha256::digest(include_bytes!("benchmark.rs")));
+    ensure!(
+        Some(harness.as_str()) == metadata["comparison_harness_sha256"].as_str(),
+        "benchmark measurement harness changed; baseline review is required"
+    );
+    let lock = include_str!("../Cargo.lock");
+    for package in ["wasmtime", "wasmtime-wasi", "wasmtime-wasi-http"] {
+        let declaration = lock
+            .split("[[package]]")
+            .find(|entry| entry.contains(&format!("\nname = \"{package}\"\n")))
+            .ok_or_else(|| anyhow::anyhow!("missing locked {package}"))?;
+        let expected = metadata["wasmtime"].as_str().unwrap();
+        ensure!(
+            declaration.contains(&format!("\nversion = \"{expected}\"\n")),
+            "benchmark requires {package} {expected}"
+        );
+    }
+    Ok(())
+}
+
 async fn optimization_fixtures() -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     for domain in ["s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64"] {
@@ -694,28 +798,13 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
         } else {
             include_str!("fixtures/optimization/add.ts")
         };
-        let compiled = match component(
+        let compiled = component(
             source,
             &format!(
                 "package test:integers; world test {{ export add: func(x: {domain}, y: {domain}) -> {domain}; }}"
             ),
             "test",
-        ) {
-            Ok(compiled) => compiled,
-            Err(error)
-                if wide
-                    && format!("{error:#}")
-                        .contains("operator Add on these operand types is not supported yet") =>
-            {
-                rows.push(Row {
-                    workload: format!("WIT {domain} addition"),
-                    compilation_error: Some(format!("{error:#}")),
-                    ..Row::default()
-                });
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+        )?;
         rows.push(measure_core(
             &format!("WIT {domain} addition"),
             &compiled,
@@ -807,11 +896,12 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
 
 fn measure_core(
     workload: &str,
-    compiled: &perry_wit::Compiled,
+    compilation: &Compilation,
     export: &str,
     args: &[Val],
     expected: Val,
 ) -> Result<Row> {
+    let compiled = &compilation.output;
     let engine = engine(true)?;
     let module = wasmtime::Module::new(&engine, &compiled.core)?;
     let mut store = Store::new(&engine, Memory::default());
@@ -846,6 +936,9 @@ fn measure_core(
         ),
         core_bytes: Some(compiled.core.len()),
         defined_functions: Some(defined_functions(&compiled.core)?),
+        helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+        optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+        compile_milliseconds: Some(compilation.milliseconds),
         fuel: Some(fuel),
         initial_memory: Some(store.data().initial.unwrap_or(0)),
         memory: Some(store.data().bytes),

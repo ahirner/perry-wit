@@ -1,6 +1,16 @@
 //! Attributes of the `perry` dialect.
 use pliron::derive::pliron_attr;
 
+/// Measurements of the numeric solver and convergent cleanup for one compilation.
+#[pliron_attr(name = "perry.optimization_statistics", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
+pub struct OptimizationStatistics {
+    pub numeric_contexts: u64,
+    pub constraint_visits: u64,
+    pub specializations: u64,
+    pub cleanup_rounds: u64,
+}
+
 /// Absence states admitted by a statically typed value.
 #[pliron_attr(name = "perry.absence", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]

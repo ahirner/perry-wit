@@ -101,6 +101,7 @@ wit-bindgen = "0.62"
 wasmparser.workspace = true
 
 [dev-dependencies]
+sha2 = "0.10"
 serde = { workspace = true, features = ["derive"] }
 wat = "1.261.0"
 bytes.workspace = true
