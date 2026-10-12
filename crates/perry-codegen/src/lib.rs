@@ -6,8 +6,9 @@
 //! functions ([Exports::Raw], for tests) or canonical-ABI component exports
 //! ([Exports::Canonical], see [boundary]). Representation decisions for this first slice:
 //!
-//! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
-//!   `i32` addresses.
+//! - `f64` stays `f64`; semantic integers use `i32` through 32 bits and `i64` through 64 bits,
+//!   with narrow results normalized at their wrap points. Records, arrays, strings and
+//!   promises are `i32` addresses.
 //! - `undefined` (R8) is the signalling-NaN bit pattern [perry_abi::UNDEFINED_BITS] for
 //!   numbers, the null address for references and `2` for booleans. Wasm arithmetic only
 //!   produces quiet NaNs, so no computed number can be mistaken for `undefined`;
@@ -47,6 +48,7 @@ mod json;
 mod lease;
 mod memory;
 mod module;
+mod numeric;
 mod ops;
 mod optional;
 mod regex;

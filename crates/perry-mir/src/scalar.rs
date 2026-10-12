@@ -1,5 +1,5 @@
 //! Scalar arithmetic and comparison.
-use crate::attrs::{BinaryKind, CompareKind, ConvertKind};
+use crate::attrs::{BinaryKind, CompareKind};
 use pliron::{
     builtin::{
         op_interfaces::{
@@ -15,7 +15,7 @@ use pliron::{
     operation::Operation,
     opts::dce::SideEffects,
     result::Result,
-    r#type::Typed,
+    r#type::{TypeHandle, Typed},
     value::Value,
     verify_err,
 };
@@ -129,79 +129,56 @@ pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
         .is_some_and(|ty| ty.width() == 1 && ty.signedness() == Signedness::Signless)
 }
 
-/// Conversion between `f64` and signless `i32`.
+/// A representation conversion with explicit source and destination numeric types.
+/// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
+/// conversion to an integer saturates, matching the existing floating-point WIT boundary.
 #[pliron_op(
-    name = "perry.convert",
-    format = "attr($perry_convert_kind, $ConvertKind) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface],
-    attributes = (perry_convert_kind: ConvertKind)
+    name = "perry.numeric_cast",
+    format = "$0 ` : ` type($0)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface]
 )]
-pub struct ConvertOp;
+pub struct NumericCastOp;
 
-impl ConvertOp {
-    pub fn new(ctx: &mut Context, kind: crate::attrs::ConvertKind, value: Value) -> Self {
-        use crate::attrs::ConvertKind;
-        let ty = match kind {
-            ConvertKind::I32ToF64 => pliron::builtin::types::FP64Type::get(ctx).into(),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                IntegerType::get(ctx, 32, Signedness::Signless).into()
-            }
-        };
-        let op = ConvertOp {
+impl NumericCastOp {
+    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
+        Self {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
-                vec![ty],
+                vec![target],
                 vec![value],
                 vec![],
                 0,
             ),
-        };
-        op.set_attr_perry_convert_kind(ctx, kind);
-        op
-    }
-
-    pub fn kind(&self, ctx: &Context) -> crate::attrs::ConvertKind {
-        *self.get_attr_perry_convert_kind(ctx).expect("convert kind")
+        }
     }
 }
 
 #[derive(Debug, Error)]
-#[error("perry.convert {0:?} has operand or result of the wrong type")]
-pub(crate) struct ConvertErr(crate::attrs::ConvertKind);
+#[error("perry.numeric_cast requires f64 or an 8-, 16-, 32-, or 64-bit integer")]
+struct NumericCastErr;
 
-impl Verify for ConvertOp {
+impl Verify for NumericCastOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        use crate::attrs::ConvertKind;
-        let kind = self.kind(ctx);
-        let input = self.get_operation().deref(ctx).get_operand(0);
-        let is_f64 = |v: Value| {
-            v.get_type(ctx)
-                .deref(ctx)
-                .is::<pliron::builtin::types::FP64Type>()
-        };
-        let is_i32 = |v: Value| {
-            v.get_type(ctx)
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|ty| ty.width() == 32 && ty.signedness() == Signedness::Signless)
-        };
-        let ok = match kind {
-            ConvertKind::I32ToF64 => is_i32(input) && is_f64(self.get_result(ctx)),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                is_f64(input) && is_i32(self.get_result(ctx))
+        let op = self.get_operation().deref(ctx);
+        for value in op.operands().chain(op.results()) {
+            let ty = value.get_type(ctx);
+            let ty = ty.deref(ctx);
+            if !ty.is::<pliron::builtin::types::FP64Type>()
+                && !ty
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            {
+                verify_err!(self.loc(ctx), NumericCastErr)?;
             }
-        };
-        if !ok {
-            verify_err!(self.loc(ctx), ConvertErr(kind))?
         }
         Ok(())
     }
 }
 
 #[op_interface_impl]
-impl SideEffects for ConvertOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
+impl SideEffects for NumericCastOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
         false
     }
 }

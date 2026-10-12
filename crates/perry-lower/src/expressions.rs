@@ -589,13 +589,13 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::String, "length") => {
                 let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
                 self.emit_value(ctx, |ctx| {
-                    ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
             }
             (Kind::Array, "length") => {
                 let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, value));
                 self.emit_value(ctx, |ctx| {
-                    ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
             }
             (Kind::Bytes, "buffer") => self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value]),

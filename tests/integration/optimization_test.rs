@@ -2,6 +2,42 @@
 use anyhow::Result;
 use wasmparser::{Parser, Payload};
 
+fn mir_program(
+    signature: &str,
+    arguments: &str,
+    body: &str,
+) -> Result<crate::core_program::Program> {
+    use pliron::{
+        builtin::{
+            op_interfaces::SingleBlockRegionInterface,
+            ops::{FuncOp, ModuleOp},
+        },
+        context::Context,
+        irfmt::parsers::spaced,
+        linked_list::ContainsLinkedList,
+        operation::Operation,
+        parsable::parse_from_str,
+        printable::Printable,
+    };
+    let ctx = &mut Context::new();
+    let text = format!(
+        "builtin.module @numeric {{ ^module(): builtin.func @run: builtin.function <{signature}> {{ ^entry({arguments}): {body} }} }}"
+    );
+    let root = parse_from_str(spaced(Operation::top_level_parser()), ctx, &text)
+        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let module = Operation::get_op::<ModuleOp>(root, ctx).unwrap();
+    let operations: Vec<_> = module.get_body(ctx, 0).deref(ctx).iter(ctx).collect();
+    for op in operations {
+        if let Some(function) = Operation::get_op::<FuncOp>(op, ctx) {
+            perry_mir::calls::set_exported(ctx, &function);
+        }
+    }
+    let mut analyses = perry_mir::pipeline::canonicalize(root, ctx)
+        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let bytes = perry_codegen::compile(ctx, &module, &perry_codegen::Exports::Raw, &mut analyses)?;
+    Ok(crate::core_program::Program::from_wasm(bytes))
+}
+
 fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str(
@@ -72,6 +108,151 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
             crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
         let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
         assert_eq!(run.call(&mut store, (1.0,))?, (1.0,));
+    }
+    Ok(())
+}
+
+#[test]
+fn semantic_integer_arithmetic_wraps_at_each_width() -> Result<()> {
+    for bits in [8, 16, 32, 64] {
+        for signed in [false, true] {
+            let ty = format!("builtin.integer {}i{bits}", if signed { "s" } else { "u" });
+            let mask = u64::MAX >> (64 - bits);
+            let normalize = |value: u64| {
+                let value = value & mask;
+                if signed && bits < 64 && value & (1 << (bits - 1)) != 0 {
+                    value | !mask
+                } else {
+                    value
+                }
+            };
+            let to_val = |value: u64| {
+                let value = normalize(value);
+                if bits == 64 {
+                    wasmtime::Val::I64(value as i64)
+                } else {
+                    wasmtime::Val::I32(value as i32)
+                }
+            };
+            for kind in ["Add", "Sub", "Mul"] {
+                let mut program = mir_program(
+                    &format!("({ty}, {ty}) -> ({ty})"),
+                    &format!("x: {ty}, y: {ty}"),
+                    &format!("value = perry.binary {kind} x, y : {ty}; perry.return value"),
+                )?;
+                assert_eq!(program.memory_bytes(), 0);
+                for (x, y) in [
+                    (mask, 1),
+                    (1 << (bits - 1), mask),
+                    (mask >> 1, 2),
+                    (9007199254740993 & mask, 7),
+                ] {
+                    let expected = normalize(match kind {
+                        "Add" => x.wrapping_add(y),
+                        "Sub" => x.wrapping_sub(y),
+                        _ => x.wrapping_mul(y),
+                    });
+                    let (actual, _) = program.call("run", &[to_val(x), to_val(y)]);
+                    let actual = if bits == 64 {
+                        actual[0].unwrap_i64() as u64
+                    } else {
+                        actual[0].unwrap_i32() as i64 as u64
+                    };
+                    let expected = if bits == 32 {
+                        expected as i32 as i64 as u64
+                    } else {
+                        expected
+                    };
+                    assert_eq!(actual, expected, "{kind} {ty}: {x}, {y}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn integer_casts_use_source_signedness_and_wrap_narrowing() -> Result<()> {
+    use wasmtime::Val::{I32, I64};
+    for (from, to, input, expected) in [
+        ("si8", "si64", I32(-1), -1i64),
+        ("ui8", "si64", I32(255), 255),
+        ("ui32", "ui64", I32(-1), 4294967295),
+        ("si32", "ui64", I32(-1), -1),
+        ("si64", "si8", I64(128), -128),
+        ("ui64", "ui8", I64(-1), 255),
+        ("ui64", "si32", I64(4294967295), -1),
+        ("si8", "ui16", I32(-128), 65408),
+    ] {
+        let mut program = mir_program(
+            &format!("(builtin.integer {from}) -> (builtin.integer {to})"),
+            &format!("x: builtin.integer {from}"),
+            &format!("value = perry.numeric_cast x : builtin.integer {to}; perry.return value"),
+        )?;
+        let (actual, _) = program.call("run", &[input]);
+        let actual = if to.ends_with("64") {
+            actual[0].unwrap_i64()
+        } else {
+            i64::from(actual[0].unwrap_i32())
+        };
+        assert_eq!(actual, expected, "{from} -> {to}");
+        let literal = match input {
+            I32(value) if from.starts_with('u') => (value as u32).to_string(),
+            I32(value) => value.to_string(),
+            I64(value) if from.starts_with('u') => (value as u64).to_string(),
+            I64(value) => value.to_string(),
+            _ => unreachable!(),
+        };
+        let mut folded = mir_program(
+            &format!("() -> (builtin.integer {to})"),
+            "",
+            &format!(
+                "x = builtin.constant <builtin.integer <{literal}: {from}>> : builtin.integer {from}; value = perry.numeric_cast x : builtin.integer {to}; perry.return value"
+            ),
+        )?;
+        let (actual, _) = folded.call("run", &[]);
+        let actual = if to.ends_with("64") {
+            actual[0].unwrap_i64()
+        } else {
+            i64::from(actual[0].unwrap_i32())
+        };
+        assert_eq!(actual, expected, "folded {from} -> {to}");
+    }
+    Ok(())
+}
+
+#[test]
+fn narrow_arithmetic_wraps_before_later_widening() -> Result<()> {
+    let mut program = mir_program(
+        "(builtin.integer si8, builtin.integer si8) -> (builtin.integer si64)",
+        "x: builtin.integer si8, y: builtin.integer si8",
+        "sum = perry.binary Add x, y : builtin.integer si8; value = perry.numeric_cast sum : builtin.integer si64; perry.return value",
+    )?;
+    let (result, _) = program.call("run", &[wasmtime::Val::I32(127), wasmtime::Val::I32(1)]);
+    assert_eq!(result[0].unwrap_i64(), -128);
+    Ok(())
+}
+
+#[test]
+fn integer_comparisons_respect_signedness_at_wasm_widths() -> Result<()> {
+    for (ty, input, expected) in [
+        ("si32", wasmtime::Val::I32(-1), 0),
+        ("ui32", wasmtime::Val::I32(-1), 1),
+        ("si64", wasmtime::Val::I64(-1), 0),
+        ("ui64", wasmtime::Val::I64(-1), 1),
+    ] {
+        let mut program = mir_program(
+            &format!("(builtin.integer {ty}) -> (builtin.integer i1)"),
+            &format!("x: builtin.integer {ty}"),
+            &format!(
+                "zero = builtin.constant <builtin.integer <0: {ty}>> : builtin.integer {ty}; result = perry.compare Gt x, zero : builtin.integer i1; perry.return result"
+            ),
+        )?;
+        assert_eq!(
+            program.call("run", &[input]).0[0].unwrap_i32(),
+            expected,
+            "{ty}"
+        );
     }
     Ok(())
 }

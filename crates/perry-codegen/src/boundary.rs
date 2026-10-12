@@ -147,6 +147,23 @@ pub enum Flat {
 }
 
 impl AbiType {
+    /// Exact integer domain supplied by WIT, independent of the source representation.
+    pub fn integer_type(&self, ctx: &Context) -> Option<TypeHandle> {
+        use Signedness::{Signed, Unsigned};
+        let (bits, sign) = match self {
+            Self::S8 => (8, Signed),
+            Self::U8 => (8, Unsigned),
+            Self::S16 => (16, Signed),
+            Self::U16 => (16, Unsigned),
+            Self::S32 => (32, Signed),
+            Self::U32 => (32, Unsigned),
+            Self::S64 => (64, Signed),
+            Self::U64 => (64, Unsigned),
+            _ => return None,
+        };
+        Some(IntegerType::get(ctx, bits, sign).into())
+    }
+
     fn flatten(&self, out: &mut Vec<Flat>) {
         match self {
             AbiType::Bool
@@ -321,6 +338,12 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         raw: Value,
     ) -> Result<Value> {
+        if let Some(source) = ty.integer_type(ctx)
+            && matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64)
+        {
+            let value = self.normalize_integer(ctx, raw, source);
+            return self.numeric_cast(ctx, value, source, mir_ty);
+        }
         let opcode = match ty {
             AbiType::Resource { key, owned } => {
                 return self.lift_resource(ctx, *key, *owned, mir_ty, raw);
@@ -559,6 +582,11 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         value: Value,
     ) -> Result<Value> {
+        if let Some(target) = ty.integer_type(ctx)
+            && matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64)
+        {
+            return self.numeric_cast(ctx, value, mir_ty, target);
+        }
         if ty.is_sum() {
             let mut flat = self.lower_sum_flat(ctx, ty, mir_ty, value)?;
             ensure!(

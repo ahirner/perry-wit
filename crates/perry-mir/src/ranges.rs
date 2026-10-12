@@ -25,13 +25,13 @@
 //! becomes `string_char_at_index` without integrality or range checks.
 use crate::{
     aggregates::{functions, operations},
-    attrs::{BinaryKind, CompareKind, ConvertKind},
+    attrs::{BinaryKind, CompareKind},
     calls::{AsyncCallOp, AwaitOp, CallOp},
     collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, StringLenOp},
     control::CondBrOp,
     intrinsics::{Intrinsic, IntrinsicOp},
     optional::WrapOp,
-    scalar::{BinaryOp, CompareOp, ConvertOp},
+    scalar::{BinaryOp, CompareOp, NumericCastOp},
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -39,7 +39,7 @@ use pliron::{
         attributes::FPDoubleAttr,
         op_interfaces::{BranchOpInterface, OneRegionInterface, OneResultInterface},
         ops::{ConstantOp, FuncOp},
-        types::FP64Type,
+        types::{FP64Type, IntegerType, Signedness},
     },
     context::{Context, Ptr},
     graph::dominance::DomInfo,
@@ -94,8 +94,8 @@ fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
 /// Recognize array/string lengths converted to numbers and byte-view lengths.
 fn length(ctx: &Context, value: Value) -> Option<Length> {
     let op = value.defining_op()?;
-    if let Some(convert) = Operation::get_op::<ConvertOp>(op, ctx)
-        && convert.kind(ctx) == ConvertKind::I32ToF64
+    if Operation::get_op::<NumericCastOp>(op, ctx).is_some()
+        && value.get_type(ctx).deref(ctx).is::<FP64Type>()
     {
         let len = op.deref(ctx).get_operand(0).defining_op()?;
         if Operation::get_op::<StringLenOp>(len, ctx).is_some() {
@@ -390,7 +390,8 @@ fn stays_attached(ctx: &Context, info: &Function, fact: &Fact, block: Ptr<BasicB
 /// Turn the checked read `op` into an unchecked one, wrapped back into `T | undefined`
 /// (a character is a plain string).
 fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value, kind: Object) {
-    let convert = ConvertOp::new(ctx, ConvertKind::F64ToU32, index).get_operation();
+    let target = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+    let convert = NumericCastOp::new(ctx, index, target).get_operation();
     convert.insert_before(ctx, op);
     let index = convert.deref(ctx).get_result(0);
     if kind == Object::String {
@@ -438,7 +439,7 @@ mod tests {
         let ty = IntegerType::get(ctx, 32, Signedness::Signless);
         let attr = IntegerAttr::new(ty, APInt::from_u64(3, bw(32)));
         let integer = ConstantOp::new(ctx, Box::new(attr)).get_result(ctx);
-        let number = ConvertOp::new(ctx, ConvertKind::I32ToF64, integer).get_result(ctx);
+        let number = NumericCastOp::new(ctx, integer, FP64Type::get(ctx).into()).get_result(ctx);
         assert!(length(ctx, number).is_none());
     }
 }

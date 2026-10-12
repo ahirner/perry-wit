@@ -1,9 +1,9 @@
 //! Optional-value and exact-conversion canonicalization.
 use crate::{
-    attrs::{CompareKind, ConvertKind},
+    attrs::CompareKind,
     exceptions::CaughtOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
-    scalar::{CompareOp, ConvertOp},
+    scalar::{CompareOp, NumericCastOp},
 };
 use pliron::{
     builtin::{
@@ -32,10 +32,20 @@ fn wrapped(ctx: &Context, value: Value) -> Option<Value> {
     Some(op.deref(ctx).get_operand(0))
 }
 
-fn converted_i32(ctx: &Context, value: Value) -> Option<Value> {
+fn converted_integer(ctx: &Context, value: Value) -> Option<Value> {
     let op = value.defining_op()?;
-    let convert = Operation::get_op::<ConvertOp>(op, ctx)?;
-    (convert.kind(ctx) == ConvertKind::I32ToF64).then(|| op.deref(ctx).get_operand(0))
+    Operation::get_op::<NumericCastOp>(op, ctx)?;
+    let input = op.deref(ctx).get_operand(0);
+    (value
+        .get_type(ctx)
+        .deref(ctx)
+        .is::<pliron::builtin::types::FP64Type>()
+        && input
+            .get_type(ctx)
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() <= 32))
+    .then_some(input)
 }
 
 enum Replacement {
@@ -73,10 +83,12 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
             .map(Replacement::Value);
     }
     if let Some(compare) = Operation::get_op::<CompareOp>(op, ctx) {
-        return Some(Replacement::Compare(
+        let lhs = converted_integer(ctx, operation.get_operand(0))?;
+        let rhs = converted_integer(ctx, operation.get_operand(1))?;
+        return (lhs.get_type(ctx) == rhs.get_type(ctx)).then_some(Replacement::Compare(
             compare.kind(ctx),
-            converted_i32(ctx, operation.get_operand(0))?,
-            converted_i32(ctx, operation.get_operand(1))?,
+            lhs,
+            rhs,
         ));
     }
     None

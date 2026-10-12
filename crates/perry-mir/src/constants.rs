@@ -2,14 +2,14 @@
 use crate::{
     attrs::{BinaryKind, CompareKind},
     control::{BrOp, CondBrOp},
-    scalar::{BinaryOp, CompareOp},
+    scalar::{BinaryOp, CompareOp, NumericCastOp},
 };
 use pliron::{
     attribute::AttrObj,
     basic_block::BasicBlock,
     builtin::{
         attributes::{FPDoubleAttr, IntegerAttr},
-        op_interfaces::{BranchOpInterface, OneRegionInterface},
+        op_interfaces::{BranchOpInterface, OneRegionInterface, OneResultInterface},
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
@@ -19,6 +19,7 @@ use pliron::{
     op::{Op, op_cast},
     operation::Operation,
     opts::constants::{BranchOpFoldInterface, ConstFoldInterface},
+    r#type::{Typed, TypedHandle},
     utils::apint::{APInt, bw},
 };
 use std::cmp::Ordering::{Equal, Greater, Less};
@@ -86,6 +87,67 @@ impl ConstFoldInterface for BinaryOp {
                 BinaryKind::Div | BinaryKind::Rem => return None,
             };
             Some(Box::new(IntegerAttr::new(lhs.get_type(), result)))
+        })();
+        vec![folded]
+    }
+
+    fn fold_in_place(
+        &self,
+        ctx: &mut Context,
+        operands: &[Option<AttrObj>],
+        rewriter: &mut dyn Rewriter,
+    ) -> IRStatus {
+        self.fold_with_materialization(ctx, operands, rewriter)
+    }
+}
+
+#[op_interface_impl]
+impl ConstFoldInterface for NumericCastOp {
+    fn check_fold(&self, ctx: &Context, operands: &[Option<AttrObj>]) -> Vec<Option<AttrObj>> {
+        let folded = (|| {
+            let input = operands[0].as_ref()?;
+            let target = self.get_result(ctx).get_type(ctx);
+            let target_int = TypedHandle::<IntegerType>::from_handle(target, ctx).ok();
+            if let Some(input) = input.downcast_ref::<IntegerAttr>() {
+                let source = input.get_type().deref(ctx);
+                let signed = source.signedness() != Signedness::Unsigned;
+                if let Some(target) = target_int {
+                    let bits = target.deref(ctx).width();
+                    let width = bw(bits as usize);
+                    let value = if bits < source.width() {
+                        input.value().trunc(width)
+                    } else if signed {
+                        input.value().sext(width)
+                    } else {
+                        input.value().zext(width)
+                    };
+                    return Some(Box::new(IntegerAttr::new(target, value)) as AttrObj);
+                }
+                let value = if signed {
+                    input.value().to_i64() as f64
+                } else {
+                    input.value().to_u64() as f64
+                };
+                return Some(Box::new(FPDoubleAttr::from(value)) as AttrObj);
+            }
+            let value = f64::from(input.downcast_ref::<FPDoubleAttr>()?.clone());
+            let Some(target) = target_int else {
+                return Some(Box::new(FPDoubleAttr::from(value)) as AttrObj);
+            };
+            let integer = target.deref(ctx);
+            let bits = match (
+                integer.width() == 64,
+                integer.signedness() != Signedness::Unsigned,
+            ) {
+                (false, true) => value as i32 as u64,
+                (false, false) => value as u32 as u64,
+                (true, true) => value as i64 as u64,
+                (true, false) => value as u64,
+            };
+            Some(Box::new(IntegerAttr::new(
+                target,
+                APInt::from_u64(bits, bw(integer.width() as usize)),
+            )) as AttrObj)
         })();
         vec![folded]
     }

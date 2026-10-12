@@ -193,7 +193,7 @@ impl Ty {
             Ty::BigInt => deref.is::<crate::types::BigIntType>(),
             Ty::Index | Ty::Scalar => deref
                 .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 32 && i.signedness() == Signedness::Signless),
+                .is_some_and(|i| i.width() == 32),
             Ty::Number => deref.is::<FP64Type>(),
             Ty::Bool => deref
                 .downcast_ref::<IntegerType>()

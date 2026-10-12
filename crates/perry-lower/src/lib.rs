@@ -46,7 +46,7 @@ use perry_hir::{
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{
-    attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
+    attrs::{BinaryKind, CompareKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
     collections::{
         ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp, StringConstOp,
@@ -67,7 +67,7 @@ use perry_mir::{
         IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
         UnwrapOp, WrapOp, absence, optional_parts, optional_value,
     },
-    scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
+    scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, NumericCastOp},
     types::{
         AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
         InstantType, JsonType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,

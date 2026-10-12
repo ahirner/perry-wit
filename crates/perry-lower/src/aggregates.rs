@@ -286,7 +286,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_length(&mut self, ctx: &mut Context, array: Value) -> Value {
         let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
         self.emit_value(ctx, |ctx| {
-            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
         })
     }
 }

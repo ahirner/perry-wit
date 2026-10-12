@@ -826,7 +826,13 @@ impl<'s> FunctionBuilder<'s> {
 
     /// `array[index]` for an `f64` index the caller checked against the length.
     fn element_at(&mut self, ctx: &mut Context, array: Value, index: Value) -> Result<Value> {
-        let at = self.emit_value(ctx, |ctx| ConvertOp::new(ctx, ConvertKind::F64ToU32, index));
+        let at = self.emit_value(ctx, |ctx| {
+            NumericCastOp::new(
+                ctx,
+                index,
+                IntegerType::get(ctx, 32, Signedness::Unsigned).into(),
+            )
+        });
         let op = ArrayAtOp::new(ctx, array, at)?;
         Ok(self.append_value(ctx, &op))
     }

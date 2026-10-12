@@ -38,6 +38,7 @@ pub(crate) enum Repr {
     F64,
     Bool,
     I32,
+    I64,
     Ref,
 }
 
@@ -59,7 +60,8 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
         return match int.width() {
             1 => Ok(Repr::Bool),
-            32 => Ok(Repr::I32),
+            8 | 16 | 32 => Ok(Repr::I32),
+            64 => Ok(Repr::I64),
             width => bail!("integers of width {width} are not supported"),
         };
     }
@@ -113,6 +115,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
 pub(crate) fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => FP64Type::get(ctx).into(),
+        Repr::I64 => IntegerType::get(ctx, 64, Signedness::Signless).into(),
         _ => i32_type(ctx),
     })
 }
@@ -120,6 +123,7 @@ pub(crate) fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle>
 pub(crate) fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => MemKind::F64,
+        Repr::I64 => MemKind::I64,
         _ => MemKind::I32,
     })
 }

@@ -56,7 +56,7 @@ fn is_index(ctx: &Context, value: Value) -> bool {
         .get_type(ctx)
         .deref(ctx)
         .downcast_ref::<IntegerType>()
-        .is_some_and(|ty| ty.width() == 32 && ty.signedness() == Signedness::Signless)
+        .is_some_and(|ty| ty.width() == 32)
 }
 
 fn element(ctx: &Context, array: Value, op: &'static str) -> Result<TypeHandle> {

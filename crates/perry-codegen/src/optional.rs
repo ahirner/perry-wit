@@ -107,7 +107,7 @@ impl FunctionLowering<'_, '_> {
             }
             Repr::Bool => self.i32_const(ctx, UNDEFINED_BOOL),
             Repr::Ref => self.i32_const(ctx, 0),
-            Repr::I32 => bail!("i32 | undefined has no representation"),
+            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
         })
     }
 
@@ -128,7 +128,7 @@ impl FunctionLowering<'_, '_> {
                 self.num(ctx, NumOpcode::I32Eq, vec![value, undefined])
             }
             Repr::Ref => self.num(ctx, NumOpcode::I32Eqz, vec![value]),
-            Repr::I32 => bail!("i32 | undefined has no representation"),
+            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
         })
     }
 
@@ -140,7 +140,7 @@ impl FunctionLowering<'_, '_> {
             }
             Repr::Bool => self.i32_const(ctx, 3),
             Repr::Ref => self.i32_const(ctx, 1),
-            Repr::I32 => bail!("i32 | null has no representation"),
+            Repr::I32 | Repr::I64 => bail!("nullable fixed-width integer has no representation"),
         })
     }
 

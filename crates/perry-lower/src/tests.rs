@@ -97,7 +97,12 @@ export function run(x: number): number {
 "#,
     );
     assert!(printed.contains("perry.concat_reuse"), "{printed}");
-    assert!(printed.contains("perry.convert I32ToF64"), "{printed}");
+    assert!(
+        printed
+            .lines()
+            .any(|line| line.contains("perry.numeric_cast") && line.contains("builtin.fp64")),
+        "{printed}"
+    );
 }
 
 #[test]
@@ -164,8 +169,6 @@ export function run(x: number): number {
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
-    // Indices stay f64: the bounds and integrality check is part of `perry.array_get`.
-    assert!(!printed.contains("perry.convert F64ToI32"), "{printed}");
 }
 
 #[test]

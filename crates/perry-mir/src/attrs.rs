@@ -57,19 +57,6 @@ pub enum Tier {
     Instance,
 }
 
-/// Numeric conversions between ECMAScript numbers and proven integer ranges.
-#[pliron_attr(name = "perry.convert_kind", format, verifier = "succ")]
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
-pub enum ConvertKind {
-    /// Exact: every signless `i32` (read as signed) is an `f64`.
-    I32ToF64,
-    /// Only inserted by P3.5 for values proven integral and in `i32` range. Runtime failures
-    /// in the subset are exceptions, never traps, so this conversion never checks.
-    F64ToI32,
-    /// A proven nonnegative integral Wasm32 index.
-    F64ToU32,
-}
-
 /// The ECMAScript error a throwing op raises.
 #[pliron_attr(name = "perry.error_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]

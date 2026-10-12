@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
-    attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
+    attrs::{BinaryKind, CompareKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp},
     collections::{ConcatOp, StringConstOp, StringLenOp},
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
@@ -17,7 +17,7 @@ use perry_mir::{
         PromiseResolvedOp, SettledField, SettledFieldOp,
     },
     locals::UndefOp,
-    scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
+    scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, NumericCastOp},
     types::{ArrayType, PromiseType, SettledType, StringType},
 };
 use pliron::{
@@ -127,9 +127,21 @@ impl FunctionLowering<'_, '_> {
                 drop(attr);
                 self.f64_const(ctx, value)
             } else if let Some(int) = attr.downcast_ref::<IntegerAttr>() {
+                let ty = int.get_type().into();
                 let bits: APInt = int.clone().into();
                 drop(attr);
-                self.i32_const(ctx, bits.to_u64() as u32 as i32)
+                let (width, signed) =
+                    crate::numeric::integer(ctx, ty).expect("integer attribute type");
+                if width == 64 {
+                    self.i64_const(ctx, bits.to_u64())
+                } else {
+                    let value = if signed && width > 1 {
+                        bits.to_i64() as i32
+                    } else {
+                        bits.to_u64() as i32
+                    };
+                    self.i32_const(ctx, value)
+                }
             } else {
                 bail!("unsupported constant")
             };
@@ -140,6 +152,7 @@ impl FunctionLowering<'_, '_> {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
             let value = match repr(ctx, ty)? {
                 Repr::F64 => self.f64_const(ctx, 0.0),
+                Repr::I64 => self.i64_const(ctx, 0),
                 _ => self.i32_const(ctx, 0),
             };
             self.define(ctx, op, value);
@@ -147,6 +160,22 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(binary) = Operation::get_op::<MirBinaryOp>(op, ctx) {
             let operands = self.operands(ctx, op)?;
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if let Some((bits, _)) = crate::numeric::integer(ctx, ty) {
+                let opcode = match (binary.kind(ctx), bits == 64) {
+                    (BinaryKind::Add, false) => NumOpcode::I32Add,
+                    (BinaryKind::Sub, false) => NumOpcode::I32Sub,
+                    (BinaryKind::Mul, false) => NumOpcode::I32Mul,
+                    (BinaryKind::Add, true) => NumOpcode::I64Add,
+                    (BinaryKind::Sub, true) => NumOpcode::I64Sub,
+                    (BinaryKind::Mul, true) => NumOpcode::I64Mul,
+                    (kind, _) => bail!("integer {kind:?} requires explicit division semantics"),
+                };
+                let value = self.num(ctx, opcode, operands);
+                let value = self.normalize_integer(ctx, value, ty);
+                self.define(ctx, op, value);
+                return Ok(());
+            }
             let is_f64 = operands[0].get_type(ctx).deref(ctx).is::<FP64Type>();
             let value = match (binary.kind(ctx), is_f64) {
                 (BinaryKind::Rem, true) => {
@@ -157,10 +186,7 @@ impl FunctionLowering<'_, '_> {
                 (BinaryKind::Sub, true) => self.num(ctx, NumOpcode::F64Sub, operands),
                 (BinaryKind::Mul, true) => self.num(ctx, NumOpcode::F64Mul, operands),
                 (BinaryKind::Div, true) => self.num(ctx, NumOpcode::F64Div, operands),
-                (BinaryKind::Add, false) => self.num(ctx, NumOpcode::I32Add, operands),
-                (BinaryKind::Sub, false) => self.num(ctx, NumOpcode::I32Sub, operands),
-                (BinaryKind::Mul, false) => self.num(ctx, NumOpcode::I32Mul, operands),
-                (kind, false) => bail!("i32 {kind:?} is not supported"),
+                (kind, false) => bail!("{kind:?} requires a resolved numeric representation"),
             };
             self.define(ctx, op, value);
             return Ok(());
@@ -255,27 +281,39 @@ impl FunctionLowering<'_, '_> {
                 };
                 self.num(ctx, opcode, operands)
             } else {
-                let opcode = match kind {
-                    CompareKind::Lt => NumOpcode::I32LtS,
-                    CompareKind::Le => NumOpcode::I32LeS,
-                    CompareKind::Gt => NumOpcode::I32GtS,
-                    CompareKind::Ge => NumOpcode::I32GeS,
-                    CompareKind::Eq => NumOpcode::I32Eq,
-                    CompareKind::Ne => NumOpcode::I32Ne,
+                let (bits, signed) = crate::numeric::integer(ctx, mir_ty).unwrap_or((32, true));
+                let opcode = match (kind, bits == 64, signed) {
+                    (CompareKind::Lt, false, true) => NumOpcode::I32LtS,
+                    (CompareKind::Le, false, true) => NumOpcode::I32LeS,
+                    (CompareKind::Gt, false, true) => NumOpcode::I32GtS,
+                    (CompareKind::Ge, false, true) => NumOpcode::I32GeS,
+                    (CompareKind::Lt, false, false) => NumOpcode::I32LtU,
+                    (CompareKind::Le, false, false) => NumOpcode::I32LeU,
+                    (CompareKind::Gt, false, false) => NumOpcode::I32GtU,
+                    (CompareKind::Ge, false, false) => NumOpcode::I32GeU,
+                    (CompareKind::Eq, false, _) => NumOpcode::I32Eq,
+                    (CompareKind::Ne, false, _) => NumOpcode::I32Ne,
+                    (CompareKind::Lt, true, true) => NumOpcode::I64LtS,
+                    (CompareKind::Le, true, true) => NumOpcode::I64LeS,
+                    (CompareKind::Gt, true, true) => NumOpcode::I64GtS,
+                    (CompareKind::Ge, true, true) => NumOpcode::I64GeS,
+                    (CompareKind::Lt, true, false) => NumOpcode::I64LtU,
+                    (CompareKind::Le, true, false) => NumOpcode::I64LeU,
+                    (CompareKind::Gt, true, false) => NumOpcode::I64GtU,
+                    (CompareKind::Ge, true, false) => NumOpcode::I64GeU,
+                    (CompareKind::Eq, true, _) => NumOpcode::I64Eq,
+                    (CompareKind::Ne, true, _) => NumOpcode::I64Ne,
                 };
                 self.num(ctx, opcode, operands)
             };
             self.define(ctx, op, value);
             return Ok(());
         }
-        if let Some(convert) = Operation::get_op::<ConvertOp>(op, ctx) {
-            let operands = self.operands(ctx, op)?;
-            let opcode = match convert.kind(ctx) {
-                ConvertKind::I32ToF64 => NumOpcode::F64ConvertI32S,
-                ConvertKind::F64ToI32 => NumOpcode::I32TruncSatF64S,
-                ConvertKind::F64ToU32 => NumOpcode::I32TruncSatF64U,
-            };
-            let value = self.num(ctx, opcode, operands);
+        if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
+            let source = op.deref(ctx).get_operand(0).get_type(ctx);
+            let target = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = self.operand(ctx, op, 0)?;
+            let value = self.numeric_cast(ctx, value, source, target)?;
             self.define(ctx, op, value);
             return Ok(());
         }
