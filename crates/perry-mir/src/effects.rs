@@ -45,6 +45,8 @@ pub struct Summary {
     pub may_reenter: bool,
     pub writes_record: bool,
     pub failure: Failure,
+    /// Runtime-managed values or effectful services whose task independence is unproven.
+    pub task_state: bool,
     pub repeated: bool,
     pub unknown_helper_bound: bool,
     /// Parameters returned, captured by an async call, or stored through an aggregate.
@@ -54,6 +56,15 @@ pub struct Summary {
 impl Summary {
     pub fn may_mutate_records(&self) -> bool {
         self.writes_record || self.may_suspend || self.may_reenter
+    }
+
+    pub fn requires_task(&self) -> bool {
+        self.task_state
+            || self.allocates
+            || self.may_collect
+            || self.may_suspend
+            || self.may_reenter
+            || self.failure != Failure::None
     }
 }
 
@@ -286,6 +297,13 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                 .flat_map(|value| origins.get(value).into_iter().flatten().copied())
                 .collect();
             summary.writes_record |= Operation::get_op::<FieldSetOp>(op, ctx).is_some();
+            summary.task_state |= op
+                .deref(ctx)
+                .operands()
+                .chain(op.deref(ctx).results())
+                .any(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
+                || Operation::get_op::<IntrinsicOp>(op, ctx)
+                    .is_some_and(|op| op.intrinsic(ctx).is_none_or(|intrinsic| !intrinsic.pure()));
             if Operation::get_op::<CallOp>(op, ctx).is_none() {
                 fails |= crate::intrinsics::may_throw(ctx, op);
             }
@@ -332,6 +350,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                     summary.may_suspend |= callee.may_suspend;
                     summary.may_reenter |= callee.may_reenter;
                     summary.writes_record |= callee.writes_record;
+                    summary.task_state |= callee.task_state;
                     fails |= Operation::get_op::<CallOp>(op, ctx).is_some()
                         && callee.failure == Failure::Throws;
                     summary.repeated |= callee.repeated;
@@ -347,6 +366,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                     summary.may_suspend = true;
                     summary.may_reenter = true;
                     summary.writes_record = true;
+                    summary.task_state = true;
                     fails |= Operation::get_op::<CallOp>(op, ctx).is_some();
                     summary.unknown_helper_bound = true;
                     summary.escapes.extend(dependencies);

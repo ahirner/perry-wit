@@ -38,10 +38,12 @@ mod imports;
 mod integers;
 mod parameters;
 mod resources;
+mod scopes;
 mod sums;
 
 pub(super) use exports::{export, realloc};
 pub(super) use resources::{emit_drain, used_keys};
+pub(super) use scopes::Scope;
 
 /// A WIT value type as the canonical ABI sees it.
 #[derive(Clone, Debug, PartialEq)]

@@ -159,7 +159,7 @@ pub(crate) fn lower(
     mir: &ModuleOp,
     exports: &Exports,
     analyses: &mut AnalysisManager,
-) -> Result<(ModuleOp, Vec<u8>)> {
+) -> Result<(ModuleOp, Vec<u8>, bool)> {
     let name = mir.get_symbol_name(ctx);
     let functions = reachable_functions(ctx, mir, exports);
     let async_functions: Vec<Identifier> = functions
@@ -286,6 +286,18 @@ pub(crate) fn lower(
         memory::export_checks(ctx, &mut state);
     }
     boundary::emit_drain(ctx, &mut state);
+    let memory = !state.data.bytes.is_empty()
+        || !state.runtime.is_empty()
+        || crate::analysis::module_functions(ctx, &state.wasm)
+            .iter()
+            .any(|function| {
+                crate::analysis::function_ops(ctx, function)
+                    .into_iter()
+                    .any(|op| {
+                        Operation::get_op::<pliron_wasm::ops::LoadOp>(op, ctx).is_some()
+                            || Operation::get_op::<pliron_wasm::ops::StoreOp>(op, ctx).is_some()
+                    })
+            });
     // The imports come last: every function above may still add to them.
     for runtime in std::mem::take(&mut state.runtime) {
         let (params, results) = runtime.signature(ctx);
@@ -301,7 +313,7 @@ pub(crate) fn lower(
         let import = ImportFuncOp::new(ctx, symbol, ty, &module, &field);
         state.wasm.append_operation(ctx, import.get_operation(), 0);
     }
-    Ok((state.wasm, state.data.bytes))
+    Ok((state.wasm, state.data.bytes, memory))
 }
 
 /// Emit the canonical-ABI glue of every WIT export, and `cabi_realloc`.
@@ -390,7 +402,9 @@ fn bind_exports(
         boundary::export(ctx, state, function, export)
             .with_context(|| format!("binding WIT export {}", export.core_name))?;
     }
-    boundary::realloc(ctx, state);
+    if !state.runtime.is_empty() {
+        boundary::realloc(ctx, state);
+    }
     Ok(())
 }
 
@@ -412,12 +426,17 @@ fn export_wrapper(
     let entry = wrapper.get_entry_block(ctx);
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
     let mut b = FunctionLowering::glue(state, ctx, &wrapper);
-    b.task_enter(ctx);
+    let scope = boundary::Scope::for_function(b.state, name);
+    if scope == boundary::Scope::Task {
+        b.task_enter(ctx);
+    }
     b.initialize_module(ctx);
     let call = CallOp::new(ctx, name.clone(), args, results).get_operation();
     b.insert(ctx, call);
     let values: Vec<_> = call.deref(ctx).results().collect();
-    b.task_free(ctx);
+    if scope == boundary::Scope::Task {
+        b.task_free(ctx);
+    }
     let ret = ReturnOp::new(ctx, values).get_operation();
     b.insert(ctx, ret);
     for param in params {

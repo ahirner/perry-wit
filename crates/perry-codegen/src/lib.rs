@@ -1,6 +1,6 @@
 //! perry MIR → pliron `wasm` dialect → core Wasm (`TODOs.md` P4).
 //!
-//! The output defines and exports linear memory, places string constants in data segments
+//! The output defines and exports linear memory when required, places string constants in data segments
 //! from `DATA_BASE`, and imports runtime functions from `HELPER_MODULE`; `perry-wit`'s linker
 //! resolves those against `perry-runtime` and the helper libraries. Exports are either the raw
 //! functions ([Exports::Raw], for tests) or canonical-ABI component exports
@@ -96,7 +96,7 @@ pub fn compile(
     exports: &Exports,
     analyses: &mut AnalysisManager,
 ) -> Result<Vec<u8>> {
-    let (wasm, data) = module::lower(ctx, mir, exports, analyses)?;
+    let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses)?;
     // Resuming an `await` inside a loop enters the loop at a second block.
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);
@@ -106,9 +106,13 @@ pub fn compile(
         .context("verifying the lowered wasm module")?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
-        memory: Memory::Define {
-            min_pages: end.div_ceil(65536).max(1) as u64,
-            export: Some("memory".into()),
+        memory: if memory {
+            Memory::Define {
+                min_pages: end.div_ceil(65536).max(1) as u64,
+                export: Some("memory".into()),
+            }
+        } else {
+            Memory::None
         },
         data: if data.is_empty() {
             vec![]

@@ -8,6 +8,7 @@ pub(crate) fn export(
     function: &FuncOp,
     export: &Export,
 ) -> Result<()> {
+    let scope = Scope::for_export(state, export, &function.get_symbol_name(ctx));
     let is_async = state
         .async_functions
         .contains(&function.get_symbol_name(ctx));
@@ -71,7 +72,9 @@ pub(crate) fn export(
     flat.reverse();
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
-    b.task_enter(ctx);
+    if scope == Scope::Task {
+        b.task_enter(ctx);
+    }
     let initialization = b.initialization_status(ctx);
     let mut joined_types = mir_results
         .iter()
@@ -195,6 +198,10 @@ pub(crate) fn export(
     b.insert(ctx, ret);
     let state = b.state;
     state.wasm.append_operation(ctx, glue.get_operation(), 0);
+
+    if scope == Scope::Direct {
+        return Ok(());
+    }
 
     // `cabi_post_<export>` receives the core results and ends the task.
     let post_ty = FunctionType::get(ctx, results, vec![]);
