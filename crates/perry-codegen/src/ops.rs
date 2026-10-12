@@ -452,6 +452,10 @@ impl FunctionLowering<'_, '_> {
             return self.lower_await(ctx, op);
         }
         if let Some(combinator) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
+            self.state.runtime_frames.insert(
+                perry_abi::layout::promise::COMBINATOR_KIND,
+                Runtime::CombinatorStep,
+            );
             let function = match combinator.combinator(ctx) {
                 Combinator::All => Runtime::PromiseAll,
                 Combinator::Race => Runtime::PromiseRace,

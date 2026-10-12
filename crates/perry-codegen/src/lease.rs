@@ -75,8 +75,8 @@ pub(crate) fn leased(
         let dead = members.iter().all(|op| {
             let result = op.deref(ctx).get_result(0);
             live.after(*op)
-                .iter()
-                .all(|v| *v == result || !derived.contains(v))
+                .values()
+                .all(|v| v == result || !derived.contains(&v))
         });
         if dead {
             leased.extend(members);

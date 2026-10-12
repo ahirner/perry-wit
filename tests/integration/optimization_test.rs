@@ -71,7 +71,15 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
         let mut addition = false;
         for payload in Parser::new(0).parse_all(&compiled.core) {
             match payload? {
-                Payload::FunctionSection(section) => assert_eq!(section.count(), 2, "{wit}"),
+                Payload::FunctionSection(section) => assert_eq!(
+                    section.count(),
+                    if wit.ends_with("8") || wit.ends_with("16") {
+                        2
+                    } else {
+                        1
+                    },
+                    "{wit}"
+                ),
                 Payload::MemorySection(section) => assert_eq!(section.count(), 0, "{wit}"),
                 Payload::ImportSection(section) => assert_eq!(section.count(), 0, "{wit}"),
                 Payload::ExportSection(section) => {
@@ -90,6 +98,19 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
                                 | (wasmparser::Operator::I32Add, false)
                         );
                         assert!(!format!("{op:?}").contains("F64"), "{wit}: {op:?}");
+                        assert!(
+                            !matches!(
+                                op,
+                                wasmparser::Operator::I32Shl | wasmparser::Operator::I32ShrS
+                            ),
+                            "{wit}: use sign-extension instructions"
+                        );
+                        if matches!(wit, "s32" | "u32" | "s64" | "u64") {
+                            assert!(
+                                !matches!(op, wasmparser::Operator::Call { .. }),
+                                "{wit}: exported arithmetic must not forward"
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -446,7 +467,7 @@ fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
                 _ => {}
             }
         }
-        assert_eq!(functions, 2, "implementation and wrapper only");
+        assert_eq!(functions, 1, "export the implementation directly");
         assert_eq!(exports, ["run"]);
         assert!(compiled.core.len() < 2963);
         let engine = wasmtime::Engine::default();
@@ -654,6 +675,132 @@ fn integer_comparisons_respect_signedness_at_wasm_widths() -> Result<()> {
             expected,
             "{ty}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn scalar_core_is_one_direct_function_with_and_without_names() -> Result<()> {
+    let compiled = compile(
+        "export function run(a:number,b:number):number { return a+b; }",
+        "func(a:s32,b:s32)->s32",
+    )?;
+    let mut stripped = wasm_encoder::Module::new();
+    let mut names = false;
+    for payload in Parser::new(0).parse_all(&compiled.core) {
+        let payload = payload?;
+        if let Payload::CustomSection(section) = &payload {
+            names |= section.name() == "name";
+        } else if let Some((id, range)) = payload.as_section() {
+            stripped.section(&wasm_encoder::RawSection {
+                id,
+                data: &compiled.core[range.start as usize..range.end as usize],
+            });
+        }
+    }
+    assert!(names);
+    let stripped = stripped.finish();
+    assert!(stripped.len() < compiled.core.len());
+    for bytes in [&compiled.core, &stripped] {
+        let mut functions = 0;
+        let mut bodies = 0;
+        for payload in Parser::new(0).parse_all(bytes) {
+            match payload? {
+                Payload::FunctionSection(section) => functions = section.count(),
+                Payload::CodeSectionEntry(body) => {
+                    bodies += 1;
+                    let ops = body
+                        .get_operators_reader()?
+                        .into_iter()
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    assert!(
+                        matches!(
+                            ops.as_slice(),
+                            [
+                                wasmparser::Operator::LocalGet { local_index: 0 },
+                                wasmparser::Operator::LocalGet { local_index: 1 },
+                                wasmparser::Operator::I32Add,
+                                wasmparser::Operator::End,
+                            ]
+                        ),
+                        "{ops:?}"
+                    );
+                }
+                Payload::MemorySection(_) | Payload::ImportSection(_) => {
+                    panic!("scalar arithmetic needs no runtime")
+                }
+                Payload::ExportSection(section) => {
+                    let exports = section
+                        .into_iter()
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    assert_eq!(exports.len(), 1);
+                    assert_eq!((exports[0].name, exports[0].index), ("run", 0));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((functions, bodies), (1, 1));
+    }
+    Ok(())
+}
+
+#[test]
+fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<()> {
+    for (wit, body, expected) in [
+        ("s8", "a+b", 3),
+        ("s16", "a+b", 3),
+        ("s8", "a", 1),
+        ("s16", "a", 1),
+    ] {
+        let (parameters, signature) = if body == "a" {
+            ("a:number".to_owned(), format!("func(a:{wit})->{wit}"))
+        } else {
+            (
+                "a:number,b:number".to_owned(),
+                format!("func(a:{wit},b:{wit})->{wit}"),
+            )
+        };
+        let compiled = compile(
+            &format!("export function run({parameters}):number {{ return {body}; }}"),
+            &signature,
+        )?;
+        let mut extensions = 0;
+        for payload in Parser::new(0).parse_all(&compiled.core) {
+            if let Payload::CodeSectionEntry(body) = payload? {
+                for op in body.get_operators_reader()? {
+                    match op? {
+                        wasmparser::Operator::I32Extend8S if wit == "s8" => extensions += 1,
+                        wasmparser::Operator::I32Extend16S if wit == "s16" => extensions += 1,
+                        wasmparser::Operator::I32Shl | wasmparser::Operator::I32ShrS => {
+                            panic!("use sign extension")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(extensions, expected, "{wit}: {body}");
+    }
+    Ok(())
+}
+
+#[test]
+fn async_dispatch_roots_only_constructed_frame_handlers() -> Result<()> {
+    for (body, combinator) in [
+        ("return await value(n);", false),
+        (
+            "const values = await Promise.all([value(n), Promise.resolve(n)]); return values[0] + values[1];",
+            true,
+        ),
+    ] {
+        let compiled = compile(
+            &format!(
+                "async function value(n:number):Promise<number> {{ return n+1; }} export async function run(n:number):Promise<number> {{ {body} }}"
+            ),
+            "async func(n:f64)->f64",
+        )?;
+        let wat = wasmprinter::print_bytes(&compiled.core)?;
+        assert_eq!(wat.contains("(func $perry_combinator_step "), combinator);
     }
     Ok(())
 }

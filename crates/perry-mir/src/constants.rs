@@ -168,6 +168,53 @@ impl ConstFoldInterface for NumericCastOp {
 #[op_interface_impl]
 impl ConstFoldInterface for CompareOp {
     fn check_fold(&self, ctx: &Context, operands: &[Option<AttrObj>]) -> Vec<Option<AttrObj>> {
+        if operands.iter().any(Option::is_none) {
+            let interval = |index: usize| {
+                let value = self.get_operation().deref(ctx).get_operand(index);
+                let ty = value.get_type(ctx).deref(ctx);
+                let ty = ty.downcast_ref::<IntegerType>()?;
+                let bits = ty.width();
+                if bits > 64 {
+                    return None;
+                }
+                let unsigned = ty.signedness() == Signedness::Unsigned || bits == 1;
+                if let Some(attr) = operands[index].as_ref() {
+                    let integer = attr.downcast_ref::<IntegerAttr>()?;
+                    let value = if unsigned {
+                        integer.value().to_u64() as i128
+                    } else {
+                        integer.value().to_i64() as i128
+                    };
+                    Some((value, value))
+                } else if unsigned {
+                    Some((0, (1i128 << bits) - 1))
+                } else {
+                    Some((-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1))
+                }
+            };
+            if let (Some((a_min, a_max)), Some((b_min, b_max))) = (interval(0), interval(1)) {
+                let result = match self.kind(ctx) {
+                    CompareKind::Lt if a_max < b_min => Some(true),
+                    CompareKind::Lt if a_min >= b_max => Some(false),
+                    CompareKind::Le if a_max <= b_min => Some(true),
+                    CompareKind::Le if a_min > b_max => Some(false),
+                    CompareKind::Gt if a_min > b_max => Some(true),
+                    CompareKind::Gt if a_max <= b_min => Some(false),
+                    CompareKind::Ge if a_min >= b_max => Some(true),
+                    CompareKind::Ge if a_max < b_min => Some(false),
+                    CompareKind::Eq | CompareKind::Ne if a_max < b_min || b_max < a_min => {
+                        Some(self.kind(ctx) == CompareKind::Ne)
+                    }
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    return vec![Some(Box::new(IntegerAttr::new(
+                        IntegerType::get(ctx, 1, Signedness::Signless),
+                        APInt::from_u64(u64::from(result), bw(1)),
+                    )))];
+                }
+            }
+        }
         let folded = (|| {
             let (lhs, rhs) = (operands[0].as_ref()?, operands[1].as_ref()?);
             let ordering = if let (Some(lhs), Some(rhs)) = (

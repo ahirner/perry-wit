@@ -20,23 +20,7 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::MemKind;
-use std::collections::{HashMap, HashSet};
-
-/// Values live across `op`: its operands and what is live after it, except its results.
-/// May repeat an operand that is also live after `op`.
-fn live_across<'a>(
-    ctx: &'a Context,
-    op: Ptr<Operation>,
-    after: &'a HashSet<Value>,
-) -> impl Iterator<Item = Value> + 'a {
-    let results: Vec<Value> = op.deref(ctx).results().collect();
-    let operands: Vec<Value> = op.deref(ctx).operands().collect();
-    after
-        .iter()
-        .copied()
-        .filter(move |value| !results.contains(value))
-        .chain(operands)
-}
+use std::collections::HashMap;
 
 pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::ModuleState) {
     use pliron::{
@@ -439,7 +423,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
-        after: &HashSet<Value>,
+        after: perry_mir::liveness::LiveAfter<'_>,
         order: &HashMap<Value, usize>,
     ) -> Result<Option<Value>> {
         let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some_and(|call| {
@@ -455,9 +439,16 @@ impl FunctionLowering<'_, '_> {
         {
             return Ok(None);
         }
-        let mut live: Vec<Value> = live_across(ctx, op, after)
-            .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
-            .collect();
+        self.clear_dead_frame_slots(ctx, op, after);
+        let mut live: Vec<Value> = {
+            let operation = op.deref(ctx);
+            after
+                .values()
+                .filter(|value| !operation.results().any(|result| result == *value))
+                .chain(operation.operands())
+                .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
+                .collect()
+        };
         live.sort_unstable_by_key(|value| order[value]);
         live.dedup();
         let values = live
@@ -496,7 +487,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
-        after: &HashSet<Value>,
+        after: perry_mir::liveness::LiveAfter<'_>,
     ) {
         if !self.state.collectible {
             return;
@@ -504,10 +495,10 @@ impl FunctionLowering<'_, '_> {
         let Some(frame) = &self.frame else {
             return;
         };
-        let operands: Vec<Value> = op.deref(ctx).operands().collect();
-        let results: Vec<Value> = op.deref(ctx).results().collect();
         let live = |value: &Value| {
-            operands.contains(value) || (after.contains(value) && !results.contains(value))
+            op.deref(ctx).operands().any(|operand| operand == *value)
+                || (after.contains(value)
+                    && !op.deref(ctx).results().any(|result| result == *value))
         };
         let pointer = frame.frame;
         let mut dead: Vec<_> = frame

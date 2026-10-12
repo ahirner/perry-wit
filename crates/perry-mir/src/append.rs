@@ -11,7 +11,7 @@ use pliron::{
     linked_list::{ContainsLinkedList, LinkedList},
     op::Op,
     operation::Operation,
-    pass::{Analysis, AnalysisManager, Pass, PassResult, Passes},
+    pass::{AnalysisManager, Pass, PassResult, Passes},
     result::Result,
     r#type::Typed,
     value::Value,
@@ -349,22 +349,6 @@ struct ReusableSequences {
     candidates: HashMap<Ptr<Operation>, crate::attrs::ReuseOperands>,
 }
 
-impl Analysis for ReusableSequences {
-    fn name(&self) -> &str {
-        "reusable-sequences"
-    }
-    fn compute(
-        root: Ptr<Operation>,
-        ctx: &Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<Self> {
-        let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
-        Ok(Self {
-            candidates: reuse_candidates(root, ctx, &live),
-        })
-    }
-}
-
 struct ReusePass;
 
 impl Pass for ReusePass {
@@ -377,10 +361,10 @@ impl Pass for ReusePass {
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
-        let candidates = analyses
-            .get_analysis::<ReusableSequences>(root, ctx)?
-            .candidates
-            .clone();
+        let candidates = {
+            let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+            reuse_candidates(root, ctx, &live)
+        };
         PassWrapper::new("owned-append", ReusableSequences { candidates }).run(root, ctx, analyses)
     }
 }

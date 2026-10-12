@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::calls::is_exported;
 use pliron::{
     builtin::{
-        op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
         type_interfaces::FunctionTypeInterface,
         types::FunctionType,
@@ -22,6 +22,7 @@ use pliron::{
     context::{Context, Ptr},
     ident,
     identifier::Identifier,
+    linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
@@ -33,7 +34,7 @@ use pliron_wasm::{
     control::ReturnOp,
     ops::{CallOp, ImportFuncOp, set_export},
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The symbol of module initialization, checked to be an identifier at compile time.
 const INITIALIZER: Identifier = Identifier::new(perry_mir::globals::INITIALIZER);
@@ -104,6 +105,8 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) foreign_transfers: Vec<&'e boundary::Import>,
     /// Async functions in dispatch-kind order.
     pub(crate) async_functions: Vec<Identifier>,
+    /// Resume handlers registered by runtime frame constructors during lowering.
+    pub(crate) runtime_frames: BTreeMap<u32, Runtime>,
     pub(crate) shapes: HashMap<String, i32>,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
@@ -224,6 +227,7 @@ pub(crate) fn lower(
         },
         foreign_transfers: Vec::new(),
         async_functions,
+        runtime_frames: BTreeMap::new(),
         shapes: HashMap::new(),
         uses_io: false,
         uses_fs: false,
@@ -284,7 +288,7 @@ pub(crate) fn lower(
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
         if raw && is_exported(ctx, function) {
             let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
-            state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
+            append_export(ctx, &mut state, &wrapper, &lowered, symbol.as_ref());
         }
     }
     if !state.async_functions.is_empty() {
@@ -402,6 +406,10 @@ fn bind_exports(
         .iter()
         .map(|f| (f.get_symbol_name(ctx).into(), *f))
         .collect();
+    let lowered: HashMap<_, _> = crate::analysis::module_functions(ctx, &state.wasm)
+        .into_iter()
+        .map(|function| (function.get_symbol_name(ctx), function))
+        .collect();
     for export in exports {
         let function = mir_functions.get(&export.function).ok_or_else(|| {
             anyhow!(
@@ -410,10 +418,61 @@ fn bind_exports(
                 export.function
             )
         })?;
-        boundary::export(ctx, state, function, export)
-            .with_context(|| format!("binding WIT export {}", export.core_name))?;
+        boundary::export(
+            ctx,
+            state,
+            function,
+            &lowered[&function.get_symbol_name(ctx)],
+            export,
+        )
+        .with_context(|| format!("binding WIT export {}", export.core_name))?;
     }
     Ok(())
+}
+
+/// A generated export whose entire body forwards its arguments and results contributes
+/// only an export name. All marshalling, initialization and cleanup remain in real stubs.
+pub(crate) fn append_export(
+    ctx: &mut Context,
+    state: &mut ModuleState,
+    wrapper: &FuncOp,
+    inner: &FuncOp,
+    name: &str,
+) {
+    let transparent = (|| {
+        let region = wrapper.get_region(ctx);
+        let region = region.deref(ctx);
+        let mut blocks = region.iter(ctx);
+        let block = blocks.next()?;
+        if blocks.next().is_some() || wrapper.get_type(ctx) != inner.get_type(ctx) {
+            return None;
+        }
+        let block = block.deref(ctx);
+        let mut ops = block.iter(ctx);
+        let call = Operation::get_op::<CallOp>(ops.next()?, ctx)?;
+        let ret = Operation::get_op::<ReturnOp>(ops.next()?, ctx)?;
+        (ops.next().is_none()
+            && call.get_attr_wasm_callee(ctx)?.as_ref() == &inner.get_symbol_name(ctx)
+            && call
+                .get_operation()
+                .deref(ctx)
+                .operands()
+                .eq(block.arguments())
+            && ret
+                .get_operation()
+                .deref(ctx)
+                .operands()
+                .eq(call.get_operation().deref(ctx).results()))
+        .then_some(())
+    })()
+    .is_some();
+    if transparent {
+        set_export(ctx, inner, name);
+        Operation::erase(wrapper.get_operation(), ctx);
+    } else {
+        set_export(ctx, wrapper, name);
+        state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
+    }
 }
 
 /// `export_<name>`, exported as `<name>`: runs the function as one task.

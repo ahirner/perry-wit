@@ -10,7 +10,9 @@ use pliron::{
         ops::FuncOp,
     },
     context::{Context, Ptr},
+    irbuild::IRStatus,
     linked_list::ContainsLinkedList,
+    op::Op,
     operation::Operation,
     r#type::{Typed, TypedHandle},
 };
@@ -69,21 +71,41 @@ fn frame_candidates(
         .collect()
 }
 
-pub(crate) fn assign(root: Ptr<Operation>, ctx: &Context, summaries: &effects::RuntimeEffects) {
-    let functions = crate::aggregates::functions(root, ctx);
-    for function in &functions {
+pub(crate) fn assign(
+    root: Ptr<Operation>,
+    ctx: &Context,
+    summaries: &effects::RuntimeEffects,
+) -> IRStatus {
+    let mut status = IRStatus::Unchanged;
+    for function in crate::aggregates::functions(root, ctx) {
+        let frame: std::collections::HashSet<_> =
+            frame_candidates(ctx, &function, &summaries.functions)
+                .into_iter()
+                .map(|allocation| allocation.get_operation())
+                .collect();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
                 if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
-                    allocation.set_tier(ctx, Tier::Instance);
+                    let tier = if frame.contains(&op) {
+                        Tier::Frame
+                    } else {
+                        Tier::Instance
+                    };
+                    if allocation.tier(ctx) != tier {
+                        allocation.set_tier(ctx, tier);
+                        status = IRStatus::Changed;
+                    }
                 }
-                if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx) {
+                if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx)
+                    && array
+                        .get_attr_perry_array_tier(ctx)
+                        .is_none_or(|tier| *tier != Tier::Instance)
+                {
                     array.set_attr_perry_array_tier(ctx, Tier::Instance);
+                    status = IRStatus::Changed;
                 }
             }
         }
-        for allocation in frame_candidates(ctx, function, &summaries.functions) {
-            allocation.set_tier(ctx, Tier::Frame);
-        }
     }
+    status
 }

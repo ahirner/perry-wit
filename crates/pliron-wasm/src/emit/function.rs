@@ -185,6 +185,9 @@ impl<'a> FunctionEmitter<'a> {
         if falls_off && !self.results.is_empty() {
             self.code.push(Instruction::Unreachable);
         }
+        if matches!(self.code.last(), Some(Instruction::Return)) {
+            self.code.pop();
+        }
         self.code.push(Instruction::End);
 
         let mut declared: Vec<(u32, ValType)> = Vec::new();

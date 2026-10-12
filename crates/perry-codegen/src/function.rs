@@ -190,7 +190,9 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             let mut index = 0;
             while index < ops.len() {
                 let op = ops[index];
-                self.clear_dead_frame_slots(ctx, op, live.after(op));
+                if Operation::get_op::<perry_mir::calls::AwaitOp>(op, ctx).is_some() {
+                    self.clear_dead_frame_slots(ctx, op, live.after(op));
+                }
                 let root_mark = self.safe_point(ctx, op, live.after(op), &order)?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops

@@ -23,7 +23,7 @@ use pliron::{
     utils::apint::{APInt, bw},
     value::Value,
 };
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// A scalar or the empty string. UTF-8 ordering agrees with scalar ordering; -1 precedes NUL.
 fn literal(ctx: &Context, value: Value) -> Option<i32> {
@@ -52,7 +52,10 @@ fn supports(ctx: &Context, op: Ptr<Operation>, character: Value) -> bool {
 
 /// Materialized characters that escape, enter unknown calls or join other string values
 /// retain their ordinary representation. The existing append pass supplies ownership proof.
-pub(crate) struct ScalarizeCharacters;
+#[derive(Default)]
+pub(crate) struct ScalarizeCharacters {
+    order: HashMap<Ptr<Operation>, HashMap<Ptr<Operation>, usize>>,
+}
 
 impl MatchRewrite for ScalarizeCharacters {
     fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
@@ -85,7 +88,7 @@ impl MatchRewrite for ScalarizeCharacters {
             _ => unreachable!("matched character lookup"),
         };
         let character = op.deref(ctx).get_result(0);
-        let users: HashSet<_> = character
+        let mut users: Vec<_> = character
             .uses(ctx)
             .iter()
             .map(|usage| usage.user_op())
@@ -97,10 +100,18 @@ impl MatchRewrite for ScalarizeCharacters {
             ctx,
         )
         .expect("MIR function");
-        let users: Vec<_> = operations(ctx, &function)
-            .into_iter()
-            .filter(|user| users.contains(user))
-            .collect();
+        let order = self
+            .order
+            .entry(function.get_operation())
+            .or_insert_with(|| {
+                operations(ctx, &function)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, op)| (op, index))
+                    .collect()
+            });
+        users.sort_unstable_by_key(|user| order[user]);
+        users.dedup();
         let args = op.deref(ctx).operands().collect();
         let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
         rewriter.insert_operation(ctx, scalar);

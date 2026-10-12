@@ -86,8 +86,10 @@ fn shared_liveness_distinguishes_edges_and_block_definitions() -> Result<()> {
     assert!(!live.on_entry(blocks[1], argument));
     assert!(live.on_entry(blocks[2], args[1]));
     assert_eq!(
-        live.after(addition),
-        &std::collections::HashSet::from([sum])
+        live.after(addition)
+            .values()
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from([sum])
     );
     Ok(())
 }
@@ -968,4 +970,51 @@ fn sccp_preserves_floating_point_special_values() {
             .value();
         assert_eq!(!value.is_zero(), kind == CompareKind::Ne);
     }
+}
+
+#[test]
+fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
+    use pliron::{
+        analyses::liveness::{Liveness, LivenessTq},
+        builtin::op_interfaces::OneRegionInterface,
+        graph::dominance::DomInfo,
+        irbuild::inserter::OpInsertionPoint,
+        linked_list::ContainsLinkedList,
+        pass::AnalysisManager,
+    };
+    let ctx = &mut Context::new();
+    let root = parse(ctx, TEMPORARY_RECORDS);
+    let mut analyses = AnalysisManager::default();
+    analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+    let intervals = analyses
+        .try_get_analysis::<crate::liveness::LiveValues>(root)
+        .unwrap();
+    let mut upstream = analyses
+        .try_get_analysis_mut::<Liveness<LivenessTq>>(root)
+        .unwrap();
+    let mut dominance = analyses.try_get_analysis_mut::<DomInfo>(root).unwrap();
+    for function in crate::aggregates::functions(root, ctx) {
+        let mut values = Vec::new();
+        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+            values.extend(block.deref(ctx).arguments());
+            for op in block.deref(ctx).iter(ctx) {
+                values.extend(op.deref(ctx).results());
+            }
+        }
+        for op in crate::aggregates::operations(ctx, &function) {
+            for &value in &values {
+                assert_eq!(
+                    intervals.after(op).contains(&value),
+                    upstream.is_live_at_point(
+                        ctx,
+                        &mut dominance,
+                        value,
+                        OpInsertionPoint::AfterOperation(op)
+                    ),
+                    "{value:?} after {op:?}"
+                );
+            }
+        }
+    }
+    Ok(())
 }

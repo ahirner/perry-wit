@@ -117,17 +117,17 @@ Pliron's `Passes` and `AnalysisManager` schedule verified transformations and ca
 | --- | --- | --- |
 | Arithmetic and comparison folding | SCCP propagation, materialization, DCE; `APInt` arithmetic | `ConstFoldInterface` semantics for scalar operations and conversions |
 | Constant branches | SCCP reachability and CFG simplification | `BranchOpFoldInterface` for MIR terminators; unused block-argument adapter |
-| Async frames, leases, GC roots, append liveness | Cached SSA liveness and dominance | Program-point sets derived by local reverse scans; deterministic frame layout, root selection, ownership transfer rules |
+| Async frames, leases, GC roots, append liveness | Cached SSA liveness and dominance | Block-local live intervals from definition and last-use positions; deterministic frame layout, root selection, ownership transfer rules |
 | Optional/conversion simplification, record decomposition, character scalarization, owned append, append fast paths | `MatchRewrite` traversal and `IRRewriter` mutation | Rewrite patterns and semantic predicates |
 | Record promotion | `Mem2RegPass` | Record-to-slot decomposition |
 | Successful-unwrap reuse | Cached dominance and rewriting | Exception-aware availability rules |
 | Numeric specialization and bounds | Integer types, cloning, analysis caching | Numeric worklist, context selection, range widening, buffer-detachment rules |
-| Allocation and boundary scopes | Analysis caching | Interprocedural runtime-effects worklist |
+| Allocation and boundary scopes | Analysis caching; Tarjan SCCs for CFG and call-graph cycles | Interprocedural runtime-effects worklist |
 | Leaf inlining and argument promotion | Cloning, rewriting, cached call effects | Legality and profitability rules |
 
-WIT constraints enter before arithmetic folding. One numeric worklist propagates domains and ranges forward and result-width requirements backward through SSA values, CFG edges, synchronous and asynchronous calls, and returns. Function contexts are keyed by argument domains and result requirements. Finite domain choices, recursive context reuse and conservative range widening ensure termination. Representation rewriting fixes integer wrap points before algebraic optimization. The numeric analysis also supplies bounds-check facts. The [numeric semantics](README.md#semantics) define wrapping, widening, exact 64-bit values and floating-point boundaries.
+WIT constraints enter before arithmetic folding. One numeric worklist propagates domains and ranges forward and result-width requirements backward through SSA values, CFG edges, synchronous and asynchronous calls, and returns. Function contexts are keyed by argument domains and result requirements. Finite domain choices, recursive context reuse and conservative range widening ensure termination. Representation rewriting fixes integer wrap points before algebraic optimization. Contexts that preserve representations and callee choices reuse the original body. The numeric analysis also supplies bounds-check facts. The [numeric semantics](README.md#semantics) define wrapping, widening, exact 64-bit values and floating-point boundaries.
 
-One cached runtime-effects analysis propagates allocation, collection, suspension, reentry, record mutation, escape and failure information through the call graph. Async rejection remains distinct from synchronous throwing. Allocation reports, argument promotion, lifetime assignment, GC roots and export scopes consume this shared analysis. Boundary scopes account for initializers and canonical marshalling before lowering inserts runtime calls.
+One cached runtime-effects analysis propagates allocation, collection, suspension, reentry, record mutation, escape and failure information through the call graph. Escape provenance follows SSA uses and branch arguments as facts become known. Async rejection remains distinct from synchronous throwing. Allocation reports, argument promotion, lifetime assignment, GC roots and export scopes consume this shared analysis. Boundary scopes account for initializers and canonical marshalling before lowering inserts runtime calls. Runtime frame constructors register their resume handlers; the dispatcher emits calls to those handlers. Async frame slots are cleared at collection and suspension points. Lifetime attributes preserve cached control-flow and value analyses.
 
 ### 5. Code Generation
 
@@ -251,7 +251,7 @@ Verification rests on two complementary boundaries:
 
 The benchmark harness compares every unchanged-semantics workload against the checked-in baseline. Named core size, stripped component size, guest fuel, initial memory and peak memory must each stay within 105% of their baseline; zero baselines remain zero. Input hashes and locked Wasmtime versions are verified before comparison. Allocation counters, function and helper counts, specialization and convergence statistics, compilation time and execution time appear in the JSON report. Timing is informational. Linux CI runs the comparison using its existing test build and uploads the report.
 
-The scalar artifact test inspects Wasm sections and instructions: WIT integer addition requires typed integer arithmetic, at most two defined functions and zero runtime helpers, memory, allocator or post-return exports. Native/Wasm library and CLI parity checks cover every WIT integer width, widening, exact 64-bit arithmetic and unconstrained raw compilation.
+The scalar artifact test inspects named and stripped Wasm: pure `s32` addition is one directly exported function containing only two argument loads and `i32.add`. It has no forwarding call, memory, runtime helper, allocator or cleanup export. Signed 8- and 16-bit boundaries use sign-extension instructions; producer range guarantees suppress redundant normalization. Generated stubs that only forward arguments and results contribute an export name on the implementation. Marshalling and stateful stubs retain their boundary behavior. Native/Wasm library and CLI parity checks cover every WIT integer width, widening, exact 64-bit arithmetic and unconstrained raw compilation.
 
 ## References
 

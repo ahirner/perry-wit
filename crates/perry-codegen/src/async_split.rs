@@ -84,8 +84,7 @@ fn live_across_awaits(
             let result = op.deref(ctx).get_result(0);
             let mut live: Vec<_> = liveness
                 .after(op)
-                .iter()
-                .copied()
+                .values()
                 .filter(|value| *value != result)
                 .collect();
             // Order by definition position for deterministic frame layouts.
@@ -235,6 +234,7 @@ pub(crate) fn lower(
 
 /// Resume one frame from the fan-out selected by a native P3 completion event.
 pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
+    let runtime_frames = std::mem::take(&mut state.runtime_frames);
     let i32 = i32_type(ctx);
     let ty = FunctionType::get(ctx, vec![i32], vec![]);
     let function = FuncOp::new(ctx, RESUME, ty);
@@ -247,21 +247,17 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     b.insert(ctx, ret);
     b.block = entry;
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
-    // Runtime combinators (`Promise.all`, `Promise.race`) step in the runtime.
-    let combinator_kind = b.i32_const(ctx, perry_abi::layout::promise::COMBINATOR_KIND as i32);
-    let is_combinator = b.num(ctx, NumOpcode::I32Eq, vec![kind, combinator_kind]);
-    let step_combinator = b.new_block(ctx, vec![]);
-    let step_function = b.new_block(ctx, vec![]);
-    b.cond_br(
-        ctx,
-        is_combinator,
-        (step_combinator, vec![]),
-        (step_function, vec![]),
-    );
-    b.block = step_combinator;
-    b.runtime_void(ctx, Runtime::CombinatorStep, vec![frame]);
-    b.br(ctx, done, vec![]);
-    b.block = step_function;
+    for (frame_kind, handler) in runtime_frames {
+        let frame_kind = b.i32_const(ctx, frame_kind as i32);
+        let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, frame_kind]);
+        let handle = b.new_block(ctx, vec![]);
+        let next = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, matches, (handle, vec![]), (next, vec![]));
+        b.block = handle;
+        b.runtime_void(ctx, handler, vec![frame]);
+        b.br(ctx, done, vec![]);
+        b.block = next;
+    }
     let mut calls = Vec::new();
     for index in 0..b.state.async_functions.len() {
         let step = step_name(&b.state.async_functions[index]);

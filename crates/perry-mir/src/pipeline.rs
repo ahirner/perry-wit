@@ -78,7 +78,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     ownership.add_pass(crate::append::AppendPass);
     ownership.add_pass(PassWrapper::new(
         "scalar-characters",
-        crate::characters::ScalarizeCharacters,
+        crate::characters::ScalarizeCharacters::default(),
     ));
     ownership.add_pass(DCEPass);
     ownership.add_pass(PassWrapper::new(
@@ -158,10 +158,13 @@ impl Pass for AssignLifetimes {
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
         let effects = analyses.get_analysis::<crate::effects::RuntimeEffects>(root, ctx)?;
-        crate::lifetimes::assign(root, ctx, &effects);
         let mut result = PassResult::default();
-        result.ir_changed = IRStatus::Changed;
+        result.ir_changed = crate::lifetimes::assign(root, ctx, &effects);
         result.set_preserved::<crate::effects::RuntimeEffects>();
+        result.set_preserved::<crate::numeric::NumericAnalysis>();
+        result.set_preserved::<crate::liveness::LiveValues>();
+        result.set_preserved::<pliron::analyses::liveness::Liveness<pliron::analyses::liveness::LivenessTq>>();
+        result.set_preserved::<pliron::graph::dominance::DomInfo>();
         Ok(result)
     }
 }

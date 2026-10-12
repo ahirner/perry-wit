@@ -421,15 +421,18 @@ impl Solver {
 
     fn changed(&mut self, id: usize, value: Value) {
         let body = &self.analysis.bodies[&self.analysis.keys[id].function];
-        let dependents = body.dependents.get(&value).cloned().unwrap_or_default();
+        let dependents = body.dependents.get(&value).into_iter().flatten();
         let parameter = body.parameters.contains(&value);
-        for constraint in dependents {
-            self.enqueue((id, constraint));
+        for &constraint in dependents {
+            if self.queued.insert((id, constraint)) {
+                self.pending.push_back((id, constraint));
+            }
         }
         if parameter {
-            let callers: Vec<_> = self.analysis.states[id].callers.iter().copied().collect();
-            for caller in callers {
-                self.enqueue(caller);
+            for &caller in &self.analysis.states[id].callers {
+                if self.queued.insert(caller) {
+                    self.pending.push_back(caller);
+                }
             }
         }
     }
@@ -474,27 +477,24 @@ impl Solver {
 
     fn arithmetic(&self, ctx: &Context, id: usize, inputs: &[Value], result: Value) -> Fact {
         let state = &self.analysis.states[id];
-        let facts: Vec<_> = inputs.iter().map(|&value| state.fact(value)).collect();
+        let facts = || inputs.iter().map(|&value| state.fact(value));
         if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
             return Fact::Integer(integer);
         }
-        if facts.contains(&Fact::Original) {
+        if facts().any(|fact| fact == Fact::Original) {
             return Fact::Original;
         }
-        if facts.contains(&Fact::Bottom) {
+        if facts().any(|fact| fact == Fact::Bottom) {
             return Fact::Bottom;
         }
         if !self.analysis.keys[id].specialize {
-            return if facts.iter().all(|fact| *fact == Fact::Literal) {
+            return if facts().all(|fact| fact == Fact::Literal) {
                 Fact::Literal
             } else {
                 Fact::Original
             };
         }
-        let input = facts
-            .into_iter()
-            .filter_map(Fact::integer)
-            .reduce(Integer::common);
+        let input = facts().filter_map(Fact::integer).reduce(Integer::common);
         let required = state.required.get(&result).copied();
         match (input, required) {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
@@ -526,21 +526,20 @@ impl Solver {
         let Constraint::Op(op) = constraint else {
             unreachable!()
         };
-        let inputs: Vec<_> = op.deref(ctx).operands().collect();
-        let results: Vec<_> = op.deref(ctx).results().collect();
+        let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if Operation::get_op::<AwaitOp>(op, ctx).is_none()
             && op_cast::<dyn BranchOpInterface>(&*dynamic).is_none()
         {
-            for &value in &inputs {
+            for value in operation.operands() {
                 if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
                     self.preserve_promise_payload(id, value);
                 }
             }
         }
         if let Some(index) = promise_payload(ctx, op) {
-            let value = inputs[index];
-            let promise = results[0];
+            let value = operation.get_operand(index);
+            let promise = operation.get_result(0);
             if self.analysis.states[id]
                 .original_payloads
                 .contains(&promise)
@@ -558,8 +557,8 @@ impl Solver {
             return;
         }
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
-            let promise = inputs[0];
-            let result = results[0];
+            let promise = operation.get_operand(0);
+            let result = operation.get_result(0);
             let fact = self.analysis.states[id].fact(promise);
             if fact == Fact::Original {
                 self.preserve_promise_payload(id, promise);
@@ -579,7 +578,7 @@ impl Solver {
             return;
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
-            if let Some(&value) = inputs.first() {
+            if let Some(value) = operation.operands().next() {
                 self.require(id, value, self.analysis.keys[id].result.integer());
                 let fact = self.analysis.states[id].fact(value);
                 let fact = if self.analysis.keys[id].result == ResultDomain::Original {
@@ -599,10 +598,10 @@ impl Solver {
                 if new != old || range != old_range {
                     self.analysis.states[id].result = new;
                     self.analysis.states[id].result_range = range;
-                    let callers: Vec<_> =
-                        self.analysis.states[id].callers.iter().copied().collect();
-                    for caller in callers {
-                        self.enqueue(caller);
+                    for &caller in &self.analysis.states[id].callers {
+                        if self.queued.insert(caller) {
+                            self.pending.push_back(caller);
+                        }
                     }
                 }
             }
@@ -617,40 +616,39 @@ impl Solver {
                 && let Some(&child) = self.analysis.generic.get(&callee)
             {
                 self.analysis.states[child].callers.insert((id, index));
-                if let Some(&result) = results.first() {
+                if let Some(result) = operation.results().next() {
                     self.fact(id, result, self.analysis.states[child].result);
                     self.range(id, result, self.analysis.states[child].result_range);
                 }
                 return;
             }
-            let required = results
-                .first()
-                .and_then(|value| self.analysis.states[id].required.get(value))
+            let required = operation
+                .results()
+                .next()
+                .and_then(|value| self.analysis.states[id].required.get(&value))
                 .copied();
-            let facts: Vec<_> = inputs
-                .iter()
-                .map(|&value| self.analysis.states[id].fact(value))
-                .collect();
-            if facts.contains(&Fact::Bottom) {
+            if operation
+                .operands()
+                .any(|value| self.analysis.states[id].fact(value) == Fact::Bottom)
+            {
                 return;
             }
             if self.analysis.bodies.contains_key(&callee) {
                 let preserve_result = asynchronous.is_some()
                     && self.analysis.states[id]
                         .original_payloads
-                        .contains(&results[0]);
-                let args = inputs
-                    .iter()
-                    .zip(&facts)
-                    .map(|(value, fact)| {
+                        .contains(&operation.get_result(0));
+                let args = operation
+                    .operands()
+                    .map(|value| {
                         if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
                             None
                         } else {
-                            match fact {
-                                Fact::Integer(integer) => Some(*integer),
+                            match self.analysis.states[id].fact(value) {
+                                Fact::Integer(integer) => Some(integer),
                                 Fact::Literal => {
                                     let Range::Bounds(interval) =
-                                        self.analysis.states[id].range(*value)
+                                        self.analysis.states[id].range(value)
                                     else {
                                         return None;
                                     };
@@ -676,18 +674,18 @@ impl Solver {
                 });
                 self.analysis.states[id].calls.insert(op, child);
                 self.analysis.states[child].callers.insert((id, index));
-                let parameters = self.analysis.bodies[&callee].parameters.clone();
-                for (input, parameter) in inputs.iter().zip(parameters) {
+                for (position, input) in operation.operands().enumerate() {
+                    let parameter = self.analysis.bodies[&callee].parameters[position];
                     self.require(
                         id,
-                        *input,
+                        input,
                         self.analysis.states[child]
                             .required
                             .get(&parameter)
                             .copied(),
                     );
                 }
-                if let Some(&result) = results.first() {
+                if let Some(result) = operation.results().next() {
                     self.fact(id, result, self.analysis.states[child].result);
                     self.range(id, result, self.analysis.states[child].result_range);
                 }
@@ -700,23 +698,33 @@ impl Solver {
                 BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul
             )
         {
-            let required = self.analysis.states[id].required.get(&results[0]).copied();
-            for &input in &inputs {
+            let required = self.analysis.states[id]
+                .required
+                .get(&operation.get_result(0))
+                .copied();
+            for input in operation.operands() {
                 self.require(id, input, required);
             }
             self.fact(
                 id,
-                results[0],
-                self.arithmetic(ctx, id, &inputs, results[0]),
+                operation.get_result(0),
+                self.arithmetic(
+                    ctx,
+                    id,
+                    &[operation.get_operand(0), operation.get_operand(1)],
+                    operation.get_result(0),
+                ),
             );
             self.range(
                 id,
-                results[0],
+                operation.get_result(0),
                 arithmetic_range(
                     binary.kind(ctx),
-                    self.analysis.states[id].range(inputs[0]),
-                    self.analysis.states[id].range(inputs[1]),
-                    self.analysis.states[id].fact(results[0]).integer(),
+                    self.analysis.states[id].range(operation.get_operand(0)),
+                    self.analysis.states[id].range(operation.get_operand(1)),
+                    self.analysis.states[id]
+                        .fact(operation.get_result(0))
+                        .integer(),
                 ),
             );
             return;
@@ -724,35 +732,48 @@ impl Solver {
         if Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
             .is_some_and(|op| op.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::BigIntNegate))
         {
-            let required = self.analysis.states[id].required.get(&results[0]).copied();
-            self.require(id, inputs[0], required);
+            let required = self.analysis.states[id]
+                .required
+                .get(&operation.get_result(0))
+                .copied();
+            self.require(id, operation.get_operand(0), required);
             self.fact(
                 id,
-                results[0],
-                self.arithmetic(ctx, id, &inputs, results[0]),
+                operation.get_result(0),
+                self.arithmetic(
+                    ctx,
+                    id,
+                    &[operation.get_operand(0)],
+                    operation.get_result(0),
+                ),
             );
             self.range(
                 id,
-                results[0],
+                operation.get_result(0),
                 arithmetic_range(
                     BinaryKind::Sub,
                     Range::Bounds(Interval { lower: 0, upper: 0 }),
-                    self.analysis.states[id].range(inputs[0]),
-                    self.analysis.states[id].fact(results[0]).integer(),
+                    self.analysis.states[id].range(operation.get_operand(0)),
+                    self.analysis.states[id]
+                        .fact(operation.get_result(0))
+                        .integer(),
                 ),
             );
             return;
         }
         if Operation::get_op::<CompareOp>(op, ctx).is_some()
-            && let Some(domain) = comparison_domain(&self.analysis.states[id], &inputs)
+            && let Some(domain) = comparison_domain(
+                &self.analysis.states[id],
+                &[operation.get_operand(0), operation.get_operand(1)],
+            )
         {
-            for &input in &inputs {
+            for input in operation.operands() {
                 if self.analysis.states[id].fact(input) == Fact::Literal {
                     self.require(id, input, Some(domain));
                 }
             }
         }
-        for result in results {
+        for result in operation.results() {
             let fact = if literal(ctx, op).is_some() {
                 Fact::Literal
             } else if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
@@ -781,7 +802,7 @@ impl Solver {
             } else if let Some(integer) = fact.integer() {
                 Range::Bounds(integer.bounds())
             } else if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
-                self.analysis.states[id].range(inputs[0])
+                self.analysis.states[id].range(operation.get_operand(0))
             } else {
                 Range::Unknown
             };
@@ -957,6 +978,15 @@ impl Analysis for NumericAnalysis {
                 .analysis
                 .generic
                 .insert(function.get_symbol_name(ctx), generic);
+            if function
+                .get_operation()
+                .deref(ctx)
+                .attributes
+                .0
+                .contains_key(&SPECIALIZATION)
+            {
+                continue;
+            }
             let signature = function
                 .get_operation()
                 .deref(ctx)
@@ -1073,6 +1103,42 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
             pending.extend(analysis.states[id].calls.values().copied());
         }
     }
+    let mut changed = HashSet::new();
+    let mut pending = Vec::new();
+    for &id in &reachable {
+        let state = &analysis.states[id];
+        let signature = analysis.bodies[&analysis.keys[id].function]
+            .function
+            .get_type(ctx);
+        let signature =
+            TypedHandle::<FunctionType>::from_handle(signature, ctx).expect("function type");
+        let result_changes = state.result.integer().is_some_and(|domain| {
+            signature
+                .deref(ctx)
+                .res_types()
+                .first()
+                .is_none_or(|&ty| Integer::from_type(ctx, ty) != Some(domain))
+        });
+        let values_change = state.facts.keys().any(|&value| {
+            state.representation(value).is_some_and(|domain| {
+                let ty = value.get_type(ctx);
+                let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
+                    .map_or(ty, |promise| promise.deref(ctx).value());
+                Integer::from_type(ctx, ty) != Some(domain)
+            })
+        });
+        if result_changes || values_change {
+            changed.insert(id);
+            pending.push(id);
+        }
+    }
+    while let Some(id) = pending.pop() {
+        for &(caller, _) in &analysis.states[id].callers {
+            if reachable.contains(&caller) && changed.insert(caller) {
+                pending.push(caller);
+            }
+        }
+    }
     let mut clones = HashMap::new();
     let mut signatures = HashMap::new();
     for (id, key) in analysis
@@ -1083,6 +1149,20 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
     {
         let body = &analysis.bodies[&key.function];
         let mut mapping = IrMapping::new();
+        if !changed.contains(&id) {
+            let signature =
+                TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
+                    .expect("function type");
+            signatures.insert(
+                id,
+                (
+                    signature.deref(ctx).arg_types(),
+                    signature.deref(ctx).res_types(),
+                ),
+            );
+            clones.insert(id, (body.function, mapping));
+            continue;
+        }
         let cloned = clone_operation(
             body.function.get_operation(),
             ctx,
@@ -1132,6 +1212,9 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
         .enumerate()
         .filter(|(id, _)| reachable.contains(id))
     {
+        if !changed.contains(&id) {
+            continue;
+        }
         let (_, mapping) = &clones[&id];
         let state = &analysis.states[id];
         let body = &analysis.bodies[&analysis.keys[id].function];
@@ -1301,6 +1384,9 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
         }
     }
     for &(original, id) in &analysis.roots {
+        if !changed.contains(&id) {
+            continue;
+        }
         let name = clones[&id].0.get_symbol_name(ctx);
         original
             .get_operation()
@@ -1308,5 +1394,5 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
             .attributes
             .set(SPECIALIZATION.clone(), IdentifierAttr::new(name));
     }
-    reachable.len()
+    changed.len()
 }

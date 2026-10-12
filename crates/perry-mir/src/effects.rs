@@ -10,14 +10,13 @@ use crate::{
     },
 };
 use pliron::{
-    basic_block::BasicBlock,
     builtin::{
         op_interfaces::{BranchOpInterface, OneRegionInterface, SymbolOpInterface},
         ops::FuncOp,
     },
     context::{Context, Ptr},
+    graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order},
     identifier::Identifier,
-    linked_list::ContainsLinkedList,
     op::op_cast,
     operation::Operation,
     pass::{Analysis, AnalysisManager},
@@ -25,7 +24,7 @@ use pliron::{
     r#type::Typed,
     value::Value,
 };
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 /// Async failures settle a promise; they never add a synchronous status result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,36 +156,40 @@ fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
         .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)))
 }
 
-fn cyclic<N: Copy + Eq + std::hash::Hash, S: IntoIterator<Item = N>>(
-    nodes: impl IntoIterator<Item = N>,
-    successors: impl Fn(N) -> S,
-) -> bool {
-    fn visit<N: Copy + Eq + std::hash::Hash, S: IntoIterator<Item = N>>(
-        node: N,
-        successors: &impl Fn(N) -> S,
-        active: &mut HashSet<N>,
-        done: &mut HashSet<N>,
-    ) -> bool {
-        if done.contains(&node) {
-            return false;
-        }
-        if !active.insert(node) {
-            return true;
-        }
-        if successors(node)
-            .into_iter()
-            .any(|next| visit(next, successors, active, done))
-        {
-            return true;
-        }
-        active.remove(&node);
-        done.insert(node);
-        false
+struct CallGraph<'a> {
+    callees: &'a [Vec<usize>],
+    callers: &'a [Vec<usize>],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FunctionIndex(usize);
+
+impl HasLabel<()> for FunctionIndex {
+    fn label(&self, _: &()) -> String {
+        self.0.to_string()
     }
-    let (mut active, mut done) = (HashSet::new(), HashSet::new());
-    nodes
-        .into_iter()
-        .any(|node| visit(node, &successors, &mut active, &mut done))
+}
+
+impl ControlFlowGraph<()> for CallGraph<'_> {
+    type Node = FunctionIndex;
+    fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
+        self.callees[node.0].len()
+    }
+    fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
+        FunctionIndex(self.callees[node.0][index])
+    }
+    fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
+        self.callers[node.0].len()
+    }
+    fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
+        FunctionIndex(self.callers[node.0][index])
+    }
+    fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
+        (!self.callees.is_empty()).then_some(FunctionIndex(0))
+    }
+    fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
+        Box::new((0..self.callees.len()).map(FunctionIndex))
+    }
 }
 
 /// Fixed point over direct calls. Unknown bounds propagate to every caller; recursion and
@@ -199,16 +202,9 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
         .cloned()
         .map(|name| (name, Summary::default()))
         .collect();
-    let bodies: Vec<Vec<_>> = functions
+    let bodies: Vec<_> = functions
         .iter()
-        .map(|function| {
-            function
-                .get_region(ctx)
-                .deref(ctx)
-                .iter(ctx)
-                .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-                .collect()
-        })
+        .map(|function| crate::aggregates::operations(ctx, function))
         .collect();
     let index_of: HashMap<&Identifier, usize> = names
         .iter()
@@ -223,75 +219,80 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                 .collect()
         })
         .collect();
-    let loops: Vec<_> = functions
-        .iter()
-        .enumerate()
-        .map(|(index, function)| {
-            let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-            cyclic(blocks, |block: Ptr<BasicBlock>| block.deref(ctx).succs(ctx))
-                || cyclic([index], |function| call_graph[function].iter().copied())
-        })
-        .collect();
-    let origins: Vec<_> = functions
-        .iter()
-        .enumerate()
-        .map(|(index, function)| {
-            let mut origins: HashMap<Value, BTreeSet<usize>> = function
-                .get_entry_block(ctx)
-                .deref(ctx)
-                .arguments()
-                .enumerate()
-                .filter(|(_, value)| crate::types::is_reference(ctx, value.get_type(ctx)))
-                .map(|(index, value)| (value, BTreeSet::from([index])))
-                .collect();
-            loop {
-                let mut grew = false;
-                for &op in &bodies[index] {
-                    let inputs: Vec<_> = op.deref(ctx).operands().collect();
-                    let dependencies: BTreeSet<_> = inputs
-                        .iter()
-                        .flat_map(|value| origins.get(value).into_iter().flatten().copied())
-                        .collect();
-                    for result in op.deref(ctx).results() {
-                        if !crate::types::is_reference(ctx, result.get_type(ctx)) {
-                            continue;
-                        }
-                        let set = origins.entry(result).or_default();
-                        let before = set.len();
-                        set.extend(dependencies.iter().copied());
-                        grew |= set.len() != before;
-                    }
-                    let dynamic = Operation::get_op_dyn(op, ctx);
-                    if let Some(branch) = op_cast::<dyn BranchOpInterface>(dynamic.as_ref()) {
-                        for successor in 0..op.deref(ctx).get_num_successors() {
-                            let block = op.deref(ctx).get_successor(successor);
-                            for (argument, operand) in block
-                                .deref(ctx)
-                                .arguments()
-                                .zip(branch.successor_operand_range(ctx, successor))
-                            {
-                                let dependency =
-                                    origins.get(&inputs[operand]).cloned().unwrap_or_default();
-                                let set = origins.entry(argument).or_default();
-                                let before = set.len();
-                                set.extend(dependency);
-                                grew |= set.len() != before;
-                            }
-                        }
-                    }
-                }
-                if !grew {
-                    return origins;
-                }
-            }
-        })
-        .collect();
     let mut callers = vec![Vec::new(); functions.len()];
     for (caller, callees) in call_graph.iter().enumerate() {
         for &callee in callees {
             callers[callee].push(caller);
         }
     }
+    let graph = CallGraph {
+        callees: &call_graph,
+        callers: &callers,
+    };
+    let mut recursive = vec![false; functions.len()];
+    for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
+        let reaches_cycle = component.is_cyclic
+            || component
+                .nodes
+                .iter()
+                .any(|node| call_graph[node.0].iter().any(|&callee| recursive[callee]));
+        for node in component.nodes {
+            recursive[node.0] = reaches_cycle;
+        }
+    }
+    let loops: Vec<_> = functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            recursive[index]
+                || sccs_in_topological_order(ctx, &function.get_region(ctx))
+                    .iter()
+                    .any(|component| component.is_cyclic)
+        })
+        .collect();
+    let origins: Vec<_> = functions
+        .iter()
+        .map(|function| {
+            let mut origins: HashMap<Value, BTreeSet<usize>> = HashMap::new();
+            let mut pending: Vec<_> = function
+                .get_entry_block(ctx)
+                .deref(ctx)
+                .arguments()
+                .enumerate()
+                .filter(|(_, value)| crate::types::is_reference(ctx, value.get_type(ctx)))
+                .map(|(index, value)| (value, index))
+                .collect();
+            while let Some((value, origin)) = pending.pop() {
+                if !origins.entry(value).or_default().insert(origin) {
+                    continue;
+                }
+                for usage in value.uses(ctx) {
+                    let op = usage.user_op();
+                    pending.extend(
+                        op.deref(ctx)
+                            .results()
+                            .filter(|result| crate::types::is_reference(ctx, result.get_type(ctx)))
+                            .map(|result| (result, origin)),
+                    );
+                    let dynamic = Operation::get_op_dyn(op, ctx);
+                    if let Some(branch) = op_cast::<dyn BranchOpInterface>(dynamic.as_ref()) {
+                        let operand = usage.find_index(ctx);
+                        for successor in 0..op.deref(ctx).get_num_successors() {
+                            let range = branch.successor_operand_range(ctx, successor);
+                            if range.contains(&operand) {
+                                let block = op.deref(ctx).get_successor(successor);
+                                pending.push((
+                                    block.deref(ctx).get_argument(operand - range.start),
+                                    origin,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            origins
+        })
+        .collect();
     let mut pending: VecDeque<_> = (0..functions.len()).collect();
     let mut queued = vec![true; functions.len()];
     while let Some(index) = pending.pop_front() {
@@ -301,11 +302,12 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
         let mut summary = summaries[&names[index]].clone();
         let mut fails = summary.failure != Failure::None;
         for &op in &bodies[index] {
-            let inputs: Vec<_> = op.deref(ctx).operands().collect();
-            let dependencies: BTreeSet<_> = inputs
-                .iter()
-                .flat_map(|value| origins.get(value).into_iter().flatten().copied())
-                .collect();
+            let operation = op.deref(ctx);
+            let dependencies = || {
+                operation
+                    .operands()
+                    .flat_map(|value| origins.get(&value).into_iter().flatten().copied())
+            };
             summary.writes_record |= Operation::get_op::<FieldSetOp>(op, ctx).is_some();
             summary.task_state |= op
                 .deref(ctx)
@@ -335,7 +337,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                     .is_some_and(|op| op.phase(ctx) == crate::foreign::Phase::Start)
                 || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
             {
-                summary.escapes.extend(dependencies.iter().copied());
+                summary.escapes.extend(dependencies());
             }
             let stored = if Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
                 || Operation::get_op::<FieldSetOp>(op, ctx).is_some()
@@ -349,9 +351,13 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                 None
             };
             if let Some(stored) = stored {
-                summary
-                    .escapes
-                    .extend(origins.get(&inputs[stored]).into_iter().flatten().copied());
+                summary.escapes.extend(
+                    origins
+                        .get(&operation.get_operand(stored))
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
             }
             if let Some(callee) = callee(ctx, op) {
                 if let Some(callee) = summaries.get(&callee) {
@@ -366,9 +372,13 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                     summary.repeated |= callee.repeated;
                     summary.unknown_helper_bound |= callee.unknown_helper_bound;
                     for &index in &callee.escapes {
-                        summary
-                            .escapes
-                            .extend(origins.get(&inputs[index]).into_iter().flatten().copied());
+                        summary.escapes.extend(
+                            origins
+                                .get(&operation.get_operand(index))
+                                .into_iter()
+                                .flatten()
+                                .copied(),
+                        );
                     }
                 } else {
                     summary.allocates = true;
@@ -379,7 +389,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                     summary.task_state = true;
                     fails |= Operation::get_op::<CallOp>(op, ctx).is_some();
                     summary.unknown_helper_bound = true;
-                    summary.escapes.extend(dependencies);
+                    summary.escapes.extend(dependencies());
                 }
             }
         }

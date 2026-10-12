@@ -6,6 +6,7 @@ pub(crate) fn export(
     ctx: &mut Context,
     state: &mut ModuleState,
     function: &FuncOp,
+    lowered: &FuncOp,
     export: &Export,
 ) -> Result<()> {
     let scope = Scope::for_export(state, export, &function.get_symbol_name(ctx));
@@ -197,7 +198,7 @@ pub(crate) fn export(
     let ret = ReturnOp::new(ctx, returned).get_operation();
     b.insert(ctx, ret);
     let state = b.state;
-    state.wasm.append_operation(ctx, glue.get_operation(), 0);
+    crate::module::append_export(ctx, state, &glue, lowered, &export.core_name);
 
     if scope == Scope::Direct {
         return Ok(());

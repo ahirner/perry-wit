@@ -14,17 +14,42 @@ use pliron::{
 };
 use std::collections::{HashMap, HashSet};
 
-/// Sets for one unchanged MIR snapshot. Pliron answers block-boundary queries; a local
-/// backward scan derives operation sets without another CFG fixed-point solver.
+/// Block-local live intervals. Pliron supplies inter-block liveness; definition and
+/// last-use positions answer local queries without copying a set at every operation.
 #[derive(Default)]
 pub struct LiveValues {
-    after: HashMap<Ptr<Operation>, HashSet<Value>>,
+    positions: HashMap<Ptr<Operation>, (Ptr<BasicBlock>, usize)>,
+    blocks: HashMap<Ptr<BasicBlock>, HashMap<Value, std::ops::Range<usize>>>,
     entry: HashMap<Ptr<BasicBlock>, HashSet<Value>>,
 }
 
+#[derive(Clone, Copy)]
+pub struct LiveAfter<'a> {
+    intervals: &'a HashMap<Value, std::ops::Range<usize>>,
+    position: usize,
+}
+
+impl<'a> LiveAfter<'a> {
+    pub fn values(self) -> impl Iterator<Item = Value> + 'a {
+        self.intervals
+            .iter()
+            .filter_map(move |(&value, range)| range.contains(&self.position).then_some(value))
+    }
+
+    pub fn contains(&self, value: &Value) -> bool {
+        self.intervals
+            .get(value)
+            .is_some_and(|range| range.contains(&self.position))
+    }
+}
+
 impl LiveValues {
-    pub fn after(&self, operation: Ptr<Operation>) -> &HashSet<Value> {
-        &self.after[&operation]
+    pub fn after(&self, operation: Ptr<Operation>) -> LiveAfter<'_> {
+        let (block, position) = self.positions[&operation];
+        LiveAfter {
+            intervals: &self.blocks[&block],
+            position,
+        }
     }
 
     /// Direct uses on this receiving edge, excluding values defined by the receiving block.
@@ -52,47 +77,62 @@ impl Analysis for LiveValues {
             .expect("liveness computes dominance");
         let mut result = Self::default();
         for function in crate::aggregates::functions(root, ctx) {
-            let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-            let values: Vec<_> = blocks
-                .iter()
-                .flat_map(|block| {
-                    block
-                        .deref(ctx)
-                        .arguments()
-                        .chain(
-                            block
-                                .deref(ctx)
-                                .iter(ctx)
-                                .flat_map(|op| op.deref(ctx).results().collect::<Vec<_>>()),
-                        )
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            for block in blocks {
-                let mut live: HashSet<_> = values
+            let region = function.get_region(ctx);
+            let mut definitions = HashMap::new();
+            for block in region.deref(ctx).iter(ctx) {
+                for value in block.deref(ctx).arguments() {
+                    definitions.insert(value, (block, 0));
+                }
+                for (index, op) in block.deref(ctx).iter(ctx).enumerate() {
+                    let position = index + 1;
+                    result.positions.insert(op, (block, position));
+                    for value in op.deref(ctx).results() {
+                        definitions.insert(value, (block, position));
+                    }
+                }
+            }
+            let mut crossing = HashSet::new();
+            for block in region.deref(ctx).iter(ctx) {
+                for op in block.deref(ctx).iter(ctx) {
+                    for value in op.deref(ctx).operands() {
+                        if definitions[&value].0 != block {
+                            crossing.insert(value);
+                        }
+                    }
+                }
+            }
+            for block in region.deref(ctx).iter(ctx) {
+                let mut intervals = HashMap::new();
+                for &value in &crossing {
+                    if liveness.is_live_at_point(
+                        ctx,
+                        &mut dominance,
+                        value,
+                        OpInsertionPoint::AtBlockEnd(block),
+                    ) {
+                        let (definition, position) = definitions[&value];
+                        let start = if definition == block { position } else { 0 };
+                        intervals.insert(value, start..usize::MAX);
+                    }
+                }
+                for (index, op) in block.deref(ctx).iter(ctx).enumerate() {
+                    for value in op.deref(ctx).operands() {
+                        let (definition, position) = definitions[&value];
+                        let start = if definition == block { position } else { 0 };
+                        intervals
+                            .entry(value)
+                            .and_modify(|range| range.end = range.end.max(index + 1))
+                            .or_insert(start..index + 1);
+                    }
+                }
+                let entry = intervals
                     .iter()
-                    .copied()
-                    .filter(|&value| {
-                        liveness.is_live_at_point(
-                            ctx,
-                            &mut dominance,
-                            value,
-                            OpInsertionPoint::AtBlockEnd(block),
-                        )
+                    .filter_map(|(&value, range)| {
+                        (range.start == 0 && definitions[&value].0 != block).then_some(value)
                     })
                     .collect();
-                let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-                for op in ops.into_iter().rev() {
-                    result.after.insert(op, live.clone());
-                    for value in op.deref(ctx).results() {
-                        live.remove(&value);
-                    }
-                    live.extend(op.deref(ctx).operands());
-                }
-                for argument in block.deref(ctx).arguments() {
-                    live.remove(&argument);
-                }
-                result.entry.insert(block, live);
+                result.entry.insert(block, entry);
+                result.blocks.insert(block, intervals);
             }
         }
         Ok(result)

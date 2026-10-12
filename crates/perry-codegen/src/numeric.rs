@@ -2,12 +2,49 @@
 use crate::function::FunctionLowering;
 use anyhow::{Result, bail};
 use pliron::{
-    builtin::types::{FP64Type, IntegerType, Signedness},
+    builtin::{
+        attributes::IntegerAttr,
+        ops::ConstantOp,
+        types::{FP64Type, IntegerType, Signedness},
+    },
     context::Context,
+    operation::Operation,
     r#type::TypeHandle,
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
+use pliron_wasm::ops::{LoadOp, NumOp};
+
+/// Bounds guaranteed by the producing instruction, independent of source-level types.
+fn produced_range(ctx: &Context, value: Value) -> Option<(i64, i64)> {
+    let op = value.defining_op()?;
+    if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
+        let attr = constant.get_attr_builtin_constant_value(ctx)?;
+        let value = attr.downcast_ref::<IntegerAttr>()?.value().to_i64();
+        return Some((value, value));
+    }
+    if let Some(load) = Operation::get_op::<LoadOp>(op, ctx) {
+        return match *load.get_attr_wasm_load_kind(ctx)? {
+            MemKind::I32S8 => Some((-128, 127)),
+            MemKind::I32S16 => Some((-32768, 32767)),
+            MemKind::I32U8 => Some((0, 255)),
+            MemKind::I32U16 => Some((0, 65535)),
+            _ => None,
+        };
+    }
+    let num = Operation::get_op::<NumOp>(op, ctx)?;
+    match *num.get_attr_wasm_num(ctx)? {
+        NumOpcode::I32Extend8S => Some((-128, 127)),
+        NumOpcode::I32Extend16S => Some((-32768, 32767)),
+        NumOpcode::I32And => op.deref(ctx).operands().find_map(|value| {
+            let constant = Operation::get_op::<ConstantOp>(value.defining_op()?, ctx)?;
+            let attr = constant.get_attr_builtin_constant_value(ctx)?;
+            let mask = attr.downcast_ref::<IntegerAttr>()?.value().to_i64();
+            (mask >= 0).then_some((0, mask))
+        }),
+        _ => None,
+    }
+}
 
 pub(crate) fn integer(ctx: &Context, ty: TypeHandle) -> Option<(u32, bool)> {
     ty.deref(ctx)
@@ -22,12 +59,21 @@ impl FunctionLowering<'_, '_> {
         value: Value,
         ty: TypeHandle,
     ) -> Value {
-        match integer(ctx, ty) {
-            Some((bits @ (8 | 16), true)) => {
-                let shift = self.i32_const(ctx, (32 - bits) as i32);
-                let shifted = self.num(ctx, NumOpcode::I32Shl, vec![value, shift]);
-                self.num(ctx, NumOpcode::I32ShrS, vec![shifted, shift])
+        if let Some((bits @ (8 | 16), signed)) = integer(ctx, ty)
+            && let Some((lower, upper)) = produced_range(ctx, value)
+        {
+            let bounds = if signed {
+                (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+            } else {
+                (0, (1 << bits) - 1)
+            };
+            if lower >= bounds.0 && upper <= bounds.1 {
+                return value;
             }
+        }
+        match integer(ctx, ty) {
+            Some((8, true)) => self.num(ctx, NumOpcode::I32Extend8S, vec![value]),
+            Some((16, true)) => self.num(ctx, NumOpcode::I32Extend16S, vec![value]),
             Some((bits @ (8 | 16), false)) => {
                 let mask = self.i32_const(ctx, (1 << bits) - 1);
                 self.num(ctx, NumOpcode::I32And, vec![value, mask])
@@ -104,6 +150,16 @@ impl FunctionLowering<'_, '_> {
             _ => bail!("unsupported numeric representation conversion"),
         };
         let value = opcode.map_or(value, |opcode| self.num(ctx, opcode, vec![value]));
-        Ok(self.normalize_integer(ctx, value, target))
+        let preserves_range = match (integer(ctx, source), integer(ctx, target)) {
+            (Some((from, signed)), Some((to, target_signed))) => {
+                (signed == target_signed && from <= to) || (!signed && target_signed && from < to)
+            }
+            _ => false,
+        };
+        Ok(if preserves_range {
+            value
+        } else {
+            self.normalize_integer(ctx, value, target)
+        })
     }
 }

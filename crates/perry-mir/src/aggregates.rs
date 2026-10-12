@@ -61,11 +61,11 @@ pub(crate) fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
 pub(crate) fn operations(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
     use pliron::builtin::op_interfaces::OneRegionInterface;
     let region = function.get_region(ctx);
-    let blocks: Vec<Ptr<BasicBlock>> = region.deref(ctx).iter(ctx).collect();
-    blocks
-        .into_iter()
-        .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-        .collect()
+    let mut operations = Vec::new();
+    for block in region.deref(ctx).iter(ctx) {
+        operations.extend(block.deref(ctx).iter(ctx));
+    }
+    operations
 }
 
 /// A function that can be inlined: synchronous, at most [LIMIT] operations, and calling
@@ -264,17 +264,8 @@ pub(crate) fn promote_arguments(
                 function,
                 index,
                 &fields,
-                sites.get(&name).map_or(&[][..], |v| v),
+                sites.entry(name.clone()).or_default(),
             );
-            // The call sites were replaced; find them again for the next parameter.
-            let calls: Vec<Ptr<Operation>> = functions
-                .iter()
-                .flat_map(|f| operations(ctx, f))
-                .filter(|&op| {
-                    Operation::get_op::<CallOp>(op, ctx).is_some_and(|c| c.callee(ctx) == name)
-                })
-                .collect();
-            sites.insert(name.clone(), calls);
             status = IRStatus::Changed;
         }
     }
@@ -288,7 +279,7 @@ fn promote(
     function: &FuncOp,
     index: usize,
     fields: &[String],
-    calls: &[Ptr<Operation>],
+    calls: &mut [Ptr<Operation>],
 ) {
     use pliron::builtin::{
         attributes::TypeAttr, type_interfaces::FunctionTypeInterface, types::FunctionType,
@@ -345,7 +336,8 @@ fn promote(
     let ty = FunctionType::get(ctx, arguments, results);
     function.set_attr_builtin_func_type(ctx, TypeAttr::new(ty.into()));
     // The callers read the fields at the call.
-    for &call in calls {
+    for site in calls {
+        let call = *site;
         let callee = Operation::get_op::<CallOp>(call, ctx)
             .expect("a call")
             .callee(ctx);
@@ -371,6 +363,7 @@ fn promote(
             value.replace_all_uses_with(ctx, &new);
         }
         Operation::erase(call, ctx);
+        *site = replacement;
     }
 }
 
