@@ -536,16 +536,18 @@ impl FunctionLowering<'_, '_> {
         let shape = *self.state.shapes.entry(name).or_insert(next_shape);
         let size = self.i32_const(ctx, perry_abi::layout::record::field(field_count) as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
+        if self.state.retains_json {
+            let zero = self.i32_const(ctx, 0);
+            self.store(
+                ctx,
+                MemKind::I32,
+                object,
+                perry_abi::layout::record::JSON,
+                zero,
+            );
+        }
         let shape = self.i32_const(ctx, shape);
         self.store(ctx, MemKind::I32, object, 0, shape);
-        let empty = self.i32_const(ctx, 0);
-        self.store(
-            ctx,
-            MemKind::I32,
-            object,
-            perry_abi::layout::record::SOURCE,
-            empty,
-        );
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, field)?;
             let kind = crate::repr::slot_kind(ctx, field_mir)?;

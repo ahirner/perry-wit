@@ -129,7 +129,7 @@ pub extern "C" fn str_from_code_point(code_point: f64, out_ptr: u32) -> u32 {
 }
 
 /// Converts UTF-8 text, returning packed byte/scalar lengths, or u64::MAX on overflow.
-/// With out_ptr = 0, measures the exact allocation without writing output.
+/// With out_ptr = 0, measures without writing; zero means the unchanged input can be reused.
 #[unsafe(no_mangle)]
 pub extern "C" fn str_case_convert(
     src_ptr: u32,
@@ -149,6 +149,8 @@ pub extern "C" fn str_case_convert(
     };
     let mut byte_len = 0u32;
     let mut scalar_len = 0u32;
+    let mut original = input.chars();
+    let mut unchanged = out_ptr == 0;
     for scalar in casing::mapped_scalars(input.chars(), to_upper != 0) {
         let Some(next_len) = byte_len.checked_add(scalar.len_utf8() as u32) else {
             return u64::MAX;
@@ -163,10 +165,15 @@ pub extern "C" fn str_case_convert(
             };
             scalar.encode_utf8(output);
         }
+        unchanged = unchanged && original.next() == Some(scalar);
         byte_len = next_len;
         scalar_len += 1;
     }
-    u64::from(byte_len) | (u64::from(scalar_len) << 32)
+    if unchanged && original.next().is_none() {
+        0
+    } else {
+        u64::from(byte_len) | (u64::from(scalar_len) << 32)
+    }
 }
 
 /// Returns the number of chunks produced by splitting haystack by sep.

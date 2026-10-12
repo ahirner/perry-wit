@@ -1,4 +1,6 @@
 use super::{Error, Kind, MAX_DEPTH, NODE_BYTES, storage::Storage};
+use arrayvec::ArrayVec;
+use perry_abi::json::MEMBER_COUNT;
 
 /// Validates a document and computes its exact node/data storage requirement.
 pub fn measure(input: &str) -> Result<usize, Error> {
@@ -52,51 +54,39 @@ struct Open {
     object: bool,
 }
 
-const CLOSED: Open = Open {
-    node: 0,
-    previous: None,
-    count: 0,
-    key: 0,
-    object: false,
-};
-
 impl Parser<'_> {
     /// One loop over values with an explicit stack of open containers instead of recursion:
     /// the frame is fixed, so the linker can bound the stack of programs that parse JSON.
     /// Nodes are reserved in document order (a container, then each member's key and value).
     fn document(&mut self) -> Result<usize, Error> {
-        let mut stack = [CLOSED; MAX_DEPTH];
-        let mut depth = 0;
+        let mut stack = ArrayVec::<Open, MAX_DEPTH>::new();
         loop {
-            let (mut node, opened) = self.value(depth)?;
+            let (mut node, opened) = self.value(stack.len())?;
             if let Some(object) = opened {
                 let end = if object { b'}' } else { b']' };
                 self.whitespace();
                 if self.peek() != Some(end) {
-                    stack[depth] = Open {
+                    stack.push(Open {
                         node,
                         object,
-                        ..CLOSED
-                    };
-                    depth += 1;
-                    if object {
-                        stack[depth - 1].key = self.key()?;
-                    }
+                        previous: None,
+                        count: 0,
+                        key: if object { self.key()? } else { 0 },
+                    });
                     continue;
                 }
                 self.position += 1;
-                self.word(node + 20, 0)?;
+                self.word(node + MEMBER_COUNT, 0)?;
             }
             // `node` is complete: link it into its container, closing containers it ends.
             loop {
-                let Some(open) = depth.checked_sub(1).map(|top| &mut stack[top]) else {
+                let Some(open) = stack.last_mut() else {
                     self.whitespace();
                     if self.position != self.input.len() {
                         return Err(Error::Syntax(self.position));
                     }
                     return Ok(node);
                 };
-                let open = *open;
                 if open.object {
                     self.pointer(node + 24, open.key)?;
                 }
@@ -105,20 +95,20 @@ impl Parser<'_> {
                     None => self.pointer(open.node + 16, node)?,
                 }
                 let count = open.count.checked_add(1).ok_or(Error::Capacity)?;
-                stack[depth - 1].previous = Some(node);
-                stack[depth - 1].count = count;
+                open.previous = Some(node);
+                open.count = count;
                 self.whitespace();
                 let end = if open.object { b'}' } else { b']' };
                 if self.peek() == Some(end) {
                     self.position += 1;
-                    self.word(open.node + 20, count)?;
-                    depth -= 1;
+                    self.word(open.node + MEMBER_COUNT, count)?;
                     node = open.node;
+                    stack.pop();
                     continue;
                 }
                 self.expect(b',')?;
                 if open.object {
-                    stack[depth - 1].key = self.key()?;
+                    open.key = self.key()?;
                 }
                 break;
             }
@@ -250,22 +240,15 @@ impl Parser<'_> {
                     // A run of unescaped bytes, copied as is: the input is valid UTF-8.
                     let bytes = self.input.as_bytes();
                     let start = self.position;
-                    while bytes
-                        .get(self.position)
-                        .is_some_and(|&b| b >= 0x20 && b != b'"' && b != b'\\')
-                    {
-                        self.position += 1;
-                    }
+                    self.position += perry_abi::json::unescaped_prefix(&bytes[self.position..]);
                     let run = &bytes[start..self.position];
-                    let destination = self.output.reserve(run.len(), 1)?;
-                    self.output.write(destination, run)?;
+                    self.output.append(run)?;
                     byte_length = byte_length
                         .checked_add(run.len() as u32)
                         .ok_or(Error::Capacity)?;
                     if self.output.stores {
-                        let scalars = run.iter().filter(|&&b| b & 0xC0 != 0x80).count();
                         scalar_length = scalar_length
-                            .checked_add(scalars as u32)
+                            .checked_add(perry_abi::utf8::scalars_length_wide(run))
                             .ok_or(Error::Capacity)?;
                     }
                     continue;
@@ -273,8 +256,7 @@ impl Parser<'_> {
             };
             let mut bytes = [0; 4];
             let bytes = scalar.encode_utf8(&mut bytes).as_bytes();
-            let destination = self.output.reserve(bytes.len(), 1)?;
-            self.output.write(destination, bytes)?;
+            self.output.append(bytes)?;
             byte_length = byte_length
                 .checked_add(bytes.len() as u32)
                 .ok_or(Error::Capacity)?;

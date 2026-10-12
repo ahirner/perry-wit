@@ -1,7 +1,7 @@
 //! Wasm32 aggregate layouts shared by generated code and linked helpers.
 pub mod record {
     pub const SHAPE: u32 = 0;
-    pub const SOURCE: u32 = 4;
+    pub const JSON: u32 = 4;
     pub const HEADER: u32 = 8;
     pub const SLOT: u32 = 8;
 
@@ -14,7 +14,6 @@ pub mod array {
     pub const LEN: u32 = 0;
     pub const CAP: u32 = 4;
     pub const DATA: u32 = 8;
-    pub const SOURCE: u32 = 12;
     pub const SLOT: u32 = 8;
 }
 
@@ -22,12 +21,11 @@ pub mod variant {
     pub const TAG: u32 = 0;
     pub const OWNER: u32 = 4;
     pub const VALUE: u32 = 8;
-    pub const BASE_SIZE: u32 = 16;
-    pub const SOURCE: u32 = 16;
-    pub const SIZE: u32 = 24;
+    pub const SIZE: u32 = 16;
+    pub const JSON: u32 = SIZE;
 }
 
-/// Native helpers and Wasm code share this definition, including pooled string headers.
+/// Native helpers and Wasm code share this definition, including string headers.
 pub mod string {
     pub const LEN: u32 = 0;
     pub const SCALARS: u32 = 4;
@@ -67,21 +65,4 @@ pub mod async_frame {
     pub const OBSERVER: u32 = 24;
     pub const OBSERVER_SIZE: u32 = 32;
     pub const SLOTS: u32 = OBSERVER + OBSERVER_SIZE;
-}
-
-/// Aggregate codes passed by typed JSON decoders when attaching source provenance.
-pub mod json_source {
-    pub const RECORD: u32 = 0;
-    pub const ARRAY: u32 = 1;
-    pub const VARIANT: u32 = 2;
-    pub const TUPLE: u32 = 3;
-
-    pub const fn offset(kind: u32) -> u32 {
-        match kind {
-            RECORD | TUPLE => super::record::SOURCE,
-            ARRAY => super::array::SOURCE,
-            VARIANT => super::variant::SOURCE,
-            _ => panic!("invalid JSON aggregate layout"),
-        }
-    }
 }

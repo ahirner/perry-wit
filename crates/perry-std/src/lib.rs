@@ -12,8 +12,6 @@ mod decoder;
 mod exception;
 mod integers;
 mod json;
-mod json_read;
-mod json_source;
 mod random;
 mod regex;
 mod text;
@@ -24,12 +22,12 @@ use perry_abi as runtime;
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_raise_syntax() -> u32 {
     runtime::raise(runtime::ERROR, "SyntaxError: Unexpected token in JSON");
-    runtime::ERROR
+    runtime::take_status()
 }
 
 /// `toISOString` of an invalid date.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_raise_invalid_date() -> u32 {
     runtime::raise(runtime::RANGE_ERROR, "Invalid time value");
-    runtime::RANGE_ERROR
+    runtime::take_status()
 }

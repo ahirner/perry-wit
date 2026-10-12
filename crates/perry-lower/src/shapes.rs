@@ -31,8 +31,6 @@ pub(crate) struct Shapes<'h> {
     pub(crate) module: pliron::builtin::ops::ModuleOp,
     pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
     pub(crate) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
-    /// Generated typed `JSON.parse` decoders (`json_read`), by target type.
-    pub(crate) readers: RefCell<HashMap<TypeHandle, Identifier>>,
     pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
     pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
@@ -100,7 +98,6 @@ impl<'h> Shapes<'h> {
         Shapes {
             module,
             decoders: RefCell::new(HashMap::new()),
-            readers: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
             global_ids: if hir.functions.iter().any(|f| f.is_exported) {

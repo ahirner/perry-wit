@@ -488,8 +488,8 @@ impl FunctionLowering<'_, '_> {
                         .then_some(perry_abi::layout::record::field(index))
                 })
                 .collect();
-            if self.state.json_provenance {
-                offsets.push(perry_abi::layout::record::SOURCE);
+            if self.state.retains_json {
+                offsets.push(perry_abi::layout::record::JSON);
             }
             let shape = if offsets.is_empty() {
                 0

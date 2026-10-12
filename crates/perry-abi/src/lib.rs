@@ -84,13 +84,6 @@ mod imports {
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
         pub(crate) fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
-        pub(crate) fn perry_string_view_into(
-            out: *mut u8,
-            string: *mut u8,
-            from: u32,
-            to: u32,
-            scalars: u32,
-        );
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
@@ -149,10 +142,7 @@ mod imports {
             perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
             perry_operation_pin, perry_operation_unpin, perry_task_current,
         },
-        string::{
-            perry_string_adopt_counted, perry_string_offset, perry_string_view,
-            perry_string_view_into,
-        },
+        string::{perry_string_adopt_counted, perry_string_offset, perry_string_view},
     };
 
     pub(crate) unsafe fn perry_task_resume(task: *mut u8) {
@@ -198,6 +188,7 @@ pub unsafe fn release_canonical(data: *mut u8) {
 }
 
 /// An object with a static exact pointer map; allocation cannot trigger collection.
+/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
 ///
 /// # Safety
 /// Shape is `[stride, count, offsets...]`, valid for every instance of this allocation.
@@ -250,15 +241,6 @@ pub unsafe fn string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
     unsafe { imports::perry_string_view(string, from, to) }
 }
 
-/// Initialize a string view in traced caller-owned header storage.
-///
-/// # Safety
-/// `out` has the size, alignment and owner pointer map of the runtime string header;
-/// `from..to` is valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
-pub unsafe fn string_view_into(out: *mut u8, string: *mut u8, from: u32, to: u32, scalars: u32) {
-    unsafe { imports::perry_string_view_into(out, string, from, to, scalars) };
-}
-
 /// The UTF-8 bytes of a string.
 ///
 /// # Safety
@@ -307,6 +289,13 @@ pub fn raise(kind: u32, message: &'static str) {
 pub fn raise_string(kind: u32, message: *mut u8) {
     // SAFETY: a runtime service; the message is a live string.
     unsafe { imports::perry_raise(kind, message) }
+}
+
+/// Take and clear the pending runtime status when returning it directly to compiled code.
+#[allow(unused_unsafe)]
+pub fn take_status() -> u32 {
+    // SAFETY: the runtime owns the current task's status.
+    unsafe { imports::perry_status() }
 }
 
 /// ECMAScript `Number::toString` of `value` into `output`; returns the length.
@@ -532,15 +521,6 @@ impl Buffer {
         }
         // SAFETY: `len` bytes at `ptr` are initialized.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    /// The contents, for rewriting in place.
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        if self.len == 0 {
-            return &mut [];
-        }
-        // SAFETY: `len` bytes at `ptr` are initialized, and the buffer owns them exclusively.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 }
 

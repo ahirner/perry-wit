@@ -9,13 +9,13 @@
 //! copies of the sources' (values are immutable, so copies share their children). Members
 //! keep the order the sources list them in; ECMAScript's property order (array-index keys
 //! first, ascending, then the others in creation order, a repeated key keeping its first
-//! position and its last value) is applied once per object when it is first serialized or
-//! spread ([canonical]). Parsed objects go through the same step, so duplicate and numeric
-//! keys come out as in Node.
+//! position and its last value) is applied when serializing or enumerating ([canonical]).
+//! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
+//! the same step, so duplicate and numeric keys come out as in Node.
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
-pub(super) use perry_abi::json::MAX_DEPTH;
 use perry_abi::json::kind::*;
+use perry_abi::json::{MAX_DEPTH, MEMBER_COUNT};
 
 /// A member a spread set to `undefined`: it hides earlier values and is not serialized.
 const UNDEFINED: u32 = 0;
@@ -70,19 +70,6 @@ fn string_node(bytes: &[u8]) -> *mut u8 {
     node
 }
 
-/// Scratch words in the task region.
-fn words(count: usize) -> &'static mut [u32] {
-    if count == 0 {
-        return &mut [];
-    }
-    let data = crate::runtime::alloc((count * 4) as u32) as *mut u32;
-    // SAFETY: a fresh block of `count` words.
-    unsafe {
-        core::ptr::write_bytes(data, 0, count);
-        core::slice::from_raw_parts_mut(data, count)
-    }
-}
-
 fn string_bytes(node: *mut u8) -> &'static [u8] {
     // SAFETY: string nodes hold a data address and byte length.
     unsafe { core::slice::from_raw_parts(self::node(word(node, 8)), word(node, 12) as usize) }
@@ -114,7 +101,7 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     match word(value, 0) {
         ARRAY => {
             if name == b"length" {
-                return std_json_from_number(f64::from(word(value, 20)));
+                return std_json_from_number(f64::from(word(value, MEMBER_COUNT)));
             }
             return array_index(name)
                 .map_or(core::ptr::null_mut(), |index| array_element(value, index));
@@ -161,14 +148,17 @@ pub(crate) extern "C" fn std_json_index(value: *mut u8, index: f64) -> *mut u8 {
         let len = crate::runtime::number_format(index, &mut text);
         return property(value, &text[..len]);
     }
-    if !(index >= 0.0 && libm::trunc(index) == index && index < f64::from(word(value, 20))) {
+    if !(index >= 0.0
+        && libm::trunc(index) == index
+        && index < f64::from(word(value, MEMBER_COUNT)))
+    {
         return core::ptr::null_mut();
     }
     array_element(value, index as u32)
 }
 
 fn array_element(value: *mut u8, index: u32) -> *mut u8 {
-    if index >= word(value, 20) {
+    if index >= word(value, MEMBER_COUNT) {
         return core::ptr::null_mut();
     }
     let mut child = word(value, 16);
@@ -185,7 +175,7 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         return crate::runtime::array(&[]);
     }
     if word(value, 0) == OBJECT {
-        canonical(value);
+        let value = canonical(value);
         let mut child = word(value, 16);
         let mut count = 0;
         while child != 0 {
@@ -205,7 +195,7 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         return array;
     }
     let count = match word(value, 0) {
-        ARRAY => word(value, 20),
+        ARRAY => word(value, MEMBER_COUNT),
         STRING => scalars_length(string_bytes(value)),
         _ => 0,
     };
@@ -226,7 +216,7 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     }
     match word(value, 0) {
         STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
-        ARRAY => f64::from(word(value, 20)).to_bits(),
+        ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
         _ => crate::runtime::UNDEFINED_BITS,
     }
 }
@@ -317,16 +307,15 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
 #[repr(C)]
-pub(super) struct Writer {
-    pub(super) text: Buffer,
+struct Writer {
+    text: Buffer,
     /// Bit `d` set: the container at depth `d` already has an element.
     started: [u64; 2],
-    pub(super) depth: u32,
-    pub(super) max_depth: u32,
-    pub(super) failed: bool,
+    depth: u32,
+    failed: bool,
 }
 
-pub(super) fn writer(w: *mut u8) -> &'static mut Writer {
+fn writer(w: *mut u8) -> &'static mut Writer {
     // SAFETY: compiled code passes writers from [std_json_writer].
     unsafe { &mut *(w as *mut Writer) }
 }
@@ -341,7 +330,6 @@ pub(crate) extern "C" fn std_json_writer() -> *mut u8 {
             text: Buffer::new(),
             started: [0; 2],
             depth: 0,
-            max_depth: 0,
             failed: false,
         })
     };
@@ -358,7 +346,6 @@ pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
     }
     w.text.push(bracket as u8);
     w.depth += 1;
-    w.max_depth = w.max_depth.max(w.depth);
     let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
     w.started[word] &= !(1 << bit);
     1
@@ -412,18 +399,11 @@ pub(crate) unsafe extern "C" fn std_json_key(w: *mut u8, key: *mut u8) {
 /// `data` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u32) {
-    if len > 0 {
+    let w = writer(w);
+    if !w.failed && len > 0 {
         // SAFETY: compiled code passes `len` readable bytes.
-        writer(w).raw(unsafe { core::slice::from_raw_parts(data, len as usize) });
-    }
-}
-
-impl Writer {
-    /// Append `text` verbatim unless the writer failed.
-    pub(super) fn raw(&mut self, text: &[u8]) {
-        if !self.failed {
-            self.text.extend_from_slice(text);
-        }
+        w.text
+            .extend_from_slice(unsafe { core::slice::from_raw_parts(data, len as usize) });
     }
 }
 
@@ -436,7 +416,7 @@ pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
     }
 }
 
-pub(super) fn append_number(text: &mut Buffer, number: f64) {
+fn append_number(text: &mut Buffer, number: f64) {
     if number.is_finite() {
         let mut digits = [0; 40];
         let len = crate::runtime::number_format(number, &mut digits);
@@ -463,12 +443,8 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
 /// Append a JSON string literal, quotes included.
 pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
     text.push(b'"');
-    quote_contents(text, bytes);
-    text.push(b'"');
-}
-
-pub(super) fn quote_contents(text: &mut Buffer, bytes: &[u8]) {
     perry_abi::json::quote_contents(bytes, |part| text.extend_from_slice(part));
+    text.push(b'"');
 }
 
 /// The text written, or null after a failure (with a `TypeError` raised).
@@ -517,15 +493,10 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
         next: u32,
         written: bool,
     }
-    let mut stack = [Open {
-        node: core::ptr::null_mut(),
-        next: 0,
-        written: false,
-    }; MAX_DEPTH as usize + 1];
-    let mut open = 0usize;
+    let mut stack = arrayvec::ArrayVec::<Open, { MAX_DEPTH as usize + 1 }>::new();
     let mut current = value;
     loop {
-        if depth + open as u32 > MAX_DEPTH {
+        if depth + stack.len() as u32 > MAX_DEPTH {
             return false;
         }
         match word(current, 0) {
@@ -543,24 +514,22 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             STRING => quote(text, string_bytes(current)),
             kind @ (ARRAY | OBJECT) => {
                 if kind == OBJECT {
-                    canonical(current);
+                    current = canonical(current);
                 }
                 text.push(if kind == ARRAY { b'[' } else { b'{' });
-                stack[open] = Open {
+                stack.push(Open {
                     node: current,
                     next: word(current, 16),
                     written: false,
-                };
-                open += 1;
+                });
             }
             _ => return false,
         }
         // The next member to write, closing the containers that are done.
         loop {
-            let Some(top) = open.checked_sub(1) else {
+            let Some(container) = stack.last_mut() else {
                 return true;
             };
-            let container = stack[top];
             let mut member = container.next;
             while member != 0 && word(node(member), 0) == UNDEFINED {
                 member = word(node(member), 4);
@@ -568,7 +537,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             let object = word(container.node, 0) == OBJECT;
             if member == 0 {
                 text.push(if object { b'}' } else { b']' });
-                open = top;
+                stack.pop();
                 continue;
             }
             if container.written {
@@ -578,8 +547,8 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                 quote(text, string_bytes(node(word(node(member), 24))));
                 text.push(b':');
             }
-            stack[top].next = word(node(member), 4);
-            stack[top].written = true;
+            container.next = word(node(member), 4);
+            container.written = true;
             current = node(member);
             break;
         }
@@ -599,8 +568,65 @@ pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     }
 }
 
+/// Append undeclared object members or a tuple's remaining elements from its retained graph.
+/// Declared values were already written from their current typed storage.
+///
+/// # Safety
+/// `keys` holds `count` static string addresses sorted by byte length, then UTF-8 bytes.
+/// Arrays do not read it.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_extras(
+    w: *mut u8,
+    graph: *mut u8,
+    keys: *const u32,
+    count: u32,
+) {
+    let w = writer(w);
+    if graph.is_null() || w.failed {
+        return;
+    }
+    let object = word(graph, 0) == OBJECT;
+    let graph = if object { canonical(graph) } else { graph };
+    // SAFETY: compiled serializers supply the declared object's static field names.
+    let keys = if object && count != 0 {
+        unsafe { core::slice::from_raw_parts(keys, count as usize) }
+    } else {
+        &[]
+    };
+    let mut member = word(graph, 16);
+    let mut index = 0;
+    while member != 0 {
+        let value = node(member);
+        let keep = if object {
+            let name = key_bytes(member);
+            keys.binary_search_by(|&key| {
+                // SAFETY: every table entry is a static string header.
+                let key = unsafe { crate::runtime::bytes(node(key)) };
+                key.len().cmp(&name.len()).then_with(|| key.cmp(name))
+            })
+            .is_err()
+                && word(value, 0) != UNDEFINED
+        } else {
+            index >= count
+        };
+        if keep {
+            separate(w);
+            if object {
+                quote(&mut w.text, key_bytes(member));
+                w.text.push(b':');
+            }
+            if !value_text(&mut w.text, value, w.depth) {
+                w.failed = true;
+                return;
+            }
+        }
+        index += 1;
+        member = word(value, 4);
+    }
+}
+
 /// The array index a key names (a canonical decimal below 2³² − 1), if any.
-pub(super) fn array_index(key: &[u8]) -> Option<u32> {
+fn array_index(key: &[u8]) -> Option<u32> {
     if key.is_empty() || key.len() > 10 || (key[0] == b'0' && key.len() > 1) {
         return None;
     }
@@ -618,32 +644,40 @@ fn key_bytes(member: u32) -> &'static [u8] {
     string_bytes(node(word(node(member), 24)))
 }
 
-/// Put an object's members in ECMAScript property order, once: array-index keys first in
+/// An object view with its members in ECMAScript property order: array-index keys first in
 /// ascending order, then the others in creation order; a repeated key keeps its first
-/// position and takes its last value. Reordered members are copied, so shallow copies of
-/// the object that still share the old member list are unaffected.
-fn canonical(object: *mut u8) {
+/// position and takes its last value. Reordered members belong to a fresh traced object.
+/// The original may live in an opaque parsed graph, which cannot trace external nodes.
+fn canonical(object: *mut u8) -> *mut u8 {
     if word(object, CANONICAL) != 0 {
-        return;
+        return object;
     }
-    set_word(object, CANONICAL, 1);
-    let count = word(object, 20) as usize;
+    let count = word(object, MEMBER_COUNT) as usize;
     if count < 2 {
-        return;
+        set_word(object, CANONICAL, 1);
+        return object;
     }
-    let members = words(count);
-    let mut child = word(object, 16);
-    for slot in members.iter_mut() {
-        *slot = child;
-        child = word(node(child), 4);
-    }
-    // Deduplicate through an open-addressing table of entry positions (+1).
     let size = (count * 2).next_power_of_two();
-    let table = words(size);
-    let entries = words(count);
+    let words = count * 2 + size;
+    let mut local = [0u32; 128];
+    let scratch = if words <= local.len() {
+        &mut local[..words]
+    } else {
+        let data = crate::runtime::alloc((words * 4) as u32) as *mut u32;
+        // SAFETY: a fresh block of `words` words, with no collection during canonicalization.
+        unsafe {
+            core::ptr::write_bytes(data, 0, words);
+            core::slice::from_raw_parts_mut(data, words)
+        }
+    };
+    // Each entry keeps its first insertion position and its final member node.
+    let (entries, table) = scratch.split_at_mut(count * 2);
+    let entries = entries.as_chunks_mut::<2>().0;
     let mut unique = 0;
-    for &member in members.iter() {
-        let key = key_bytes(member);
+    let mut child = word(object, 16);
+    let mut changed = false;
+    while child != 0 {
+        let key = key_bytes(child);
         let mut hash = 0x811c_9dc5u32;
         for &byte in key {
             hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
@@ -653,93 +687,76 @@ fn canonical(object: *mut u8) {
             match table[at] {
                 0 => {
                     table[at] = unique as u32 + 1;
-                    entries[unique] = member;
+                    entries[unique] = [unique as u32, child];
                     unique += 1;
                     break;
                 }
-                slot if key_bytes(entries[slot as usize - 1]) == key => {
-                    entries[slot as usize - 1] = member;
+                slot if key_bytes(entries[slot as usize - 1][1]) == key => {
+                    entries[slot as usize - 1][1] = child;
+                    changed = true;
                     break;
                 }
                 _ => at = (at + 1) & (size - 1),
             }
         }
+        child = word(node(child), 4);
     }
     let entries = &mut entries[..unique];
-    // Array-index keys move to the front in ascending order (keys are unique now).
-    let indexed = words(unique * 2);
-    let mut indices = 0;
-    for (position, &member) in entries.iter().enumerate() {
-        if let Some(index) = array_index(key_bytes(member)) {
-            indexed[indices * 2] = index;
-            indexed[indices * 2 + 1] = position as u32;
-            indices += 1;
-        }
+    let order = |entry: [u32; 2]| match array_index(key_bytes(entry[1])) {
+        Some(index) => (0, index),
+        None => (1, entry[0]),
+    };
+    if !entries
+        .windows(2)
+        .all(|pair| order(pair[0]) <= order(pair[1]))
+    {
+        heap_sort(entries, |a, b| order(*a).cmp(&order(*b)));
+        changed = true;
     }
-    let order = words(unique);
-    if indices > 0 {
-        // SAFETY: pairs of words reinterpreted as `u64` (index in the high word).
-        let pairs =
-            unsafe { core::slice::from_raw_parts_mut(indexed.as_mut_ptr() as *mut u64, indices) };
-        for pair in pairs.iter_mut() {
-            *pair = pair.rotate_left(32);
-        }
-        heapsort(pairs);
-        for (slot, pair) in order.iter_mut().zip(pairs.iter()) {
-            *slot = entries[*pair as u32 as usize];
-        }
+    if !changed {
+        set_word(object, CANONICAL, 1);
+        return object;
     }
-    let mut next = indices;
-    for &member in entries.iter() {
-        if array_index(key_bytes(member)).is_none() {
-            order[next] = member;
-            next += 1;
-        }
-    }
-    if order[..] == members[..] {
-        return;
-    }
+    let ordered = new_node(OBJECT);
     let mut previous: *mut u8 = core::ptr::null_mut();
-    for &member in order.iter() {
+    for &[_, member] in entries.iter() {
         let copy = new_node(word(node(member), 0));
         // SAFETY: both are `NODE_BYTES` blocks.
         unsafe { core::ptr::copy_nonoverlapping(node(member), copy, NODE_BYTES as usize) };
         set_word(copy, 4, 0);
         if previous.is_null() {
-            set_word(object, 16, address(copy));
+            set_word(ordered, 16, address(copy));
         } else {
             set_word(previous, 4, address(copy));
         }
         previous = copy;
     }
-    set_word(object, 20, unique as u32);
+    set_word(ordered, MEMBER_COUNT, unique as u32);
+    set_word(ordered, CANONICAL, 1);
+    ordered
 }
 
-/// In-place heapsort: `O(n log n)` like `sort_unstable`, at a tenth of its code.
-fn heapsort(values: &mut [u64]) {
-    fn sift(values: &mut [u64], mut root: usize, end: usize) {
-        loop {
-            let mut child = 2 * root + 1;
-            if child >= end {
-                return;
-            }
-            if child + 1 < end && values[child] < values[child + 1] {
+/// Bounded-stack heapsort; the linked helper must have no recursive call paths.
+fn heap_sort<T>(items: &mut [T], compare: impl Fn(&T, &T) -> core::cmp::Ordering) {
+    let sift = |items: &mut [T], mut root: usize| {
+        while root < items.len() / 2 {
+            let mut child = root * 2 + 1;
+            if child + 1 < items.len() && compare(&items[child], &items[child + 1]).is_lt() {
                 child += 1;
             }
-            if values[root] >= values[child] {
-                return;
+            if !compare(&items[root], &items[child]).is_lt() {
+                break;
             }
-            values.swap(root, child);
+            items.swap(root, child);
             root = child;
         }
+    };
+    for root in (0..items.len() / 2).rev() {
+        sift(items, root);
     }
-    let len = values.len();
-    for root in (0..len / 2).rev() {
-        sift(values, root, len);
-    }
-    for end in (1..len).rev() {
-        values.swap(0, end);
-        sift(values, 0, end);
+    for end in (1..items.len()).rev() {
+        items.swap(0, end);
+        sift(&mut items[..end], 0);
     }
 }
 
@@ -761,7 +778,7 @@ fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
         last => set_word(node(last), 4, address(copy)),
     }
     set_word(object, 8, address(copy));
-    set_word(object, 20, word(object, 20) + 1);
+    set_word(object, MEMBER_COUNT, word(object, MEMBER_COUNT) + 1);
     set_word(object, CANONICAL, 0);
 }
 

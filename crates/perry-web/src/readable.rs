@@ -734,7 +734,9 @@ pub(crate) fn decode(contents: &[u8]) -> *mut u8 {
             text.extend_from_slice("\u{FFFD}".as_bytes());
         }
     }
-    from_bytes(text.as_slice())
+    let bytes = text.as_slice();
+    // SAFETY: decoding completed valid UTF-8 in task storage; the buffer is never mutated again.
+    unsafe { perry_abi::adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
 /// Whether a fetched body's final read still awaits its completion acknowledgement.

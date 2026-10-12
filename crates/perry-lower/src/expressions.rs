@@ -172,12 +172,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                if let Some(target) = expected {
-                    self.parse_typed(ctx, text, target)?
-                        .unwrap_or_else(|| self.intrinsic(ctx, Intrinsic::JsonParse, vec![text]))
-                } else {
-                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                }
+                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {

@@ -8,27 +8,11 @@ use anyhow::Result;
 use perry_abi::layout::variant;
 use perry_mir::{types::VariantType, variants::admits_payload};
 use pliron::{
-    basic_block::BasicBlock,
-    context::{Context, Ptr},
+    context::Context,
     r#type::{TypeHandle, TypedHandle},
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
-
-/// The loop that writes a source-backed variant's members in their parsed order.
-#[derive(Clone, Copy)]
-struct MemberOrder {
-    /// Loop header, taking the member `index`.
-    header: Ptr<BasicBlock>,
-    index: Value,
-    /// The member the runtime writes next: 0 `"tag"`, 1 `"val"`, otherwise none.
-    selected: Value,
-    /// Continues the loop with the next member.
-    advance: Ptr<BasicBlock>,
-    finished: Ptr<BasicBlock>,
-    /// Entered when `selected` is not the tag.
-    rest: Ptr<BasicBlock>,
-}
 
 impl FunctionLowering<'_, '_> {
     pub(super) fn number_string_equal(
@@ -111,26 +95,22 @@ impl FunctionLowering<'_, '_> {
         tag: &str,
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Value> {
-        // Only programs that attach parse sources to typed values reserve the source slot.
         let size = self.i32_const(
             ctx,
-            if self.state.json_provenance {
-                variant::SIZE as i32
-            } else {
-                variant::BASE_SIZE as i32
-            },
+            (variant::SIZE + u32::from(self.state.retains_json) * 8) as i32,
         );
         let object = if self.state.collectible {
-            let shape = self.pointer_shape(if self.state.json_provenance {
-                &[variant::OWNER, variant::SOURCE]
-            } else {
-                &[variant::OWNER]
-            });
+            let pointers = [variant::OWNER, variant::JSON];
+            let shape = self.pointer_shape(&pointers[..1 + usize::from(self.state.retains_json)]);
             let shape = self.i32_const(ctx, shape as i32);
             self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
         } else {
             self.alloc(ctx, size)
         };
+        if self.state.retains_json {
+            let zero = self.i32_const(ctx, 0);
+            self.store(ctx, MemKind::I32, object, variant::JSON, zero);
+        }
         let text = self.state.data.string(tag);
         let text = self.i32_const(ctx, text as i32);
         self.store(ctx, MemKind::I32, object, variant::TAG, text);
@@ -139,25 +119,20 @@ impl FunctionLowering<'_, '_> {
             _ => self.i32_const(ctx, 0),
         };
         self.store(ctx, MemKind::I32, object, variant::OWNER, owner);
-        if self.state.json_provenance {
-            let zero = self.i32_const(ctx, 0);
-            self.store(ctx, MemKind::I32, object, variant::SOURCE, zero);
-        }
         if let Some((ty, value)) = payload {
             self.store(ctx, slot_kind(ctx, ty)?, object, variant::VALUE, value);
         }
         Ok(object)
     }
 
-    /// The members `"tag"` and, for a case with a payload, `"val"` of variant `value`. With
-    /// JSON provenance, a loop writes them in the parsed member order of the value's source.
+    /// Serialize the active variant and return its declared member count.
     pub(super) fn json_variant(
         &mut self,
         ctx: &mut Context,
         writer: Value,
         value: Value,
         ty: TypedHandle<VariantType>,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let payload_cases: Vec<(String, TypeHandle)> = ty
             .deref(ctx)
             .cases()
@@ -165,25 +140,13 @@ impl FunctionLowering<'_, '_> {
             .filter_map(|(name, payload)| payload.map(|payload| (name.clone(), payload)))
             .collect();
         let tag = self.load(ctx, MemKind::I32, value, variant::TAG);
-        let ordered = if self.state.json_provenance {
-            Some(self.member_order(ctx, writer, value))
-        } else {
-            None
-        };
         let key = self.state.data.string("\"tag\":");
         let key = self.i32_const(ctx, key as i32);
         self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
         self.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, tag]);
-        if let Some(order) = ordered {
-            self.br(ctx, order.advance, vec![]);
-            self.block = order.rest;
-            let one = self.i32_const(ctx, 1);
-            let is_payload = self.num(ctx, NumOpcode::I32Eq, vec![order.selected, one]);
-            let payload = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, is_payload, (payload, vec![]), (order.finished, vec![]));
-            self.block = payload;
-        }
-        let done = self.new_block(ctx, vec![]);
+        let count_ty = crate::repr::i32_type(ctx);
+        let done = self.new_block(ctx, vec![count_ty]);
+        let two = self.i32_const(ctx, 2);
         for (name, payload) in payload_cases {
             let text = self.state.data.string(&name);
             let text = self.i32_const(ctx, text as i32);
@@ -197,61 +160,20 @@ impl FunctionLowering<'_, '_> {
             if perry_mir::optional::absence(ctx, payload).is_some_and(|a| a.admits_undefined()) {
                 let absent = self.absence_test(ctx, slot, payload, false)?;
                 let present = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, absent, (done, vec![]), (present, vec![]));
+                self.cond_br(ctx, absent, (done, vec![two]), (present, vec![]));
                 self.block = present;
             }
             let key = self.state.data.string("\"val\":");
             let key = self.i32_const(ctx, key as i32);
             self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
             self.json_value(ctx, writer, slot, payload)?;
-            self.br(ctx, done, vec![]);
+            self.br(ctx, done, vec![two]);
             self.block = next;
         }
-        self.br(ctx, done, vec![]);
+        let one = self.i32_const(ctx, 1);
+        self.br(ctx, done, vec![one]);
         self.block = done;
-        if let Some(order) = ordered {
-            self.br(ctx, order.advance, vec![]);
-            self.block = order.advance;
-            let one = self.i32_const(ctx, 1);
-            let index = self.num(ctx, NumOpcode::I32Add, vec![order.index, one]);
-            self.br(ctx, order.header, vec![index]);
-            self.block = order.finished;
-        }
-        Ok(())
-    }
-
-    /// Open the loop over the parsed members of variant `value` and continue in the block that
-    /// writes `"tag"`, selected when the runtime reports member 0 next.
-    fn member_order(&mut self, ctx: &mut Context, writer: Value, value: Value) -> MemberOrder {
-        let source = self.load(ctx, MemKind::I32, value, variant::SOURCE);
-        let members = self.runtime(ctx, Runtime::StdJsonSourceBegin, vec![source]);
-        let i32 = crate::repr::i32_type(ctx);
-        let header = self.new_block(ctx, vec![i32]);
-        let advance = self.new_block(ctx, vec![]);
-        let finished = self.new_block(ctx, vec![]);
-        let zero = self.i32_const(ctx, 0);
-        self.br(ctx, header, vec![zero]);
-        self.block = header;
-        let index = header.deref(ctx).get_argument(0);
-        let count = self.i32_const(ctx, 2);
-        let selected = self.runtime(
-            ctx,
-            Runtime::StdJsonSourceNext,
-            vec![members, writer, index, count],
-        );
-        let tag_case = self.new_block(ctx, vec![]);
-        let rest = self.new_block(ctx, vec![]);
-        let is_tag = self.num(ctx, NumOpcode::I32Eqz, vec![selected]);
-        self.cond_br(ctx, is_tag, (tag_case, vec![]), (rest, vec![]));
-        self.block = tag_case;
-        MemberOrder {
-            header,
-            index,
-            selected,
-            advance,
-            finished,
-            rest,
-        }
+        Ok(done.deref(ctx).get_argument(0))
     }
 
     pub(super) fn variant_payload(

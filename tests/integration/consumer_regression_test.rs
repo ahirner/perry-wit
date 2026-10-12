@@ -2,7 +2,7 @@
 //! resolution across modules.
 use anyhow::Result;
 
-use crate::core_program::Program;
+use crate::core_program::{Counter, Program};
 
 #[test]
 fn dense_array_iteration_callbacks_and_search() {
@@ -264,6 +264,9 @@ export function run(): number {
     if (keys[0] !== '0' || keys[1] !== '2' || keys[2] !== 'a') return -2;
     const a = raw[keys[2]];
     const first = a['0'];
+    const encoded = JSON.stringify(raw);
+    if (encoded !== '{"0":3,"2":2,"a":[{"":9}]}') return -6;
+    if (JSON.stringify({ ...raw }) !== encoded) return -7;
     if (a['00'] !== undefined) return -3;
     const text = 'é🙂';
     if (text[-1] !== undefined || text[2] !== undefined || text[0.5] !== undefined) return -4;
@@ -271,7 +274,63 @@ export function run(): number {
     return raw[0] + first[''] + a['length'] + length({extra: [['status', {jsonText: 'ok'}]]});
 }
 "#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (21.0, 0));
+    let mut program = Program::checked(source, "json-pointer-lookup.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("run", &[]), (21.0, 0));
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}
+
+#[test]
+fn dynamic_json_views_survive_collection_without_retaining_unused_inputs() {
+    let source = r#"
+let saved = JSON.parse('null');
+let view = '';
+export async function run(n:number):Promise<number> {
+    if(n>0 && (saved.text!=='Café 🙂' || view!=='escaped 🙂'))return 1;
+    let input = '{"text":"Café 🙂","nested":[{"value":"escaped \\ud83d\\ude42"}],"n":'+n+'}';
+    saved = JSON.parse(input);
+    view = saved.nested[0].value as string;
+    input += 'overwritten input';
+    await Promise.resolve(n);
+    for(let i=0;i<40;i++) {
+        const temporary = JSON.parse('{"temporary":"allocation pressure"}');
+        try {JSON.parse('{"bad":[1,]}');}catch(e){}
+        if(temporary.temporary!=='allocation pressure')return 2;
+    }
+    if(saved.n!==n || saved.text!=='Café 🙂' || view!=='escaped 🙂')return 3;
+    return 0;
+}
+export function scalar(n:number):number {
+    let input='';
+    for(let i=0;i<1024;i++)input+='                                ';
+    saved=JSON.parse(input+(n===0?'42':n===1?'"\\u00e9"':'""'));
+    view='';
+    if(n===0 && saved!==42 || n===1 && saved!=='é' || n===2 && saved!=='')return 1;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "dynamic-json-views.ts");
+    program.stress_collection(true);
+    let mut live = None;
+    for n in 0..4 {
+        assert_eq!(program.throwing("run", f64::from(n)), (0.0, 0), "run {n}");
+        let bytes = program.counter(Counter::LiveBytes);
+        if let Some(previous) = live {
+            assert_eq!(bytes, previous, "replaced documents must be collectible");
+        }
+        live = Some(bytes);
+    }
+    for n in 0..3 {
+        assert_eq!(program.throwing("scalar", f64::from(n)), (0.0, 0));
+        assert!(
+            program.counter(Counter::LiveBytes) < 4096,
+            "scalar graphs must release unused input storage"
+        );
+    }
+    assert_eq!(program.counter(Counter::Roots), 0);
+    assert_eq!(program.counter(Counter::Pins), 0);
 }
 
 #[test]
@@ -335,6 +394,10 @@ export function run():number {
  const values:number[]=[1,2,3];
  const a:number[]=values.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
  const b:number[]=values.map(n=>{while(true){return n*2;}});
+ const empty=values.map(n=>{switch(n){case 1:return;default:return n;}});
+ const overridden=values.map(n=>{try{return;}finally{return n;}});
+ const ignored=values.map(n=>{return n;return;});
+ if(empty[0]!==undefined || empty[1]!==2 || overridden[0]!==1 || ignored[0]!==1)return -1;
  let text='';
  for(const scalar of 'é🙂a'){text+=scalar+':';}
  if(text!=='é:🙂:a:')return 1;

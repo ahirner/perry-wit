@@ -349,7 +349,7 @@ export function run(n: number): number {
     if (value.tag === 'number') total = total + value.val;
     if (value.tag === 'text') total = total + value.val.length;
     if (value.tag === 'point') total = total + value.val.x;
-    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"x":7,"label":"json"}}') throw new Error('serialization');
+    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"label":"json","x":7}}') throw new Error('serialization');
     try {
         const bad: Value = JSON.parse('{"tag":"number","val":null}');
         return -1;

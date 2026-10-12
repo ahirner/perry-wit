@@ -11,6 +11,23 @@ pub(super) struct Storage<'a> {
 }
 
 impl Storage<'_> {
+    /// Append fully initialized bytes without first clearing their destination.
+    pub(super) fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let end = self
+            .length
+            .checked_add(bytes.len())
+            .ok_or(Error::Capacity)?;
+        u32::try_from(end).map_err(|_| Error::Capacity)?;
+        if self.stores {
+            self.bytes
+                .get_mut(self.length..end)
+                .ok_or(Error::Capacity)?
+                .copy_from_slice(bytes);
+        }
+        self.length = end;
+        Ok(())
+    }
+
     pub(super) fn reserve(&mut self, size: usize, alignment: usize) -> Result<usize, Error> {
         let start = self
             .length

@@ -368,28 +368,8 @@ pub unsafe extern "C" fn perry_string_view(string: *mut u8, from: u32, to: u32) 
             source.data.add(from as usize),
             (to - from) as usize,
         ));
-        let view = header().cast();
-        perry_string_view_into(view, string, from, to, scalars);
-        view
-    }
-}
-
-/// Initialize a view in caller-owned, traced header storage.
-///
-/// # Safety
-/// `out` is aligned storage for a string header, tracing its owner field. The range is
-/// valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_view_into(
-    out: *mut u8,
-    string: *mut u8,
-    from: u32,
-    to: u32,
-    scalars: u32,
-) {
-    unsafe {
-        let source = &*string.cast::<Str>();
-        out.cast::<Str>().write(Str {
+        let view = header();
+        view.write(Str {
             len: to - from,
             scalars,
             data: source.data.add(from as usize),
@@ -399,6 +379,7 @@ pub unsafe extern "C" fn perry_string_view_into(
             cursor_scalar: 0,
             cursor_byte: 0,
         });
+        view.cast()
     }
 }
 

@@ -24,7 +24,6 @@ mod expressions;
 mod foreign;
 mod host;
 mod json;
-mod json_read;
 mod modules;
 mod operators;
 mod program;

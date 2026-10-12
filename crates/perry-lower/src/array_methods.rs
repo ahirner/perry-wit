@@ -38,56 +38,22 @@ pub(super) struct CallbackReturn {
     empty_returns: Vec<Ptr<BasicBlock>>,
 }
 
-/// Whether any `return` in `statements` (outside nested functions) yields no value.
-fn returns_empty(statements: &[Stmt]) -> bool {
-    let mut pending: Vec<_> = statements.iter().collect();
-    while let Some(statement) = pending.pop() {
-        match statement {
-            Stmt::Return(None | Some(Expr::Undefined)) => return true,
-            Stmt::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                pending.extend(then_branch);
-                pending.extend(else_branch.iter().flatten());
-            }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
-                pending.extend(body)
-            }
-            Stmt::Try {
-                body,
-                catch,
-                finally,
-            } => {
-                pending.extend(body);
-                pending.extend(catch.iter().flat_map(|c| &c.body));
-                pending.extend(finally.iter().flatten());
-            }
-            Stmt::Switch { cases, .. } => pending.extend(cases.iter().flat_map(|c| &c.body)),
-            Stmt::Labeled { body, .. } => pending.push(body),
-            _ => {}
-        }
-    }
-    false
-}
-
 // How a statement list may complete, as a bit set.
 const FALLTHROUGH: u8 = 1;
 const RETURN: u8 = 2;
 const BREAK: u8 = 4;
 const CONTINUE: u8 = 8;
 const LABELLED: u8 = 16;
+// Return-type inference also sees syntactically present returns on unreachable paths.
+const EMPTY_RETURN: u8 = 32;
 
 /// The ways `statements` may complete; a callback whose body may fall through returns
 /// `undefined` on that path.
 fn completions(statements: &[Stmt]) -> u8 {
     let mut result = FALLTHROUGH;
     for statement in statements {
-        if result & FALLTHROUGH == 0 {
-            break;
-        }
         let next = match statement {
+            Stmt::Return(None | Some(Expr::Undefined)) => RETURN | EMPTY_RETURN,
             Stmt::Return(_) | Stmt::Throw(_) => RETURN,
             Stmt::Break => BREAK,
             Stmt::Continue => CONTINUE,
@@ -123,7 +89,7 @@ fn completions(statements: &[Stmt]) -> u8 {
             }
             Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                 let body = completions(body);
-                (body & (RETURN | LABELLED))
+                (body & (RETURN | EMPTY_RETURN | LABELLED))
                     | if matches!(condition, Expr::Bool(true)) && body & BREAK == 0 {
                         0
                     } else {
@@ -134,7 +100,7 @@ fn completions(statements: &[Stmt]) -> u8 {
                 condition, body, ..
             } => {
                 let body = completions(body);
-                (body & (RETURN | LABELLED))
+                (body & (RETURN | EMPTY_RETURN | LABELLED))
                     | if condition
                         .as_ref()
                         .is_none_or(|c| matches!(c, Expr::Bool(true)))
@@ -155,16 +121,25 @@ fn completions(statements: &[Stmt]) -> u8 {
                 let final_state = finally
                     .as_ref()
                     .map_or(FALLTHROUGH, |body| completions(body));
-                (final_state & !FALLTHROUGH)
+                (body & EMPTY_RETURN)
+                    | (final_state & !FALLTHROUGH)
                     | if final_state & FALLTHROUGH != 0 {
                         body
                     } else {
                         0
                     }
             }
+            Stmt::Labeled { body, .. } => {
+                FALLTHROUGH | (completions(std::slice::from_ref(body)) & EMPTY_RETURN)
+            }
             _ => FALLTHROUGH,
         };
-        result = (result & !FALLTHROUGH) | next;
+        result = (result & !FALLTHROUGH)
+            | if result & FALLTHROUGH != 0 {
+                next
+            } else {
+                next & EMPTY_RETURN
+            };
     }
     result
 }
@@ -303,7 +278,7 @@ impl<'s> FunctionBuilder<'s> {
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
         let done = self.new_block(ctx, "callback_done");
-        let optional = completions(body) & FALLTHROUGH != 0 || returns_empty(body);
+        let optional = completions(body) & (FALLTHROUGH | EMPTY_RETURN) != 0;
         let declared = match return_type {
             HirType::Number | HirType::String | HirType::Boolean | HirType::Union(_) => {
                 self.shapes.value_type(ctx, return_type).ok()

@@ -25,9 +25,11 @@ struct Transfer {
 /// concatenation or an immutable view (both return fresh buffered headers), or a block
 /// argument all of whose incoming values are owned or constants (an optimistic fixpoint, so
 /// the loop variable of `text = text + x` qualifies), and each of its uses either only reads
-/// it, returns it, or transfers it to an owned block argument after its final direct
-/// observation on that edge. Constants and character lookups may produce shared bufferless
-/// headers; the runtime preserves those headers and allocates when their text must grow.
+/// it, consumes its final use, or transfers it to an owned block argument after its final
+/// direct observation on that edge. A consuming call or store may retain the header, but no
+/// subsequent append can reuse that value. Constants and character lookups may produce
+/// shared bufferless headers; the runtime preserves those headers and allocates when their
+/// text must grow.
 pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     use crate::{
         collections::{StringAppendOp, StringConcatOp, StringConstOp, StringLenOp},
@@ -147,16 +149,12 @@ pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStat
                             return true;
                         }
                         // Transfer the header only after its final direct observation.
-                        passed.get(&(user, value)).is_some_and(|arguments| {
-                            arguments.len() == 1
-                                && owned.contains(&arguments[0].argument)
-                                && !live_in_blocks(
-                                    ctx,
-                                    &successors,
-                                    value,
-                                    vec![arguments[0].block],
-                                )
-                        })
+                        let Some(arguments) = passed.get(&(user, value)) else {
+                            return !live_after(ctx, &successors, value, user);
+                        };
+                        arguments.len() == 1
+                            && owned.contains(&arguments[0].argument)
+                            && !live_in_blocks(ctx, &successors, value, vec![arguments[0].block])
                     })
                 })
                 .collect();

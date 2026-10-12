@@ -585,6 +585,7 @@ pub extern "C" fn perry_alloc(size: u32) -> *mut u8 {
 }
 
 /// Allocate an object with a static map of its reference fields, without collecting.
+/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
 ///
 /// # Safety
 /// `shape` meets `Collector::allocate`'s shape contract.

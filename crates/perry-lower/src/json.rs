@@ -169,6 +169,7 @@ impl<'s> FunctionBuilder<'s> {
                 let decoded = self.emit_value(ctx, |ctx| {
                     perry_mir::variants::VariantNewOp::new(ctx, target, &name, payload)
                 });
+                self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
                 self.store(ctx, result, decoded);
                 self.jump(ctx, done);
                 self.switch_to(next);
@@ -206,7 +207,9 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 values.push(self.fit(ctx, member, ty)?);
             }
-            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
+            let decoded = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values));
+            self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
+            return Ok(decoded);
         }
         if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
             let element = array_type.deref(ctx).element();

@@ -77,10 +77,12 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
+            if self.state.retains_json {
+                let zero = self.i32_const(ctx, 0);
+                self.store(ctx, MemKind::I32, object, record::JSON, zero);
+            }
             let shape = self.i32_const(ctx, shape);
             self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
-            let empty = self.i32_const(ctx, 0);
-            self.store(ctx, MemKind::I32, object, record::SOURCE, empty);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, record::field(index), value);
@@ -102,10 +104,6 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
-            if self.state.json_provenance {
-                let field = self.state.data.string(&set.field(ctx));
-                self.json_source_write(ctx, operands[0], record::SOURCE, field);
-            }
             self.store(ctx, kind, operands[0], offset, operands[1]);
             return Ok(true);
         }
@@ -191,9 +189,6 @@ impl FunctionLowering<'_, '_> {
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
-            if self.state.json_provenance {
-                self.json_source_write(ctx, array, layout::SOURCE, 0);
-            }
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, i);
             self.store(ctx, kind, address, 0, value);
@@ -241,21 +236,6 @@ impl FunctionLowering<'_, '_> {
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
 
-    /// Tell the runtime that the aggregate `object`, whose parse source sits at `offset`, has
-    /// member `field` changed (an interned field name, or 0 for an array element), so later
-    /// serialization stops copying its source text. Objects without a source skip the call.
-    fn json_source_write(&mut self, ctx: &mut Context, object: Value, offset: u32, field: u32) {
-        let source = self.load(ctx, MemKind::I32, object, offset);
-        let field = self.i32_const(ctx, field as i32);
-        let write = self.new_block(ctx, vec![]);
-        let done = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, source, (write, vec![]), (done, vec![]));
-        self.block = write;
-        self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
-        self.br(ctx, done, vec![]);
-        self.block = done;
-    }
-
     /// Append `value` to `array`, growing it through the runtime when full.
     pub(crate) fn push(
         &mut self,
@@ -265,9 +245,6 @@ impl FunctionLowering<'_, '_> {
         kind: MemKind,
         references: bool,
     ) {
-        if self.state.json_provenance {
-            self.json_source_write(ctx, array, layout::SOURCE, 0);
-        }
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);

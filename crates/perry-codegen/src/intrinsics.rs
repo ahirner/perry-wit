@@ -11,7 +11,7 @@ use perry_mir::{intrinsics::Intrinsic, optional::absence};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
-    r#type::Typed,
+    r#type::{Typed, TypedHandle},
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -116,7 +116,6 @@ impl FunctionLowering<'_, '_> {
                 Some(self.load(ctx, MemKind::I32, args[0], offset))
             }
             Intrinsic::StringLower | Intrinsic::StringUpper => {
-                // The text helper measures, then converts (full Unicode case mappings).
                 use perry_runtime::string::{DATA, LEN};
                 let string = args[0];
                 let data = self.load(ctx, MemKind::I32, string, DATA);
@@ -126,9 +125,21 @@ impl FunctionLowering<'_, '_> {
                 let measured =
                     self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, zero, upper]);
                 let bytes = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
+                let changed = self.new_block(ctx, vec![]);
+                let i32 = crate::repr::i32_type(ctx);
+                let done = self.new_block(ctx, vec![i32]);
+                self.cond_br(ctx, bytes, (changed, vec![]), (done, vec![string]));
+                self.block = changed;
                 let out = self.alloc(ctx, bytes);
                 self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, out, upper]);
-                Some(self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes]))
+                let shift = self.i64_const(ctx, 32);
+                let scalars = self.num(ctx, NumOpcode::I64ShrU, vec![measured, shift]);
+                let scalars = self.num(ctx, NumOpcode::I32WrapI64, vec![scalars]);
+                let text =
+                    self.runtime(ctx, Runtime::StringAdoptCounted, vec![out, bytes, scalars]);
+                self.br(ctx, done, vec![text]);
+                self.block = done;
+                Some(done.deref(ctx).get_argument(0))
             }
             Intrinsic::StringCharAtIndex | Intrinsic::StringScalarAtIndex => {
                 let representation = if intrinsic == Intrinsic::StringCharAtIndex {
@@ -157,6 +168,40 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::StringScalarLength => {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
+            }
+            Intrinsic::JsonRetain => {
+                use perry_mir::types::{JsonType, RecordType};
+                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                let (offset, graph) =
+                    if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+                        let required = record
+                            .deref(ctx)
+                            .fields()?
+                            .iter()
+                            .filter(|(_, ty)| {
+                                !ty.deref(ctx).is::<JsonType>()
+                                    && !absence(ctx, *ty)
+                                        .is_some_and(|absence| absence.admits_undefined())
+                            })
+                            .count();
+                        // Successful validation found every required member. An equal raw count
+                        // leaves no room for extra members or duplicates, so no graph is needed.
+                        let count = self.load(
+                            ctx,
+                            MemKind::I32,
+                            args[1],
+                            perry_abi::json::MEMBER_COUNT as u32,
+                        );
+                        let required = self.i32_const(ctx, required as i32);
+                        let complete = self.num(ctx, NumOpcode::I32Eq, vec![count, required]);
+                        let zero = self.i32_const(ctx, 0);
+                        let graph = self.select(ctx, complete, zero, args[1]);
+                        (perry_abi::layout::record::JSON, graph)
+                    } else {
+                        (perry_abi::layout::variant::JSON, args[1])
+                    };
+                self.store(ctx, MemKind::I32, args[0], offset, graph);
+                None
             }
             Intrinsic::JsonParse => {
                 use perry_runtime::string::{DATA, LEN};
@@ -381,25 +426,6 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::JsonSet => Runtime::StdJsonSet,
                     Intrinsic::JsonFromNumber => Runtime::StdJsonFromNumber,
                     Intrinsic::JsonFromString => Runtime::StdJsonFromString,
-                    Intrinsic::JsonReadVariant => Runtime::StdJsonReadVariant,
-                    Intrinsic::JsonReadPayload => Runtime::StdJsonReadPayload,
-                    Intrinsic::JsonReadResume => Runtime::StdJsonReadResume,
-                    Intrinsic::JsonReadPosition => Runtime::StdJsonReadPosition,
-                    Intrinsic::JsonReadAttach => Runtime::StdJsonReadAttach,
-                    Intrinsic::JsonReadBegin => Runtime::StdJsonReadBegin,
-                    Intrinsic::JsonReadEnd => Runtime::StdJsonReadEnd,
-                    Intrinsic::JsonReadFail => Runtime::StdJsonReadFail,
-                    Intrinsic::JsonReadTakeError => Runtime::StdJsonReadTakeError,
-                    Intrinsic::JsonReadKind => Runtime::StdJsonReadKind,
-                    Intrinsic::JsonReadSkip => Runtime::StdJsonReadSkip,
-                    Intrinsic::JsonReadRaw => Runtime::StdJsonReadRaw,
-                    Intrinsic::JsonReadNumber => Runtime::StdJsonReadNumber,
-                    Intrinsic::JsonReadBool => Runtime::StdJsonReadBool,
-                    Intrinsic::JsonReadString => Runtime::StdJsonReadString,
-                    Intrinsic::JsonReadObject => Runtime::StdJsonReadObject,
-                    Intrinsic::JsonReadArray => Runtime::StdJsonReadArray,
-                    Intrinsic::JsonReadElement => Runtime::StdJsonReadElement,
-                    Intrinsic::JsonReadField => Runtime::StdJsonReadField,
 
                     Intrinsic::StatsIsFile => Runtime::FsStatsIsFile,
                     Intrinsic::StatsIsDirectory => Runtime::FsStatsIsDirectory,

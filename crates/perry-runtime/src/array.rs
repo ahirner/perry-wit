@@ -1,8 +1,7 @@
 //! Dense arrays with 8-byte element slots.
 //!
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
-//! `data: u32` at 8, traced provenance at 12. Elements are `f64` or a 32-bit reference in
-//! the low half of a slot.
+//! `data: u32` at 8. Elements are `f64` or a 32-bit reference in the low half of a slot.
 //! `cap` is never 0, so compiled code may read slot 0 unconditionally (branch-free bounds
 //! checks select the result afterwards). Growth doubles capacity and preserves live elements.
 //! Collectible arrays release old storage through tracing; proven bounded task allocations
@@ -14,11 +13,10 @@ const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {
-    assert!(core::mem::size_of::<Array>() == 16);
+    assert!(core::mem::size_of::<Array>() == 12);
     assert!(core::mem::offset_of!(Array, len) == LEN as usize);
     assert!(core::mem::offset_of!(Array, cap) == CAP as usize);
     assert!(core::mem::offset_of!(Array, data) == DATA as usize);
-    assert!(core::mem::offset_of!(Array, source) == SOURCE as usize);
 };
 
 #[repr(C)]
@@ -26,18 +24,12 @@ struct Array {
     len: u32,
     cap: u32,
     data: *mut u64,
-    source: *mut u8,
 }
 
 impl Array {
-    /// An empty array over `cap` slots at `data`, with no provenance.
+    /// An empty array over `cap` slots at `data`, with length zero.
     fn empty(cap: u32, data: *mut u64) -> Self {
-        Self {
-            len: 0,
-            cap,
-            data,
-            source: core::ptr::null_mut(),
-        }
+        Self { len: 0, cap, data }
     }
 }
 
@@ -80,12 +72,7 @@ fn slot_bytes(cap: u32) -> u32 {
     cap.checked_mul(SLOT).expect("array capacity overflow")
 }
 
-const ARRAY_SHAPE: [u32; 4] = [
-    0,
-    2,
-    core::mem::offset_of!(Array, data) as u32,
-    core::mem::offset_of!(Array, source) as u32,
-];
+const ARRAY_SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Array, data) as u32];
 const REFERENCE_SLOTS: [u32; 3] = [SLOT, 1, 0];
 
 /// The element shape of a collectible array: precise reference slots or opaque numbers.

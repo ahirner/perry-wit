@@ -14,10 +14,11 @@ use crate::engine::async_engine;
 const WIT: &str = r#"
 package test:timers;
 world timers {
-  import wasi:clocks/monotonic-clock@0.3.0;
+  include wasi:cli/imports@0.3.0;
   record observation { value: f64, trace: list<f64> }
   export run: async func(x: f64) -> observation;
   export label: async func(name: string) -> string;
+  export json-body: async func(text: string) -> string;
   export count: async func(n: u32) -> u32;
   export pressure: async func(n: u32) -> u32;
   export rotate: async func(n: u32) -> f64;
@@ -36,6 +37,18 @@ import { setTimeout } from 'node:timers/promises';
 interface Observation { value: number; trace: number[] }
 interface Cell { value: number; next: Cell | null }
 let finalized = 0;
+export async function jsonBody(text:string):Promise<string> {
+  const response=new Response('{"text":'+JSON.stringify(text)+',"escaped":"\\u00e9"}');
+  const value=await response.json();
+  const view=value.text as string;
+  await setTimeout(1);
+  for(let i=0;i<40;i++) {
+    const temporary=await new Response('{"discard":"temporary"}').json();
+    if(temporary.discard!=='temporary')throw 1;
+  }
+  if(view!==text || value.escaped!=='é')throw 2;
+  return JSON.stringify(value);
+}
 async function finishAdopt(label:string, fail:boolean):Promise<string> {
   await setTimeout(1);
   if (fail) throw 'failed:' + finalized;
@@ -352,6 +365,21 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Result<()> {
     let (mut store, instance) = instantiate(true).await?;
+    let json_body = instance.get_typed_func::<(String,), (String,)>(&mut store, "json-body")?;
+    for text in ["Café 🙂", "escaped \" text", ""] {
+        assert_eq!(
+            json_body
+                .call_async(&mut store, (text.to_string(),))
+                .await?
+                .0,
+            format!(
+                "{{\"text\":{},\"escaped\":\"é\"}}",
+                serde_json::to_string(text)?
+            )
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
     let rotate = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "rotate")?;
     for n in [0, 1, 2, 11] {
         let (mut a, mut b, mut c) = (1, 2, 3);

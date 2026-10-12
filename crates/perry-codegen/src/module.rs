@@ -104,9 +104,6 @@ pub(crate) struct ModuleState<'e> {
     /// Async functions in dispatch-kind order.
     pub(crate) async_functions: Vec<Identifier>,
     pub(crate) shapes: HashMap<String, i32>,
-    /// Whether typed `JSON.parse` attaches parse sources to values: aggregates then carry a
-    /// source slot, writes to them notify the runtime, and serializers may copy source text.
-    pub(crate) json_provenance: bool,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
     /// Whether any function starts a `node:fs` operation (callbacks pass it events).
@@ -124,6 +121,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
     pub(crate) json_serializers: HashMap<TypeHandle, Identifier>,
+    pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
     pub(crate) call_effects: HashMap<Identifier, perry_mir::effects::Summary>,
@@ -207,7 +205,6 @@ pub(crate) fn lower(
         foreign_transfers: Vec::new(),
         async_functions,
         shapes: HashMap::new(),
-        json_provenance: attaches_json_sources(ctx, &functions),
         uses_io: false,
         uses_fs: false,
         uses_streams: false,
@@ -215,6 +212,17 @@ pub(crate) fn lower(
         uses_json_bodies: false,
         uses_http_server: false,
         json_serializers: HashMap::new(),
+        retains_json: functions.iter().any(|function| {
+            crate::analysis::function_ops(ctx, function)
+                .into_iter()
+                .any(|op| {
+                    Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
+                        |op| {
+                            op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonRetain)
+                        },
+                    )
+                })
+        }),
         leased: HashSet::new(),
         collectible: !resource_keys.is_empty()
             || matches!(exports, Exports::RawChecked)
@@ -283,19 +291,6 @@ pub(crate) fn lower(
         state.wasm.append_operation(ctx, import.get_operation(), 0);
     }
     Ok((state.wasm, state.data.bytes))
-}
-
-/// Whether any of `functions` attaches a parse source to a decoded value (`JsonReadAttach`).
-fn attaches_json_sources(ctx: &Context, functions: &[FuncOp]) -> bool {
-    functions.iter().any(|function| {
-        crate::analysis::function_ops(ctx, function)
-            .into_iter()
-            .any(|op| {
-                Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(|op| {
-                    op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonReadAttach)
-                })
-            })
-    })
 }
 
 /// Emit the canonical-ABI glue of every WIT export, and `cabi_realloc`.

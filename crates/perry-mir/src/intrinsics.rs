@@ -57,7 +57,8 @@ pub(crate) enum Ty {
     Url,
     SearchParams,
     Json,
-    JsonReader,
+    /// Records and tagged unions retaining their original JSON graph. Operand-only.
+    Aggregate,
     Date,
     Decoder,
     Regex,
@@ -113,7 +114,7 @@ impl Ty {
             Ty::Url => crate::types::UrlType::get(ctx).into(),
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
-            Ty::JsonReader => crate::types::JsonReaderType::get(ctx).into(),
+            Ty::Aggregate => unreachable!("aggregate is operand-only"),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -219,7 +220,9 @@ impl Ty {
             Ty::Url => deref.is::<crate::types::UrlType>(),
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
-            Ty::JsonReader => deref.is::<crate::types::JsonReaderType>(),
+            Ty::Aggregate => {
+                deref.is::<crate::types::RecordType>() || deref.is::<crate::types::VariantType>()
+            }
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -263,38 +266,6 @@ impl Ty {
     }
 }
 
-/// Operand kinds of intrinsic signatures: a [Ty], or a kind that only constrains operands.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Operand {
-    Of(Ty),
-    /// Any record, array or variant; it names no single result type.
-    Aggregate,
-}
-
-impl Operand {
-    fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
-        match self {
-            Operand::Of(kind) => kind.matches(ctx, ty),
-            Operand::Aggregate => {
-                let deref = ty.deref(ctx);
-                deref.is::<crate::types::RecordType>()
-                    || deref.is::<ArrayType>()
-                    || deref.is::<crate::types::VariantType>()
-            }
-        }
-    }
-}
-
-/// The [Operand] an `intrinsics!` operand name denotes.
-macro_rules! operand {
-    (Aggregate) => {
-        Operand::Aggregate
-    };
-    ($kind:ident) => {
-        Operand::Of(Ty::$kind)
-    };
-}
-
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
@@ -313,9 +284,9 @@ macro_rules! intrinsics {
             }
 
             /// (operands, results).
-            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
+            pub(crate) fn types(self) -> (&'static [Ty], &'static [Ty]) {
                 match self {
-                    $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
+                    $(Intrinsic::$variant => (&[$(Ty::$operand),*], &[$(Ty::$result),*]),)*
                 }
             }
 
@@ -410,6 +381,7 @@ intrinsics! {
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws;
+    JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
@@ -435,27 +407,6 @@ intrinsics! {
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
     JsonUndefined = "json_undefined" () -> (Json), pure;
-    // Typed `JSON.parse`: generated decoders pull values from a reader (perry-std
-    // `json_read`). Only `end` and `fail` throw; the rest record errors for them.
-    JsonReadVariant = "json_read_variant" (JsonReader, String) -> (Index), atomic;
-    JsonReadPayload = "json_read_payload" (JsonReader) -> (Bool), noalloc;
-    JsonReadResume = "json_read_resume" (JsonReader, Index) -> (), noalloc;
-    JsonReadPosition = "json_read_position" (JsonReader) -> (Index), noalloc;
-    JsonReadAttach = "json_read_attach" (JsonReader, Aggregate, Index, String, Index) -> (), atomic;
-    JsonReadBegin = "json_read_begin" (String) -> (JsonReader), atomic;
-    JsonReadEnd = "json_read_end" (JsonReader) -> (), throws, atomic;
-    JsonReadFail = "json_read_fail" (JsonReader, Index) -> (), noalloc;
-    JsonReadTakeError = "json_read_take_error" (JsonReader) -> (Index), noalloc;
-    JsonReadKind = "json_read_kind" (JsonReader) -> (Index), noalloc;
-    JsonReadSkip = "json_read_skip" (JsonReader) -> (), noalloc;
-    JsonReadRaw = "json_read_raw" (JsonReader) -> (String), atomic;
-    JsonReadNumber = "json_read_number" (JsonReader) -> (Number), noalloc;
-    JsonReadBool = "json_read_bool" (JsonReader) -> (Bool), noalloc;
-    JsonReadString = "json_read_string" (JsonReader) -> (String), atomic;
-    JsonReadObject = "json_read_object" (JsonReader) -> (Bool), noalloc;
-    JsonReadArray = "json_read_array" (JsonReader) -> (Bool), noalloc;
-    JsonReadElement = "json_read_element" (JsonReader) -> (Bool), noalloc;
-    JsonReadField = "json_read_field" (JsonReader, String, Index) -> (Index), atomic;
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
