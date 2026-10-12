@@ -52,6 +52,14 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }
+            (op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul), Kind::BigInt, Kind::BigInt) => {
+                let kind = match op {
+                    BinaryOp::Add => BinaryKind::Add,
+                    BinaryOp::Sub => BinaryKind::Sub,
+                    _ => BinaryKind::Mul,
+                };
+                self.binary(ctx, kind, lhs, rhs)
+            }
             (op, _, _) => {
                 bail!("operator {op:?} on these operand types is not supported yet")
             }

@@ -2,7 +2,7 @@
 use super::*;
 
 impl FunctionLowering<'_, '_> {
-    pub(super) fn lift_integer(
+    pub(crate) fn lift_integer(
         &mut self,
         ctx: &mut Context,
         signed: bool,

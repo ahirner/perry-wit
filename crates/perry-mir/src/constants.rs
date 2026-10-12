@@ -107,6 +107,9 @@ impl ConstFoldInterface for NumericCastOp {
         let folded = (|| {
             let input = operands[0].as_ref()?;
             let target = self.get_result(ctx).get_type(ctx);
+            if target.deref(ctx).is::<crate::types::BigIntType>() {
+                return None;
+            }
             let target_int = TypedHandle::<IntegerType>::from_handle(target, ctx).ok();
             if let Some(input) = input.downcast_ref::<IntegerAttr>() {
                 let source = input.get_type().deref(ctx);

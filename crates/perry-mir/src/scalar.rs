@@ -155,12 +155,31 @@ impl NumericCastOp {
 }
 
 #[derive(Debug, Error)]
-#[error("perry.numeric_cast requires f64 or an 8-, 16-, 32-, or 64-bit integer")]
+#[error("perry.numeric_cast requires f64/integer conversion or integer/bigint boxing")]
 struct NumericCastErr;
 
 impl Verify for NumericCastOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let op = self.get_operation().deref(ctx);
+        let source = op.get_operand(0).get_type(ctx);
+        let target = op.get_result(0).get_type(ctx);
+        if source.deref(ctx).is::<crate::types::BigIntType>()
+            || target.deref(ctx).is::<crate::types::BigIntType>()
+        {
+            let other = if source.deref(ctx).is::<crate::types::BigIntType>() {
+                target
+            } else {
+                source
+            };
+            if other
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            {
+                return Ok(());
+            }
+            verify_err!(self.loc(ctx), NumericCastErr)?;
+        }
         for value in op.operands().chain(op.results()) {
             let ty = value.get_type(ctx);
             let ty = ty.deref(ctx);

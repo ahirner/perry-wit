@@ -104,6 +104,16 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
     if Operation::get_op::<crate::collections::ConcatSegmentsOp>(op, ctx).is_some() {
         return Allocation::Atomic;
     }
+    if Operation::get_op::<crate::scalar::NumericCastOp>(op, ctx).is_some()
+        && op
+            .deref(ctx)
+            .get_result(0)
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::types::BigIntType>()
+    {
+        return Allocation::Atomic;
+    }
     if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
         return intrinsic
             .intrinsic(ctx)

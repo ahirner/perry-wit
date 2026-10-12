@@ -49,6 +49,249 @@ fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
 }
 
 #[test]
+fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
+    for (wit, source_type, a, b, expected) in [
+        ("s8", "number", 127, 1, -128),
+        ("u8", "number", 255, 1, 0),
+        ("s16", "number", 32767, 1, -32768),
+        ("u16", "number", 65535, 1, 0),
+        ("s32", "number", i32::MAX as i64, 1, i32::MIN as i64),
+        ("u32", "number", u32::MAX as i64, 1, 0),
+        ("s64", "bigint", i64::MAX, 1, i64::MIN),
+        ("u64", "bigint", -1, 1, 0),
+        ("s64", "bigint", 9007199254740993, 2, 9007199254740995),
+    ] {
+        let compiled = compile(
+            &format!(
+                "export function run(a:{source_type}, b:{source_type}):{source_type} {{ return a+b; }}"
+            ),
+            &format!("func(a:{wit},b:{wit})->{wit}"),
+        )?;
+        let wide = wit.ends_with("64");
+        let mut addition = false;
+        for payload in Parser::new(0).parse_all(&compiled.core) {
+            match payload? {
+                Payload::FunctionSection(section) => assert_eq!(section.count(), 2, "{wit}"),
+                Payload::MemorySection(section) => assert_eq!(section.count(), 0, "{wit}"),
+                Payload::ImportSection(section) => assert_eq!(section.count(), 0, "{wit}"),
+                Payload::ExportSection(section) => {
+                    let exports: Vec<_> = section
+                        .into_iter()
+                        .map(|export| export.unwrap().name.to_owned())
+                        .collect();
+                    assert_eq!(exports, ["run"], "{wit}");
+                }
+                Payload::CodeSectionEntry(body) => {
+                    for op in body.get_operators_reader()? {
+                        let op = op?;
+                        addition |= matches!(
+                            (&op, wide),
+                            (wasmparser::Operator::I64Add, true)
+                                | (wasmparser::Operator::I32Add, false)
+                        );
+                        assert!(!format!("{op:?}").contains("F64"), "{wit}: {op:?}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(addition, "{wit}");
+        assert!(compiled.core.len() < 2963, "{wit}");
+        let mut program = crate::core_program::Program::from_wasm(compiled.core);
+        let args = if wide {
+            vec![wasmtime::Val::I64(a), wasmtime::Val::I64(b)]
+        } else {
+            vec![wasmtime::Val::I32(a as i32), wasmtime::Val::I32(b as i32)]
+        };
+        let result = program.call("run", &args).0[0];
+        assert_eq!(
+            if wide {
+                result.unwrap_i64()
+            } else {
+                result.unwrap_i32() as i64
+            },
+            expected,
+            "{wit}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
+    for source in [
+        "export function run(a:number,b:number):number { return a+b; }",
+        "function add(a:number,b:number):number { return a+b; } export function run(a:number,b:number):number { return add(a,b); }",
+        "function identity(a:number):number { return a; } export function run(a:number,b:number):number { return identity(a+b); }",
+        "export function run(a:number,b:number):number { let value=a; for(let i=0;i<b;i++) value+=1; return value; }",
+    ] {
+        let compiled = compile(source, "func(a:u8,b:u8)->u32")
+            .map_err(|error| anyhow::anyhow!("{source}\n{error:#}"))?;
+        let engine = wasmtime::Engine::default();
+        let (mut store, instance) =
+            crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+        let run = instance.get_typed_func::<(u8, u8), (u32,)>(&mut store, "run")?;
+        assert_eq!(run.call(&mut store, (255, 255))?, (510,), "{source}");
+    }
+    let compiled = compile(
+        "export function run(n:number):number { if(n<=0)return 0; return n+run(n-1); }",
+        "func(n:s32)->s32",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program.call("run", &[wasmtime::Val::I32(20)]).0[0].unwrap_i32(),
+        210
+    );
+    Ok(())
+}
+
+#[test]
+fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
+    for expression in [
+        "value < 256",
+        "value > -1",
+        "value < (128+128)",
+        "value !== 511",
+    ] {
+        let compiled = compile(
+            &format!("export function run(value:number):boolean {{ return {expression}; }}"),
+            "func(value:u8)->bool",
+        )?;
+        let engine = wasmtime::Engine::default();
+        let (mut store, instance) =
+            crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+        let run = instance.get_typed_func::<(u8,), (bool,)>(&mut store, "run")?;
+        for value in [0, 1, 254, 255] {
+            assert_eq!(
+                run.call(&mut store, (value,))?,
+                (true,),
+                "{expression}: {value}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Result<()> {
+    let compiled = compile(
+        "export function run(a:number,b:number):number { return a/b + a%b; }",
+        "func(a:s32,b:s32)->f64",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    for (a, b) in [(5, 2), (-5, 2), (7, -3)] {
+        assert_eq!(
+            program
+                .call("run", &[wasmtime::Val::I32(a), wasmtime::Val::I32(b)])
+                .0[0]
+                .unwrap_f64(),
+            a as f64 / b as f64 + a as f64 % b as f64
+        );
+    }
+    let source = include_str!("../fixtures/optimization/shared.ts");
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("shared.wit", "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }")?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let compiled = perry_wit::compile_for_world(source, "shared.ts", &resolve, world, true)?;
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) =
+        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+    assert_eq!(
+        instance
+            .get_typed_func::<(u8, u8), (u8,)>(&mut store, "narrow")?
+            .call(&mut store, (255, 255))?,
+        (254,)
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(u8, u8), (u32,)>(&mut store, "wide")?
+            .call(&mut store, (255, 255))?,
+        (510,)
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(f64, f64), (f64,)>(&mut store, "floating")?
+            .call(&mut store, (0.25, 0.5))?,
+        (0.75,)
+    );
+    assert_eq!(
+        crate::core_program::Program::new("export function run(x:number):number { return x+0.5; }")
+            .number("run", 0.25),
+        0.75
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
+    let compiled = compile(
+        "export function run(a:number,b:number):number { return a+b; }",
+        "func(a:s8,b:u8)->s16",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("run", &[wasmtime::Val::I32(-1), wasmtime::Val::I32(255)])
+            .0[0]
+            .unwrap_i32(),
+        254
+    );
+    let compiled = compile(
+        "export function run(a:number,b:number):number { return a+b; }",
+        "func(a:u32,b:u32)->f64",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("run", &[wasmtime::Val::I32(-1), wasmtime::Val::I32(-1)])
+            .0[0]
+            .unwrap_f64(),
+        8589934590.0
+    );
+    let compiled = compile(
+        "export function run(a:bigint,b:bigint):bigint { return a+b; }",
+        "func(a:s64,b:u64)->u64",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("run", &[wasmtime::Val::I64(-1), wasmtime::Val::I64(-1)])
+            .0[0]
+            .unwrap_i64(),
+        -2
+    );
+    let compiled = compile(
+        "export function run(value:bigint):bigint { return -value; }",
+        "func(value:u64)->u64",
+    )?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program.call("run", &[wasmtime::Val::I64(1)]).0[0].unwrap_i64(),
+        -1
+    );
+    Ok(())
+}
+
+#[test]
+fn range_queries_follow_actual_wrap_points() -> Result<()> {
+    let mut raw = crate::core_program::Program::new(
+        "function negative(value:number):number { return 0-value; } export function run():number { const values=[10]; const index=negative(18446744073709549568); if(index<values.length){const item=values[index];return item===undefined?7:item;} return 0; }",
+    );
+    assert_eq!(raw.call("run", &[]).0[0].unwrap_f64(), 7.0);
+    let compiled = compile(
+        "export function run(flag:boolean):number { const values=[10]; const index=200; if(flag && index<values.length){const item=values[index];return item===undefined?7:item;} return index; }",
+        "func(flag:bool)->s8",
+    )?;
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) =
+        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+    let run = instance.get_typed_func::<(bool,), (i8,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, (true,))?, (7,));
+    assert_eq!(run.call(&mut store, (false,))?, (-56,));
+    Ok(())
+}
+
+#[test]
 fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
     for source in [
         "export function run(a:number,b:number):number { return a+b; }",

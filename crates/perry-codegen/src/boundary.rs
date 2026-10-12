@@ -587,6 +587,17 @@ impl FunctionLowering<'_, '_> {
         {
             return self.numeric_cast(ctx, value, mir_ty, target);
         }
+        if matches!(ty, AbiType::F32 | AbiType::F64)
+            && crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, _)| bits > 1)
+        {
+            let target = FP64Type::get(ctx).into();
+            let value = self.numeric_cast(ctx, value, mir_ty, target)?;
+            return Ok(if matches!(ty, AbiType::F32) {
+                self.num(ctx, NumOpcode::F32DemoteF64, vec![value])
+            } else {
+                value
+            });
+        }
         if ty.is_sum() {
             let mut flat = self.lower_sum_flat(ctx, ty, mir_ty, value)?;
             ensure!(

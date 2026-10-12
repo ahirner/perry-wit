@@ -26,6 +26,7 @@ pub mod integers;
 pub mod intrinsics;
 mod lifetimes;
 pub mod locals;
+pub mod numeric;
 pub mod optional;
 pub mod pipeline;
 mod ranges;

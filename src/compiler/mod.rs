@@ -147,10 +147,18 @@ pub(crate) fn compile_sources(
     let mut foreign = wit_types::foreign(resolve);
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let (mir, mut analyses) = lower(ctx, source, identity, modules, &foreign)?;
-    let exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
+    let mir =
+        perry_lower::lower_sources(ctx, source, identity, modules, &foreign).map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
+        })?;
+    let mut exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
+    bind::constrain_numbers(ctx, &mir, &exports).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
+    })?;
+    let mut analyses = optimize(ctx, &mir)?;
+    bind::specialized_implementations(ctx, &mir, &mut exports);
     bind::check_main(ctx, &mir, &exports).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
@@ -245,13 +253,18 @@ fn lower(
         perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
+    let analyses = optimize(ctx, &mir)?;
+    Ok((mir, analyses))
+}
+
+fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
     let analyses = perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
         })?;
-    Ok((mir, analyses))
+    Ok(analyses)
 }
 
 fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {

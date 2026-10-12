@@ -7,7 +7,7 @@ use pliron::{
     r#type::TypeHandle,
     value::Value,
 };
-use pliron_wasm::attrs::NumOpcode;
+use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 pub(crate) fn integer(ctx: &Context, ty: TypeHandle) -> Option<(u32, bool)> {
     ty.deref(ctx)
@@ -45,6 +45,31 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Value> {
         if source == target {
             return Ok(value);
+        }
+        if source.deref(ctx).is::<perry_mir::types::BigIntType>() {
+            let magnitude = self.load(ctx, MemKind::I64, value, 0);
+            let negative = self.load(ctx, MemKind::I32, value, 8);
+            let zero = self.i64_const(ctx, 0);
+            let inverted = self.num(ctx, NumOpcode::I64Sub, vec![zero, magnitude]);
+            let raw = self.select(ctx, negative, inverted, magnitude);
+            let source = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
+            return self.numeric_cast(ctx, raw, source, target);
+        }
+        if target.deref(ctx).is::<perry_mir::types::BigIntType>() {
+            let (_, signed) = integer(ctx, source)
+                .ok_or_else(|| anyhow::anyhow!("bigint boxing needs an integer"))?;
+            let wide = IntegerType::get(
+                ctx,
+                64,
+                if signed {
+                    Signedness::Signed
+                } else {
+                    Signedness::Unsigned
+                },
+            )
+            .into();
+            let raw = self.numeric_cast(ctx, value, source, wide)?;
+            return self.lift_integer(ctx, signed, target, raw);
         }
         let opcode = match (integer(ctx, source), integer(ctx, target)) {
             (Some((from, signed)), Some((to, _))) => {

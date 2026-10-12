@@ -21,6 +21,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     });
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
+    preparation.add_pass(crate::numeric::Specialize);
     preparation.add_pass(Transform("inline-leaves", |root, ctx| {
         Ok(crate::aggregates::inline_leaves(root, ctx))
     }));
@@ -49,9 +50,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         crate::unwraps::reuse(root, ctx);
         Ok(IRStatus::Changed)
     }));
-    bounds.add_pass(Transform("prove-bounds", |root, ctx| {
-        Ok(crate::ranges::prove_bounds(root, ctx))
-    }));
+    bounds.add_pass(ProveBounds);
     bounds.run(root, ctx, &mut analyses)?;
     while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
 
@@ -74,6 +73,33 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
 }
 
 struct PromoteArguments;
+
+struct ProveBounds;
+
+impl Pass for ProveBounds {
+    fn name(&self) -> &str {
+        "prove-bounds"
+    }
+    fn run(
+        &mut self,
+        root: Ptr<Operation>,
+        ctx: &mut Context,
+        analyses: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        use pliron::graph::dominance::DomInfo;
+        analyses.get_analysis::<crate::numeric::NumericAnalysis>(root, ctx)?;
+        analyses.get_analysis::<DomInfo>(root, ctx)?;
+        let numeric = analyses
+            .try_get_analysis::<crate::numeric::NumericAnalysis>(root)
+            .expect("numeric analysis");
+        let mut dominance = analyses
+            .try_get_analysis_mut::<DomInfo>(root)
+            .expect("dominance");
+        let mut result = PassResult::default();
+        result.ir_changed = crate::ranges::prove_bounds(root, ctx, &numeric, &mut dominance);
+        Ok(result)
+    }
+}
 
 impl Pass for PromoteArguments {
     fn name(&self) -> &str {
