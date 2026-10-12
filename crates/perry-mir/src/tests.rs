@@ -542,3 +542,226 @@ fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn canonicalization_replaces_optional_users() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @optional {
+  ^module():
+    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(v: builtin.fp64):
+        wrapped = perry.wrap v : perry.optional <builtin.fp64,Undefined>;
+        numeric = perry.to_number wrapped : builtin.fp64;
+        unwrapped = perry.unwrap wrapped : builtin.fp64;
+        sum = perry.binary Add numeric, unwrapped : builtin.fp64;
+        perry.return sum
+    }
+}
+"#,
+    );
+    crate::pipeline::canonicalize(module, ctx)?;
+    let printed = print(ctx, module);
+    for removed in ["perry.wrap", "perry.unwrap", "perry.to_number"] {
+        assert!(!printed.contains(removed), "{removed} survived:\n{printed}");
+    }
+    assert!(
+        normalized(&printed).contains("perry.binary Add v, v"),
+        "{printed}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sccp_propagates_block_arguments_and_removes_constant_branches() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @constants {
+  ^module():
+    builtin.func @run: builtin.function <() -> (builtin.fp64)> {
+      ^entry():
+        two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+        perry.br ^calculate(two)
+      ^calculate(x: builtin.fp64):
+        four = perry.binary Mul x, x : builtin.fp64;
+        take = perry.compare Gt four, x : builtin.integer i1;
+        perry.cond_br if take ^yes(four) else ^no(x)
+      ^yes(answer: builtin.fp64):
+        perry.return answer
+      ^no(wrong: builtin.fp64):
+        perry.return wrong
+    }
+}
+
+"#,
+    );
+    crate::pipeline::canonicalize(module, ctx)?;
+    let printed = print(ctx, module);
+    for removed in [
+        "perry.binary",
+        "perry.compare",
+        "perry.cond_br",
+        "^no",
+        "^calculate",
+        "^yes",
+    ] {
+        assert!(!printed.contains(removed), "{removed} survived:\n{printed}");
+    }
+    assert!(printed.contains("builtin.double 4>"), "{printed}");
+    Ok(())
+}
+
+#[test]
+fn sccp_keeps_loop_variants_and_folds_loop_invariants() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @loop {
+  ^module():
+    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(n: builtin.fp64):
+        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        seven = builtin.constant <builtin.double 7.0> : builtin.fp64;
+        perry.br ^header(zero, seven)
+      ^header(i: builtin.fp64, invariant: builtin.fp64):
+        more = perry.compare Lt i, n : builtin.integer i1;
+        perry.cond_br if more ^body() else ^exit()
+      ^body():
+        one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+        next = perry.binary Add i, one : builtin.fp64;
+        perry.br ^header(next, invariant)
+      ^exit():
+        result = perry.binary Mul invariant, seven : builtin.fp64;
+        perry.return result
+    }
+}
+"#,
+    );
+    crate::pipeline::canonicalize(module, ctx)?;
+    let printed = print(ctx, module);
+    assert!(
+        printed.contains("perry.cond_br"),
+        "loop was erased:\n{printed}"
+    );
+    assert!(
+        printed.contains("perry.binary Add"),
+        "induction was folded:\n{printed}"
+    );
+    assert!(
+        !printed.contains("perry.binary Mul"),
+        "invariant was not folded:\n{printed}"
+    );
+    assert!(printed.contains("builtin.double 49>"), "{printed}");
+    Ok(())
+}
+
+#[test]
+fn sccp_folds_wrapping_integer_constants_at_each_width() {
+    use crate::{attrs::BinaryKind, scalar::BinaryOp};
+    use pliron::{
+        builtin::{
+            attributes::IntegerAttr,
+            op_interfaces::OneResultInterface,
+            ops::ConstantOp,
+            types::{IntegerType, Signedness},
+        },
+        opts::constants::ConstFoldInterface,
+        utils::apint::{APInt, bw},
+    };
+    let ctx = &mut Context::new();
+    for width in [8, 16, 32, 64] {
+        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+            let ty = IntegerType::get(ctx, width, signedness);
+            let max = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            for (kind, lhs, rhs, expected) in [
+                (BinaryKind::Add, max, 1, 0),
+                (BinaryKind::Sub, 0, 1, max),
+                (BinaryKind::Mul, max, 2, max - 1),
+            ] {
+                let lhs = IntegerAttr::new(ty, APInt::from_u64(lhs, bw(width as usize)));
+                let rhs = IntegerAttr::new(ty, APInt::from_u64(rhs, bw(width as usize)));
+                let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
+                let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
+                let op = BinaryOp::new(ctx, kind, a, b);
+                let folded = op.check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))]);
+                let attr = folded[0]
+                    .as_ref()
+                    .unwrap()
+                    .downcast_ref::<IntegerAttr>()
+                    .unwrap();
+                assert_eq!(
+                    attr.value().to_u64(),
+                    expected,
+                    "{kind:?} {signedness:?}{width}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sccp_preserves_floating_point_special_values() {
+    use crate::{
+        attrs::{BinaryKind, CompareKind},
+        scalar::{BinaryOp, CompareOp},
+    };
+    use pliron::{
+        builtin::{
+            attributes::{FPDoubleAttr, IntegerAttr},
+            op_interfaces::OneResultInterface,
+            ops::ConstantOp,
+        },
+        opts::constants::ConstFoldInterface,
+    };
+    let ctx = &mut Context::new();
+    for (kind, lhs, rhs, expected) in [
+        (BinaryKind::Mul, -0.0, 2.0, -0.0),
+        (BinaryKind::Div, 1.0, 0.0, f64::INFINITY),
+        (BinaryKind::Rem, -5.0, 2.0, -1.0),
+    ] {
+        let lhs = FPDoubleAttr::from(lhs);
+        let rhs = FPDoubleAttr::from(rhs);
+        let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
+        let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
+        let op = BinaryOp::new(ctx, kind, a, b);
+        let folded = op.check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))]);
+        let value = f64::from(
+            folded[0]
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<FPDoubleAttr>()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(value.to_bits(), expected.to_bits());
+    }
+    for kind in [
+        CompareKind::Lt,
+        CompareKind::Le,
+        CompareKind::Gt,
+        CompareKind::Ge,
+        CompareKind::Eq,
+        CompareKind::Ne,
+    ] {
+        let nan = FPDoubleAttr::from(f64::NAN);
+        let a = ConstantOp::new(ctx, Box::new(nan.clone())).get_result(ctx);
+        let op = CompareOp::new(ctx, kind, a, a);
+        let folded = op.check_fold(ctx, &[Some(Box::new(nan.clone())), Some(Box::new(nan))]);
+        let value = folded[0]
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<IntegerAttr>()
+            .unwrap()
+            .value();
+        assert_eq!(!value.is_zero(), kind == CompareKind::Ne);
+    }
+}

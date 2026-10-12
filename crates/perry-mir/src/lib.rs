@@ -12,6 +12,7 @@ pub mod attrs;
 pub mod calls;
 mod characters;
 pub mod collections;
+mod constants;
 pub mod control;
 pub mod diagnostics;
 pub mod effects;

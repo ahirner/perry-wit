@@ -1,0 +1,210 @@
+//! Scalar semantics for pliron's sparse conditional constant propagation.
+use crate::{
+    attrs::{BinaryKind, CompareKind},
+    control::{BrOp, CondBrOp},
+    scalar::{BinaryOp, CompareOp},
+};
+use pliron::{
+    attribute::AttrObj,
+    basic_block::BasicBlock,
+    builtin::{
+        attributes::{FPDoubleAttr, IntegerAttr},
+        op_interfaces::{BranchOpInterface, OneRegionInterface},
+        types::{IntegerType, Signedness},
+    },
+    context::{Context, Ptr},
+    derive::op_interface_impl,
+    irbuild::{IRStatus, rewriter::Rewriter},
+    linked_list::ContainsLinkedList,
+    op::{Op, op_cast},
+    operation::Operation,
+    opts::constants::{BranchOpFoldInterface, ConstFoldInterface},
+    utils::apint::{APInt, bw},
+};
+use std::cmp::Ordering::{Equal, Greater, Less};
+
+/// Drop unused CFG arguments, preserving function parameters. Pinned pliron's builtin
+/// FuncOp lacks BlockArgRemoval; without this, SCCP keeps materializing dead arguments
+/// on every iteration. Branch reachability and block removal remain pliron passes.
+pub(crate) fn remove_unused_block_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+    let mut status = IRStatus::Unchanged;
+    for function in crate::aggregates::functions(root, ctx) {
+        let blocks: Vec<_> = function
+            .get_region(ctx)
+            .deref(ctx)
+            .iter(ctx)
+            .skip(1)
+            .collect();
+        for block in blocks {
+            let arguments: Vec<_> = block.deref(ctx).arguments().collect();
+            for (index, argument) in arguments.into_iter().enumerate().rev() {
+                if argument.is_used(ctx) {
+                    continue;
+                }
+                for predecessor in block.uses(ctx) {
+                    let successor = predecessor.find_index(ctx);
+                    let branch = Operation::get_op_dyn(predecessor.user_op(), ctx);
+                    op_cast::<dyn BranchOpInterface>(&*branch)
+                        .expect("MIR branch")
+                        .remove_successor_operand(ctx, successor, index);
+                }
+                BasicBlock::remove_argument(block, ctx, index);
+                status = IRStatus::Changed;
+            }
+        }
+    }
+    status
+}
+
+#[op_interface_impl]
+impl ConstFoldInterface for BinaryOp {
+    fn check_fold(&self, ctx: &Context, operands: &[Option<AttrObj>]) -> Vec<Option<AttrObj>> {
+        let folded = (|| {
+            let (lhs, rhs) = (operands[0].as_ref()?, operands[1].as_ref()?);
+            if let (Some(lhs), Some(rhs)) = (
+                lhs.downcast_ref::<FPDoubleAttr>(),
+                rhs.downcast_ref::<FPDoubleAttr>(),
+            ) {
+                let (lhs, rhs) = (f64::from(lhs.clone()), f64::from(rhs.clone()));
+                let result = match self.kind(ctx) {
+                    BinaryKind::Add => lhs + rhs,
+                    BinaryKind::Sub => lhs - rhs,
+                    BinaryKind::Mul => lhs * rhs,
+                    BinaryKind::Div => lhs / rhs,
+                    BinaryKind::Rem => lhs % rhs,
+                };
+                return Some(Box::new(FPDoubleAttr::from(result)) as AttrObj);
+            }
+            let (lhs, rhs) = (
+                lhs.downcast_ref::<IntegerAttr>()?,
+                rhs.downcast_ref::<IntegerAttr>()?,
+            );
+            let result = match self.kind(ctx) {
+                BinaryKind::Add => lhs.value().add(&rhs.value()),
+                BinaryKind::Sub => lhs.value().sub(&rhs.value()),
+                BinaryKind::Mul => lhs.value().mul(&rhs.value()),
+                BinaryKind::Div | BinaryKind::Rem => return None,
+            };
+            Some(Box::new(IntegerAttr::new(lhs.get_type(), result)))
+        })();
+        vec![folded]
+    }
+
+    fn fold_in_place(
+        &self,
+        ctx: &mut Context,
+        operands: &[Option<AttrObj>],
+        rewriter: &mut dyn Rewriter,
+    ) -> IRStatus {
+        self.fold_with_materialization(ctx, operands, rewriter)
+    }
+}
+
+#[op_interface_impl]
+impl ConstFoldInterface for CompareOp {
+    fn check_fold(&self, ctx: &Context, operands: &[Option<AttrObj>]) -> Vec<Option<AttrObj>> {
+        let folded = (|| {
+            let (lhs, rhs) = (operands[0].as_ref()?, operands[1].as_ref()?);
+            let ordering = if let (Some(lhs), Some(rhs)) = (
+                lhs.downcast_ref::<FPDoubleAttr>(),
+                rhs.downcast_ref::<FPDoubleAttr>(),
+            ) {
+                f64::from(lhs.clone()).partial_cmp(&f64::from(rhs.clone()))
+            } else {
+                let (lhs, rhs) = (
+                    lhs.downcast_ref::<IntegerAttr>()?,
+                    rhs.downcast_ref::<IntegerAttr>()?,
+                );
+                let ty = lhs.get_type().deref(ctx);
+                let less = if ty.signedness() == Signedness::Unsigned || ty.width() == 1 {
+                    lhs.value().ult(&rhs.value())
+                } else {
+                    lhs.value().slt(&rhs.value())
+                };
+                Some(if lhs.value() == rhs.value() {
+                    Equal
+                } else if less {
+                    Less
+                } else {
+                    Greater
+                })
+            };
+            let result = match self.kind(ctx) {
+                CompareKind::Lt => ordering == Some(Less),
+                CompareKind::Le => matches!(ordering, Some(Less | Equal)),
+                CompareKind::Gt => ordering == Some(Greater),
+                CompareKind::Ge => matches!(ordering, Some(Greater | Equal)),
+                CompareKind::Eq => ordering == Some(Equal),
+                CompareKind::Ne => ordering != Some(Equal),
+            };
+            Some(Box::new(IntegerAttr::new(
+                IntegerType::get(ctx, 1, Signedness::Signless),
+                APInt::from_u64(u64::from(result), bw(1)),
+            )) as AttrObj)
+        })();
+        vec![folded]
+    }
+
+    fn fold_in_place(
+        &self,
+        ctx: &mut Context,
+        operands: &[Option<AttrObj>],
+        rewriter: &mut dyn Rewriter,
+    ) -> IRStatus {
+        self.fold_with_materialization(ctx, operands, rewriter)
+    }
+}
+
+#[op_interface_impl]
+impl BranchOpFoldInterface for BrOp {
+    fn check_fold(&self, ctx: &Context, _: &[Option<AttrObj>]) -> Vec<Ptr<BasicBlock>> {
+        self.get_operation().deref(ctx).successors().collect()
+    }
+
+    fn fold_in_place(
+        &self,
+        _: &mut Context,
+        _: &[Option<AttrObj>],
+        _: &mut dyn Rewriter,
+    ) -> IRStatus {
+        IRStatus::Unchanged
+    }
+}
+
+#[op_interface_impl]
+impl BranchOpFoldInterface for CondBrOp {
+    fn check_fold(&self, ctx: &Context, operands: &[Option<AttrObj>]) -> Vec<Ptr<BasicBlock>> {
+        match operands[0]
+            .as_ref()
+            .and_then(|attr| attr.downcast_ref::<IntegerAttr>())
+        {
+            Some(condition) => vec![
+                self.get_operation()
+                    .deref(ctx)
+                    .get_successor(usize::from(condition.value().is_zero())),
+            ],
+            None => self.get_operation().deref(ctx).successors().collect(),
+        }
+    }
+
+    fn fold_in_place(
+        &self,
+        ctx: &mut Context,
+        operands: &[Option<AttrObj>],
+        rewriter: &mut dyn Rewriter,
+    ) -> IRStatus {
+        let Some(condition) = operands[0]
+            .as_ref()
+            .and_then(|attr| attr.downcast_ref::<IntegerAttr>())
+        else {
+            return IRStatus::Unchanged;
+        };
+        let successor = usize::from(condition.value().is_zero());
+        let destination = self.get_operation().deref(ctx).get_successor(successor);
+        let branch =
+            BrOp::new(ctx, destination, self.successor_operands(ctx, successor)).get_operation();
+        rewriter.insert_operation(ctx, branch);
+        rewriter.replace_operation(ctx, self.get_operation(), branch);
+        IRStatus::Changed
+    }
+}
