@@ -33,11 +33,20 @@ use pliron_wasm::{
 /// The member prefix `"name":` of a record field known at compile time, quoted as ECMAScript
 /// `QuoteJSONString` does.
 fn json_key(name: &str) -> String {
-    let mut out = Vec::with_capacity(name.len() + 3);
-    out.push(b'"');
-    perry_abi::json::quote_contents(name.as_bytes(), |part| out.extend_from_slice(part));
-    out.extend_from_slice(b"\":");
-    String::from_utf8(out).expect("JSON quoting preserves UTF-8")
+    let mut out = String::with_capacity(name.len() + 3);
+    out.push('"');
+    for character in name.chars() {
+        match u8::try_from(character) {
+            // A Latin-1 scalar is its byte; the escaper keeps such bytes or emits ASCII.
+            Ok(byte) => perry_abi::json::quote_contents(&[byte], |part| {
+                out.extend(part.iter().copied().map(char::from));
+            }),
+            // Only ASCII needs an escape.
+            Err(_) => out.push(character),
+        }
+    }
+    out.push_str("\":");
+    out
 }
 
 impl FunctionLowering<'_, '_> {
@@ -141,7 +150,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(name.clone());
         }
         let index = self.state.json_serializers.len().to_string();
-        let name = crate::host::symbol("json_", &index);
+        let name = crate::host::symbol(pliron::ident!("json_"), &index);
         self.state.json_serializers.insert(ty, name.clone());
         let i32 = i32_type(ctx);
         let value_ty = wasm_type(ctx, ty)?;
@@ -182,11 +191,11 @@ impl FunctionLowering<'_, '_> {
             let count = b.i32_const(ctx, types.len() as i32);
             if tuple {
                 b.json_tuple_items(ctx, writer, value, &types)?;
-                b.json_extras(ctx, writer, value, record::JSON, &[], count);
             } else {
                 b.json_record_members(ctx, writer, value, &keys, &types)?;
-                b.json_extras(ctx, writer, value, record::JSON, &keys, count);
             }
+            // A tuple has no keys: its extras are the elements past `count`.
+            b.json_extras(ctx, writer, value, record::JSON, &keys, count);
         } else if let Some(variant_type) = variant_type {
             let count = b.json_variant(ctx, writer, value, variant_type)?;
             b.json_extras(
@@ -194,7 +203,7 @@ impl FunctionLowering<'_, '_> {
                 writer,
                 value,
                 perry_abi::layout::variant::JSON,
-                &["tag".into(), "val".into()],
+                &["tag", "val"],
                 count,
             );
         } else {
@@ -232,13 +241,14 @@ impl FunctionLowering<'_, '_> {
         writer: Value,
         value: Value,
         offset: u32,
-        fields: &[String],
+        fields: &[impl AsRef<str>],
         count: Value,
     ) {
         if !self.state.retains_json {
             return;
         }
-        let mut fields: Vec<_> = fields.iter().collect();
+        // `std_json_extras` binary-searches the names by byte length, then bytes.
+        let mut fields: Vec<&str> = fields.iter().map(AsRef::as_ref).collect();
         fields.sort_unstable_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
         let addresses: Vec<_> = fields
             .iter()

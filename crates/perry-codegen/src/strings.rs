@@ -167,7 +167,7 @@ impl FunctionLowering<'_, '_> {
         valid: Value,
         representation: Character,
     ) -> Value {
-        let i32 = crate::repr::i32_type(ctx);
+        let i32 = i32_type(ctx);
         let join = self.new_block(ctx, vec![i32]);
         let inline = self.new_block(ctx, vec![]);
         let call = self.new_block(ctx, vec![]);
@@ -295,7 +295,7 @@ impl FunctionLowering<'_, '_> {
         b: Value,
         representation: Character,
     ) -> Value {
-        let i32 = crate::repr::i32_type(ctx);
+        let i32 = i32_type(ctx);
         let join = self.new_block(ctx, vec![i32]);
         let buffered = self.new_block(ctx, vec![]);
         let inline = self.new_block(ctx, vec![]);

@@ -172,7 +172,7 @@ pub fn alloc(size: u32) -> *mut u8 {
 /// `len` fresh, uninitialized bytes in the task region, exclusively the caller's.
 ///
 /// Like every task allocation, the block lives until the task ends; `'static` stands for that.
-pub fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
+fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
     let len32 = u32::try_from(len).expect("allocation size overflow");
     // SAFETY: a fresh, 8-aligned block of `len` bytes that nothing else references; any
     // byte pattern (including none) is a valid `MaybeUninit<u8>`.
@@ -527,5 +527,30 @@ impl Buffer {
 impl Default for Buffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Here rather than in `utf8.rs`, which `perry-runtime` also compiles: the test runs once.
+#[cfg(test)]
+mod tests {
+    use crate::utf8::{scalars_length, scalars_length_wide};
+
+    #[test]
+    fn scalar_counts_cross_word_boundaries() {
+        for prefix in 0..24 {
+            for suffix in 0..24 {
+                let text = format!("{}é漢🙂\0{}", "a".repeat(prefix), "z".repeat(suffix));
+                assert_eq!(
+                    scalars_length(text.as_bytes()) as usize,
+                    text.chars().count()
+                );
+                assert_eq!(
+                    scalars_length_wide(text.as_bytes()),
+                    scalars_length(text.as_bytes())
+                );
+            }
+        }
+        assert_eq!(scalars_length(b""), 0);
+        assert_eq!(scalars_length_wide(b""), 0);
     }
 }

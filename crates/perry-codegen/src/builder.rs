@@ -1,6 +1,11 @@
 //! Construction helpers of [FunctionLowering]: appending ops, constants, memory accesses,
 //! calls and branches to the current block.
-use crate::{function::FunctionLowering, host::Host, repr::i32_type, runtime::Runtime};
+use crate::{
+    function::FunctionLowering,
+    host::{EffectHost, Host, ValueHost},
+    repr::i32_type,
+    runtime::Runtime,
+};
 use anyhow::{Result, anyhow};
 use pliron::{
     basic_block::BasicBlock,
@@ -214,36 +219,20 @@ impl FunctionLowering<'_, '_> {
         operands.into_iter().map(|v| self.mapped(ctx, v)).collect()
     }
 
-    /// Call a canonical built-in or host import that returns one value. Results follow from
-    /// [Host::signature], so a mismatch is a bug at the call site, like [Self::runtime].
-    pub(crate) fn host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Value {
-        let call = self.call_host(ctx, host, args);
-        let call = call.deref(ctx);
-        assert_eq!(
-            call.get_num_results(),
-            1,
-            "a host import called for its value returns exactly one; others use host_void"
-        );
-        call.get_result(0)
+    /// Call a canonical built-in or host import for its one result.
+    pub(crate) fn host(&mut self, ctx: &mut Context, host: ValueHost, args: Vec<Value>) -> Value {
+        let call = self.call_host(ctx, Host::Value(host), args);
+        // A value import's signature declares exactly one result.
+        call.deref(ctx).get_result(0)
     }
 
-    /// Call a canonical built-in or host import without a result.
-    pub(crate) fn host_void(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) {
-        let call = self.call_host(ctx, host, args);
-        assert_eq!(
-            call.deref(ctx).get_num_results(),
-            0,
-            "a host import called for its effect returns nothing"
-        );
+    /// Call a canonical built-in or host import for its effect.
+    pub(crate) fn host_void(&mut self, ctx: &mut Context, host: EffectHost, args: Vec<Value>) {
+        self.call_host(ctx, Host::Effect(host), args);
     }
 
     /// Call a canonical built-in or host import with the results of its [Host::signature].
-    pub(crate) fn call_host(
-        &mut self,
-        ctx: &mut Context,
-        host: Host,
-        args: Vec<Value>,
-    ) -> Ptr<Operation> {
+    fn call_host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Ptr<Operation> {
         let (_, results) = host.signature(ctx);
         let symbol = host.symbol();
         self.state.host.insert(host);

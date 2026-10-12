@@ -4,8 +4,15 @@
 //! owners remain live through lifting/post-return or async acknowledgement. Results support
 //! explicit tags and checked completion-style returns/throws. Async exports use stackless P3
 //! callbacks; async imports retain a canonical transfer until the host settles it.
-use crate::{function::FunctionLowering, module::ModuleState, repr::i32_type, runtime::Runtime};
+use crate::{
+    function::FunctionLowering,
+    host::{EffectHost, Foreign, ValueHost},
+    module::ModuleState,
+    repr::{Repr, i32_type, repr, slot_kind, wasm_type},
+    runtime::Runtime,
+};
 use anyhow::{Result, anyhow, bail, ensure};
+use perry_abi::layout::record;
 use perry_mir::types::{ArrayType, RecordType};
 use perry_runtime::{array as layout, string as strings};
 use pliron::{
@@ -266,7 +273,7 @@ pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
 
 /// Symbol of a canonical-ABI glue function named after a WIT item.
 fn identifier(name: &str) -> Identifier {
-    crate::host::symbol("wit_", name)
+    crate::host::symbol(pliron::ident!("wit_"), name)
 }
 
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
@@ -319,7 +326,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Bool => {
                 ensure!(
-                    crate::repr::repr(ctx, mir_ty)? == crate::repr::Repr::Bool,
+                    repr(ctx, mir_ty)? == Repr::Bool,
                     "WIT bool needs a TypeScript boolean"
                 );
                 let zero = self.i32_const(ctx, 0);
@@ -486,7 +493,7 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = crate::repr::slot_kind(ctx, element_mir)?;
+        let kind = slot_kind(ctx, element_mir)?;
         let array = self.new_array(ctx, len, element_mir)?;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
         let size = element.size() as i32;
@@ -532,32 +539,13 @@ impl FunctionLowering<'_, '_> {
             "the WIT record has {} fields but the TypeScript type {name} has {field_count}",
             values.len()
         );
-        let next_shape = self.state.shapes.len() as i32 + 1;
-        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
-        let size = self.i32_const(ctx, perry_abi::layout::record::field(field_count) as i32);
+        let size = self.i32_const(ctx, record::field(field_count) as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
-        if self.state.retains_json {
-            let zero = self.i32_const(ctx, 0);
-            self.store(
-                ctx,
-                MemKind::I32,
-                object,
-                perry_abi::layout::record::JSON,
-                zero,
-            );
-        }
-        let shape = self.i32_const(ctx, shape);
-        self.store(ctx, MemKind::I32, object, 0, shape);
+        self.record_header(ctx, object, name);
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, field)?;
-            let kind = crate::repr::slot_kind(ctx, field_mir)?;
-            self.store(
-                ctx,
-                kind,
-                object,
-                perry_abi::layout::record::field(index),
-                value,
-            );
+            let kind = slot_kind(ctx, field_mir)?;
+            self.store(ctx, kind, object, record::field(index), value);
         }
         Ok(object)
     }
@@ -637,9 +625,8 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = crate::repr::slot_kind(ctx, field_mir)?;
-                    let field =
-                        self.load(ctx, kind, value, perry_abi::layout::record::field(index));
+                    let kind = slot_kind(ctx, field_mir)?;
+                    let field = self.load(ctx, kind, value, record::field(index));
                     self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
                 }
             }
@@ -687,7 +674,7 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = crate::repr::slot_kind(ctx, element_mir)?;
+        let kind = slot_kind(ctx, element_mir)?;
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
         let data = self.load(ctx, MemKind::I32, value, layout::DATA);
         let stride = self.i32_const(ctx, element.size() as i32);
@@ -764,9 +751,8 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for (name, field_ty) in fields {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = crate::repr::slot_kind(ctx, field_mir)?;
-                    let field =
-                        self.load(ctx, kind, value, perry_abi::layout::record::field(index));
+                    let kind = slot_kind(ctx, field_mir)?;
+                    let field = self.load(ctx, kind, value, record::field(index));
                     self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
                 }
             }

@@ -231,10 +231,8 @@ impl<'s> FunctionBuilder<'s> {
                 catch,
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
-            other => bail!(
-                "MIR backend does not support statement {} yet",
-                crate::node_kind(other)
-            ),
+            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
+            other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
     }

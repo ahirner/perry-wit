@@ -1,7 +1,7 @@
 //! Compact finite variants: tag string, traced payload owner, and one eight-byte value slot.
 use crate::{
     function::FunctionLowering,
-    repr::{Repr, repr, slot_kind},
+    repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
 use anyhow::Result;
@@ -22,9 +22,9 @@ impl FunctionLowering<'_, '_> {
         a: Value,
         b: Value,
     ) -> Result<Value> {
-        let result_type = crate::repr::i32_type(ctx);
+        let result_type = i32_type(ctx);
         let done = self.new_block(ctx, vec![result_type]);
-        if crate::repr::optional_inner(ctx, ty).is_some() {
+        if optional_inner(ctx, ty).is_some() {
             let absent_a = self.is_absent(ctx, a, ty)?;
             let absent_b = self.is_absent(ctx, b, ty)?;
             let either = self.num(ctx, NumOpcode::I32Or, vec![absent_a, absent_b]);
@@ -144,7 +144,7 @@ impl FunctionLowering<'_, '_> {
         let key = self.i32_const(ctx, key as i32);
         self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
         self.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, tag]);
-        let count_ty = crate::repr::i32_type(ctx);
+        let count_ty = i32_type(ctx);
         let done = self.new_block(ctx, vec![count_ty]);
         let two = self.i32_const(ctx, 2);
         for (name, payload) in payload_cases {

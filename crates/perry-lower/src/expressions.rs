@@ -375,10 +375,8 @@ impl<'s> FunctionBuilder<'s> {
                 index,
                 value,
             } => self.set_index(ctx, object, index, value)?,
-            other => bail!(
-                "MIR backend does not support expression {} yet",
-                crate::node_kind(other)
-            ),
+            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
+            other => bail!("MIR backend does not support expression {other:?} yet"),
         };
         self.narrow_primitive(ctx, expr, value)
     }

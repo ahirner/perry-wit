@@ -30,11 +30,11 @@ impl AbiType {
         else {
             return Some(completion);
         };
-        let tagged = record_field(ctx, record, "ok").is_ok_and(|(_, ty)| {
-            crate::repr::repr(ctx, ty).is_ok_and(|r| r == crate::repr::Repr::Bool)
-        }) && ok
-            .as_ref()
-            .is_none_or(|_| record_field(ctx, record, "value").is_ok())
+        let tagged = record_field(ctx, record, "ok")
+            .is_ok_and(|(_, ty)| repr(ctx, ty).is_ok_and(|r| r == Repr::Bool))
+            && ok
+                .as_ref()
+                .is_none_or(|_| record_field(ctx, record, "value").is_ok())
             && err
                 .as_ref()
                 .is_none_or(|_| record_field(ctx, record, "error").is_ok());
@@ -254,7 +254,7 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, trap);
         self.block = valid;
         let value = self.load(ctx, kind, exception, exception_layout::VALUE);
-        if self.state.collectible && crate::repr::repr(ctx, mir)? == crate::repr::Repr::Ref {
+        if self.state.collectible && repr(ctx, mir)? == Repr::Ref {
             self.runtime(ctx, Runtime::GcPin, vec![value]);
         }
         Ok(Some((mir, value)))
@@ -369,7 +369,7 @@ impl FunctionLowering<'_, '_> {
                 for (name, field) in &fields {
                     let value = if name.as_str() == "ok" {
                         ensure!(
-                            crate::repr::repr(ctx, *field)? == crate::repr::Repr::Bool,
+                            repr(ctx, *field)? == Repr::Bool,
                             "result ok field must be boolean"
                         );
                         self.i32_const(ctx, i32::from(case == 0))
@@ -436,7 +436,7 @@ impl FunctionLowering<'_, '_> {
         let raw = (0..layout.len())
             .map(|_| flat.pop().ok_or_else(|| anyhow!("too few flat values")))
             .collect::<Result<Vec<_>>>()?;
-        let result = crate::repr::wasm_type(ctx, mir)?;
+        let result = wasm_type(ctx, mir)?;
         Ok(self.sum_switch(
             ctx,
             raw[0],
@@ -470,7 +470,7 @@ impl FunctionLowering<'_, '_> {
         offset: u32,
     ) -> Result<Value> {
         let tag = self.load(ctx, ty.discriminant_kind(), address, offset);
-        let result = crate::repr::wasm_type(ctx, mir)?;
+        let result = wasm_type(ctx, mir)?;
         Ok(
             self.sum_switch(ctx, tag, ty.cases().len(), vec![result], |b, ctx, case| {
                 let payload = if let Some(payload) = ty.cases()[case] {
@@ -504,15 +504,10 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir)?;
                 let (index, field) = record_field(ctx, record, "ok")?;
                 ensure!(
-                    crate::repr::repr(ctx, field)? == crate::repr::Repr::Bool,
+                    repr(ctx, field)? == Repr::Bool,
                     "result ok field must be boolean"
                 );
-                let ok = self.load(
-                    ctx,
-                    MemKind::I32,
-                    value,
-                    perry_abi::layout::record::field(index),
-                );
+                let ok = self.load(ctx, MemKind::I32, value, record::field(index));
                 self.num(ctx, NumOpcode::I32Eqz, vec![ok])
             }
             AbiType::Variant(cases) => {
@@ -566,13 +561,13 @@ impl FunctionLowering<'_, '_> {
         }
         if matches!(ty, AbiType::Variant(_)) {
             let payload = self.payload_type(ctx, ty, mir, case)?;
-            return Ok(self.load(ctx, crate::repr::slot_kind(ctx, payload)?, value, 8));
+            return Ok(self.load(ctx, slot_kind(ctx, payload)?, value, 8));
         }
         let record = self.record_type(ctx, mir)?;
         let name = if case == 0 { "value" } else { "error" };
         let (index, field) = record_field(ctx, record, name)?;
-        let kind = crate::repr::slot_kind(ctx, field)?;
-        let value = self.load(ctx, kind, value, perry_abi::layout::record::field(index));
+        let kind = slot_kind(ctx, field)?;
+        let value = self.load(ctx, kind, value, record::field(index));
         if !matches!(ty.cases()[case], Some(AbiType::Option(_)))
             && optional_value(ctx, field).is_some()
         {

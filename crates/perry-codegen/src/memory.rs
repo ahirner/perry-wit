@@ -1,10 +1,11 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
 use crate::{
     function::FunctionLowering,
-    repr::{Repr, repr},
+    repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
 use anyhow::Result;
+use perry_abi::layout::record;
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
     types::RecordType,
@@ -44,7 +45,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
     for runtime in [Runtime::GcDebug, Runtime::GcCounter] {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
-        let export = crate::host::symbol("__", runtime.name());
+        let export = crate::host::symbol(pliron::ident!("__"), runtime.name());
         let function = FuncOp::new(ctx, export.clone(), ty);
         set_export(ctx, &function, export.as_ref());
         let mut args: Vec<_> = function
@@ -179,7 +180,7 @@ impl FunctionLowering<'_, '_> {
                         ctx,
                     )?;
                     self.frame_slots.insert(op, bytes);
-                    bytes += perry_abi::layout::record::field(record.deref(ctx).fields()?.len());
+                    bytes += record::field(record.deref(ctx).fields()?.len());
                 }
             }
         }
@@ -220,11 +221,7 @@ impl FunctionLowering<'_, '_> {
         let one = self.i32_const(ctx, 1);
         self.store(ctx, MemKind::I32, cell, 0, one);
         let throws = self.state.throws.contains(&function);
-        let results = if throws {
-            vec![crate::repr::i32_type(ctx)]
-        } else {
-            vec![]
-        };
+        let results = if throws { vec![i32_type(ctx)] } else { vec![] };
         let call = CallOp::new(ctx, function, vec![], results).get_operation();
         self.insert(ctx, call);
         if throws {
@@ -485,11 +482,11 @@ impl FunctionLowering<'_, '_> {
                 .filter_map(|(index, (_, ty))| {
                     repr(ctx, *ty)
                         .is_ok_and(|kind| kind == Repr::Ref)
-                        .then_some(perry_abi::layout::record::field(index))
+                        .then_some(record::field(index))
                 })
                 .collect();
             if self.state.retains_json {
-                offsets.push(perry_abi::layout::record::JSON);
+                offsets.push(record::JSON);
             }
             let shape = if offsets.is_empty() {
                 0

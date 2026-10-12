@@ -1,50 +1,68 @@
 //! Canonical built-ins and host functions that compiled code imports directly, outside the
 //! runtime's helper module.
-use crate::{MONOTONIC_CLOCK, boundary, repr::i32_type};
+use crate::{
+    MONOTONIC_CLOCK,
+    boundary::{self, Flat},
+    repr::i32_type,
+};
 use pliron::{
     builtin::types::{IntegerType, Signedness},
     context::Context,
-    identifier::Identifier,
+    ident,
+    identifier::{Identifier, Legaliser},
     r#type::TypeHandle,
 };
 
-/// Canonical built-ins and host functions the module may import.
+/// An import of the module. Whether its call yields a value is part of its type, so a call
+/// site cannot read a result the import does not declare.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Host {
+    Value(ValueHost),
+    Effect(EffectHost),
+}
+
+/// Imports called for exactly one result.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ValueHost {
+    /// `context.get 0`: the task an async export stored.
     ContextGet0,
+    /// `wait-for` of the monotonic clock, lowered asynchronously: a subtask status.
+    WaitFor,
+    /// A component import with one flat result.
+    Foreign(Foreign, Flat),
+}
+
+/// Imports called for their effect only.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum EffectHost {
     ContextSet0,
     TaskCancel,
-    WaitFor,
-    Foreign(String, String, Vec<boundary::Flat>, Vec<boundary::Flat>),
+    /// A component import without flat results.
+    Foreign(Foreign),
     /// `task.return` of an async export: (module, function, flat result types).
-    TaskReturn(String, String, Vec<boundary::Flat>),
+    TaskReturn(String, String, Vec<Flat>),
+}
+
+/// A component import: its module, field and flat parameter types.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Foreign {
+    pub(crate) module: String,
+    pub(crate) name: String,
+    pub(crate) params: Vec<Flat>,
 }
 
 impl Host {
     /// The symbol of the import in the compiled module.
     pub(crate) fn symbol(&self) -> Identifier {
         match self {
-            Host::Foreign(module, name, _, _) => {
-                // Hex-encode `module#name`: import names may contain any character, and
-                // sanitizing alone could map two imports to one symbol.
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                let mut hex = String::new();
-                for byte in module
-                    .bytes()
-                    .chain(std::iter::once(b'#'))
-                    .chain(name.bytes())
-                {
-                    hex.push(char::from(HEX[usize::from(byte >> 4)]));
-                    hex.push(char::from(HEX[usize::from(byte & 0xF)]));
-                }
-                symbol("host_foreign_", &hex)
-            }
-            Host::ContextGet0 => pliron::ident!("host_context_get_0"),
-            Host::ContextSet0 => pliron::ident!("host_context_set_0"),
-            Host::TaskCancel => pliron::ident!("host_task_cancel"),
-            Host::WaitFor => pliron::ident!("host_wait_for"),
-            Host::TaskReturn(module, function, _) => {
-                symbol("host_task_return_", &format!("{module}_{function}"))
+            Host::Value(ValueHost::Foreign(foreign, _))
+            | Host::Effect(EffectHost::Foreign(foreign)) => foreign.symbol(),
+            Host::Value(ValueHost::ContextGet0) => ident!("host_context_get_0"),
+            Host::Value(ValueHost::WaitFor) => ident!("host_wait_for"),
+            Host::Effect(EffectHost::ContextSet0) => ident!("host_context_set_0"),
+            Host::Effect(EffectHost::TaskCancel) => ident!("host_task_cancel"),
+            Host::Effect(EffectHost::TaskReturn(module, function, _)) => {
+                symbol(ident!("host_task_return_"), &format!("{module}_{function}"))
             }
         }
     }
@@ -53,55 +71,80 @@ impl Host {
     pub(crate) fn into_path(self) -> (String, String) {
         let root = |name: &str| ("$root".to_string(), name.to_string());
         match self {
-            Host::Foreign(module, name, _, _) => (module, name),
-            Host::ContextGet0 => root("[context-get-0]"),
-            Host::ContextSet0 => root("[context-set-0]"),
-            Host::TaskCancel => ("[export]$root".into(), "[task-cancel]".into()),
-            Host::WaitFor => (
+            Host::Value(ValueHost::Foreign(foreign, _))
+            | Host::Effect(EffectHost::Foreign(foreign)) => (foreign.module, foreign.name),
+            Host::Value(ValueHost::ContextGet0) => root("[context-get-0]"),
+            Host::Value(ValueHost::WaitFor) => (
                 MONOTONIC_CLOCK.to_string(),
                 "[async-lower]wait-for".to_string(),
             ),
-            Host::TaskReturn(module, function, _) => (module, format!("[task-return]{function}")),
+            Host::Effect(EffectHost::ContextSet0) => root("[context-set-0]"),
+            Host::Effect(EffectHost::TaskCancel) => {
+                ("[export]$root".into(), "[task-cancel]".into())
+            }
+            Host::Effect(EffectHost::TaskReturn(module, function, _)) => {
+                (module, format!("[task-return]{function}"))
+            }
         }
     }
 
-    /// Wasm parameter and result types of the import.
+    /// Wasm parameter and result types of the import: one result exactly for [Host::Value].
     pub(crate) fn signature(&self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
-        let i32 = i32_type(ctx);
-        let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
+        let flat = |ctx: &mut Context, flat: &[Flat]| -> Vec<TypeHandle> {
+            flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect()
+        };
         match self {
-            Host::Foreign(_, _, params, results) => (
-                params
-                    .iter()
-                    .map(|f| boundary::flat_type(ctx, *f))
-                    .collect(),
-                results
-                    .iter()
-                    .map(|f| boundary::flat_type(ctx, *f))
-                    .collect(),
-            ),
-            Host::ContextGet0 => (vec![], vec![i32]),
-            Host::ContextSet0 => (vec![i32], vec![]),
-            Host::TaskCancel => (vec![], vec![]),
-            Host::WaitFor => (vec![i64], vec![i32]),
-            Host::TaskReturn(_, _, flat) => (
-                flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect(),
-                vec![],
-            ),
+            Host::Value(host) => {
+                let (params, result) = match host {
+                    ValueHost::ContextGet0 => (vec![], i32_type(ctx)),
+                    ValueHost::WaitFor => (
+                        vec![IntegerType::get(ctx, 64, Signedness::Signless).into()],
+                        i32_type(ctx),
+                    ),
+                    ValueHost::Foreign(foreign, result) => (
+                        flat(ctx, &foreign.params),
+                        boundary::flat_type(ctx, *result),
+                    ),
+                };
+                (params, vec![result])
+            }
+            Host::Effect(host) => {
+                let params = match host {
+                    EffectHost::ContextSet0 => vec![i32_type(ctx)],
+                    EffectHost::TaskCancel => vec![],
+                    EffectHost::Foreign(foreign) => flat(ctx, &foreign.params),
+                    EffectHost::TaskReturn(_, _, results) => flat(ctx, results),
+                };
+                (params, vec![])
+            }
         }
+    }
+}
+
+impl Foreign {
+    /// Hex-encoded `module#name`: import names may contain any character, and sanitizing
+    /// alone could map two imports to one symbol.
+    fn symbol(&self) -> Identifier {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut hex = String::with_capacity(2 * (self.module.len() + 1 + self.name.len()));
+        for byte in self
+            .module
+            .bytes()
+            .chain(std::iter::once(b'#'))
+            .chain(self.name.bytes())
+        {
+            hex.push(char::from(HEX[usize::from(byte >> 4)]));
+            hex.push(char::from(HEX[usize::from(byte & 0xF)]));
+        }
+        symbol(ident!("host_foreign_"), &hex)
     }
 }
 
 /// The symbol `prefix` followed by `name`, with every character of `name` outside ASCII
 /// alphanumerics replaced by `_`. Distinct names may share a symbol.
-pub(crate) fn symbol(prefix: &'static str, name: &str) -> Identifier {
-    let mut text = String::with_capacity(prefix.len() + name.len());
-    text.push_str(prefix);
-    text.extend(
-        name.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }),
-    );
-    Identifier::try_new(text).expect(
-        "an identifier prefix followed by ASCII alphanumerics and underscores is an identifier",
-    )
+///
+/// Legalising after a valid identifier only replaces characters, so every name has a symbol.
+pub(crate) fn symbol(prefix: Identifier, name: &str) -> Identifier {
+    Identifier::try_new(format!("{prefix}{name}"))
+        .unwrap_or_else(|_| Legaliser::default().legalise(&format!("{prefix}{name}")))
 }

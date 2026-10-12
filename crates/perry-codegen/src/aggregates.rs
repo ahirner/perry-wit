@@ -64,8 +64,6 @@ impl FunctionLowering<'_, '_> {
                     .collect();
                 (record.name().to_string(), fields)
             };
-            let next_shape = self.state.shapes.len() as i32 + 1;
-            let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
@@ -77,12 +75,7 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            if self.state.retains_json {
-                let zero = self.i32_const(ctx, 0);
-                self.store(ctx, MemKind::I32, object, record::JSON, zero);
-            }
-            let shape = self.i32_const(ctx, shape);
-            self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
+            self.record_header(ctx, object, name);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, record::field(index), value);
@@ -286,5 +279,18 @@ impl FunctionLowering<'_, '_> {
             .field(field)
             .ok_or_else(|| anyhow!("record has no field {field}"))?;
         Ok((record::field(index), field_ty))
+    }
+
+    /// Initialize the header of fresh record storage: the id of shape `name` and, when the
+    /// module retains parsed JSON, an empty source word.
+    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, name: String) {
+        let next_shape = self.state.shapes.len() as i32 + 1;
+        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+        if self.state.retains_json {
+            let zero = self.i32_const(ctx, 0);
+            self.store(ctx, MemKind::I32, object, record::JSON, zero);
+        }
+        let shape = self.i32_const(ctx, shape);
+        self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
     }
 }

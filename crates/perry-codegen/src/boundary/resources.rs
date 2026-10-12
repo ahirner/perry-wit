@@ -1,6 +1,5 @@
 //! Opaque resource lowering and acknowledgement-scoped canonical ownership changes.
 use super::*;
-use crate::host::Host;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 use std::collections::HashSet;
 
@@ -141,29 +140,29 @@ impl FunctionLowering<'_, '_> {
         operation: &str,
         argument: Value,
     ) -> Value {
-        let host = self.resource_builtin(key, operation, vec![Flat::I32]);
+        let host = ValueHost::Foreign(self.resource_builtin(key, operation), Flat::I32);
         self.preserving_task(ctx, |b, ctx| b.host(ctx, host, vec![argument]))
     }
 
     /// Call `[resource-drop]` of resource `key`.
     fn resource_drop(&mut self, ctx: &mut Context, key: u32, handle: Value) {
-        let host = self.resource_builtin(key, "drop", vec![]);
+        let host = EffectHost::Foreign(self.resource_builtin(key, "drop"));
         self.preserving_task(ctx, |b, ctx| b.host_void(ctx, host, vec![handle]));
     }
 
-    fn resource_builtin(&self, key: u32, operation: &str, results: Vec<Flat>) -> Host {
+    /// The canonical `[resource-<operation>]` built-in of resource `key`, taking one handle.
+    fn resource_builtin(&self, key: u32, operation: &str) -> Foreign {
         let resource = &self.state.resources[&key];
         let module = if resource.exported {
             format!("[export]{}", resource.module)
         } else {
             resource.module.clone()
         };
-        Host::Foreign(
+        Foreign {
             module,
-            format!("[resource-{operation}]{}", resource.name),
-            vec![Flat::I32],
-            results,
-        )
+            name: format!("[resource-{operation}]{}", resource.name),
+            params: vec![Flat::I32],
+        }
     }
 
     /// Open the resource scope of one canonical call when `needed`; `roots` is the root mark a

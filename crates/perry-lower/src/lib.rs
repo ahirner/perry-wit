@@ -82,7 +82,7 @@ use pliron::{
         types::{FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    identifier::Identifier,
+    identifier::{Identifier, Legaliser},
     irbuild::{
         inserter::{IRInserter, Inserter},
         listener::DummyListener,
@@ -130,15 +130,6 @@ pub fn lower_source(
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
     program::build_module(ctx, &hir, foreign, inferred)
-}
-
-/// The variant name of a HIR node, for diagnostics about unsupported constructs.
-fn node_kind(node: &impl std::fmt::Debug) -> String {
-    format!("{node:?}")
-        .split(['(', ' ', '{'])
-        .next()
-        .unwrap_or("?")
-        .to_string()
 }
 
 #[cfg(test)]

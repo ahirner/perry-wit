@@ -426,7 +426,6 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::JsonSet => Runtime::StdJsonSet,
                     Intrinsic::JsonFromNumber => Runtime::StdJsonFromNumber,
                     Intrinsic::JsonFromString => Runtime::StdJsonFromString,
-
                     Intrinsic::StatsIsFile => Runtime::FsStatsIsFile,
                     Intrinsic::StatsIsDirectory => Runtime::FsStatsIsDirectory,
                     Intrinsic::StatsSize => Runtime::FsStatsSize,

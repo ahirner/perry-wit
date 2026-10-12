@@ -19,27 +19,3 @@ pub fn scalars_length_wide(bytes: &[u8]) -> u32 {
     continuations += tail.iter().filter(|&&byte| byte & 0xc0 == 0x80).count() as u32;
     bytes.len() as u32 - continuations
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scalar_counts_cross_word_boundaries() {
-        for prefix in 0..24 {
-            for suffix in 0..24 {
-                let text = format!("{}é漢🙂\0{}", "a".repeat(prefix), "z".repeat(suffix));
-                assert_eq!(
-                    scalars_length(text.as_bytes()) as usize,
-                    text.chars().count()
-                );
-                assert_eq!(
-                    scalars_length_wide(text.as_bytes()),
-                    scalars_length(text.as_bytes())
-                );
-            }
-        }
-        assert_eq!(scalars_length(b""), 0);
-        assert_eq!(scalars_length_wide(b""), 0);
-    }
-}

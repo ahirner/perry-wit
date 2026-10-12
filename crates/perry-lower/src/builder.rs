@@ -247,10 +247,12 @@ impl<'s> FunctionBuilder<'s> {
         op.get_result(ctx)
     }
 
+    /// A new block named `label` and a counter. Labels only make printed MIR readable, so the
+    /// name is legalised: every label names a block, and an identifier label stays as written.
     pub(super) fn new_block(&mut self, ctx: &mut Context, label: &str) -> Ptr<BasicBlock> {
         self.labels += 1;
-        let name = Identifier::try_from(format!("{label}{}", self.labels))
-            .expect("block labels are identifiers followed by a counter");
+        let name = Identifier::try_new(format!("{label}{}", self.labels))
+            .unwrap_or_else(|_| Legaliser::default().legalise(&format!("{label}{}", self.labels)));
         let block = BasicBlock::new(ctx, Some(name), vec![]);
         block.insert_at_back(self.region, ctx);
         block

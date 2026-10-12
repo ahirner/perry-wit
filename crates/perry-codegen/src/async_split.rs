@@ -457,7 +457,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, joined, vec![]);
             self.block = start;
         }
-        let status = self.host(ctx, crate::host::Host::WaitFor, vec![nanos]);
+        let status = self.host(ctx, crate::host::ValueHost::WaitFor, vec![nanos]);
         let mask = self.i32_const(ctx, 0xF);
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);

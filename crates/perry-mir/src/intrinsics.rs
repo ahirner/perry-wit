@@ -57,8 +57,6 @@ pub(crate) enum Ty {
     Url,
     SearchParams,
     Json,
-    /// Records and tagged unions retaining their original JSON graph. Operand-only.
-    Aggregate,
     Date,
     Decoder,
     Regex,
@@ -114,7 +112,6 @@ impl Ty {
             Ty::Url => crate::types::UrlType::get(ctx).into(),
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
-            Ty::Aggregate => unreachable!("aggregate is operand-only"),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -220,9 +217,6 @@ impl Ty {
             Ty::Url => deref.is::<crate::types::UrlType>(),
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
-            Ty::Aggregate => {
-                deref.is::<crate::types::RecordType>() || deref.is::<crate::types::VariantType>()
-            }
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -266,6 +260,37 @@ impl Ty {
     }
 }
 
+/// Operand kinds: a value kind, or an aggregate kind that names no single MIR type and so
+/// cannot be a result ([Ty] has no such kind).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Operand {
+    Value(Ty),
+    /// Records and tagged unions retaining their original JSON graph.
+    Aggregate,
+}
+
+impl Operand {
+    fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
+        match self {
+            Operand::Value(kind) => kind.matches(ctx, ty),
+            Operand::Aggregate => {
+                let deref = ty.deref(ctx);
+                deref.is::<crate::types::RecordType>() || deref.is::<crate::types::VariantType>()
+            }
+        }
+    }
+}
+
+/// The [Operand] an `intrinsics!` operand name denotes.
+macro_rules! operand {
+    (Aggregate) => {
+        Operand::Aggregate
+    };
+    ($kind:ident) => {
+        Operand::Value(Ty::$kind)
+    };
+}
+
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
@@ -283,10 +308,17 @@ macro_rules! intrinsics {
                 }
             }
 
-            /// (operands, results).
-            pub(crate) fn types(self) -> (&'static [Ty], &'static [Ty]) {
+            /// The name as an identifier, validated at compile time.
+            fn identifier(self) -> Identifier {
                 match self {
-                    $(Intrinsic::$variant => (&[$(Ty::$operand),*], &[$(Ty::$result),*]),)*
+                    $(Intrinsic::$variant => pliron::ident!($name),)*
+                }
+            }
+
+            /// (operands, results).
+            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
+                match self {
+                    $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
                 }
             }
 
@@ -579,11 +611,7 @@ impl IntrinsicOp {
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
-        let name: Identifier = intrinsic
-            .name()
-            .try_into()
-            .expect("intrinsic names are snake_case identifiers");
-        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(name));
+        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(intrinsic.identifier()));
         op
     }
 
