@@ -152,7 +152,11 @@ pub(crate) fn compile(
     };
     let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)?;
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-    let (core, helpers) = finish(core, streams.as_ref())?;
+    let (core, helpers) = finish(
+        core,
+        streams.as_ref(),
+        &crate::link::canonical::Requirements::for_world(&resolve, world),
+    )?;
     allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
     let component = componentize
         .then(|| ComponentOutput::encode(&core, &resolve, world))

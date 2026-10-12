@@ -184,9 +184,12 @@ pub(crate) fn compile_sources(
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    let (core, helpers) = finish(core, streams.as_ref()).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
+    let (core, helpers) = finish(
+        core,
+        streams.as_ref(),
+        &link::canonical::Requirements::for_world(resolve, world),
+    )
+    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))?;
     let core = link::raw::available_stdio(core, stdout, stderr).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
@@ -239,7 +242,7 @@ pub(crate) fn compile_core_sources(
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    link::raw::without_p3(finish(core, None)?.0)
+    link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
 }
 
@@ -268,9 +271,13 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
     Ok(analyses)
 }
 
-fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<(Vec<u8>, u32)> {
-    let (core, helpers) =
-        link::link_helpers_with(core, streams).context("linking perry-runtime and helpers")?;
+fn finish(
+    core: Vec<u8>,
+    streams: Option<&link::StreamAnchor>,
+    canonical: &link::canonical::Requirements,
+) -> Result<(Vec<u8>, u32)> {
+    let (core, helpers) = link::link_helpers_with(core, streams, canonical)
+        .context("linking perry-runtime and helpers")?;
     let core = link::compact(&core).context("interning core function signatures")?;
     audit::validate_guest(&core).context("validating stackless core Wasm")?;
     Ok((core, helpers))

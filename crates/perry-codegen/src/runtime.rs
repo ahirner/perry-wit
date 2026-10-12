@@ -94,7 +94,6 @@ runtime_functions! {
     ExceptionCatch = "perry_exception_catch" (I32) -> I32;
     ExceptionMessage = "perry_exception_message" (I32) -> I32;
     Exit = "perry_exit" (F64) -> I32;
-    CabiRealloc = "perry_cabi_realloc" (I32, I32, I32, I32) -> I32;
     StringAdopt = "perry_string_adopt" (I32, I32) -> I32;
     StringAdoptCounted = "perry_string_adopt_counted" (I32, I32, I32) -> I32;
     StringConcat = "perry_string_concat" (I32, I32) -> I32;

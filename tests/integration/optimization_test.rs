@@ -346,12 +346,39 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
         }
         assert!(exports.iter().any(|e| e == "memory"), "{source}");
         assert!(exports.iter().any(|e| e == "cabi_post_run"), "{source}");
+        assert!(!exports.iter().any(|e| e == "cabi_realloc"), "{source}");
         let engine = wasmtime::Engine::default();
         let (mut store, instance) =
             crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
         let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
         assert_eq!(run.call(&mut store, (1.0,))?, (1.0,));
     }
+    Ok(())
+}
+
+#[test]
+fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("unused.wit", "package test:unused; world test { import label: func() -> string; export run: func(a:f64)->f64; }")?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let compiled = perry_wit::compile_for_world(
+        "export function run(a:number):number { return String(a).length; }",
+        "unused.ts",
+        &resolve,
+        world,
+        true,
+    )?;
+    for payload in Parser::new(0).parse_all(&compiled.core) {
+        if let Payload::ExportSection(exports) = payload? {
+            assert!(
+                exports
+                    .into_iter()
+                    .all(|export| export.unwrap().name != "cabi_realloc")
+            );
+        }
+    }
+    // Component encoding validates the reachable import and export ABI without realloc.
+    assert!(compiled.component.is_some());
     Ok(())
 }
 

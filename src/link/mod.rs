@@ -17,6 +17,7 @@ use wasm_encoder::{
 };
 use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator};
 
+pub(crate) mod canonical;
 mod data_relocations;
 pub(crate) mod libraries;
 mod type_compaction;
@@ -75,29 +76,31 @@ impl StreamAnchor {
 /// [link_helpers_with] without byte streams (helper tests link core modules directly).
 #[allow(dead_code)] // Used by the helper tests, which include this module.
 pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
-    Ok(link_helpers_with(core_wasm, None)?.0)
+    Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
 /// [link_helpers] for a module of a WIT world whose byte streams use `streams`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
+    canonical: &canonical::Requirements,
 ) -> Result<(Vec<u8>, u32)> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
+    let mut export_realloc = canonical.export_realloc;
     for payload in Parser::new(0).parse_all(&core_wasm) {
         if let Payload::ImportSection(imports) = payload? {
             for import in imports.into_imports() {
                 let import = import?;
                 if import.module == HELPER_MODULE {
                     has_helper_imports = true;
-                    break;
                 }
+                export_realloc |= canonical.import(import.module, import.name);
             }
         }
     }
 
-    if !has_helper_imports {
+    if !has_helper_imports && !export_realloc {
         return Ok((core_wasm, 0));
     }
 
@@ -217,6 +220,12 @@ pub(crate) fn link_helpers_with(
             .or_default()
             .insert(entry_name.to_string());
     }
+    if export_realloc {
+        requested_by_lib
+            .entry(LibraryId::Runtime)
+            .or_default()
+            .insert("perry_cabi_realloc".into());
+    }
     // Libraries may call each other through `__perry_helper` imports (the runtime formats
     // numbers with the number helper): request those entries too, to a fixpoint.
     loop {
@@ -231,6 +240,9 @@ pub(crate) fn link_helpers_with(
                 let (module, name, _) = &lib.imports[orig as usize];
                 if module == HELPER_MODULE {
                     added.push((LibraryId::for_entry(name)?, name.clone()));
+                } else if !export_realloc && canonical.import(module, name) {
+                    export_realloc = true;
+                    added.push((LibraryId::Runtime, "perry_cabi_realloc".into()));
                 }
             }
         }
@@ -685,6 +697,13 @@ pub(crate) fn link_helpers_with(
             ExternalKind::Tag => ExportKind::Tag,
         };
         new_exports.export(export.name, kind, export.index);
+    }
+    if export_realloc {
+        new_exports.export(
+            "cabi_realloc",
+            ExportKind::Func,
+            entry_index[&(LibraryId::Runtime, "perry_cabi_realloc".into())],
+        );
     }
     module.section(&new_exports);
 

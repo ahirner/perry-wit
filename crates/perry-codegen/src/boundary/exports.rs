@@ -683,23 +683,3 @@ fn async_export(
     }
     Ok(())
 }
-
-/// `cabi_realloc`, through which the host lowers strings and lists into guest memory.
-pub(crate) fn realloc(ctx: &mut Context, state: &mut ModuleState) {
-    let i32 = i32_type(ctx);
-    let ty = FunctionType::get(ctx, vec![i32; 4], vec![i32]);
-    let function = FuncOp::new(ctx, pliron::ident!("cabi_realloc"), ty);
-    set_export(ctx, &function, "cabi_realloc");
-    let args: Vec<_> = function
-        .get_entry_block(ctx)
-        .deref(ctx)
-        .arguments()
-        .collect();
-    let mut b = FunctionLowering::glue(state, ctx, &function);
-    let block = b.runtime(ctx, Runtime::CabiRealloc, args);
-    let ret = ReturnOp::new(ctx, vec![block]).get_operation();
-    b.insert(ctx, ret);
-    b.state
-        .wasm
-        .append_operation(ctx, function.get_operation(), 0);
-}

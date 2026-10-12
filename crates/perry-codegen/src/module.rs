@@ -327,7 +327,7 @@ pub(crate) fn lower(
     Ok((state.wasm, state.data.bytes, memory))
 }
 
-/// Emit the canonical-ABI glue of every WIT export, and `cabi_realloc`.
+/// Emit the canonical-ABI glue of every WIT export.
 fn bind_exports(
     ctx: &mut Context,
     state: &mut ModuleState<'_>,
@@ -412,9 +412,6 @@ fn bind_exports(
         })?;
         boundary::export(ctx, state, function, export)
             .with_context(|| format!("binding WIT export {}", export.core_name))?;
-    }
-    if !state.runtime.is_empty() {
-        boundary::realloc(ctx, state);
     }
     Ok(())
 }

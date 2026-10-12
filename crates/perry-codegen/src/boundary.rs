@@ -41,7 +41,7 @@ mod resources;
 mod scopes;
 mod sums;
 
-pub(super) use exports::{export, realloc};
+pub(super) use exports::export;
 pub(super) use resources::{emit_drain, used_keys};
 pub(super) use scopes::Scope;
 
