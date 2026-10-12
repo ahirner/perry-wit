@@ -4,6 +4,13 @@
 //! cargo test --test benchmark -- --ignored --nocapture
 //! ```
 //!
+//! `PERRY_BENCH_REPORT` writes measured rows; `PERRY_BENCH_BASELINE` compares each
+//! deterministic metric with its recorded value (at most 105%, zero stays zero).
+//! The comparison never updates the baseline. `tests/baselines/pliron.metadata.json`
+//! records its compiler revision, input hashes, dependency versions and options.
+//! `bytes` measures stripped components or named raw modules, matching the original
+//! campaign; `core_bytes` always measures the named core module before componentization.
+//!
 //! It prints a Markdown table: component bytes (stripped), guest fuel per call and guest
 //! memory, which are deterministic and machine-independent, and median milliseconds per call
 //! for orientation. The committed table lives in `TODOs.md`. Workloads: the legacy
@@ -11,6 +18,7 @@
 //! whole), the critique microbenchmarks as core modules, the compile time of a deep property
 //! chain, and the example components.
 use anyhow::{Result, ensure};
+use http_body_util::{BodyExt, Full};
 use perry_wit::{compile_core, compile_for_world, component::wit::resolve_wit};
 use std::{future::Future, time::Instant};
 use wasmtime::{
@@ -18,12 +26,9 @@ use wasmtime::{
     component::{Component, Linker, ResourceTable, StreamReader},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
-
-#[allow(dead_code)]
-#[path = "support/http_fixture.rs"]
-mod http_fixture;
-use http_fixture::{HttpFixture, Reply};
+use wasmtime_wasi_http::{
+    Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+};
 
 const MIB4: usize = 4 * 1024 * 1024;
 const SAMPLES: usize = 5;
@@ -56,6 +61,43 @@ struct Host {
     http: WasiHttpCtx,
     table: ResourceTable,
     memory: Memory,
+    fixture: FixedHttp,
+}
+
+struct FixedHttp;
+
+impl WasiHttpHooks for FixedHttp {
+    fn send_request(
+        &mut self,
+        request: http::Request<WasiBody>,
+        _: Option<RequestOptions>,
+        _: Box<dyn Future<Output = Result<(), Error>> + Send>,
+    ) -> Box<
+        dyn Future<
+                Output = Result<
+                    (
+                        http::Response<WasiBody>,
+                        Box<dyn Future<Output = Result<(), Error>> + Send>,
+                    ),
+                    Error,
+                >,
+            > + Send,
+    > {
+        assert_eq!(request.uri(), "http://benchmark.test/body");
+        Box::new(async {
+            let bytes: Vec<u8> = (0..MIB4).map(|i| i as u8).collect();
+            let body = Full::new(bytes::Bytes::from(bytes))
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            Ok((
+                http::Response::builder()
+                    .header("content-length", MIB4)
+                    .body(body)
+                    .unwrap(),
+                Box::new(async { Ok(()) }) as Box<dyn Future<Output = _> + Send>,
+            ))
+        })
+    }
 }
 
 impl WasiView for Host {
@@ -72,15 +114,18 @@ impl WasiHttpView for Host {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: &mut self.fixture,
         }
     }
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Row {
     workload: String,
+    compilation_error: Option<String>,
     bytes: Option<usize>,
+    core_bytes: Option<usize>,
+    defined_functions: Option<u32>,
     fuel: Option<u64>,
     memory: Option<usize>,
     milliseconds: Option<f64>,
@@ -134,6 +179,7 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             memory: Memory::default(),
+            fixture: FixedHttp,
         },
     );
     store.limiter(|host| &mut host.memory);
@@ -143,24 +189,28 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
     Ok(store)
 }
 
-fn component(source: &str, wit: &str, world: &str) -> Result<Vec<u8>> {
+fn component(source: &str, wit: &str, world: &str) -> Result<perry_wit::Compiled> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), wit)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some(world))?;
-    Ok(
-        compile_for_world(source, "bench.ts", &resolve, world, true)?
-            .component
-            .unwrap()
-            .stripped,
-    )
+    compile_for_world(source, "bench.ts", &resolve, world, true)
+}
+
+fn defined_functions(core: &[u8]) -> Result<u32> {
+    for payload in wasmparser::Parser::new(0).parse_all(core) {
+        if let wasmparser::Payload::FunctionSection(functions) = payload? {
+            return Ok(functions.count());
+        }
+    }
+    Ok(0)
 }
 
 /// Measure `call` on a fresh instance per engine: fuel and memory of one call after a
 /// warm-up call, and the median of `SAMPLES` timed calls.
 async fn measure<F, Fut>(
     workload: &str,
-    bytes: &[u8],
+    compiled: &perry_wit::Compiled,
     root: Option<&std::path::Path>,
     call: F,
 ) -> Result<Row>
@@ -168,6 +218,11 @@ where
     F: Fn(Store<Host>, Component, Linker<Host>) -> Fut,
     Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64)>>,
 {
+    let bytes = &compiled
+        .component
+        .as_ref()
+        .expect("component benchmark")
+        .stripped;
     let mut fuel = None;
     let mut memory = None;
     let mut milliseconds = None;
@@ -182,7 +237,7 @@ where
         if metered {
             fuel = Some(used);
             memory = Some(store.data().memory.bytes);
-            initial_memory = store.data().memory.initial;
+            initial_memory = Some(store.data().memory.initial.unwrap_or(0));
         } else {
             let mut ms: Vec<f64> = times.iter().map(|t| t.as_secs_f64() * 1000.0).collect();
             ms.sort_by(f64::total_cmp);
@@ -192,6 +247,8 @@ where
     Ok(Row {
         workload: workload.into(),
         bytes: Some(bytes.len()),
+        core_bytes: Some(compiled.core.len()),
+        defined_functions: Some(defined_functions(&compiled.core)?),
         fuel,
         memory,
         milliseconds,
@@ -333,10 +390,7 @@ export async function runTask(path: string): Promise<string> {
     );
 
     // HTTP: a 4 MiB body read with a bound (exact and one byte over) and whole.
-    let body: Vec<u8> = (0..MIB4).map(|i| i as u8).collect();
-    let served = body.clone();
-    let server = HttpFixture::new(move |_| Reply::Bytes(200, served.clone()));
-    let url = format!("http://{}/", server.address);
+    let url = "http://benchmark.test/body".to_owned();
     let http_wit = "package test:bench; world task { include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0; export run: async func(url: string, limit: f64) -> f64; }";
     let bounded = component(
         &format!(
@@ -469,6 +523,8 @@ export function run(n: number): number {
         let mut row = Row {
             workload: format!("{workload} (n = 10⁶)"),
             bytes: Some(wasm.len()),
+            core_bytes: Some(wasm.len()),
+            defined_functions: Some(defined_functions(&wasm)?),
             fuel: None,
             memory: None,
             milliseconds: None,
@@ -591,13 +647,12 @@ fn examples() -> Result<Vec<Row>> {
         let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
         let world = resolve.select_world(&[package], Some(world))?;
         let source_text = std::fs::read_to_string(source)?;
-        let bytes = compile_for_world(&source_text, source, &resolve, world, true)?
-            .component
-            .unwrap()
-            .stripped;
+        let compiled = compile_for_world(&source_text, source, &resolve, world, true)?;
         rows.push(Row {
             workload: workload.into(),
-            bytes: Some(bytes.len()),
+            bytes: Some(compiled.component.unwrap().stripped.len()),
+            core_bytes: Some(compiled.core.len()),
+            defined_functions: Some(defined_functions(&compiled.core)?),
             fuel: None,
             memory: None,
             milliseconds: None,
@@ -614,13 +669,275 @@ async fn benchmark_baseline() -> Result<()> {
     rows.extend(microbenchmarks()?);
     rows.push(compile_time()?);
     rows.extend(examples()?);
+    rows.extend(optimization_fixtures().await?);
     println!("| Workload | Component bytes | Fuel per call | Guest memory bytes | Median ms |");
     println!("|---|---:|---:|---:|---:|");
     if let Ok(path) = std::env::var("PERRY_BENCH_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&rows)?)?;
     }
+    if let Ok(path) = std::env::var("PERRY_BENCH_BASELINE") {
+        let baseline: Vec<Row> = serde_json::from_slice(&std::fs::read(path)?)?;
+        compare_baseline(&baseline, &rows)?;
+    }
     for row in rows {
         println!("{}", row.markdown());
     }
     Ok(())
+}
+
+async fn optimization_fixtures() -> Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    for domain in ["s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64"] {
+        let wide = domain.ends_with("64");
+        let source = if wide {
+            include_str!("fixtures/optimization/add_bigint.ts")
+        } else {
+            include_str!("fixtures/optimization/add.ts")
+        };
+        let compiled = match component(
+            source,
+            &format!(
+                "package test:integers; world test {{ export add: func(x: {domain}, y: {domain}) -> {domain}; }}"
+            ),
+            "test",
+        ) {
+            Ok(compiled) => compiled,
+            Err(error)
+                if wide
+                    && format!("{error:#}")
+                        .contains("operator Add on these operand types is not supported yet") =>
+            {
+                rows.push(Row {
+                    workload: format!("WIT {domain} addition"),
+                    compilation_error: Some(format!("{error:#}")),
+                    ..Row::default()
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        rows.push(measure_core(
+            &format!("WIT {domain} addition"),
+            &compiled,
+            "add",
+            if wide {
+                &[Val::I64(20), Val::I64(22)]
+            } else {
+                &[Val::I32(20), Val::I32(22)]
+            },
+            if wide { Val::I64(42) } else { Val::I32(42) },
+        )?);
+    }
+    let widening = component(
+        include_str!("fixtures/optimization/add.ts"),
+        "package test:integers; world test { export add: func(x: u8, y: u8) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT backward result width",
+        &widening,
+        "add",
+        &[Val::I32(255), Val::I32(255)],
+        Val::I32(510),
+    )?);
+    let shared = component(
+        include_str!("fixtures/optimization/shared.ts"),
+        "package test:integers; world test {
+          export narrow: func(x: u8, y: u8) -> u8;
+          export wide: func(x: u8, y: u8) -> u32;
+          export floating: func(x: f64, y: f64) -> f64;
+        }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT shared helper",
+        &shared,
+        "wide",
+        &[Val::I32(255), Val::I32(255)],
+        Val::I32(510),
+    )?);
+    let recursive = component(
+        include_str!("fixtures/optimization/recursive.ts"),
+        "package test:integers; world test { export sum: func(n: u32) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT recursion",
+        &recursive,
+        "sum",
+        &[Val::I32(10)],
+        Val::I32(55),
+    )?);
+    let unwrap = component(
+        include_str!("fixtures/optimization/unwrap.ts"),
+        "package test:optimization; world test { export run: func(n: f64) -> f64; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "successful unwrap reuse",
+        &unwrap,
+        "run",
+        &[Val::F64(4.0f64.to_bits())],
+        Val::F64(12.0f64.to_bits()),
+    )?);
+    let asynchronous = component(
+        include_str!("fixtures/optimization/async.ts"),
+        "package test:optimization; world test { export run: async func(n: f64) -> f64; }",
+        "test",
+    )?;
+    rows.push(
+        measure(
+            "async frame liveness",
+            &asynchronous,
+            None,
+            |mut store, component, linker| async move {
+                let instance = linker.instantiate_async(&mut store, &component).await?;
+                let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+                let (times, used) = timed!(store, SAMPLES, {
+                    let (result,) = run.call_async(&mut store, (4.0,)).await?;
+                    ensure!(result == 17.0, "async frame result");
+                });
+                Ok((store, times, used))
+            },
+        )
+        .await?,
+    );
+    Ok(rows)
+}
+
+fn measure_core(
+    workload: &str,
+    compiled: &perry_wit::Compiled,
+    export: &str,
+    args: &[Val],
+    expected: Val,
+) -> Result<Row> {
+    let engine = engine(true)?;
+    let module = wasmtime::Module::new(&engine, &compiled.core)?;
+    let mut store = Store::new(&engine, Memory::default());
+    store.limiter(|memory| memory);
+    store.set_fuel(u64::MAX)?;
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let run = instance
+        .get_func(&mut store, export)
+        .expect("fixture export");
+    let mut results = [Val::I32(0)];
+    let before = store.get_fuel()?;
+    let start = Instant::now();
+    run.call(&mut store, args, &mut results)?;
+    let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
+    let fuel = before - store.get_fuel()?;
+    let correct = match (results[0], expected) {
+        (Val::I32(actual), Val::I32(expected)) => actual == expected,
+        (Val::I64(actual), Val::I64(expected)) => actual == expected,
+        (Val::F64(actual), Val::F64(expected)) => actual == expected,
+        _ => false,
+    };
+    ensure!(correct, "{workload}: wrong result {:?}", results[0]);
+    Ok(Row {
+        workload: workload.into(),
+        bytes: Some(
+            compiled
+                .component
+                .as_ref()
+                .expect("fixture component")
+                .stripped
+                .len(),
+        ),
+        core_bytes: Some(compiled.core.len()),
+        defined_functions: Some(defined_functions(&compiled.core)?),
+        fuel: Some(fuel),
+        initial_memory: Some(store.data().initial.unwrap_or(0)),
+        memory: Some(store.data().bytes),
+        milliseconds: Some(milliseconds),
+        ..Row::default()
+    })
+}
+
+fn compare_baseline(baseline: &[Row], current: &[Row]) -> Result<()> {
+    use std::collections::BTreeMap;
+    let by_name = |rows: &[Row]| {
+        rows.iter()
+            .map(|row| row.workload.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    ensure!(
+        by_name(baseline) == by_name(current),
+        "benchmark workload set changed"
+    );
+    ensure!(
+        by_name(current).len() == current.len() && baseline.len() == current.len(),
+        "duplicate workload"
+    );
+    let previous: BTreeMap<_, _> = baseline.iter().map(|row| (&row.workload, row)).collect();
+    let mut failures = Vec::new();
+    for row in current {
+        let old = previous[&row.workload];
+        if let Some(error) = &old.compilation_error {
+            ensure!(
+                row.compilation_error
+                    .as_ref()
+                    .is_none_or(|current| current == error),
+                "{}: changed compilation error",
+                row.workload
+            );
+            continue;
+        }
+        ensure!(
+            row.compilation_error.is_none(),
+            "{}: compilation regressed",
+            row.workload
+        );
+        for (name, before, after) in [
+            (
+                "artifact bytes",
+                old.bytes.map(|n| n as u64),
+                row.bytes.map(|n| n as u64),
+            ),
+            (
+                "core bytes",
+                old.core_bytes.map(|n| n as u64),
+                row.core_bytes.map(|n| n as u64),
+            ),
+            ("fuel", old.fuel, row.fuel),
+            (
+                "initial memory",
+                old.initial_memory.map(|n| n as u64),
+                row.initial_memory.map(|n| n as u64),
+            ),
+            (
+                "peak memory",
+                old.memory.map(|n| n as u64),
+                row.memory.map(|n| n as u64),
+            ),
+        ] {
+            match (before, after) {
+                (Some(before), Some(after))
+                    if u128::from(after) * 100 <= u128::from(before) * 105 => {}
+                (None, None) => {}
+                _ => failures.push(format!("{}: {name}: {before:?} -> {after:?}", row.workload)),
+            }
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "benchmark regressions (limit 105%):\n{}",
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+#[test]
+fn benchmark_gate_checks_each_metric_and_zero_baselines() {
+    let sample = |bytes, fuel| Row {
+        workload: "sample".into(),
+        bytes: Some(bytes),
+        fuel: Some(fuel),
+        ..Row::default()
+    };
+    assert!(compare_baseline(&[sample(100, 0)], &[sample(105, 0)]).is_ok());
+    assert!(compare_baseline(&[sample(100, 0)], &[sample(106, 0)]).is_err());
+    assert!(compare_baseline(&[sample(100, 0)], &[sample(90, 1)]).is_err());
+    assert!(compare_baseline(&[sample(100, 100)], &[sample(1, 106)]).is_err());
+    assert!(compare_baseline(&[sample(100, 0)], &[]).is_err());
 }
