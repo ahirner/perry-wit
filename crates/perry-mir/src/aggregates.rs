@@ -3,7 +3,7 @@
 //! - [inline_leaves]: calls to small synchronous leaf functions (no calls, awaits or
 //!   timers of their own) take the callee's body, bottom-up by construction since leaves
 //!   call nothing. Callees left without callers are removed unless exported.
-//! - [scalar_replace]: a record that does not escape its function (it is only read and
+//! - [DecomposeRecords]: a record that does not escape its function (it is only read and
 //!   written through `perry.field_get`/`perry.field_set`) becomes one local per field, which
 //!   `mem2reg` then promotes to SSA values: the allocation disappears.
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
+        op_interfaces::{OneResultInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
     },
     context::{Context, Ptr},
@@ -27,6 +27,7 @@ use pliron::{
         cloning::{IrMapping, clone_blocks_into},
         inserter::{Inserter, OpInsertionPoint},
         listener::DummyListener,
+        match_rewrite::{MatchRewrite, MatchRewriter},
         rewriter::{IRRewriter, Rewriter},
     },
     linked_list::{ContainsLinkedList, LinkedList},
@@ -217,7 +218,7 @@ fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
 /// per field read, and callers read the fields at the call. This is exact when nothing can
 /// write the record while the callee runs: the callee writes no record field, directly or
 /// through a call, and does not await. The caller's record then often no longer escapes, so
-/// `scalar_replace` dissolves it.
+/// record decomposition dissolves it.
 pub(crate) fn promote_arguments(
     root: Ptr<Operation>,
     ctx: &mut Context,
@@ -376,65 +377,75 @@ fn promote(
 /// Split a record into local field slots only when all uses are direct field reads/writes.
 /// Entry slots plus stores at the original allocation preserve per-iteration initialization;
 /// mem2reg then removes the slots and supplies the required control-flow joins.
-pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> Result<bool> {
-    let mut changed = false;
-    let mut rewriter = IRRewriter::<DummyListener>::default();
-    for function in functions(root, ctx) {
-        let allocations: Vec<_> = function
-            .get_region(ctx)
-            .deref(ctx)
-            .iter(ctx)
-            .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-            .filter_map(|op| Operation::get_op::<AllocOp>(op, ctx))
-            .collect();
-        for allocation in allocations {
-            let reference = allocation.get_result(ctx);
-            let uses = reference.uses(ctx);
-            if uses.iter().any(|u| {
-                u.find_index(ctx) != 0
-                    || (Operation::get_op::<FieldGetOp>(u.user_op(), ctx).is_none()
-                        && Operation::get_op::<FieldSetOp>(u.user_op(), ctx).is_none())
-            }) {
-                continue;
-            }
-            let record = TypedHandle::<RecordType>::from_handle(reference.get_type(ctx), ctx)?;
-            let fields = record.deref(ctx).fields()?.to_vec();
-            let initial: Vec<_> = allocation.get_operation().deref(ctx).operands().collect();
-            let mut slots = HashMap::new();
-            rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));
-            for (name, ty) in fields {
-                let slot = LocalOp::new(ctx, ty);
-                rewriter.insert_op(ctx, &slot);
-                slots.insert(name, slot.get_result(ctx));
-            }
-            rewriter.set_insertion_point_before_operation(allocation.get_operation());
-            let names: Vec<_> = record
-                .deref(ctx)
-                .fields()?
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
-            for (name, value) in names.into_iter().zip(initial) {
-                let store = StoreOp::new(ctx, slots[&name], value);
-                rewriter.insert_op(ctx, &store);
-            }
-            for use_ in uses {
-                let op = use_.user_op();
-                rewriter.set_insertion_point_before_operation(op);
-                if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
-                    let load = LoadOp::new(ctx, slots[&get.field(ctx)])?;
-                    rewriter.insert_op(ctx, &load);
-                    rewriter.replace_operation(ctx, op, load.get_operation());
-                } else if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
-                    let value = op.deref(ctx).get_operand(1);
-                    let store = StoreOp::new(ctx, slots[&set.field(ctx)], value);
-                    rewriter.insert_op(ctx, &store);
-                    rewriter.replace_operation(ctx, op, store.get_operation());
-                }
-            }
-            rewriter.erase_operation(ctx, allocation.get_operation());
-            changed = true;
-        }
+pub(crate) struct DecomposeRecords;
+
+impl MatchRewrite for DecomposeRecords {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) else {
+            return false;
+        };
+        allocation.get_result(ctx).uses(ctx).iter().all(|usage| {
+            usage.find_index(ctx) == 0
+                && (Operation::get_op::<FieldGetOp>(usage.user_op(), ctx).is_some()
+                    || Operation::get_op::<FieldSetOp>(usage.user_op(), ctx).is_some())
+        })
     }
-    Ok(changed)
+
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut MatchRewriter,
+        op: Ptr<Operation>,
+    ) -> Result<()> {
+        if !self.r#match(ctx, op) {
+            return Ok(());
+        }
+        let allocation = Operation::get_op::<AllocOp>(op, ctx).expect("matched allocation");
+        let function = Operation::get_op::<FuncOp>(
+            op.deref(ctx)
+                .get_parent_op(ctx)
+                .expect("allocation in function"),
+            ctx,
+        )
+        .expect("MIR function");
+        let reference = allocation.get_result(ctx);
+        let uses = reference.uses(ctx);
+        let record = TypedHandle::<RecordType>::from_handle(reference.get_type(ctx), ctx)?;
+        let fields = record.deref(ctx).fields()?.to_vec();
+        let initial: Vec<_> = allocation.get_operation().deref(ctx).operands().collect();
+        let mut slots = HashMap::new();
+        rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));
+        for (name, ty) in fields {
+            let slot = LocalOp::new(ctx, ty);
+            rewriter.insert_op(ctx, &slot);
+            slots.insert(name, slot.get_result(ctx));
+        }
+        rewriter.set_insertion_point_before_operation(allocation.get_operation());
+        let names: Vec<_> = record
+            .deref(ctx)
+            .fields()?
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (name, value) in names.into_iter().zip(initial) {
+            let store = StoreOp::new(ctx, slots[&name], value);
+            rewriter.insert_op(ctx, &store);
+        }
+        for use_ in uses {
+            let op = use_.user_op();
+            rewriter.set_insertion_point_before_operation(op);
+            if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
+                let load = LoadOp::new(ctx, slots[&get.field(ctx)])?;
+                rewriter.insert_op(ctx, &load);
+                rewriter.replace_operation(ctx, op, load.get_operation());
+            } else if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
+                let value = op.deref(ctx).get_operand(1);
+                let store = StoreOp::new(ctx, slots[&set.field(ctx)], value);
+                rewriter.insert_op(ctx, &store);
+                rewriter.replace_operation(ctx, op, store.get_operation());
+            }
+        }
+        rewriter.erase_operation(ctx, allocation.get_operation());
+        Ok(())
+    }
 }

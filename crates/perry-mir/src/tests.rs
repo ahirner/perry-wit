@@ -668,6 +668,57 @@ fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
 }
 
 #[test]
+fn append_rewriting_expands_each_site_once_and_keeps_fallbacks() -> Result<()> {
+    use pliron::{
+        irbuild::match_rewrite::PassWrapper,
+        pass::{AnalysisManager, Pass},
+    };
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @appends {
+  ^module():
+    builtin.func @run: builtin.function <(perry.string, perry.string) -> (perry.string)> {
+      ^entry(prefix: perry.string, suffix: perry.string):
+        first = perry.string_append prefix, suffix : perry.string;
+        second = perry.string_append first, suffix : perry.string;
+        perry.return second
+    }
+}
+"#,
+    );
+    let mut analyses = AnalysisManager::default();
+    let mut pass = PassWrapper::new(
+        "expand-appends",
+        crate::fast_paths::ExpandAppends::default(),
+    );
+    assert_eq!(
+        pass.run(module, ctx, &mut analyses)?.ir_changed,
+        IRStatus::Changed
+    );
+    verify_operation(module, ctx)?;
+    let printed = print(ctx, module);
+    assert_eq!(
+        printed.matches("perry.intrinsic string_try_append").count(),
+        2,
+        "{printed}"
+    );
+    assert_eq!(
+        printed.matches("perry.string_append").count(),
+        2,
+        "{printed}"
+    );
+    assert_eq!(printed.matches("perry.cond_br").count(), 2, "{printed}");
+    assert_eq!(
+        pass.run(module, ctx, &mut analyses)?.ir_changed,
+        IRStatus::Unchanged
+    );
+    assert_eq!(print(ctx, module), printed);
+    Ok(())
+}
+
+#[test]
 fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     let variant = r#"perry.variant <"empty", "n": builtin.fp64, "text": perry.string>"#;
     let input = single_block(&format!(

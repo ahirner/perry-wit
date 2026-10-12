@@ -1,6 +1,6 @@
 //! Keep unobserved character strings in scalar SSA form through comparison and append.
 use crate::{
-    aggregates::{functions, operations},
+    aggregates::operations,
     collections::{ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp},
     intrinsics::{Intrinsic, IntrinsicOp},
     scalar::CompareOp,
@@ -8,17 +8,22 @@ use crate::{
 use pliron::{
     builtin::{
         attributes::IntegerAttr,
-        ops::ConstantOp,
+        ops::{ConstantOp, FuncOp},
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    irbuild::{
+        inserter::Inserter,
+        match_rewrite::{MatchRewrite, MatchRewriter},
+        rewriter::Rewriter,
+    },
     op::Op,
     operation::Operation,
+    result::Result,
     utils::apint::{APInt, bw},
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// A scalar or the empty string. UTF-8 ordering agrees with scalar ordering; -1 precedes NUL.
 fn literal(ctx: &Context, value: Value) -> Option<i32> {
@@ -47,85 +52,100 @@ fn supports(ctx: &Context, op: Ptr<Operation>, character: Value) -> bool {
 
 /// Materialized characters that escape, enter unknown calls or join other string values
 /// retain their ordinary representation. The existing append pass supplies ownership proof.
-pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
-    let mut status = IRStatus::Unchanged;
-    for function in functions(root, ctx) {
-        let body = operations(ctx, &function);
-        let mut order: HashMap<_, _> = body.iter().enumerate().map(|(i, &op)| (op, i)).collect();
-        let candidates: Vec<_> = body
-            .into_iter()
-            .filter_map(
-                |op| match Operation::get_op::<IntrinsicOp>(op, ctx)?.intrinsic(ctx)? {
-                    Intrinsic::StringCharAt => Some((op, Intrinsic::StringScalarAt)),
-                    Intrinsic::StringCharAtIndex => Some((op, Intrinsic::StringScalarAtIndex)),
-                    _ => None,
-                },
-            )
-            .collect();
-        for (op, kind) in candidates {
-            let character = op.deref(ctx).get_result(0);
-            let mut seen = HashSet::new();
-            let mut users: Vec<_> = character
-                .uses(ctx)
-                .iter()
-                .map(|usage| usage.user_op())
-                .filter(|user| seen.insert(*user))
-                .collect();
-            if users.is_empty() || !users.iter().all(|&user| supports(ctx, user, character)) {
-                continue;
-            }
-            users.sort_unstable_by_key(|user| order[user]);
-            let args = op.deref(ctx).operands().collect();
-            let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
-            scalar.insert_before(ctx, op);
-            let scalar = scalar.deref(ctx).get_result(0);
-            for user in users {
-                let replacement = if let Some(compare) = Operation::get_op::<CompareOp>(user, ctx) {
-                    let kind = compare.kind(ctx);
-                    let args: Vec<_> = user.deref(ctx).operands().collect();
-                    let args: Vec<_> = args
-                        .into_iter()
-                        .map(|value| {
-                            if value == character {
-                                return scalar;
-                            }
-                            let value = literal(ctx, value).expect("validated character literal");
-                            let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-                            let attr =
-                                IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
-                            let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
-                            constant.insert_before(ctx, user);
-                            constant.deref(ctx).get_result(0)
-                        })
-                        .collect();
-                    CompareOp::new(ctx, kind, args[0], args[1]).get_operation()
-                } else if Operation::get_op::<StringLenOp>(user, ctx).is_some() {
-                    IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
-                        .get_operation()
-                } else {
-                    let append = Operation::get_op::<ConcatReuseOp>(user, ctx).is_some();
-                    let prefix = user.deref(ctx).get_operand(0);
-                    IntrinsicOp::new(
-                        ctx,
-                        if append {
-                            Intrinsic::StringScalarAppend
-                        } else {
-                            Intrinsic::StringScalarConcat
-                        },
-                        vec![prefix, scalar],
-                    )
-                    .get_operation()
-                };
-                order.insert(replacement, order[&user]);
-                replacement.insert_before(ctx, user);
-                let old = user.deref(ctx).get_result(0);
-                let new = replacement.deref(ctx).get_result(0);
-                old.replace_all_uses_with(ctx, &new);
-                Operation::erase(user, ctx);
-            }
-            Operation::erase(op, ctx);
-            status = IRStatus::Changed;
+pub(crate) struct ScalarizeCharacters;
+
+impl MatchRewrite for ScalarizeCharacters {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        if !matches!(
+            Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)),
+            Some(Intrinsic::StringCharAt | Intrinsic::StringCharAtIndex)
+        ) {
+            return false;
         }
+        let character = op.deref(ctx).get_result(0);
+        let users = character.uses(ctx);
+        !users.is_empty()
+            && users
+                .iter()
+                .all(|usage| supports(ctx, usage.user_op(), character))
     }
-    status
+
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut MatchRewriter,
+        op: Ptr<Operation>,
+    ) -> Result<()> {
+        if !self.r#match(ctx, op) {
+            return Ok(());
+        }
+        let kind = match Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)) {
+            Some(Intrinsic::StringCharAt) => Intrinsic::StringScalarAt,
+            Some(Intrinsic::StringCharAtIndex) => Intrinsic::StringScalarAtIndex,
+            _ => unreachable!("matched character lookup"),
+        };
+        let character = op.deref(ctx).get_result(0);
+        let users: HashSet<_> = character
+            .uses(ctx)
+            .iter()
+            .map(|usage| usage.user_op())
+            .collect();
+        let function = Operation::get_op::<FuncOp>(
+            op.deref(ctx)
+                .get_parent_op(ctx)
+                .expect("character in function"),
+            ctx,
+        )
+        .expect("MIR function");
+        let users: Vec<_> = operations(ctx, &function)
+            .into_iter()
+            .filter(|user| users.contains(user))
+            .collect();
+        let args = op.deref(ctx).operands().collect();
+        let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
+        rewriter.insert_operation(ctx, scalar);
+        let scalar = scalar.deref(ctx).get_result(0);
+        for user in users {
+            rewriter.set_insertion_point_before_operation(user);
+            let replacement = if let Some(compare) = Operation::get_op::<CompareOp>(user, ctx) {
+                let kind = compare.kind(ctx);
+                let args: Vec<_> = user.deref(ctx).operands().collect();
+                let args: Vec<_> = args
+                    .into_iter()
+                    .map(|value| {
+                        if value == character {
+                            return scalar;
+                        }
+                        let value = literal(ctx, value).expect("validated character literal");
+                        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+                        let attr =
+                            IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
+                        let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+                        rewriter.insert_operation(ctx, constant);
+                        constant.deref(ctx).get_result(0)
+                    })
+                    .collect();
+                CompareOp::new(ctx, kind, args[0], args[1]).get_operation()
+            } else if Operation::get_op::<StringLenOp>(user, ctx).is_some() {
+                IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar]).get_operation()
+            } else {
+                let append = Operation::get_op::<ConcatReuseOp>(user, ctx).is_some();
+                let prefix = user.deref(ctx).get_operand(0);
+                IntrinsicOp::new(
+                    ctx,
+                    if append {
+                        Intrinsic::StringScalarAppend
+                    } else {
+                        Intrinsic::StringScalarConcat
+                    },
+                    vec![prefix, scalar],
+                )
+                .get_operation()
+            };
+            rewriter.insert_operation(ctx, replacement);
+            rewriter.replace_operation(ctx, user, replacement);
+        }
+        rewriter.erase_operation(ctx, op);
+        Ok(())
+    }
 }

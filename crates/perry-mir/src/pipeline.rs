@@ -37,33 +37,32 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     cleanup.add_pass(Transform("unused-block-arguments", |root, ctx| {
         Ok(crate::constants::remove_unused_block_arguments(root, ctx))
     }));
-    cleanup.add_pass(Transform("decompose-records", |root, ctx| {
-        crate::aggregates::scalar_replace(root, ctx).map(IRStatus::from)
-    }));
+    cleanup.add_pass(PassWrapper::new(
+        "decompose-records",
+        crate::aggregates::DecomposeRecords,
+    ));
     cleanup.add_pass(Mem2RegPass);
     cleanup.add_pass(DCEPass);
     cleanup.add_pass(SimplifyCFGPass);
     while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
 
     let mut bounds = Passes::default();
-    bounds.add_pass(Transform("reuse-unwraps", |root, ctx| {
-        crate::unwraps::reuse(root, ctx);
-        Ok(IRStatus::Changed)
-    }));
+    bounds.add_pass(crate::unwraps::ReuseUnwraps);
     bounds.add_pass(ProveBounds);
     bounds.run(root, ctx, &mut analyses)?;
     while cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Changed {}
 
     let mut ownership = Passes::default();
     ownership.add_pass(crate::append::AppendPass);
-    ownership.add_pass(Transform("scalar-characters", |root, ctx| {
-        Ok(crate::characters::scalar_replace(root, ctx))
-    }));
+    ownership.add_pass(PassWrapper::new(
+        "scalar-characters",
+        crate::characters::ScalarizeCharacters,
+    ));
     ownership.add_pass(DCEPass);
-    ownership.add_pass(Transform("expand-append", |root, ctx| {
-        crate::fast_paths::expand(root, ctx);
-        Ok(IRStatus::Changed)
-    }));
+    ownership.add_pass(PassWrapper::new(
+        "expand-append",
+        crate::fast_paths::ExpandAppends::default(),
+    ));
     ownership.add_pass(AssignLifetimes);
     ownership.run(root, ctx, &mut analyses)?;
     verify_operation(root, ctx)?;
@@ -95,6 +94,7 @@ impl Pass for ProveBounds {
             .expect("dominance");
         let mut result = PassResult::default();
         result.ir_changed = crate::ranges::prove_bounds(root, ctx, &numeric, &mut dominance);
+        result.set_preserved::<DomInfo>();
         Ok(result)
     }
 }
