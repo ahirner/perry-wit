@@ -85,6 +85,20 @@ jobs:
         name: perry-wit-core-helpers
         path: dist/perry-wit-core-helpers.tar.gz
         if-no-files-found: error
+    - name: Package Wasm compiler
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        nix build -L .#perry-wit-wasm --out-link result-compiler
+        mkdir -p dist/compiler
+        cp result-compiler/lib/perry-wit.wasm dist/compiler/
+        cp result-compiler/share/perry-wit/compiler.wit dist/compiler/
+        cp result-compiler/share/perry-wit/metadata.json dist/compiler/compiler.metadata.json
+    - uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        name: perry-wit-compiler
+        path: dist/compiler/
+        if-no-files-found: error
 
   release:
     needs: [flake-build, site]
@@ -118,15 +132,11 @@ jobs:
     - run: nix develop .#browser -c node site/check-browser.mjs
       env:
         DEBUG: pw:browser
-    - run: |
-        mkdir -p dist
-        cp site/dist/downloads/perry-wit.wasm dist/
-        cp site/dist/downloads/compiler.wit dist/
-        cp site/dist/downloads/compiler.metadata.json dist/
     - uses: actions/upload-artifact@v7
       with:
-        name: perry-wit-compiler
-        path: dist/*
+        name: static-site
+        path: site/dist/
+        include-hidden-files: true
         if-no-files-found: error
     - uses: actions/upload-artifact@v7
       if: failure()

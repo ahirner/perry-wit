@@ -55,3 +55,7 @@ The build packages bundled examples into the playground workspace. Opening a loc
 ## Deployment
 
 Continuous integration builds the site and executes verification suites on pull requests. Merges to `main` publish the generated distribution to GitHub Pages.
+
+Successful site jobs upload a `static-site` artifact containing the complete distribution, including the playground, compiler, runtime assets, and Rust API documentation. Download it from the workflow run, extract it, and serve the extracted directory over HTTPS or HTTP on localhost. All asset links are relative, so the site can be served at a domain root or under a subdirectory. No build tools or application backend are needed to serve it.
+
+The Linux `flake-build` job uploads `perry-wit-compiler` with the compiler component, WIT contract, and metadata. Tagged releases include that compiler artifact; `static-site` remains a CI download and is excluded from releases.
