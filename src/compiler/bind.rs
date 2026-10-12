@@ -39,9 +39,6 @@ pub(crate) fn constrain_numbers(
         else {
             continue;
         };
-        if perry_mir::calls::is_async(ctx, function) {
-            continue;
-        }
         let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
             .expect("function type");
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());

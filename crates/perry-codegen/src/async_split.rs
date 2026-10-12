@@ -29,7 +29,7 @@ use pliron::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
-        types::{FP64Type, FunctionType},
+        types::{FP64Type, FunctionType, IntegerType},
     },
     context::{Context, Ptr},
     identifier::Identifier,
@@ -288,6 +288,13 @@ impl FunctionLowering<'_, '_> {
     pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
         if value.get_type(ctx).deref(ctx).is::<FP64Type>() {
             self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
+        } else if value
+            .get_type(ctx)
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 64)
+        {
+            value
         } else {
             self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
         }

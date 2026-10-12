@@ -6,10 +6,12 @@
 //! SCCP, inlining and other algebraic transformations.
 use crate::{
     attrs::BinaryKind,
-    calls::{CallOp, is_async},
+    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp},
     control::ReturnOp,
     integers::BigIntConstOp,
+    intrinsics::PromiseResolvedOp,
     scalar::{BinaryOp, CompareOp, NumericCastOp},
+    types::PromiseType,
 };
 use pliron::{
     builtin::{
@@ -239,11 +241,35 @@ impl Fact {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ResultDomain {
+    Inferred,
+    Integer(Integer),
+    /// Escaping promises keep their declared payload representation; their callees may
+    /// still specialize arithmetic using known argument domains.
+    Original,
+}
+
+impl ResultDomain {
+    fn integer(self) -> Option<Integer> {
+        match self {
+            Self::Integer(integer) => Some(integer),
+            Self::Inferred | Self::Original => None,
+        }
+    }
+}
+
+impl From<Option<Integer>> for ResultDomain {
+    fn from(integer: Option<Integer>) -> Self {
+        integer.map_or(Self::Inferred, Self::Integer)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
     function: Identifier,
     args: Vec<Option<Integer>>,
-    result: Option<Integer>,
+    result: ResultDomain,
     /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
     specialize: bool,
 }
@@ -306,6 +332,7 @@ struct State {
     facts: HashMap<Value, Fact>,
     ranges: HashMap<Value, Range>,
     required: HashMap<Value, Integer>,
+    original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
     result: Fact,
     result_range: Range,
@@ -438,6 +465,13 @@ impl Solver {
         }
     }
 
+    fn preserve_promise_payload(&mut self, id: usize, value: Value) {
+        if self.analysis.states[id].original_payloads.insert(value) {
+            self.fact(id, value, Fact::Original);
+            self.changed(id, value);
+        }
+    }
+
     fn arithmetic(&self, ctx: &Context, id: usize, inputs: &[Value], result: Value) -> Fact {
         let state = &self.analysis.states[id];
         let facts: Vec<_> = inputs.iter().map(|&value| state.fact(value)).collect();
@@ -473,6 +507,15 @@ impl Solver {
     fn process(&mut self, ctx: &Context, id: usize, index: usize) {
         let constraint = self.analysis.bodies[&self.analysis.keys[id].function].constraints[index];
         if let Constraint::Edge { from, to } = constraint {
+            if from.get_type(ctx).deref(ctx).is::<PromiseType>()
+                && (self.analysis.states[id].original_payloads.contains(&from)
+                    || self.analysis.states[id].original_payloads.contains(&to)
+                    || self.analysis.states[id].fact(from) == Fact::Original
+                    || self.analysis.states[id].fact(to) == Fact::Original)
+            {
+                self.preserve_promise_payload(id, from);
+                self.preserve_promise_payload(id, to);
+            }
             let required = self.analysis.states[id].required.get(&to).copied();
             self.require(id, from, required);
             let fact = self.analysis.states[id].fact(from);
@@ -485,13 +528,66 @@ impl Solver {
         };
         let inputs: Vec<_> = op.deref(ctx).operands().collect();
         let results: Vec<_> = op.deref(ctx).results().collect();
+        let dynamic = Operation::get_op_dyn(op, ctx);
+        if Operation::get_op::<AwaitOp>(op, ctx).is_none()
+            && op_cast::<dyn BranchOpInterface>(&*dynamic).is_none()
+        {
+            for &value in &inputs {
+                if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                    self.preserve_promise_payload(id, value);
+                }
+            }
+        }
+        if let Some(index) = promise_payload(ctx, op) {
+            let value = inputs[index];
+            let promise = results[0];
+            if self.analysis.states[id]
+                .original_payloads
+                .contains(&promise)
+            {
+                self.fact(id, promise, Fact::Original);
+            } else {
+                self.require(
+                    id,
+                    value,
+                    self.analysis.states[id].required.get(&promise).copied(),
+                );
+                self.fact(id, promise, self.analysis.states[id].fact(value));
+            }
+            self.range(id, promise, self.analysis.states[id].range(value));
+            return;
+        }
+        if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
+            let promise = inputs[0];
+            let result = results[0];
+            let fact = self.analysis.states[id].fact(promise);
+            if fact == Fact::Original {
+                self.preserve_promise_payload(id, promise);
+            }
+            if !self.analysis.states[id]
+                .original_payloads
+                .contains(&promise)
+            {
+                self.require(
+                    id,
+                    promise,
+                    self.analysis.states[id].required.get(&result).copied(),
+                );
+            }
+            self.fact(id, result, fact);
+            self.range(id, result, self.analysis.states[id].range(promise));
+            return;
+        }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             if let Some(&value) = inputs.first() {
-                self.require(id, value, self.analysis.keys[id].result);
+                self.require(id, value, self.analysis.keys[id].result.integer());
                 let fact = self.analysis.states[id].fact(value);
-                let fact = if fact == Fact::Literal {
+                let fact = if self.analysis.keys[id].result == ResultDomain::Original {
+                    Fact::Original
+                } else if fact == Fact::Literal {
                     self.analysis.keys[id]
                         .result
+                        .integer()
                         .map_or(Fact::Literal, Fact::Integer)
                 } else {
                     fact
@@ -512,8 +608,11 @@ impl Solver {
             }
             return;
         }
-        if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-            let callee = call.callee(ctx);
+        let asynchronous = Operation::get_op::<AsyncCallOp>(op, ctx);
+        if let Some(callee) = Operation::get_op::<CallOp>(op, ctx)
+            .map(|call| call.callee(ctx))
+            .or_else(|| asynchronous.map(|call| call.callee(ctx)))
+        {
             if !self.analysis.keys[id].specialize
                 && let Some(&child) = self.analysis.generic.get(&callee)
             {
@@ -535,34 +634,44 @@ impl Solver {
             if facts.contains(&Fact::Bottom) {
                 return;
             }
-            if self
-                .analysis
-                .bodies
-                .get(&callee)
-                .is_some_and(|body| !is_async(ctx, &body.function))
-            {
+            if self.analysis.bodies.contains_key(&callee) {
+                let preserve_result = asynchronous.is_some()
+                    && self.analysis.states[id]
+                        .original_payloads
+                        .contains(&results[0]);
                 let args = inputs
                     .iter()
                     .zip(&facts)
-                    .map(|(value, fact)| match fact {
-                        Fact::Integer(integer) => Some(*integer),
-                        Fact::Literal => {
-                            let Range::Bounds(interval) = self.analysis.states[id].range(*value)
-                            else {
-                                return None;
-                            };
-                            interval.include(Integer {
-                                bits: 64,
-                                signed: true,
-                            })
+                    .map(|(value, fact)| {
+                        if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                            None
+                        } else {
+                            match fact {
+                                Fact::Integer(integer) => Some(*integer),
+                                Fact::Literal => {
+                                    let Range::Bounds(interval) =
+                                        self.analysis.states[id].range(*value)
+                                    else {
+                                        return None;
+                                    };
+                                    interval.include(Integer {
+                                        bits: 64,
+                                        signed: true,
+                                    })
+                                }
+                                _ => None,
+                            }
                         }
-                        _ => None,
                     })
                     .collect();
                 let child = self.context(Key {
                     function: callee.clone(),
                     args,
-                    result: required,
+                    result: if preserve_result {
+                        ResultDomain::Original
+                    } else {
+                        required.into()
+                    },
                     specialize: true,
                 });
                 self.analysis.states[id].calls.insert(op, child);
@@ -678,6 +787,16 @@ impl Solver {
             };
             self.range(id, result, range);
         }
+    }
+}
+
+fn promise_payload(ctx: &Context, op: Ptr<Operation>) -> Option<usize> {
+    if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
+        Some(0)
+    } else if Operation::get_op::<TimerOp>(op, ctx).is_some() {
+        Some(1)
+    } else {
+        None
     }
 }
 
@@ -830,7 +949,8 @@ impl Analysis for NumericAnalysis {
                     .deref(ctx)
                     .res_types()
                     .first()
-                    .and_then(|&ty| Integer::from_type(ctx, ty)),
+                    .and_then(|&ty| Integer::from_type(ctx, ty))
+                    .into(),
                 specialize: false,
             });
             solver
@@ -861,7 +981,7 @@ impl Analysis for NumericAnalysis {
             let id = solver.context(Key {
                 function: function.get_symbol_name(ctx),
                 args,
-                result,
+                result: result.into(),
                 specialize: true,
             });
             solver.analysis.roots.push((function, id));
@@ -1036,7 +1156,12 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
         for value in values {
             if let Some(domain) = state.representation(value) {
                 let cloned = mapping.lookup_value(value).expect("cloned value");
-                let ty = domain.ty(ctx);
+                let scalar = domain.ty(ctx);
+                let ty = if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                    PromiseType::get(ctx, scalar).into()
+                } else {
+                    scalar
+                };
                 cloned.set_type(ctx, ty);
             }
         }
@@ -1111,16 +1236,37 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
                 }
             }
             if let Some(&child) = state.calls.get(&original) {
-                let call = Operation::get_op::<CallOp>(op, ctx).expect("call");
-                call.set_attr_perry_callee(
-                    ctx,
-                    IdentifierAttr::new(clones[&child].0.get_symbol_name(ctx)),
-                );
+                let name = IdentifierAttr::new(clones[&child].0.get_symbol_name(ctx));
+                let asynchronous = if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
+                    call.set_attr_perry_async_callee(ctx, name);
+                    true
+                } else {
+                    Operation::get_op::<CallOp>(op, ctx)
+                        .expect("call")
+                        .set_attr_perry_callee(ctx, name);
+                    false
+                };
                 expected.clone_from(&signatures[&child].0);
                 let values: Vec<_> = op.deref(ctx).results().collect();
                 for (value, ty) in values.into_iter().zip(&signatures[&child].1) {
-                    value.set_type(ctx, *ty);
+                    let ty = if asynchronous {
+                        PromiseType::get(ctx, *ty).into()
+                    } else {
+                        *ty
+                    };
+                    value.set_type(ctx, ty);
                 }
+            } else if Operation::get_op::<AwaitOp>(original, ctx).is_some() {
+                expected[0] =
+                    PromiseType::get(ctx, op.deref(ctx).get_result(0).get_type(ctx)).into();
+            } else if let Some(index) = promise_payload(ctx, original) {
+                expected[index] = TypedHandle::<PromiseType>::from_handle(
+                    op.deref(ctx).get_result(0).get_type(ctx),
+                    ctx,
+                )
+                .expect("promise")
+                .deref(ctx)
+                .value();
             } else if Operation::get_op::<BinaryOp>(original, ctx).is_some() {
                 expected.fill(op.deref(ctx).get_result(0).get_type(ctx));
             } else if Operation::get_op::<CompareOp>(original, ctx).is_some() {
