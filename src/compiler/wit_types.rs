@@ -1,7 +1,7 @@
 //! WIT types as HIR types under their SDK names, for programs that import the SDK's generated
 //! declarations (which the parser does not read). The mapping mirrors the SDK's TypeScript:
 //! records are object types, variants unions of `{ tag, val }` objects, options
-//! `T | null | undefined`, tuples tuples and `list<u8>` a `Uint8Array`.
+//! `T | null`, tuples tuples and `list<u8>` a `Uint8Array`.
 use crate::sdk::{to_camel_case, to_pascal_case, type_name};
 use perry_lower::hir::{ObjectType, PropertyInfo, Type as HirType};
 use std::collections::HashMap;
@@ -157,9 +157,7 @@ fn kind(resolve: &Resolve, kind: &TypeDefKind) -> Option<HirType> {
             })
             .collect::<Option<_>>()?,
         ),
-        TypeDefKind::Option(inner) => {
-            HirType::Union(vec![ty(resolve, inner)?, HirType::Null, HirType::Void])
-        }
+        TypeDefKind::Option(inner) => HirType::Union(vec![ty(resolve, inner)?, HirType::Null]),
         TypeDefKind::List(Type::U8) => HirType::Named("Uint8Array".into()),
         TypeDefKind::List(element) => HirType::Array(Box::new(ty(resolve, element)?)),
         TypeDefKind::Tuple(tuple) => HirType::Tuple(

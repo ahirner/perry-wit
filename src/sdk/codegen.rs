@@ -136,7 +136,7 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
             }
         }
         TypeDefKind::Option(inner) => {
-            format!("{} | null | undefined", wit_type_to_ts(resolve, inner))
+            format!("{} | null", wit_type_to_ts(resolve, inner))
         }
         TypeDefKind::Result(WitResult { ok, err }) => {
             let ok = ok
@@ -718,7 +718,7 @@ world complex-processor {
         assert!(dts.contains("id: number;"));
         assert!(dts.contains("title: string;"));
         assert!(dts.contains("tags: Array<string>;"));
-        assert!(dts.contains("meta: string | null | undefined;"));
+        assert!(dts.contains("meta: string | null;"));
         assert!(dts.contains("export type Status = \"pending\" | \"active\" | \"failed\";"));
         assert!(dts.contains("export type OutputResult ="));
         assert!(dts.contains("tag: \"success\"; val: string"));
