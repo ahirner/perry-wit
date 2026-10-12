@@ -38,6 +38,13 @@ export function json(x: number): number {
 export function badJson(x: number): number {
   try { JSON.parse("{" + x); return 0; } catch (e) { return 1; }
 }
+export function recover(x: number): number {
+  try { JSON.parse("{" + x); } catch (e) {}
+  const value = JSON.parse('{"n":7}');
+  const before: number = value.n;
+  try { new Date(NaN).toISOString(); } catch (e) {}
+  return before + identity(value.n);
+}
 "#;
 
 const INPUTS: [f64; 7] = [0.0, 1.0, -0.5, 2.5, -2.5, 7.0, f64::NAN];
@@ -45,7 +52,8 @@ const INPUTS: [f64; 7] = [0.0, 1.0, -0.5, 2.5, -2.5, 7.0, f64::NAN];
 #[test]
 fn builtins_match_node() {
     let mut program = Program::new(SOURCE);
-    let expected: [(&str, [Result<f64, ErrorKind>; 7]); 6] = [
+    let expected: [(&str, [Result<f64, ErrorKind>; 7]); 7] = [
+        ("recover", [Ok(14.0); 7]),
         (
             "math",
             [

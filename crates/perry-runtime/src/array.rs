@@ -8,20 +8,29 @@
 //! retain their storage until task completion.
 use crate::region::perry_alloc;
 
-pub const LEN: u32 = 0;
-pub const CAP: u32 = 4;
-pub const DATA: u32 = 8;
-pub const SLOT: u32 = 8;
+pub use crate::layout::array::*;
 const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(core::mem::size_of::<Array>() == 12);
+const _: () = {
+    assert!(core::mem::size_of::<Array>() == 12);
+    assert!(core::mem::offset_of!(Array, len) == LEN as usize);
+    assert!(core::mem::offset_of!(Array, cap) == CAP as usize);
+    assert!(core::mem::offset_of!(Array, data) == DATA as usize);
+};
 
 #[repr(C)]
 struct Array {
     len: u32,
     cap: u32,
     data: *mut u64,
+}
+
+impl Array {
+    /// An empty array over `cap` slots at `data`, with length zero.
+    fn empty(cap: u32, data: *mut u64) -> Self {
+        Self { len: 0, cap, data }
+    }
 }
 
 /// A new array with room for at least `capacity` elements and length 0.
@@ -31,7 +40,7 @@ pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
     let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
     let data = perry_alloc(slot_bytes(cap)) as *mut u64;
     // SAFETY: both blocks were just allocated with sufficient size and alignment.
-    unsafe { array.write(Array { len: 0, cap, data }) };
+    unsafe { array.write(Array::empty(cap, data)) };
     array as *mut u8
 }
 
@@ -88,7 +97,7 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
         ) as *mut Array;
         let data =
             crate::roots::perry_gc_alloc(slot_bytes(cap), element_shape(references)) as *mut u64;
-        array.write(Array { len: 0, cap, data });
+        array.write(Array::empty(cap, data));
         array as *mut u8
     }
 }

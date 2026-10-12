@@ -1,17 +1,38 @@
 //! Arrays and records: literals, element and field writes.
 use super::*;
+use crate::coerce::merge_absence;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `array[index] = value`; computed keys on records are rejected (subset rule R1).
     pub(super) fn set_index(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
-        index: &Expr,
-        value: &Expr,
+        object: &'s Expr,
+        index: &'s Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if let Ok(record) = TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
+            && record.deref(ctx).is_tuple()
+        {
+            let field = match index {
+                Expr::Number(index) if *index >= 0.0 && index.fract() == 0.0 => {
+                    format!("_{}", *index as u64)
+                }
+                Expr::Integer(index) if *index >= 0 => format!("_{index}"),
+                _ => bail!("tuples require literal positions"),
+            };
+            let ty = record
+                .deref(ctx)
+                .field(&field)
+                .map(|(_, ty)| ty)
+                .context("tuple index is outside its declared shape")?;
+            let value = self.expression_with(ctx, value, Some(ty))?;
+            let value = self.fit(ctx, value, ty)?;
+            self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
+            return Ok(value);
+        }
         ensure!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
@@ -27,9 +48,9 @@ impl FunctionBuilder<'_> {
     pub(super) fn set_field(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         field: &str,
-        value: &Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
@@ -37,18 +58,19 @@ impl FunctionBuilder<'_> {
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"
         );
-        let field = field.to_string();
         let field_type = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?
             .deref(ctx)
-            .field(&field)
+            .field(field)
             .map(|(_, ty)| ty)
             .ok_or_else(|| {
                 anyhow!("property {field} does not exist on this shape (subset rule R1)")
             })?;
         let value = self.expression_with(ctx, value, Some(field_type))?;
         let value = self.fit(ctx, value, field_type)?;
-        self.emit(ctx, |ctx| FieldSetOp::new(ctx, record, field, value));
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, record, field.to_string(), value)
+        });
         Ok(value)
     }
 
@@ -57,33 +79,31 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         names: &[&str],
-        args: &[Expr],
+        args: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        if let Some(ty) = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+        // A record or variant where `T | undefined` is expected is a `T`.
+        let expected = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
+        if let Some(ty) = expected
             && ty.deref(ctx).is::<perry_mir::types::VariantType>()
         {
             return self.variant_literal(ctx, ty, names, args);
         }
-        let mut wanted = names.to_vec();
-        wanted.sort_unstable();
-        // A record where `T | undefined` is expected is a `T`.
         let expected = expected
-            .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
             .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
             .filter(|record| {
                 record.deref(ctx).fields().is_ok_and(|fields| {
-                    wanted
+                    names
                         .iter()
                         .all(|name| fields.iter().any(|(field, _)| field.as_str() == *name))
                         && fields.iter().all(|(name, ty)| {
-                            wanted.contains(&name.as_str())
+                            names.contains(&name.as_str())
                                 || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
                         })
                 })
             });
         let mut values = Vec::with_capacity(args.len());
-        for (name, arg) in names.iter().zip(args) {
+        for (&name, arg) in names.iter().zip(args) {
             let field_type = match expected {
                 Some(record) => record.deref(ctx).field(name).map(|(_, ty)| ty),
                 _ => None,
@@ -93,52 +113,57 @@ impl FunctionBuilder<'_> {
                 Some(field_type) => self.fit(ctx, value, field_type)?,
                 None => value,
             };
-            values.push((name.to_string(), value));
+            values.push((name, value));
         }
         // With a matching expected type the fields were fitted to it; that includes recursive
-        // records, which no literal's own structure can name.
-        let record = match expected {
+        // records, which no literal's own structure can name. Its fields the literal omits
+        // are `undefined`, by record position.
+        let (record, missing) = match expected {
             Some(record) => {
-                let fields = record
+                let missing: Vec<(usize, TypeHandle)> = record
                     .deref(ctx)
                     .fields()
                     .map_err(|_| anyhow!("record without fields"))?
-                    .to_vec();
-                for (name, ty) in fields {
-                    if !names.contains(&name.as_str()) {
-                        let value = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
-                        values.push((name, value));
-                    }
-                }
-                record
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (name, _))| !names.contains(&name.as_str()))
+                    .map(|(index, (_, ty))| (index, *ty))
+                    .collect();
+                (record, missing)
             }
             None => {
                 let fields = values
                     .iter()
-                    .map(|(n, v)| (n.clone(), v.get_type(ctx)))
+                    .map(|&(name, value)| (name.to_string(), value.get_type(ctx)))
                     .collect();
-                self.shapes.mir_record(ctx, fields)?
+                (self.shapes.mir_record(ctx, fields)?, Vec::new())
             }
         };
-        let mut positioned = values
-            .into_iter()
-            .map(|(name, value)| {
-                let (index, _) = record
-                    .deref(ctx)
-                    .field(&name)
-                    .with_context(|| format!("record has no field {name}"))?;
-                Ok((index, value))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut positioned = Vec::with_capacity(values.len() + missing.len());
+        for (index, ty) in missing {
+            positioned.push((
+                index,
+                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
+            ));
+        }
+        for (name, value) in values {
+            let (index, _) = record
+                .deref(ctx)
+                .field(name)
+                .with_context(|| format!("record has no field {name}"))?;
+            positioned.push((index, value));
+        }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
+
+    /// `new C(…)` of a class that Perry HIR made from an object literal.
     pub(super) fn object_literal(
         &mut self,
         ctx: &mut Context,
         class_name: &str,
-        args: &[Expr],
+        args: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let names = self
@@ -151,10 +176,12 @@ impl FunctionBuilder<'_> {
         );
         self.record_literal(ctx, &names, args, expected)
     }
+
+    /// `[…]`, with the element type from `expected` or from the items.
     pub(super) fn array_literal(
         &mut self,
         ctx: &mut Context,
-        items: &[Expr],
+        items: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let element = match expected.map(|ty| {
@@ -172,19 +199,19 @@ impl FunctionBuilder<'_> {
             };
             values.push(value);
         }
-        let element = match (element, values.first()) {
+        let element = match (element, values.split_first()) {
             (Some(element), _) => element,
-            (None, Some(first)) => {
+            (None, Some((first, rest))) => {
                 let first = first.get_type(ctx);
                 let inner = optional_value(ctx, first).unwrap_or(first);
                 let mut states = absence(ctx, first);
-                for value in &values[1..] {
+                for value in rest {
                     let ty = value.get_type(ctx);
                     ensure!(
                         optional_value(ctx, ty).unwrap_or(ty) == inner,
                         "array literals must have one element type"
                     );
-                    states = coerce::merge_absence(states, absence(ctx, ty));
+                    states = merge_absence(states, absence(ctx, ty));
                 }
                 states.map_or(inner, |states| {
                     perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
@@ -198,21 +225,46 @@ impl FunctionBuilder<'_> {
             .collect::<Result<_>>()?;
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
     }
+
+    /// `local.push(value)` on an array local.
     pub(super) fn array_push(
         &mut self,
         ctx: &mut Context,
         array_id: LocalId,
-        value: &Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let slot = self.local(array_id)?;
         let array = self.load(ctx, slot)?;
+        self.push_values(ctx, array, std::slice::from_ref(value))
+    }
+
+    /// `array.push(…values)`: every value is evaluated and fitted to the element type before
+    /// the first push; the result is the new length.
+    pub(super) fn push_values(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        values: &'s [Expr],
+    ) -> Result<Value> {
         let element = self.array_element(ctx, array)?;
-        let value = self.expression_with(ctx, value, Some(element))?;
-        let value = self.fit(ctx, value, element)?;
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+        let values = values
+            .iter()
+            .map(|value| {
+                let value = self.expression_with(ctx, value, Some(element))?;
+                self.fit(ctx, value, element)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for value in values {
+            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+        }
+        Ok(self.array_length(ctx, array))
+    }
+
+    /// `array.length` as a number.
+    pub(super) fn array_length(&mut self, ctx: &mut Context, array: Value) -> Value {
         let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
-        Ok(self.emit_value(ctx, |ctx| {
+        self.emit_value(ctx, |ctx| {
             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
-        }))
+        })
     }
 }

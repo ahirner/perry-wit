@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
+    Store, StoreLimits, StoreLimitsBuilder,
     component::{Linker, ResourceTable, StreamReader},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -189,9 +189,7 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("streams"))?;
     let compiled = compile_for_world(SOURCE, "streams.ts", &resolve, world, true)?;
-    let mut config = Config::new();
-    config.wasm_component_model_async(true);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;

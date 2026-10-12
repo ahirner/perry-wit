@@ -9,6 +9,13 @@
 
 use core::ptr;
 
+pub mod json;
+pub mod layout;
+// Public because `perry-runtime` compiles this source too and uses the compact counter.
+pub mod utf8;
+/// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
+pub use utf8::scalars_length_wide as scalars_length;
+
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -36,20 +43,17 @@ pub const EXCEPTION_VALUE: usize = 8;
 pub const THROWN_VALUE: u32 = 4;
 pub const TAG_NUMBER: u32 = 1;
 pub const TAG_STRING: u32 = 3;
-/// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`).
+/// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
+/// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
-/// Offset of an array's data address (`perry_runtime::array::DATA`).
-pub const ARRAY_DATA: u32 = 8;
-/// `Uint8Array` layout (`perry_std::bytes`): byte length and data address.
-pub const BYTES_LEN: usize = 0;
+/// Offset of an array's data address ([layout::array::DATA]).
+pub const ARRAY_DATA: u32 = layout::array::DATA;
+/// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
 pub const BYTES_DATA: usize = 4;
-/// String layout (`perry_runtime::string`): byte length and data address.
-const STRING_LEN: usize = 0;
-const STRING_DATA: usize = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
 const _: () = {
-    use perry_runtime::{array, exception, string};
+    use perry_runtime::exception;
     assert!(exception::TYPE_ERROR == TYPE_ERROR);
     assert!(exception::RANGE_ERROR == RANGE_ERROR);
     assert!(exception::ERROR == ERROR);
@@ -57,8 +61,6 @@ const _: () = {
     assert!(exception::TAG_NUMBER == TAG_NUMBER && exception::TAG_STRING == TAG_STRING);
     assert!(exception::KIND as usize == EXCEPTION_KIND && exception::TAG as usize == EXCEPTION_TAG);
     assert!(exception::VALUE as usize == EXCEPTION_VALUE);
-    assert!(array::DATA == ARRAY_DATA);
-    assert!(string::LEN as usize == STRING_LEN && string::DATA as usize == STRING_DATA);
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -81,7 +83,7 @@ mod imports {
         pub(crate) fn perry_cabi_release(data: *mut u8);
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
-        pub(crate) fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
+        pub(crate) fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
@@ -140,12 +142,9 @@ mod imports {
             perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
             perry_operation_pin, perry_operation_unpin, perry_task_current,
         },
-        string::{perry_string_offset, perry_string_view},
+        string::{perry_string_adopt_counted, perry_string_offset, perry_string_view},
     };
 
-    pub(crate) unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
-        unsafe { perry_runtime::string::perry_string_adopt(data, len) }
-    }
     pub(crate) unsafe fn perry_task_resume(task: *mut u8) {
         unsafe { perry_runtime::region::perry_task_resume(task.cast()) };
     }
@@ -170,6 +169,16 @@ pub fn alloc(size: u32) -> *mut u8 {
     unsafe { imports::perry_alloc(size) }
 }
 
+/// `len` fresh, uninitialized bytes in the task region, exclusively the caller's.
+///
+/// Like every task allocation, the block lives until the task ends; `'static` stands for that.
+fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
+    let len32 = u32::try_from(len).expect("allocation size overflow");
+    // SAFETY: a fresh, 8-aligned block of `len` bytes that nothing else references; any
+    // byte pattern (including none) is a valid `MaybeUninit<u8>`.
+    unsafe { core::slice::from_raw_parts_mut(alloc(len32.max(1)).cast(), len) }
+}
+
 /// Release the host pin after a canonical payload is adopted or discarded.
 ///
 /// # Safety
@@ -179,6 +188,7 @@ pub unsafe fn release_canonical(data: *mut u8) {
 }
 
 /// An object with a static exact pointer map; allocation cannot trigger collection.
+/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
 ///
 /// # Safety
 /// Shape is `[stride, count, offsets...]`, valid for every instance of this allocation.
@@ -214,7 +224,10 @@ pub fn unpin(token: u32) {
 /// `data` must point to `len` readable bytes of valid UTF-8.
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
-    unsafe { imports::perry_string_adopt(data, len) }
+    unsafe {
+        let bytes = core::slice::from_raw_parts(data, len as usize);
+        imports::perry_string_adopt_counted(data, len, scalars_length(bytes))
+    }
 }
 
 /// # Safety
@@ -235,9 +248,11 @@ pub unsafe fn string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
 pub unsafe fn bytes(string: *mut u8) -> &'static [u8] {
     // SAFETY: guaranteed by the caller; layout of `perry_runtime::string`.
     unsafe {
-        let len = *(string.add(STRING_LEN) as *const u32);
-        let data = *(string.add(STRING_DATA) as *const *const u8);
-        core::slice::from_raw_parts(data, len as usize)
+        let header = &*string.cast::<layout::string::Header>();
+        if header.len == 0 {
+            return &[];
+        }
+        core::slice::from_raw_parts(header.data, header.len as usize)
     }
 }
 
@@ -246,12 +261,9 @@ pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     if bytes.is_empty() {
         return from_static("");
     }
-    let data = alloc(bytes.len() as u32);
-    // SAFETY: fresh block of `len` bytes, then valid UTF-8 living as long as the task.
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
-        adopt(data, bytes.len() as u32)
-    }
+    let data = alloc_uninit(bytes.len()).write_copy_of_slice(bytes);
+    // SAFETY: copied UTF-8 in task storage; the string takes ownership of the allocation.
+    unsafe { adopt(data.as_mut_ptr(), data.len() as u32) }
 }
 
 mod byte_buffer;
@@ -266,11 +278,6 @@ pub fn from_static(text: &'static str) -> *mut u8 {
     unsafe { adopt(text.as_ptr() as *mut u8, text.len() as u32) }
 }
 
-/// Unicode scalar count in valid UTF-8.
-pub fn scalars_length(bytes: &[u8]) -> u32 {
-    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
-}
-
 /// Throw an `Error` of `kind` with `message`: the exception becomes pending, and compiled
 /// code finds its status with `perry_status`.
 pub fn raise(kind: u32, message: &'static str) {
@@ -282,6 +289,13 @@ pub fn raise(kind: u32, message: &'static str) {
 pub fn raise_string(kind: u32, message: *mut u8) {
     // SAFETY: a runtime service; the message is a live string.
     unsafe { imports::perry_raise(kind, message) }
+}
+
+/// Take and clear the pending runtime status when returning it directly to compiled code.
+#[allow(unused_unsafe)]
+pub fn take_status() -> u32 {
+    // SAFETY: the runtime owns the current task's status.
+    unsafe { imports::perry_status() }
 }
 
 /// ECMAScript `Number::toString` of `value` into `output`; returns the length.
@@ -513,5 +527,30 @@ impl Buffer {
 impl Default for Buffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Here rather than in `utf8.rs`, which `perry-runtime` also compiles: the test runs once.
+#[cfg(test)]
+mod tests {
+    use crate::utf8::{scalars_length, scalars_length_wide};
+
+    #[test]
+    fn scalar_counts_cross_word_boundaries() {
+        for prefix in 0..24 {
+            for suffix in 0..24 {
+                let text = format!("{}é漢🙂\0{}", "a".repeat(prefix), "z".repeat(suffix));
+                assert_eq!(
+                    scalars_length(text.as_bytes()) as usize,
+                    text.chars().count()
+                );
+                assert_eq!(
+                    scalars_length_wide(text.as_bytes()),
+                    scalars_length(text.as_bytes())
+                );
+            }
+        }
+        assert_eq!(scalars_length(b""), 0);
+        assert_eq!(scalars_length_wide(b""), 0);
     }
 }

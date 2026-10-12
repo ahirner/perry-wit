@@ -18,7 +18,8 @@ pub(crate) fn foreign(resolve: &Resolve) -> HashMap<String, HirType> {
         // A `use` makes an alias with the declaration's SDK name: keep the declaration.
         .filter(|(id, definition)| {
             !matches!(definition.kind, TypeDefKind::Type(Type::Id(inner))
-                if type_name(resolve, inner) == type_name(resolve, *id))
+                if resolve.types[inner].name.is_some()
+                    && type_name(resolve, inner) == type_name(resolve, *id))
         })
         .filter_map(|(id, definition)| {
             Some((

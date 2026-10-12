@@ -5,6 +5,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow};
+use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     attrs::ErrorKind,
     collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
@@ -12,7 +13,6 @@ use perry_mir::{
     types::{ArrayType, RecordType},
     variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
 };
-use perry_runtime::array as layout;
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -38,7 +38,7 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<VariantTagOp>(op, ctx).is_some() {
             let object = self.operand(ctx, op, 0)?;
-            let value = self.load(ctx, MemKind::I32, object, 0);
+            let value = self.load(ctx, MemKind::I32, object, variant::TAG);
             self.define(ctx, op, value);
             return Ok(true);
         }
@@ -64,22 +64,21 @@ impl FunctionLowering<'_, '_> {
                     .collect();
                 (record.name().to_string(), fields)
             };
-            let next_shape = self.state.shapes.len() as i32 + 1;
-            let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
-            let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
+            let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
-                let base = self.local_frame.expect("frame storage");
+                let base = self
+                    .local_frame
+                    .ok_or_else(|| anyhow!("frame-resident record without frame storage"))?;
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            let shape = self.i32_const(ctx, shape);
-            self.store(ctx, MemKind::I32, object, 0, shape);
+            self.record_header(ctx, object, name);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
-                self.store(ctx, kind, object, 8 + 8 * index as u32, value);
+                self.store(ctx, kind, object, record::field(index), value);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -279,6 +278,19 @@ impl FunctionLowering<'_, '_> {
         let (index, field_ty) = ty
             .field(field)
             .ok_or_else(|| anyhow!("record has no field {field}"))?;
-        Ok((8 + 8 * index as u32, field_ty))
+        Ok((record::field(index), field_ty))
+    }
+
+    /// Initialize the header of fresh record storage: the id of shape `name` and, when the
+    /// module retains parsed JSON, an empty source word.
+    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, name: String) {
+        let next_shape = self.state.shapes.len() as i32 + 1;
+        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+        if self.state.retains_json {
+            let zero = self.i32_const(ctx, 0);
+            self.store(ctx, MemKind::I32, object, record::JSON, zero);
+        }
+        let shape = self.i32_const(ctx, shape);
+        self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
     }
 }

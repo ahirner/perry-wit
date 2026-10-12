@@ -3,7 +3,7 @@ use super::*;
 
 impl<'s> FunctionBuilder<'s> {
     /// `setTimeout(delay?, value?)` from `node:timers/promises`.
-    pub(super) fn timer(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+    pub(super) fn timer(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         ensure!(
             args.len() <= 3,
             "setTimeout takes a delay, a value and options"
@@ -60,7 +60,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         class: &str,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Value> {
         if class == "Headers" {
             ensure!(args.len() <= 1, "new Headers takes one init");
@@ -113,6 +113,7 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         init: Option<&'e Expr>,
     ) -> Result<Vec<(&'s str, &'e Expr)>> {
+        const NOT_LITERAL: &str = "init objects must be object literals yet";
         match init {
             None | Some(Expr::Undefined) => Ok(Vec::new()),
             Some(Expr::New {
@@ -121,18 +122,18 @@ impl<'s> FunctionBuilder<'s> {
                 let names = self
                     .shapes
                     .literal_fields(class_name)
-                    .context("init objects must be object literals")?;
+                    .context(NOT_LITERAL)?;
                 ensure!(
                     names.len() == args.len(),
                     "init object arity differs from its shape"
                 );
                 Ok(names.into_iter().zip(args.iter()).collect())
             }
-            Some(_) => bail!("init objects must be object literals yet"),
+            Some(_) => bail!(NOT_LITERAL),
         }
     }
 
-    pub(super) fn fetch(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+    pub(super) fn fetch(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         ensure!(
             (1..=2).contains(&args.len()),
             "fetch takes a URL and optional init"
@@ -161,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A header list from an init: absent, an object literal of string values, or `Headers`.
-    pub(super) fn headers_init(&mut self, ctx: &mut Context, init: Option<&Expr>) -> Result<Value> {
+    fn headers_init(&mut self, ctx: &mut Context, init: Option<&'s Expr>) -> Result<Value> {
         if let Some(expr) = init
             && !matches!(expr, Expr::Undefined | Expr::New { .. })
         {
@@ -173,6 +174,15 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(self.intrinsic(ctx, Intrinsic::HeadersCopy, vec![value]));
         }
         let fields = self.init_fields(init)?;
+        self.header_list(ctx, fields)
+    }
+
+    /// A new header list of string-valued `(name, value)` pairs, in order.
+    fn header_list<'e: 's>(
+        &mut self,
+        ctx: &mut Context,
+        fields: impl IntoIterator<Item = (&'e str, &'e Expr)>,
+    ) -> Result<Value> {
         let headers = self.intrinsic(ctx, Intrinsic::HeadersNew, vec![]);
         for (name, expr) in fields {
             let name = self.string(ctx, name);
@@ -183,11 +193,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A body init as `Uint8Array | undefined` and whether it was a string.
-    pub(super) fn body_init(
-        &mut self,
-        ctx: &mut Context,
-        body: Option<&Expr>,
-    ) -> Result<(Value, bool)> {
+    fn body_init(&mut self, ctx: &mut Context, body: Option<&'s Expr>) -> Result<(Value, bool)> {
         let bytes: TypeHandle = BytesType::get(ctx).into();
         let Some(body) = body.filter(|b| !matches!(b, Expr::Undefined | Expr::Null)) else {
             return Ok((
@@ -214,7 +220,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         name: &str,
-        args: Option<&[Expr]>,
+        args: Option<&'s [Expr]>,
     ) -> Result<Value> {
         let receiver_kind = kind(ctx, receiver)?;
         let strings = |builder: &mut Self, ctx: &mut Context, count: usize| -> Result<Vec<Value>> {
@@ -363,25 +369,20 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn fetch_with_options(
         &mut self,
         ctx: &mut Context,
-        url: &Expr,
-        method: &Expr,
-        body: &Expr,
-        headers: &[(String, Expr)],
-        headers_dynamic: Option<&Expr>,
+        url: &'s Expr,
+        method: &'s Expr,
+        body: &'s Expr,
+        headers: &'s [(String, Expr)],
+        headers_dynamic: Option<&'s Expr>,
     ) -> Result<Value> {
         let url = self.url_string(ctx, url)?;
         let method = self.typed_operand(ctx, method, Kind::String, "a method string")?;
         let list = match headers_dynamic {
             Some(dynamic) => self.headers_init(ctx, Some(dynamic))?,
-            None => {
-                let list = self.intrinsic(ctx, Intrinsic::HeadersNew, vec![]);
-                for (name, value) in headers {
-                    let name = self.string(ctx, name);
-                    let value = self.typed_operand(ctx, value, Kind::String, "a header value")?;
-                    self.intrinsic_void(ctx, Intrinsic::HeadersAppend, vec![list, name, value]);
-                }
-                list
-            }
+            None => self.header_list(
+                ctx,
+                headers.iter().map(|(name, value)| (name.as_str(), value)),
+            )?,
         };
         let (body, text) = self.body_init(ctx, Some(body))?;
         let text = self.boolean(ctx, text);
@@ -389,7 +390,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `Writable.toWeb(process.stdout)` or of `process.stderr`.
-    pub(super) fn writable_to_web(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+    pub(super) fn writable_to_web(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let intrinsic = match args {
             [Expr::ProcessStdout] => Intrinsic::WritableStdout,
             [Expr::ProcessStderr] => Intrinsic::WritableStderr,
@@ -403,9 +404,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn web_method(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         method: &str,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
@@ -445,7 +446,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         builtin: Builtin,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Value> {
         let path = args.first().context("a path is required")?;
         let path = self.typed_operand(ctx, path, Kind::String, "a path string")?;

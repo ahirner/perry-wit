@@ -1,6 +1,11 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
-use crate::{FunctionLowering, Repr, Runtime, repr};
+use crate::{
+    function::FunctionLowering,
+    repr::{Repr, i32_type, repr},
+    runtime::Runtime,
+};
 use anyhow::Result;
+use perry_abi::layout::record;
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
     types::RecordType,
@@ -31,7 +36,7 @@ fn live_across<'a>(
         .chain(operands)
 }
 
-pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
+pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::ModuleState) {
     use pliron::{
         builtin::{op_interfaces::SingleBlockRegionInterface, ops::FuncOp, types::FunctionType},
         op::Op,
@@ -40,9 +45,9 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
     for runtime in [Runtime::GcDebug, Runtime::GcCounter] {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
-        let export = format!("__{}", runtime.name());
-        let function = FuncOp::new(ctx, export.as_str().try_into().expect("export name"), ty);
-        set_export(ctx, &function, &export);
+        let export = crate::host::symbol(pliron::ident!("__"), runtime.name());
+        let function = FuncOp::new(ctx, export.clone(), ty);
+        set_export(ctx, &function, export.as_ref());
         let mut args: Vec<_> = function
             .get_entry_block(ctx)
             .deref(ctx)
@@ -175,7 +180,7 @@ impl FunctionLowering<'_, '_> {
                         ctx,
                     )?;
                     self.frame_slots.insert(op, bytes);
-                    bytes += 8 + 8 * record.deref(ctx).fields()?.len() as u32;
+                    bytes += record::field(record.deref(ctx).fields()?.len());
                 }
             }
         }
@@ -216,11 +221,7 @@ impl FunctionLowering<'_, '_> {
         let one = self.i32_const(ctx, 1);
         self.store(ctx, MemKind::I32, cell, 0, one);
         let throws = self.state.throws.contains(&function);
-        let results = if throws {
-            vec![crate::i32_type(ctx)]
-        } else {
-            vec![]
-        };
+        let results = if throws { vec![i32_type(ctx)] } else { vec![] };
         let call = CallOp::new(ctx, function, vec![], results).get_operation();
         self.insert(ctx, call);
         if throws {
@@ -441,10 +442,7 @@ impl FunctionLowering<'_, '_> {
         if offsets.is_empty() {
             return 0;
         }
-        while !self.state.data.bytes.len().is_multiple_of(4) {
-            self.state.data.bytes.push(0);
-        }
-        let address = crate::DATA_BASE + self.state.data.bytes.len() as u32;
+        let address = self.state.data.align(4);
         for word in [0, offsets.len() as u32]
             .into_iter()
             .chain(offsets.iter().copied())
@@ -476,7 +474,7 @@ impl FunctionLowering<'_, '_> {
             shape
         } else {
             let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
-            let offsets: Vec<_> = record
+            let mut offsets: Vec<_> = record
                 .deref(ctx)
                 .fields()?
                 .iter()
@@ -484,10 +482,17 @@ impl FunctionLowering<'_, '_> {
                 .filter_map(|(index, (_, ty))| {
                     repr(ctx, *ty)
                         .is_ok_and(|kind| kind == Repr::Ref)
-                        .then_some(8 + 8 * index as u32)
+                        .then_some(record::field(index))
                 })
                 .collect();
-            let shape = self.pointer_shape(&offsets);
+            if self.state.retains_json {
+                offsets.push(record::JSON);
+            }
+            let shape = if offsets.is_empty() {
+                0
+            } else {
+                self.pointer_shape(&offsets)
+            };
             self.state.pointer_maps.insert(ty, shape);
             shape
         };

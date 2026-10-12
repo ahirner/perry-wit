@@ -1,6 +1,11 @@
 //! Construction helpers of [FunctionLowering]: appending ops, constants, memory accesses,
 //! calls and branches to the current block.
-use crate::{function::FunctionLowering, host::Host, repr::i32_type, runtime::Runtime};
+use crate::{
+    function::FunctionLowering,
+    host::{EffectHost, Host, ValueHost},
+    repr::i32_type,
+    runtime::Runtime,
+};
 use anyhow::{Result, anyhow};
 use pliron::{
     basic_block::BasicBlock,
@@ -214,19 +219,39 @@ impl FunctionLowering<'_, '_> {
         operands.into_iter().map(|v| self.mapped(ctx, v)).collect()
     }
 
-    /// Call a canonical built-in or host import.
-    pub(crate) fn host(
-        &mut self,
-        ctx: &mut Context,
-        host: Host,
-        args: Vec<Value>,
-    ) -> Option<Value> {
+    /// Call a canonical built-in or host import for its one result.
+    pub(crate) fn host(&mut self, ctx: &mut Context, host: ValueHost, args: Vec<Value>) -> Value {
+        let call = self.call_host(ctx, Host::Value(host), args);
+        // A value import's signature declares exactly one result.
+        call.deref(ctx).get_result(0)
+    }
+
+    /// Call a canonical built-in or host import for its effect.
+    pub(crate) fn host_void(&mut self, ctx: &mut Context, host: EffectHost, args: Vec<Value>) {
+        self.call_host(ctx, Host::Effect(host), args);
+    }
+
+    /// Call a canonical built-in or host import with the results of its [Host::signature].
+    fn call_host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Ptr<Operation> {
         let (_, results) = host.signature(ctx);
         let symbol = host.symbol();
         self.state.host.insert(host);
-        let op = CallOp::new(ctx, symbol, args, results).get_operation();
-        self.insert(ctx, op);
-        op.deref(ctx).results().next()
+        let call = CallOp::new(ctx, symbol, args, results).get_operation();
+        self.insert(ctx, call);
+        call
+    }
+
+    /// Emit `call` between saving and resuming the current task, as calls that may switch
+    /// tasks (host imports and canonical resource built-ins) require.
+    pub(crate) fn preserving_task<T>(
+        &mut self,
+        ctx: &mut Context,
+        call: impl FnOnce(&mut Self, &mut Context) -> T,
+    ) -> T {
+        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
+        let result = call(self, ctx);
+        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
+        result
     }
 
     pub(crate) fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {

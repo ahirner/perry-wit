@@ -121,7 +121,7 @@ impl CondBrOp {
 }
 
 #[derive(Debug, Error)]
-pub enum CondBrErr {
+pub(crate) enum CondBrErr {
     #[error("perry.cond_br condition must be a signless i1")]
     Condition,
     #[error("perry.cond_br needs exactly one condition operand, found {0}")]

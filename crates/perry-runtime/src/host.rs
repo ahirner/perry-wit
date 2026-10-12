@@ -32,6 +32,22 @@ mod imports {
         pub(crate) fn subtask_cancel(subtask: u32) -> u32;
     }
 
+    #[link(wasm_import_module = "[export]$root")]
+    unsafe extern "C" {
+        #[link_name = "[future-new-0]perry-internal-promise"]
+        pub(crate) fn reaction_new() -> u64;
+        #[link_name = "[async-lower][future-read-0]perry-internal-promise"]
+        pub(crate) fn reaction_read(readable: u32, value: *mut u8) -> u32;
+        #[link_name = "[async-lower][future-write-0]perry-internal-promise"]
+        pub(crate) fn reaction_write(writable: u32, value: *const u8) -> u32;
+        #[link_name = "[future-drop-readable-0]perry-internal-promise"]
+        pub(crate) fn reaction_drop_readable(readable: u32);
+        #[link_name = "[future-drop-writable-0]perry-internal-promise"]
+        pub(crate) fn reaction_drop_writable(writable: u32);
+        #[link_name = "[future-cancel-read-0]perry-internal-promise"]
+        pub(crate) fn reaction_cancel_read(readable: u32) -> u32;
+    }
+
     macro_rules! output {
         ($module:literal, $new:ident, $start:ident, $write:ident, $drop_writer:ident, $read:ident, $drop_future:ident, $cancel_write:ident, $cancel_read:ident) => {
             #[link(wasm_import_module = $module)]
@@ -193,6 +209,21 @@ pub mod mock {
         block_next: bool,
         pending: Option<(usize, *const u8, u32)>,
         joined: Vec<(u32, u32)>,
+        pub(crate) reactions: Vec<Reaction>,
+    }
+
+    /// A promise-reaction future: which ends are still open, and whether it was written.
+    pub(crate) struct Reaction {
+        pub(crate) readable: bool,
+        pub(crate) writable: bool,
+        written: bool,
+    }
+
+    /// Reaction futures use one handle for both ends, numbered from here.
+    const FIRST_REACTION: u32 = 1000;
+
+    fn reaction(host: &mut Host, handle: u32) -> &mut Reaction {
+        &mut host.reactions[(handle - FIRST_REACTION) as usize]
     }
 
     pub(crate) fn with<R>(access: impl FnOnce(&mut Host) -> R) -> R {
@@ -213,6 +244,46 @@ pub mod mock {
     pub unsafe fn subtask_cancel(_: u32) -> u32 {
         3
     }
+    pub(crate) unsafe fn reaction_new() -> u64 {
+        with(|host| {
+            let handle = FIRST_REACTION + host.reactions.len() as u32;
+            host.reactions.push(Reaction {
+                readable: true,
+                writable: true,
+                written: false,
+            });
+            u64::from(handle) | (u64::from(handle) << 32)
+        })
+    }
+    pub(crate) unsafe fn reaction_read(_: u32, _: *mut u8) -> u32 {
+        super::BLOCKED
+    }
+    pub(crate) unsafe fn reaction_write(handle: u32, _: *const u8) -> u32 {
+        with(|host| reaction(host, handle).written = true);
+        COMPLETED
+    }
+    pub(crate) unsafe fn reaction_drop_readable(handle: u32) {
+        with(|host| reaction(host, handle).readable = false);
+    }
+    pub(crate) unsafe fn reaction_drop_writable(handle: u32) {
+        with(|host| reaction(host, handle).writable = false);
+    }
+    pub(crate) unsafe fn reaction_cancel_read(_: u32) -> u32 {
+        COMPLETED
+    }
+    /// Handles of written reactions whose reader has not consumed them yet.
+    #[cfg(test)]
+    pub(crate) fn completed_reactions() -> Vec<u32> {
+        with(|host| {
+            (FIRST_REACTION..)
+                .zip(&host.reactions)
+                .filter_map(|(handle, reaction)| {
+                    (reaction.readable && reaction.written).then_some(handle)
+                })
+                .collect()
+        })
+    }
+
     pub(crate) unsafe fn get_environment(result: *mut u32) {
         unsafe {
             *result = 0;

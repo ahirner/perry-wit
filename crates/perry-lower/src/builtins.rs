@@ -5,24 +5,59 @@ use super::*;
 /// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
 pub(super) const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `object.method(args)` on built-in values.
     pub(super) fn method(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         method: &str,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Option<Value>> {
+        if method == streams::ITERATION && matches!(object, Expr::UrlSearchParamsNew(_)) {
+            bail!(
+                "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
+            );
+        }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
+        if method == streams::ITERATION {
+            ensure!(
+                matches!(kind(ctx, receiver)?, Kind::Array | Kind::String),
+                "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
+            );
+            return Ok(Some(receiver));
+        }
+        if method == array_methods::PUSH {
+            ensure!(
+                kind(ctx, receiver)? == Kind::Array,
+                "push requires a dense array receiver"
+            );
+        }
         let arg = |index: usize| args.get(index);
         let method = if method == decoder::DECODE {
             "decode"
+        } else if method == array_methods::PUSH {
+            "push"
         } else {
             method
         };
         let value = match (kind(ctx, receiver)?, method) {
+            (Kind::Array, "push") => Some(self.push_values(ctx, receiver, args)?),
+            (Kind::Array, "map" | "filter") => {
+                let [callback] = args else {
+                    bail!("array.{method} requires one static callback")
+                };
+                Some(self.array_transform(ctx, receiver, callback, method == "filter")?)
+            }
+            (Kind::Array, "includes" | "indexOf") => {
+                let (value, from_index) = match args {
+                    [value] => (value, None),
+                    [value, from_index] => (value, Some(from_index)),
+                    _ => bail!("array.{method} requires a value and optional starting index"),
+                };
+                Some(self.array_search(ctx, receiver, value, from_index, method == "includes")?)
+            }
             (Kind::String, "split") => {
                 let [separator] = args else {
                     bail!("string.split requires one string separator");
@@ -59,7 +94,7 @@ impl FunctionBuilder<'_> {
                 let name = self.string_operand(ctx, name)?;
                 let value = self.string_operand(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![receiver, name, value]);
-                let ty = self.void_type(ctx);
+                let ty = void_type(ctx);
                 Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
             }
             (
@@ -210,7 +245,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `JSON.stringify(value)`.
-    pub(super) fn stringify(&mut self, ctx: &mut Context, value: &Expr) -> Result<Value> {
+    pub(super) fn stringify(&mut self, ctx: &mut Context, value: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, value)?;
         Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }
@@ -220,8 +255,8 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         kind: ErrorKind,
-        message: &Expr,
-        cause: &Expr,
+        message: &'s Expr,
+        cause: &'s Expr,
     ) -> Result<Value> {
         let message = self.string_operand(ctx, message)?;
         let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
@@ -235,8 +270,8 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         error_kind: u32,
-        message: &Expr,
-        options: &Expr,
+        message: &'s Expr,
+        options: &'s Expr,
     ) -> Result<Value> {
         let kind = match error_kind {
             0 => ErrorKind::Any,
@@ -252,11 +287,15 @@ impl FunctionBuilder<'_> {
                 .literal_fields(class_name)
                 .is_some_and(|names| names == ["cause"]) =>
             {
-                &args[0]
+                args.first()
             }
-            Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "cause" => &fields[0].1,
-            _ => bail!("error options must be a literal {{ cause }}"),
-        };
+            Expr::Object(fields) => match fields.as_slice() {
+                [(name, cause)] if name == "cause" => Some(cause),
+                _ => None,
+            },
+            _ => None,
+        }
+        .context("error options must be a literal { cause }")?;
         self.error_with_cause(ctx, kind, message, cause)
     }
 
@@ -264,7 +303,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn instance_of(
         &mut self,
         ctx: &mut Context,
-        value: &Expr,
+        value: &'s Expr,
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
@@ -281,7 +320,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `BigInt(value)` of a number or bigint.
-    pub(super) fn bigint_coerce(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn bigint_coerce(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
         Ok(match kind(ctx, value)? {
@@ -294,7 +333,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `Number(value)`.
-    pub(super) fn number_coerce(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn number_coerce(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         ensure!(
             kind(ctx, value)? != Kind::NumberString,
@@ -307,37 +346,25 @@ impl FunctionBuilder<'_> {
         })
     }
 
-    /// `Math.floor` and the other one-argument `Math` functions of `expr`.
+    /// A one-argument `Math` function such as `Math.floor`, lowered as `intrinsic`.
     pub(super) fn math_unary(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
-        value: &Expr,
+        intrinsic: Intrinsic,
+        value: &'s Expr,
     ) -> Result<Value> {
-        let intrinsic = match expr {
-            Expr::MathFloor(_) => Intrinsic::MathFloor,
-            Expr::MathCeil(_) => Intrinsic::MathCeil,
-            Expr::MathTrunc(_) => Intrinsic::MathTrunc,
-            Expr::MathAbs(_) => Intrinsic::MathAbs,
-            Expr::MathRound(_) => Intrinsic::MathRound,
-            _ => Intrinsic::MathSqrt,
-        };
         let value = self.number_operand(ctx, value)?;
         Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
 
-    /// `Math.min(…)` (`min`) or `Math.max(…)`.
+    /// `Math.min(…)` or `Math.max(…)`: `intrinsic` folded over `values` from `empty`.
     pub(super) fn math_extremum(
         &mut self,
         ctx: &mut Context,
-        min: bool,
-        values: &[Expr],
+        intrinsic: Intrinsic,
+        empty: f64,
+        values: &'s [Expr],
     ) -> Result<Value> {
-        let (intrinsic, empty) = if min {
-            (Intrinsic::MathMin, f64::INFINITY)
-        } else {
-            (Intrinsic::MathMax, f64::NEG_INFINITY)
-        };
         let mut result = self.number(ctx, empty);
         for value in values {
             let value = self.number_operand(ctx, value)?;
@@ -346,13 +373,12 @@ impl FunctionBuilder<'_> {
         Ok(result)
     }
 
-    /// `new Uint8Array(source)` (`construct`, which also takes a length) or
-    /// `Uint8Array.from(source)`.
+    /// `new Uint8Array(source)` or `Uint8Array.from(source)`.
     pub(super) fn bytes_from(
         &mut self,
         ctx: &mut Context,
-        construct: bool,
-        source: &Expr,
+        creation: BytesCreation,
+        source: &'s Expr,
     ) -> Result<Value> {
         let number = FP64Type::get(ctx).into();
         let numbers = ArrayType::get(ctx, number).into();
@@ -361,7 +387,9 @@ impl FunctionBuilder<'_> {
         let value = self.defined(ctx, value)?;
         let value = self.arithmetic(ctx, value);
         Ok(match kind(ctx, value)? {
-            Kind::Number if construct => self.intrinsic(ctx, Intrinsic::BytesNew, vec![value]),
+            Kind::Number if matches!(creation, BytesCreation::Construct) => {
+                self.intrinsic(ctx, Intrinsic::BytesNew, vec![value])
+            }
             Kind::Array => {
                 ensure!(
                     value.get_type(ctx) == numbers,
@@ -379,9 +407,9 @@ impl FunctionBuilder<'_> {
     pub(super) fn text_decoder(
         &mut self,
         ctx: &mut Context,
-        label: &Expr,
-        fatal: &Expr,
-        ignore_bom: &Expr,
+        label: &'s Expr,
+        fatal: &'s Expr,
+        ignore_bom: &'s Expr,
     ) -> Result<Value> {
         ensure!(
             matches!(label, Expr::Undefined)
@@ -400,7 +428,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `console.log(a, b, …)`: the arguments' strings joined by spaces.
-    pub(super) fn console_line(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+    pub(super) fn console_line(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let mut line: Option<Value> = None;
         for arg in args {
             let value = self.expression(ctx, arg)?;
@@ -419,4 +447,10 @@ impl FunctionBuilder<'_> {
             None => self.string(ctx, ""),
         })
     }
+}
+
+/// How a `Uint8Array` is created from a source: only the constructor also accepts a length.
+pub(super) enum BytesCreation {
+    Construct,
+    From,
 }

@@ -289,25 +289,6 @@ impl Verify for StoreOp {
     }
 }
 
-/// `memory.size` of memory 0, in 64 KiB pages. Built only by the text parser.
-#[pliron_op(
-    name = "wasm.memory_size",
-    format = "` : ` type($0)",
-    interfaces = [OneResultInterface, NOpdsInterface<0>],
-    verifier = "succ"
-)]
-pub(crate) struct MemorySizeOp;
-
-/// `memory.grow` of memory 0 by a number of pages; the previous size, or -1 on failure.
-/// Built only by the text parser.
-#[pliron_op(
-    name = "wasm.memory_grow",
-    format = "$0 ` : ` type($0)",
-    interfaces = [OneResultInterface, NOpdsInterface<1>],
-    verifier = "succ"
-)]
-pub(crate) struct MemoryGrowOp;
-
 /// A function imported from the host as `module`.`name`; callable with [CallOp].
 #[pliron_op(
     name = "wasm.import_func",

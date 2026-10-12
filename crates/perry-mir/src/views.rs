@@ -1,8 +1,5 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
-use crate::{
-    optional::absence,
-    types::{ArrayType, OptionalType, RecordType},
-};
+use crate::types::{ArrayType, OptionalType, RecordType};
 use pliron::{
     builtin::op_interfaces::{OneOpdInterface, OneResultInterface},
     common_traits::Verify,
@@ -35,7 +32,7 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             a.downcast_ref::<OptionalType>(),
             b.downcast_ref::<OptionalType>(),
         ) {
-            let (from, to) = (absence(ctx, source).unwrap(), absence(ctx, target).unwrap());
+            let (from, to) = (a.absence(), b.absence());
             return (!from.admits_null() || to.admits_null())
                 && (!from.admits_undefined() || to.admits_undefined())
                 && compatible(ctx, a.value(), b.value(), seen);

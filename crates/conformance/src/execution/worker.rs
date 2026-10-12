@@ -1,6 +1,9 @@
 //! The isolated worker process: compiles one case and runs the component under wasmtime.
 use super::{Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
-use crate::{fetch::FetchCase, handler::HandlerCase, registry::Case, streams::StreamCase};
+use crate::{
+    fetch::FetchCase, handler::HandlerCase, program::ENV_FIXTURE, registry::Case,
+    streams::StreamCase,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use http_body_util::{BodyExt, Full};
 use perry_wit::{CompileOptions, compile_for_world, compile_typescript};
@@ -47,8 +50,8 @@ pub fn worker(request: &Path, destination: &Path) -> Result<()> {
                             "-W",
                             "component-model-async=y",
                             "--env",
-                            "PERRY_CONFORMANCE=fixture",
                         ])
+                        .arg(format!("PERRY_CONFORMANCE={ENV_FIXTURE}"))
                         .arg("-W")
                         .arg(format!("fuel={}", limits.fuel))
                         .arg("-W")

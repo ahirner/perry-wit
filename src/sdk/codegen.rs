@@ -56,10 +56,20 @@ fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     id
 }
 
+/// The TypeScript name of a named WIT type, owner-qualified when another declaration shares
+/// its PascalCase name.
+///
+/// Callers pass only named types (declarations, resources, or ids filtered on `name`); an
+/// invented name for an anonymous type would reference a declaration that does not exist.
 pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = declaration_id(resolve, id);
     let definition = &resolve.types[id];
-    let name = to_pascal_case(definition.name.as_deref().unwrap());
+    let name = to_pascal_case(
+        definition
+            .name
+            .as_deref()
+            .expect("callers name only named WIT types; aliases keep their declaration's name"),
+    );
     let collides = resolve.types.iter().any(|(other, ty)| {
         declaration_id(resolve, other) != id
             && ty
@@ -87,7 +97,7 @@ pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
 }
 
 /// Formats a WIT Type into its corresponding TypeScript representation.
-pub(crate) fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
+fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
     match ty {
         Type::Bool => "boolean".to_string(),
         Type::U8
@@ -192,7 +202,7 @@ fn export_result_types(resolve: &Resolve, function: &Function) -> Vec<String> {
 }
 
 fn implementation_signature(resolve: &Resolve, function: &Function, allow_promise: bool) -> String {
-    export_result_types(resolve, function)
+    let mut signatures: Vec<String> = export_result_types(resolve, function)
         .into_iter()
         .map(|result| {
             let mut signature = String::from("(");
@@ -207,12 +217,16 @@ fn implementation_signature(resolve: &Resolve, function: &Function, allow_promis
             }
             signature
         })
-        .reduce(|left, right| format!("({left}) | ({right})"))
-        .unwrap()
+        .collect();
+    if signatures.len() == 1 {
+        signatures.swap_remove(0)
+    } else {
+        format!("({})", signatures.join(") | ("))
+    }
 }
 
 /// Formats a WIT function return type into TypeScript.
-pub(crate) fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
+fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     let result = match &func.result {
         None => "void".to_string(),
         Some(ty) => wit_type_to_ts(resolve, ty),
@@ -419,10 +433,10 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         let WorldItem::Interface { id, .. } = item else {
             continue;
         };
-        let module = resolve.name_world_key(key);
-        if !emitted.insert(module.clone()) {
+        if !emitted.insert(key) {
             continue;
         }
+        let module = serde_json::Value::String(resolve.name_world_key(key));
         let interface = &resolve.interfaces[*id];
         let mut ids = HashSet::new();
         for id in interface.types.values() {
@@ -443,10 +457,8 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
             .collect();
         names.sort();
         names.dedup();
-        out.push_str(&format!(
-            "declare module {} {{\n",
-            serde_json::to_string(&module).unwrap()
-        ));
+        // A JSON string literal is a valid TypeScript module specifier.
+        out.push_str(&format!("declare module {module} {{\n"));
         for name in &names {
             out.push_str(&format!("  type {name} = import(\"./world\").{name};\n"));
         }

@@ -31,7 +31,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum CollectionErr {
+pub(crate) enum CollectionErr {
     #[error("{0} expects a perry.array")]
     NotArray(&'static str),
     #[error("{0} element type differs from the array's element type")]
@@ -45,7 +45,7 @@ pub enum CollectionErr {
 }
 
 /// Signless `i32`, the type of lengths and indices.
-pub fn index_type(ctx: &mut Context) -> TypeHandle {
+pub(crate) fn index_type(ctx: &mut Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }
 

@@ -1,7 +1,7 @@
 //! Instruction selection for statements and the value trees folded into them.
 use super::{EmitResult, function::FunctionEmitter, schedule::movable};
 use crate::{
-    ops::{CallOp, LoadOp, MemoryGrowOp, MemorySizeOp, NumOp, SelectOp, StoreOp},
+    ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
     types::val_type,
 };
 use pliron::{
@@ -97,10 +97,6 @@ impl FunctionEmitter<'_> {
                 .get(&callee)
                 .ok_or_else(|| self.malformed(format!("unknown callee {callee}")))?;
             Instruction::Call(index)
-        } else if Operation::get_op::<MemorySizeOp>(op, ctx).is_some() {
-            Instruction::MemorySize(0)
-        } else if Operation::get_op::<MemoryGrowOp>(op, ctx).is_some() {
-            Instruction::MemoryGrow(0)
         } else {
             return Err(self.unsupported(op));
         };

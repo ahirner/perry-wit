@@ -54,14 +54,15 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
         let mut order: HashMap<_, _> = body.iter().enumerate().map(|(i, &op)| (op, i)).collect();
         let candidates: Vec<_> = body
             .into_iter()
-            .filter(|&op| {
-                matches!(
-                    Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)),
-                    Some(Intrinsic::StringCharAt | Intrinsic::StringCharAtIndex)
-                )
-            })
+            .filter_map(
+                |op| match Operation::get_op::<IntrinsicOp>(op, ctx)?.intrinsic(ctx)? {
+                    Intrinsic::StringCharAt => Some((op, Intrinsic::StringScalarAt)),
+                    Intrinsic::StringCharAtIndex => Some((op, Intrinsic::StringScalarAtIndex)),
+                    _ => None,
+                },
+            )
             .collect();
-        for op in candidates {
+        for (op, kind) in candidates {
             let character = op.deref(ctx).get_result(0);
             let mut seen = HashSet::new();
             let mut users: Vec<_> = character
@@ -75,14 +76,6 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
             }
             users.sort_unstable_by_key(|user| order[user]);
             let args = op.deref(ctx).operands().collect();
-            let intrinsic = Operation::get_op::<IntrinsicOp>(op, ctx)
-                .unwrap()
-                .intrinsic(ctx);
-            let kind = if intrinsic == Some(Intrinsic::StringCharAtIndex) {
-                Intrinsic::StringScalarAtIndex
-            } else {
-                Intrinsic::StringScalarAt
-            };
             let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
             scalar.insert_before(ctx, op);
             let scalar = scalar.deref(ctx).get_result(0);

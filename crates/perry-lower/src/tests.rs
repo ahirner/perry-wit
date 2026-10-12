@@ -4,14 +4,14 @@ use pliron::{
 use std::collections::HashMap;
 
 /// Lower a source without foreign (WIT) types.
-fn lower_source(ctx: &mut Context, source: &str, file: &str) -> anyhow::Result<ModuleOp> {
-    crate::lower_source_with(ctx, source, file, &HashMap::new())
+fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow::Result<ModuleOp> {
+    crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
 /// Lower, verify, promote slots, clean up, verify again; return the printed module.
 fn lowered(source: &str) -> String {
     let ctx = &mut Context::new();
-    let module = lower_source(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
+    let module = lower_without_foreign(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
     let op = module.get_operation();
     perry_mir::pipeline::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     let printed = Operation::get_op_dyn(op, ctx).disp(ctx).to_string();
@@ -28,7 +28,7 @@ fn rejected(source: &str) -> String {
     let ctx = &mut Context::new();
     format!(
         "{:#}",
-        lower_source(ctx, source, "case.ts")
+        lower_without_foreign(ctx, source, "case.ts")
             .err()
             .expect("rejection")
     )
@@ -332,7 +332,7 @@ fn dump_mir() {
     let path = std::env::var("PERRY_MIR").expect("PERRY_MIR=<file.ts>");
     let source = std::fs::read_to_string(&path).unwrap();
     let ctx = &mut Context::new();
-    let module = lower_source(ctx, &source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
+    let module = lower_without_foreign(ctx, &source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
     let op = module.get_operation();
     println!("{}", Operation::get_op_dyn(op, ctx).disp(ctx));
     if let Err(e) = pliron::operation::verify_operation(op, ctx) {
@@ -351,7 +351,7 @@ function save(cell: Cell, n: number): void { if (n < 0) { save(cell, -n); return
 export function local(x: number): number { const cell: Cell = { value: x }; return read(cell, x); }
 export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
 "#;
-    let module = lower_source(ctx, source, "lifetimes.ts").unwrap();
+    let module = lower_without_foreign(ctx, source, "lifetimes.ts").unwrap();
     perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
     let printed = module.disp(ctx).to_string();
     assert!(printed.contains("perry.call read"), "{printed}");

@@ -3,6 +3,33 @@
 use crate::core_program::{Counter, Program};
 
 #[test]
+fn retained_prefix_does_not_keep_later_append_storage_alive() {
+    let mut program = Program::checked(
+        r#"
+let saved = '';
+export function run(n: number): number {
+  let text = 'é🙂' + String(n);
+  saved = text.slice(0, 2);
+  for (let i = 0; i < n; i++) text += '漢';
+  if (saved !== 'é🙂' || text.charAt(text.length - 1) !== '漢') return -1;
+  return text.length;
+}
+export function retained(n: number): number { return saved.length + saved.codePointAt(1) + n; }
+"#,
+        "retained-append-prefix.ts",
+    );
+    program.stress_collection(true);
+    for n in [1000.0, 100_000.0, 2000.0] {
+        assert_eq!(
+            program.number("run", n),
+            n + n.to_string().len() as f64 + 2.0
+        );
+        assert_eq!(program.number("retained", 0.0), 128_580.0);
+        assert!(program.counter(Counter::LiveBytes) < 512);
+    }
+}
+
+#[test]
 fn astral_strings_use_scalar_positions_and_keep_append_prefixes() {
     let mut program = Program::new(
         r#"
@@ -105,6 +132,45 @@ export function run(n: number): number {
     assert_eq!(program.number("run", 1000.0), 3000.0);
     let allocations = program.counter(Counter::Allocations);
     assert!(allocations < 100, "headers should be reused");
+}
+
+#[test]
+fn finished_string_builders_transfer_ownership_to_consumers() {
+    let mut program = Program::checked(
+        r#"
+export function run(n: number): number {
+  const input = 'a- b'.repeat(n / 4);
+  let text = '';
+  for (let i = 0; i < input.length; i++) {
+    const character = input.charAt(i);
+    text += character === '-' || character === ' ' ? '_' : character;
+  }
+  if (text !== 'a__b'.repeat(n / 4)) return -1;
+  return JSON.stringify(text).length;
+}
+export function aliases(n: number): number {
+  const prefix = 'é' + String(n);
+  let left = prefix;
+  let right = prefix;
+  if (n > 0) { left += 'a'; right += 'b'; }
+  else { left += 'x'; right += 'y'; }
+  if (left !== prefix + (n > 0 ? 'a' : 'x')) return -1;
+  if (right !== prefix + (n > 0 ? 'b' : 'y')) return -2;
+  return 1;
+}
+"#,
+        "consumed-builder.ts",
+    );
+    program.stress_collection(true);
+    assert_eq!(program.number("run", 1000.0), 1002.0);
+    let allocations = program.counter(Counter::Allocations);
+    assert!(
+        allocations < 100,
+        "consumed builder allocated {allocations}"
+    );
+    for n in [-1.0, 0.0, 1.0] {
+        assert_eq!(program.number("aliases", n), 1.0);
+    }
 }
 
 #[test]
@@ -283,6 +349,32 @@ export function aliases(n: number): number {
     let allocations = program.counter(Counter::Allocations);
     assert!(allocations < 20, "{allocations:?}");
     assert_eq!(program.number("aliases", 1.0), 4.0);
+}
+
+#[test]
+fn unchanged_casing_borrows_strings_without_changing_aliases() {
+    let source = r#"
+export function run(n:number):number {
+ const lower='ä🙂already lowercase';const upper='Ä🙂ALREADY UPPERCASE';
+ let total=0;
+ for(let i=0;i<n;i++)total+=lower.toLowerCase().length+upper.toUpperCase().length;
+ return total;
+}
+export function aliases(n:number):number {
+ let source='ä🙂'+String(n);
+ let lower=source.toLowerCase();const kept=lower;
+ source+='X';lower+='!';
+ if(source!=='ä🙂'+String(n)+'X'||kept!=='ä🙂'+String(n))return -1;
+ return lower==='ä🙂'+String(n)+'!'?1:0;
+}
+"#;
+    let mut program = Program::checked(source, "casing-sharing.ts");
+    program.stress_collection(true);
+    assert_eq!(program.number("run", 1000.0), 38000.0);
+    assert!(program.counter(Counter::Allocations) < 20);
+    for n in 0..3 {
+        assert_eq!(program.number("aliases", f64::from(n)), 1.0);
+    }
 }
 
 #[test]

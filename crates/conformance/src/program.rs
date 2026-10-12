@@ -30,6 +30,8 @@ pub(crate) const INPUTS: [f64; 24] = [
     -8640000000000001.0,
 ];
 pub(crate) const FIXTURE: &str = "é\0abc";
+/// Value of `PERRY_CONFORMANCE` in command cases; non-ASCII so both runtimes must decode it.
+pub(crate) const ENV_FIXTURE: &str = "grüezi";
 pub(crate) const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
     export run: func(x: f64) -> observation;

@@ -7,6 +7,7 @@
 //! corrected by exact comparison against the midpoints of neighbouring doubles, on a stack
 //! big integer. Digits after the 780th only decide ties: a midpoint has at most 767
 //! significant digits, so they act as one sticky digit.
+use arrayvec::ArrayVec;
 
 /// Maximum significant digits kept exactly; further digits only mark the value as above.
 const KEPT_DIGITS: usize = 780;
@@ -19,8 +20,7 @@ const EXACT: [f64; 23] = [
 ];
 
 /// The double nearest to a validated JSON number literal (ties to even). Never inlined: the
-/// parser recurses per nesting level, and the big integers of [correct] must stay out of
-/// its frame.
+/// big integers of [correct] must stay out of the parser's traversal frame.
 #[inline(never)]
 pub(crate) fn parse_number(literal: &[u8]) -> f64 {
     let negative = literal.first() == Some(&b'-');
@@ -254,41 +254,37 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
 /// A fixed-capacity unsigned big integer (little-endian 32-bit limbs).
 #[derive(Clone)]
 struct Big {
-    len: usize,
-    limbs: [u32; LIMBS],
+    limbs: ArrayVec<u32, LIMBS>,
 }
 
 impl Big {
     fn zero() -> Self {
         Big {
-            len: 0,
-            limbs: [0; LIMBS],
+            limbs: ArrayVec::new(),
         }
     }
 
     fn from_u64(value: u64) -> Self {
         let mut big = Big::zero();
-        big.limbs[0] = value as u32;
-        big.limbs[1] = (value >> 32) as u32;
-        big.len = if value >> 32 != 0 {
-            2
-        } else {
-            usize::from(value != 0)
-        };
+        if value != 0 {
+            big.limbs.push(value as u32);
+            if value >> 32 != 0 {
+                big.limbs.push((value >> 32) as u32);
+            }
+        }
         big
     }
 
     /// `self × factor + addend`.
     fn mul_add(&mut self, factor: u32, addend: u32) {
         let mut carry = u64::from(addend);
-        for limb in &mut self.limbs[..self.len] {
+        for limb in &mut self.limbs {
             let product = u64::from(*limb) * u64::from(factor) + carry;
             *limb = product as u32;
             carry = product >> 32;
         }
-        if carry != 0 && self.len < LIMBS {
-            self.limbs[self.len] = carry as u32;
-            self.len += 1;
+        if carry != 0 && self.limbs.len() < LIMBS {
+            self.limbs.push(carry as u32);
         }
     }
 
@@ -302,19 +298,23 @@ impl Big {
     }
 
     fn shl(&mut self, bits: u32) {
-        if self.len == 0 {
+        if self.limbs.is_empty() {
             return;
         }
         let (words, bits) = ((bits / 32) as usize, bits % 32);
-        let len = (self.len + words + 1).min(LIMBS);
+        let previous_len = self.limbs.len();
+        let len = (previous_len + words + 1).min(LIMBS);
+        while self.limbs.len() < len {
+            self.limbs.push(0);
+        }
         for index in (0..len).rev() {
             let source = index as isize - words as isize;
-            let high = if source >= 0 && (source as usize) < self.len {
+            let high = if source >= 0 && (source as usize) < previous_len {
                 self.limbs[source as usize]
             } else {
                 0
             };
-            let low = if source >= 1 && (source as usize - 1) < self.len {
+            let low = if source >= 1 && (source as usize - 1) < previous_len {
                 self.limbs[source as usize - 1]
             } else {
                 0
@@ -325,19 +325,16 @@ impl Big {
                 (high << bits) | (low >> (32 - bits))
             };
         }
-        self.len = len;
-        while self.len > 0 && self.limbs[self.len - 1] == 0 {
-            self.len -= 1;
+        while self.limbs.last() == Some(&0) {
+            self.limbs.pop();
         }
     }
 
     fn cmp(&self, other: &Big) -> core::cmp::Ordering {
-        self.len.cmp(&other.len).then_with(|| {
-            self.limbs[..self.len]
-                .iter()
-                .rev()
-                .cmp(other.limbs[..other.len].iter().rev())
-        })
+        self.limbs
+            .len()
+            .cmp(&other.limbs.len())
+            .then_with(|| self.limbs.iter().rev().cmp(other.limbs.iter().rev()))
     }
 }
 

@@ -36,7 +36,7 @@ use thiserror::Error;
 
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Ty {
+pub(crate) enum Ty {
     BigInt,
     /// A signless i32 index proven in bounds.
     Index,
@@ -89,7 +89,7 @@ pub enum Ty {
 }
 
 impl Ty {
-    pub fn get(self, ctx: &mut Context) -> TypeHandle {
+    fn get(self, ctx: &mut Context) -> TypeHandle {
         let string: TypeHandle = StringType::get(ctx).into();
         let number: TypeHandle = FP64Type::get(ctx).into();
         match self {
@@ -260,6 +260,37 @@ impl Ty {
     }
 }
 
+/// Operand kinds: a value kind, or an aggregate kind that names no single MIR type and so
+/// cannot be a result ([Ty] has no such kind).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Operand {
+    Value(Ty),
+    /// Records and tagged unions retaining their original JSON graph.
+    Aggregate,
+}
+
+impl Operand {
+    fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
+        match self {
+            Operand::Value(kind) => kind.matches(ctx, ty),
+            Operand::Aggregate => {
+                let deref = ty.deref(ctx);
+                deref.is::<crate::types::RecordType>() || deref.is::<crate::types::VariantType>()
+            }
+        }
+    }
+}
+
+/// The [Operand] an `intrinsics!` operand name denotes.
+macro_rules! operand {
+    (Aggregate) => {
+        Operand::Aggregate
+    };
+    ($kind:ident) => {
+        Operand::Value(Ty::$kind)
+    };
+}
+
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
@@ -277,10 +308,17 @@ macro_rules! intrinsics {
                 }
             }
 
-            /// (operands, results).
-            pub fn types(self) -> (&'static [Ty], &'static [Ty]) {
+            /// The name as an identifier, validated at compile time.
+            fn identifier(self) -> Identifier {
                 match self {
-                    $(Intrinsic::$variant => (&[$(Ty::$operand),*], &[$(Ty::$result),*]),)*
+                    $(Intrinsic::$variant => pliron::ident!($name),)*
+                }
+            }
+
+            /// (operands, results).
+            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
+                match self {
+                    $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
                 }
             }
 
@@ -375,6 +413,7 @@ intrinsics! {
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws;
+    JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
@@ -512,21 +551,12 @@ impl Intrinsic {
         }
     }
 
-    pub fn may_allocate(self) -> bool {
+    pub(crate) fn may_allocate(self) -> bool {
         self.allocation() != crate::effects::Allocation::None
     }
 
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|i| i.name() == name)
-    }
-
-    /// (operands, results) as MIR types.
-    pub fn signature(self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
-        let (operands, results) = self.types();
-        (
-            operands.iter().map(|t| t.get(ctx)).collect(),
-            results.iter().map(|t| t.get(ctx)).collect(),
-        )
     }
 
     /// Pure services can be removed when unused.
@@ -537,6 +567,11 @@ impl Intrinsic {
     /// Whether the service may throw (as an ECMAScript exception).
     pub fn throws(self) -> bool {
         self.flags().contains(&"throws")
+    }
+
+    /// Whether the service produces a value (all services have at most one result).
+    pub fn has_result(self) -> bool {
+        !self.types().1.is_empty()
     }
 }
 
@@ -550,7 +585,7 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 }
 
 #[derive(Debug, Error)]
-pub enum IntrinsicErr {
+pub(crate) enum IntrinsicErr {
     #[error("unknown intrinsic {0}")]
     Unknown(String),
     #[error("intrinsic {0} has the wrong operand or result types")]
@@ -567,12 +602,16 @@ pub struct IntrinsicOp;
 
 impl IntrinsicOp {
     pub fn new(ctx: &mut Context, intrinsic: Intrinsic, args: Vec<Value>) -> Self {
-        let (_, results) = intrinsic.signature(ctx);
+        let results = intrinsic
+            .types()
+            .1
+            .iter()
+            .map(|ty| ty.get(ctx))
+            .collect::<Vec<_>>();
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
-        let name: Identifier = intrinsic.name().try_into().expect("identifier");
-        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(name));
+        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(intrinsic.identifier()));
         op
     }
 
@@ -596,11 +635,11 @@ impl Verify for IntrinsicOp {
         let results: Vec<_> = op.results().map(|v| v.get_type(ctx)).collect();
         drop(op);
         let (ins, outs) = intrinsic.types();
-        let fits = |types: &[TypeHandle], expected: &[Ty]| {
-            types.len() == expected.len()
-                && types.iter().zip(expected).all(|(t, e)| e.matches(ctx, *t))
-        };
-        if !fits(&operands, ins) || !fits(&results, outs) {
+        let operands_fit = operands.len() == ins.len()
+            && operands.iter().zip(ins).all(|(t, e)| e.matches(ctx, *t));
+        let results_fit = results.len() == outs.len()
+            && results.iter().zip(outs).all(|(t, e)| e.matches(ctx, *t));
+        if !operands_fit || !results_fit {
             verify_err!(
                 self.loc(ctx),
                 IntrinsicErr::Signature(intrinsic.name().into())
@@ -627,7 +666,7 @@ impl MayThrowInterface for IntrinsicOp {
 
 #[derive(Debug, Error)]
 #[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
-pub struct StringifyErr;
+pub(crate) struct StringifyErr;
 
 /// `JSON.stringify(value)` of a typed value: records, arrays, strings, numbers, booleans,
 /// `Uint8Array`s, JSON values and their optionals.
@@ -675,13 +714,20 @@ impl Verify for JsonStringifyOp {
 #[op_interface_impl]
 impl SideEffects for JsonStringifyOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
+        true
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for JsonStringifyOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
     }
 }
 
 #[derive(Debug, Error)]
 #[error("perry.promise_combinator takes an array of promises of one type")]
-pub struct CombinatorErr;
+pub(crate) struct CombinatorErr;
 
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
@@ -823,7 +869,7 @@ impl Verify for PromiseResolvedOp {
 
 #[derive(Debug, Error)]
 #[error("perry.settled_field reads a perry.settled value")]
-pub struct SettledErr;
+pub(crate) struct SettledErr;
 
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]

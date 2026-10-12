@@ -8,13 +8,18 @@
 //!   state: 0 starts the body, `k` resumes after the `k`-th `await`.
 //!
 //! An `await` of a settled promise continues inline. Otherwise the step stores its state,
-//! registers the frame as a waiter on the promise and returns; settling the promise queues the
-//! frame, and the drive loop (`drive`, run at every entry from the host) dispatches queued
-//! frames by kind. Values live across an `await` (backward liveness over the MIR CFG) live in
+//! registers its frame on a shared P3 future and returns. Settling the promise completes
+//! that future; its host event dispatches the registered frames in order. Values live
+//! across an `await` (backward liveness over the MIR CFG) live in
 //! frame slots: they are stored where they are defined and loaded where they are used, so the
 //! resume entries need no SSA repair. `return v` fulfils the frame's promise, and an exception
 //! rejects it with its status.
-use crate::{FunctionLowering, ModuleState, Runtime, i32_type, slot_kind, wasm_type};
+use crate::{
+    function::FunctionLowering,
+    module::ModuleState,
+    repr::{i32_type, slot_kind, wasm_type},
+    runtime::Runtime,
+};
 use anyhow::{Result, anyhow};
 use perry_mir::calls::AwaitOp;
 use perry_runtime::promise as promises;
@@ -42,12 +47,8 @@ use pliron_wasm::{
 use std::collections::{HashMap, HashSet};
 
 /// Frame header: dispatch kind, resume state, result promise, awaited promise.
-pub(crate) const KIND: u32 = 0;
-pub(crate) const STATE: u32 = 4;
-pub(crate) const PROMISE: u32 = 8;
-pub(crate) const AWAITED: u32 = 12;
-const PIN: u32 = 16;
-const SLOTS: u32 = 24;
+pub(crate) use perry_abi::layout::async_frame::{AWAITED, KIND, PROMISE, STATE};
+use perry_abi::layout::async_frame::{OBSERVER, PIN, SLOTS};
 
 /// The frame of the async function being lowered.
 pub(crate) struct Frame {
@@ -62,7 +63,7 @@ pub(crate) fn step_name(name: &Identifier) -> Identifier {
     pliron::ident!("step_") + name.clone()
 }
 
-pub(super) const DRIVE: Identifier = pliron::ident!("drive");
+pub(super) const RESUME: Identifier = pliron::ident!("resume");
 
 /// MIR values live across some `await` of `function`, in a deterministic order.
 fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
@@ -173,8 +174,8 @@ pub(crate) fn lower(
         let frame = if b.state.collectible {
             let mut offsets = vec![PROMISE, AWAITED];
             offsets.extend(slots.iter().filter_map(|(value, (offset, _))| {
-                crate::repr(ctx, value.get_type(ctx))
-                    .is_ok_and(|kind| kind == crate::Repr::Ref)
+                crate::repr::repr(ctx, value.get_type(ctx))
+                    .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
                     .then_some(*offset)
             }));
             offsets.sort_unstable();
@@ -259,23 +260,19 @@ pub(crate) fn lower(
     Ok(())
 }
 
-/// `drive()`: run queued frames of the current task until none is ready.
-pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState) {
-    let ty = FunctionType::get(ctx, vec![], vec![]);
-    let function = FuncOp::new(ctx, DRIVE, ty);
+/// Resume one frame from the fan-out selected by a native P3 completion event.
+pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
+    let i32 = i32_type(ctx);
+    let ty = FunctionType::get(ctx, vec![i32], vec![]);
+    let function = FuncOp::new(ctx, RESUME, ty);
+    let frame = function.get_entry_block(ctx).deref(ctx).get_argument(0);
     let mut b = FunctionLowering::glue(state, ctx, &function);
-    let header = b.new_block(ctx, vec![]);
-    b.br(ctx, header, vec![]);
-    b.block = header;
-    let frame = b.runtime(ctx, Runtime::ReadyPop, vec![]);
-    let idle = b.num(ctx, NumOpcode::I32Eqz, vec![frame]);
     let done = b.new_block(ctx, vec![]);
-    let run = b.new_block(ctx, vec![]);
-    b.cond_br(ctx, idle, (done, vec![]), (run, vec![]));
+    let entry = b.block;
     b.block = done;
     let ret = ReturnOp::new(ctx, vec![]).get_operation();
     b.insert(ctx, ret);
-    b.block = run;
+    b.block = entry;
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
     // Runtime combinators (`Promise.all`, `Promise.race`) step in the runtime.
     let combinator_kind = b.i32_const(ctx, perry_runtime::promise::COMBINATOR_KIND as i32);
@@ -290,7 +287,7 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState) {
     );
     b.block = step_combinator;
     b.runtime_void(ctx, Runtime::CombinatorStep, vec![frame]);
-    b.br(ctx, header, vec![]);
+    b.br(ctx, done, vec![]);
     b.block = step_function;
     let mut calls = Vec::new();
     for index in 0..b.state.async_functions.len() {
@@ -299,7 +296,7 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState) {
         let saved = std::mem::replace(&mut b.block, call_block);
         let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
-        b.br(ctx, header, vec![]);
+        b.br(ctx, done, vec![]);
         b.block = saved;
         calls.push(call_block);
     }
@@ -342,7 +339,9 @@ impl FunctionLowering<'_, '_> {
         let state = self.i32_const(ctx, state);
         self.store(ctx, MemKind::I32, frame, STATE, state);
         self.store(ctx, MemKind::I32, frame, AWAITED, promise);
-        self.runtime_void(ctx, Runtime::PromiseWait, vec![promise, frame]);
+        let offset = self.i32_const(ctx, OBSERVER as i32);
+        let observer = self.num(ctx, NumOpcode::I32Add, vec![frame, offset]);
+        self.runtime_void(ctx, Runtime::PromiseWait, vec![promise, frame, observer]);
         self.leave_roots(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
@@ -458,9 +457,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, joined, vec![]);
             self.block = start;
         }
-        let status = self
-            .host(ctx, crate::Host::WaitFor, vec![nanos])
-            .expect("status");
+        let status = self.host(ctx, crate::host::ValueHost::WaitFor, vec![nanos]);
         let mask = self.i32_const(ctx, 0xF);
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);

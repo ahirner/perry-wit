@@ -18,7 +18,7 @@ use pliron::{
 use thiserror::Error;
 
 /// Whether a value can retain native storage; unknown dialect types are conservative.
-pub fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
+pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
     if let Some(inner) = crate::optional::optional_value(ctx, ty) {
         return is_reference(ctx, inner);
     }
@@ -41,7 +41,7 @@ pub struct RecordType {
 }
 
 #[derive(Debug, Error)]
-pub enum RecordErr {
+pub(crate) enum RecordErr {
     #[error("record {0} already exists with different fields")]
     Mismatch(String),
     #[error("record {0} has duplicate field {1}")]
@@ -87,18 +87,21 @@ impl RecordType {
         }
         let handle = Type::instantiate(
             RecordType {
-                name: name.clone(),
+                name,
                 fields: None,
                 tuple,
             },
             ctx,
         );
         if let Some(fields) = fields {
+            // `TypedHandle` has no mutable access, so downcast the untyped handle back.
             let mut record = handle.to_handle().deref_mut(ctx);
-            let record = record.downcast_mut::<RecordType>().unwrap();
+            let record = record
+                .downcast_mut::<RecordType>()
+                .expect("the handle was instantiated from a RecordType just above");
             match &record.fields {
                 Some(existing) if *existing != fields || record.tuple != tuple => {
-                    input_err_noloc!(RecordErr::Mismatch(name.to_string()))?
+                    input_err_noloc!(RecordErr::Mismatch(record.name.to_string()))?
                 }
                 Some(_) => {}
                 None => record.fields = Some(fields),

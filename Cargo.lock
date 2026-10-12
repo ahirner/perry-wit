@@ -1480,6 +1480,10 @@ dependencies = [
 [[package]]
 name = "perry-json-helper"
 version = "0.1.0"
+dependencies = [
+ "arrayvec",
+ "perry-abi",
+]
 
 [[package]]
 name = "perry-lower"
@@ -1542,6 +1546,7 @@ version = "0.1.0"
 name = "perry-std"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "libm",
  "perry-abi",
 ]

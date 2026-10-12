@@ -26,7 +26,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum CallErr {
+pub(crate) enum CallErr {
     #[error("callee {0} is not a function of the enclosing module")]
     Unknown(String),
     #[error("call to {0} does not match the callee's signature")]
@@ -220,7 +220,7 @@ impl crate::exceptions::MayThrowInterface for AwaitOp {
 }
 
 /// Function attribute marking a module export; each call of one is a task (D3, D5).
-pub const EXPORT_KEY: &str = "perry_export";
+pub(crate) const EXPORT_KEY: &str = "perry_export";
 
 /// Mark `function` as exported from the component.
 pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
@@ -245,7 +245,7 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
 
 /// Function attribute marking an `async` function. Its body may `perry.await`; callers start it
 /// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
-pub const ASYNC_KEY: &str = "perry_async";
+pub(crate) const ASYNC_KEY: &str = "perry_async";
 
 pub fn set_async(ctx: &mut Context, function: &FuncOp) {
     let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
@@ -268,7 +268,7 @@ pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
 
 #[derive(Debug, Error)]
 #[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
-pub struct TimerErr;
+pub(crate) struct TimerErr;
 
 /// `setTimeout(delay, value, { signal })` from `node:timers/promises`: a promise that settles
 /// with `value` once `delay` milliseconds (at least 1, as in Node) have passed on the host's

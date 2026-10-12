@@ -1,19 +1,20 @@
 //! Statements: bindings, `return`, `throw`, jumps and expression statements.
 use super::*;
 
-impl FunctionBuilder<'_> {
-    // ── Statements ─────────────────────────────────────────────────────────
-
-    pub(super) fn statements(&mut self, ctx: &mut Context, statements: &[Stmt]) -> Result<()> {
-        let mut index = 0;
-        while index < statements.len() {
-            if let Some(element) = self.destructured_element(&statements[index..]) {
-                self.statement(ctx, &element)?;
-                index += 2;
-                continue;
-            }
-            self.statement(ctx, &statements[index])?;
-            index += 1;
+impl<'s> FunctionBuilder<'s> {
+    pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
+        let mut rest = statements;
+        while let Some((first, tail)) = rest.split_first() {
+            rest = match self.destructured_element(rest) {
+                Some((id, value, after)) => {
+                    self.binding(ctx, id, &HirType::Any, Some(value))?;
+                    after
+                }
+                None => {
+                    self.statement(ctx, first)?;
+                    tail
+                }
+            };
         }
         Ok(())
     }
@@ -21,12 +22,14 @@ impl FunctionBuilder<'_> {
     /// Array destructuring declares each element as `let e = undefined` and assigns it in
     /// `if (guard) { <iterator pull> } else { e = i < a.length ? a[i] : undefined }`. With a
     /// statically false guard this is `let e = a[i]` (a read that is `undefined` out of
-    /// bounds, R8).
-    pub(super) fn destructured_element(&self, statements: &[Stmt]) -> Option<Stmt> {
+    /// bounds, R8): the element, its initializer and the statements after the pair.
+    fn destructured_element(
+        &self,
+        statements: &'s [Stmt],
+    ) -> Option<(LocalId, &'s Expr, &'s [Stmt])> {
         let [
             Stmt::Let {
                 id,
-                name,
                 ty: HirType::Any,
                 init: Some(Expr::Undefined),
                 ..
@@ -36,7 +39,7 @@ impl FunctionBuilder<'_> {
                 else_branch: Some(else_branch),
                 ..
             },
-            ..,
+            after @ ..,
         ] = statements
         else {
             return None;
@@ -55,34 +58,15 @@ impl FunctionBuilder<'_> {
             } if matches!(**else_expr, Expr::Undefined)
                 && matches!(**then_expr, Expr::IndexGet { .. }) =>
             {
-                (**then_expr).clone()
+                &**then_expr
             }
-            other => other.clone(),
+            other => other,
         };
-        Some(Stmt::Let {
-            id: *id,
-            name: name.clone(),
-            ty: HirType::Any,
-            mutable: false,
-            init: Some(value),
-        })
+        Some((*id, value, after))
     }
 
-    pub(super) fn statement(&mut self, ctx: &mut Context, statement: &Stmt) -> Result<()> {
+    pub(super) fn statement(&mut self, ctx: &mut Context, statement: &'s Stmt) -> Result<()> {
         match statement {
-            Stmt::Let {
-                id,
-                init: Some(guard),
-                ..
-            } if self.iterator_guard(ctx, guard)? => {
-                self.false_guards.insert(*id);
-            }
-            // The iterator of the protocol arm (`guard ? GetIterator(a) : undefined`).
-            Stmt::Let {
-                init: Some(Expr::Conditional { condition, .. }),
-                ..
-            } if matches!(condition.as_ref(), Expr::LocalGet(guard) if self.false_guards.contains(guard)) =>
-                {}
             Stmt::If {
                 condition: Expr::LocalGet(guard),
                 else_branch,
@@ -92,61 +76,17 @@ impl FunctionBuilder<'_> {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::Let { id, ty, init, .. } => {
-                // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
-                // type. An explicit type the subset cannot represent is an error, not a fallback.
-                // `Array(Any)` is such a binding too (array destructuring's element source).
-                let declared = match ty {
-                    HirType::Any | HirType::Unknown => None,
-                    HirType::Array(element) if matches!(**element, HirType::Any) => None,
-                    ty => Some(self.shapes.value_type(ctx, ty)?),
-                };
-                let init = init
-                    .as_ref()
-                    .map(|e| self.expression_with(ctx, e, declared))
-                    .transpose()?;
-                // Inferred bindings preserve absence states and the selected reader mode.
-                // HIR's getReader signature assumes the default overload.
-                let ty = match (declared, init) {
-                    (Some(ty), Some(value))
-                        if self.shapes.inferred_bindings.contains(id)
-                            && (optional_value(ctx, value.get_type(ctx)) == Some(ty)
-                                || (ty.deref(ctx).is::<ReaderType>()
-                                    && kind(ctx, value)? == Kind::ByobReader)) =>
-                    {
-                        value.get_type(ctx)
-                    }
-                    (Some(ty), _) => ty,
-                    (None, Some(value)) => value.get_type(ctx),
-                    (None, None) => bail!("an untyped binding needs an initializer"),
-                };
-                let slot = if self.shapes.global_ids.contains(id) {
-                    self.shapes.globals.borrow_mut().insert(*id, ty);
-                    self.emit_value(ctx, |ctx| {
-                        perry_mir::globals::GlobalOp::new(
-                            ctx,
-                            format!("global_{id}").try_into().expect("global name"),
-                            ty,
-                        )
-                    })
-                } else {
-                    self.entry_slot(ctx, ty)
-                };
-                if self.shapes.global_ids.contains(id) {
-                    self.global_slots.insert(slot);
-                }
-                if let Some(value) = init {
-                    let value = self.fit(ctx, value, ty)?;
-                    self.store(ctx, slot, value);
-                }
-                self.locals.insert(*id, slot);
-            }
+            Stmt::Let { id, ty, init, .. } => self.binding(ctx, *id, ty, init.as_ref())?,
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
+            Stmt::Return(value) if !self.callback_returns.is_empty() => {
+                self.callback_return(ctx, value.as_ref())?;
+            }
             Stmt::Return(value) => {
-                let mut adopts_promise = false;
-                let mut values = match value {
+                // An async function adopts a returned promise (and its result type) after
+                // the finalizers ran.
+                let (mut values, adopted) = match value {
                     Some(expr) => {
                         let expected = self
                             .results
@@ -154,32 +94,33 @@ impl FunctionBuilder<'_> {
                             .copied()
                             .context("a void function returns a value")?;
                         let value = self.expression_with(ctx, expr, Some(expected))?;
-                        adopts_promise =
-                            self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>();
-                        vec![if adopts_promise {
-                            value
+                        if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                            (Vec::with_capacity(1), Some((value, expected)))
                         } else {
-                            self.fit(ctx, value, expected)?
-                        }]
+                            (vec![self.fit(ctx, value, expected)?], None)
+                        }
                     }
-                    None => self.implicit_results(ctx),
+                    None => (self.implicit_results(ctx), None),
                 };
                 self.run_finallies(ctx, |_| true)?;
                 if self.terminated(ctx) {
                     self.after_terminator(ctx);
                     return Ok(());
                 }
-                if adopts_promise {
+                if let Some((promise, expected)) = adopted {
                     // Returning a promise runs finalizers before adoption; its later rejection
                     // does not enter a catch surrounding the return expression.
                     let handlers = std::mem::take(&mut self.handlers);
-                    let await_ = AwaitOp::new(ctx, values[0])?;
+                    let await_ = AwaitOp::new(ctx, promise)?;
                     let value = self.append_value(ctx, &await_);
-                    values[0] = self.fit(ctx, value, self.results[0])?;
+                    values.push(self.fit(ctx, value, expected)?);
                     self.handlers = handlers;
                 }
                 ensure!(
-                    values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
+                    values
+                        .iter()
+                        .map(|v| v.get_type(ctx))
+                        .eq(self.results.iter().copied()),
                     "return value type differs from the declared result"
                 );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
@@ -290,16 +231,75 @@ impl FunctionBuilder<'_> {
                 catch,
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
-            other => bail!(
-                "MIR backend does not support statement {} yet",
-                statement_name(other)
-            ),
+            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
+            other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
     }
 
+    /// `let id: ty = init`. Array destructuring's iterator guard and the iterator of its
+    /// protocol arm (`guard ? GetIterator(a) : undefined`) bind nothing when the guard is
+    /// statically false.
+    fn binding(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        ty: &HirType,
+        init: Option<&'s Expr>,
+    ) -> Result<()> {
+        if let Some(guard) = init
+            && self.iterator_guard(ctx, guard)?
+        {
+            self.false_guards.insert(id);
+            return Ok(());
+        }
+        if let Some(Expr::Conditional { condition, .. }) = init
+            && matches!(condition.as_ref(), Expr::LocalGet(guard) if self.false_guards.contains(guard))
+        {
+            return Ok(());
+        }
+        // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
+        // type. An explicit type the subset cannot represent is an error, not a fallback.
+        // `Array(Any)` is such a binding too (array destructuring's element source).
+        let declared = match ty {
+            HirType::Any | HirType::Unknown => None,
+            HirType::Array(element) if matches!(**element, HirType::Any) => None,
+            ty => Some(self.shapes.value_type(ctx, ty)?),
+        };
+        let init = init
+            .map(|e| self.expression_with(ctx, e, declared))
+            .transpose()?;
+        // Inferred bindings preserve absence states and the selected reader mode.
+        // HIR's getReader signature assumes the default overload.
+        let ty = match (declared, init) {
+            (Some(ty), Some(value))
+                if self.shapes.inferred_bindings.contains(&id)
+                    && (optional_value(ctx, value.get_type(ctx)) == Some(ty)
+                        || (ty.deref(ctx).is::<ReaderType>()
+                            && kind(ctx, value)? == Kind::ByobReader)) =>
+            {
+                value.get_type(ctx)
+            }
+            (Some(ty), _) => ty,
+            (None, Some(value)) => value.get_type(ctx),
+            (None, None) => bail!("an untyped binding needs an initializer"),
+        };
+        let slot = if self.shapes.global_ids.contains(&id) {
+            self.shapes.globals.borrow_mut().insert(id, ty);
+            self.global_slot(ctx, id, ty)?
+        } else {
+            self.entry_slot(ctx, ty)
+        };
+        if let Some(value) = init {
+            let value = self.fit(ctx, value, ty)?;
+            self.store(ctx, slot, value);
+        }
+        self.locals.insert(id, slot);
+        Ok(())
+    }
+
     /// Lower an expression evaluated for its effects; void calls are allowed here.
-    pub(super) fn effect(&mut self, ctx: &mut Context, expr: &Expr) -> Result<()> {
+    pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
         if let Expr::Call { callee, args, .. } = expr {
             self.call(ctx, callee, args)?;
         } else if let Expr::ProcessExit(code) = expr {
@@ -327,7 +327,7 @@ impl FunctionBuilder<'_> {
     /// Whether `expr` is array destructuring's guard for the iterator protocol, which is
     /// false for MIR arrays: they are plain arrays, and `Array.prototype[Symbol.iterator]`
     /// cannot be patched. Other sources are an error.
-    pub(super) fn iterator_guard(&mut self, ctx: &mut Context, expr: &Expr) -> Result<bool> {
+    fn iterator_guard(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<bool> {
         let source = match expr {
             Expr::ArrayIterationPatched => return Ok(true),
             Expr::NativeMethodCall {
@@ -351,12 +351,4 @@ impl FunctionBuilder<'_> {
         );
         Ok(true)
     }
-}
-
-fn statement_name(statement: &Stmt) -> String {
-    format!("{statement:?}")
-        .split(['(', ' ', '{'])
-        .next()
-        .unwrap_or("?")
-        .to_string()
 }

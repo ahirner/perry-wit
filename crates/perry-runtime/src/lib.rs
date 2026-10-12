@@ -3,7 +3,7 @@
 //! `talc` supplies linear-memory storage. Proven bounded tasks use regions; unproven and
 //! persistent allocations use precise non-moving collection. Compiled safe points root live
 //! values, while suspended operations retain explicit owners through acknowledgement.
-//! Scheduler nodes and proven stream leases reuse their storage independently of collection.
+//! Promise observers reside in their frames; proven stream leases reuse their storage.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 extern crate alloc;
@@ -26,6 +26,13 @@ pub mod region;
 mod resources;
 pub mod roots;
 pub mod string;
+// `perry-abi` owns these shared sources; this dependency-free crate compiles its own copy.
+// They stay public: their `pub` items serve `perry-abi`'s API, and this crate uses only a
+// build-dependent subset (one scalar counter, no record or variant layouts).
+#[path = "../../perry-abi/src/layout.rs"]
+pub mod layout;
+#[path = "../../perry-abi/src/utf8.rs"]
+pub mod utf8;
 
 #[cfg(target_arch = "wasm32")]
 mod heap;
@@ -40,7 +47,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-/// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`), the
+/// Bits of `undefined` in a `number | undefined` slot (`perry_abi::UNDEFINED_BITS`), the
 /// value of `Promise<void>`.
 pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 
@@ -94,16 +101,16 @@ mod tests {
     }
 
     #[test]
-    fn promises_queue_waiters_and_tasks_interleave() {
+    fn promise_events_resume_observers_and_tasks_interleave() {
         crate::RuntimeInstance::default().enter(|| {
             use promise::*;
             use region::*;
             let a = perry_task_enter();
             let p = perry_promise_new();
-            let (f1, f2) = (perry_alloc(16), perry_alloc(16));
-            perry_promise_wait(p, f1);
-            perry_promise_wait(p, f2);
-            assert!(perry_ready_pop().is_null());
+            let (f1, f2) = (perry_alloc(80), perry_alloc(80));
+            perry_promise_wait(p, f1, unsafe { f1.add(16) });
+            perry_promise_wait(p, f2, unsafe { f2.add(16) });
+            assert!(host::mock::completed_reactions().is_empty());
             perry_subtask_register(7, p, 42);
             perry_task_set_set(3);
             assert_eq!(perry_task_suspend(), 3);
@@ -117,9 +124,13 @@ mod tests {
             assert_eq!(perry_subtask_done(7), 1);
             assert_eq!(unsafe { *(p as *const u32) }, FULFILLED);
             assert_eq!(unsafe { *(p.add(VALUE as usize) as *const u64) }, 42);
-            assert_eq!(perry_ready_pop(), f1);
-            assert_eq!(perry_ready_pop(), f2);
-            assert!(perry_ready_pop().is_null());
+            // The subtask's settlement fires one shared completion for both observers.
+            let events = host::mock::completed_reactions();
+            assert_eq!(events.len(), 1);
+            let completion = perry_promise_event(host::EVENT_FUTURE_READ, events[0]);
+            assert_eq!(perry_promise_next(completion), f1);
+            assert_eq!(perry_promise_next(completion), f2);
+            assert!(perry_promise_next(completion).is_null());
             // Settling twice is a no-op; rejection records the status.
             let q = perry_promise_new();
             perry_promise_reject(q, 2);

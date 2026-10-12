@@ -2,7 +2,7 @@
 //! task ends.
 //!
 //! Every export call is one task (design decision D3/D5). Async export calls can overlap on one
-//! instance, so each task owns its region, its queue of ready frames and its pending host
+//! instance, so each task owns its region, its active promise observers and its pending host
 //! subtasks ([Task]). Compiled code makes a task current while it runs ([perry_task_resume]) and
 //! clears it before handing control back to the host ([perry_task_suspend]).
 //!
@@ -37,13 +37,6 @@ struct Chunk {
 
 const HEADER: usize = core::mem::size_of::<Chunk>().next_multiple_of(ALIGN);
 
-/// A frame waiting to run or waiting on a promise.
-#[repr(C)]
-pub(crate) struct Node {
-    pub(crate) frame: *mut u8,
-    pub(crate) next: *mut Node,
-}
-
 /// A host subtask whose completion settles a promise.
 #[repr(C)]
 pub(crate) struct Subtask {
@@ -61,17 +54,15 @@ pub(crate) struct Subtask {
 /// One export call.
 #[repr(C)]
 pub struct Task {
+    #[cfg(test)]
+    pub(crate) allocations: usize,
     chunk: *mut Chunk,
     large: *mut Chunk,
     cursor: usize,
     end: usize,
     /// Size class of `chunk`.
     class: usize,
-    ready_head: *mut Node,
-    ready_tail: *mut Node,
-    /// Queue nodes and subtask entries no longer in use: waits and wakeups in a loop reuse
-    /// them instead of growing the region.
-    spare_nodes: *mut Node,
+    pub(crate) signals: crate::promise::Signals,
     spare_subtasks: *mut Subtask,
     pub(crate) subtasks: *mut Subtask,
     cancelled: *mut Subtask,
@@ -90,19 +81,17 @@ pub struct Task {
     /// Status of the last runtime service that threw (`crate::exception::raise`), taken by
     /// compiled code with `perry_status`.
     pub(crate) status: u32,
+    pub(crate) observers: crate::promise::Observers,
 }
 
 impl Task {
-    /// Active scheduler edges; recycled nodes and allocation history never retain objects.
+    /// Active observer and host-operation roots.
     pub(crate) unsafe fn trace_roots(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
         roots.extend([self.result, self.exception]);
-        // SAFETY: active queue entries belong to this live task.
+        // SAFETY: active observers belong to this live task.
         unsafe {
-            let mut node = self.ready_head;
-            while !node.is_null() {
-                roots.push((*node).frame);
-                node = (*node).next;
-            }
+            self.observers.trace(roots);
+            self.signals.trace(roots);
             let mut subtask = self.subtasks;
             while !subtask.is_null() {
                 roots.extend([(*subtask).promise, (*subtask).signal.cast()]);
@@ -200,14 +189,15 @@ fn new_chunk(size: usize, previous: *mut Chunk) -> *mut Chunk {
 
 fn new_task() -> *mut Task {
     let value = Task {
+        #[cfg(test)]
+        allocations: 0,
         chunk: ptr::null_mut(),
         large: ptr::null_mut(),
         cursor: 0,
         end: 0,
         class: 0,
-        ready_head: ptr::null_mut(),
-        ready_tail: ptr::null_mut(),
-        spare_nodes: ptr::null_mut(),
+        observers: crate::promise::Observers::new(),
+        signals: crate::promise::Signals::new(),
         spare_subtasks: ptr::null_mut(),
         subtasks: ptr::null_mut(),
         cancelled: ptr::null_mut(),
@@ -242,6 +232,10 @@ fn new_task() -> *mut Task {
 
 impl Task {
     pub(crate) fn allocate(&mut self, size: usize) -> *mut u8 {
+        #[cfg(test)]
+        {
+            self.allocations += 1;
+        }
         let size = size.next_multiple_of(ALIGN).max(ALIGN);
         if size > LARGE {
             let chunk = new_chunk(HEADER + size, self.large);
@@ -278,40 +272,6 @@ impl Task {
         let object = self.cursor as *mut u8;
         self.cursor += size;
         object
-    }
-
-    /// A queue node for `frame`, reused when one is spare.
-    pub(crate) fn node(&mut self, frame: *mut u8) -> *mut Node {
-        let node = if self.spare_nodes.is_null() {
-            self.allocate(core::mem::size_of::<Node>()) as *mut Node
-        } else {
-            let node = self.spare_nodes;
-            // SAFETY: spare nodes are live allocations of this task.
-            self.spare_nodes = unsafe { (*node).next };
-            node
-        };
-        // SAFETY: `node` is exclusively ours.
-        unsafe {
-            node.write(Node {
-                frame,
-                next: ptr::null_mut(),
-            })
-        };
-        node
-    }
-
-    /// Queue `node` (a waiter whose promise settled) as it is.
-    pub(crate) fn push_ready_node(&mut self, node: *mut Node) {
-        // SAFETY: `node` is a live node of this task; the tail, if any, too.
-        unsafe {
-            (*node).next = ptr::null_mut();
-            if self.ready_tail.is_null() {
-                self.ready_head = node;
-            } else {
-                (*self.ready_tail).next = node;
-            }
-        }
-        self.ready_tail = node;
     }
 }
 
@@ -372,6 +332,8 @@ pub extern "C" fn perry_task_free() {
     if task.is_null() {
         return;
     }
+    debug_assert!(current().observers.is_empty());
+    debug_assert!(current().signals.is_empty());
     // SAFETY: every chunk on the task's chains belongs to it; the task was allocated by
     // [new_task].
     unsafe {
@@ -434,28 +396,6 @@ pub(crate) extern "C" fn perry_task_result() -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_task_set_result(promise: *mut u8) {
     current().result = promise;
-}
-
-/// The next frame ready to run in the current task, or null.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_ready_pop() -> *mut u8 {
-    let task = current();
-    let node = task.ready_head;
-    if node.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: queue nodes are live allocations of this task.
-    unsafe {
-        task.ready_head = (*node).next;
-        if task.ready_head.is_null() {
-            task.ready_tail = ptr::null_mut();
-        }
-        let frame = (*node).frame;
-        (*node).frame = ptr::null_mut();
-        (*node).next = task.spare_nodes;
-        task.spare_nodes = node;
-        frame
-    }
 }
 
 /// Settle `promise` with `value` when host subtask `handle` returns.
@@ -535,6 +475,7 @@ pub(crate) fn take_subtask(handle: u32) -> Option<(*mut u8, u64)> {
 /// Cancel unobserved host calls before their task storage is reclaimed.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_task_cancel() -> u32 {
+    crate::promise::prepare_cancellation();
     let task = perry_task_current();
     let mut count = 0;
     // SAFETY: cancellation acknowledges each host call; the task remains live throughout.
@@ -542,6 +483,7 @@ pub(crate) extern "C" fn perry_task_cancel() -> u32 {
         while !(*task).subtasks.is_null() {
             let entry = (*task).subtasks;
             let handle = (*entry).handle;
+            count += u32::from(!crate::promise::cancellation_owned((*entry).promise));
             crate::host::waitable_join(handle, 0);
             let status = crate::host::subtask_cancel(handle);
             perry_task_resume(task);
@@ -562,9 +504,9 @@ pub(crate) extern "C" fn perry_task_cancel() -> u32 {
                 (*entry).next = (*task).spare_subtasks;
                 (*task).spare_subtasks = entry;
             }
-            count += 1;
         }
     }
+    crate::promise::cancel_observers();
     count
 }
 
@@ -576,7 +518,7 @@ pub(crate) extern "C" fn perry_foreign_cancelled() -> *mut u8 {
     if entry.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: cancellation queues live scheduler nodes until the compiled cleanup drains them.
+    // SAFETY: cancellation retains live host transfers until the compiled cleanup drains them.
     unsafe {
         task.cancelled = (*entry).next;
         let transfer = (*entry).value as usize as *mut u8;
@@ -643,6 +585,7 @@ pub extern "C" fn perry_alloc(size: u32) -> *mut u8 {
 }
 
 /// Allocate an object with a static map of its reference fields, without collecting.
+/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
 ///
 /// # Safety
 /// `shape` meets `Collector::allocate`'s shape contract.

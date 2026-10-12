@@ -1,7 +1,7 @@
 //! ISO Temporal factories, calendar accessors and day arithmetic.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `Temporal.Instant.from(string)`, `Instant.fromEpochMilliseconds(number)`,
     /// `PlainDate.from(string)` and `PlainDateTime.from(string)`: the supported ISO factories.
     pub(super) fn temporal_factory(
@@ -9,7 +9,7 @@ impl FunctionBuilder<'_> {
         ctx: &mut Context,
         class: &str,
         factory: &str,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Value> {
         let (intrinsic, input, what) = match (class, factory) {
             ("Instant", "fromEpochMilliseconds") => {
@@ -67,7 +67,7 @@ impl FunctionBuilder<'_> {
         ctx: &mut Context,
         receiver: Value,
         method: &str,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Option<Value>> {
         Ok(match (kind(ctx, receiver)?, method) {
             (Kind::Instant | Kind::PlainDate | Kind::PlainDateTime, "toString" | "toJSON") => {

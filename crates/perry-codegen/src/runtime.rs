@@ -75,13 +75,14 @@ runtime_functions! {
     TaskCloseSet = "perry_task_close_set" ();
     TaskResult = "perry_task_result" () -> I32;
     TaskSetResult = "perry_task_set_result" (I32);
-    ReadyPop = "perry_ready_pop" () -> I32;
+    PromiseEvent = "perry_promise_event" (I32, I32) -> I32;
+    PromiseNext = "perry_promise_next" (I32) -> I32;
     CombinatorStep = "perry_combinator_step" (I32);
     SubtaskRegister = "perry_subtask_register" (I32, I32, I64);
     PromiseNew = "perry_promise_new" () -> I32;
     PromiseResolve = "perry_promise_resolve" (I32, I64);
     PromiseReject = "perry_promise_reject" (I32, I32);
-    PromiseWait = "perry_promise_wait" (I32, I32);
+    PromiseWait = "perry_promise_wait" (I32, I32, I32);
     PromiseRethrow = "perry_promise_rethrow" (I32) -> I32;
     ExceptionNew = "perry_exception_new" (I32, I32, I64) -> I32;
     ExceptionRaise = "perry_exception_raise" (I32) -> I32;
@@ -90,6 +91,7 @@ runtime_functions! {
     Exit = "perry_exit" (F64) -> I32;
     CabiRealloc = "perry_cabi_realloc" (I32, I32, I32, I32) -> I32;
     StringAdopt = "perry_string_adopt" (I32, I32) -> I32;
+    StringAdoptCounted = "perry_string_adopt_counted" (I32, I32, I32) -> I32;
     StringConcat = "perry_string_concat" (I32, I32) -> I32;
     StringCompare = "perry_string_compare" (I32, I32) -> I32;
     Print = "perry_print" (I32, I32, I32);
@@ -201,6 +203,7 @@ runtime_functions! {
     StdJsonAssign = "std_json_assign" (I32, I32);
     StdJsonClose = "std_json_close" (I32, I32);
     StdJsonFinish = "std_json_finish" (I32) -> I32;
+    StdJsonExtras = "std_json_extras" (I32, I32, I32, I32);
     StdJsonFirst = "std_json_first" (I32) -> I32;
     StdJsonFromNumber = "std_json_from_number" (F64) -> I32;
     StdJsonFromScalar = "std_json_from_scalar" (I32, I32) -> I32;
@@ -217,6 +220,7 @@ runtime_functions! {
     StdJsonOpen = "std_json_open" (I32, I32) -> I32;
     StdJsonQuote = "std_json_quote" (I32, I32);
     StdJsonRaw = "std_json_raw" (I32, I32, I32);
+    StdJsonNumber = "std_json_number" (I32, F64);
     StdJsonRequireNumber = "std_json_require_number" (I32) -> F64;
     StdJsonRequireObject = "std_json_require_object" (I32);
     StdJsonSet = "std_json_set" (I32, I32, I32);

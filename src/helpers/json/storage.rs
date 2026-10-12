@@ -1,16 +1,31 @@
 use super::Error;
 
-/// Graph storage: measuring (`stores` false) only counts the bytes a graph needs; storing
-/// writes it to `bytes`, whose first byte has guest address `base`. One type for both keeps
-/// a single copy of the parser.
-pub(super) struct Storage<'a> {
+/// Caller-owned graph storage. `STORE` selects measurement or writing at compile time,
+/// so measuring validates and counts without executing the storage operations.
+pub(super) struct Storage<'a, const STORE: bool> {
     pub(super) bytes: &'a mut [u8],
     pub(super) length: usize,
     pub(super) base: u32,
-    pub(super) stores: bool,
 }
 
-impl Storage<'_> {
+impl<const STORE: bool> Storage<'_, STORE> {
+    /// Append fully initialized bytes without first clearing their destination.
+    pub(super) fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let end = self
+            .length
+            .checked_add(bytes.len())
+            .ok_or(Error::Capacity)?;
+        u32::try_from(end).map_err(|_| Error::Capacity)?;
+        if STORE {
+            self.bytes
+                .get_mut(self.length..end)
+                .ok_or(Error::Capacity)?
+                .copy_from_slice(bytes);
+        }
+        self.length = end;
+        Ok(())
+    }
+
     pub(super) fn reserve(&mut self, size: usize, alignment: usize) -> Result<usize, Error> {
         let start = self
             .length
@@ -19,7 +34,7 @@ impl Storage<'_> {
             & !(alignment - 1);
         let end = start.checked_add(size).ok_or(Error::Capacity)?;
         u32::try_from(end).map_err(|_| Error::Capacity)?;
-        if self.stores {
+        if STORE {
             self.bytes
                 .get_mut(self.length..end)
                 .ok_or(Error::Capacity)?
@@ -30,7 +45,7 @@ impl Storage<'_> {
     }
 
     pub(super) fn write(&mut self, position: usize, bytes: &[u8]) -> Result<(), Error> {
-        if !self.stores {
+        if !STORE {
             return Ok(());
         }
         let end = position.checked_add(bytes.len()).ok_or(Error::Capacity)?;

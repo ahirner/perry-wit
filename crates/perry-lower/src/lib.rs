@@ -7,11 +7,12 @@
 //!   recursive type inference;
 //! - tiers stay `Unassigned` and layouts abstract; later passes decide them.
 //!
-//! [lower_source_with] runs the source passes (module graph, validation, stream rewriting),
+//! [lower_source] runs the source passes (module graph, validation, stream rewriting),
 //! Perry's HIR lowering, and then [program] over the HIR. Each function body is lowered by a
 //! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
 //! Unsupported constructs are rejected with a diagnostic.
 mod aggregates;
+mod array_methods;
 mod builder;
 mod builtins;
 mod calls;
@@ -21,6 +22,7 @@ mod dates;
 mod decoder;
 mod expressions;
 mod foreign;
+mod host;
 mod json;
 mod modules;
 mod operators;
@@ -32,7 +34,6 @@ mod streams;
 mod temporal;
 mod url;
 mod variants;
-mod web;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{
     ir::{
@@ -61,7 +62,7 @@ use perry_mir::{
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
-        UnwrapOp, WrapOp, absence, optional_value,
+        UnwrapOp, WrapOp, absence, optional_parts, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
@@ -81,7 +82,7 @@ use pliron::{
         types::{FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    identifier::Identifier,
+    identifier::{Identifier, Legaliser},
     irbuild::{
         inserter::{IRInserter, Inserter},
         listener::DummyListener,
@@ -101,7 +102,7 @@ pub mod hir {
     pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
 }
 use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, remove_unreachable};
-use coerce::{Kind, kind};
+use coerce::{Kind, kind, void_type};
 use program::{Builtin, Signature};
 
 /// The function holding a module's top-level statements, if it has any.
@@ -109,7 +110,7 @@ pub const MAIN: &str = "perry_main";
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` types by SDK name: WIT types the program imports from its generated declarations.
-pub fn lower_source_with(
+pub fn lower_source(
     ctx: &mut Context,
     source: &str,
     file: &str,
@@ -119,6 +120,7 @@ pub fn lower_source_with(
     source::validate(&ast)?;
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
+    array_methods::preserve_arguments(&mut ast);
     let hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
     let spans = source::inferred_bindings(&ast);

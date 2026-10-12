@@ -88,13 +88,13 @@ fn normalize_constructor(new: &mut ast::NewExpr) -> Result<()> {
     Ok(())
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn decode(
         &mut self,
         ctx: &mut Context,
         decoder: Value,
-        input: Option<&Expr>,
-        options: Option<&Expr>,
+        input: Option<&'s Expr>,
+        options: Option<&'s Expr>,
     ) -> Result<Value> {
         let bytes = match input {
             None | Some(Expr::Undefined) => {

@@ -2,14 +2,14 @@
 use super::*;
 use crate::coerce::merge_absence;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `left op right` for arithmetic operators and string concatenation.
     pub(super) fn binary_expression(
         &mut self,
         ctx: &mut Context,
         op: &BinaryOp,
-        left: &Expr,
-        right: &Expr,
+        left: &'s Expr,
+        right: &'s Expr,
     ) -> Result<Value> {
         let lhs = self.expression(ctx, left)?;
         let lhs = self.arithmetic(ctx, lhs);
@@ -46,8 +46,8 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         op: &CompareOp,
-        left: &Expr,
-        right: &Expr,
+        left: &'s Expr,
+        right: &'s Expr,
     ) -> Result<Value> {
         let equality = match op {
             CompareOp::Eq => Some(CompareKind::Eq),
@@ -154,10 +154,10 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         equality: CompareKind,
-        left: &Expr,
-        right: &Expr,
+        left: &'s Expr,
+        right: &'s Expr,
     ) -> Result<Option<Value>> {
-        let absent = |expr: &Expr| matches!(expr, Expr::Null | Expr::Undefined);
+        let absent = |expr: &'s Expr| matches!(expr, Expr::Null | Expr::Undefined);
         if absent(left) && absent(right) {
             let equal = matches!(left, Expr::Null) == matches!(right, Expr::Null);
             return Ok(Some(
@@ -209,8 +209,8 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         op: &LogicalOp,
-        left: &Expr,
-        right: &Expr,
+        left: &'s Expr,
+        right: &'s Expr,
     ) -> Result<Value> {
         // Short-circuit through a result slot; mem2reg turns it into a block argument.
         ensure!(
@@ -239,7 +239,7 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         op: &UnaryOp,
-        operand: &Expr,
+        operand: &'s Expr,
     ) -> Result<Value> {
         let value = self.expression(ctx, operand)?;
         if *op == UnaryOp::Not {
@@ -262,7 +262,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// The truthiness of `expr`, as a branch condition.
-    pub(super) fn condition(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn condition(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         self.truthy(ctx, value)
     }

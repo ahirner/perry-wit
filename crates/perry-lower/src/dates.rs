@@ -1,11 +1,11 @@
 //! Statically typed Date construction and UTC mutation.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn date_expression(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
+        expr: &'s Expr,
     ) -> Result<Option<Value>> {
         let (date, part) = match expr {
             Expr::DateNew(args) => {
@@ -89,7 +89,7 @@ impl FunctionBuilder<'_> {
         Ok(self.call_intrinsic(ctx, Intrinsic::DatePart, vec![date, part]))
     }
 
-    fn date_utc(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+    fn date_utc(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let mut values = Vec::with_capacity(7);
         for (index, default) in [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
             .into_iter()
@@ -110,9 +110,9 @@ impl FunctionBuilder<'_> {
     fn date_set(
         &mut self,
         ctx: &mut Context,
-        date: &Expr,
+        date: &'s Expr,
         part: u32,
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Option<Value>> {
         let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
         let maximum = [3, 2, 1, 4, 3, 2, 1, 1][part as usize];

@@ -102,7 +102,7 @@ impl CompareOp {
 
 #[derive(Debug, Error)]
 #[error("perry.compare must produce a signless i1")]
-pub struct CompareResultErr;
+pub(crate) struct CompareResultErr;
 
 impl Verify for CompareOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
@@ -121,7 +121,7 @@ impl SideEffects for CompareOp {
 }
 
 /// Whether `value` is a signless `i1`, the type of branch conditions.
-pub fn is_bool(ctx: &Context, value: Value) -> bool {
+pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
     value
         .get_type(ctx)
         .deref(ctx)
@@ -168,7 +168,7 @@ impl ConvertOp {
 
 #[derive(Debug, Error)]
 #[error("perry.convert {0:?} has operand or result of the wrong type")]
-pub struct ConvertErr(crate::attrs::ConvertKind);
+pub(crate) struct ConvertErr(crate::attrs::ConvertKind);
 
 impl Verify for ConvertOp {
     fn verify(&self, ctx: &Context) -> Result<()> {

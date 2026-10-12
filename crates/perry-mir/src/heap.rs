@@ -22,7 +22,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum HeapErr {
+pub(crate) enum HeapErr {
     #[error("{0} expects a perry.record, found another type")]
     NotRecord(&'static str),
     #[error("record {record} has {expected} fields but perry.alloc supplies {found}")]
@@ -79,7 +79,7 @@ impl AllocOp {
         *self.get_attr_perry_tier(ctx).expect("alloc tier")
     }
 
-    pub fn set_tier(&self, ctx: &Context, tier: Tier) {
+    pub(crate) fn set_tier(&self, ctx: &Context, tier: Tier) {
         self.set_attr_perry_tier(ctx, tier);
     }
 }

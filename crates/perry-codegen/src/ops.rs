@@ -1,12 +1,12 @@
-//! Wasm lowering of scalar, control-flow and call operations.
+//! Wasm lowering of one MIR operation: dispatch to the domain lowerings, and directly the
+//! scalar, constant, global, control-flow, call and promise operations.
 use crate::{
-    DATA_BASE,
     function::FunctionLowering,
     regex,
     repr::{Repr, i32_type, nonzero_i32_constant, optional_inner, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp},
@@ -63,11 +63,7 @@ impl FunctionLowering<'_, '_> {
                 );
                 address
             } else {
-                while !self.state.data.bytes.len().is_multiple_of(8) {
-                    self.state.data.bytes.push(0);
-                }
-                let address = DATA_BASE + self.state.data.bytes.len() as u32;
-                self.state.data.bytes.extend_from_slice(&[0; 16]);
+                let address = self.state.data.append(8, &[0; 16]);
                 self.state.globals.insert(name, (address, ty));
                 address
             };
@@ -103,11 +99,7 @@ impl FunctionLowering<'_, '_> {
                 address
             } else {
                 let table = regex::compile(&key.0, &key.1)?;
-                while !self.state.data.bytes.len().is_multiple_of(4) {
-                    self.state.data.bytes.push(0);
-                }
-                let address = DATA_BASE + self.state.data.bytes.len() as u32;
-                self.state.data.bytes.extend(table);
+                let address = self.state.data.append(4, &table);
                 self.state.data.regexes.insert(key, address);
                 address
             };
@@ -116,17 +108,12 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if let Some(constant) = Operation::get_op::<perry_mir::integers::BigIntConstOp>(op, ctx) {
-            while !self.state.data.bytes.len().is_multiple_of(8) {
-                self.state.data.bytes.push(0);
-            }
-            let address = DATA_BASE + self.state.data.bytes.len() as u32;
-            self.state.data.bytes.extend_from_slice(
-                &constant
-                    .magnitude(ctx)
-                    .expect("verified integer")
-                    .to_le_bytes(),
-            );
-            self.state.data.bytes.extend_from_slice(&[0; 8]);
+            let magnitude = constant
+                .magnitude(ctx)
+                .context("BigInt constant without a u64 magnitude")?;
+            let mut bytes = [0; 16];
+            bytes[..8].copy_from_slice(&magnitude.to_le_bytes());
+            let address = self.state.data.append(8, &bytes);
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);
             return Ok(());

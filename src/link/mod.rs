@@ -4,9 +4,12 @@
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
 //! libraries: `perry-runtime` and the computation helpers.
 
+pub(crate) mod raw;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+use perry_codegen::HELPER_MODULE;
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
@@ -20,8 +23,6 @@ mod type_compaction;
 
 use libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
 pub(crate) use type_compaction::compact;
-
-pub(crate) const HELPER_MODULE: &str = "__perry_helper";
 
 struct CoreRelocations<'a> {
     functions: &'a BTreeMap<u32, u32>,

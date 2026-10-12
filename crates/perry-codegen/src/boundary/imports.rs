@@ -27,7 +27,7 @@ impl FunctionLowering<'_, '_> {
         let values = self.operands(ctx, op)?;
         let mark = self.root_mark(ctx);
         for (mir, value) in operands.iter().zip(&values) {
-            if crate::repr(ctx, mir.get_type(ctx))? == crate::Repr::Ref {
+            if repr(ctx, mir.get_type(ctx))? == Repr::Ref {
                 self.publish_roots(ctx, &[*value]);
             }
         }
@@ -35,7 +35,7 @@ impl FunctionLowering<'_, '_> {
             ctx,
             import.params.iter().any(AbiType::has_resources),
             Some(mark),
-        );
+        )?;
         self.canonical_borrows = true;
         let mut args = Vec::new();
         let mut params: Vec<_> = import.params.iter().flat_map(AbiType::flat).collect();
@@ -112,33 +112,26 @@ impl FunctionLowering<'_, '_> {
         } else {
             None
         };
-        let results = if import.asynchronous {
-            vec![Flat::I32]
-        } else if area.is_some() {
-            vec![]
-        } else {
-            result_flat
-        };
         let name = if import.asynchronous {
             format!("[async-lower]{}", import.name)
         } else {
             import.name.clone()
         };
-        let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
-        let host = crate::Host::Foreign(import.module.clone(), name, params, results);
-        let symbol = host.symbol();
-        self.state.host.insert(host);
+        let foreign = Foreign {
+            module: import.module.clone(),
+            name,
+            params,
+        };
         self.commit_resources(ctx);
-        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
-        let call = CallOp::new(ctx, symbol, args, result_types).get_operation();
-        self.insert(ctx, call);
-        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
-        self.canonical_borrows = false;
         if let Some(transfer) = transfer {
+            // An async lowering returns its subtask status.
+            let status = self.preserving_task(ctx, |b, ctx| {
+                b.host(ctx, ValueHost::Foreign(foreign, Flat::I32), args)
+            });
+            self.canonical_borrows = false;
             self.resource_scope = None;
             let ty = perry_mir::types::TransferType::get(ctx).into();
             let promise = self.new_promise(ctx, ty)?;
-            let status = call.deref(ctx).get_result(0);
             let mask = self.i32_const(ctx, 15);
             let state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
             let two = self.i32_const(ctx, 2);
@@ -159,16 +152,25 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, done, vec![]);
             self.block = done;
             self.define(ctx, op, promise);
-        } else if let Some(abi) = &import.result {
-            let mir = op.deref(ctx).get_result(0).get_type(ctx);
-            let value = if let Some(area) = area {
-                self.lift_load(ctx, abi, mir, area, 0)?
-            } else {
-                let mut values = call.deref(ctx).results().collect::<Vec<_>>();
-                values.reverse();
-                self.lift_flat(ctx, abi, mir, &mut values)?
-            };
-            self.define(ctx, op, value);
+        } else {
+            // A synchronous lowering returns one flat result directly; none, or more through
+            // `area`.
+            let result = self.preserving_task(ctx, |b, ctx| match *result_flat.as_slice() {
+                [flat] => Some(b.host(ctx, ValueHost::Foreign(foreign, flat), args)),
+                _ => {
+                    b.host_void(ctx, EffectHost::Foreign(foreign), args);
+                    None
+                }
+            });
+            self.canonical_borrows = false;
+            if let Some(abi) = &import.result {
+                let mir = op.deref(ctx).get_result(0).get_type(ctx);
+                let value = match area {
+                    Some(area) => self.lift_load(ctx, abi, mir, area, 0)?,
+                    None => self.lift_flat(ctx, abi, mir, &mut result.into_iter().collect())?,
+                };
+                self.define(ctx, op, value);
+            }
         }
         self.finish_resources(ctx);
         self.reset_roots(ctx, mark);

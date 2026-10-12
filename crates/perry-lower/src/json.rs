@@ -1,7 +1,7 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn json_scalar_equal(
         &mut self,
         ctx: &mut Context,
@@ -169,6 +169,7 @@ impl FunctionBuilder<'_> {
                 let decoded = self.emit_value(ctx, |ctx| {
                     perry_mir::variants::VariantNewOp::new(ctx, target, &name, payload)
                 });
+                self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
                 self.store(ctx, result, decoded);
                 self.jump(ctx, done);
                 self.switch_to(next);
@@ -206,7 +207,9 @@ impl FunctionBuilder<'_> {
                 };
                 values.push(self.fit(ctx, member, ty)?);
             }
-            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
+            let decoded = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values));
+            self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
+            return Ok(decoded);
         }
         if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
             let element = array_type.deref(ctx).element();
@@ -240,7 +243,7 @@ impl FunctionBuilder<'_> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
     /// `{}`: `js_object_literal_spread` copies each spread and `js_object_literal_define`
     /// defines each static member. Over JSON values it builds a JSON object; typed records
@@ -249,12 +252,12 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         target: LocalId,
-        body: &[Stmt],
+        body: &'s [Stmt],
     ) -> Result<Value> {
         const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
             response.json()) with static keys; computed keys, methods and accessors are not";
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
-        let is_target = |expr: &Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
+        let is_target = |expr: &'s Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
         for statement in body {
             match statement {
                 Stmt::Let {
@@ -331,7 +334,7 @@ impl FunctionBuilder<'_> {
 
     /// A member value of a JSON object literal: a JSON value, or a number, string, boolean
     /// or `null` converted to one.
-    pub(super) fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    fn json_value(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         if matches!(expr, Expr::Null) {
             return Ok(self.intrinsic(ctx, Intrinsic::JsonNull, vec![]));
         }

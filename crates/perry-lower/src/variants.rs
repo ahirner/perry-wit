@@ -22,8 +22,8 @@ fn path(expr: &Expr) -> Option<Path> {
     }
 }
 
-impl FunctionBuilder<'_> {
-    pub(super) fn variant_condition(&mut self, condition: &Expr, truth: bool) {
+impl<'s> FunctionBuilder<'s> {
+    pub(super) fn variant_condition(&mut self, condition: &'s Expr, truth: bool) {
         if let Expr::Unary {
             op: UnaryOp::Not,
             operand,
@@ -44,7 +44,7 @@ impl FunctionBuilder<'_> {
 
     /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a
     /// path and the other a string.
-    pub(super) fn variant_equality(&mut self, left: &Expr, right: &Expr, equal: bool) {
+    pub(super) fn variant_equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
         let (object, tag) = match (left, right) {
             (
                 Expr::PropertyGet {
@@ -78,7 +78,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn narrow_primitive(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
+        expr: &'s Expr,
         value: Value,
     ) -> Result<Value> {
         let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
@@ -126,7 +126,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn variant_member(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         value: Value,
         field: &str,
     ) -> Result<Value> {
@@ -171,7 +171,7 @@ impl FunctionBuilder<'_> {
         ctx: &mut Context,
         ty: TypeHandle,
         names: &[&str],
-        args: &[Expr],
+        args: &'s [Expr],
     ) -> Result<Value> {
         ensure!(
             names.iter().all(|&n| n == "tag" || n == "val"),

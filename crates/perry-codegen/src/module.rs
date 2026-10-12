@@ -76,6 +76,13 @@ impl Data {
         }
         DATA_BASE + self.bytes.len() as u32
     }
+
+    /// Append `bytes` at the next multiple of `alignment` and return their address.
+    pub(crate) fn append(&mut self, alignment: usize, bytes: &[u8]) -> u32 {
+        let address = self.align(alignment);
+        self.bytes.extend_from_slice(bytes);
+        address
+    }
 }
 
 /// What the lowering of a module accumulates across its functions. Configuration borrowed
@@ -114,6 +121,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
     pub(crate) json_serializers: HashMap<TypeHandle, Identifier>,
+    pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
     pub(crate) call_effects: HashMap<Identifier, perry_mir::effects::Summary>,
@@ -204,6 +212,17 @@ pub(crate) fn lower(
         uses_json_bodies: false,
         uses_http_server: false,
         json_serializers: HashMap::new(),
+        retains_json: functions.iter().any(|function| {
+            crate::analysis::function_ops(ctx, function)
+                .into_iter()
+                .any(|op| {
+                    Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
+                        |op| {
+                            op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonRetain)
+                        },
+                    )
+                })
+        }),
         leased: HashSet::new(),
         collectible: !resource_keys.is_empty()
             || matches!(exports, Exports::RawChecked)
@@ -220,8 +239,7 @@ pub(crate) fn lower(
         .iter()
         .any(|f| f.get_symbol_name(ctx) == INITIALIZER)
     {
-        let address = state.data.align(1);
-        state.data.bytes.extend_from_slice(&[0; 8]);
+        let address = state.data.append(1, &[0; 8]);
         state.initializer = Some((INITIALIZER, address));
         state.collectible = true;
     }
@@ -248,7 +266,7 @@ pub(crate) fn lower(
         }
     }
     if !state.async_functions.is_empty() {
-        async_split::drive(ctx, &mut state);
+        async_split::resume(ctx, &mut state);
     }
     if let Exports::Canonical { exports, .. } = exports {
         bind_exports(ctx, &mut state, &functions, exports)?;
@@ -393,8 +411,6 @@ fn async_export_wrapper(
     b.insert(ctx, call);
     let promise = call.deref(ctx).get_result(0);
     b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
-    let drive = CallOp::new(ctx, async_split::DRIVE, vec![], vec![]).get_operation();
-    b.insert(ctx, drive);
     let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
     let fulfilled_state = b.i32_const(ctx, perry_runtime::promise::FULFILLED as i32);
     let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);

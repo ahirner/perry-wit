@@ -2,7 +2,123 @@
 //! resolution across modules.
 use anyhow::Result;
 
-use crate::core_program::Program;
+use crate::core_program::{Counter, Program};
+
+/// Inline and named callbacks see `(item, index, array)` over the original length, propagate
+/// exceptions, run `finally`, return through `switch` and endless loops (an empty return is
+/// `undefined`), and `for...of` visits elements pushed during iteration and string scalars.
+#[test]
+fn array_callbacks_and_iteration_match_javascript() {
+    let source = r#"
+function twice(n:number):number {return n*2;}
+function nothing(n:number):void {}
+export function callbacks():number {
+ let calls=0;
+ const numbers:number[]=[1,2,3];
+ const mapped=numbers.map((n,i,a)=>{calls++;if(i===0)a.push(4);return n+i;});
+ const doubled=mapped.filter(n=>n>1).map(twice);
+ if(calls!==3 || mapped.length!==3 || doubled[0]!==6 || doubled[1]!==10)return 1;
+ const values:number[]=[1,2];
+ let trace=0;
+ try {values.map((n,i,a)=>{trace=trace*10+n;if(i===1)throw new Error('stop');a[1]=4;return n;});return 2;}
+ catch(e){if(e.message!=='stop')return 3;}
+ const finished=values.map(n=>{try {return n*2;}finally {trace++;}});
+ if(trace!==16 || finished[1]!==8)return 4;
+ const small:number[]=[1,2,3];
+ const cases:number[]=small.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
+ const loops:number[]=small.map(n=>{while(true){return n*2;}});
+ const empty=small.map(n=>{switch(n){case 1:return;default:return n;}});
+ const overridden=small.map(n=>{try{return;}finally{return n;}});
+ const ignored=small.map(n=>{return n;return;});
+ if(cases[0]+cases[1]+cases[2]+loops[2]!==18 || empty[0]!==undefined || empty[1]!==2 || overridden[0]!==1 || ignored[0]!==1)return 5;
+ const optional=small.map(n=>{if(n===1)return 'yes';});
+ const bare=small.map(n=>{if(n===1)return;return 'value';});
+ if(optional[0]!=='yes' || optional[1]!==undefined || bare[0]!==undefined || bare[1]!=='value')return 6;
+ return small.filter(nothing).length;
+}
+export function iteration():number {
+ const values:number[]=[1,2];
+ let visits=0;
+ for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
+ let text='';
+ for(const word of 'c,d'.split(',')){text+=word;}
+ for(const scalar of 'é🙂a'){text+=scalar+':';}
+ return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
+}
+"#;
+    let mut program = Program::checked(source, "array-callbacks.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("callbacks", &[]), (0.0, 0));
+    assert_eq!(program.call("iteration", &[]).0[0].unwrap_f64(), 0.0);
+}
+
+/// `includes` (SameValueZero) and `indexOf` (strict equality) over numbers, optionals, mixed
+/// values and records with ECMAScript start positions; `push` evaluates every argument and
+/// spread before the receiver grows, so a failed argument pushes nothing.
+#[test]
+fn array_search_and_push_match_javascript() {
+    let source = r#"
+interface Item {n:number}
+const values:number[]=[1];
+function start():number {values.push(2);return 0;}
+const a:number[]=[1,2];
+const rest:number[]=[3,4];
+function later():number {rest[0]=8;return a.length;}
+function fail():number {throw new Error('argument');}
+function failText():string {throw new Error('argument');}
+export function search():number {
+ if(!values.includes(2,start()))return 1;
+ const item:Item={n:1};
+ const other:Item={n:1};
+ const objects:Item[]=[item];
+ if(!objects.includes(item) || objects.includes(other) || objects.indexOf(other)!==-1)return 2;
+ const words:string[]=['a','b'];
+ if(!words.includes('b') || words.indexOf('b',-1)!==1)return 3;
+ const numbers:number[]=[1,4];
+ if(!numbers.includes(1,NaN) || numbers.includes(1,Infinity) || !numbers.includes(1,-Infinity))return 4;
+ if(numbers.indexOf(4,-2.8)!==1 || numbers.indexOf(1,0.8)!==0 || numbers.includes(1,-1))return 5;
+ const special:number[]=[NaN,0];
+ if(!special.includes(NaN) || special.indexOf(NaN)!==-1 || !special.includes(-0))return 6;
+ const optional:(number|undefined)[]=[undefined,NaN,1];
+ if(!optional.includes(NaN) || !optional.includes(undefined) || optional.indexOf(NaN)!==-1)return 7;
+ const mixed:(string|number)[]=['x',NaN];
+ return mixed.includes(NaN) && mixed.indexOf(NaN)===-1 ? 0 : 8;
+}
+export function push():number {
+ const pushed:number[]=[];
+ if(pushed.push(1,pushed.length)!==2 || pushed[1]!==0 || pushed.push()!==2)return 1;
+ const holder:{items:string[]}={items:[]};
+ try {holder.items.push('first',failText());}catch(e){}
+ if(holder.items.length!==0)return 2;
+ if(a.push(0,...rest,later())!==6)return 3;
+ if(a[3]!==3 || a[4]!==4 || a[5]!==2)return 4;
+ if(a.push(...a)!==12 || a[9]!==3)return 5;
+ try{a.push(7,...rest,fail());}catch{}
+ if(a.length!==12)return 6;
+ const words:string[]=['é'];words.push(...'🙂,x'.split(','));
+ return words.length===3 && words[1]==='🙂' ? 0:7;
+}
+"#;
+    let mut program = Program::checked(source, "array-search.ts");
+    assert_eq!(program.outcome("search", &[]), (0.0, 0));
+    assert_eq!(program.outcome("push", &[]), (0.0, 0));
+}
+
+#[test]
+fn number_coercion_uses_javascript_notation() {
+    let source = r#"
+export function run():number {
+ const values:number[]=[-0,NaN,Infinity,-Infinity,1e-7,1e-6,1e20,1e21];
+ const expected:string[]=['0','NaN','Infinity','-Infinity','1e-7','0.000001','100000000000000000000','1e+21'];
+ for(let i=0;i<values.length;i++) {
+   const value=values[i];
+   if(String(value)!==expected[i] || ''+value!==expected[i] || `${value}`!==expected[i])return i+1;
+ }
+ return 0;
+}
+"#;
+    assert_eq!(Program::new(source).call("run", &[]).0[0].unwrap_f64(), 0.0);
+}
 
 #[test]
 fn checked_json_tuples_are_arrays_and_preserve_numeric_element_order() {
@@ -184,6 +300,9 @@ export function run(): number {
     if (keys[0] !== '0' || keys[1] !== '2' || keys[2] !== 'a') return -2;
     const a = raw[keys[2]];
     const first = a['0'];
+    const encoded = JSON.stringify(raw);
+    if (encoded !== '{"0":3,"2":2,"a":[{"":9}]}') return -6;
+    if (JSON.stringify({ ...raw }) !== encoded) return -7;
     if (a['00'] !== undefined) return -3;
     const text = 'é🙂';
     if (text[-1] !== undefined || text[2] !== undefined || text[0.5] !== undefined) return -4;
@@ -191,5 +310,46 @@ export function run(): number {
     return raw[0] + first[''] + a['length'] + length({extra: [['status', {jsonText: 'ok'}]]});
 }
 "#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (21.0, 0));
+    let mut program = Program::checked(source, "json-pointer-lookup.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("run", &[]), (21.0, 0));
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}
+
+#[test]
+fn generic_interfaces_aliases_and_defaults_resolve_to_concrete_shapes() {
+    let source = r#"
+interface Item { n:number }
+interface Pair<Item,Other=Item> { a:Item; b:Other }
+interface Page<T> {items:T[];next:string|null}
+interface Entry<T=string> {value:T}
+type Box<T> = {item:T};
+interface Link<T> {value:T;next:Link<T>|null}
+function size(page:Page<Entry>):number {return page.items[0].value.length;}
+function unbox(box:Box<number>):number {return box.item;}
+export function run():number {
+ const value:Pair<string,Item> = {a:'x',b:{n:17}};
+ const defaults:Pair<string> = {a:'a',b:'bc'};
+ const page:Page<Entry> = {items:[{value:'hello'}],next:null};
+ const link:Link<number> = {value:3,next:null};
+ return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
+}
+"#;
+    assert_eq!(Program::new(source).outcome("run", &[]), (29.0, 0));
+}
+
+#[test]
+fn unsupported_iterators_have_direct_diagnostics() {
+    for expression in ["new Headers()", "new URLSearchParams()"] {
+        let source = format!(
+            "export function run():number {{for(const value of {expression}){{}} return 0;}}"
+        );
+        let error = perry_wit::compile_core(&source, "iteration.ts").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("synchronous for...of requires"),
+            "{error:#}"
+        );
+    }
 }

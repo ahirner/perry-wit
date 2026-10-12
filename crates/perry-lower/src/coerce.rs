@@ -129,7 +129,7 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn is_optional(&self, ctx: &Context, value: Value) -> bool {
         optional_value(ctx, value.get_type(ctx)).is_some()
     }
@@ -206,8 +206,7 @@ impl FunctionBuilder<'_> {
             }
         }
         if ty.deref(ctx).is::<JsonType>() && ty != target {
-            if let Some(states) = absence(ctx, target) {
-                let inner = optional_value(ctx, target).expect("optional");
+            if let Some((inner, states)) = optional_parts(ctx, target) {
                 let convert = |b: &mut Self, ctx: &mut Context| {
                     let converted = b.fit(ctx, value, inner)?;
                     b.fit(ctx, converted, target)
@@ -289,7 +288,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// An expression that must be a string (`undefined` throws `TypeError`).
-    pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
         ensure!(
@@ -300,7 +299,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// An ECMAScript number used as an array index (R8: reads miss with `undefined`).
-    pub(super) fn index(&mut self, ctx: &mut Context, index: &Expr) -> Result<Value> {
+    pub(super) fn index(&mut self, ctx: &mut Context, index: &'s Expr) -> Result<Value> {
         let index = self.expression(ctx, index)?;
         let index = self.arithmetic(ctx, index);
         ensure!(
@@ -317,7 +316,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// An expression used as a number (`undefined` becomes `NaN`).
-    pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.arithmetic(ctx, value);
         ensure!(
@@ -331,7 +330,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn number_or(
         &mut self,
         ctx: &mut Context,
-        expr: Option<&Expr>,
+        expr: Option<&'s Expr>,
         default: f64,
     ) -> Result<Value> {
         match expr {
@@ -343,7 +342,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn typed_operand(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
+        expr: &'s Expr,
         want: Kind,
         what: &str,
     ) -> Result<Value> {
@@ -456,4 +455,10 @@ impl FunctionBuilder<'_> {
         };
         Ok(self.string(ctx, name))
     }
+}
+
+/// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
+pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
+    let number = FP64Type::get(ctx).into();
+    perry_mir::types::OptionalType::get(ctx, number).into()
 }

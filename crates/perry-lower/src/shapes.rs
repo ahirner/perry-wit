@@ -25,6 +25,8 @@ use pliron::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
+mod generics;
+
 pub(crate) struct Shapes<'h> {
     pub(crate) module: pliron::builtin::ops::ModuleOp,
     pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
@@ -199,6 +201,7 @@ impl<'h> Shapes<'h> {
                 let settled = self.settled_type(ctx, inner)?;
                 PromiseType::get(ctx, settled).into()
             }
+            HirType::Generic { base, type_args } => self.generic(ctx, base, type_args)?,
             HirType::Object(object) => {
                 ensure!(
                     object.index_signature.is_none(),
@@ -218,8 +221,22 @@ impl<'h> Shapes<'h> {
                 {
                     return Ok(StringType::get(ctx).into());
                 }
-                if members.iter().all(|m| matches!(m, HirType::Object(o) if matches!(o.properties.get("ok").map(|p| &p.ty), Some(HirType::Boolean)))) {
-                    return self.result(ctx, members);
+                let results: Option<Vec<&perry_hir::types::ObjectType>> = members
+                    .iter()
+                    .map(|member| match member {
+                        HirType::Object(object)
+                            if matches!(
+                                object.properties.get("ok").map(|p| &p.ty),
+                                Some(HirType::Boolean)
+                            ) =>
+                        {
+                            Some(object)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(alternatives) = results {
+                    return self.result(ctx, &alternatives);
                 }
                 if members.iter().any(|ty| matches!(ty, HirType::Number))
                     && members.iter().any(|ty| matches!(ty, HirType::String))
@@ -325,9 +342,13 @@ impl<'h> Shapes<'h> {
     }
 
     /// SDK results use disjoint, statically typed payload slots. The inactive slot is absent.
-    fn result(&self, ctx: &mut Context, members: &[HirType]) -> Result<TypeHandle> {
+    fn result(
+        &self,
+        ctx: &mut Context,
+        alternatives: &[&perry_hir::types::ObjectType],
+    ) -> Result<TypeHandle> {
         ensure!(
-            members.len() == 2,
+            alternatives.len() == 2,
             "a tagged result needs exactly two alternatives"
         );
         let mut fields = vec![(
@@ -336,10 +357,7 @@ impl<'h> Shapes<'h> {
         )];
         for name in ["value", "error"] {
             let mut payload = None;
-            for member in members {
-                let HirType::Object(object) = member else {
-                    unreachable!()
-                };
+            for object in alternatives {
                 ensure!(
                     object
                         .properties
@@ -468,11 +486,12 @@ impl<'h> Shapes<'h> {
             }
         }
         if let Some(interface) = self.hir.interfaces.iter().find(|i| i.name == name) {
+            if !interface.type_params.is_empty() {
+                return self.generic(ctx, name, &[]);
+            }
             ensure!(
-                interface.type_params.is_empty()
-                    && interface.extends.is_empty()
-                    && interface.methods.is_empty(),
-                "interface {name}: generics, extends and methods are not supported yet"
+                interface.extends.is_empty() && interface.methods.is_empty(),
+                "interface {name}: inheritance and methods are not supported yet"
             );
             let fields = interface
                 .properties
@@ -482,10 +501,9 @@ impl<'h> Shapes<'h> {
             return Ok(self.hir_record(ctx, Some(name), fields)?.into());
         }
         if let Some(alias) = self.hir.type_aliases.iter().find(|a| a.name == name) {
-            ensure!(
-                alias.type_params.is_empty(),
-                "generic type alias {name} is not supported yet"
-            );
+            if !alias.type_params.is_empty() {
+                return self.generic(ctx, name, &[]);
+            }
             return self.value_type(ctx, &alias.ty);
         }
         bail!("type {name} is not supported by the MIR backend yet")

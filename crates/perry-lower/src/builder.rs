@@ -20,9 +20,9 @@ pub(super) struct Handler {
 }
 
 /// An enclosing `finally`, run inline before `return`, `break` and `continue` leave it.
-#[derive(Clone)]
-pub(super) struct Finally {
-    pub(super) body: Vec<Stmt>,
+#[derive(Clone, Copy)]
+pub(super) struct Finally<'s> {
+    pub(super) body: &'s [Stmt],
     /// `handlers.len()` and `controls.len()` outside the `try`.
     pub(super) handlers: usize,
     pub(super) controls: usize,
@@ -33,6 +33,8 @@ pub(super) const EXIT_STATUS: u64 = 5;
 
 pub(super) struct FunctionBuilder<'s> {
     pub(super) region: Ptr<pliron::region::Region>,
+    /// The region's entry block, where slots are allocated so they dominate every use.
+    entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
     pub(super) locals: HashMap<LocalId, Value>,
@@ -43,8 +45,9 @@ pub(super) struct FunctionBuilder<'s> {
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
     pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
     pub(super) controls: Vec<Control>,
+    pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
     pub(super) handlers: Vec<Handler>,
-    pub(super) finallies: Vec<Finally>,
+    pub(super) finallies: Vec<Finally<'s>>,
     pub(super) signatures: &'s HashMap<FuncId, Signature>,
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
@@ -57,7 +60,7 @@ pub(super) struct FunctionBuilder<'s> {
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn lower(
         ctx: &mut Context,
-        function: &Function,
+        function: &'s Function,
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
@@ -70,7 +73,9 @@ impl<'s> FunctionBuilder<'s> {
             "closures capturing activation-local values are unsupported: {}",
             function.name
         );
-        let signature = &signatures[&function.id];
+        let signature = signatures
+            .get(&function.id)
+            .with_context(|| format!("no signature for function {}", function.name))?;
         let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
         Self::lower_body(
             ctx,
@@ -83,20 +88,17 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_body(
         ctx: &mut Context,
         signature: &Signature,
         params: &[LocalId],
-        body: &[Stmt],
+        body: &'s [Stmt],
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
-        let entry = func.get_entry_block(ctx);
-        let region = func.get_operation().deref(ctx).get_region(0);
         let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
         let mut globals: Vec<_> = shapes
             .globals
@@ -106,18 +108,11 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         globals.sort_by_key(|(id, _)| *id);
         for (id, ty) in globals {
-            let slot = builder.emit_value(ctx, |ctx| {
-                perry_mir::globals::GlobalOp::new(
-                    ctx,
-                    format!("global_{id}").try_into().expect("global name"),
-                    ty,
-                )
-            });
+            let slot = builder.global_slot(ctx, id, ty)?;
             builder.locals.insert(id, slot);
-            builder.global_slots.insert(slot);
         }
         for (index, param) in params.iter().enumerate() {
-            let value = entry.deref(ctx).get_argument(index);
+            let value = builder.entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
             builder.store(ctx, slot, value);
             builder.locals.insert(*param, slot);
@@ -127,7 +122,7 @@ impl<'s> FunctionBuilder<'s> {
             let values = builder.implicit_results(ctx);
             builder.emit(ctx, |ctx| ReturnOp::new(ctx, values));
         }
-        remove_unreachable(ctx, region);
+        remove_unreachable(ctx, builder.region);
         Ok(func)
     }
 
@@ -143,6 +138,7 @@ impl<'s> FunctionBuilder<'s> {
         let region = func.get_operation().deref(ctx).get_region(0);
         Self {
             region,
+            entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
@@ -150,6 +146,7 @@ impl<'s> FunctionBuilder<'s> {
             false_guards: HashSet::new(),
             variant_guards: Vec::new(),
             controls: Vec::new(),
+            callback_returns: Vec::new(),
             handlers: Vec::new(),
             finallies: Vec::new(),
             signatures,
@@ -162,7 +159,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
     pub(super) fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
         self.results
@@ -250,9 +247,12 @@ impl FunctionBuilder<'_> {
         op.get_result(ctx)
     }
 
+    /// A new block named `label` and a counter. Labels only make printed MIR readable, so the
+    /// name is legalised: every label names a block, and an identifier label stays as written.
     pub(super) fn new_block(&mut self, ctx: &mut Context, label: &str) -> Ptr<BasicBlock> {
         self.labels += 1;
-        let name = Identifier::try_from(format!("{label}{}", self.labels)).expect("label");
+        let name = Identifier::try_new(format!("{label}{}", self.labels))
+            .unwrap_or_else(|_| Legaliser::default().legalise(&format!("{label}{}", self.labels)));
         let block = BasicBlock::new(ctx, Some(name), vec![]);
         block.insert_at_back(self.region, ctx);
         block
@@ -356,11 +356,28 @@ impl FunctionBuilder<'_> {
 
     /// A slot inserted at the start of the entry block, dominating every use.
     pub(super) fn entry_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        let entry = self.region.deref(ctx).get_head().expect("entry block");
         let op = LocalOp::new(ctx, ty);
-        let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(entry);
+        let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(self.entry);
         at_entry.append_op(ctx, &op);
         op.get_result(ctx)
+    }
+
+    /// The region's entry block, cached at construction.
+    pub(super) fn entry_block(&self) -> Ptr<BasicBlock> {
+        self.entry
+    }
+
+    /// The slot of module binding `id`, shared by every function that reads or writes it.
+    pub(super) fn global_slot(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        let name = identifier(&format!("global_{id}"))?;
+        let slot = self.emit_value(ctx, |ctx| perry_mir::globals::GlobalOp::new(ctx, name, ty));
+        self.global_slots.insert(slot);
+        Ok(slot)
     }
 
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
@@ -416,7 +433,7 @@ impl FunctionBuilder<'_> {
         args: Vec<Value>,
     ) {
         assert!(
-            intrinsic.types().1.is_empty(),
+            !intrinsic.has_result(),
             "the result of {} is discarded",
             intrinsic.name()
         );
@@ -466,8 +483,11 @@ impl FunctionBuilder<'_> {
 /// to); they would break dominance of the values they use.
 pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::Region>) {
     let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
-    let mut reached = HashSet::from([blocks[0]]);
-    let mut stack = vec![blocks[0]];
+    let Some(&entry) = blocks.first() else {
+        return;
+    };
+    let mut reached = HashSet::from([entry]);
+    let mut stack = vec![entry];
     while let Some(block) = stack.pop() {
         for succ in block.deref(ctx).succs(ctx) {
             if reached.insert(succ) {

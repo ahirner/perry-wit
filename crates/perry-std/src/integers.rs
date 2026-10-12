@@ -4,8 +4,8 @@ use crate::runtime;
 /// Native and guest layout is identical; no pointer fields are stored here.
 #[repr(C)]
 pub(crate) struct Integer {
-    pub magnitude: u64,
-    pub negative: u32,
+    pub(crate) magnitude: u64,
+    pub(crate) negative: u32,
     padding: u32,
 }
 
