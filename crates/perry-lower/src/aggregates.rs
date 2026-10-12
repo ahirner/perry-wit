@@ -89,6 +89,28 @@ impl<'s> FunctionBuilder<'s> {
         {
             return self.variant_literal(ctx, ty, names, args);
         }
+        if let Some(record) =
+            expected.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+        {
+            let missing: Vec<_> = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .iter()
+                .filter(|(name, ty)| {
+                    !names.contains(&name.as_str())
+                        && !absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
+                })
+                .map(|(name, _)| name.to_string())
+                .collect();
+            if !missing.is_empty() {
+                return Err(PerryDiagnostic::error(
+                    DiagnosticCode::MissingRequiredField,
+                    format!("missing required record fields: {}", missing.join(", ")),
+                )
+                .into());
+            }
+        }
         let expected = expected
             .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
             .filter(|record| {

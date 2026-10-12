@@ -8,6 +8,11 @@ mod abi;
 pub mod api;
 mod audit;
 pub mod compiler;
+pub use api::compile as compile_with_diagnostics;
+pub use diagnostics::{
+    CompileError, DiagnosticCode, DiagnosticSeverity, PerryDiagnostic, SourceSpan,
+};
+pub use perry_wit_diagnostics as diagnostics;
 pub mod component;
 mod link;
 pub mod sdk;

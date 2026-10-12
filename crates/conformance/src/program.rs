@@ -34,7 +34,7 @@ pub(crate) const FIXTURE: &str = "é\0abc";
 pub(crate) const ENV_FIXTURE: &str = "grüezi";
 pub(crate) const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
-    export run: func(x: f64) -> observation;
+    export run: func(x: f64) -> result<observation>;
 }";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

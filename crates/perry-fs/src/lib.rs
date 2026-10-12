@@ -20,7 +20,7 @@ use core::{cell::UnsafeCell, ptr};
 use perry_abi::{
     BLOCKED, Buffer, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_READ, EVENT_STREAM_WRITE,
     EVENT_SUBTASK, SUBTASK_RETURNED, UNDEFINED_BITS, adopt, alloc, bytes, bytes_view, from_bytes,
-    join, promise_new, reject, resolve, subtask_drop, unjoin, view_bytes,
+    join, promise_new, resolve, subtask_drop, unjoin, view_bytes,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -837,5 +837,13 @@ fn fail(op: &mut Op, code: u8) {
     // SAFETY: the path argument is a string.
     message.extend_from_slice(unsafe { bytes(op.path) });
     message.push(b'\'');
-    reject(op.promise, from_bytes(message.as_slice()));
+    perry_abi::reject_native(
+        op.promise,
+        perry_abi::ERROR,
+        from_bytes(message.as_slice()),
+        name,
+        "filesystem",
+        "path",
+        unsafe { bytes(op.path) },
+    );
 }

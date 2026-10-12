@@ -40,6 +40,46 @@ impl AbiType {
                 .is_none_or(|_| record_field(ctx, record, "error").is_ok());
         (!tagged).then_some(completion)
     }
+    pub(super) fn error_completion(&self) -> Option<Completion<'_>> {
+        let Self::Result { err, .. } = self else {
+            return None;
+        };
+        Some(Completion {
+            result: self,
+            err: err.as_deref(),
+        })
+    }
+
+    pub(crate) fn accepts_exception(&self) -> bool {
+        match self {
+            Self::Result { err, .. } => err.as_deref().is_none_or(|err| match err {
+                Self::Bool
+                | Self::S8
+                | Self::U8
+                | Self::S16
+                | Self::U16
+                | Self::S32
+                | Self::U32
+                | Self::S64
+                | Self::U64
+                | Self::F32
+                | Self::F64
+                | Self::String
+                | Self::Enum(_) => true,
+                Self::Record(fields) => {
+                    fields.len() == 2
+                        && ["name", "message"].iter().all(|name| {
+                            fields
+                                .iter()
+                                .any(|(field, ty)| field == name && *ty == Self::String)
+                        })
+                }
+                _ => false,
+            }),
+            Self::OkHandle { .. } => true,
+            _ => false,
+        }
+    }
     pub(super) fn is_sum(&self) -> bool {
         matches!(
             self,
@@ -188,7 +228,12 @@ impl FunctionLowering<'_, '_> {
             let maximum = self.i32_const(ctx, exception_layout::ERROR as i32);
             let at_least = self.num(ctx, NumOpcode::I32GeU, vec![kind, minimum]);
             let at_most = self.num(ctx, NumOpcode::I32LeU, vec![kind, maximum]);
-            let matches = self.num(ctx, NumOpcode::I32And, vec![at_least, at_most]);
+            let basic = self.num(ctx, NumOpcode::I32And, vec![at_least, at_most]);
+            let six = self.i32_const(ctx, 6);
+            let offset = self.num(ctx, NumOpcode::I32Sub, vec![kind, six]);
+            let two = self.i32_const(ctx, 2);
+            let native = self.num(ctx, NumOpcode::I32LtU, vec![offset, two]);
+            let matches = self.num(ctx, NumOpcode::I32Or, vec![basic, native]);
             let valid = self.new_block(ctx, vec![]);
             let invalid = self.new_block(ctx, vec![]);
             self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));

@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp},
-    collections::{StringConcatOp, StringConstOp, StringLenOp},
+    collections::{ConcatOp, StringConstOp, StringLenOp},
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
     intrinsics::{
         Combinator, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, PromiseRejectedOp,
@@ -369,13 +369,31 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<perry_mir::collections::StringAppendOp>(op, ctx).is_some() {
+        if Operation::get_op::<perry_mir::collections::ConcatReuseOp>(op, ctx).is_some() {
+            if op
+                .deref(ctx)
+                .get_result(0)
+                .get_type(ctx)
+                .deref(ctx)
+                .is::<perry_mir::types::ArrayType>()
+            {
+                return self.array_concat(ctx, op);
+            }
             let args = self.operands(ctx, op)?;
             let value = self.runtime(ctx, Runtime::StringAppend, args);
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<StringConcatOp>(op, ctx).is_some() {
+        if Operation::get_op::<ConcatOp>(op, ctx).is_some() {
+            if op
+                .deref(ctx)
+                .get_result(0)
+                .get_type(ctx)
+                .deref(ctx)
+                .is::<perry_mir::types::ArrayType>()
+            {
+                return self.array_concat(ctx, op);
+            }
             let operands = self.operands(ctx, op)?;
             let value = self.runtime(ctx, Runtime::StringConcat, operands);
             self.define(ctx, op, value);

@@ -41,7 +41,15 @@ pub struct SdkResult {
 }
 
 /// Generates world/import declarations, an implementation check, and a missing tsconfig.
-pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
+pub fn generate_sdk_files(
+    options: &SdkOptions,
+) -> std::result::Result<SdkResult, crate::CompileError> {
+    generate_sdk_files_impl(options).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+    })
+}
+
+fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
     let world = resolve.select_world(&[package], options.world.as_deref())?;
     let artifacts = declarations(&resolve, world)?;

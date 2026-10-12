@@ -1,11 +1,16 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, `indexOf`/`includes`,
-//! and variadic or spread `push`.
+//! variadic or spread `push`, and string or array `concat`.
 use super::*;
-use perry_mir::{collections::ArrayAtOp, types::OptionalType};
+use perry_mir::{
+    attrs::Absence,
+    collections::{ArrayAtOp, ArrayExtendOp, ConcatSegmentsOp},
+    types::{OptionalType, StringType},
+};
 use perry_parser::swc_ecma_ast as ast;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 pub(super) const PUSH: &str = "$$perryArrayPush";
+pub(super) const CONCAT: &str = "$$perryArrayConcat";
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
 pub(super) fn preserve_arguments(module: &mut ast::Module) {
@@ -13,13 +18,15 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
     impl VisitMut for Arguments {
         fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
             call.visit_mut_children_with(self);
-            if (call.args.len() != 1 || call.args.iter().any(|argument| argument.spread.is_some()))
-                && let ast::Callee::Expr(callee) = &mut call.callee
+            if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
-                && method.sym == "push"
+                && (method.sym == "concat"
+                    || (method.sym == "push"
+                        && (call.args.len() != 1
+                            || call.args.iter().any(|argument| argument.spread.is_some()))))
             {
-                method.sym = PUSH.into();
+                method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
             }
         }
     }
@@ -144,7 +151,162 @@ fn completions(statements: &[Stmt]) -> u8 {
     result
 }
 
+pub(super) fn returns_optional(statements: &[Stmt]) -> bool {
+    completions(statements) & (FALLTHROUGH | EMPTY_RETURN) != 0
+}
+
 impl<'s> FunctionBuilder<'s> {
+    fn spread_value(
+        &mut self,
+        ctx: &mut Context,
+        source: &'s Expr,
+        element: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let expected = if matches!(source, Expr::Array(items) if items.is_empty()) {
+            element.map(|element| ArrayType::get(ctx, element).into())
+        } else {
+            None
+        };
+        self.expression_with(ctx, source, expected)
+    }
+
+    pub(super) fn concat_values(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        args: &'s [Expr],
+    ) -> Result<Value> {
+        let element = self.array_element(ctx, receiver)?;
+        let mut operands = Vec::with_capacity(args.len() + 1);
+        operands.push(receiver);
+        for arg in args {
+            let value = self.expression(ctx, arg)?;
+            operands.push(self.concat_segment(ctx, value, element)?);
+        }
+        Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, operands)))
+    }
+
+    fn concat_segment(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        element: TypeHandle,
+    ) -> Result<Value> {
+        if value.get_type(ctx).deref(ctx).is::<ArrayType>() {
+            let target = ArrayType::get(ctx, element).into();
+            self.fit(ctx, value, target)
+        } else {
+            let value = self.fit(ctx, value, element)?;
+            Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value])))
+        }
+    }
+
+    pub(super) fn array_spread(
+        &mut self,
+        ctx: &mut Context,
+        items: &'s [perry_hir::ArrayElement],
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let mut element = expected
+            .and_then(|ty| {
+                TypedHandle::<ArrayType>::from_handle(optional_value(ctx, ty).unwrap_or(ty), ctx)
+                    .ok()
+            })
+            .map(|array| array.deref(ctx).element());
+        let fixed_element = element.is_some();
+        if element.is_none() {
+            let env = perry_hir::HirTypeEnv::from_module(self.shapes.hir);
+            element = items.iter().find_map(|item| {
+                let (expression, spread) = match item {
+                    perry_hir::ArrayElement::Expr(Expr::Null | Expr::Undefined)
+                    | perry_hir::ArrayElement::Hole => return None,
+                    perry_hir::ArrayElement::Expr(expr) => (expr, false),
+                    perry_hir::ArrayElement::Spread(expr) => (expr, true),
+                };
+                let ty = perry_hir::infer_expr_type(expression, &env);
+                let ty = if spread {
+                    if let HirType::Array(inner) = ty {
+                        *inner
+                    } else {
+                        return None;
+                    }
+                } else {
+                    ty
+                };
+                self.shapes.value_type(ctx, &ty).ok()
+            });
+            if let Some(base) = element {
+                let states = items.iter().fold(absence(ctx, base), |states, item| {
+                    let state = match item {
+                        perry_hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
+                        perry_hir::ArrayElement::Expr(Expr::Undefined) => Some(Absence::Undefined),
+                        _ => None,
+                    };
+                    crate::coerce::merge_absence(states, state)
+                });
+                let inner = optional_value(ctx, base).unwrap_or(base);
+                element = Some(states.map_or(inner, |states| {
+                    OptionalType::get_with(ctx, inner, states).into()
+                }));
+            }
+        }
+        let mut result = None;
+        for item in items {
+            let (expression, spread) = match item {
+                perry_hir::ArrayElement::Expr(expression) => (expression, false),
+                perry_hir::ArrayElement::Spread(expression) => (expression, true),
+                perry_hir::ArrayElement::Hole => {
+                    return Err(PerryDiagnostic::error(
+                        DiagnosticCode::UnsupportedSpread,
+                        "sparse array spreads are outside the dense-array profile",
+                    )
+                    .into());
+                }
+            };
+            let value = if spread {
+                self.spread_value(ctx, expression, element)?
+            } else {
+                self.expression_with(ctx, expression, element)?
+            };
+            let source_element = if spread {
+                self.array_element(ctx, value)?
+            } else {
+                value.get_type(ctx)
+            };
+            if !fixed_element && let Some(previous) = element {
+                let inner = optional_value(ctx, previous).unwrap_or(previous);
+                ensure!(
+                    optional_value(ctx, source_element).unwrap_or(source_element) == inner,
+                    "array spreads must have one element type"
+                );
+                element = Some(
+                    crate::coerce::merge_absence(
+                        absence(ctx, previous),
+                        absence(ctx, source_element),
+                    )
+                    .map_or(inner, |states| {
+                        OptionalType::get_with(ctx, inner, states).into()
+                    }),
+                );
+                if let Some(prefix) = result {
+                    let target = ArrayType::get(ctx, element.unwrap()).into();
+                    result = Some(self.fit(ctx, prefix, target)?);
+                }
+            }
+            let element = *element.get_or_insert(source_element);
+            let source = if spread {
+                let target = ArrayType::get(ctx, element).into();
+                self.fit(ctx, value, target)?
+            } else {
+                let value = self.fit(ctx, value, element)?;
+                self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
+            };
+            let sources = result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
+            result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
+        }
+        result.context("an empty spread array needs an element type")
+    }
+
     /// `return` inside the innermost array callback: store the result and leave for its `done`
     /// block through the callback's own `finally` bodies.
     pub(super) fn callback_return(
@@ -489,9 +651,12 @@ impl<'s> FunctionBuilder<'s> {
             bail!("spread calls require a dense array push receiver")
         };
         ensure!(
-            property == PUSH || property == "push",
+            matches!(property.as_str(), PUSH | "push" | CONCAT | "concat"),
             "spread calls are supported for dense array push"
         );
+        if matches!(property.as_str(), CONCAT | "concat") {
+            return self.concat_call_spread(ctx, object, args);
+        }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         ensure!(
@@ -508,12 +673,10 @@ impl<'s> FunctionBuilder<'s> {
                     self.emit(ctx, |ctx| ArrayPushOp::new(ctx, values, value));
                 }
                 perry_hir::CallArg::Spread(expression) => {
-                    let source = self.expression(ctx, expression)?;
+                    let source = self.spread_value(ctx, expression, Some(element))?;
                     let source = self.defined(ctx, source)?;
-                    ensure!(
-                        self.array_element(ctx, source)? == element,
-                        "spread elements must fit the destination array"
-                    );
+                    let target = ArrayType::get(ctx, element).into();
+                    let source = self.fit(ctx, source, target)?;
                     self.append_array(ctx, values, source)?;
                 }
             }
@@ -522,15 +685,110 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.array_length(ctx, receiver))
     }
 
+    fn concat_call_spread(
+        &mut self,
+        ctx: &mut Context,
+        object: &'s Expr,
+        args: &'s [perry_hir::CallArg],
+    ) -> Result<Value> {
+        let receiver = self.expression(ctx, object)?;
+        let receiver = self.defined(ctx, receiver)?;
+        if receiver.get_type(ctx).deref(ctx).is::<StringType>() {
+            return self.string_concat_spread(ctx, receiver, args);
+        }
+        let element = self.array_element(ctx, receiver)?;
+        let array = ArrayType::get(ctx, element).into();
+        let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
+        for argument in args {
+            match argument {
+                perry_hir::CallArg::Expr(expression) => {
+                    let value = self.expression(ctx, expression)?;
+                    let source = self.concat_segment(ctx, value, element)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, source));
+                }
+                perry_hir::CallArg::Spread(expression) => {
+                    let source = self.spread_value(ctx, expression, Some(element))?;
+                    self.array_element(ctx, source)?;
+                    let limit = self.array_length(ctx, source);
+                    let zero = self.number(ctx, 0.0);
+                    self.index_loop(
+                        ctx,
+                        "concat_arguments",
+                        zero,
+                        limit,
+                        |b, ctx, current, _, _| {
+                            let value = b.element_at(ctx, source, current)?;
+                            let segment = b.concat_segment(ctx, value, element)?;
+                            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
+                            Ok(())
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(self.emit_value(ctx, |ctx| ConcatSegmentsOp::new(ctx, sources)))
+    }
+
+    fn string_concat_spread(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        args: &'s [perry_hir::CallArg],
+    ) -> Result<Value> {
+        let text = StringType::get(ctx).into();
+        let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, text, vec![]));
+        for argument in args {
+            match argument {
+                perry_hir::CallArg::Expr(expression) => {
+                    let value = self.expression(ctx, expression)?;
+                    let value = self.display(ctx, value)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, value));
+                }
+                perry_hir::CallArg::Spread(expression) => {
+                    let source = self.spread_value(ctx, expression, Some(text))?;
+                    let source = self.defined(ctx, source)?;
+                    self.array_element(ctx, source)?;
+                    let limit = self.array_length(ctx, source);
+                    let zero = self.number(ctx, 0.0);
+                    self.index_loop(
+                        ctx,
+                        "string_concat_arguments",
+                        zero,
+                        limit,
+                        |b, ctx, current, _, _| {
+                            let value = b.element_at(ctx, source, current)?;
+                            let value = b.display(ctx, value)?;
+                            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, value));
+                            Ok(())
+                        },
+                    )?;
+                }
+            }
+        }
+        let result = self.entry_slot(ctx, text);
+        self.store(ctx, result, receiver);
+        let limit = self.array_length(ctx, sources);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(
+            ctx,
+            "string_concat_segments",
+            zero,
+            limit,
+            |b, ctx, current, _, _| {
+                let previous = b.load(ctx, result)?;
+                let value = b.element_at(ctx, sources, current)?;
+                let joined = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
+                b.store(ctx, result, joined);
+                Ok(())
+            },
+        )?;
+        self.load(ctx, result)
+    }
+
     /// Push every element of `source` onto `target`.
     fn append_array(&mut self, ctx: &mut Context, target: Value, source: Value) -> Result<()> {
-        let limit = self.array_length(ctx, source);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "spread", zero, limit, |b, ctx, current, _, _| {
-            let value = b.element_at(ctx, source, current)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, target, value));
-            Ok(())
-        })
+        self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, target, source));
+        Ok(())
     }
 
     /// `for (i = start; i < limit; i++) body` over `f64` indices. `body` gets `i`, the block

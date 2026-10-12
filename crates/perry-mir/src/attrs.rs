@@ -79,8 +79,19 @@ pub enum ErrorKind {
     Any,
     TypeError,
     RangeError,
+    ReferenceError,
+    SyntaxError,
     /// A thrown value that is not an `Error` object (`throw 90`).
     Value,
     /// `process.exit`: unwinds to the export without running `catch` or `finally`.
     Exit,
 }
+
+/// Operands whose storage may be consumed after their final observation.
+#[pliron_attr(
+    name = "perry.reuse_operands",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub struct ReuseOperands(pub Vec<u32>);

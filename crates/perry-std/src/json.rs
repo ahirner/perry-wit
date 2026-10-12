@@ -19,6 +19,8 @@ use perry_abi::json::{MAX_DEPTH, MEMBER_COUNT};
 
 /// A member a spread set to `undefined`: it hides earlier values and is not serialized.
 const UNDEFINED: u32 = 0;
+const EXCEPTION: u32 = 7;
+const NATIVE: u32 = 8;
 /// Word 28 of an object: nonzero once its members are in property order.
 const CANONICAL: usize = 28;
 const NODE_BYTES: u32 = 32;
@@ -45,6 +47,7 @@ fn address(node: *mut u8) -> u32 {
 fn new_node(kind: u32) -> *mut u8 {
     let shape: &'static [u32] = match kind {
         STRING => &[0, 3, 4, 8, 24],
+        EXCEPTION | NATIVE => &[0, 4, 4, 8, 16, 24],
         ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
         _ => &[0, 2, 4, 24],
     };
@@ -99,6 +102,23 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
         return core::ptr::null_mut();
     }
     match word(value, 0) {
+        NATIVE => return native_property(value, name),
+        EXCEPTION => {
+            let error = node(word(value, 8));
+            return match name {
+                b"name" => unsafe {
+                    std_json_from_string(crate::exception::std_exception_name(error))
+                },
+                b"message" => unsafe {
+                    std_json_from_string(crate::runtime::exception_message(error))
+                },
+                b"cause" => unsafe {
+                    *(error.add(crate::runtime::layout::exception::CAUSE as usize)
+                        as *const *mut u8)
+                },
+                _ => core::ptr::null_mut(),
+            };
+        }
         ARRAY => {
             if name == b"length" {
                 return std_json_from_number(f64::from(word(value, MEMBER_COUNT)));
@@ -217,6 +237,9 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     match word(value, 0) {
         STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
         ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
+        NATIVE if word(node(word(value, 12)), 0) == 5 => {
+            f64::from(word(node(word(value, 8)), 0)).to_bits()
+        }
         _ => crate::runtime::UNDEFINED_BITS,
     }
 }
@@ -299,7 +322,7 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
             u32::from(number != 0.0 && !number.is_nan())
         }
         STRING => u32::from(word(value, 12) != 0),
-        ARRAY | OBJECT => 1,
+        ARRAY | OBJECT | EXCEPTION | NATIVE => 1,
         _ => unreachable!("JSON tag"),
     }
 }
@@ -500,6 +523,11 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             return false;
         }
         match word(current, 0) {
+            NATIVE => {
+                current = native_snapshot(current);
+                continue;
+            }
+            EXCEPTION => text.extend_from_slice(b"{}"),
             NULL => text.extend_from_slice(b"null"),
             BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
                 b"true"
@@ -909,4 +937,213 @@ pub(crate) extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
     } else {
         node(word(value, 4))
     }
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_from_exception(exception: *mut u8) -> *mut u8 {
+    let value = new_node(EXCEPTION);
+    set_word(value, 8, address(exception));
+    value
+}
+/// Strict equality preserves scalar values and identity of live cause references.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_strict_equal(left: *mut u8, right: *mut u8) -> u32 {
+    if left.is_null() || right.is_null() {
+        return u32::from(left == right);
+    }
+    let kind = word(left, 0);
+    if kind != word(right, 0) {
+        return 0;
+    }
+    u32::from(match kind {
+        NULL => true,
+        BOOLEAN => word(left, 8) == word(right, 8),
+        STRING => string_bytes(left) == string_bytes(right),
+        NUMBER => {
+            // SAFETY: both nodes hold f64 payloads.
+            unsafe { *left.add(8).cast::<f64>() == *right.add(8).cast::<f64>() }
+        }
+        EXCEPTION | NATIVE => word(left, 8) == word(right, 8),
+        _ => left == right,
+    })
+}
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_origin_equal(value: *mut u8, origin: *mut u8) -> u32 {
+    u32::from(
+        !value.is_null()
+            && matches!(word(value, 0), EXCEPTION | NATIVE)
+            && word(value, 8) == address(origin),
+    )
+}
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_to_exception(value: *mut u8) -> *mut u8 {
+    use perry_abi::layout::exception::*;
+    if value.is_null() {
+        return perry_abi::exception_value(TAG_UNDEFINED, 0);
+    }
+    let (tag, bits) = match word(value, 0) {
+        EXCEPTION => return node(word(value, 8)),
+        NULL => (TAG_NULL, 0),
+        BOOLEAN => (TAG_BOOLEAN, word(value, 8) as u64),
+        NUMBER => {
+            // SAFETY: this node holds a numeric payload.
+            (TAG_NUMBER, unsafe { *value.add(8).cast::<u64>() })
+        }
+        STRING => (TAG_STRING, std_json_to_string(value) as usize as u64),
+        _ => (TAG_JSON, value as usize as u64),
+    };
+    perry_abi::exception_value(tag, bits)
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_exception_equal(value: *mut u8, exception: *mut u8) -> u32 {
+    use perry_abi::layout::exception::*;
+    if word(exception, KIND as usize) != THROWN_VALUE {
+        return std_json_origin_equal(value, exception);
+    }
+    let tag = word(exception, TAG as usize);
+    // SAFETY: the tag identifies the exception's value slot.
+    let bits = unsafe { *exception.add(VALUE as usize).cast::<u64>() };
+    if tag == TAG_UNDEFINED {
+        return u32::from(value.is_null());
+    }
+    if tag == TAG_JSON {
+        return std_json_strict_equal(value, node(bits as u32));
+    }
+    if value.is_null() {
+        return 0;
+    }
+    u32::from(match (tag, word(value, 0)) {
+        (TAG_NULL, NULL) => true,
+        (TAG_BOOLEAN, BOOLEAN) => bits == word(value, 8) as u64,
+        (TAG_STRING, STRING) => {
+            string_bytes(value) == unsafe { crate::runtime::bytes(node(bits as u32)) }
+        }
+        (TAG_NUMBER, NUMBER) => f64::from_bits(bits) == unsafe { *value.add(8).cast::<f64>() },
+        _ => false,
+    })
+}
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_exception_is(value: *mut u8, expected: u32) -> u32 {
+    if value.is_null() || word(value, 0) != EXCEPTION {
+        return 0;
+    }
+    let kind = word(node(word(value, 8)), 0);
+    u32::from(if expected == 0 {
+        matches!(kind, 1..=3 | 6 | 7)
+    } else {
+        kind == expected
+    })
+}
+
+/// ECMAScript ToString for supported dynamic primitives and cause references.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_display(value: *mut u8) -> *mut u8 {
+    if value.is_null() {
+        return from_static("undefined");
+    }
+    match word(value, 0) {
+        NULL => from_static("null"),
+        BOOLEAN => from_static(if word(value, 8) == 0 { "false" } else { "true" }),
+        STRING => std_json_to_string(value),
+        NUMBER => {
+            let mut text = Buffer::new();
+            let number = unsafe { *(value.add(8) as *const f64) };
+            append_number(&mut text, number);
+            crate::runtime::from_bytes(text.as_slice())
+        }
+        _ => from_static("[object Object]"),
+    }
+}
+
+/// A live native reference with its compiler-emitted layout descriptor.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -> *mut u8 {
+    let value = new_node(NATIVE);
+    set_word(value, 8, address(origin));
+    set_word(value, 12, address(descriptor));
+    value
+}
+fn native_slot(bits: u64, descriptor: *mut u8) -> *mut u8 {
+    match word(descriptor, 0) {
+        1 => std_json_from_number(f64::from_bits(bits)),
+        2 => std_json_from_scalar(BOOLEAN, bits as u32),
+        3 => unsafe { std_json_from_string(node(bits as u32)) },
+        4 | 5 => std_json_native(node(bits as u32), descriptor),
+        6 => std_json_from_exception(node(bits as u32)),
+        7 => {
+            let inner = node(word(descriptor, 4));
+            let (undefined, null) = match word(inner, 0) {
+                1 => (crate::runtime::UNDEFINED_BITS, 0x7ff0_0000_0000_0002),
+                2 => (2, 3),
+                _ => (0, 1),
+            };
+            if bits == undefined {
+                core::ptr::null_mut()
+            } else if bits == null {
+                std_json_from_scalar(NULL, 0)
+            } else {
+                native_slot(bits, inner)
+            }
+        }
+        _ => unreachable!("native layout descriptor"),
+    }
+}
+fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
+    let (origin, descriptor) = (node(word(value, 8)), node(word(value, 12)));
+    match word(descriptor, 0) {
+        4 => {
+            for index in 0..word(descriptor, 4) {
+                let field = unsafe { descriptor.add(8 + index as usize * 12) };
+                let key = unsafe { crate::runtime::bytes(node(word(field, 0))) };
+                if key == name {
+                    let slot = unsafe { *(origin.add(word(field, 8) as usize).cast::<u64>()) };
+                    return native_slot(slot, node(word(field, 4)));
+                }
+            }
+            core::ptr::null_mut()
+        }
+        5 => {
+            let length = word(origin, 0);
+            if name == b"length" {
+                return std_json_from_number(f64::from(length));
+            }
+            if let Some(index) = array_index(name).filter(|&index| index < length) {
+                let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
+                let slot = unsafe { *data.add(index as usize * 8).cast::<u64>() };
+                native_slot(slot, node(word(descriptor, 4)))
+            } else {
+                core::ptr::null_mut()
+            }
+        }
+        _ => unreachable!("native aggregate descriptor"),
+    }
+}
+fn native_snapshot(value: *mut u8) -> *mut u8 {
+    let descriptor = node(word(value, 12));
+    let result = new_node(if word(descriptor, 0) == 5 {
+        ARRAY
+    } else {
+        OBJECT
+    });
+    let count = if word(descriptor, 0) == 5 {
+        word(node(word(value, 8)), 0)
+    } else {
+        word(descriptor, 4)
+    };
+    for index in 0..count {
+        if word(descriptor, 0) == 5 {
+            let origin = node(word(value, 8));
+            let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
+            let slot = unsafe { *data.add(index as usize * 8).cast::<u64>() };
+            let item = native_slot(slot, node(word(descriptor, 4)));
+            append(result, item, core::ptr::null_mut());
+        } else {
+            let name = node(word(descriptor, 8 + index as usize * 12));
+            let key = unsafe { std_json_from_string(name) };
+            let item = native_property(value, string_bytes(key));
+            append(result, item, key);
+        }
+    }
+    result
 }

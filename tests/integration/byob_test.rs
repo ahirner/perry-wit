@@ -11,7 +11,7 @@ use crate::engine::async_engine;
 
 async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, Instance)> {
     let wit = format!(
-        "package test:byob; world run {{ export run: async func(input: stream<u8>) -> {result}; }}"
+        "package test:byob; world run {{ export run: async func(input: stream<u8>) -> result<{result}>; }}"
     );
     let (resolve, package) = perry_wit::component::wit::resolve_source("byob.wit", &wit)?;
     let world = resolve.select_world(&[package], Some("run"))?;
@@ -78,12 +78,17 @@ async fn byob_reuses_transferred_buffers_with_offsets_and_bounded_memory() -> Re
     let source = SUM_BYTES;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for size in [0, 1, 8191, 8192, 8193, 4 * 1024 * 1024, 37] {
         let bytes: Vec<u8> = (0..size).map(|i| (i * 37 + i / 251) as u8).collect();
         let expected = bytes.iter().map(|&b| f64::from(b)).sum::<f64>();
         let input = StreamReader::new(&mut store, bytes)?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0, expected);
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0.unwrap(),
+            expected
+        );
         store.assert_concurrent_state_empty();
     }
     Ok(())
@@ -102,7 +107,9 @@ async fn byob_minimum_and_short_eof_preserve_transferred_bytes() -> Result<()> {
     "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (Vec<u8>,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
+        &mut store, "run",
+    )?;
     for size in [0, 1, 7, 8, 9] {
         let bytes: Vec<u8> = (1..=size).collect();
         let read = usize::from(size.min(8));
@@ -110,7 +117,10 @@ async fn byob_minimum_and_short_eof_preserve_transferred_bytes() -> Result<()> {
         expected.extend_from_slice(&bytes[..read]);
         expected.resize(10, 0);
         let input = StreamReader::new(&mut store, bytes)?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0, expected);
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0.unwrap(),
+            expected
+        );
         store.assert_concurrent_state_empty();
     }
     Ok(())
@@ -140,7 +150,9 @@ async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
     "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (Vec<u8>,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
+        &mut store, "run",
+    )?;
     for prefix in [0, 2] {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
@@ -173,7 +185,7 @@ async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
             tokio::join!(invocation, feed)
         })
         .await?;
-        assert_eq!(result?.0, [3, 7, 11, 19, 23]);
+        assert_eq!(result?.0.unwrap(), [3, 7, 11, 19, 23]);
         assert!(observations.dropped.load(Ordering::SeqCst));
         store.assert_concurrent_state_empty();
     }
@@ -199,7 +211,9 @@ async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
     "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (_sender, receiver) = mpsc::channel(1);
@@ -216,7 +230,8 @@ async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
                 run.call_async(&mut store, (input,))
             )
             .await??
-            .0,
+            .0
+            .unwrap(),
             1.0
         );
         assert!(observations.dropped.load(Ordering::SeqCst));
@@ -246,10 +261,12 @@ async fn byob_validation_rejects_without_transferring_the_buffer() -> Result<()>
     "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..3 {
         let input = StreamReader::new(&mut store, vec![1, 2, 3])?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0, 7.0);
+        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 7.0);
         store.assert_concurrent_state_empty();
     }
     Ok(())
@@ -268,7 +285,9 @@ async fn byob_minimum_waits_across_host_releases() -> Result<()> {
         await reader.cancel();reader.releaseLock();return bytes;
     }"#;
     let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (Vec<u8>,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
@@ -294,7 +313,8 @@ async fn byob_minimum_waits_across_host_releases() -> Result<()> {
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(5), invocation)
                 .await??
-                .0,
+                .0
+                .unwrap(),
             [1, 2, 3, 4]
         );
         store.assert_concurrent_state_empty();
@@ -328,10 +348,12 @@ async fn buffered_byob_reads_keep_offsets_and_reject_short_closed_queues() -> Re
     "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..10 {
         let input = StreamReader::new(&mut store, Vec::<u8>::new())?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0, 1.0);
+        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 1.0);
         store.assert_concurrent_state_empty();
     }
     Ok(())
@@ -341,7 +363,9 @@ async fn buffered_byob_reads_keep_offsets_and_reject_short_closed_queues() -> Re
 async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> Result<()> {
     let (mut store, instance) = instantiate(SUM_BYTES, "f64").await?;
     *store.data_mut() = StoreLimitsBuilder::new().memory_size(512 * 1024).build();
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..10 {
         let left = StreamReader::new(&mut store, vec![3u8; 65_539])?;
         let right = StreamReader::new(&mut store, vec![7u8; 131_079])?;
@@ -351,7 +375,7 @@ async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> R
                     run.call_concurrent(accessor, (left,)),
                     run.call_concurrent(accessor, (right,))
                 );
-                Ok::<_, wasmtime::Error>((left?.0, right?.0))
+                Ok::<_, wasmtime::Error>((left?.0.unwrap(), right?.0.unwrap()))
             })
             .await??;
         assert_eq!((left, right), (65_539.0 * 3.0, 131_079.0 * 7.0));
@@ -391,10 +415,12 @@ export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
 "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..3 {
         let input = StreamReader::new(&mut store, vec![9u8; 32])?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0, 7.0);
+        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 7.0);
         store.assert_concurrent_state_empty();
     }
     Ok(())

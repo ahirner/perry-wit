@@ -149,10 +149,17 @@ fn execute_function(
         )
         .and_then(|(resolve, package)| {
             let world = resolve.select_world(&[package], Some("handler"))?;
-            compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
+            Ok(compile_for_world(
+                source,
+                &path.to_string_lossy(),
+                &resolve,
+                world,
+                true,
+            )?)
         })
     } else {
         compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
+            .map_err(Into::into)
     };
     let compiled = match compilation {
         Ok(compiled) => compiled,
@@ -413,15 +420,21 @@ async fn stream_calls(
     case: &StreamCase,
     fuel: u64,
 ) -> Result<Calls> {
-    let run =
-        instance.get_typed_func::<(StreamReader<u8>,), (GuestObservation,)>(&mut *store, "run")?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (Result<GuestObservation, ()>,)>(
+        &mut *store,
+        "run",
+    )?;
     let mut calls = Calls::default();
     for _ in 0..3 {
         store.set_fuel(fuel)?;
         let input = StreamReader::new(&mut *store, case.bytes.clone())?;
         let (value,) = run.call_async(&mut *store, (input,)).await?;
         calls.1.push(settle(store, fuel, "stream")?);
-        calls.0.push(value.into());
+        calls.0.push(
+            value
+                .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
+                .into(),
+        );
     }
     Ok(calls)
 }
@@ -442,13 +455,18 @@ async fn fetch_calls(
         }
     });
     let url = format!("http://{}/contract", server.address);
-    let run = instance.get_typed_func::<(&str,), (GuestObservation,)>(&mut *store, "run")?;
+    let run =
+        instance.get_typed_func::<(&str,), (Result<GuestObservation, ()>,)>(&mut *store, "run")?;
     let mut calls = Calls::default();
     for _ in 0..3 {
         store.set_fuel(fuel)?;
         let (value,) = run.call_async(&mut *store, (&url,)).await?;
         calls.1.push(settle(store, fuel, "Fetch")?);
-        calls.0.push(value.into());
+        calls.0.push(
+            value
+                .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
+                .into(),
+        );
     }
     let requests = server
         .requests
@@ -475,7 +493,8 @@ async fn number_calls(
     fault: Option<Fault>,
     fuel: u64,
 ) -> Result<Calls> {
-    let run = instance.get_typed_func::<(f64,), (GuestObservation,)>(&mut *store, "run")?;
+    let run =
+        instance.get_typed_func::<(f64,), (Result<GuestObservation, ()>,)>(&mut *store, "run")?;
     let inputs: Vec<String> = serde_json::from_slice(&fs::read(artifacts.join("inputs.json"))?)?;
     let mut calls = Calls::default();
     for encoded in inputs {
@@ -494,7 +513,11 @@ async fn number_calls(
             store.data_mut().table.push(())?;
         }
         calls.1.push(settle(store, fuel, "run")?);
-        calls.0.push(value.into());
+        calls.0.push(
+            value
+                .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
+                .into(),
+        );
     }
     Ok(calls)
 }

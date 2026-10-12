@@ -23,7 +23,9 @@ mod decoder;
 mod expressions;
 mod foreign;
 mod host;
+mod infer;
 mod json;
+mod locations;
 mod modules;
 mod operators;
 mod program;
@@ -47,7 +49,7 @@ use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
     collections::{
-        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
+        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp, StringConstOp,
         StringLenOp,
     },
     control::{BrOp, CondBrOp, ReturnOp},
@@ -73,6 +75,7 @@ use perry_mir::{
         StringType, WritableType, WriterType,
     },
 };
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
     basic_block::BasicBlock,
@@ -129,20 +132,36 @@ pub fn lower_sources(
     modules: &BTreeMap<String, String>,
     foreign: &HashMap<String, HirType>,
 ) -> Result<ModuleOp> {
-    let mut ast = modules::load(source, identity, modules, foreign)?;
+    let loaded = modules::load(source, identity, modules, foreign)?;
+    let mut ast = loaded.module;
+    let mut locations = loaded.locations;
+    locations.collect(&ast);
     source::validate(&ast)?;
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
     array_methods::preserve_arguments(&mut ast);
-    let hir = perry_hir::lower_module(&ast, "main", "input.mts")
-        .map_err(|error| anyhow!("failed to lower {identity}: {error:?}"))?;
+    let mut hir = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
+        let span = error
+            .downcast_ref::<perry_hir::error::LowerError>()
+            .and_then(|error| error.span);
+        let diagnostic = PerryDiagnostic::error(
+            DiagnosticCode::UnsupportedExpression,
+            format!("failed to lower {identity}: {error:#}"),
+        );
+        let error = error.context(diagnostic);
+        match span {
+            Some(span) => locations.annotate(error, span),
+            None => error,
+        }
+    })?;
+    infer::unresolved_types(&mut hir, &locations);
     let spans = source::inferred_bindings(&ast);
     let inferred = hir
         .local_source_spans
         .iter()
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
-    program::build_module(ctx, &hir, foreign, inferred)
+    program::build_module(ctx, &hir, foreign, inferred, &locations)
 }
 
 #[cfg(test)]

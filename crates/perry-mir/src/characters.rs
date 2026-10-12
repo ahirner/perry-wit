@@ -1,7 +1,7 @@
 //! Keep unobserved character strings in scalar SSA form through comparison and append.
 use crate::{
     aggregates::{functions, operations},
-    collections::{StringAppendOp, StringConcatOp, StringConstOp, StringLenOp},
+    collections::{ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp},
     intrinsics::{Intrinsic, IntrinsicOp},
     scalar::CompareOp,
 };
@@ -37,8 +37,8 @@ fn supports(ctx: &Context, op: Ptr<Operation>, character: Value) -> bool {
             .operands()
             .all(|value| value == character || literal(ctx, value).is_some());
     }
-    if Operation::get_op::<StringConcatOp>(op, ctx).is_some()
-        || Operation::get_op::<StringAppendOp>(op, ctx).is_some()
+    if Operation::get_op::<ConcatOp>(op, ctx).is_some()
+        || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
     {
         return operation.get_operand(1) == character && operation.get_operand(0) != character;
     }
@@ -103,7 +103,7 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
                     IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
                         .get_operation()
                 } else {
-                    let append = Operation::get_op::<StringAppendOp>(user, ctx).is_some();
+                    let append = Operation::get_op::<ConcatReuseOp>(user, ctx).is_some();
                     let prefix = user.deref(ctx).get_operand(0);
                     IntrinsicOp::new(
                         ctx,

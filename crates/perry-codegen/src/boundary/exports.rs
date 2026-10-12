@@ -72,8 +72,28 @@ pub(crate) fn export(
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
     b.task_enter(ctx);
-    b.initialize_module(ctx);
     let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
+    let initialization = b.initialization_status(ctx);
+    let mut joined_types = mir_results
+        .iter()
+        .map(|&ty| wasm_type(ctx, ty))
+        .collect::<Result<Vec<_>>>()?;
+    joined_types.push(i32_type(ctx));
+    let joined = initialization.map(|status| {
+        let active = b.new_block(ctx, vec![]);
+        let failed = b.new_block(ctx, vec![]);
+        let joined = b.new_block(ctx, joined_types.clone());
+        b.cond_br(ctx, status, (failed, vec![]), (active, vec![]));
+        b.block = failed;
+        let mut values: Vec<_> = joined_types[..joined_types.len() - 1]
+            .iter()
+            .map(|&ty| b.zero(ctx, ty))
+            .collect();
+        values.push(status);
+        b.br(ctx, joined, values);
+        b.block = active;
+        joined
+    });
     let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
     let mut call_results = mir_results
         .iter()
@@ -85,8 +105,19 @@ pub(crate) fn export(
     let call = CallOp::new(ctx, function.get_symbol_name(ctx), args, call_results).get_operation();
     b.insert(ctx, call);
     let mut values: Vec<Value> = call.deref(ctx).results().collect();
-    // A throwing function returns its status after its results.
-    let status = if throws { values.pop() } else { None };
+    if let Some(joined) = joined {
+        if !throws {
+            values.push(b.i32_const(ctx, 0));
+        }
+        b.br(ctx, joined, values);
+        b.block = joined;
+        values = joined.deref(ctx).arguments().collect();
+    }
+    let status = if throws || joined.is_some() {
+        values.pop()
+    } else {
+        None
+    };
     if let Some(status) = status {
         // An uncaught exception without a WIT error type has no value to return.
         let trap = b.new_block(ctx, vec![]);
@@ -94,7 +125,7 @@ pub(crate) fn export(
         b.cond_br(ctx, status, (trap, vec![]), (normal, vec![]));
         b.block = trap;
         b.return_resources(ctx);
-        if let Some(completion) = completion {
+        if let Some(completion) = export.result.as_ref().and_then(AbiType::error_completion) {
             let ty = completion.result;
             let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
             let payload = b.completion_error(ctx, completion, exception)?;
@@ -236,8 +267,8 @@ fn async_export(
         if uses_io {
             b.runtime_void(ctx, Runtime::IoPump, vec![]);
         }
-        let promise = b.runtime(ctx, Runtime::TaskResult, vec![]);
-        let settled = b.load(
+        let mut promise = b.runtime(ctx, Runtime::TaskResult, vec![]);
+        let mut settled = b.load(
             ctx,
             MemKind::I32,
             promise,
@@ -294,12 +325,37 @@ fn async_export(
         } else {
             let clean = b.new_block(ctx, vec![]);
             let failed = b.new_block(ctx, vec![]);
+            let completion = b.new_block(ctx, vec![i32, i32]);
             b.cond_br(ctx, detached, (failed, vec![]), (clean, vec![]));
             b.block = failed;
-            b.abort_task(ctx)?;
-            let trap = UnreachableOp::new(ctx).get_operation();
-            b.insert(ctx, trap);
+            let rejected = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
+            let preserve = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected]);
+            let rejected_completion = b.new_block(ctx, vec![]);
+            b.cond_br(
+                ctx,
+                preserve,
+                (completion, vec![promise, settled]),
+                (rejected_completion, vec![]),
+            );
+            b.block = rejected_completion;
+            let message = b
+                .state
+                .data
+                .string("Unresolved detached work at task boundary; pending operations cancelled");
+            let message = b.i64_const(ctx, message as u64);
+            let kind = b.i32_const(ctx, 3);
+            let tag = b.i32_const(ctx, 3);
+            let exception = b.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message]);
+            let status = b.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
+            let failure = b.runtime(ctx, Runtime::PromiseNew, vec![]);
+            b.runtime_void(ctx, Runtime::PromiseReject, vec![failure, status]);
+            b.runtime_void(ctx, Runtime::TaskSetResult, vec![failure]);
+            b.br(ctx, completion, vec![failure, rejected]);
             b.block = clean;
+            b.br(ctx, completion, vec![promise, settled]);
+            b.block = completion;
+            promise = completion.deref(ctx).get_argument(0);
+            settled = completion.deref(ctx).get_argument(1);
         }
         let outcome = if export.command {
             Some(b.runtime(ctx, Runtime::CommandOutcome, vec![promise]))
@@ -311,16 +367,28 @@ fn async_export(
             b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
             b.block = trap;
             b.return_resources(ctx);
-            if completion.is_some() || matches!(&export.result, Some(AbiType::OkHandle { .. })) {
+            if uses_io
+                && export
+                    .result
+                    .as_ref()
+                    .is_some_and(AbiType::accepts_exception)
+            {
+                let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
+                let closed = b.new_block(ctx, vec![]);
+                b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
+                b.block = closed;
+            }
+            if export
+                .result
+                .as_ref()
+                .is_some_and(AbiType::accepts_exception)
+            {
                 let mut values = Vec::new();
-                if let Some(completion) = completion {
+                if let Some(completion) = export.result.as_ref().and_then(AbiType::error_completion)
+                {
                     let ty = completion.result;
-                    let exception = b.load(
-                        ctx,
-                        MemKind::I32,
-                        promise,
-                        perry_abi::layout::promise::VALUE,
-                    );
+                    let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
+                    let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
                     let payload = b.completion_error(ctx, completion, exception)?;
                     if indirect {
                         let size = b.i32_const(ctx, ty.size() as i32);
@@ -355,6 +423,13 @@ fn async_export(
                 let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
                 b.insert(ctx, ret);
             } else {
+                if uses_io {
+                    b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
+                    let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
+                    let closed = b.new_block(ctx, vec![]);
+                    b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
+                    b.block = closed;
+                }
                 if b.state.uses_http_server {
                     b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
                 }
@@ -460,11 +535,28 @@ fn async_export(
         flat.reverse();
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.task_enter(ctx);
-        b.initialize_module(ctx);
         b.host_void(ctx, EffectHost::ContextSet0, vec![task]);
         let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
+        let initialization = b.initialization_status(ctx);
+        let joined = initialization.map(|status| {
+            let active = b.new_block(ctx, vec![]);
+            let failed = b.new_block(ctx, vec![]);
+            let joined = b.new_block(ctx, vec![i32]);
+            b.cond_br(ctx, status, (failed, vec![]), (active, vec![]));
+            b.block = failed;
+            let promise = b.runtime(ctx, Runtime::PromiseNew, vec![]);
+            b.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
+            b.br(ctx, joined, vec![promise]);
+            b.block = active;
+            joined
+        });
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
-        let promise = b.result(ctx, ramp.get_operation());
+        let mut promise = b.result(ctx, ramp.get_operation());
+        if let Some(joined) = joined {
+            b.br(ctx, joined, vec![promise]);
+            b.block = joined;
+            promise = joined.deref(ctx).get_argument(0);
+        }
         b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
         let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());

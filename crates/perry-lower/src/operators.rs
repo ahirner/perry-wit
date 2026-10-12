@@ -12,17 +12,28 @@ impl<'s> FunctionBuilder<'s> {
         right: &'s Expr,
     ) -> Result<Value> {
         let lhs = self.expression(ctx, left)?;
-        let lhs = self.arithmetic(ctx, lhs);
         let rhs = self.expression(ctx, right)?;
+        let string = |value: Value| {
+            optional_value(ctx, value.get_type(ctx))
+                .unwrap_or(value.get_type(ctx))
+                .deref(ctx)
+                .is::<StringType>()
+        };
+        if matches!(op, BinaryOp::Add) && (string(lhs) || string(rhs)) {
+            let lhs = self.display(ctx, lhs)?;
+            let rhs = self.display(ctx, rhs)?;
+            return Ok(self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs)));
+        }
+        let lhs = self.arithmetic(ctx, lhs);
         let rhs = self.arithmetic(ctx, rhs);
         Ok(match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
             (BinaryOp::Add, Kind::String, Kind::String) => {
-                self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, lhs, rhs))
+                self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs))
             }
             (BinaryOp::Add, Kind::String, _) | (BinaryOp::Add, _, Kind::String) => {
                 let lhs = self.display(ctx, lhs)?;
                 let rhs = self.display(ctx, rhs)?;
-                self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, lhs, rhs))
+                self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs))
             }
             (op, Kind::Number, Kind::Number) => {
                 let kind = match op {
@@ -31,7 +42,13 @@ impl<'s> FunctionBuilder<'s> {
                     BinaryOp::Mul => BinaryKind::Mul,
                     BinaryOp::Div => BinaryKind::Div,
                     BinaryOp::Mod => BinaryKind::Rem,
-                    other => bail!("MIR backend does not support operator {other:?} yet"),
+                    other => {
+                        return Err(PerryDiagnostic::error(
+                            DiagnosticCode::UnsupportedOperator,
+                            format!("MIR backend does not support operator {other:?} yet"),
+                        )
+                        .into());
+                    }
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }
@@ -62,13 +79,35 @@ impl<'s> FunctionBuilder<'s> {
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
         if let Some(equality) = equality {
+            let exception = |value: Value| value.get_type(ctx).deref(ctx).is::<ExceptionType>();
+            if exception(lhs) || exception(rhs) {
+                let equal = if exception(lhs) && exception(rhs) {
+                    self.intrinsic(ctx, Intrinsic::ExceptionEqual, vec![lhs, rhs])
+                } else {
+                    let (exception, value) = if exception(lhs) {
+                        (lhs, rhs)
+                    } else {
+                        (rhs, lhs)
+                    };
+                    if value
+                        .get_type(ctx)
+                        .deref(ctx)
+                        .is::<perry_mir::types::BigIntType>()
+                    {
+                        self.intrinsic(ctx, Intrinsic::ExceptionBigIntEqual, vec![exception, value])
+                    } else {
+                        let value = self.error_cause(ctx, value)?;
+                        self.intrinsic(ctx, Intrinsic::JsonExceptionEqual, vec![value, exception])
+                    }
+                };
+                return Ok(self.equality_result(ctx, equality, equal));
+            }
             let json_left = self.json_operand(ctx, lhs)?;
             let json_right = self.json_operand(ctx, rhs)?;
             let operands = match (json_left, json_right) {
-                (Some(_), Some(_)) => {
-                    bail!(
-                        "strict equality between JSON snapshots requires an explicit scalar conversion"
-                    )
+                (Some(left), Some(right)) => {
+                    let equal = self.intrinsic(ctx, Intrinsic::JsonStrictEqual, vec![left, right]);
+                    return Ok(self.equality_result(ctx, equality, equal));
                 }
                 (Some(json), None) => Some((json, rhs)),
                 (None, Some(json)) => Some((json, lhs)),
@@ -177,6 +216,16 @@ impl<'s> FunctionBuilder<'s> {
                 Intrinsic::JsonIsUndefined
             };
             self.intrinsic(ctx, intrinsic, vec![json])
+        } else if value.get_type(ctx).deref(ctx).is::<ExceptionType>() {
+            self.intrinsic(
+                ctx,
+                if null {
+                    Intrinsic::ExceptionIsNull
+                } else {
+                    Intrinsic::ExceptionIsUndefined
+                },
+                vec![value],
+            )
         } else if self.is_optional(ctx, value) {
             if null {
                 self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))

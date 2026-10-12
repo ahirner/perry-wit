@@ -8,6 +8,7 @@ pub(super) struct Signature {
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `results[0]`.
     pub(super) is_async: bool,
+    pub(super) await_initialization: bool,
     pub(super) params: Vec<TypeHandle>,
     pub(super) results: Vec<TypeHandle>,
 }
@@ -17,9 +18,10 @@ pub(super) fn build_module(
     hir: &HirModule,
     foreign: &HashMap<String, HirType>,
     inferred: HashSet<LocalId>,
+    locations: &crate::locations::Locations<'_>,
 ) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(module, hir, foreign, inferred);
+    let shapes = Shapes::new(module, hir, foreign, inferred, locations);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<String, Builtin> = HashMap::new();
@@ -74,26 +76,35 @@ pub(super) fn build_module(
                 );
                 shapes
                     .value_type(ctx, &param.ty)
+                    .map_err(|error| shapes.annotate_local(error, param.id))
                     .with_context(|| format!("parameter {} of {}", param.name, function.name))
             })
             .collect::<Result<Vec<_>>>()?;
         let results = match (&function.return_type, function.is_async) {
-            (HirType::Void, false) => vec![],
+            (HirType::Void, false) => Ok(vec![]),
             // An async function settles its promise with its result; `void` settles `undefined`.
-            (HirType::Promise(inner), true) => vec![shapes.settled_type(ctx, inner)?],
-            (ty, true) => vec![shapes.settled_type(ctx, ty)?],
-            (ty, false) => {
-                vec![
-                    shapes
-                        .value_type(ctx, ty)
-                        .with_context(|| format!("result of {}", function.name))?,
-                ]
-            }
-        };
+            (HirType::Promise(inner), true) => shapes.settled_type(ctx, inner).map(|ty| vec![ty]),
+            (ty, true) => shapes.settled_type(ctx, ty).map(|ty| vec![ty]),
+            (ty, false) => shapes.value_type(ctx, ty).map(|ty| vec![ty]),
+        }
+        .map_err(|error| {
+            locations.annotate(
+                error,
+                locations
+                    .functions
+                    .get(&function.name)
+                    .copied()
+                    .unwrap_or(swc_common::DUMMY_SP),
+            )
+        })
+        .with_context(|| format!("result of {}", function.name))?;
         signatures.insert(
             function.id,
             Signature {
                 is_async: function.is_async,
+                await_initialization: function.is_exported
+                    && function.is_async
+                    && locations.async_init,
                 name: identifier(&function.name)?,
                 params,
                 results,
@@ -117,9 +128,10 @@ pub(super) fn build_module(
             } else {
                 MAIN
             })?,
-            is_async: !persistent,
+            is_async: !persistent || locations.async_init,
+            await_initialization: false,
             params: vec![],
-            results: if persistent {
+            results: if persistent && !locations.async_init {
                 vec![]
             } else {
                 vec![shapes.settled_type(ctx, &HirType::Void)?]
@@ -142,7 +154,24 @@ pub(super) fn build_module(
     }
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
+            .map_err(|error| {
+                locations.annotate(
+                    error,
+                    locations
+                        .functions
+                        .get(&function.name)
+                        .copied()
+                        .unwrap_or(swc_common::DUMMY_SP),
+                )
+            })
             .with_context(|| format!("lowering function {}", function.name))?;
+        if let Some(span) = locations
+            .functions
+            .get(&function.name)
+            .and_then(|&span| locations.span(span))
+        {
+            perry_mir::diagnostics::set_source_span(ctx, &func, &span);
+        }
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);
         }

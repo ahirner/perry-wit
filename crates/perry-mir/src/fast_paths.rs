@@ -1,7 +1,7 @@
 //! Expose allocation-free append paths before liveness and collection planning.
 use crate::{
     aggregates::{functions, operations},
-    collections::StringAppendOp,
+    collections::ConcatReuseOp,
     control::{BrOp, CondBrOp},
     intrinsics::{Intrinsic, IntrinsicOp},
 };
@@ -24,7 +24,14 @@ use pliron::{
 pub(crate) fn expand(root: Ptr<Operation>, ctx: &mut Context) {
     for function in functions(root, ctx) {
         for op in operations(ctx, &function) {
-            let kind = if Operation::get_op::<StringAppendOp>(op, ctx).is_some() {
+            let kind = if Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
+                && op
+                    .deref(ctx)
+                    .get_result(0)
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .is::<crate::types::StringType>()
+            {
                 Intrinsic::StringTryAppend
             } else if Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
                 == Some(Intrinsic::StringScalarAppend)

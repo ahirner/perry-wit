@@ -76,6 +76,55 @@ fn zero_bytes(word: u64) -> u64 {
     word.wrapping_sub(ONES) & !word & HIGHS
 }
 
+/// Emit a JSON parser location using a zero-based byte offset and Unicode columns.
+pub fn syntax_message(input: &[u8], offset: u32, mut emit: impl FnMut(&[u8])) {
+    fn number(value: u32, emit: &mut impl FnMut(&[u8])) {
+        let mut digits = [0u8; 10];
+        let mut index = digits.len();
+        let mut value = value;
+        loop {
+            index -= 1;
+            digits[index] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        emit(&digits[index..]);
+    }
+    let prefix = &input[..(offset as usize).min(input.len())];
+    let (mut line, mut column, mut carriage_return) = (1, 1, false);
+    for &byte in prefix {
+        match byte {
+            b'\r' => {
+                line += 1;
+                column = 1;
+                carriage_return = true;
+            }
+            b'\n' => {
+                if !carriage_return {
+                    line += 1;
+                }
+                column = 1;
+                carriage_return = false;
+            }
+            _ => {
+                if byte & 0xC0 != 0x80 {
+                    column += 1;
+                }
+                carriage_return = false;
+            }
+        }
+    }
+    emit(b"Invalid JSON at byte ");
+    number(offset, &mut emit);
+    emit(b" (line ");
+    number(line, &mut emit);
+    emit(b", column ");
+    number(column, &mut emit);
+    emit(b")");
+}
+
 #[cfg(test)]
 mod tests {
     use super::unescaped_prefix;

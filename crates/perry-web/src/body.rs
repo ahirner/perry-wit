@@ -143,27 +143,31 @@ fn settle_json(promise: *mut u8, contents: &[u8]) {
     // SAFETY: `decode` returns a string.
     let text = unsafe { bytes(decode(contents)) };
     match parse_json(text) {
-        Some(root) => resolve(promise, root as usize as u64),
-        None => reject_with(
+        Ok(root) => resolve(promise, root as usize as u64),
+        Err(offset) => reject_with(
             promise,
-            perry_abi::ERROR,
-            from_static("SyntaxError: Unexpected token in JSON"),
+            perry_abi::SYNTAX_ERROR,
+            perry_abi::json_syntax_message(text, offset),
         ),
     }
 }
 
 /// `JSON.parse` through the JSON helper: the graph's root, or `None` for invalid text.
-fn parse_json(text: &[u8]) -> Option<*mut u8> {
+fn parse_json(text: &[u8]) -> Result<*mut u8, u32> {
     // SAFETY: helper calls on a live input and a fresh disjoint output of the measured size.
     unsafe {
         let measured = helper::json_measure(text.as_ptr(), text.len() as u32);
         if measured >> 32 != 0 {
-            return None;
+            return Err(measured as u32);
         }
         let out = alloc(measured as u32);
         let root =
             helper::json_populate_measured(text.as_ptr(), text.len() as u32, out, measured as u32);
-        (root >> 32 == 0).then_some(root as u32 as usize as *mut u8)
+        if root >> 32 == 0 {
+            Ok(root as u32 as usize as *mut u8)
+        } else {
+            Err(root as u32)
+        }
     }
 }
 

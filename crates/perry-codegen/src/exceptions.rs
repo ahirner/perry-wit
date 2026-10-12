@@ -80,7 +80,12 @@ impl FunctionLowering<'_, '_> {
                     let one = self.i32_const(ctx, 1);
                     let offset = self.num(ctx, NumOpcode::I32Sub, vec![kind, one]);
                     let three = self.i32_const(ctx, 3);
-                    self.num(ctx, NumOpcode::I32LtU, vec![offset, three])
+                    let basic = self.num(ctx, NumOpcode::I32LtU, vec![offset, three]);
+                    let six = self.i32_const(ctx, 6);
+                    let offset = self.num(ctx, NumOpcode::I32Sub, vec![kind, six]);
+                    let two = self.i32_const(ctx, 2);
+                    let native = self.num(ctx, NumOpcode::I32LtU, vec![offset, two]);
+                    self.num(ctx, NumOpcode::I32Or, vec![basic, native])
                 }
                 other => {
                     let code = self.i32_const(ctx, status_code(other));
@@ -100,15 +105,28 @@ impl FunctionLowering<'_, '_> {
         if ty.deref(ctx).is::<ExceptionType>() {
             return Ok(value);
         }
-        let tag = match repr(ctx, ty)? {
+        if ty.deref(ctx).is::<perry_mir::types::JsonType>() {
+            return Ok(self.runtime(ctx, Runtime::StdJsonToException, vec![value]));
+        }
+        let inner = crate::repr::optional_inner(ctx, ty).unwrap_or(ty);
+        let tag = match repr(ctx, inner)? {
             Repr::F64 => TAG_NUMBER,
             Repr::Bool => TAG_BOOLEAN,
-            _ if ty.deref(ctx).is::<StringType>() => TAG_STRING,
-            _ if ty.deref(ctx).is::<BigIntType>() => TAG_BIGINT,
+            _ if inner.deref(ctx).is::<StringType>() => TAG_STRING,
+            _ if inner.deref(ctx).is::<BigIntType>() => TAG_BIGINT,
             _ => bail!("this value cannot be thrown yet"),
         };
         let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
-        let tag = self.i32_const(ctx, tag as i32);
+        let mut tag = self.i32_const(ctx, tag as i32);
+        if inner != ty {
+            let null = self.absence_test(ctx, value, ty, true)?;
+            let undefined = self.absence_test(ctx, value, ty, false)?;
+            let null_tag = self.i32_const(ctx, perry_abi::layout::exception::TAG_NULL as i32);
+            let undefined_tag =
+                self.i32_const(ctx, perry_abi::layout::exception::TAG_UNDEFINED as i32);
+            tag = self.select(ctx, null, null_tag, tag);
+            tag = self.select(ctx, undefined, undefined_tag, tag);
+        }
         let bits = self.slot_bits(ctx, value);
         Ok(self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits]))
     }
@@ -162,6 +180,7 @@ impl FunctionLowering<'_, '_> {
     /// Throw `status` if `failed` is non-zero; code after this runs on the normal path.
     pub(crate) fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
         let status = self.i32_const(ctx, status_code(kind));
+        let status = self.runtime(ctx, Runtime::ExceptionImplicit, vec![failed, status]);
         self.throw_status_if(ctx, failed, status);
     }
 
@@ -178,7 +197,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// The zero of Wasm type `ty`.
-    fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
+    pub(crate) fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
         if ty.deref(ctx).is::<FP64Type>() {
             self.f64_const(ctx, 0.0)
         } else if val_type_is_i64(ctx, ty) {

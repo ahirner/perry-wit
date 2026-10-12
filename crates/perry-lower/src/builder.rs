@@ -117,6 +117,11 @@ impl<'s> FunctionBuilder<'s> {
             builder.store(ctx, slot, value);
             builder.locals.insert(*param, slot);
         }
+        if signature.await_initialization {
+            let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
+            let await_ = AwaitOp::new(ctx, promise)?;
+            builder.append_value(ctx, &await_);
+        }
         builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);
@@ -166,8 +171,8 @@ impl<'s> FunctionBuilder<'s> {
             .clone()
             .into_iter()
             .map(|ty| match optional_value(ctx, ty) {
-                Some(inner) if self.is_async => {
-                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
+                Some(_) if absence(ctx, ty).is_some_and(|states| states.admits_undefined()) => {
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
                 }
                 _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
             })

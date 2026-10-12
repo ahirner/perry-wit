@@ -1,20 +1,21 @@
 //! Exception objects (`crate::region::Task::exception`).
 //!
 //! Compiled code passes exceptions as an `i32` status (1 `TypeError`, 2 `RangeError`, 3
-//! `Error`, 4 another thrown value, 5 `process.exit`). `throw` also makes an exception object
+//! `Error`, 4 another thrown value, 5 `process.exit`, 6 `ReferenceError`, 7 `SyntaxError`).
+//! `throw` also makes an exception object
 //! pending in the task, so `catch (e)` sees the thrown object itself; failures raised by
 //! compiled code without an object (`perry.unwrap`, holes) get one materialized at the catch.
 //!
 //! Layout, read inline by compiled code: `kind: u32` at 0 (the status), `tag: u32` at 4,
-//! `value: u64` at 8, `cause: u32` at 16. `Error` objects have tag [TAG_STRING] and their
-//! message in `value`, and a string `cause` or null; other thrown values keep their slot
-//! bits.
+//! `value: u64` at 8, `cause: u32` at 16, `owner: u32` at 20. `Error` objects have tag
+//! [TAG_STRING] and their message in `value`; their cause is a JSON value or null.
+//! Other thrown values keep their slot bits. The owner retains referenced payloads.
 use crate::region::current;
 use core::ptr;
 
 pub use crate::layout::exception::{
-    CAUSE, ERROR, KIND, RANGE_ERROR, TAG, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING,
-    THROWN_VALUE, TYPE_ERROR, VALUE,
+    CAUSE, ERROR, KIND, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR, TAG, TAG_BIGINT, TAG_BOOLEAN,
+    TAG_JSON, TAG_NULL, TAG_NUMBER, TAG_STRING, TAG_UNDEFINED, THROWN_VALUE, TYPE_ERROR, VALUE,
 };
 
 pub(crate) const EXIT: u32 = 5;
@@ -30,7 +31,7 @@ struct Exception {
 
 /// A new exception object in the current task.
 #[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
+pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
     static SHAPE: [u32; 4] = [
         0,
         2,
@@ -48,7 +49,7 @@ pub(crate) extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) ->
             tag,
             value,
             cause: ptr::null_mut(),
-            owner: if matches!(tag, TAG_STRING | TAG_BIGINT) {
+            owner: if matches!(tag, TAG_STRING | TAG_BIGINT | TAG_JSON) {
                 value as usize as *mut u8
             } else {
                 ptr::null_mut()
@@ -91,10 +92,14 @@ pub(crate) extern "C" fn perry_exception_catch(status: u32) -> *mut u8 {
 /// # Safety
 /// `exception` must be an exception object of the current task.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 {
+pub unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let exception = unsafe { &*(exception as *mut Exception) };
-    if (TYPE_ERROR..=ERROR).contains(&exception.kind) && exception.tag == TAG_STRING {
+    if matches!(
+        exception.kind,
+        TYPE_ERROR..=ERROR | REFERENCE_ERROR | SYNTAX_ERROR
+    ) && exception.tag == TAG_STRING
+    {
         exception.value as usize as *mut u8
     } else {
         crate::string::from_static("")
@@ -116,4 +121,25 @@ pub extern "C" fn perry_raise(kind: u32, message: *mut u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_status() -> u32 {
     core::mem::replace(&mut current().status, 0)
+}
+
+/// Replace a stale handled exception when compiled checks raise a fresh implicit failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_exception_implicit(failed: u32, status: u32) -> u32 {
+    if failed != 0 {
+        current().exception = ptr::null_mut();
+    }
+    status
+}
+
+/// Raise a native failure with a structured cause retained by the exception's pointer map.
+///
+/// # Safety
+/// The message is a live string and cause is a live JSON graph or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_raise_with_cause(kind: u32, message: *mut u8, cause: *mut u8) {
+    perry_raise(kind, message);
+    unsafe {
+        (*current().exception.cast::<Exception>()).cause = cause;
+    }
 }

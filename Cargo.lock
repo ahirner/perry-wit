@@ -1412,9 +1412,11 @@ dependencies = [
  "anyhow",
  "perry-abi",
  "perry-mir",
+ "perry-wit-diagnostics",
  "pliron",
  "pliron-wasm",
  "regex-automata",
+ "serde_json",
 ]
 
 [[package]]
@@ -1500,8 +1502,10 @@ dependencies = [
  "perry-hir",
  "perry-mir",
  "perry-parser",
+ "perry-wit-diagnostics",
  "pliron",
  "swc_common",
+ "swc_ecma_parser",
  "swc_ecma_transforms_base",
  "swc_ecma_visit",
 ]
@@ -1511,8 +1515,10 @@ name = "perry-mir"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "perry-wit-diagnostics",
  "pliron",
  "regex",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1596,6 +1602,7 @@ dependencies = [
  "perry-lower",
  "perry-mir",
  "perry-parser",
+ "perry-wit-diagnostics",
  "pliron",
  "serde",
  "serde_json",
@@ -1611,6 +1618,14 @@ dependencies = [
  "wit-bindgen 0.62.0",
  "wit-component 0.261.0",
  "wit-parser 0.261.0",
+]
+
+[[package]]
+name = "perry-wit-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
 ]
 
 [[package]]

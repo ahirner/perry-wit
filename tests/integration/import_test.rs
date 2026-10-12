@@ -16,10 +16,17 @@ struct Packet {
     values: Vec<f64>,
 }
 
+#[derive(ComponentType, Lift, Debug, PartialEq)]
+#[component(record)]
+struct CompletionError {
+    name: String,
+    message: String,
+}
+
 #[test]
 fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<()> {
     let component = crate::world::component(
-        "package test:initialization; world app { export run: func() -> f64; }",
+        "package test:initialization; world app { export run: func() -> result<f64>; }",
         "app",
         "initialization.ts",
         r#"
@@ -40,9 +47,9 @@ fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<(
         "#,
     )?;
     let (mut store, instance) = crate::world::instantiate(&Engine::default(), &component)?;
-    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
-    assert_eq!(run.call(&mut store, ())?.0, 216.0);
-    assert_eq!(run.call(&mut store, ())?.0, 215.0);
+    let run = instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 216.0);
+    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 215.0);
     Ok(())
 }
 
@@ -60,7 +67,7 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
             wide: func(value: s64) -> s64;
             observe: func(value: string);
         }
-        world app { import service; export run: func(n: u32) -> string; }
+        world app { import service; export run: func(n: u32) -> result<string>; }
     "#,
     )?;
     let world = resolve.select_world(&[package], Some("app"))?;
@@ -111,10 +118,11 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
     })?;
     let mut store = Store::new(&engine, (0, String::new()));
     let instance = linker.instantiate(&mut store, &component)?;
-    let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+    let run =
+        instance.get_typed_func::<(u32,), (std::result::Result<String, ()>,)>(&mut store, "run")?;
     for (n, expected) in [(2, "failure"), (1000, "hé😀:7")] {
         assert_eq!(
-            run.call(&mut store, (n,))?.0,
+            run.call(&mut store, (n,))?.0.unwrap(),
             format!("{expected}:-9007199254740993")
         );
         assert_eq!(store.data().1, expected);
@@ -139,7 +147,7 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
             exchange: async func(input: packet) -> result<packet, string>;
             observe: async func(value: string);
         }
-        world app { import service; export run: async func(n: u32) -> string; }
+        world app { import service; export run: async func(n: u32) -> result<string>; }
     "#,
     )?;
     let world = resolve.select_world(&[package], Some("app"))?;
@@ -211,12 +219,14 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
     );
     store.limiter(|state| &mut state.limits);
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+    let run =
+        instance.get_typed_func::<(u32,), (std::result::Result<String, ()>,)>(&mut store, "run")?;
     let (result,) = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         run.call_async(&mut store, (1000,)),
     )
     .await??;
+    let result = result.expect("fixture has no escaping failure");
     assert_eq!(result, "leftright7");
     assert_eq!(store.data().text, result);
     assert_eq!(started.load(Ordering::SeqCst), 4000);
@@ -241,15 +251,20 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
         r#"
         package test:cancel;
         interface service { work: async func(value: list<string>) -> list<string>; }
-        world app { import service; export run: async func() -> string; }
+        world app {
+            import service;
+            record failure { name: string, message: string }
+            export run: async func(fail: bool) -> result<string, failure>;
+        }
     "#,
     )?;
     let world = resolve.select_world(&[package], Some("app"))?;
     let compiled = compile_for_world_with_memory_checks(
         r#"
         import { work } from 'test:cancel/service';
-        export async function run(): Promise<string> {
+        export async function run(fail: boolean): Promise<string> {
             const pending = work(['input', 'hé😀']);
+            if (fail) throw new RangeError('original failure');
             return 'unfinished';
         }
     "#,
@@ -278,28 +293,38 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
             })?;
         let mut store = Store::new(&engine, ());
         let instance = linker.instantiate_async(&mut store, &component).await?;
-        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            run.call_async(&mut store, ()),
-        )
-        .await?;
-        if immediate {
+        let run = instance
+            .get_typed_func::<(bool,), (std::result::Result<String, CompletionError>,)>(
+                &mut store, "run",
+            )?;
+        for (calls, fail) in [false, true, false].into_iter().enumerate() {
+            let (result,) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run.call_async(&mut store, (fail,)),
+            )
+            .await??;
+            let expected = if fail {
+                Err(CompletionError {
+                    name: "RangeError".into(),
+                    message: "original failure".into(),
+                })
+            } else if immediate {
+                Ok("unfinished".into())
+            } else {
+                Err(CompletionError {
+                    name: "Error".into(),
+                    message:
+                        "Unresolved detached work at task boundary; pending operations cancelled"
+                            .into(),
+                })
+            };
+            assert_eq!(result, expected);
             assert_eq!(
-                result?.0, "unfinished",
-                "settled imports need no task-boundary cancellation"
-            );
-        } else {
-            assert!(
-                result.is_err(),
-                "unresolved detached work must fail at the task boundary"
+                dropped.load(Ordering::SeqCst),
+                calls + 1,
+                "host future must be dropped exactly once before the task completes"
             );
         }
-        assert_eq!(
-            dropped.load(Ordering::SeqCst),
-            1,
-            "host future must be dropped exactly once before the task completes"
-        );
     }
     Ok(())
 }

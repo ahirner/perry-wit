@@ -13,6 +13,7 @@ pub mod calls;
 mod characters;
 pub mod collections;
 pub mod control;
+pub mod diagnostics;
 pub mod effects;
 pub mod exceptions;
 mod fast_paths;

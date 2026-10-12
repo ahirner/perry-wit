@@ -161,6 +161,11 @@ pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     let promise = promise as *mut Promise;
     // SAFETY: compiled code passes a live, rejected promise.
     unsafe {
+        if (*promise).value == 0 {
+            let exception = crate::exception::perry_exception_catch((*promise).status as u32);
+            (*promise).value = exception as usize as u64;
+            (*promise).owner = exception;
+        }
         current().exception = (*promise).value as usize as *mut u8;
         (*promise).status
     }

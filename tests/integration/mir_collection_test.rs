@@ -3,6 +3,146 @@
 use crate::core_program::{Counter, Program};
 
 #[test]
+fn array_combination_preserves_snapshots_and_identity() {
+    let mut program = Program::checked(
+        r#"
+function mutate(a: number[]): number[] { a[0] = 9; return [3]; }
+export function run(n: number): number {
+  const a: number[] = [1, 2];
+  const alias = a;
+  const spread = [...a, ...mutate(a), n];
+  if (spread[0] !== 1 || spread[2] !== 3 || alias[0] !== 9) return -1;
+  const combined = a.concat(mutate(a), 4, ...[5, 6]);
+  if (combined === a || combined[0] !== 9 || combined[2] !== 3 || combined[5] !== 6) return -2;
+  combined[0] = 7;
+  if (a[0] !== 9) return -3;
+  const copied = a.concat();
+  copied[0] = 8;
+  if (a[0] !== 9) return -4;
+  return spread.length + combined.length + copied.length;
+}
+"#,
+        "array-combination.ts",
+    );
+    program.stress_collection(true);
+    assert_eq!(program.throwing("run", 10.0), (12.0, 0));
+}
+
+#[test]
+fn owned_array_combination_reuses_capacity_and_retains_children() {
+    let mut program = Program::checked(
+        r#"
+interface Cell { value: number }
+export function run(n: number): number {
+  let items: Cell[] = [];
+  for (let i = 0; i < n; i++) items = [...items, { value: i }];
+  return items.length + items[0].value + items[items.length - 1].value;
+}
+"#,
+        "owned-array-combination.ts",
+    );
+    program.stress_collection(true);
+    assert_eq!(program.throwing("run", 1000.0), (1999.0, 0));
+    assert!(program.counter(Counter::Allocations) < 3200);
+}
+
+#[test]
+fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
+    let source = r#"
+interface Cell { value:number }
+interface Holder { items:Cell[] }
+function mutate(items:Cell[]):number { items[0].value=9;return 3; }
+export function run():number {
+ const cell:Cell={value:1};const values:Cell[]=[cell];
+ const copied=[...values];copied[0].value=2;
+ if(values[0]!==cell || cell.value!==2)return 1;
+ const nested:number[][]=[[1],[2]];
+ const flat=nested.concat([[3]]);
+ if(flat.length!==3 || flat[0]!==nested[0])return 2;
+ const text:string[]=['é','🙂'];
+ const emptyMix=[...[],...text];const emptyCopy=values.concat(...[]);
+ if(emptyMix.length!==2 || emptyCopy===values || ''.concat(...[])!=='')return 11;
+ const nullable=[null,...text,undefined];
+ if(nullable[0]!==null || nullable[1]!=='é' || nullable[3]!==undefined)return 3;
+ const optional:(number|null)[]=[1,null];
+ const joined=optional.concat(null,[2]);
+ if(joined.length!==4 || joined[2]!==null)return 4;
+ const repeated=values.concat(values);
+ repeated[0].value=7;
+ if(repeated[1]!==cell || values[0].value!==7)return 5;
+ const empty:number[]=[];empty.push(...empty);
+ const self:number[]=[1,2];self.push(...self);
+ if(self.length!==4 || self[2]!==1 || self[3]!==2)return 6;
+ const words='start'.concat(...text,mutate(values));
+ if(words!=='starté🙂3' || cell.value!==9)return 7;
+ const holder:Holder={items:values};
+ const escape=holder.items.concat([{value:4}]);escape[0]={value:8};
+ if(holder.items[0]!==cell || holder.items.length!==1)return 8;
+ return 0;
+}
+"#;
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("concat.mts");
+    std::fs::write(&script, format!("{source}\nconsole.log(run());"))?;
+    let node = std::process::Command::new("node")
+        .arg("--experimental-strip-types")
+        .arg(script)
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected = String::from_utf8(node.stdout)?.trim().parse::<f64>()?;
+    let mut program = Program::checked(source, "concat.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (expected, 0));
+    Ok(())
+}
+
+#[test]
+fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
+    for expression in [
+        "owned.concat(borrowed)",
+        "borrowed.concat(owned)",
+        "owned.concat([2,3])",
+    ] {
+        let source = format!(
+            "export function run(n:number):number{{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){{const owned:number[]=[1];const joined={expression};total+=joined.length+joined[0];}}return total;}}"
+        );
+        let mut program = Program::checked(&source, "concat-capacity.ts");
+        program.stress_collection(true);
+        let expected = if expression.starts_with("borrowed") {
+            5000.0
+        } else {
+            4000.0
+        };
+        assert_eq!(program.number("run", 1000.0), expected);
+        assert!(
+            program.counter(Counter::Allocations)
+                < if expression.ends_with("[2,3])") {
+                    4100
+                } else {
+                    2100
+                },
+            "{expression}: {} allocations",
+            program.counter(Counter::Allocations)
+        );
+    }
+    let source = "export function run(n:number):number{let items:number[]=[];for(let i=0;i<n;i++){if(i%2===0)items=[i].concat(items);else items=items.concat([i]);}return items.length+items[0];}";
+    let mut program = Program::checked(source, "concat-join.ts");
+    program.stress_collection(true);
+    let results = program
+        .call("run", &[wasmtime::Val::F64(1000.0f64.to_bits())])
+        .0;
+    assert_eq!(results[0].unwrap_f64(), 1998.0);
+    if let Some(status) = results.get(1) {
+        assert_eq!(status.unwrap_i32(), 0);
+    }
+    assert!(program.counter(Counter::Allocations) < 2200);
+}
+
+#[test]
 fn unchanged_module_graph_does_not_collect_on_every_export() {
     let source = r#"
 interface Cell { value: number; next: Cell | null }

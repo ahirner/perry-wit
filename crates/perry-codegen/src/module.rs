@@ -120,6 +120,7 @@ pub(crate) struct ModuleState<'e> {
     /// Operations whose previous results are dead whenever they run again (`lease`).
     pub(crate) leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
+    pub(crate) native_descriptors: HashMap<TypeHandle, u32>,
     pub(crate) json_serializers: HashMap<TypeHandle, Identifier>,
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
@@ -212,6 +213,7 @@ pub(crate) fn lower(
         uses_json_bodies: false,
         uses_http_server: false,
         json_serializers: HashMap::new(),
+        native_descriptors: HashMap::new(),
         retains_json: functions.iter().any(|function| {
             crate::analysis::function_ops(ctx, function)
                 .into_iter()
@@ -239,7 +241,7 @@ pub(crate) fn lower(
         .iter()
         .any(|f| f.get_symbol_name(ctx) == INITIALIZER)
     {
-        let address = state.data.append(1, &[0; 8]);
+        let address = state.data.append(8, &[0; 32]);
         state.initializer = Some((INITIALIZER, address));
         state.collectible = true;
     }
@@ -318,6 +320,49 @@ fn bind_exports(
             .any(|p| matches!(p, boundary::AbiType::ByteStream))
     }) {
         state.uses_streams = true;
+    }
+    let escaping = perry_mir::exceptions::escaping_functions(ctx, functions);
+    let initialization_escapes = escaping
+        .iter()
+        .any(|name| name.as_ref() == perry_mir::globals::INITIALIZER);
+    let stderr = state.imports.as_ref().is_some_and(|imports| {
+        imports
+            .iter()
+            .any(|name| name.starts_with("wasi:cli/stderr@"))
+    });
+    for export in exports {
+        if export.task_return.is_none()
+            && state
+                .async_functions
+                .iter()
+                .any(|name| name.as_ref() == perry_mir::globals::INITIALIZER)
+        {
+            return Err(perry_wit_diagnostics::PerryDiagnostic::error(
+                perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
+                format!("{} requires asynchronous module initialization", export.core_name))
+                .with_help("Declare this WIT export async so it can await module initialization and its error channel.").into());
+        }
+        if !export.command
+            && (initialization_escapes
+                || escaping.iter().any(|name| name.as_ref() == export.function))
+            && !export
+                .result
+                .as_ref()
+                .is_some_and(boundary::AbiType::accepts_exception)
+        {
+            if export.task_return.is_none() || !stderr {
+                let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::error(
+                    perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
+                    format!("{} can throw without a compatible WIT error channel", export.core_name))
+                    .with_help("Declare a WIT result error, or use an async export with wasi:cli/stderr support.");
+                diagnostic.span = functions
+                    .iter()
+                    .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
+                    .and_then(|function| perry_mir::diagnostics::source_span(ctx, function));
+                return Err(diagnostic.into());
+            }
+            state.uses_io = true;
+        }
     }
     let mir_functions: HashMap<String, FuncOp> = functions
         .iter()

@@ -119,10 +119,13 @@ pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, S
 }
 
 /// Compile supplied TypeScript and WIT contents with the embedded standard packages.
-pub fn compile(input: &Program, wit: &Wit, options: &Options) -> Result<crate::Compiled> {
+fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::Compiled> {
     let (source, identity, modules) = program(input)?;
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
-    let world = resolve.select_world(&[package], options.world.as_deref())?;
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let world = resolve
+        .select_world(&[package], options.world.as_deref())
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     crate::compiler::compile_sources(
         source,
         identity,
@@ -137,14 +140,42 @@ pub fn compile(input: &Program, wit: &Wit, options: &Options) -> Result<crate::C
 /// Compile raw TypeScript exports without WIT or filesystem access.
 /// Unlike [`compile`] with [`Options::core_only`], these exports use raw core signatures,
 /// not the canonical ABI of a WIT world.
-pub fn compile_core(input: &Program) -> Result<Vec<u8>> {
+fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
     let (source, identity, modules) = program(input)?;
     crate::compiler::compile_core_sources(source, identity, &modules, false)
 }
 
 /// Generate declaration contents. Project layout and writing belong to the caller.
-pub fn generate_sdk(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
-    let world = resolve.select_world(&[package], world)?;
+fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let world = resolve
+        .select_world(&[package], world)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     crate::sdk::declarations(&resolve, world)
+}
+
+pub fn compile(
+    input: &Program,
+    wit: &Wit,
+    options: &Options,
+) -> std::result::Result<crate::Compiled, crate::CompileError> {
+    compile_impl(input, wit, options).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::InvalidInput)
+    })
+}
+
+pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::CompileError> {
+    compile_core_impl(input).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::InvalidInput)
+    })
+}
+
+pub fn generate_sdk(
+    wit: &Wit,
+    world: Option<&str>,
+) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
+    generate_sdk_impl(wit, world).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+    })
 }

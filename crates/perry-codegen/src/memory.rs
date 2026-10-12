@@ -12,6 +12,7 @@ use perry_mir::{
 };
 use pliron::{
     context::{Context, Ptr},
+    op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -196,42 +197,110 @@ impl FunctionLowering<'_, '_> {
     /// Run synchronous module initialization once. A failed or reentrant initializer traps
     /// consistently instead of exposing partially initialized typed values.
     pub(super) fn initialize_module(&mut self, ctx: &mut Context) {
-        use pliron::op::Op;
-        use pliron_wasm::{attrs::NumOpcode, control::UnreachableOp, ops::CallOp};
-        let Some((function, address)) = self.state.initializer.clone() else {
+        use pliron_wasm::control::UnreachableOp;
+        let Some(status) = self.initialization_status(ctx) else {
             return;
         };
-        let cell = self.i32_const(ctx, address as i32);
-        let state = self.load(ctx, MemKind::I32, cell, 0);
-        let two = self.i32_const(ctx, 2);
-        let ready = self.num(ctx, NumOpcode::I32Eq, vec![state, two]);
-        let done = self.new_block(ctx, vec![]);
-        let check = self.new_block(ctx, vec![]);
-        let start = self.new_block(ctx, vec![]);
         let failed = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, ready, (done, vec![]), (check, vec![]));
-        self.block = check;
-        self.cond_br(ctx, state, (failed, vec![]), (start, vec![]));
+        let ready = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, status, (failed, vec![]), (ready, vec![]));
         self.block = failed;
         self.task_free(ctx);
         let trap = UnreachableOp::new(ctx).get_operation();
         self.insert(ctx, trap);
+        self.block = ready;
+    }
+
+    /// Initialize once, retaining a failed exception as an instance root for later callers.
+    pub(super) fn initialization_status(&mut self, ctx: &mut Context) -> Option<Value> {
+        use pliron_wasm::{attrs::NumOpcode, ops::CallOp};
+        let (function, address) = self.state.initializer.clone()?;
+        if self.state.async_functions.contains(&function) {
+            return None;
+        }
+        let cell = self.i32_const(ctx, address as i32);
+        let error_cell = self.i32_const(ctx, (address + 16) as i32);
+        self.runtime_void(ctx, Runtime::GcGlobal, vec![error_cell]);
+        let state = self.load(ctx, MemKind::I32, cell, 0);
+        let two = self.i32_const(ctx, 2);
+        let ready = self.num(ctx, NumOpcode::I32Eq, vec![state, two]);
+        let i32 = i32_type(ctx);
+        let done = self.new_block(ctx, vec![i32]);
+        let check = self.new_block(ctx, vec![]);
+        let start = self.new_block(ctx, vec![]);
+        let failed = self.new_block(ctx, vec![]);
+        let zero = self.i32_const(ctx, 0);
+        self.cond_br(ctx, ready, (done, vec![zero]), (check, vec![]));
+        self.block = check;
+        self.cond_br(ctx, state, (failed, vec![]), (start, vec![]));
+        self.block = failed;
+        let exception = self.load(ctx, MemKind::I32, error_cell, 0);
+        let existing = self.new_block(ctx, vec![]);
+        let reentrant = self.new_block(ctx, vec![]);
+        let raised = self.new_block(ctx, vec![i32]);
+        self.cond_br(ctx, exception, (existing, vec![]), (reentrant, vec![]));
+        self.block = reentrant;
+        let kind = self.i32_const(ctx, 6);
+        let tag = self.i32_const(ctx, 3);
+        let message = self
+            .state
+            .data
+            .string("Module initialization is still in progress");
+        let message = self.i64_const(ctx, message as u64);
+        let cycle = self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message]);
+        self.br(ctx, raised, vec![cycle]);
+        self.block = existing;
+        self.br(ctx, raised, vec![exception]);
+        self.block = raised;
+        let exception = raised.deref(ctx).get_argument(0);
+        let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
+        self.br(ctx, done, vec![status]);
         self.block = start;
         let one = self.i32_const(ctx, 1);
         self.store(ctx, MemKind::I32, cell, 0, one);
         let throws = self.state.throws.contains(&function);
-        let results = if throws { vec![i32_type(ctx)] } else { vec![] };
+        let results = if throws { vec![i32] } else { vec![] };
         let call = CallOp::new(ctx, function, vec![], results).get_operation();
         self.insert(ctx, call);
         if throws {
-            let initialized = self.new_block(ctx, vec![]);
             let status = call.deref(ctx).get_result(0);
-            self.cond_br(ctx, status, (failed, vec![]), (initialized, vec![]));
+            let initialized = self.new_block(ctx, vec![]);
+            let rejected = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, status, (rejected, vec![]), (initialized, vec![]));
+            self.block = rejected;
+            let exception = self.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
+            self.store(ctx, MemKind::I32, error_cell, 0, exception);
+            let three = self.i32_const(ctx, 3);
+            self.store(ctx, MemKind::I32, cell, 0, three);
+            self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
+            self.br(ctx, done, vec![status]);
             self.block = initialized;
         }
         self.store(ctx, MemKind::I32, cell, 0, two);
-        self.br(ctx, done, vec![]);
+        self.br(ctx, done, vec![zero]);
         self.block = done;
+        Some(done.deref(ctx).get_argument(0))
+    }
+
+    /// Start asynchronous initialization once and share its fulfillment or rejection.
+    pub(super) fn initialization_promise(&mut self, ctx: &mut Context) -> Value {
+        use pliron_wasm::ops::CallOp;
+        let (function, address) = self.state.initializer.clone().expect("async initializer");
+        let cell = self.i32_const(ctx, address as i32);
+        self.runtime_void(ctx, Runtime::GcGlobal, vec![cell]);
+        let previous = self.load(ctx, MemKind::I32, cell, 0);
+        let i32 = i32_type(ctx);
+        let start = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, vec![i32]);
+        self.cond_br(ctx, previous, (done, vec![previous]), (start, vec![]));
+        self.block = start;
+        let call = CallOp::new(ctx, function, vec![], vec![i32]).get_operation();
+        self.insert(ctx, call);
+        let promise = call.deref(ctx).get_result(0);
+        self.store(ctx, MemKind::I32, cell, 0, promise);
+        self.br(ctx, done, vec![promise]);
+        self.block = done;
+        done.deref(ctx).get_argument(0)
     }
 
     fn root_stack(&mut self, ctx: &mut Context) -> Value {

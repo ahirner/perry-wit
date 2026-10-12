@@ -16,6 +16,7 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -34,7 +35,8 @@ pub(crate) struct Shapes<'h> {
     pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
     pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
-    hir: &'h HirModule,
+    pub(super) hir: &'h HirModule,
+    locations: &'h crate::locations::Locations<'h>,
     /// WIT types by SDK name, and the local names they are imported under.
     foreign: &'h HashMap<String, HirType>,
     aliases: HashMap<String, String>,
@@ -77,6 +79,7 @@ impl<'h> Shapes<'h> {
         hir: &'h HirModule,
         foreign: &'h HashMap<String, HirType>,
         inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
+        locations: &'h crate::locations::Locations<'h>,
     ) -> Self {
         let aliases = hir
             .imports
@@ -113,12 +116,30 @@ impl<'h> Shapes<'h> {
             },
             inferred_bindings,
             hir,
+            locations,
             foreign,
             aliases,
             pending: RefCell::new(HashMap::new()),
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn annotate_local(
+        &self,
+        error: anyhow::Error,
+        id: perry_hir::types::LocalId,
+    ) -> anyhow::Error {
+        match self.hir.local_source_spans.get(&id) {
+            Some(span) => self.locations.annotate(
+                error,
+                swc_common::Span::new(
+                    swc_common::BytePos(span.start),
+                    swc_common::BytePos(span.end),
+                ),
+            ),
+            None => error,
         }
     }
 
@@ -281,7 +302,21 @@ impl<'h> Shapes<'h> {
                     .collect::<Result<Vec<_>>>()?;
                 self.mir_record_kind(ctx, fields, true)?.into()
             }
-            other => bail!("MIR backend does not support type {other:?} yet"),
+            HirType::Any | HirType::Unknown => return Err(PerryDiagnostic::error(
+                DiagnosticCode::MissingTypeAnnotation,
+                "the value type cannot be inferred for the MIR backend",
+            )
+            .with_help(
+                "Add a concrete type annotation to this binding, parameter, or function return.",
+            )
+            .into()),
+            other => {
+                return Err(PerryDiagnostic::error(
+                    DiagnosticCode::UnsupportedType,
+                    format!("MIR backend does not support type {other:?} yet"),
+                )
+                .into());
+            }
         })
     }
 
@@ -456,7 +491,7 @@ impl<'h> Shapes<'h> {
                 "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
                 "URL" => return Ok(perry_mir::types::UrlType::get(ctx).into()),
                 "URLSearchParams" => return Ok(perry_mir::types::SearchParamsType::get(ctx).into()),
-                "Error" | "TypeError" | "RangeError" => {
+                "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" => {
                     return Ok(perry_mir::types::ExceptionType::get(ctx).into());
                 }
                 "RegExp" => return Ok(perry_mir::types::RegexType::get(ctx).into()),

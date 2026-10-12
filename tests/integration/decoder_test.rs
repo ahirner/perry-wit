@@ -23,12 +23,14 @@ export function decode(input: Uint8Array, split: number, fatal: boolean, ignore:
     return JSON.stringify({ parts, encoding: decoder.encoding, fatal: decoder.fatal, ignore: decoder.ignoreBOM });
 }
 "#;
-    let wit = "package test:decoder; world decoder { export decode: func(input: list<u8>, split: f64, fatal: bool, ignore: bool) -> string; }";
+    let wit = "package test:decoder; world decoder { export decode: func(input: list<u8>, split: f64, fatal: bool, ignore: bool) -> result<string>; }";
     let component = world::component(wit, "decoder", "decoder.ts", source)?;
     let engine = Engine::default();
     let (mut store, instance) = world::instantiate(&engine, &component)?;
-    let decode =
-        instance.get_typed_func::<(&[u8], f64, bool, bool), (String,)>(&mut store, "decode")?;
+    let decode = instance
+        .get_typed_func::<(&[u8], f64, bool, bool), (std::result::Result<String, ()>,)>(
+            &mut store, "decode",
+        )?;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("decode.mts");
     std::fs::write(
@@ -62,6 +64,7 @@ export function decode(input: Uint8Array, split: number, fatal: boolean, ignore:
                 for ignore in [false, true] {
                     let (actual,) =
                         decode.call(&mut store, (input, split as f64, fatal, ignore))?;
+                    let actual = actual.expect("fixture has no escaping failure");
                     assert_eq!(
                         serde_json::from_str::<serde_json::Value>(&actual)?,
                         expected[index],

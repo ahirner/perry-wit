@@ -112,6 +112,19 @@ impl Decoder {
     }
 }
 
+/// Validate labels against the supported UTF-8 decoder and raise its native range error.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_decoder_validate_label(label: *mut u8) {
+    // SAFETY: compiled code passes a live string.
+    let label = unsafe { runtime::bytes(label) }.trim_ascii();
+    if ![b"utf-8".as_slice(), b"utf8", b"unicode-1-1-utf-8"]
+        .iter()
+        .any(|name| label.eq_ignore_ascii_case(name))
+    {
+        runtime::raise(runtime::RANGE_ERROR, "Unsupported text encoding");
+    }
+}
+
 /// Allocate only the decoder's bounded scalar state; no input buffer is retained.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut Decoder {

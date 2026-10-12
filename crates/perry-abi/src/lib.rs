@@ -36,6 +36,8 @@ pub const DROPPED: u32 = 1;
 pub const TYPE_ERROR: u32 = 1;
 pub const RANGE_ERROR: u32 = 2;
 pub const ERROR: u32 = 3;
+pub const REFERENCE_ERROR: u32 = 6;
+pub const SYNTAX_ERROR: u32 = 7;
 /// Exception layout (`perry_runtime::exception`): `kind` at 0, `tag` at 4, `value` at 8.
 pub const EXCEPTION_KIND: usize = 0;
 pub const EXCEPTION_TAG: usize = 4;
@@ -84,6 +86,9 @@ mod imports {
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
         pub(crate) fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
+        pub(crate) fn perry_exception_message(exception: *mut u8) -> *mut u8;
+        pub(crate) fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8;
+        pub(crate) fn perry_raise_with_cause(kind: u32, message: *mut u8, cause: *mut u8);
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
@@ -132,7 +137,10 @@ mod imports {
     extern crate std;
     pub(crate) use perry_runtime::{
         array::perry_array_new_typed,
-        exception::{perry_raise, perry_status},
+        exception::{
+            perry_exception_message, perry_exception_new, perry_raise, perry_raise_with_cause,
+            perry_status,
+        },
         host::{subtask_cancel, subtask_drop, waitable_join},
         io::{perry_task_join, perry_write_acknowledged},
         promise::{
@@ -539,6 +547,85 @@ impl Default for Buffer {
 }
 
 // Here rather than in `utf8.rs`, which `perry-runtime` also compiles: the test runs once.
+/// Allocate the strict JSON parser's message from its original byte coordinates.
+pub fn json_syntax_message(input: &[u8], offset: u32) -> *mut u8 {
+    let mut message = Buffer::new();
+    json::syntax_message(input, offset, |part| message.extend_from_slice(part));
+    // SAFETY: the buffer owns valid UTF-8 and transfers its payload to the string.
+    unsafe { adopt(message.ptr, message.len as u32) }
+}
+
+/// The message of a live exception supplied by the compiler or another helper.
+#[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
+pub fn exception_message(exception: *mut u8) -> *mut u8 {
+    unsafe { imports::perry_exception_message(exception) }
+}
+
+/// Box a supported thrown value, retaining reference payloads through their runtime tag.
+#[allow(unused_unsafe)]
+pub fn exception_value(tag: u32, value: u64) -> *mut u8 {
+    // SAFETY: helper callers select the payload representation named by tag.
+    unsafe { imports::perry_exception_new(THROWN_VALUE, tag, value) }
+}
+
+/// Reject a native operation with category, code and its original path or URL.
+#[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
+pub fn reject_native(
+    promise: *mut u8,
+    kind: u32,
+    message: *mut u8,
+    code: &str,
+    category: &str,
+    location_key: &str,
+    location: &[u8],
+) {
+    fn string(bytes: &[u8]) -> *mut u8 {
+        let text = from_bytes(bytes);
+        let node = unsafe { alloc_shaped(32, &[0, 3, 4, 8, 24]) };
+        unsafe {
+            ptr::write_bytes(node, 0, 32);
+            ptr::write(node.cast::<u32>(), json::kind::STRING);
+            ptr::write(
+                node.add(8).cast::<u32>(),
+                *text.add(layout::string::DATA as usize).cast::<u32>(),
+            );
+            ptr::write(node.add(12).cast::<u32>(), bytes.len() as u32);
+            ptr::write(node.add(16).cast::<u32>(), scalars_length(bytes));
+        }
+        node
+    }
+    let cause = unsafe { alloc_shaped(32, &[0, 4, 4, 8, 16, 24]) };
+    unsafe {
+        ptr::write_bytes(cause, 0, 32);
+        ptr::write(cause.cast::<u32>(), json::kind::OBJECT);
+    }
+    let mut previous: *mut u8 = ptr::null_mut();
+    for (key, value) in [
+        ("code", code.as_bytes()),
+        ("category", category.as_bytes()),
+        (location_key, location),
+    ] {
+        let member = string(value);
+        let key = string(key.as_bytes());
+        unsafe {
+            ptr::write(member.add(24).cast::<u32>(), key as usize as u32);
+            let next = if previous.is_null() {
+                cause.add(16)
+            } else {
+                previous.add(4)
+            };
+            ptr::write(next.cast::<u32>(), member as usize as u32);
+        }
+        previous = member;
+    }
+    unsafe {
+        ptr::write(cause.add(20).cast::<u32>(), 3);
+        imports::perry_raise_with_cause(kind, message, cause);
+        imports::perry_status();
+        imports::perry_promise_reject(promise, kind as i32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::utf8::{scalars_length, scalars_length_wide};

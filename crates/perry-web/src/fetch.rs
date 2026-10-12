@@ -169,6 +169,7 @@ const RESULT_SIZE: u32 = 40;
 struct Fetch {
     pin: u32,
     promise: *mut u8,
+    url: *mut u8,
     /// The `send` subtask, while it runs.
     sending: u32,
     /// The request's contents stream (writable end) and the bytes still to write.
@@ -272,7 +273,7 @@ pub(crate) unsafe extern "C" fn web_fetch(
     let mut copy = Buffer::new();
     copy.extend_from_slice(body);
 
-    let op = perry_abi::object!(Fetch; promise, data, body, sent, ended, transmitted, zero);
+    let op = perry_abi::object!(Fetch; promise, url, data, body, sent, ended, transmitted, zero);
     let zero = alloc(RESULT_SIZE);
     // SAFETY: fresh blocks; every canonical call below takes live arguments.
     unsafe {
@@ -325,6 +326,7 @@ pub(crate) unsafe extern "C" fn web_fetch(
         op.write(Fetch {
             pin: perry_abi::pin(op.cast()),
             promise,
+            url,
             sending: 0,
             contents: (contents >> 32) as u32,
             contents_blocked: false,
@@ -422,7 +424,22 @@ fn sent(op: &mut Fetch) {
     let (failed, response) = unsafe { (*op.sent != 0, *(op.sent.add(8) as *const u32)) };
     if failed {
         cancel_writes(op);
-        reject_with(op.promise, TYPE_ERROR, from_static("fetch failed"));
+        let category = unsafe { error_category(*op.sent.add(8)) };
+        let mut message = Buffer::new();
+        message.extend_from_slice(b"fetch failed: ");
+        message.extend_from_slice(category.as_bytes());
+        let url = unsafe { bytes(op.url) };
+        message.extend_from_slice(b": ");
+        message.extend_from_slice(url);
+        perry_abi::reject_native(
+            op.promise,
+            TYPE_ERROR,
+            from_bytes(message.as_slice()),
+            category,
+            category,
+            "url",
+            url,
+        );
         return;
     }
     // SAFETY: canonical calls on the response this fetch owns.
@@ -694,4 +711,52 @@ pub(crate) extern "C" fn web_fetch_close() {
             }
         }
     }
+}
+
+fn error_category(case: u8) -> &'static str {
+    const CATEGORIES: &[&str] = &[
+        "DNS-timeout",
+        "DNS-error",
+        "destination-not-found",
+        "destination-unavailable",
+        "destination-IP-prohibited",
+        "destination-IP-unroutable",
+        "connection-refused",
+        "connection-terminated",
+        "connection-timeout",
+        "connection-read-timeout",
+        "connection-write-timeout",
+        "connection-limit-reached",
+        "TLS-protocol-error",
+        "TLS-certificate-error",
+        "TLS-alert-received",
+        "HTTP-request-denied",
+        "HTTP-request-length-required",
+        "HTTP-request-body-size",
+        "HTTP-request-method-invalid",
+        "HTTP-request-URI-invalid",
+        "HTTP-request-URI-too-long",
+        "HTTP-request-header-section-size",
+        "HTTP-request-header-size",
+        "HTTP-request-trailer-section-size",
+        "HTTP-request-trailer-size",
+        "HTTP-response-incomplete",
+        "HTTP-response-header-section-size",
+        "HTTP-response-header-size",
+        "HTTP-response-body-size",
+        "HTTP-response-trailer-section-size",
+        "HTTP-response-trailer-size",
+        "HTTP-response-transfer-coding",
+        "HTTP-response-content-coding",
+        "HTTP-response-timeout",
+        "HTTP-upgrade-failed",
+        "HTTP-protocol-error",
+        "loop-detected",
+        "configuration-error",
+        "internal-error",
+    ];
+    CATEGORIES
+        .get(case as usize)
+        .copied()
+        .unwrap_or("internal-error")
 }

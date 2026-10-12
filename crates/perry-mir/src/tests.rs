@@ -346,7 +346,7 @@ builtin.module @tasks {
         value = perry.await pending : builtin.fp64;
         prefix = perry.string_const "done: " : perry.string;
         suffix = perry.string_const "漢🙂" : perry.string;
-        text = perry.string_concat prefix, suffix : perry.string;
+        text = perry.concat prefix, suffix : perry.string;
         length = perry.string_len text : builtin.integer i32;
         perry.return text
     }
