@@ -42,11 +42,50 @@ interface api {
     name: string,
     contents: list<u8>,
   }
-  compile: func(program: program, wit: wit-input, options: compile-options) -> result<compiled, string>;
+  enum diagnostic-code {
+    parse-error,
+    unsupported-operator,
+    unsupported-spread,
+    missing-type-annotation,
+    unsupported-type,
+    unsupported-expression,
+    incompatible-record-layout,
+    missing-required-field,
+    absence-mismatch,
+    interface-mismatch,
+    export-mismatch,
+    import-signature-mismatch,
+    module-resolution,
+    invalid-input,
+    wit-resolution,
+    codegen-failure,
+    missing-error-channel,
+    io,
+    internal-compiler-error,
+  }
+  enum diagnostic-severity { error, warning, info }
+  record source-span {
+    file: string,
+    start-line: u32,
+    start-column: u32,
+    end-line: u32,
+    end-column: u32,
+    start-byte: u64,
+    end-byte: u64,
+  }
+  record diagnostic {
+    code: diagnostic-code,
+    severity: diagnostic-severity,
+    message: string,
+    span: option<source-span>,
+    notes: list<string>,
+    help: option<string>,
+  }
+  compile: func(program: program, wit: wit-input, options: compile-options) -> result<compiled, list<diagnostic>>;
   /// Raw TypeScript exports without WIT. This differs from compile with core-only,
   /// which still checks a WIT world and emits its canonical ABI.
-  compile-core: func(program: program) -> result<list<u8>, string>;
-  generate-sdk: func(wit: wit-input, %world: option<string>) -> result<list<artifact>, string>;
+  compile-core: func(program: program) -> result<list<u8>, list<diagnostic>>;
+  generate-sdk: func(wit: wit-input, %world: option<string>) -> result<list<artifact>, list<diagnostic>>;
 }
 
 world compiler {
