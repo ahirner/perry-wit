@@ -1,7 +1,10 @@
 //! Conservative completion-aware inference for unresolved local helper returns.
 use super::*;
 
-fn expression(expr: &Expr, env: &perry_hir::HirTypeEnv) -> HirType {
+use perry_hir::HirTypeFacts;
+use std::collections::HashMap;
+
+fn expression(expr: &Expr, env: &impl HirTypeFacts) -> HirType {
     if let Expr::Call { callee, .. } = expr
         && let Expr::PropertyGet {
             object, property, ..
@@ -13,9 +16,60 @@ fn expression(expr: &Expr, env: &perry_hir::HirTypeEnv) -> HirType {
     perry_hir::infer_expr_type(expr, env)
 }
 
+struct FunctionEnv<'a> {
+    base: &'a perry_hir::HirTypeEnv,
+    locals: &'a mut HashMap<LocalId, HirType>,
+}
+
+impl HirTypeFacts for FunctionEnv<'_> {
+    fn local_type(&self, id: LocalId) -> Option<&HirType> {
+        self.locals.get(&id).or_else(|| self.base.local_type(id))
+    }
+
+    fn global_type(&self, id: perry_hir::types::GlobalId) -> Option<&HirType> {
+        self.base.global_type(id)
+    }
+
+    fn function_return_type(&self, id: FuncId) -> Option<&HirType> {
+        self.base.function_return_type(id)
+    }
+
+    fn extern_function_return_type(&self, name: &str) -> Option<&HirType> {
+        self.base.extern_function_return_type(name)
+    }
+
+    fn this_type(&self) -> Option<HirType> {
+        self.base.this_type()
+    }
+
+    fn enum_member_type(&self, enum_name: &str, member_name: &str) -> Option<HirType> {
+        self.base.enum_member_type(enum_name, member_name)
+    }
+
+    fn static_field_type(&self, class_name: &str, field_name: &str) -> Option<&HirType> {
+        self.base.static_field_type(class_name, field_name)
+    }
+
+    fn static_method_return_type(&self, class_name: &str, method_name: &str) -> Option<&HirType> {
+        self.base.static_method_return_type(class_name, method_name)
+    }
+
+    fn named_property_type(&self, type_name: &str, property: &str) -> Option<HirType> {
+        self.base.named_property_type(type_name, property)
+    }
+
+    fn super_property_type(&self, property: &str) -> Option<HirType> {
+        self.base.super_property_type(property)
+    }
+
+    fn super_method_return_type(&self, method: &str) -> Option<HirType> {
+        self.base.super_method_return_type(method)
+    }
+}
+
 fn scan(
     statements: &mut [Stmt],
-    env: &mut perry_hir::HirTypeEnv,
+    env: &mut FunctionEnv<'_>,
     returned: &mut Vec<HirType>,
     resolve: bool,
 ) {
@@ -28,7 +82,7 @@ fn scan(
                 ..
             } if matches!(ty, HirType::Any | HirType::Unknown) => {
                 let inferred = expression(init, env);
-                env.insert_local(*id, inferred.clone());
+                env.locals.insert(*id, inferred.clone());
                 if resolve
                     && !matches!(
                         inferred,
@@ -87,14 +141,19 @@ fn scan(
 }
 
 pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations::Locations<'_>) {
+    let mut locals = HashMap::new();
+    let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
     for _ in 0..=hir.functions.len() {
         let mut changed = false;
-        let module_env = perry_hir::HirTypeEnv::from_module(hir);
         for function in &mut hir.functions {
             if locations.explicit_returns.contains(&function.name) {
                 continue;
             }
-            let mut env = module_env.clone();
+            locals.clear();
+            let mut env = FunctionEnv {
+                base: &module_env,
+                locals: &mut locals,
+            };
             let mut returned = Vec::new();
             scan(&mut function.body, &mut env, &mut returned, false);
             if function.is_async {
@@ -146,14 +205,14 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
         if !changed {
             break;
         }
+        module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
-    let module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
-        scan(
-            &mut function.body,
-            &mut module_env.clone(),
-            &mut Vec::new(),
-            true,
-        );
+        locals.clear();
+        let mut env = FunctionEnv {
+            base: &module_env,
+            locals: &mut locals,
+        };
+        scan(&mut function.body, &mut env, &mut Vec::new(), true);
     }
 }

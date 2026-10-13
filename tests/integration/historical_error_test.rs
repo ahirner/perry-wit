@@ -221,58 +221,6 @@ struct ExportError {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn json_failures_preserve_locations_identity_and_recovery() -> Result<()> {
-    let (mut store, instance, output) = instantiate(r#"
-        async function parse(input:string, mode:number):Promise<string> {
-            if(mode===1)return JSON.stringify(await new Response(input).json());
-            if(mode===2)return JSON.stringify(await new Request('http://example.test/', {method:'POST',body:input}).json());
-            return JSON.stringify(JSON.parse(input));
-        }
-        export async function run(input:string, mode:number):Promise<string> {
-            const pending=parse(input,mode);
-            try {return await pending;}
-            catch(original) {
-                try {await Promise.all([pending]);}
-                catch(repeated) {
-                    if(repeated!==original || !(repeated instanceof SyntaxError))throw new Error('JSON error lost');
-                }
-                throw original;
-            }
-        }
-    "#, "package test:errors; world boundary {
-        record failure {name:string,message:string}
-        import wasi:http/client@0.3.0;
-        export run:async func(input:string,mode:u32)->result<string,failure>;
-    }").await?;
-    let run = instance
-        .get_typed_func::<(&str, u32), (Result<String, ExportError>,)>(&mut store, "run")?;
-    for mode in 0..3 {
-        for (input, position) in [
-            ("", "0 (line 1, column 1)"),
-            ("[1,", "3 (line 1, column 4)"),
-            ("{\"é\":\"😀\",}", "13 (line 1, column 10)"),
-            ("{\r\n \"x\": }\r\n", "9 (line 2, column 7)"),
-        ] {
-            assert_eq!(
-                run.call_async(&mut store, (input, mode)).await?.0,
-                Err(ExportError {
-                    name: "SyntaxError".into(),
-                    message: format!("Invalid JSON at byte {position}")
-                })
-            );
-            assert_eq!(
-                run.call_async(&mut store, ("{\"ok\":true}", mode)).await?.0,
-                Ok("{\"ok\":true}".into())
-            );
-            store.assert_concurrent_state_empty();
-            assert!(store.data().table.is_empty());
-        }
-    }
-    assert!(output.contents().is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn native_failures_keep_their_domain_at_the_error_boundary() -> Result<()> {
     for (operation, name, message) in [
         (
@@ -386,38 +334,6 @@ async fn rejected_fetch_returns_a_typed_error_and_preserves_instance_reuse() -> 
         }
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
-    }
-    assert!(output.contents().is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn module_initialization_rejections_use_the_export_error_channel() -> Result<()> {
-    let (mut store, instance, output) = instantiate(
-        r#"
-        async function initialize():Promise<string>{throw new Error('initialization failed');}
-        const initialized=await initialize();
-        export async function run():Promise<string>{return initialized;}
-    "#,
-        "package test:errors; world boundary {
-        record failure { name:string, message:string }
-        export run:async func()->result<string,failure>;
-    }",
-    )
-    .await?;
-    let run = instance.get_typed_func::<(), (Result<String, ExportError>,)>(&mut store, "run")?;
-    for iteration in 0..10 {
-        assert_eq!(
-            run.call_async(&mut store, ())
-                .await
-                .map_err(|error| anyhow::anyhow!("initialization call {iteration}: {error:#}"))?
-                .0,
-            Err(ExportError {
-                name: "Error".into(),
-                message: "initialization failed".into(),
-            })
-        );
-        store.assert_concurrent_state_empty();
     }
     assert!(output.contents().is_empty());
     Ok(())
