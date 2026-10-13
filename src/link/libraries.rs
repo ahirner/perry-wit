@@ -250,6 +250,20 @@ impl Library {
     /// reservation. This bounds linear-memory shadow storage, not the Wasm call stack.
     fn fixed_stack_bound(&self, reachable: Option<&BTreeSet<u32>>) -> Option<u32> {
         use wasmparser::Operator as Op;
+        macro_rules! return_value_ops {
+            ($(@$proposal:ident $operator:ident $({ $($field:ident: $ty:ty),* })? => $visitor:ident ($($annotation:tt)*))*) => {
+                |operator: &Op<'_>| match operator {
+                    $(Op::$operator $({ $($field: _),* })? => return_value_ops!(@operator $operator $($annotation)*),)*
+                    _ => false,
+                }
+            };
+            (@operator Unreachable $($annotation:tt)*) => { false };
+            (@operator GlobalSet $($annotation:tt)*) => { false };
+            (@operator $operator:ident arity custom) => { false };
+            (@operator $operator:ident $($annotation:tt)*) => { true };
+        }
+        // Fixed-arity operators cannot branch or call. Global writes remain excluded.
+        let computes_return_value = wasmparser::for_each_operator!(return_value_ops);
         // Imported functions are leaves here; HelperMemory adds the guest-library bounds.
         let imported = self.imports.len();
         let stack = self
@@ -322,18 +336,8 @@ impl Library {
                                 restored = true;
                             } else {
                                 let tail = &ops[index + 1..];
-                                let returned = tail.iter().position(|op| {
-                                    !matches!(
-                                        op,
-                                        Op::LocalGet { .. }
-                                            | Op::I32Const { .. }
-                                            | Op::I64Const { .. }
-                                            | Op::F32Const { .. }
-                                            | Op::F64Const { .. }
-                                            | Op::I32Add
-                                            | Op::I32Sub
-                                    )
-                                })?;
+                                let returned =
+                                    tail.iter().position(|op| !computes_return_value(op))?;
                                 if !matches!(tail[returned], Op::Return) {
                                     return None;
                                 }
@@ -909,6 +913,37 @@ mod tests {
             .unwrap();
             let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
             assert_eq!(library.fixed_stack_bound(None), Some(bound), "{body}");
+        }
+    }
+
+    #[test]
+    fn return_values_can_be_computed_after_conditional_stack_restoration() {
+        for (parameter, computation) in [
+            ("f64", "local.get 0 f64.neg local.get 0 local.get 1 select"),
+            (
+                "i32",
+                "local.get 0 i32.const 8 i32.mul i32.const 255 i32.and",
+            ),
+            (
+                "i64",
+                "local.get 0 i64.const 56 i64.shl i64.const 56 i64.shr_s",
+            ),
+        ] {
+            let bytes = wat::parse_str(format!(
+                "(module (import \"env\" \"__stack_pointer\" (global (mut i32)))
+                  (func (param {parameter} i32) (result {parameter}) (local i32)
+                    global.get 0 i32.const 16 i32.sub local.tee 2 global.set 0
+                    local.get 1 if
+                      local.get 2 i32.const 16 i32.add global.set 0
+                      {computation} return
+                    end
+                    local.get 2 i32.const 16 i32.add global.set 0
+                    local.get 0))"
+            ))
+            .unwrap();
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
+            assert_eq!(library.fixed_stack_bound(None), Some(1024), "{computation}");
         }
     }
 
