@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
+use pliron::graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order};
 use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{
@@ -193,12 +194,60 @@ pub(crate) struct Library {
     pub(crate) start: Option<u32>,
 }
 
+struct HelperCalls<'a>(&'a [Vec<usize>]);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FunctionIndex(usize);
+
+impl HasLabel<()> for FunctionIndex {
+    fn label(&self, _: &()) -> String {
+        self.0.to_string()
+    }
+}
+
+impl ControlFlowGraph<()> for HelperCalls<'_> {
+    type Node = FunctionIndex;
+    fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
+        self.0[node.0].len()
+    }
+    fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
+        FunctionIndex(self.0[node.0][index])
+    }
+    fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
+        self.0
+            .iter()
+            .flat_map(|calls| calls.iter())
+            .filter(|&&callee| callee == node.0)
+            .count()
+    }
+    fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
+        FunctionIndex(
+            self.0
+                .iter()
+                .enumerate()
+                .flat_map(|(caller, calls)| {
+                    calls
+                        .iter()
+                        .filter(move |&&callee| callee == node.0)
+                        .map(move |_| caller)
+                })
+                .nth(index)
+                .expect("predecessor index"),
+        )
+    }
+    fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
+        (!self.0.is_empty()).then_some(FunctionIndex(0))
+    }
+    fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
+        Box::new((0..self.0.len()).map(FunctionIndex))
+    }
+}
+
 impl Library {
-    /// Acyclic helpers with fixed LLVM stack frames need at most their deepest chain of
-    /// frames. Only `reachable` functions count (`None`: all), so a recursive or unrecognized
-    /// function the program never calls does not cost the full reservation. Unrecognized
-    /// stack writes, recursion, and indirect calls among reachable functions retain the
-    /// conservative reservation. The allocator and linker use this same bound.
+    /// Bound the deepest shadow-stack frame chain among reachable helpers. Recursive
+    /// components that allocate no frame contribute only their callees' depth. Growing
+    /// recursion, unrecognized stack writes, and indirect calls retain the conservative
+    /// reservation. This bounds linear-memory shadow storage, not the Wasm call stack.
     fn fixed_stack_bound(&self, reachable: Option<&BTreeSet<u32>>) -> Option<u32> {
         use wasmparser::Operator as Op;
         // Imported functions are leaves here; HelperMemory adds the guest-library bounds.
@@ -233,7 +282,13 @@ impl Library {
             for (index, op) in ops.iter().enumerate() {
                 match op {
                     Op::Call { function_index } if (*function_index as usize) < imported => {}
-                    Op::Call { function_index } => calls.push(*function_index as usize - imported),
+                    Op::Call { function_index } => {
+                        let callee = *function_index as usize - imported;
+                        if callee >= self.bodies.len() {
+                            return None;
+                        }
+                        calls.push(callee);
+                    }
                     Op::CallIndirect { .. }
                     | Op::CallRef { .. }
                     | Op::ReturnCall { .. }
@@ -329,32 +384,24 @@ impl Library {
             graph.push(calls);
             frames.push(frame.map_or(0, |(_, size)| size as u32));
         }
-        /// The deepest frame chain from `index`; `None` on recursion.
-        fn depth(
-            index: usize,
-            graph: &[Vec<usize>],
-            frames: &[u32],
-            memo: &mut [Option<Option<u32>>],
-        ) -> Option<u32> {
-            match *memo.get(index)? {
-                Some(Some(depth)) => return Some(depth),
-                Some(None) => return None,
-                None => {}
+        let graph = HelperCalls(&graph);
+        let mut depths = vec![0_u32; frames.len()];
+        for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
+            if component.is_cyclic && component.nodes.iter().any(|node| frames[node.0] != 0) {
+                return None;
             }
-            memo[index] = Some(None);
-            let mut deepest = 0_u32;
-            for &callee in &graph[index] {
-                deepest = deepest.max(depth(callee, graph, frames, memo)?);
+            let mut depth = 0_u32;
+            for node in &component.nodes {
+                let callee_depth = graph.0[node.0].iter().try_fold(0_u32, |deepest, &callee| {
+                    Some(deepest.max(*depths.get(callee)?))
+                })?;
+                depth = depth.max(frames[node.0].checked_add(callee_depth)?);
             }
-            let total = frames[index].checked_add(deepest)?;
-            memo[index] = Some(Some(total));
-            Some(total)
+            for node in component.nodes {
+                depths[node.0] = depth;
+            }
         }
-        let mut memo = vec![None; graph.len()];
-        let mut deepest = 0_u32;
-        for index in 0..graph.len() {
-            deepest = deepest.max(depth(index, &graph, &frames, &mut memo)?);
-        }
+        let deepest = depths.into_iter().max().unwrap_or(0);
         Some(deepest.max(1024))
     }
 
@@ -826,7 +873,7 @@ mod tests {
     fn unbounded_or_unbalanced_helpers_keep_the_full_stack_reservation() {
         for body in [
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 i32.const 1 if local.get 0 i32.const 16 i32.add global.set 0 return end)",
-            "(func call 0)",
+            "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 call 0 local.get 0 i32.const 16 i32.add global.set 0)",
             "(func (local i32) loop global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 br 0 end)",
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 return)",
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 i32.const 1 if return end local.get 0 i32.const 16 i32.add global.set 0)",
@@ -839,6 +886,29 @@ mod tests {
             .unwrap();
             let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
             assert_eq!(library.fixed_stack_bound(None), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn zero_frame_recursion_preserves_callee_and_caller_depths() {
+        for (body, bound) in [
+            ("(func call 0)", 1024),
+            ("(func call 1) (func call 0)", 1024),
+            (
+                "(func call 1) (func call 0 call 2) (func (local i32) global.get 0 i32.const 4096 i32.sub local.tee 0 global.set 0 local.get 0 i32.const 4096 i32.add global.set 0)",
+                4096,
+            ),
+            (
+                "(func (local i32) global.get 0 i32.const 2048 i32.sub local.tee 0 global.set 0 call 1 local.get 0 i32.const 2048 i32.add global.set 0) (func call 2) (func call 1 call 3) (func (local i32) global.get 0 i32.const 4096 i32.sub local.tee 0 global.set 0 local.get 0 i32.const 4096 i32.add global.set 0)",
+                6144,
+            ),
+        ] {
+            let bytes = wat::parse_str(format!(
+                "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
+            ))
+            .unwrap();
+            let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
+            assert_eq!(library.fixed_stack_bound(None), Some(bound), "{body}");
         }
     }
 
