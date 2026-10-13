@@ -143,7 +143,7 @@ runtime_functions! {
     JsonCursorTail = "json_cursor_tail" (I32, I32, I32) -> I32;
     JsonCursorFinish = "json_cursor_finish" (I32, I32);
     JsonCursorKey = "json_cursor_key" (I32, I32, I32) -> I32;
-    JsonParseDynamic = "json_parse_dynamic" (I32, I32) -> I32;
+    JsonParseString = "json_parse_string" (I32) -> I32;
     ArrayGrowCollectible = "perry_array_grow_collectible" (I32, I32);
     ArrayNewCollectible = "perry_array_new_collectible" (I32, I32) -> I32;
     CabiRelease = "perry_cabi_release" (I32);

@@ -133,7 +133,7 @@ One cached runtime-effects analysis propagates allocation, collection, suspensio
 
 An expected JSON type selects a generated MIR decoder for numbers, booleans, strings, numeric/string unions, optional values, records, arrays and tuples. Recursive schemas reserve decoder identities before constructing their bodies. The decoder writes known fields directly into native storage and retains unknown fields in JSON residue. Dynamic JSON and schemas requiring snapshot conversion use the shared graph destination.
 
-Typed construction and dynamic parsing share the JSON lexer, Unicode validation and number conversion. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior. Numeric JSON storage uses the existing floating representation. Fixed-width and exceptional numeric layouts belong to compositional inference.
+Typed construction and dynamic parsing share the JSON lexer, Unicode-escape validation and number conversion. Runtime strings carry validated immutable UTF-8; both parser destinations preserve that contract instead of rescanning it. Raw byte adapters validate UTF-8 before entering the shared lexer. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior. Numeric JSON storage uses the existing floating representation. Fixed-width and exceptional numeric layouts belong to compositional inference.
 
 A decoder carries its lookahead through SSA and returns a value plus a deferred schema-failure flag. Repeated object keys replace both the candidate value and its schema result. Syntax errors take precedence at completion; malformed input unwinds bounded container state while partial values remain unpublished. Parsing preserves the depth limit of 128, nullable/absent distinctions and independent mutable views of immutable snapshots.
 
@@ -166,7 +166,7 @@ Interface glue implements the [Canonical ABI] around exported entry points:
 Perry-WIT manages all heap-allocated objects in a single, non-moving guest memory space managed by `talc`.
 
 ### Text
-Strings are stored as validated UTF-8 byte sequences using Unicode scalar indexing. Lone surrogates and UTF-16 code-unit operations are rejected at compile time. External text entering through Canonical ABI boundaries, JSON, or `TextDecoder` undergoes strict UTF-8 validation. Binary payloads remain intact as raw byte views without intermediate transcoding. Repeated appends reuse spare buffer capacity for amortized linear copying.
+Strings are stored as validated UTF-8 byte sequences using Unicode scalar indexing. Lone surrogates and UTF-16 code-unit operations are rejected at compile time. Canonical ABI string inputs carry valid UTF-8. `TextDecoder` replaces malformed byte sequences by default and rejects them in fatal mode. JSON validates its grammar and Unicode escapes against these established string invariants. Binary payloads remain intact as raw byte views without intermediate transcoding. Repeated appends reuse spare buffer capacity for amortized linear copying.
 
 ### Heap
 Records, dictionaries, finite unions, JSON trees, byte views, and Promise outcomes share a unified managed heap.

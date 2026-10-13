@@ -422,7 +422,7 @@ intrinsics! {
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws, atomic;
-    JsonCursorBegin = "json_cursor_begin" (String) -> (JsonCursor), throws, atomic;
+    JsonCursorBegin = "json_cursor_begin" (String) -> (JsonCursor), atomic;
     JsonCursorByte = "json_cursor_byte" (JsonCursor) -> (Index), noalloc;
     JsonCursorConsume = "json_cursor_consume" (JsonCursor, Index) -> (), noalloc;
     JsonCursorNumber = "json_cursor_number" (JsonCursor) -> (Number), noalloc;

@@ -1,4 +1,4 @@
-//! Allocation-free JSON parsing into caller-owned typed nodes.
+//! Shared JSON grammar with fixed-buffer and dynamic graph destinations.
 
 #[path = "json/number.rs"]
 mod number;

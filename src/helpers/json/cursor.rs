@@ -88,16 +88,12 @@ fn set_word(value: *mut u8, offset: usize, data: u32) {
     unsafe { value.add(offset).cast::<u32>().write(data) }
 }
 
+/// # Safety
+/// `input` is a live Perry string with immutable UTF-8 bytes.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_begin(input: *mut u8) -> u32 {
-    let text = unsafe { runtime::bytes(input) };
-    let text = match core::str::from_utf8(text) {
-        Ok(text) => text,
-        Err(_) => {
-            runtime::raise(runtime::SYNTAX_ERROR, "JSON input is not UTF-8");
-            return 0;
-        }
-    };
+    // SAFETY: a Perry string owns immutable UTF-8 for the task lifetime.
+    let text = unsafe { core::str::from_utf8_unchecked(runtime::bytes(input)) };
     static SHAPE: [u32; 4] = [
         0,
         2,

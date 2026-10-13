@@ -115,6 +115,15 @@ type Result<T> = {tag:'ok';val:T}|{tag:'err';val:string};
 interface Item {n:number}
 interface Envelope {result:Result<Item>}
 interface Row {name:string; inner:Item; extra?:string}
+export function encoding():number {
+ const text = new TextDecoder().decode(new Uint8Array([34,255,34]));
+ const typed:string = JSON.parse(text);
+ if(typed !== '�') return 1;
+ if(JSON.stringify(JSON.parse(text)) !== '\"�\"') return 2;
+ try {const invalid = new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array([255]));return 3;}
+ catch(error) {if(!(error instanceof TypeError))return 4;}
+ return 0;
+}
 export function duplicates():number {
  const tagged:Envelope=JSON.parse('{"result":{"val":{"n":4},"tag":"ok"}}');
  if(tagged.result.tag !== 'ok') return 1;
@@ -196,7 +205,7 @@ export function limits():number {{
     let source = format!("{DUPLICATES}{limits}{fields}");
     let mut program = Program::checked(&source, "typed-validation.ts");
     program.stress_collection(true);
-    for export in ["duplicates", "limits", "fields"] {
+    for export in ["duplicates", "limits", "fields", "encoding"] {
         assert_eq!(program.outcome(export, &[]), (0.0, 0), "{export}");
     }
 }

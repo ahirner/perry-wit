@@ -241,10 +241,7 @@ impl FunctionLowering<'_, '_> {
                 None
             }
             Intrinsic::JsonParse => {
-                use perry_abi::layout::string::{DATA, LEN};
-                let data = self.load(ctx, MemKind::I32, args[0], DATA);
-                let len = self.load(ctx, MemKind::I32, args[0], LEN);
-                let value = self.runtime(ctx, Runtime::JsonParseDynamic, vec![data, len]);
+                let value = self.runtime(ctx, Runtime::JsonParseString, args);
                 let status = self.runtime(ctx, Runtime::Status, vec![]);
                 self.throw_status_if(ctx, status, status);
                 Some(value)

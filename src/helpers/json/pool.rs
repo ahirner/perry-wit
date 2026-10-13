@@ -189,16 +189,11 @@ impl GraphStorage for Pooled<'_> {
     }
 }
 
+/// # Safety
+/// `string` is a live Perry string with immutable UTF-8 bytes.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn json_parse_dynamic(data: u32, len: u32) -> u32 {
-    let bytes = unsafe { core::slice::from_raw_parts(data as usize as *const u8, len as usize) };
-    let input = match core::str::from_utf8(bytes) {
-        Ok(input) => input,
-        Err(_) => {
-            runtime::raise(runtime::SYNTAX_ERROR, "JSON input is not UTF-8");
-            return 0;
-        }
-    };
+pub(crate) unsafe extern "C" fn json_parse_string(string: *mut u8) -> u32 {
+    let input = unsafe { core::str::from_utf8_unchecked(runtime::bytes(string)) };
     let mut residue = Residue::new(input);
     match super::parse::pooled(input, 0, true, 0, &mut residue) {
         Ok((value, _)) => value,

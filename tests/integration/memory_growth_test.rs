@@ -9,8 +9,8 @@ struct Heap {
     memory: Memory,
 }
 impl Heap {
-    fn new() -> Result<Self> {
-        let core = wat::parse_str(
+    fn new(static_padding: usize) -> Result<Self> {
+        let core = wat::parse_str(format!(
             r#"(module
           (import "__perry_helper" "perry_gc_alloc" (func $alloc (param i32 i32) (result i32)))
           (import "__perry_helper" "perry_buffer_resize" (func $resize (param i32 i32 i32 i32 i32) (result i32)))
@@ -22,11 +22,13 @@ impl Heap {
           (import "__perry_helper" "perry_gc_pin" (func $pin (param i32) (result i32)))
           (import "__perry_helper" "perry_gc_unpin" (func $unpin (param i32)))
           (memory (export "memory") 1 64)
+          (data (i32.const 1024) "{padding}")
           (export "alloc" (func $alloc)) (export "resize" (func $resize))
           (export "push" (func $push)) (export "reset" (func $reset))
           (export "debug" (func $debug)) (export "collect" (func $collect))
           (export "counter" (func $counter)) (export "pin" (func $pin)) (export "unpin" (func $unpin)))"#,
-        )?;
+            padding = r"\00".repeat(static_padding),
+        ))?;
         let engine = Engine::default();
         let module = Module::new(&engine, link::link_helpers(core)?)?;
         let mut store = Store::new(&engine, ());
@@ -78,8 +80,12 @@ impl Heap {
 
 #[test]
 fn tail_growth_preserves_bytes_updates_directory_and_reclaims() -> Result<()> {
-    for size in [131072, 2 * 1024 * 1024] {
-        let mut heap = Heap::new()?;
+    for (size, padding) in [131072, 2 * 1024 * 1024].into_iter().flat_map(|size| {
+        [0, 160, 320, 1008, 1040]
+            .into_iter()
+            .map(move |padding| (size, padding))
+    }) {
+        let mut heap = Heap::new(padding)?;
         let pointer = heap.alloc(8192)?;
         heap.unit("push", pointer)?;
         heap.memory
@@ -115,7 +121,7 @@ fn tail_growth_preserves_bytes_updates_directory_and_reclaims() -> Result<()> {
 #[test]
 fn fragmentation_and_pins_use_copy_fallback() -> Result<()> {
     for pinned in [false, true] {
-        let mut heap = Heap::new()?;
+        let mut heap = Heap::new(0)?;
         let pointer = heap.alloc(8192)?;
         heap.memory
             .write(&mut heap.store, pointer as usize, b"kept")?;
@@ -161,7 +167,7 @@ fn fragmentation_and_pins_use_copy_fallback() -> Result<()> {
 
 #[test]
 fn denied_growth_keeps_the_original_payload() -> Result<()> {
-    let mut heap = Heap::new()?;
+    let mut heap = Heap::new(0)?;
     let pointer = heap.alloc(8192)?;
     heap.unit("push", pointer)?;
     heap.memory
