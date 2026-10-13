@@ -503,3 +503,45 @@ export function write():number {{ const rows=JSON.parse({input});let size=0;for(
         allocations[1]
     );
 }
+
+#[test]
+fn immutable_json_lookup_preserves_duplicates_keys_and_copied_container_owners() {
+    let members = (0..40)
+        .map(|i| format!("\"k{i}\":{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let values = (0..128)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!("{{{members},\"k0\":99,\"\\u006b1\":88,\"é🙂\":17,\"values\":[{values}]}}");
+    let literal = serde_json::to_string(&input).unwrap();
+    let source = format!(
+        r#"
+let kept=JSON.parse('{{}}');
+export function prepare():number {{
+ const original=JSON.parse({literal});
+ const copy={{...original,k0:100}};
+ if(original.k0!==99 || original.k1!==88 || copy.k0!==100 || copy.k1!==88)return 1;
+ kept=copy;
+ return 0;
+}}
+export function read():number {{
+ if(kept.k0!==100 || kept.k1!==88 || kept['é🙂']!==17 || kept.missing!==undefined)return 1;
+ for(let i=2;i<40;i++)if(kept['k'+i]!==i)return 2;
+ const values=kept.values;
+ for(let i=0;i<128;i++)if(values[i]!==i)return 3;
+ if(values[128]!==undefined || values[-1]!==undefined || values[1.5]!==undefined)return 4;
+ return 0;
+}}
+"#
+    );
+    let mut program = Program::checked(&source, "indexed-json.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("prepare", &[]), (0.0, 0));
+        assert_eq!(program.outcome("read", &[]), (0.0, 0));
+    }
+    assert_eq!(program.counter(Counter::Roots), 0);
+    assert_eq!(program.counter(Counter::Pins), 0);
+}

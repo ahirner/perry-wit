@@ -193,7 +193,9 @@ impl FunctionLowering<'_, '_> {
             let size = self.i32_const(ctx, bytes as i32);
             let shape = self.i32_const(ctx, 0);
             let frame = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
-            self.publish_roots(ctx, &[frame]);
+            if !self.atomic_construction {
+                self.publish_roots(ctx, &[frame]);
+            }
             self.local_frame = Some(frame);
         }
         Ok(())
@@ -426,12 +428,14 @@ impl FunctionLowering<'_, '_> {
         after: perry_mir::liveness::LiveAfter<'_>,
         order: &HashMap<Value, usize>,
     ) -> Result<Option<Value>> {
-        let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some_and(|call| {
-            self.state
-                .call_effects
-                .get(&call.callee(ctx))
-                .is_none_or(|effect| effect.may_collect)
-        });
+        if self.atomic_construction {
+            return Ok(None);
+        }
+        let call_effect = Operation::get_op::<CallOp>(op, ctx)
+            .and_then(|call| self.state.call_effects.get(&call.callee(ctx)));
+        let atomic_call = call_effect.is_some_and(|e| e.atomic_construction);
+        let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some()
+            && call_effect.is_none_or(|effect| effect.may_collect || effect.allocates);
         if !self.state.collectible
             || !(perry_mir::effects::allocates(ctx, op)
                 || collecting_call
@@ -456,7 +460,8 @@ impl FunctionLowering<'_, '_> {
             .map(|value| self.mapped(ctx, value))
             .collect::<Result<Vec<_>>>()?;
         let atomic = self.state.resources.is_empty()
-            && perry_mir::effects::allocation(ctx, op) == perry_mir::effects::Allocation::Atomic;
+            && (perry_mir::effects::allocation(ctx, op) == perry_mir::effects::Allocation::Atomic
+                || atomic_call);
         let resume = atomic.then(|| {
             let due = self.runtime(ctx, Runtime::GcDue, vec![]);
             let collect = self.new_block(ctx, vec![]);

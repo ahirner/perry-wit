@@ -172,7 +172,13 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                if let Some(target) = expected.filter(|ty| {
+                    !ty.deref(ctx).is::<JsonType>() && crate::json::direct_json_schema(ctx, *ty)
+                }) {
+                    self.parse_cursor(ctx, text, target)?
+                } else {
+                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                }
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
@@ -190,7 +196,13 @@ impl<'s> FunctionBuilder<'s> {
                     "{JSON_CALLBACKS}"
                 );
                 let text = self.string_operand(ctx, text)?;
-                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                if let Some(target) = expected.filter(|ty| {
+                    !ty.deref(ctx).is::<JsonType>() && crate::json::direct_json_schema(ctx, *ty)
+                }) {
+                    self.parse_cursor(ctx, text, target)?
+                } else {
+                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                }
             }
             Expr::JsonStringifyPretty { .. } => bail!("{JSON_CALLBACKS}"),
             Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),

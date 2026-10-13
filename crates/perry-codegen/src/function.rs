@@ -40,6 +40,7 @@ pub(crate) struct FunctionLowering<'s, 'e> {
     pub(crate) blocks: HashMap<Ptr<BasicBlock>, Ptr<BasicBlock>>,
     /// Whether the function returns an exception status after its results.
     pub(crate) throws: bool,
+    pub(crate) atomic_construction: bool,
     /// Wasm result types, without the status.
     pub(crate) results: Vec<TypeHandle>,
     pub(crate) throw_block: Option<Ptr<BasicBlock>>,
@@ -78,6 +79,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             values: HashMap::new(),
             blocks: HashMap::new(),
             throws: false,
+            atomic_construction: false,
             results: vec![],
             throw_block: None,
             landing: None,
@@ -124,6 +126,8 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         let entry = function.get_entry_block(ctx);
         let mut lowering = FunctionLowering::glue(state, ctx, &function);
         lowering.throws = throws;
+        lowering.atomic_construction =
+            lowering.state.call_effects[&mir.get_symbol_name(ctx)].atomic_construction;
         lowering.results = results;
         lowering.map_blocks(ctx, mir, Some(entry))?;
         if may_collect {

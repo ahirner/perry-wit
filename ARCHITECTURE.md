@@ -129,6 +129,16 @@ WIT constraints enter before arithmetic folding. One numeric worklist propagates
 
 One cached runtime-effects analysis propagates allocation, collection, suspension, reentry, record mutation, escape and failure information through the call graph. Escape provenance follows SSA uses and branch arguments as facts become known. Async rejection remains distinct from synchronous throwing. Allocation reports, argument promotion, lifetime assignment, GC roots and export scopes consume this shared analysis. Boundary scopes account for initializers and canonical marshalling before lowering inserts runtime calls. Runtime frame constructors register their resume handlers; the dispatcher emits calls to those handlers. Async frame slots are cleared at collection and suspension points. Lifetime attributes preserve cached control-flow and value analyses.
 
+#### JSON construction
+
+An expected JSON type selects a generated MIR decoder for numbers, booleans, strings, numeric/string unions, optional values, records, arrays and tuples. Recursive schemas reserve decoder identities before constructing their bodies. The decoder writes known fields directly into native storage and retains unknown fields in JSON residue. Dynamic JSON and schemas requiring snapshot conversion use the shared graph destination.
+
+Typed construction and dynamic parsing share the JSON lexer, Unicode validation and number conversion. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior. Numeric JSON storage uses the existing floating representation. Fixed-width and exceptional numeric layouts belong to compositional inference.
+
+A decoder carries its lookahead through SSA and returns a value plus a deferred schema-failure flag. Repeated object keys replace both the candidate value and its schema result. Syntax errors take precedence at completion; malformed input unwinds bounded container state while partial values remain unpublished. Parsing preserves the depth limit of 128, nullable/absent distinctions and independent mutable views of immutable snapshots.
+
+Generated decoders form a verified synchronous construction group. Every direct callee belongs to that group, and its operations complete without collection, suspension, callbacks or conservative allocation. Collection and root publication occur at the caller; allocation, escape, task and failure effects remain visible to the shared analysis. Repeated internal GC checks and root setup are omitted under this proof.
+
 ### 5. Code Generation
 
 The code generator translates typed MIR into WebAssembly instructions:
@@ -136,6 +146,8 @@ The code generator translates typed MIR into WebAssembly instructions:
 - Reducible control flow structures into valid WebAssembly blocks, loops, and branches using Ramsey's dominator-tree algorithm ([Ramsey 2022]).
 - **Operand Stack Scheduling**: Single-use values defined in the same block as their user fold into expression trees evaluated on the operand stack when effect and trap ordering permits. Constants rematerialize at use sites. Other live values and used block parameters occupy WebAssembly locals, with locals reused across non-overlapping live ranges.
 - **Canonical ABI Marshalling**: Synthesizes boundary stubs directly around compiled entry points according to the [Canonical ABI]. Inbound values lift from flat registers into typed guest objects, while outbound values lower into caller return areas.
+
+Pliron CFG simplification and DCE run on the lowered Wasm IR to convergence before control-flow structurization.
 
 The resulting core WebAssembly module can be emitted directly for low-level embedding or unit testing.
 

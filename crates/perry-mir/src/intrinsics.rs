@@ -17,7 +17,7 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        attributes::IdentifierAttr,
+        attributes::{IdentifierAttr, TypeAttr},
         types::{FP64Type, IntegerType, Signedness},
     },
     common_traits::Verify,
@@ -57,6 +57,7 @@ pub(crate) enum Ty {
     Url,
     SearchParams,
     Json,
+    JsonCursor,
     Date,
     Decoder,
     Regex,
@@ -112,6 +113,7 @@ impl Ty {
             Ty::Url => crate::types::UrlType::get(ctx).into(),
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
+            Ty::JsonCursor => crate::types::JsonCursorType::get(ctx).into(),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -217,6 +219,7 @@ impl Ty {
             Ty::Url => deref.is::<crate::types::UrlType>(),
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
+            Ty::JsonCursor => deref.is::<crate::types::JsonCursorType>(),
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -418,7 +421,19 @@ intrinsics! {
     DecoderValidateLabel = "decoder_validate_label" (String) -> (), throws, atomic;
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
-    JsonParse = "json_parse" (String) -> (Json), throws;
+    JsonParse = "json_parse" (String) -> (Json), throws, atomic;
+    JsonCursorBegin = "json_cursor_begin" (String) -> (JsonCursor), throws, atomic;
+    JsonCursorByte = "json_cursor_byte" (JsonCursor) -> (Index), noalloc;
+    JsonCursorConsume = "json_cursor_consume" (JsonCursor, Index) -> (), noalloc;
+    JsonCursorNumber = "json_cursor_number" (JsonCursor) -> (Number), noalloc;
+    JsonCursorBoolean = "json_cursor_boolean" (JsonCursor) -> (Bool), noalloc;
+    JsonCursorString = "json_cursor_string" (JsonCursor) -> (String), atomic;
+    JsonCursorDiscard = "json_cursor_discard" (JsonCursor) -> (), noalloc;
+    JsonCursorValue = "json_cursor_value" (JsonCursor) -> (Json), atomic;
+    JsonCursorMember = "json_cursor_member" (JsonCursor, Json) -> (Json), atomic;
+    JsonCursorTail = "json_cursor_tail" (JsonCursor, Json, Index) -> (Json), atomic;
+    JsonCursorFinish = "json_cursor_finish" (JsonCursor, Bool) -> (), throws, atomic;
+    JsonResidue = "json_residue" (Aggregate, Json) -> (), noalloc;
     JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
@@ -445,7 +460,7 @@ intrinsics! {
     JsonFromString = "json_from_string" (String) -> (Json), pure;
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
-    JsonUndefined = "json_undefined" () -> (Json), pure;
+    JsonUndefined = "json_undefined" () -> (Json), pure, noalloc;
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
@@ -961,5 +976,56 @@ impl Verify for SettledFieldOp {
 impl SideEffects for SettledFieldOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         false
+    }
+}
+
+/// Select a record field by its static schema names, without allocating a key string.
+#[pliron_op(
+    name = "perry.json_cursor_key",
+    format = "$0 ` : ` type($0) ` schema ` attr($perry_json_record, $TypeAttr)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
+    attributes = (perry_json_record: pliron::builtin::attributes::TypeAttr)
+)]
+pub struct JsonCursorKeyOp;
+impl JsonCursorKeyOp {
+    pub fn new(ctx: &mut Context, cursor: Value, record: TypeHandle) -> Self {
+        let index = crate::collections::index_type(ctx);
+        let op = Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![index],
+                vec![cursor],
+                vec![],
+                0,
+            ),
+        };
+        op.set_attr_perry_json_record(ctx, pliron::builtin::attributes::TypeAttr::new(record));
+        op
+    }
+    pub fn record(&self, ctx: &Context) -> TypeHandle {
+        self.get_attr_perry_json_record(ctx)
+            .expect("record schema")
+            .get_type(ctx)
+    }
+}
+impl Verify for JsonCursorKeyOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
+        if !operand.deref(ctx).is::<crate::types::JsonCursorType>()
+            || !self.record(ctx).deref(ctx).is::<crate::types::RecordType>()
+        {
+            verify_err!(
+                self.loc(ctx),
+                IntrinsicErr::Signature("json_cursor_key".into())
+            )?
+        }
+        Ok(())
+    }
+}
+#[op_interface_impl]
+impl SideEffects for JsonCursorKeyOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        true
     }
 }

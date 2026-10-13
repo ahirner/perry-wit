@@ -325,6 +325,16 @@ pub struct UrlType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct SearchParamsType;
 
+/// An internal cursor over one fully validated immutable JSON document.
+#[pliron_type(
+    name = "perry.json_cursor",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct JsonCursorType;
+
 /// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
 /// Untyped data is a JSON tree, never `any` (subset rule R6).
 #[pliron_type(name = "perry.json", generate_get = true, format, verifier = "succ")]

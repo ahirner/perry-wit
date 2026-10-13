@@ -29,8 +29,13 @@
 use anyhow::{Context as _, Result, anyhow};
 use perry_mir::attrs::ErrorKind;
 use pliron::{
-    builtin::ops::ModuleOp, context::Context, op::Op, operation::verify_operation,
-    pass::AnalysisManager, printable::Printable,
+    builtin::ops::ModuleOp,
+    context::Context,
+    op::Op,
+    operation::verify_operation,
+    opts::{dce::DCEPass, simplify_cfg::SimplifyCFGPass},
+    pass::{AnalysisManager, PMConfig, Pass, Passes},
+    printable::Printable,
 };
 use pliron_wasm::emit::{DataSegment, EmitOptions, Memory, emit_module};
 
@@ -99,6 +104,20 @@ pub fn compile(
     analyses: &mut AnalysisManager,
 ) -> Result<Vec<u8>> {
     let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses)?;
+    let mut cleanup = Passes::default();
+    cleanup.add_pass(SimplifyCFGPass);
+    cleanup.add_pass(DCEPass);
+    let mut lowered_analyses = AnalysisManager::default();
+    lowered_analyses.set_config(PMConfig {
+        verify_after_all: true,
+        ..PMConfig::default()
+    });
+    while cleanup
+        .run(wasm.get_operation(), ctx, &mut lowered_analyses)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?
+        .ir_changed
+        == pliron::irbuild::IRStatus::Changed
+    {}
     // Resuming an `await` inside a loop enters the loop at a second block.
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);

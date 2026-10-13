@@ -64,7 +64,12 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         target: TypeHandle,
     ) -> Result<Value> {
-        let existing = self.shapes.decoders.borrow().get(&target).cloned();
+        let existing = self
+            .shapes
+            .decoders
+            .borrow()
+            .get(&(target, crate::shapes::DecoderInput::Snapshot))
+            .cloned();
         let name = match existing {
             Some(name) => name,
             None => {
@@ -86,10 +91,10 @@ impl<'s> FunctionBuilder<'s> {
                     }
                     index += 1;
                 };
-                self.shapes
-                    .decoders
-                    .borrow_mut()
-                    .insert(target, name.clone());
+                self.shapes.decoders.borrow_mut().insert(
+                    (target, crate::shapes::DecoderInput::Snapshot),
+                    name.clone(),
+                );
                 let signature = Signature {
                     name: name.clone(),
                     is_async: false,
@@ -403,4 +408,37 @@ impl<'s> FunctionBuilder<'s> {
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
+}
+
+/// Schemas supported by direct cursor construction with the current runtime layout.
+/// Other schema kinds use checked snapshot conversion.
+pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
+    let mut pending = vec![root];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(ty) = pending.pop() {
+        if !visited.insert(ty) {
+            continue;
+        }
+        let ty = ty.deref(ctx);
+        if let Some(record) = ty.downcast_ref::<RecordType>() {
+            let Ok(fields) = record.fields() else {
+                return false;
+            };
+            pending.extend(fields.iter().map(|(_, ty)| *ty));
+        } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
+            pending.push(array.element());
+        } else if let Some(optional) = ty.downcast_ref::<perry_mir::types::OptionalType>() {
+            pending.push(optional.value());
+        } else if !(ty.is::<FP64Type>()
+            || ty.is::<StringType>()
+            || ty.is::<JsonType>()
+            || ty.is::<perry_mir::types::NumberStringType>()
+            || ty
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 1))
+        {
+            return false;
+        }
+    }
+    true
 }

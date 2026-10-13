@@ -25,6 +25,7 @@ mod foreign;
 mod host;
 mod infer;
 mod json;
+mod json_cursor;
 mod locations;
 mod modules;
 mod operators;

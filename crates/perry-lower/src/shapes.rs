@@ -28,10 +28,17 @@ use std::{cell::RefCell, collections::HashMap};
 
 mod generics;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DecoderInput {
+    Snapshot,
+    Cursor,
+    Text,
+}
+
 pub(crate) struct Shapes<'h> {
     pub(crate) module: pliron::builtin::ops::ModuleOp,
     pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
-    pub(crate) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
+    pub(crate) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
     pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
     pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,

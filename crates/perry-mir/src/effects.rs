@@ -17,7 +17,7 @@ use pliron::{
     context::{Context, Ptr},
     graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order},
     identifier::Identifier,
-    op::op_cast,
+    op::{Op, op_cast},
     operation::Operation,
     pass::{Analysis, AnalysisManager},
     result::Result,
@@ -25,6 +25,13 @@ use pliron::{
     value::Value,
 };
 use std::collections::{BTreeSet, HashMap, VecDeque};
+
+#[derive(Debug, thiserror::Error)]
+#[error("{function} contains {operation} outside its atomic construction group")]
+struct AtomicConstructionError {
+    function: String,
+    operation: String,
+}
 
 /// Async failures settle a promise; they never add a synchronous status result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,6 +45,7 @@ pub enum Failure {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub allocates: bool,
+    pub atomic_construction: bool,
     /// The compiled body contains a safe point, including those in direct callees.
     pub may_collect: bool,
     pub may_suspend: bool,
@@ -79,7 +87,7 @@ impl Analysis for RuntimeEffects {
 
     fn compute(root: Ptr<Operation>, ctx: &Context, _: &mut AnalysisManager) -> Result<Self> {
         Ok(Self {
-            functions: summarize(ctx, &crate::aggregates::functions(root, ctx)),
+            functions: summarize(ctx, &crate::aggregates::functions(root, ctx))?,
         })
     }
 }
@@ -123,13 +131,13 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
         || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
         || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
         || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some()
         || Operation::get_op::<ConcatOp>(op, ctx).is_some()
         || Operation::get_op::<crate::collections::ConcatReuseOp>(op, ctx).is_some()
     {
         return Allocation::Atomic;
     }
     if Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some()
         || Operation::get_op::<TimerOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some()
@@ -195,7 +203,7 @@ impl ControlFlowGraph<()> for CallGraph<'_> {
 /// Fixed point over direct calls. Unknown bounds propagate to every caller; recursion and
 /// CFG cycles never establish bounded task allocation. Escape provenance follows SSA joins,
 /// aggregates and calls. Scalar field reads do not retain their containing object.
-fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary> {
+fn summarize(ctx: &Context, functions: &[FuncOp]) -> Result<HashMap<Identifier, Summary>> {
     let names: Vec<_> = functions.iter().map(|f| f.get_symbol_name(ctx)).collect();
     let mut summaries: HashMap<_, _> = names
         .iter()
@@ -211,6 +219,43 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
         .enumerate()
         .map(|(index, name)| (name, index))
         .collect();
+    let atomic: Vec<_> = functions
+        .iter()
+        .map(|f| crate::calls::is_atomic_construction(ctx, f))
+        .collect();
+    for (index, body) in bodies.iter().enumerate().filter(|(i, _)| atomic[*i]) {
+        if is_async(ctx, &functions[index]) {
+            return pliron::verify_err!(
+                functions[index].loc(ctx),
+                AtomicConstructionError {
+                    function: names[index].to_string(),
+                    operation: "async function".into()
+                }
+            );
+        }
+        for &op in body {
+            let closed_call =
+                callee(ctx, op).is_none_or(|name| index_of.get(&name).is_some_and(|&i| atomic[i]));
+            let unsafe_effect = allocation(ctx, op) == Allocation::Conservative
+                || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
+                || Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
+                || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+            if !closed_call || unsafe_effect {
+                return pliron::verify_err!(
+                    Operation::get_op_dyn(op, ctx).loc(ctx),
+                    AtomicConstructionError {
+                        function: names[index].to_string(),
+                        operation: Operation::get_op::<IntrinsicOp>(op, ctx)
+                            .and_then(|intrinsic| intrinsic.intrinsic(ctx))
+                            .map_or_else(
+                                || Operation::get_op_dyn(op, ctx).get_opid().to_string(),
+                                |intrinsic| intrinsic.name().to_owned()
+                            )
+                    }
+                );
+            }
+        }
+    }
     let call_graph: Vec<Vec<usize>> = bodies
         .iter()
         .map(|body| {
@@ -321,7 +366,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
             }
             summary.allocates |=
                 allocates(ctx, op) || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
-            summary.may_collect |= allocates(ctx, op);
+            summary.may_collect |= !atomic[index] && allocates(ctx, op);
             summary.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
                 || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
             summary.may_reenter |=
@@ -362,7 +407,8 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
             if let Some(callee) = callee(ctx, op) {
                 if let Some(callee) = summaries.get(&callee) {
                     summary.allocates |= callee.allocates;
-                    summary.may_collect |= callee.may_collect;
+                    summary.may_collect |=
+                        !atomic[index] && (callee.may_collect || callee.allocates);
                     summary.may_suspend |= callee.may_suspend;
                     summary.may_reenter |= callee.may_reenter;
                     summary.writes_record |= callee.writes_record;
@@ -393,6 +439,7 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
                 }
             }
         }
+        summary.atomic_construction = atomic[index];
         summary.failure = if !fails {
             Failure::None
         } else if is_async(ctx, function) {
@@ -414,5 +461,5 @@ fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Summary
             }
         }
     }
-    summaries
+    Ok(summaries)
 }

@@ -1018,3 +1018,117 @@ fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn atomic_construction_preserves_allocation_and_caller_collection_effects() -> Result<()> {
+    use crate::effects::RuntimeEffects;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @atomic {
+  ^module():
+    builtin.func @left: builtin.function <(builtin.fp64) -> (perry.record <Cell { value: builtin.fp64 }>)> {
+      ^entry(value: builtin.fp64):
+        cell = perry.alloc Unassigned (value) : perry.record <Cell>;
+        result = perry.call right (cell) : perry.record <Cell>;
+        perry.return result
+    };
+    builtin.func @right: builtin.function <(perry.record <Cell>) -> (perry.record <Cell>)> {
+      ^entry(cell: perry.record <Cell>):
+        value = perry.field_get cell."value" : builtin.fp64;
+        result = perry.call left (value) : perry.record <Cell>;
+        perry.return result
+    };
+    builtin.func @run: builtin.function <(builtin.fp64) -> (perry.record <Cell>)> {
+      ^entry(value: builtin.fp64):
+        result = perry.call left (value) : perry.record <Cell>;
+        perry.return result
+    }
+}
+"#,
+    );
+    verify_operation(module, ctx)?;
+    for function in crate::aggregates::functions(module, ctx) {
+        if function.get_symbol_name(ctx).as_ref() != "run" {
+            crate::calls::set_atomic_construction(ctx, &function);
+        }
+    }
+    let mut analyses = AnalysisManager::default();
+    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+    for name in ["left", "right"] {
+        let effect = &effects.functions[&name.try_into().unwrap()];
+        assert!(effect.atomic_construction && effect.allocates && effect.requires_task());
+        assert!(!effect.may_collect && !effect.may_suspend && !effect.may_reenter);
+    }
+    let effect = &effects.functions[&pliron::ident!("run")];
+    assert!(!effect.atomic_construction && effect.allocates && effect.may_collect);
+    Ok(())
+}
+
+#[test]
+fn atomic_construction_rejects_open_calls_and_observable_runtime_operations() {
+    use crate::effects::RuntimeEffects;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    let ordinary = r#"
+builtin.module @atomic {
+  ^module():
+    builtin.func @leaf: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(value: builtin.fp64):
+        perry.return value
+    };
+    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(value: builtin.fp64):
+        result = perry.call leaf (value) : builtin.fp64;
+        perry.return result
+    }
+}
+"#;
+    let foreign = ordinary.replace("perry.call leaf", "perry.foreign Call \"demo#callback\"");
+    let asynchronous = ordinary.replace(
+        "result = perry.call leaf (value) : builtin.fp64;",
+        "pending = perry.async_call leaf (value) : perry.promise <builtin.fp64>;\nresult = perry.await pending : builtin.fp64;",
+    );
+    for (text, operation) in [
+        (ordinary, "perry.call"),
+        (&foreign, "perry.foreign"),
+        (&asynchronous, "perry.async_call"),
+    ] {
+        let ctx = &mut Context::new();
+        let module = parse(ctx, text);
+        let run = crate::aggregates::functions(module, ctx)
+            .into_iter()
+            .find(|f| f.get_symbol_name(ctx).as_ref() == "run")
+            .unwrap();
+        crate::calls::set_atomic_construction(ctx, &run);
+        let mut analyses = AnalysisManager::default();
+        let error = match analyses.get_analysis::<RuntimeEffects>(module, ctx) {
+            Ok(_) => panic!("accepted {operation} in an open construction group"),
+            Err(error) => error.disp(ctx).to_string(),
+        };
+        assert!(error.contains(operation), "{error}");
+        assert!(
+            analyses
+                .try_get_analysis::<RuntimeEffects>(module)
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn atomic_construction_rejects_async_function_scope() {
+    use crate::effects::RuntimeEffects;
+    use pliron::pass::AnalysisManager;
+    let ctx = &mut Context::new();
+    let module = parse(ctx, ASYNC_STEP);
+    let function = crate::aggregates::functions(module, ctx)[0];
+    crate::calls::set_async(ctx, &function);
+    crate::calls::set_atomic_construction(ctx, &function);
+    let mut analyses = AnalysisManager::default();
+    let error = match analyses.get_analysis::<RuntimeEffects>(module, ctx) {
+        Ok(_) => panic!("accepted an asynchronous construction scope"),
+        Err(error) => error.disp(ctx).to_string(),
+    };
+    assert!(error.contains("async function"), "{error}");
+}

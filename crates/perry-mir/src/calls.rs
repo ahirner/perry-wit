@@ -243,6 +243,25 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
         .is_some_and(|flag| bool::from(flag.clone()))
 }
 
+pliron::dict_key!(ATOMIC_CONSTRUCTION, "perry_atomic_construction");
+
+/// Request one uninterrupted construction scope. RuntimeEffects verifies the closed
+/// synchronous call group and each operation before codegen omits internal safe points.
+pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
+    function.get_operation().deref_mut(ctx).attributes.set(
+        ATOMIC_CONSTRUCTION.clone(),
+        pliron::builtin::attributes::BoolAttr::from(true),
+    );
+}
+pub fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<pliron::builtin::attributes::BoolAttr>(&ATOMIC_CONSTRUCTION)
+        .is_some_and(|v| bool::from(v.clone()))
+}
+
 /// Function attribute marking an `async` function. Its body may `perry.await`; callers start it
 /// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
 pub(crate) const ASYNC_KEY: &str = "perry_async";

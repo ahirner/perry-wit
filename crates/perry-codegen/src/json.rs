@@ -50,6 +50,39 @@ fn json_key(name: &str) -> String {
 }
 
 impl FunctionLowering<'_, '_> {
+    pub(super) fn json_cursor_key(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        ty: TypeHandle,
+    ) -> Result<()> {
+        let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
+        let mut names = record
+            .deref(ctx)
+            .fields()?
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.to_string(), i as u32))
+            .collect::<Vec<_>>();
+        names.sort_unstable_by(|a, b| {
+            a.0.len()
+                .cmp(&b.0.len())
+                .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+        });
+        let mut bytes = Vec::with_capacity(names.len() * 8);
+        for (name, index) in &names {
+            bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
+            bytes.extend_from_slice(&index.to_le_bytes());
+        }
+        let table = self.state.data.append(4, &bytes);
+        let table = self.i32_const(ctx, table as i32);
+        let count = self.i32_const(ctx, names.len() as i32);
+        let cursor = self.operand(ctx, op, 0)?;
+        let index = self.runtime(ctx, Runtime::JsonCursorKey, vec![cursor, table, count]);
+        self.define(ctx, op, index);
+        Ok(())
+    }
+
     pub(crate) fn native_descriptor(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<u32> {
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);

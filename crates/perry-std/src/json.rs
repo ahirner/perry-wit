@@ -622,7 +622,7 @@ pub(crate) unsafe extern "C" fn std_json_extras(
         &[]
     };
     let mut member = word(graph, 16);
-    let mut index = 0;
+    let mut index = if object { 0 } else { word(graph, 28) };
     while member != 0 {
         let value = node(member);
         let keep = if object {

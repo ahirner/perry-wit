@@ -547,6 +547,9 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
+        if let Some(key) = Operation::get_op::<perry_mir::intrinsics::JsonCursorKeyOp>(op, ctx) {
+            return self.json_cursor_key(ctx, op, key.record(ctx));
+        }
         if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some() {
             return self.json_stringify(ctx, op);
         }

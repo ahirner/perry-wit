@@ -174,6 +174,38 @@ impl FunctionLowering<'_, '_> {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
             }
+            Intrinsic::JsonCursorBegin => Some(self.runtime(ctx, Runtime::JsonCursorBegin, args)),
+            Intrinsic::JsonCursorByte => Some(self.runtime(ctx, Runtime::JsonCursorByte, args)),
+            Intrinsic::JsonCursorNumber => Some(self.runtime(ctx, Runtime::JsonCursorNumber, args)),
+            Intrinsic::JsonCursorBoolean => {
+                Some(self.runtime(ctx, Runtime::JsonCursorBoolean, args))
+            }
+            Intrinsic::JsonCursorString => Some(self.runtime(ctx, Runtime::JsonCursorString, args)),
+            Intrinsic::JsonCursorValue => Some(self.runtime(ctx, Runtime::JsonCursorValue, args)),
+            Intrinsic::JsonCursorMember => Some(self.runtime(ctx, Runtime::JsonCursorMember, args)),
+            Intrinsic::JsonCursorConsume => {
+                self.runtime_void(ctx, Runtime::JsonCursorConsume, args);
+                None
+            }
+            Intrinsic::JsonCursorDiscard => {
+                self.runtime_void(ctx, Runtime::JsonCursorDiscard, args);
+                None
+            }
+            Intrinsic::JsonCursorTail => Some(self.runtime(ctx, Runtime::JsonCursorTail, args)),
+            Intrinsic::JsonCursorFinish => {
+                self.runtime_void(ctx, Runtime::JsonCursorFinish, args);
+                None
+            }
+            Intrinsic::JsonResidue => {
+                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                let offset = if ty.deref(ctx).is::<perry_mir::types::RecordType>() {
+                    perry_abi::layout::record::JSON
+                } else {
+                    perry_abi::layout::variant::JSON
+                };
+                self.store(ctx, MemKind::I32, args[0], offset, args[1]);
+                None
+            }
             Intrinsic::JsonRetain => {
                 use perry_mir::types::{JsonType, RecordType};
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
@@ -210,27 +242,12 @@ impl FunctionLowering<'_, '_> {
             }
             Intrinsic::JsonParse => {
                 use perry_abi::layout::string::{DATA, LEN};
-                let string = args[0];
-                let data = self.load(ctx, MemKind::I32, string, DATA);
-                let len = self.load(ctx, MemKind::I32, string, LEN);
-                let measured = self.runtime(ctx, Runtime::JsonMeasure, vec![data, len]);
-                let thirty_two = self.i64_const(ctx, 32);
-                let error = self.num(ctx, NumOpcode::I64ShrU, vec![measured, thirty_two]);
-                let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
-                let failed = self.new_block(ctx, vec![]);
-                let valid = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, error, (failed, vec![]), (valid, vec![]));
-                self.block = failed;
-                let offset = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let status = self.runtime(ctx, Runtime::StdRaiseSyntax, vec![data, len, offset]);
-                let (target, throw_args) = self.throw_target(ctx, status);
-                self.br(ctx, target, throw_args);
-                self.block = valid;
-                let size = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let out = self.alloc(ctx, size);
-                let populated =
-                    self.runtime(ctx, Runtime::JsonPopulate, vec![data, len, out, size]);
-                Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
+                let data = self.load(ctx, MemKind::I32, args[0], DATA);
+                let len = self.load(ctx, MemKind::I32, args[0], LEN);
+                let value = self.runtime(ctx, Runtime::JsonParseDynamic, vec![data, len]);
+                let status = self.runtime(ctx, Runtime::Status, vec![]);
+                self.throw_status_if(ctx, status, status);
+                Some(value)
             }
             Intrinsic::InstantFromMs
             | Intrinsic::InstantFrom

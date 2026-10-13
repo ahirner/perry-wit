@@ -19,44 +19,62 @@ const EXACT: [f64; 23] = [
     1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 ];
 
-/// The double nearest to a validated JSON number literal (ties to even). Never inlined: the
-/// big integers of [correct] must stay out of the parser's traversal frame.
-#[inline(never)]
-pub(crate) fn parse_number(literal: &[u8]) -> f64 {
+/// Decimal facts accumulated by the JSON lexer; no second mantissa scan is required.
+#[derive(Default)]
+pub(crate) struct Decimal {
+    count: usize,
+    trailing: usize,
+    leading: u64,
+    fraction_digits: i64,
+}
+impl Decimal {
+    pub(crate) fn digit(&mut self, byte: u8, fractional: bool) {
+        self.fraction_digits += i64::from(fractional);
+        if self.count == 0 && byte == b'0' {
+            return;
+        }
+        self.count += 1;
+        if self.count <= 19 {
+            self.leading = self.leading * 10 + u64::from(byte - b'0');
+        }
+        self.trailing = if byte == b'0' { self.trailing + 1 } else { 0 };
+    }
+    pub(crate) fn finish(mut self, mantissa: &[u8], negative: bool, exponent: i64) -> f64 {
+        let significant = self.count - self.trailing;
+        let exponent10 = exponent - self.fraction_digits + self.trailing as i64;
+        if significant < self.count.min(19) {
+            self.leading /= 10u64.pow((self.count.min(19) - significant) as u32);
+        }
+        let magnitude = if significant == 0 {
+            0.0
+        } else {
+            convert(mantissa, significant, exponent10, self.leading)
+        };
+        if negative { -magnitude } else { magnitude }
+    }
+}
+
+#[cfg(test)]
+fn parse_number(literal: &[u8]) -> f64 {
     let negative = literal.first() == Some(&b'-');
     let body = &literal[usize::from(negative)..];
-    let mantissa_end = body
-        .iter()
-        .position(|&b| b == b'e' || b == b'E')
-        .unwrap_or(body.len());
-    let (mantissa, exponent) = body.split_at(mantissa_end);
-    let point = mantissa
-        .iter()
-        .position(|&b| b == b'.')
-        .unwrap_or(mantissa.len());
-    let mut exponent10 =
-        parse_exponent(exponent) - (mantissa.len() - point).saturating_sub(1) as i64;
-    let digits = Digits::new(mantissa);
-    // Trailing zeros scale the exponent; leading zeros are skipped by `Digits`.
-    let count = digits.count();
-    let trailing = digits
-        .text
-        .iter()
-        .rev()
-        .filter(|&&b| b != b'.')
-        .take_while(|&&b| b == b'0')
-        .count();
-    let significant = count - trailing.min(count);
-    exponent10 += (count - significant) as i64;
-    let magnitude = if significant == 0 {
-        0.0
-    } else {
-        convert(&digits, significant, exponent10)
-    };
-    if negative { -magnitude } else { magnitude }
+    let mut at = 0;
+    let mut fractional = false;
+    let mut decimal = Decimal::default();
+    while at < body.len() && !matches!(body[at], b'e' | b'E') {
+        let byte = body[at];
+        at += 1;
+        if byte == b'.' {
+            fractional = true;
+        } else {
+            decimal.digit(byte, fractional);
+        }
+    }
+    decimal.finish(&body[..at], negative, parse_exponent(&body[at..]))
 }
 
 /// The exponent part (`e+12`), saturated far outside the double range.
+#[cfg(test)]
 fn parse_exponent(part: &[u8]) -> i64 {
     let Some((_, rest)) = part.split_first() else {
         return 0;
@@ -90,10 +108,6 @@ impl<'a> Digits<'a> {
         }
     }
 
-    fn count(&self) -> usize {
-        self.text.iter().filter(|&&b| b != b'.').count()
-    }
-
     fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.text
             .iter()
@@ -103,7 +117,7 @@ impl<'a> Digits<'a> {
 }
 
 /// `D × 10^e` for the first `significant` digits (`D` without leading or trailing zeros).
-fn convert(digits: &Digits<'_>, significant: usize, exponent10: i64) -> f64 {
+fn convert(mantissa: &[u8], significant: usize, exponent10: i64, leading: u64) -> f64 {
     // Out of range either way: below half the smallest subnormal, or above the largest double.
     let scale = significant as i64 + exponent10;
     if scale <= -324 {
@@ -113,10 +127,6 @@ fn convert(digits: &Digits<'_>, significant: usize, exponent10: i64) -> f64 {
         return f64::INFINITY;
     }
     let exponent10 = exponent10 as i32;
-    let mut leading = 0u64;
-    for digit in digits.iter().take(significant.min(19)) {
-        leading = leading * 10 + u64::from(digit);
-    }
     if significant <= 19 && leading < 1 << 53 {
         if (0..=22).contains(&exponent10) {
             return leading as f64 * EXACT[exponent10 as usize];
@@ -139,7 +149,7 @@ fn convert(digits: &Digits<'_>, significant: usize, exponent10: i64) -> f64 {
         leading as f64,
         exponent10 + significant.saturating_sub(19) as i32,
     );
-    correct(digits, significant, exponent10, approximate)
+    correct(&Digits::new(mantissa), significant, exponent10, approximate)
 }
 
 /// `x × 10^power` in a few roundings, without overflowing or underflowing on the way.
@@ -179,6 +189,7 @@ fn decompose(bits: u64) -> (u64, i32) {
 /// Exact comparison of `D × 10^e` (digits beyond [KEPT_DIGITS] only make it larger) with the
 /// midpoint of the adjacent doubles `low` and `low + 1` (by bits), then step until the
 /// candidate is the nearest.
+#[inline(never)]
 fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate: f64) -> f64 {
     let kept = significant.min(KEPT_DIGITS);
     let sticky = digits.iter().skip(kept).any(|digit| digit != 0);
@@ -345,6 +356,20 @@ mod tests {
     fn check(literal: &str) {
         let expected: f64 = literal.parse().unwrap();
         let actual = parse_number(literal.as_bytes());
+        let mut reader = super::super::reader::Reader::new(literal);
+        let unsigned = literal.trim_start_matches('-').as_bytes();
+        let valid_json =
+            unsigned[0] != b'0' || matches!(unsigned.get(1), None | Some(b'.' | b'e' | b'E'));
+        let fused = reader.numeric().expect("generated decimal grammar");
+        if valid_json {
+            assert_eq!(reader.position, literal.len(), "fused token {literal}");
+            assert_eq!(fused.to_bits(), expected.to_bits(), "fused {literal}");
+        } else {
+            assert!(
+                reader.position < literal.len(),
+                "JSON rejects leading zeros: {literal}"
+            );
+        }
         assert_eq!(
             actual.to_bits(),
             expected.to_bits(),

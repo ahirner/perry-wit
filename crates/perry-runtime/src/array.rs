@@ -139,6 +139,25 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
     }
 }
 
+/// Grow a helper array without collecting; its reference flag must match construction.
+///
+/// # Safety
+/// `array` is a live exclusively owned array created with the same `references` flag.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_array_grow_typed(array: *mut u8, references: u32) {
+    #[cfg(feature = "collectible")]
+    unsafe {
+        perry_array_grow_collectible(array, references);
+    }
+    #[cfg(not(feature = "collectible"))]
+    {
+        let _ = references;
+        unsafe {
+            perry_array_grow(array);
+        }
+    }
+}
+
 /// Concatenate arrays, consuming only headers and buffers proved exclusive by MIR.
 ///
 /// # Safety

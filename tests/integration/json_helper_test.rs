@@ -352,6 +352,18 @@ impl GuestJson {
             )?;
             linker.define(&store, "env", name, global)?;
         }
+        for import in module
+            .imports()
+            .filter(|import| import.module() == "__perry_helper")
+        {
+            if let wasmtime::ExternType::Func(ty) = import.ty() {
+                linker.func_new(import.module(), import.name(), ty, |_, _, _| {
+                    Err(wasmtime::Error::msg(
+                        "raw codec called a typed-construction runtime import",
+                    ))
+                })?;
+            }
+        }
         let instance = linker.instantiate(&mut store, &module)?;
         Ok(Self {
             store,
