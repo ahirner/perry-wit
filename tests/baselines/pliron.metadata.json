@@ -1,8 +1,8 @@
 {
   "compiler_revision": "2f606a2a075b025f681dbf9eda5b8982353199a8",
   "compiler_source_changes": false,
-  "comparison_harness_sha256": "a9d4ca8bc4be72f5158ea1377bb50cce209a20623a9b0bfc90df868359e0533b",
-  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged.",
+  "comparison_harness_sha256": "048190599dc6f9e58fd0eb0f9de0d94f47e3304acfd49f61fed1df77b8343ca2",
+  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged. Report consumed instantiation and first-invocation fuel separately; retain the historical fuel measurement and captured baseline unchanged.",
   "harness_changes": "Added core sizes and optimization fixtures; replaced TCP HTTP transport with a fixed in-process response before capture.",
   "host": "macOS-27.0-arm64-arm-64bit",
   "rust": "1.98.1",
@@ -32,7 +32,10 @@
     "component": "stripped",
     "memory_checks": "separate instrumented execution for microbenchmark counters",
     "timing_samples": 5,
-    "http": "4 MiB in a single host Full body; no socket or transport scheduling"
+    "http": "4 MiB in a single host Full body; no socket or transport scheduling",
+    "initialization_fuel": "Consumed Wasmtime fuel during instantiation, before export calls; module initialization triggered by a first export remains invocation fuel.",
+    "invocation_fuel": "Consumed fuel for the first export call on a fresh instance, including its post-return cleanup; component timing uses a separate warm-up and samples.",
+    "fuel": "Historical field: warmed component call; first core optimization-fixture call; instantiation plus first raw microbenchmark call."
   },
   "scalar_nix": {
     "compiler": "/nix/store/gmqp7ba5rwd1ykgzfjiwm9mfsryscfxs-perry-wit-0.1.0/bin/perry-wit",

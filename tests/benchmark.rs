@@ -10,6 +10,9 @@
 //! records its compiler revision, input hashes, dependency versions and options.
 //! `bytes` measures stripped components or named raw modules, matching the original
 //! campaign; `core_bytes` always measures the named core module before componentization.
+//! `initialization_fuel` measures instantiation and `invocation_fuel` the first export
+//! call. The historical `fuel` metric retains its captured convention: a warmed
+//! component call, a first core-fixture call, or instantiation plus a raw microbenchmark.
 //!
 //! It prints a Markdown table: component bytes (stripped), guest fuel per call and guest
 //! memory, which are deterministic and machine-independent, and median milliseconds per call
@@ -23,7 +26,7 @@ use perry_wit::{compile_core, compile_for_world, component::wit::resolve_wit};
 use std::{future::Future, time::Instant};
 use wasmtime::{
     Config, Engine, ResourceLimiter, Store, Val,
-    component::{Component, Linker, ResourceTable, StreamReader},
+    component::{Component, Instance, Linker, ResourceTable, StreamReader},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -129,6 +132,8 @@ struct Row {
     helper_functions: Option<u32>,
     optimization: Option<std::collections::BTreeMap<String, u64>>,
     fuel: Option<u64>,
+    initialization_fuel: Option<u64>,
+    invocation_fuel: Option<u64>,
     memory: Option<usize>,
     milliseconds: Option<f64>,
     initial_memory: Option<usize>,
@@ -155,7 +160,7 @@ impl Row {
             "| {} | {} | {} | {} | {} |",
             self.workload,
             number(self.bytes.map(|b| b as u64)),
-            number(self.fuel),
+            number(self.invocation_fuel),
             number(self.memory.map(|b| b as u64)),
             self.milliseconds
                 .map_or("–".into(), |ms| format!("{ms:.3}"))
@@ -241,8 +246,7 @@ fn defined_functions(core: &[u8]) -> Result<u32> {
     Ok(0)
 }
 
-/// Measure `call` on a fresh instance per engine: fuel and memory of one call after a
-/// warm-up call, and the median of `SAMPLES` timed calls.
+/// Measure instantiation, first invocation, the historical warmed call, and timed samples.
 async fn measure<F, Fut>(
     workload: &str,
     compilation: &Compilation,
@@ -250,8 +254,8 @@ async fn measure<F, Fut>(
     call: F,
 ) -> Result<Row>
 where
-    F: Fn(Store<Host>, Component, Linker<Host>) -> Fut,
-    Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64)>>,
+    F: Fn(Store<Host>, Instance) -> Fut,
+    Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64, u64)>>,
 {
     let compiled = &compilation.output;
     let bytes = &compiled
@@ -260,6 +264,8 @@ where
         .expect("component benchmark")
         .stripped;
     let mut fuel = None;
+    let mut initialization_fuel = None;
+    let mut invocation_fuel = None;
     let mut memory = None;
     let mut milliseconds = None;
     let mut initial_memory = None;
@@ -269,9 +275,15 @@ where
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-        let (store, times, used) = call(store(&engine, root, metered)?, component, linker).await?;
+        let mut store = store(&engine, root, metered)?;
+        let before = store.get_fuel().unwrap_or(0);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let initialization = spent(&store, before);
+        let (store, times, used, first_used) = call(store, instance).await?;
         if metered {
             fuel = Some(used);
+            initialization_fuel = Some(initialization);
+            invocation_fuel = Some(first_used);
             memory = Some(store.data().memory.bytes);
             initial_memory = Some(store.data().memory.initial.unwrap_or(0));
         } else {
@@ -289,6 +301,8 @@ where
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
         compile_milliseconds: Some(compilation.milliseconds),
         fuel,
+        initialization_fuel,
+        invocation_fuel,
         memory,
         milliseconds,
         initial_memory,
@@ -303,8 +317,10 @@ fn spent(store: &Store<Host>, before: u64) -> u64 {
 
 macro_rules! timed {
     ($store:ident, $calls:expr, $body:expr) => {{
-        // Warm-up, then one metered call, then the timed samples.
+        // The first call is also the timing warm-up.
+        let before = $store.get_fuel().unwrap_or(0);
         $body;
+        let first_used = spent(&$store, before);
         let before = $store.get_fuel().unwrap_or(0);
         $body;
         let used = spent(&$store, before);
@@ -314,7 +330,7 @@ macro_rules! timed {
             $body;
             times.push(started.elapsed());
         }
-        (times, used)
+        (times, used, first_used)
     }};
 }
 
@@ -334,16 +350,15 @@ async fn components() -> Result<Vec<Row>> {
     let input = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(128)[..4096].to_owned();
     let expected = format!("{input}{}", "!".repeat(64));
     rows.push(
-        measure("text", &text, None, |mut store, component, linker| {
+        measure("text", &text, None, |mut store, instance| {
             let (input, expected) = (input.clone(), expected.clone());
             async move {
-                let instance = linker.instantiate_async(&mut store, &component).await?;
                 let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run-task")?;
-                let (times, used) = timed!(store, SAMPLES, {
+                let (times, used, first_used) = timed!(store, SAMPLES, {
                     let (result,) = run.call_async(&mut store, (input.as_str(),)).await?;
                     ensure!(result == expected, "text result");
                 });
-                Ok((store, times, used))
+                Ok((store, times, used, first_used))
             }
         })
         .await?,
@@ -368,17 +383,16 @@ export async function runTask(path: string): Promise<string> {
             "io (64 KiB)",
             &io,
             Some(directory.path()),
-            |mut store, component, linker| {
+            |mut store, instance| {
                 let data = data.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run =
                         instance.get_typed_func::<(&str,), (String,)>(&mut store, "run-task")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let (result,) = run.call_async(&mut store, ("/input",)).await?;
                         ensure!(result == data, "io result");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             },
         )
@@ -410,18 +424,17 @@ export async function runTask(path: string): Promise<string> {
             "incoming-stream (4 MiB)",
             &stream,
             None,
-            |mut store, component, linker| {
+            |mut store, instance| {
                 let payload = payload.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run = instance
                         .get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let input = StreamReader::new(&mut store, payload.clone())?;
                         let (result,) = run.call_async(&mut store, (input,)).await?;
                         ensure!(result == sum, "stream sum");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             },
         )
@@ -463,18 +476,17 @@ export async function run(url: string, limit: number): Promise<number> {{
         ("unbounded-http-bytes (4 MiB)", &whole, 0, MIB4 as f64),
     ] {
         rows.push(
-            measure(workload, bytes, None, |mut store, component, linker| {
+            measure(workload, bytes, None, |mut store, instance| {
                 let url = url.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let (result,) = run
                             .call_async(&mut store, (url.as_str(), limit as f64))
                             .await?;
                         ensure!(result == expected, "{workload}: {result}");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             })
             .await?,
@@ -607,10 +619,12 @@ export function run(n: number): number {
             let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
             if metered {
                 row.initial_memory = Some(store.data().bytes);
+                row.initialization_fuel = Some(u64::MAX - store.get_fuel()?);
             }
             let run = instance.get_func(&mut store, "run").unwrap();
             let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
             let n = Val::F64(1_000_000f64.to_bits());
+            let before = store.get_fuel().unwrap_or(0);
             let started = Instant::now();
             run.call(&mut store, &[n], &mut results)?;
             let elapsed = started.elapsed();
@@ -632,6 +646,7 @@ export function run(n: number): number {
             }
             if metered {
                 row.fuel = Some(u64::MAX - store.get_fuel()?);
+                row.invocation_fuel = Some(before - store.get_fuel()?);
                 let memory = instance.get_memory(&mut store, "memory");
                 row.memory = Some(memory.map_or(store.data().bytes, |m| {
                     m.data_size(&store).max(store.data().bytes)
@@ -879,14 +894,13 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
             "async frame liveness",
             &asynchronous,
             None,
-            |mut store, component, linker| async move {
-                let instance = linker.instantiate_async(&mut store, &component).await?;
+            |mut store, instance| async move {
                 let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
-                let (times, used) = timed!(store, SAMPLES, {
+                let (times, used, first_used) = timed!(store, SAMPLES, {
                     let (result,) = run.call_async(&mut store, (4.0,)).await?;
                     ensure!(result == 17.0, "async frame result");
                 });
-                Ok((store, times, used))
+                Ok((store, times, used, first_used))
             },
         )
         .await?,
@@ -940,6 +954,8 @@ fn measure_core(
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
         compile_milliseconds: Some(compilation.milliseconds),
         fuel: Some(fuel),
+        initialization_fuel: Some(u64::MAX - before),
+        invocation_fuel: Some(fuel),
         initial_memory: Some(store.data().initial.unwrap_or(0)),
         memory: Some(store.data().bytes),
         milliseconds: Some(milliseconds),
@@ -1003,7 +1019,20 @@ fn compare_baseline(baseline: &[Row], current: &[Row]) -> Result<()> {
                 old.memory.map(|n| n as u64),
                 row.memory.map(|n| n as u64),
             ),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            [
+                (
+                    "initialization fuel",
+                    old.initialization_fuel,
+                    row.initialization_fuel,
+                ),
+                ("invocation fuel", old.invocation_fuel, row.invocation_fuel),
+            ]
+            .into_iter()
+            .filter(|(_, before, _)| before.is_some()),
+        ) {
             match (before, after) {
                 (Some(before), Some(after))
                     if u128::from(after) * 100 <= u128::from(before) * 105 => {}
@@ -1033,4 +1062,58 @@ fn benchmark_gate_checks_each_metric_and_zero_baselines() {
     assert!(compare_baseline(&[sample(100, 0)], &[sample(90, 1)]).is_err());
     assert!(compare_baseline(&[sample(100, 100)], &[sample(1, 106)]).is_err());
     assert!(compare_baseline(&[sample(100, 0)], &[]).is_err());
+
+    let detailed = |initialization_fuel, invocation_fuel| Row {
+        initialization_fuel,
+        invocation_fuel,
+        ..sample(100, 0)
+    };
+    for (initial_before, call_before, initial_after, call_after, accepted) in [
+        (None, None, Some(20), Some(105), true),
+        (Some(0), Some(100), Some(0), Some(105), true),
+        (Some(0), None, Some(1), None, false),
+        (None, Some(100), None, Some(106), false),
+        (Some(0), None, None, None, false),
+    ] {
+        assert_eq!(
+            compare_baseline(
+                &[detailed(initial_before, call_before)],
+                &[detailed(initial_after, call_after)],
+            )
+            .is_ok(),
+            accepted,
+        );
+    }
+}
+
+#[test]
+fn timed_calls_account_for_warmup_separately() -> Result<()> {
+    let engine = engine(true)?;
+    let module = wasmtime::Module::new(
+        &engine,
+        wat::parse_str(
+            r#"(module
+              (global $calls (mut i32) (i32.const 0))
+              (func $start nop)
+              (start $start)
+              (func (export "run") (result i32)
+                global.get $calls i32.const 1 i32.add global.set $calls
+                global.get $calls))"#,
+        )?,
+    )?;
+    let mut store = store(&engine, None, true)?;
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let before = store.get_fuel()?;
+    ensure!(before < u64::MAX, "start function must consume fuel");
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    let mut results = Vec::new();
+    let (times, warmed, first) = timed!(store, 2, {
+        results.push(run.call(&mut store, ())?);
+    });
+    assert_eq!(results, [1, 2, 3, 4]);
+    assert_eq!(times.len(), 2);
+    assert!(first > 0);
+    assert_eq!(warmed, first);
+    assert_eq!(spent(&store, before), 4 * first);
+    Ok(())
 }
