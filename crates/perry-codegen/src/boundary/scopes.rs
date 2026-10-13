@@ -13,9 +13,9 @@ impl Scope {
             || state.memory_checks
             || state.root_metrics.is_some()
             || state
-                .call_effects
-                .get(name)
-                .is_none_or(|effects| effects.requires_task())
+                .program_facts
+                .effects(name)
+                .is_none_or(|effects| effects.effects.requires_task())
         {
             Self::Task
         } else {

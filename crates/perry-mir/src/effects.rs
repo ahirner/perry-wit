@@ -1,8 +1,7 @@
-//! Cached interprocedural allocation, mutation, exception and reference-escape effects.
+//! Runtime capabilities and local effect constraints for ProgramFacts.
 use crate::{
     calls::{AsyncCallOp, CallOp, TimerOp, is_async},
     collections::{ArrayExtendOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp},
-    control::ReturnOp,
     exceptions::{CatchOp, ErrorNewOp, RaiseOp},
     heap::{AllocOp, FieldSetOp},
     intrinsics::{
@@ -11,20 +10,19 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        op_interfaces::{BranchOpInterface, OneRegionInterface, SymbolOpInterface},
+        op_interfaces::{OneRegionInterface, SymbolOpInterface},
         ops::FuncOp,
     },
     context::{Context, Ptr},
     graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order},
     identifier::Identifier,
-    op::{Op, op_cast},
+    linked_list::ContainsLinkedList,
+    op::Op,
     operation::Operation,
-    pass::{Analysis, AnalysisManager},
     result::Result,
     r#type::Typed,
-    value::Value,
 };
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{function} contains {operation} outside its atomic construction group")]
@@ -42,8 +40,8 @@ pub enum Failure {
     Rejects,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Summary {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Effects {
     pub allocates: bool,
     pub atomic_construction: bool,
     /// The compiled body contains a safe point, including those in direct callees.
@@ -56,11 +54,16 @@ pub struct Summary {
     pub task_state: bool,
     pub repeated: bool,
     pub unknown_helper_bound: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub effects: Effects,
     /// Parameters returned, captured by an async call, or stored through an aggregate.
     pub escapes: BTreeSet<usize>,
 }
 
-impl Summary {
+impl Effects {
     pub fn may_mutate_records(&self) -> bool {
         self.writes_record || self.may_suspend || self.may_reenter
     }
@@ -75,20 +78,37 @@ impl Summary {
     }
 }
 
-/// One module snapshot, shared by MIR transformations, allocation reports and lowering.
-pub struct RuntimeEffects {
-    pub functions: HashMap<Identifier, Summary>,
+pub(crate) struct LocalEffects {
+    pub effects: Effects,
+    asynchronous: bool,
+    repeated: bool,
 }
 
-impl Analysis for RuntimeEffects {
-    fn name(&self) -> &str {
-        "perry-runtime-effects"
-    }
-
-    fn compute(root: Ptr<Operation>, ctx: &Context, _: &mut AnalysisManager) -> Result<Self> {
-        Ok(Self {
-            functions: summarize(ctx, &crate::aggregates::functions(root, ctx))?,
-        })
+impl LocalEffects {
+    pub(crate) fn inherit(
+        &self,
+        mut current: Effects,
+        callee: Effects,
+        synchronous: bool,
+    ) -> Effects {
+        current.allocates |= callee.allocates;
+        current.may_collect |=
+            !current.atomic_construction && (callee.may_collect || callee.allocates);
+        current.may_suspend |= callee.may_suspend;
+        current.may_reenter |= callee.may_reenter;
+        current.writes_record |= callee.writes_record;
+        current.task_state |= callee.task_state;
+        if synchronous && callee.failure == Failure::Throws {
+            current.failure = if self.asynchronous {
+                Failure::Rejects
+            } else {
+                Failure::Throws
+            };
+        }
+        current.repeated |= callee.repeated || self.repeated && current.allocates;
+        current.unknown_helper_bound |= callee.unknown_helper_bound;
+        current.may_collect |= current.may_suspend || current.may_reenter;
+        current
     }
 }
 
@@ -200,266 +220,138 @@ impl ControlFlowGraph<()> for CallGraph<'_> {
     }
 }
 
-/// Fixed point over direct calls. Unknown bounds propagate to every caller; recursion and
-/// CFG cycles never establish bounded task allocation. Escape provenance follows SSA joins,
-/// aggregates and calls. Scalar field reads do not retain their containing object.
-fn summarize(ctx: &Context, functions: &[FuncOp]) -> Result<HashMap<Identifier, Summary>> {
+/// Classify each operation once; caller-dependent propagation belongs to ProgramFacts.
+pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEffects>> {
     let names: Vec<_> = functions.iter().map(|f| f.get_symbol_name(ctx)).collect();
-    let mut summaries: HashMap<_, _> = names
-        .iter()
-        .cloned()
-        .map(|name| (name, Summary::default()))
-        .collect();
-    let bodies: Vec<_> = functions
-        .iter()
-        .map(|function| crate::aggregates::operations(ctx, function))
-        .collect();
-    let index_of: HashMap<&Identifier, usize> = names
+    let indices: HashMap<_, _> = names
         .iter()
         .enumerate()
-        .map(|(index, name)| (name, index))
+        .map(|(i, name)| (name, i))
         .collect();
-    let atomic: Vec<_> = functions
+    let mut local: Vec<_> = functions
         .iter()
-        .map(|f| crate::calls::is_atomic_construction(ctx, f))
+        .map(|f| LocalEffects {
+            effects: Effects {
+                atomic_construction: crate::calls::is_atomic_construction(ctx, f),
+                ..Effects::default()
+            },
+            asynchronous: is_async(ctx, f),
+            repeated: false,
+        })
         .collect();
-    for (index, body) in bodies.iter().enumerate().filter(|(i, _)| atomic[*i]) {
-        if is_async(ctx, &functions[index]) {
+    let mut callees = vec![Vec::new(); functions.len()];
+    let mut callers = vec![Vec::new(); functions.len()];
+    for (index, function) in functions.iter().enumerate() {
+        let atomic = local[index].effects.atomic_construction;
+        if atomic && local[index].asynchronous {
             return pliron::verify_err!(
-                functions[index].loc(ctx),
+                function.loc(ctx),
                 AtomicConstructionError {
                     function: names[index].to_string(),
                     operation: "async function".into()
                 }
             );
         }
-        for &op in body {
-            let closed_call =
-                callee(ctx, op).is_none_or(|name| index_of.get(&name).is_some_and(|&i| atomic[i]));
-            let unsafe_effect = allocation(ctx, op) == Allocation::Conservative
-                || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
-            if !closed_call || unsafe_effect {
-                return pliron::verify_err!(
-                    Operation::get_op_dyn(op, ctx).loc(ctx),
-                    AtomicConstructionError {
-                        function: names[index].to_string(),
-                        operation: Operation::get_op::<IntrinsicOp>(op, ctx)
-                            .and_then(|intrinsic| intrinsic.intrinsic(ctx))
-                            .map_or_else(
-                                || Operation::get_op_dyn(op, ctx).get_opid().to_string(),
-                                |intrinsic| intrinsic.name().to_owned()
-                            )
-                    }
-                );
-            }
-        }
-    }
-    let call_graph: Vec<Vec<usize>> = bodies
-        .iter()
-        .map(|body| {
-            body.iter()
-                .filter_map(|&op| callee(ctx, op).and_then(|callee| index_of.get(&callee).copied()))
-                .collect()
-        })
-        .collect();
-    let mut callers = vec![Vec::new(); functions.len()];
-    for (caller, callees) in call_graph.iter().enumerate() {
-        for &callee in callees {
-            callers[callee].push(caller);
-        }
-    }
-    let graph = CallGraph {
-        callees: &call_graph,
-        callers: &callers,
-    };
-    let mut recursive = vec![false; functions.len()];
-    for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
-        let reaches_cycle = component.is_cyclic
-            || component
-                .nodes
-                .iter()
-                .any(|node| call_graph[node.0].iter().any(|&callee| recursive[callee]));
-        for node in component.nodes {
-            recursive[node.0] = reaches_cycle;
-        }
-    }
-    let loops: Vec<_> = functions
-        .iter()
-        .enumerate()
-        .map(|(index, function)| {
-            recursive[index]
-                || sccs_in_topological_order(ctx, &function.get_region(ctx))
-                    .iter()
-                    .any(|component| component.is_cyclic)
-        })
-        .collect();
-    let origins: Vec<_> = functions
-        .iter()
-        .map(|function| {
-            let mut origins: HashMap<Value, BTreeSet<usize>> = HashMap::new();
-            let mut pending: Vec<_> = function
-                .get_entry_block(ctx)
-                .deref(ctx)
-                .arguments()
-                .enumerate()
-                .filter(|(_, value)| crate::types::is_reference(ctx, value.get_type(ctx)))
-                .map(|(index, value)| (value, index))
-                .collect();
-            while let Some((value, origin)) = pending.pop() {
-                if !origins.entry(value).or_default().insert(origin) {
-                    continue;
-                }
-                for usage in value.uses(ctx) {
-                    let op = usage.user_op();
-                    pending.extend(
-                        op.deref(ctx)
-                            .results()
-                            .filter(|result| crate::types::is_reference(ctx, result.get_type(ctx)))
-                            .map(|result| (result, origin)),
-                    );
-                    let dynamic = Operation::get_op_dyn(op, ctx);
-                    if let Some(branch) = op_cast::<dyn BranchOpInterface>(dynamic.as_ref()) {
-                        let operand = usage.find_index(ctx);
-                        for successor in 0..op.deref(ctx).get_num_successors() {
-                            let range = branch.successor_operand_range(ctx, successor);
-                            if range.contains(&operand) {
-                                let block = op.deref(ctx).get_successor(successor);
-                                pending.push((
-                                    block.deref(ctx).get_argument(operand - range.start),
-                                    origin,
-                                ));
+        let mut effects = local[index].effects;
+        let mut fails = false;
+        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+            for op in block.deref(ctx).iter(ctx) {
+                let callee = callee(ctx, op);
+                let target = callee.as_ref().and_then(|name| indices.get(name)).copied();
+                let allocation = allocation(ctx, op);
+                if atomic {
+                    let closed = callee.is_none()
+                        || target.is_some_and(|i| local[i].effects.atomic_construction);
+                    let unsafe_effect = allocation == Allocation::Conservative
+                        || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
+                        || Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
+                        || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+                    if !closed || unsafe_effect {
+                        return pliron::verify_err!(
+                            Operation::get_op_dyn(op, ctx).loc(ctx),
+                            AtomicConstructionError {
+                                function: names[index].to_string(),
+                                operation: Operation::get_op::<IntrinsicOp>(op, ctx)
+                                    .and_then(|i| i.intrinsic(ctx))
+                                    .map_or_else(
+                                        || Operation::get_op_dyn(op, ctx).get_opid().to_string(),
+                                        |i| i.name().to_owned()
+                                    )
                             }
-                        }
-                    }
-                }
-            }
-            origins
-        })
-        .collect();
-    let mut pending: VecDeque<_> = (0..functions.len()).collect();
-    let mut queued = vec![true; functions.len()];
-    while let Some(index) = pending.pop_front() {
-        queued[index] = false;
-        let function = &functions[index];
-        let origins = &origins[index];
-        let mut summary = summaries[&names[index]].clone();
-        let mut fails = summary.failure != Failure::None;
-        for &op in &bodies[index] {
-            let operation = op.deref(ctx);
-            let dependencies = || {
-                operation
-                    .operands()
-                    .flat_map(|value| origins.get(&value).into_iter().flatten().copied())
-            };
-            summary.writes_record |= Operation::get_op::<FieldSetOp>(op, ctx).is_some();
-            summary.task_state |= op
-                .deref(ctx)
-                .operands()
-                .chain(op.deref(ctx).results())
-                .any(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
-                || Operation::get_op::<IntrinsicOp>(op, ctx)
-                    .is_some_and(|op| op.intrinsic(ctx).is_none_or(|intrinsic| !intrinsic.pure()));
-            if Operation::get_op::<CallOp>(op, ctx).is_none() {
-                fails |= crate::intrinsics::may_throw(ctx, op);
-            }
-            summary.allocates |=
-                allocates(ctx, op) || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
-            summary.may_collect |= !atomic[index] && allocates(ctx, op);
-            summary.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
-                || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
-            summary.may_reenter |=
-                Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
-            summary.unknown_helper_bound |= Operation::get_op::<crate::foreign::ForeignOp>(op, ctx)
-                .is_some()
-                || Operation::get_op::<IntrinsicOp>(op, ctx)
-                    .and_then(|i| i.intrinsic(ctx))
-                    .is_some_and(|i| i.may_allocate())
-                || Operation::get_op::<JsonStringifyOp>(op, ctx).is_some();
-            if Operation::get_op::<ReturnOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx)
-                    .is_some_and(|op| op.phase(ctx) == crate::foreign::Phase::Start)
-                || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-            {
-                summary.escapes.extend(dependencies());
-            }
-            let stored = if Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
-                || Operation::get_op::<FieldSetOp>(op, ctx).is_some()
-                || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-            {
-                Some(1)
-            } else if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-                Some(2)
-            } else {
-                None
-            };
-            if let Some(stored) = stored {
-                summary.escapes.extend(
-                    origins
-                        .get(&operation.get_operand(stored))
-                        .into_iter()
-                        .flatten()
-                        .copied(),
-                );
-            }
-            if let Some(callee) = callee(ctx, op) {
-                if let Some(callee) = summaries.get(&callee) {
-                    summary.allocates |= callee.allocates;
-                    summary.may_collect |=
-                        !atomic[index] && (callee.may_collect || callee.allocates);
-                    summary.may_suspend |= callee.may_suspend;
-                    summary.may_reenter |= callee.may_reenter;
-                    summary.writes_record |= callee.writes_record;
-                    summary.task_state |= callee.task_state;
-                    fails |= Operation::get_op::<CallOp>(op, ctx).is_some()
-                        && callee.failure == Failure::Throws;
-                    summary.repeated |= callee.repeated;
-                    summary.unknown_helper_bound |= callee.unknown_helper_bound;
-                    for &index in &callee.escapes {
-                        summary.escapes.extend(
-                            origins
-                                .get(&operation.get_operand(index))
-                                .into_iter()
-                                .flatten()
-                                .copied(),
                         );
                     }
-                } else {
-                    summary.allocates = true;
-                    summary.may_collect = true;
-                    summary.may_suspend = true;
-                    summary.may_reenter = true;
-                    summary.writes_record = true;
-                    summary.task_state = true;
+                }
+                effects.writes_record |= Operation::get_op::<FieldSetOp>(op, ctx).is_some();
+                effects.task_state |= op
+                    .deref(ctx)
+                    .operands()
+                    .chain(op.deref(ctx).results())
+                    .any(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
+                    || Operation::get_op::<IntrinsicOp>(op, ctx)
+                        .is_some_and(|i| i.intrinsic(ctx).is_none_or(|i| !i.pure()));
+                if Operation::get_op::<CallOp>(op, ctx).is_none() {
+                    fails |= crate::intrinsics::may_throw(ctx, op);
+                }
+                effects.allocates |= allocation != Allocation::None
+                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                effects.may_collect |= !atomic && allocation != Allocation::None;
+                effects.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
+                    .is_some()
+                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                effects.may_reenter |=
+                    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+                effects.unknown_helper_bound |=
+                    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
+                        || Operation::get_op::<IntrinsicOp>(op, ctx)
+                            .and_then(|i| i.intrinsic(ctx))
+                            .is_some_and(|i| i.may_allocate())
+                        || Operation::get_op::<JsonStringifyOp>(op, ctx).is_some();
+                if let Some(target) = target {
+                    callees[index].push(target);
+                    callers[target].push(index);
+                } else if callee.is_some() {
+                    effects.allocates = true;
+                    effects.may_collect = true;
+                    effects.may_suspend = true;
+                    effects.may_reenter = true;
+                    effects.writes_record = true;
+                    effects.task_state = true;
+                    effects.unknown_helper_bound = true;
                     fails |= Operation::get_op::<CallOp>(op, ctx).is_some();
-                    summary.unknown_helper_bound = true;
-                    summary.escapes.extend(dependencies());
                 }
             }
         }
-        summary.atomic_construction = atomic[index];
-        summary.failure = if !fails {
+        effects.failure = if !fails {
             Failure::None
-        } else if is_async(ctx, function) {
+        } else if local[index].asynchronous {
             Failure::Rejects
         } else {
             Failure::Throws
         };
-        summary.allocates |= is_async(ctx, function);
-        summary.may_suspend |= is_async(ctx, function);
-        summary.may_collect |= summary.may_suspend || summary.may_reenter;
-        summary.repeated |= loops[index] && summary.allocates;
-        if summaries[&names[index]] != summary {
-            summaries.insert(names[index].clone(), summary);
-            for &caller in &callers[index] {
-                if !queued[caller] {
-                    pending.push_back(caller);
-                    queued[caller] = true;
-                }
-            }
+        effects.allocates |= local[index].asynchronous;
+        effects.may_suspend |= local[index].asynchronous;
+        effects.may_collect |= effects.may_suspend || effects.may_reenter;
+        local[index].effects = effects;
+    }
+    let graph = CallGraph {
+        callees: &callees,
+        callers: &callers,
+    };
+    for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
+        let repeated = component.is_cyclic
+            || component
+                .nodes
+                .iter()
+                .any(|node| callees[node.0].iter().any(|&callee| local[callee].repeated));
+        for node in component.nodes {
+            local[node.0].repeated = repeated;
         }
     }
-    Ok(summaries)
+    for (function, local) in functions.iter().zip(&mut local) {
+        local.repeated |= sccs_in_topological_order(ctx, &function.get_region(ctx))
+            .iter()
+            .any(|scc| scc.is_cyclic);
+        local.effects.repeated |= local.repeated && local.effects.allocates;
+    }
+    Ok(local)
 }

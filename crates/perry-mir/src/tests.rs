@@ -422,7 +422,7 @@ fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
 
 #[test]
 fn runtime_effects_propagate_recursion_mutation_escape_and_async_failure() -> Result<()> {
-    use crate::effects::{Failure, RuntimeEffects};
+    use crate::{effects::Failure, facts::ProgramFacts};
     use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
     let ctx = &mut Context::new();
     let module = parse(
@@ -458,6 +458,11 @@ builtin.module @effects {
       ^entry(pending: perry.promise <perry.record <Cell>>):
         result = perry.await pending : perry.record <Cell>;
         perry.return result
+    };
+    builtin.func @rotate: builtin.function <(perry.record <Cell>, perry.record <Cell>) -> (perry.record <Cell>)> {
+      ^entry(first: perry.record <Cell>, second: perry.record <Cell>):
+        ignored = perry.call rotate (second, first) : perry.record <Cell>;
+        perry.return first
     }
 }
 "#,
@@ -470,13 +475,13 @@ builtin.module @effects {
     crate::calls::set_async(ctx, worker);
     verify_operation(module, ctx)?;
     let mut analyses = AnalysisManager::default();
-    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+    let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
     for name in ["left", "right", "worker", "launch"] {
-        let summary = &effects.functions[&name.try_into().unwrap()];
-        assert!(summary.writes_record, "{name}");
+        let summary = effects.effects(&name.try_into().unwrap()).unwrap();
+        assert!(summary.effects.writes_record, "{name}");
         assert!(summary.escapes.contains(&0), "{name}");
         assert_eq!(
-            summary.failure,
+            summary.effects.failure,
             match name {
                 "worker" => Failure::Rejects,
                 "launch" => Failure::None,
@@ -485,28 +490,35 @@ builtin.module @effects {
             "{name}"
         );
     }
-    let wait = &effects.functions[&pliron::ident!("wait")];
-    assert!(wait.may_mutate_records());
-    assert_eq!(wait.failure, Failure::Throws);
-    let launch = &effects.functions[&pliron::ident!("launch")];
-    assert!(launch.allocates && launch.may_collect && launch.may_suspend);
+    let wait = effects.effects(&pliron::ident!("wait")).unwrap();
+    assert!(wait.effects.may_mutate_records());
+    assert_eq!(wait.effects.failure, Failure::Throws);
+    let launch = effects.effects(&pliron::ident!("launch")).unwrap();
+    assert!(launch.effects.allocates && launch.effects.may_collect && launch.effects.may_suspend);
+    assert_eq!(
+        effects.effects(&pliron::ident!("rotate")).unwrap().escapes,
+        std::collections::BTreeSet::from([0, 1])
+    );
     Ok(())
 }
 
 #[test]
 fn runtime_effects_cache_tracks_mir_mutations() -> Result<()> {
-    use crate::effects::{Failure, RuntimeEffects};
+    use crate::{effects::Failure, facts::ProgramFacts};
     use pliron::{
         builtin::op_interfaces::SymbolOpInterface,
-        pass::{AnalysisManager, PassResult},
+        pass::{Analysis, AnalysisManager, PassResult},
     };
     let ctx = &mut Context::new();
     let module = parse(ctx, ASYNC_STEP);
     let mut analyses = AnalysisManager::default();
     let run = pliron::ident!("run");
     {
-        let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
-        assert_eq!(effects.functions[&run].failure, Failure::Throws);
+        let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+        assert_eq!(
+            effects.effects(&run).unwrap().effects.failure,
+            Failure::Throws
+        );
     }
     let function = crate::aggregates::functions(module, ctx)
         .into_iter()
@@ -516,13 +528,75 @@ fn runtime_effects_cache_tracks_mir_mutations() -> Result<()> {
     let mut changed = PassResult::default();
     changed.ir_changed = IRStatus::Changed;
     analyses.retain_preserved(&changed);
-    assert!(
-        analyses
-            .try_get_analysis::<RuntimeEffects>(module)
-            .is_none()
+    assert!(analyses.try_get_analysis::<ProgramFacts>(module).is_none());
+    let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+    assert_eq!(
+        effects.effects(&run).unwrap().effects.failure,
+        Failure::Rejects
     );
-    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
-    assert_eq!(effects.functions[&run].failure, Failure::Rejects);
+    let fresh = ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())?;
+    for function in crate::aggregates::functions(module, ctx) {
+        let name = function.get_symbol_name(ctx);
+        assert_eq!(effects.effects(&name), fresh.effects(&name));
+    }
+    Ok(())
+}
+
+#[test]
+fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    let mut visits = Vec::new();
+    for calls in [32, 128] {
+        let ctx = &mut Context::new();
+        let mut text = String::from(
+            r#"builtin.module @scaling { ^module():
+          builtin.func @count: builtin.function <(perry.record <Counter { value: builtin.integer i32 }>, perry.string) -> (builtin.integer i32)> {
+            ^entry(cell: perry.record <Counter>, text: perry.string):
+              length = perry.string_len text : builtin.integer i32;
+              perry.field_set cell."value" = length;
+              perry.return length
+          };
+          builtin.func @run: builtin.function <(perry.record <Counter>, perry.string) -> (builtin.integer i32)> {
+            ^entry(cell: perry.record <Counter>, text: perry.string):
+        "#,
+        );
+        for index in 0..calls {
+            use std::fmt::Write;
+            writeln!(
+                text,
+                "value{index} = perry.call count (cell, text) : builtin.integer i32;"
+            )
+            .unwrap();
+        }
+        text.push_str(&format!("perry.return value{} }} }}", calls - 1));
+        let root = parse(ctx, &text);
+        verify_operation(root, ctx)?;
+        let run = crate::aggregates::functions(root, ctx)
+            .into_iter()
+            .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
+            .unwrap();
+        let returned = run
+            .get_entry_block(ctx)
+            .deref(ctx)
+            .get_terminator(ctx)
+            .unwrap()
+            .deref(ctx)
+            .get_operand(0);
+        let mut analyses = AnalysisManager::default();
+        let identity = {
+            let facts = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+            let effects = facts.effects(&pliron::ident!("run")).unwrap();
+            assert!(effects.effects.writes_record);
+            assert!(effects.escapes.is_empty());
+            assert!(facts.is_count(ctx, &run, returned));
+            visits.push(facts.constraint_visits);
+            &*facts as *const ProgramFacts
+        };
+        let cached = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+        assert_eq!(identity, &*cached as *const ProgramFacts);
+    }
+    assert!(visits[1] < 5 * visits[0], "{visits:?}");
     Ok(())
 }
 
@@ -1021,7 +1095,7 @@ fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
 
 #[test]
 fn atomic_construction_preserves_allocation_and_caller_collection_effects() -> Result<()> {
-    use crate::effects::RuntimeEffects;
+    use crate::facts::ProgramFacts;
     use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
     let ctx = &mut Context::new();
     let module = parse(
@@ -1056,20 +1130,32 @@ builtin.module @atomic {
         }
     }
     let mut analyses = AnalysisManager::default();
-    let effects = analyses.get_analysis::<RuntimeEffects>(module, ctx)?;
+    let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
     for name in ["left", "right"] {
-        let effect = &effects.functions[&name.try_into().unwrap()];
-        assert!(effect.atomic_construction && effect.allocates && effect.requires_task());
-        assert!(!effect.may_collect && !effect.may_suspend && !effect.may_reenter);
+        let effect = effects.effects(&name.try_into().unwrap()).unwrap();
+        assert!(
+            effect.effects.atomic_construction
+                && effect.effects.allocates
+                && effect.effects.requires_task()
+        );
+        assert!(
+            !effect.effects.may_collect
+                && !effect.effects.may_suspend
+                && !effect.effects.may_reenter
+        );
     }
-    let effect = &effects.functions[&pliron::ident!("run")];
-    assert!(!effect.atomic_construction && effect.allocates && effect.may_collect);
+    let effect = effects.effects(&pliron::ident!("run")).unwrap();
+    assert!(
+        !effect.effects.atomic_construction
+            && effect.effects.allocates
+            && effect.effects.may_collect
+    );
     Ok(())
 }
 
 #[test]
 fn atomic_construction_rejects_open_calls_and_observable_runtime_operations() {
-    use crate::effects::RuntimeEffects;
+    use crate::facts::ProgramFacts;
     use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
     let ordinary = r#"
 builtin.module @atomic {
@@ -1103,22 +1189,18 @@ builtin.module @atomic {
             .unwrap();
         crate::calls::set_atomic_construction(ctx, &run);
         let mut analyses = AnalysisManager::default();
-        let error = match analyses.get_analysis::<RuntimeEffects>(module, ctx) {
+        let error = match analyses.get_analysis::<ProgramFacts>(module, ctx) {
             Ok(_) => panic!("accepted {operation} in an open construction group"),
             Err(error) => error.disp(ctx).to_string(),
         };
         assert!(error.contains(operation), "{error}");
-        assert!(
-            analyses
-                .try_get_analysis::<RuntimeEffects>(module)
-                .is_none()
-        );
+        assert!(analyses.try_get_analysis::<ProgramFacts>(module).is_none());
     }
 }
 
 #[test]
 fn atomic_construction_rejects_async_function_scope() {
-    use crate::effects::RuntimeEffects;
+    use crate::facts::ProgramFacts;
     use pliron::pass::AnalysisManager;
     let ctx = &mut Context::new();
     let module = parse(ctx, ASYNC_STEP);
@@ -1126,7 +1208,7 @@ fn atomic_construction_rejects_async_function_scope() {
     crate::calls::set_async(ctx, &function);
     crate::calls::set_atomic_construction(ctx, &function);
     let mut analyses = AnalysisManager::default();
-    let error = match analyses.get_analysis::<RuntimeEffects>(module, ctx) {
+    let error = match analyses.get_analysis::<ProgramFacts>(module, ctx) {
         Ok(_) => panic!("accepted an asynchronous construction scope"),
         Err(error) => error.disp(ctx).to_string(),
     };

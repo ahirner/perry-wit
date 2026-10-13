@@ -71,10 +71,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
 pub(crate) fn needs_collector(
     ctx: &Context,
     functions: &[pliron::builtin::ops::FuncOp],
-    summaries: &std::collections::HashMap<
-        pliron::identifier::Identifier,
-        perry_mir::effects::Summary,
-    >,
+    summaries: &perry_mir::facts::ProgramFacts,
 ) -> bool {
     use pliron::{
         builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
@@ -83,8 +80,12 @@ pub(crate) fn needs_collector(
     !crate::boundary::used_keys(ctx, functions).is_empty()
         || functions
             .iter()
-            .map(|f| &summaries[&f.get_symbol_name(ctx)])
-            .any(|summary| summary.repeated || summary.unknown_helper_bound)
+            .map(|f| {
+                summaries
+                    .effects(&f.get_symbol_name(ctx))
+                    .expect("function effects")
+            })
+            .any(|summary| summary.effects.repeated || summary.effects.unknown_helper_bound)
         || functions.iter().any(|function| {
             perry_mir::calls::is_async(ctx, function)
                 || {
@@ -120,12 +121,12 @@ pub fn explain_tiers(
         .get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     analyses
-        .get_analysis::<perry_mir::effects::RuntimeEffects>(module.get_operation(), ctx)
+        .get_analysis::<perry_mir::facts::ProgramFacts>(module.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     let effects = analyses
-        .try_get_analysis::<perry_mir::effects::RuntimeEffects>(module.get_operation())
+        .try_get_analysis::<perry_mir::facts::ProgramFacts>(module.get_operation())
         .expect("runtime effects");
-    let summaries = &effects.functions;
+    let summaries = &*effects;
     let live = analyses
         .try_get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation())
         .expect("liveness");
@@ -140,7 +141,7 @@ pub fn explain_tiers(
     writeln!(report, "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}", stats.numeric_contexts, stats.constraint_visits, stats.specializations, stats.cleanup_rounds).expect("string write");
     for function in &functions {
         let name = function.get_symbol_name(ctx);
-        let summary = &summaries[&name];
+        let summary = summaries.effects(&name).expect("function effects");
         let sites = function
             .get_region(ctx)
             .deref(ctx)
@@ -158,7 +159,7 @@ pub fn explain_tiers(
             .count();
         let leases = crate::lease::leased(ctx, function, &live).len();
         writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
-            summary.repeated, summary.unknown_helper_bound, summary.escapes).expect("string write");
+            summary.effects.repeated, summary.effects.unknown_helper_bound, summary.escapes).expect("string write");
     }
     report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use instance storage\n  buffer: host operations pin owners until acknowledgement\n");
     Ok(report)
@@ -432,10 +433,11 @@ impl FunctionLowering<'_, '_> {
             return Ok(None);
         }
         let call_effect = Operation::get_op::<CallOp>(op, ctx)
-            .and_then(|call| self.state.call_effects.get(&call.callee(ctx)));
-        let atomic_call = call_effect.is_some_and(|e| e.atomic_construction);
+            .and_then(|call| self.state.program_facts.effects(&call.callee(ctx)));
+        let atomic_call = call_effect.is_some_and(|e| e.effects.atomic_construction);
         let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some()
-            && call_effect.is_none_or(|effect| effect.may_collect || effect.allocates);
+            && call_effect
+                .is_none_or(|effect| effect.effects.may_collect || effect.effects.allocates);
         if !self.state.collectible
             || !(perry_mir::effects::allocates(ctx, op)
                 || collecting_call

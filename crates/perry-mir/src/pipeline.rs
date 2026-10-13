@@ -32,7 +32,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     });
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
-    preparation.add_pass(crate::numeric::Specialize);
+    preparation.add_pass(crate::facts::Specialize);
     preparation.add_pass(Transform("inline-leaves", |root, ctx| {
         Ok(crate::aggregates::inline_leaves(root, ctx))
     }));
@@ -111,10 +111,10 @@ impl Pass for ProveBounds {
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
         use pliron::graph::dominance::DomInfo;
-        analyses.get_analysis::<crate::numeric::NumericAnalysis>(root, ctx)?;
+        analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         analyses.get_analysis::<DomInfo>(root, ctx)?;
         let numeric = analyses
-            .try_get_analysis::<crate::numeric::NumericAnalysis>(root)
+            .try_get_analysis::<crate::facts::ProgramFacts>(root)
             .expect("numeric analysis");
         let mut dominance = analyses
             .try_get_analysis_mut::<DomInfo>(root)
@@ -137,7 +137,7 @@ impl Pass for PromoteArguments {
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
-        let effects = analyses.get_analysis::<crate::effects::RuntimeEffects>(root, ctx)?;
+        let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         let mut result = PassResult::default();
         result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects);
         Ok(result)
@@ -157,11 +157,10 @@ impl Pass for AssignLifetimes {
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
-        let effects = analyses.get_analysis::<crate::effects::RuntimeEffects>(root, ctx)?;
+        let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         let mut result = PassResult::default();
         result.ir_changed = crate::lifetimes::assign(root, ctx, &effects);
-        result.set_preserved::<crate::effects::RuntimeEffects>();
-        result.set_preserved::<crate::numeric::NumericAnalysis>();
+        result.set_preserved::<crate::facts::ProgramFacts>();
         result.set_preserved::<crate::liveness::LiveValues>();
         result.set_preserved::<pliron::analyses::liveness::Liveness<pliron::analyses::liveness::LivenessTq>>();
         result.set_preserved::<pliron::graph::dominance::DomInfo>();

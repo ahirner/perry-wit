@@ -1,4 +1,4 @@
-//! WIT-seeded, context-sensitive numeric constraints over SSA values.
+//! Cached numeric, runtime-effect and parameter-provenance constraints over SSA values.
 //!
 //! Contexts contain domains, never constants or intervals. A single worklist propagates
 //! representation facts forward and required widths backward, including recursive calls.
@@ -285,10 +285,11 @@ struct Body {
     constraints: Vec<Constraint>,
     dependents: HashMap<Value, Vec<usize>>,
     parameters: Vec<Value>,
+    effects: crate::effects::LocalEffects,
 }
 
 impl Body {
-    fn new(ctx: &Context, function: FuncOp) -> Self {
+    fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Self {
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
         for op in crate::aggregates::operations(ctx, &function) {
@@ -316,6 +317,7 @@ impl Body {
         }
         Self {
             function,
+            effects,
             constraints,
             dependents,
             parameters: function
@@ -336,6 +338,8 @@ struct State {
     calls: HashMap<Ptr<Operation>, usize>,
     results: Vec<ResultFact>,
     callers: BTreeSet<(usize, usize)>,
+    origins: HashMap<Value, BTreeSet<usize>>,
+    summary: crate::effects::Summary,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -362,7 +366,7 @@ impl State {
 
 /// Cached result for one unchanged module. Domain propagation is Perry semantics;
 /// scheduling, cloning, verification and invalidation use pliron infrastructure.
-pub struct NumericAnalysis {
+pub struct ProgramFacts {
     bodies: HashMap<Identifier, Body>,
     keys: Vec<Key>,
     states: Vec<State>,
@@ -371,7 +375,13 @@ pub struct NumericAnalysis {
     pub constraint_visits: usize,
 }
 
-impl NumericAnalysis {
+impl ProgramFacts {
+    pub fn effects(&self, function: &Identifier) -> Option<&crate::effects::Summary> {
+        self.generic
+            .get(function)
+            .map(|&id| &self.states[id].summary)
+    }
+
     /// Non-negative integral values, including loop-carried counts after range widening.
     pub(crate) fn is_count(&self, ctx: &Context, function: &FuncOp, value: Value) -> bool {
         let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
@@ -383,20 +393,21 @@ impl NumericAnalysis {
 }
 
 struct Solver {
-    analysis: NumericAnalysis,
+    analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     pending: VecDeque<(usize, usize)>,
-    queued: HashSet<(usize, usize)>,
+    queued: Vec<Vec<bool>>,
 }
 
 impl Solver {
     fn enqueue(&mut self, item: (usize, usize)) {
-        if self.queued.insert(item) {
+        if !self.queued[item.0][item.1] {
+            self.queued[item.0][item.1] = true;
             self.pending.push_back(item);
         }
     }
 
-    fn context(&mut self, key: Key) -> usize {
+    fn context(&mut self, ctx: &Context, key: Key) -> usize {
         if let Some(&id) = self.contexts.get(&key) {
             return id;
         }
@@ -404,9 +415,16 @@ impl Solver {
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
             results: vec![ResultFact::default(); key.results.len()],
+            summary: crate::effects::Summary {
+                effects: body.effects.effects,
+                ..Default::default()
+            },
             ..State::default()
         };
-        for (&parameter, domain) in body.parameters.iter().zip(&key.args) {
+        for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
+            if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
+                state.origins.insert(parameter, BTreeSet::from([position]));
+            }
             state
                 .facts
                 .insert(parameter, domain.map_or(Fact::Original, Fact::Integer));
@@ -419,6 +437,7 @@ impl Solver {
         self.contexts.insert(key.clone(), id);
         self.analysis.keys.push(key);
         self.analysis.states.push(state);
+        self.queued.push(vec![false; constraints]);
         for constraint in 0..constraints {
             self.enqueue((id, constraint));
         }
@@ -432,14 +451,117 @@ impl Solver {
         let dependents = body.dependents.get(&value).into_iter().flatten();
         let parameter = body.parameters.contains(&value);
         for &constraint in dependents {
-            if self.queued.insert((id, constraint)) {
+            if !self.queued[id][constraint] {
+                self.queued[id][constraint] = true;
                 self.pending.push_back((id, constraint));
             }
         }
         if parameter {
-            for &caller in &self.analysis.states[id].callers {
-                if self.queued.insert(caller) {
-                    self.pending.push_back(caller);
+            self.notify_callers(id);
+        }
+    }
+
+    fn notify_callers(&mut self, id: usize) {
+        for &caller in &self.analysis.states[id].callers {
+            if !self.queued[caller.0][caller.1] {
+                self.queued[caller.0][caller.1] = true;
+                self.pending.push_back(caller);
+            }
+        }
+    }
+
+    fn propagate_origins(&mut self, id: usize, from: Value, to: Value) {
+        let origins = &mut self.analysis.states[id].origins;
+        if from == to || !origins.contains_key(&from) {
+            return;
+        }
+        origins.entry(to).or_default();
+        let [Some(from), Some(target)] = origins.get_disjoint_mut([&from, &to]) else {
+            unreachable!("origin entries exist")
+        };
+        let previous = target.len();
+        target.extend(from.iter().copied());
+        if previous != target.len() {
+            self.changed(id, to);
+        }
+    }
+
+    fn escape(&mut self, id: usize, value: Value) {
+        let state = &mut self.analysis.states[id];
+        let previous = state.summary.escapes.len();
+        state
+            .summary
+            .escapes
+            .extend(state.origins.get(&value).into_iter().flatten().copied());
+        if previous != state.summary.escapes.len() {
+            self.notify_callers(id);
+        }
+    }
+
+    fn operation_effects(&mut self, ctx: &Context, id: usize, index: usize, op: Ptr<Operation>) {
+        let operation = op.deref(ctx);
+        for result in operation
+            .results()
+            .filter(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
+        {
+            for input in operation.operands() {
+                self.propagate_origins(id, input, result);
+            }
+        }
+        if Operation::get_op::<ReturnOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx)
+                .is_some_and(|op| op.phase(ctx) == crate::foreign::Phase::Start)
+            || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
+        {
+            for value in operation.operands() {
+                self.escape(id, value);
+            }
+        }
+        let stored = if Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::heap::FieldSetOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::collections::ArrayPushOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::collections::ArrayExtendOp>(op, ctx).is_some()
+        {
+            Some(1)
+        } else if Operation::get_op::<crate::collections::ArraySetOp>(op, ctx).is_some() {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(stored) = stored {
+            self.escape(id, operation.get_operand(stored));
+        }
+        let call = Operation::get_op::<CallOp>(op, ctx);
+        let callee = call
+            .map(|call| call.callee(ctx))
+            .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx)));
+        if let Some(callee) = callee {
+            if let Some(&child) = self.analysis.generic.get(&callee) {
+                self.analysis.states[child].callers.insert((id, index));
+                let current = self.analysis.states[id].summary.effects;
+                let effects = self.analysis.bodies[&self.analysis.keys[id].function]
+                    .effects
+                    .inherit(
+                        current,
+                        self.analysis.states[child].summary.effects,
+                        call.is_some(),
+                    );
+                if effects != current {
+                    self.analysis.states[id].summary.effects = effects;
+                    self.notify_callers(id);
+                }
+                for (position, value) in operation.operands().enumerate() {
+                    if self.analysis.states[child]
+                        .summary
+                        .escapes
+                        .contains(&position)
+                    {
+                        self.escape(id, value);
+                    }
+                }
+            } else {
+                for value in operation.operands() {
+                    self.escape(id, value);
                 }
             }
         }
@@ -515,6 +637,7 @@ impl Solver {
     fn process(&mut self, ctx: &Context, id: usize, index: usize) {
         let constraint = self.analysis.bodies[&self.analysis.keys[id].function].constraints[index];
         if let Constraint::Edge { from, to } = constraint {
+            self.propagate_origins(id, from, to);
             if from.get_type(ctx).deref(ctx).is::<PromiseType>()
                 && (self.analysis.states[id].original_payloads.contains(&from)
                     || self.analysis.states[id].original_payloads.contains(&to)
@@ -534,6 +657,7 @@ impl Solver {
         let Constraint::Op(op) = constraint else {
             unreachable!()
         };
+        self.operation_effects(ctx, id, index, op);
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if Operation::get_op::<AwaitOp>(op, ctx).is_none()
@@ -609,11 +733,7 @@ impl Solver {
                 }
             }
             if changed {
-                for &caller in &self.analysis.states[id].callers {
-                    if self.queued.insert(caller) {
-                        self.pending.push_back(caller);
-                    }
-                }
+                self.notify_callers(id);
             }
             return;
         }
@@ -668,25 +788,28 @@ impl Solver {
                         }
                     })
                     .collect();
-                let child = self.context(Key {
-                    function: callee.clone(),
-                    args,
-                    results: operation
-                        .results()
-                        .map(|value| {
-                            if preserve_result {
-                                ResultDomain::Original
-                            } else {
-                                self.analysis.states[id]
-                                    .required
-                                    .get(&value)
-                                    .copied()
-                                    .into()
-                            }
-                        })
-                        .collect(),
-                    specialize: true,
-                });
+                let child = self.context(
+                    ctx,
+                    Key {
+                        function: callee.clone(),
+                        args,
+                        results: operation
+                            .results()
+                            .map(|value| {
+                                if preserve_result {
+                                    ResultDomain::Original
+                                } else {
+                                    self.analysis.states[id]
+                                        .required
+                                        .get(&value)
+                                        .copied()
+                                        .into()
+                                }
+                            })
+                            .collect(),
+                        specialize: true,
+                    },
+                );
                 self.analysis.states[id].calls.insert(op, child);
                 self.analysis.states[child].callers.insert((id, index));
                 for (position, input) in operation.operands().enumerate() {
@@ -948,18 +1071,25 @@ fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
         .then_some(value as i128 as u64)
 }
 
-impl Analysis for NumericAnalysis {
+impl Analysis for ProgramFacts {
     fn name(&self) -> &str {
-        "perry-numeric-domains"
+        "perry-program-facts"
     }
 
     fn compute(root: Ptr<Operation>, ctx: &Context, _: &mut AnalysisManager) -> Result<Self> {
         let functions = crate::aggregates::functions(root, ctx);
+        let effects = crate::effects::prepare(ctx, &functions)?;
         let mut solver = Solver {
             analysis: Self {
                 bodies: functions
                     .iter()
-                    .map(|&function| (function.get_symbol_name(ctx), Body::new(ctx, function)))
+                    .zip(effects)
+                    .map(|(&function, effects)| {
+                        (
+                            function.get_symbol_name(ctx),
+                            Body::new(ctx, function, effects),
+                        )
+                    })
                     .collect(),
                 keys: Vec::new(),
                 states: Vec::new(),
@@ -969,7 +1099,7 @@ impl Analysis for NumericAnalysis {
             },
             contexts: HashMap::new(),
             pending: VecDeque::new(),
-            queued: HashSet::new(),
+            queued: Vec::new(),
         };
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
@@ -979,17 +1109,20 @@ impl Analysis for NumericAnalysis {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect();
-            let generic = solver.context(Key {
-                function: function.get_symbol_name(ctx),
-                args,
-                results: ty
-                    .deref(ctx)
-                    .res_types()
-                    .iter()
-                    .map(|&ty| Integer::from_type(ctx, ty).into())
-                    .collect(),
-                specialize: false,
-            });
+            let generic = solver.context(
+                ctx,
+                Key {
+                    function: function.get_symbol_name(ctx),
+                    args,
+                    results: ty
+                        .deref(ctx)
+                        .res_types()
+                        .iter()
+                        .map(|&ty| Integer::from_type(ctx, ty).into())
+                        .collect(),
+                    specialize: false,
+                },
+            );
             solver
                 .analysis
                 .generic
@@ -1025,17 +1158,20 @@ impl Analysis for NumericAnalysis {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty).into())
                 .collect();
-            let id = solver.context(Key {
-                function: function.get_symbol_name(ctx),
-                args,
-                results,
-                specialize: true,
-            });
+            let id = solver.context(
+                ctx,
+                Key {
+                    function: function.get_symbol_name(ctx),
+                    args,
+                    results,
+                    specialize: true,
+                },
+            );
             solver.analysis.roots.push((function, id));
         }
         loop {
             while let Some((id, index)) = solver.pending.pop_front() {
-                solver.queued.remove(&(id, index));
+                solver.queued[id][index] = false;
                 solver.analysis.constraint_visits += 1;
                 solver.process(ctx, id, index);
             }
@@ -1086,7 +1222,7 @@ impl Pass for Specialize {
         ctx: &mut Context,
         analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
-        let analysis = analyses.get_analysis::<NumericAnalysis>(root, ctx)?;
+        let analysis = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
         let specializations = if analysis.roots.is_empty() {
             0
         } else {
@@ -1111,7 +1247,7 @@ impl Pass for Specialize {
     }
 }
 
-fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
+fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     let mut reachable = HashSet::new();
     let mut pending: Vec<_> = analysis.roots.iter().map(|(_, id)| *id).collect();

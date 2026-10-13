@@ -245,7 +245,7 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
 
 pliron::dict_key!(ATOMIC_CONSTRUCTION, "perry_atomic_construction");
 
-/// Request one uninterrupted construction scope. RuntimeEffects verifies the closed
+/// Request one uninterrupted construction scope. ProgramFacts verifies the closed
 /// synchronous call group and each operation before codegen omits internal safe points.
 pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
     function.get_operation().deref_mut(ctx).attributes.set(

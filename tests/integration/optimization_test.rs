@@ -385,11 +385,11 @@ fn numeric_constraints_keep_each_call_result_independent() -> Result<()> {
     let byte = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
     let wide = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
     let float = FP64Type::get(ctx).into();
-    perry_mir::numeric::constrain(ctx, &run, vec![byte, boolean], vec![boolean, float, wide]);
+    perry_mir::facts::constrain(ctx, &run, vec![byte, boolean], vec![boolean, float, wide]);
     perry_mir::calls::set_exported(ctx, &run);
     let mut analyses = perry_mir::pipeline::canonicalize(root, ctx)
         .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-    let implementation = perry_mir::numeric::implementation(ctx, &run).to_string();
+    let implementation = perry_mir::facts::implementation(ctx, &run).to_string();
     let bytes = perry_codegen::compile(ctx, &module, &perry_codegen::Exports::Raw, &mut analyses)?;
     let mut program = crate::core_program::Program::from_wasm(bytes);
     for recurse in [0, 1] {

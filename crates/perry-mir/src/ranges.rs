@@ -174,7 +174,7 @@ struct Fact {
 pub(crate) fn prove_bounds(
     root: Ptr<Operation>,
     ctx: &mut Context,
-    numeric: &crate::numeric::NumericAnalysis,
+    numeric: &crate::facts::ProgramFacts,
     dominance: &mut DomInfo,
 ) -> IRStatus {
     let mut status = IRStatus::Unchanged;

@@ -1,7 +1,6 @@
 //! Bounded frame storage for closed scalar records with no escaping aliases.
 use crate::{
     attrs::Tier,
-    effects,
     heap::{AllocOp, FieldGetOp, FieldSetOp},
 };
 use pliron::{
@@ -23,7 +22,7 @@ use pliron::{
 fn frame_candidates(
     ctx: &Context,
     function: &FuncOp,
-    summaries: &std::collections::HashMap<pliron::identifier::Identifier, effects::Summary>,
+    summaries: &crate::facts::ProgramFacts,
 ) -> Vec<AllocOp> {
     if crate::calls::is_async(ctx, function) {
         return vec![];
@@ -60,7 +59,7 @@ fn frame_candidates(
                     return true;
                 }
                 Operation::get_op::<crate::calls::CallOp>(op, ctx)
-                    .and_then(|call| summaries.get(&call.callee(ctx)))
+                    .and_then(|call| summaries.effects(&call.callee(ctx)))
                     .is_some_and(|summary| !summary.escapes.contains(&operand))
             });
             if local {
@@ -74,15 +73,14 @@ fn frame_candidates(
 pub(crate) fn assign(
     root: Ptr<Operation>,
     ctx: &Context,
-    summaries: &effects::RuntimeEffects,
+    summaries: &crate::facts::ProgramFacts,
 ) -> IRStatus {
     let mut status = IRStatus::Unchanged;
     for function in crate::aggregates::functions(root, ctx) {
-        let frame: std::collections::HashSet<_> =
-            frame_candidates(ctx, &function, &summaries.functions)
-                .into_iter()
-                .map(|allocation| allocation.get_operation())
-                .collect();
+        let frame: std::collections::HashSet<_> = frame_candidates(ctx, &function, summaries)
+            .into_iter()
+            .map(|allocation| allocation.get_operation())
+            .collect();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
                 if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {

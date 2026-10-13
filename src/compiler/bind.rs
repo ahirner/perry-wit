@@ -69,7 +69,7 @@ pub(crate) fn constrain_numbers(
             }
         }
         if constrained {
-            perry_mir::numeric::constrain(ctx, function, args, results);
+            perry_mir::facts::constrain(ctx, function, args, results);
         }
     }
     Ok(())
@@ -82,7 +82,7 @@ pub(crate) fn specialized_implementations(ctx: &Context, mir: &ModuleOp, exports
             .iter()
             .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
         {
-            export.function = perry_mir::numeric::implementation(ctx, function).to_string();
+            export.function = perry_mir::facts::implementation(ctx, function).to_string();
         }
     }
 }

@@ -222,7 +222,7 @@ fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
 pub(crate) fn promote_arguments(
     root: Ptr<Operation>,
     ctx: &mut Context,
-    effects: &crate::effects::RuntimeEffects,
+    effects: &crate::facts::ProgramFacts,
 ) -> IRStatus {
     let functions = functions(root, ctx);
     // Direct call sites per callee; callees also called asynchronously are left alone.
@@ -242,7 +242,11 @@ pub(crate) fn promote_arguments(
         let name = function.get_symbol_name(ctx);
         if is_exported(ctx, function)
             || is_async(ctx, function)
-            || effects.functions[&name].may_mutate_records()
+            || effects
+                .effects(&name)
+                .expect("function effects")
+                .effects
+                .may_mutate_records()
             || async_callees.contains(&name)
         {
             continue;

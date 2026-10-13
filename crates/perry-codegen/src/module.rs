@@ -129,7 +129,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
-    pub(crate) call_effects: &'e HashMap<Identifier, perry_mir::effects::Summary>,
+    pub(crate) program_facts: &'e perry_mir::facts::ProgramFacts,
     pub(crate) live: &'e perry_mir::liveness::LiveValues,
     /// Address of the compiled-roots counter of [Exports::RawChecked].
     pub(crate) root_metrics: Option<u32>,
@@ -144,9 +144,9 @@ pub(crate) struct ModuleState<'e> {
 
 impl ModuleState<'_> {
     pub(crate) fn may_throw(&self, function: &Identifier) -> bool {
-        self.call_effects
-            .get(function)
-            .is_none_or(|summary| summary.failure == perry_mir::effects::Failure::Throws)
+        self.program_facts
+            .effects(function)
+            .is_none_or(|summary| summary.effects.failure == perry_mir::effects::Failure::Throws)
     }
 
     /// Whether the WIT world imports `interface` (always, without a world).
@@ -172,13 +172,13 @@ pub(crate) fn lower(
         .map(|f| f.get_symbol_name(ctx))
         .collect();
     analyses
-        .get_analysis::<perry_mir::effects::RuntimeEffects>(mir.get_operation(), ctx)
+        .get_analysis::<perry_mir::facts::ProgramFacts>(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     analyses
         .get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     let effects = analyses
-        .try_get_analysis::<perry_mir::effects::RuntimeEffects>(mir.get_operation())
+        .try_get_analysis::<perry_mir::facts::ProgramFacts>(mir.get_operation())
         .expect("runtime effects");
     let live = analyses
         .try_get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation())
@@ -258,9 +258,9 @@ pub(crate) fn lower(
         collectible: !resource_keys.is_empty()
             || matches!(exports, Exports::RawChecked)
             || memory_checks
-            || memory::needs_collector(ctx, &functions, &effects.functions),
+            || memory::needs_collector(ctx, &functions, &effects),
         memory_checks,
-        call_effects: &effects.functions,
+        program_facts: &effects,
         live: &live,
         root_metrics: matches!(exports, Exports::RawChecked).then_some(DATA_BASE),
         pointer_maps: HashMap::new(),
