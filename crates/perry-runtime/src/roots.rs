@@ -445,7 +445,8 @@ pub extern "C" fn perry_gc_debug(flags: u32) {
 
 /// Indices 0–6: allocations, collections, live bytes, reserved bytes, transfer-copy bytes,
 /// active pins and roots. Compiled wrappers supply root publications at 7; indices 8–10
-/// are in-place growths, copy fallbacks and growth-copy bytes.
+/// are in-place growths, copy fallbacks and growth-copy bytes. Index 11 counts live
+/// WebAssembly address-lookup tables (zero for the native ordered-map implementation).
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
     let roots = roots();
@@ -461,6 +462,7 @@ pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
         8 => roots.growth_metrics.as_ref().map_or(0, |m| m.in_place),
         9 => roots.growth_metrics.as_ref().map_or(0, |m| m.fallback),
         10 => roots.growth_metrics.as_ref().map_or(0, |m| m.copied),
+        11 => roots.heap.directory_tables() as u64,
         _ => panic!("unknown memory counter"),
     }
 }

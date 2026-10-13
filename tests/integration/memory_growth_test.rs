@@ -86,6 +86,7 @@ fn tail_growth_preserves_bytes_updates_directory_and_reclaims() -> Result<()> {
             .map(move |padding| (size, padding))
     }) {
         let mut heap = Heap::new(padding)?;
+        let initial_tables = heap.counter(11)?;
         let pointer = heap.alloc(8192)?;
         heap.unit("push", pointer)?;
         heap.memory
@@ -111,9 +112,22 @@ fn tail_growth_preserves_bytes_updates_directory_and_reclaims() -> Result<()> {
         assert_eq!(heap.counter(2)?, u64::from(size));
         assert_eq!(heap.counter(8)?, 1);
         assert_eq!(heap.counter(10)?, 0);
+        if size > 1024 * 1024 {
+            assert!(heap.counter(11)? > initial_tables);
+        }
         heap.unit("reset", 0)?;
         heap.collect()?;
         assert_eq!(heap.counter(2)?, 0);
+        assert_eq!(heap.counter(11)?, initial_tables);
+
+        let recreated = heap.alloc(size)?;
+        heap.unit("push", recreated + size - 1)?;
+        heap.collect()?;
+        assert_eq!(heap.counter(2)?, u64::from(size));
+        heap.unit("reset", 0)?;
+        heap.collect()?;
+        assert_eq!(heap.counter(2)?, 0);
+        assert_eq!(heap.counter(11)?, initial_tables);
     }
     Ok(())
 }
