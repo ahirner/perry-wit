@@ -1,8 +1,8 @@
 {
   "compiler_revision": "2f606a2a075b025f681dbf9eda5b8982353199a8",
   "compiler_source_changes": false,
-  "comparison_harness_sha256": "3ccb11e478132c575f5cc248583362ac237b11ac3aad2b138e30539c086381bd",
-  "comparison_harness_changes": "Preserve captured workloads and measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Original baseline metrics and input hashes are unchanged.",
+  "comparison_harness_sha256": "a9d4ca8bc4be72f5158ea1377bb50cce209a20623a9b0bfc90df868359e0533b",
+  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged.",
   "harness_changes": "Added core sizes and optimization fixtures; replaced TCP HTTP transport with a fixed in-process response before capture.",
   "host": "macOS-27.0-arm64-arm-64bit",
   "rust": "1.98.1",

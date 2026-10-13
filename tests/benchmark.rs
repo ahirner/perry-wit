@@ -871,7 +871,7 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
     )?);
     let asynchronous = component(
         include_str!("fixtures/optimization/async.ts"),
-        "package test:optimization; world test { export run: async func(n: f64) -> f64; }",
+        "package test:optimization; world test { import wasi:cli/stderr@0.3.0; export run: async func(n: f64) -> f64; }",
         "test",
     )?;
     rows.push(
