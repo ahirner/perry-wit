@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -111,12 +111,20 @@ pub struct SavedCase {
     pub versions: serde_json::Value,
 }
 
-/// The workspace root, where evidence is written under `target/conformance`.
+/// The workspace root used to identify the checked sources.
 fn root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .context("workspace root")
+}
+
+fn evidence_directory() -> Result<PathBuf> {
+    let target = match env::var_os("CARGO_TARGET_DIR").filter(|path| !path.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => root()?.join("target"),
+    };
+    Ok(target.join("conformance"))
 }
 fn identity() -> Result<(String, String)> {
     let root = root()?;
@@ -232,7 +240,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         "no contracts match {}",
         settings.select
     );
-    let output = root()?.join("target/conformance");
+    let output = evidence_directory()?;
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("run-")
@@ -403,7 +411,7 @@ pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
         .iter()
         .find(|c| c.id == saved.contract)
         .context("unknown contract in replay")?;
-    let output = root()?.join("target/conformance");
+    let output = evidence_directory()?;
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("replay-")
