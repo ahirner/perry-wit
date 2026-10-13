@@ -329,6 +329,96 @@ fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
 }
 
 #[test]
+fn numeric_constraints_keep_each_call_result_independent() -> Result<()> {
+    use pliron::{
+        builtin::{
+            op_interfaces::{OneRegionInterface, SymbolOpInterface},
+            ops::{FuncOp, ModuleOp},
+            types::{FP64Type, IntegerType, Signedness},
+        },
+        context::Context,
+        irfmt::parsers::spaced,
+        linked_list::ContainsLinkedList,
+        operation::Operation,
+        parsable::parse_from_str,
+        printable::Printable,
+    };
+    let ctx = &mut Context::new();
+    let root = parse_from_str(
+        spaced(Operation::top_level_parser()),
+        ctx,
+        r#"builtin.module @multiple_results { ^module():
+            builtin.func @helper: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
+              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
+                perry.cond_br if recurse ^recursive() else ^base()
+              ^recursive():
+                no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+                status, fraction, sum = perry.call helper (x, no) : builtin.integer i1, builtin.fp64, builtin.fp64;
+                perry.br ^done(status, fraction, sum)
+              ^base():
+                yes = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1;
+                two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+                half = perry.binary Div x, two : builtin.fp64;
+                doubled = perry.binary Add x, x : builtin.fp64;
+                perry.br ^done(yes, half, doubled)
+              ^done(ok: builtin.integer i1, divided: builtin.fp64, added: builtin.fp64):
+                perry.return ok, divided, added
+            };
+            builtin.func @run: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
+              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
+                status, fraction, sum = perry.call helper (x, recurse) : builtin.integer i1, builtin.fp64, builtin.fp64;
+                perry.return status, fraction, sum
+            }
+        }"#,
+    )
+    .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let module = Operation::get_op::<ModuleOp>(root, ctx).unwrap();
+    let run = module
+        .get_region(ctx)
+        .deref(ctx)
+        .iter(ctx)
+        .flat_map(|block| block.deref(ctx).iter(ctx))
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .find(|function| function.get_symbol_name(ctx) == "run".try_into().unwrap())
+        .unwrap();
+    let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
+    let byte = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    let wide = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+    let float = FP64Type::get(ctx).into();
+    perry_mir::numeric::constrain(ctx, &run, vec![byte, boolean], vec![boolean, float, wide]);
+    perry_mir::calls::set_exported(ctx, &run);
+    let mut analyses = perry_mir::pipeline::canonicalize(root, ctx)
+        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let implementation = perry_mir::numeric::implementation(ctx, &run).to_string();
+    let bytes = perry_codegen::compile(ctx, &module, &perry_codegen::Exports::Raw, &mut analyses)?;
+    let mut program = crate::core_program::Program::from_wasm(bytes);
+    for recurse in [0, 1] {
+        let results = program
+            .call(
+                &implementation,
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(recurse)],
+            )
+            .0;
+        assert_eq!(results[0].unwrap_i32(), 1);
+        assert_eq!(results[1].unwrap_f64(), 127.5);
+        assert_eq!(results[2].unwrap_i32(), 510);
+        let results = program
+            .call(
+                "run",
+                &[
+                    wasmtime::Val::F64(0.25f64.to_bits()),
+                    wasmtime::Val::I32(recurse),
+                ],
+            )
+            .0;
+        assert_eq!(results[0].unwrap_i32(), 1);
+        assert_eq!(results[1].unwrap_f64(), 0.125);
+        assert_eq!(results[2].unwrap_f64(), 0.5);
+    }
+    Ok(())
+}
+
+#[test]
 fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
     for expression in [
         "value < 256",

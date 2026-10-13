@@ -269,7 +269,7 @@ impl From<Option<Integer>> for ResultDomain {
 struct Key {
     function: Identifier,
     args: Vec<Option<Integer>>,
-    result: ResultDomain,
+    results: Vec<ResultDomain>,
     /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
     specialize: bool,
 }
@@ -334,9 +334,14 @@ struct State {
     required: HashMap<Value, Integer>,
     original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
-    result: Fact,
-    result_range: Range,
+    results: Vec<ResultFact>,
     callers: BTreeSet<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ResultFact {
+    domain: Fact,
+    range: Range,
 }
 
 impl State {
@@ -397,7 +402,10 @@ impl Solver {
         }
         let id = self.analysis.keys.len();
         let body = &self.analysis.bodies[&key.function];
-        let mut state = State::default();
+        let mut state = State {
+            results: vec![ResultFact::default(); key.results.len()],
+            ..State::default()
+        };
         for (&parameter, domain) in body.parameters.iter().zip(&key.args) {
             state
                 .facts
@@ -578,30 +586,32 @@ impl Solver {
             return;
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
-            if let Some(value) = operation.operands().next() {
-                self.require(id, value, self.analysis.keys[id].result.integer());
+            let mut changed = false;
+            for (position, value) in operation.operands().enumerate() {
+                let required = self.analysis.keys[id].results[position];
+                self.require(id, value, required.integer());
                 let fact = self.analysis.states[id].fact(value);
-                let fact = if self.analysis.keys[id].result == ResultDomain::Original {
+                let fact = if required == ResultDomain::Original {
                     Fact::Original
                 } else if fact == Fact::Literal {
-                    self.analysis.keys[id]
-                        .result
-                        .integer()
-                        .map_or(Fact::Literal, Fact::Integer)
+                    required.integer().map_or(Fact::Literal, Fact::Integer)
                 } else {
                     fact
                 };
-                let old = self.analysis.states[id].result;
-                let new = old.join(fact);
-                let old_range = self.analysis.states[id].result_range;
-                let range = old_range.join(self.analysis.states[id].range(value), new.integer());
-                if new != old || range != old_range {
-                    self.analysis.states[id].result = new;
-                    self.analysis.states[id].result_range = range;
-                    for &caller in &self.analysis.states[id].callers {
-                        if self.queued.insert(caller) {
-                            self.pending.push_back(caller);
-                        }
+                let old = self.analysis.states[id].results[position];
+                let domain = old.domain.join(fact);
+                let range = old
+                    .range
+                    .join(self.analysis.states[id].range(value), domain.integer());
+                if domain != old.domain || range != old.range {
+                    self.analysis.states[id].results[position] = ResultFact { domain, range };
+                    changed = true;
+                }
+            }
+            if changed {
+                for &caller in &self.analysis.states[id].callers {
+                    if self.queued.insert(caller) {
+                        self.pending.push_back(caller);
                     }
                 }
             }
@@ -616,17 +626,13 @@ impl Solver {
                 && let Some(&child) = self.analysis.generic.get(&callee)
             {
                 self.analysis.states[child].callers.insert((id, index));
-                if let Some(result) = operation.results().next() {
-                    self.fact(id, result, self.analysis.states[child].result);
-                    self.range(id, result, self.analysis.states[child].result_range);
+                for (position, result) in operation.results().enumerate() {
+                    let facts = self.analysis.states[child].results[position];
+                    self.fact(id, result, facts.domain);
+                    self.range(id, result, facts.range);
                 }
                 return;
             }
-            let required = operation
-                .results()
-                .next()
-                .and_then(|value| self.analysis.states[id].required.get(&value))
-                .copied();
             if operation
                 .operands()
                 .any(|value| self.analysis.states[id].fact(value) == Fact::Bottom)
@@ -665,11 +671,20 @@ impl Solver {
                 let child = self.context(Key {
                     function: callee.clone(),
                     args,
-                    result: if preserve_result {
-                        ResultDomain::Original
-                    } else {
-                        required.into()
-                    },
+                    results: operation
+                        .results()
+                        .map(|value| {
+                            if preserve_result {
+                                ResultDomain::Original
+                            } else {
+                                self.analysis.states[id]
+                                    .required
+                                    .get(&value)
+                                    .copied()
+                                    .into()
+                            }
+                        })
+                        .collect(),
                     specialize: true,
                 });
                 self.analysis.states[id].calls.insert(op, child);
@@ -685,9 +700,10 @@ impl Solver {
                             .copied(),
                     );
                 }
-                if let Some(result) = operation.results().next() {
-                    self.fact(id, result, self.analysis.states[child].result);
-                    self.range(id, result, self.analysis.states[child].result_range);
+                for (position, result) in operation.results().enumerate() {
+                    let facts = self.analysis.states[child].results[position];
+                    self.fact(id, result, facts.domain);
+                    self.range(id, result, facts.range);
                 }
                 return;
             }
@@ -966,12 +982,12 @@ impl Analysis for NumericAnalysis {
             let generic = solver.context(Key {
                 function: function.get_symbol_name(ctx),
                 args,
-                result: ty
+                results: ty
                     .deref(ctx)
                     .res_types()
-                    .first()
-                    .and_then(|&ty| Integer::from_type(ctx, ty))
-                    .into(),
+                    .iter()
+                    .map(|&ty| Integer::from_type(ctx, ty).into())
+                    .collect(),
                 specialize: false,
             });
             solver
@@ -1003,15 +1019,16 @@ impl Analysis for NumericAnalysis {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect();
-            let result = signature
+            let results = signature
                 .deref(ctx)
                 .res_types()
-                .first()
-                .and_then(|&ty| Integer::from_type(ctx, ty));
+                .iter()
+                .map(|&ty| Integer::from_type(ctx, ty).into())
+                .collect();
             let id = solver.context(Key {
                 function: function.get_symbol_name(ctx),
                 args,
-                result: result.into(),
+                results,
                 specialize: true,
             });
             solver.analysis.roots.push((function, id));
@@ -1112,13 +1129,16 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
             .get_type(ctx);
         let signature =
             TypedHandle::<FunctionType>::from_handle(signature, ctx).expect("function type");
-        let result_changes = state.result.integer().is_some_and(|domain| {
-            signature
-                .deref(ctx)
-                .res_types()
-                .first()
-                .is_none_or(|&ty| Integer::from_type(ctx, ty) != Some(domain))
-        });
+        let result_changes = state
+            .results
+            .iter()
+            .zip(signature.deref(ctx).res_types())
+            .any(|(result, ty)| {
+                result
+                    .domain
+                    .integer()
+                    .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
+            });
         let values_change = state.facts.keys().any(|&value| {
             state.representation(value).is_some_and(|domain| {
                 let ty = value.get_type(ctx);
@@ -1188,10 +1208,10 @@ fn rewrite(ctx: &mut Context, analysis: &NumericAnalysis) -> usize {
             .map(|(ty, domain)| domain.map_or(ty, |domain| domain.ty(ctx)))
             .collect();
         let mut results = original.deref(ctx).res_types();
-        if let Some(result) = results.first_mut()
-            && let Some(domain) = analysis.states[id].result.integer()
-        {
-            *result = domain.ty(ctx);
+        for (result, facts) in results.iter_mut().zip(&analysis.states[id].results) {
+            if let Some(domain) = facts.domain.integer() {
+                *result = domain.ty(ctx);
+            }
         }
         let signature = FunctionType::get(ctx, args.clone(), results.clone());
         function.set_attr_builtin_func_type(ctx, TypeAttr::new(signature.into()));
