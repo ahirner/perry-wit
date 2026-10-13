@@ -72,7 +72,6 @@ pub(crate) fn export(
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
     b.task_enter(ctx);
-    let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
     let initialization = b.initialization_status(ctx);
     let mut joined_types = mir_results
         .iter()
@@ -94,6 +93,7 @@ pub(crate) fn export(
         b.block = active;
         joined
     });
+    let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
     let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
     let mut call_results = mir_results
         .iter()
@@ -125,7 +125,12 @@ pub(crate) fn export(
         b.cond_br(ctx, status, (trap, vec![]), (normal, vec![]));
         b.block = trap;
         b.return_resources(ctx);
-        if let Some(completion) = export.result.as_ref().and_then(AbiType::error_completion) {
+        if let Some(completion) = export
+            .result
+            .as_ref()
+            .filter(|r| r.accepts_exception())
+            .and_then(AbiType::error_completion)
+        {
             let ty = completion.result;
             let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
             let payload = b.completion_error(ctx, completion, exception)?;
@@ -536,7 +541,6 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.task_enter(ctx);
         b.host_void(ctx, EffectHost::ContextSet0, vec![task]);
-        let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
         let initialization = b.initialization_status(ctx);
         let joined = initialization.map(|status| {
             let active = b.new_block(ctx, vec![]);
@@ -550,6 +554,7 @@ fn async_export(
             b.block = active;
             joined
         });
+        let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let mut promise = b.result(ctx, ramp.get_operation());
         if let Some(joined) = joined {

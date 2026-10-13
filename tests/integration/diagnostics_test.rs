@@ -43,7 +43,7 @@ fn parse_and_required_field_errors_have_typed_codes() {
 #[test]
 fn throwing_exports_require_a_declared_channel_but_catches_do_not() {
     let wit = Wit {
-        application: b"package test:diagnostics; world app { export run: func() -> f64; }"
+        application: b"package test:diagnostics; world app { export run: async func() -> f64; }"
             .as_slice()
             .into(),
         dependencies: vec![],
@@ -53,7 +53,7 @@ fn throwing_exports_require_a_declared_channel_but_catches_do_not() {
         modules: vec![],
     };
     let error = api::compile(
-        &program("export function run():number {throw new Error('broken');}"),
+        &program("export async function run():Promise<number> {throw new Error('broken');}"),
         &wit,
         &Options::default(),
     )
@@ -71,7 +71,7 @@ fn throwing_exports_require_a_declared_channel_but_catches_do_not() {
     );
     api::compile(
         &program(
-            "export function run():number {try{throw new Error('handled');}catch(e){return 7;}}",
+            "export async function run():Promise<number> {try{throw new Error('handled');}catch(e){return 7;}}",
         ),
         &wit,
         &Options::default(),

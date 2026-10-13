@@ -869,3 +869,29 @@ export function stringify(value:Page<number>):string {return JSON.stringify(valu
     );
     Ok(())
 }
+
+#[test]
+fn module_initialization_allocations_do_not_collect_lifted_parameters() -> Result<()> {
+    let wit = r#"package test:init-order;
+world boundary {
+  export check: func(date: string) -> string;
+}"#;
+    let source = r#"
+const items: { text: string }[] = [];
+for (let i = 0; i < 200; i++) {
+  items.push({ text: "item " + i });
+}
+export function check(date: string): string {
+  if (items.length > 0 && date.length > 0) {
+    return date + " ok";
+  }
+  return "none";
+}
+"#;
+    let mut component = Instance::compile(wit, source)?;
+    assert_eq!(
+        component.call("check", &[Val::String("2023-01-10".into())])?,
+        Val::String("2023-01-10 ok".into())
+    );
+    Ok(())
+}

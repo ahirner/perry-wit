@@ -397,10 +397,10 @@ impl FunctionLowering<'_, '_> {
                 );
                 match payload {
                     Some(value) => Ok(value),
-                    None if absence(ctx, mir).is_some_and(|a| a.admits_undefined()) => {
-                        self.undefined(ctx, mir)
+                    None if absence(ctx, mir).is_some_and(|a| a.admits_null()) => {
+                        self.null(ctx, mir)
                     }
-                    None => self.null(ctx, mir),
+                    None => self.undefined(ctx, mir),
                 }
             }
             AbiType::Result { .. } => {

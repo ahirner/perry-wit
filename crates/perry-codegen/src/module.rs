@@ -350,7 +350,7 @@ fn bind_exports(
                 .as_ref()
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
-            if export.task_return.is_none() || !stderr {
+            if export.task_return.is_some() && !stderr {
                 let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::error(
                     perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
                     format!("{} can throw without a compatible WIT error channel", export.core_name))
@@ -361,7 +361,9 @@ fn bind_exports(
                     .and_then(|function| perry_mir::diagnostics::source_span(ctx, function));
                 return Err(diagnostic.into());
             }
-            state.uses_io = true;
+            if export.task_return.is_some() {
+                state.uses_io = true;
+            }
         }
     }
     let mir_functions: HashMap<String, FuncOp> = functions
