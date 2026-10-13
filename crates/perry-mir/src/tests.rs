@@ -683,8 +683,8 @@ builtin.module @appends {
   ^module():
     builtin.func @run: builtin.function <(perry.string, perry.string) -> (perry.string)> {
       ^entry(prefix: perry.string, suffix: perry.string):
-        first = perry.string_append prefix, suffix : perry.string;
-        second = perry.string_append first, suffix : perry.string;
+        first = perry.concat_reuse [0] prefix, suffix : perry.string;
+        second = perry.concat_reuse [0] first, suffix : perry.string;
         perry.return second
     }
 }
@@ -707,7 +707,7 @@ builtin.module @appends {
         "{printed}"
     );
     assert_eq!(
-        printed.matches("perry.string_append").count(),
+        printed.matches("perry.concat_reuse").count(),
         2,
         "{printed}"
     );

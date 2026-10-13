@@ -1,6 +1,11 @@
 //! Binary structure and behavior of optimized WIT-constrained programs.
 use anyhow::Result;
 use wasmparser::{Parser, Payload};
+use wasmtime::{
+    Store,
+    component::{Component, Instance, Linker, ResourceTable},
+};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 fn mir_program(
     signature: &str,
@@ -39,13 +44,53 @@ fn mir_program(
 }
 
 fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str(
+    let stderr = if signature.starts_with("async ") {
+        "import wasi:cli/stderr@0.3.0;"
+    } else {
+        ""
+    };
+    let (resolve, package) = perry_wit::component::wit::resolve_source(
         "optimization.wit",
-        &format!("package test:optimization; world test {{ export run: {signature}; }}"),
+        &format!("package test:optimization; world test {{ {stderr} export run: {signature}; }}"),
     )?;
     let world = resolve.select_world(&[package], Some("test"))?;
-    perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)
+    Ok(perry_wit::compile_for_world(
+        source,
+        "optimization.ts",
+        &resolve,
+        world,
+        true,
+    )?)
+}
+
+struct WasiHost {
+    ctx: WasiCtx,
+    table: ResourceTable,
+}
+
+impl WasiView for WasiHost {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+async fn instantiate_async(bytes: &[u8]) -> Result<(Store<WasiHost>, Instance)> {
+    let engine = crate::engine::async_engine()?;
+    let component = Component::new(&engine, bytes)?;
+    let mut store = Store::new(
+        &engine,
+        WasiHost {
+            ctx: WasiCtx::builder().build(),
+            table: ResourceTable::new(),
+        },
+    );
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    Ok((store, instance))
 }
 
 #[test]
@@ -140,10 +185,7 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
-    use wasmtime::{
-        Store,
-        component::{Component, Linker, Val},
-    };
+    use wasmtime::component::Val;
     for (domain, source_type, a, b, expected) in [
         ("u8", "number", Val::U8(255), Val::U8(2), Val::U8(1)),
         (
@@ -183,12 +225,8 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
                 &source,
                 &format!("async func(a:{domain},b:{domain})->{domain}"),
             )?;
-            let engine = crate::engine::async_engine()?;
-            let component = Component::new(&engine, &compiled.component.unwrap().stripped)?;
-            let mut store = Store::new(&engine, ());
-            let instance = Linker::new(&engine)
-                .instantiate_async(&mut store, &component)
-                .await?;
+            let (mut store, instance) =
+                instantiate_async(&compiled.component.unwrap().stripped).await?;
             let run = instance.get_func(&mut store, "run").unwrap();
             let mut results = [Val::Bool(false)];
             run.call_async(&mut store, &[a.clone(), b.clone()], &mut results)
@@ -202,10 +240,7 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn promise_joins_and_escaping_payloads_converge_on_compatible_representations() -> Result<()>
 {
-    use wasmtime::{
-        Store,
-        component::{Component, Linker, Val},
-    };
+    use wasmtime::component::Val;
     let helper = "async function add(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; } async function sum(n:number):Promise<number> { if(n<=0)return 0; return n+await sum(n-1); }";
     for (body, result_type, yes, no) in [
         (
@@ -248,12 +283,8 @@ async fn promise_joins_and_escaping_payloads_converge_on_compatible_representati
             &format!("async func(a:u8,b:u8,flag:bool)->{result_type}"),
         )
         .map_err(|error| anyhow::anyhow!("{body}: {error:#}"))?;
-        let engine = crate::engine::async_engine()?;
-        let component = Component::new(&engine, &compiled.component.unwrap().stripped)?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine)
-            .instantiate_async(&mut store, &component)
-            .await?;
+        let (mut store, instance) =
+            instantiate_async(&compiled.component.unwrap().stripped).await?;
         let run = instance.get_func(&mut store, "run").unwrap();
         for (flag, expected) in [(true, yes), (false, no)] {
             let mut results = [Val::Bool(false)];
@@ -431,7 +462,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
     );
     assert_eq!(raw.call("run", &[]).0[0].unwrap_f64(), 7.0);
     let compiled = compile(
-        "export function run(flag:boolean):number { const values=[10]; const index=200; if(flag && index<values.length){const item=values[index];return item===undefined?7:item;} return index; }",
+        "export function run(flag:boolean):number { try { const values=[10]; const index=200; if(flag && index<values.length){const item=values[index];return item===undefined?7:item;} return index; } catch { return 13; } }",
         "func(flag:bool)->s8",
     )?;
     let engine = wasmtime::Engine::default();
@@ -483,8 +514,8 @@ fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
 fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
     for source in [
         "export function run(a:number):number { return String(a).length; }",
-        "function check(a:number):number { if(a<0)throw new Error('negative'); return a; } export function run(a:number):number { return check(a); }",
-        "let count=0; export function run(a:number):number { count+=a; return count; }",
+        "function check(a:number):number { if(a<0)throw new Error('negative'); return a; } export function run(a:number):number { try { return check(a); } catch { return -1; } }",
+        "let count=0; export function run(a:number):number { try { count+=a; return count; } catch { return -1; } }",
     ] {
         let compiled = compile(source, "func(a:f64)->f64")?;
         let mut exports = Vec::new();
