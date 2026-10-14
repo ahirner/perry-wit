@@ -262,6 +262,7 @@ struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     work: Worklist,
+    width_defaults: Vec<(usize, usize, Value)>,
 }
 
 impl Solver {
@@ -728,35 +729,40 @@ impl Solver {
                 BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul
             )
         {
-            let required = self.analysis.states[id]
-                .required
-                .get(&operation.get_result(0))
-                .copied();
+            let result = operation.get_result(0);
+            let was_integer = self.analysis.states[id].fact(result).integer().is_some();
+            let required = self.analysis.states[id].required.get(&result).copied();
             for input in operation.operands() {
                 self.require(id, input, required);
             }
             self.fact(
                 id,
-                operation.get_result(0),
+                result,
                 self.arithmetic(
                     ctx,
                     id,
                     &[operation.get_operand(0), operation.get_operand(1)],
-                    operation.get_result(0),
+                    result,
                 ),
             );
             self.range(
                 id,
-                operation.get_result(0),
+                result,
                 arithmetic_range(
                     binary.kind(ctx),
                     self.analysis.states[id].range(operation.get_operand(0)),
                     self.analysis.states[id].range(operation.get_operand(1)),
-                    self.analysis.states[id]
-                        .fact(operation.get_result(0))
-                        .integer(),
+                    self.analysis.states[id].fact(result).integer(),
                 ),
             );
+            if !was_integer
+                && self.analysis.keys[id].specialize
+                && required.is_none()
+                && !result.get_type(ctx).deref(ctx).is::<IntegerType>()
+                && self.analysis.states[id].fact(result).integer().is_some()
+            {
+                self.width_defaults.push((id, index, result));
+            }
             return;
         }
         if Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
@@ -883,6 +889,7 @@ impl Analysis for ProgramFacts {
             },
             contexts: HashMap::new(),
             work: Worklist::default(),
+            width_defaults: Vec::new(),
         };
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
@@ -961,25 +968,17 @@ impl Analysis for ProgramFacts {
                 }
             }
             // Every default is applied after propagation settles, before the next queue drain.
+            solver
+                .width_defaults
+                .sort_unstable_by_key(|&(id, index, _)| std::cmp::Reverse((id, index)));
             let mut defaulted = false;
-            for id in 0..solver.analysis.states.len() {
-                let key = &solver.analysis.keys[id];
-                if !key.specialize {
-                    continue;
-                }
-                let constraints = solver.analysis.bodies[&key.function].constraints.len();
-                for index in 0..constraints {
-                    let body = &solver.analysis.bodies[&solver.analysis.keys[id].function];
-                    if let Constraint::Op { op, .. } = body.constraints[index]
-                        && Operation::get_op::<BinaryOp>(op, ctx).is_some()
-                        && let Some(value) = op.deref(ctx).results().next()
-                        && !value.get_type(ctx).deref(ctx).is::<IntegerType>()
-                        && !solver.analysis.states[id].required.contains_key(&value)
-                        && let Some(integer) = solver.analysis.states[id].fact(value).integer()
-                    {
-                        solver.require(id, value, Some(integer.unconstrained()));
-                        defaulted = true;
-                    }
+            while let Some((id, _, value)) = solver.width_defaults.pop() {
+                solver.analysis.constraint_visits += 1;
+                if !solver.analysis.states[id].required.contains_key(&value)
+                    && let Some(integer) = solver.analysis.states[id].fact(value).integer()
+                {
+                    solver.require(id, value, Some(integer.unconstrained()));
+                    defaulted = true;
                 }
             }
             if !defaulted {

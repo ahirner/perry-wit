@@ -393,18 +393,27 @@ fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
             .unwrap_i32(),
         254
     );
-    let compiled = compile(
-        "export function run(a:number,b:number):number { return a+b; }",
-        "func(a:u32,b:u32)->f64",
-    )?;
-    let mut program = crate::core_program::Program::from_wasm(compiled.core);
-    assert_eq!(
-        program
-            .call("run", &[wasmtime::Val::I32(-1), wasmtime::Val::I32(-1)])
-            .0[0]
-            .unwrap_f64(),
-        8589934590.0
-    );
+    for (source, expected) in [
+        (
+            "export function run(a:number,b:number):number { return a+b; }",
+            8589934590.0,
+        ),
+        (
+            "function add(a:number,b:number):number { return a+b; } export function run(a:number,b:number):number { return add(a+b,b); }",
+            12884901885.0,
+        ),
+    ] {
+        let compiled = compile(source, "func(a:u32,b:u32)->f64")?;
+        let mut program = crate::core_program::Program::from_wasm(compiled.core);
+        assert_eq!(
+            program
+                .call("run", &[wasmtime::Val::I32(-1), wasmtime::Val::I32(-1)])
+                .0[0]
+                .unwrap_f64(),
+            expected,
+            "{source}"
+        );
+    }
     let compiled = compile(
         "export function run(a:bigint,b:bigint):bigint { return a+b; }",
         "func(a:s64,b:u64)->u64",
