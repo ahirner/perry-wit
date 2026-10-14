@@ -640,6 +640,9 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
     "#,
         r#"
         interface Node { value: number; children: Node[]; next: Node | null }
+        function perry_json_parse_0(n:number):number {return n;}
+        function perry_json_cursor_1(n:number):number {return n;}
+        function perry_json_decode_3(n:number):number {return n;}
         function sum(node: Node): number {
             let value = node.value;
             for (let i = 0; i < node.children.length; i++) value += sum(node.children[i]);
@@ -652,10 +655,13 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
                 for (let i = 0; i < iterations; i++) {
                     const first: Node = JSON.parse(text);
                     const second: Node = JSON.parse(text);
+                    const snapshot = JSON.parse(text);
+                    const view: Node = snapshot;
+                    if (sum(view) !== sum(second)) throw new Error('snapshot differs');
                     first.value += 100;
                     total = sum(first) + sum(second);
                 }
-                return String(total);
+                return String(perry_json_parse_0(perry_json_cursor_1(perry_json_decode_3(total))));
             } catch (error) { return error.name; }
         }
     "#,

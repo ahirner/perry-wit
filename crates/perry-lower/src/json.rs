@@ -64,68 +64,91 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         target: TypeHandle,
     ) -> Result<Value> {
-        let existing = self
-            .shapes
-            .decoders
-            .borrow()
-            .get(&(target, crate::shapes::DecoderInput::Snapshot))
-            .cloned();
-        let name = match existing {
-            Some(name) => name,
-            None => {
-                let mut index = self.shapes.decoders.borrow().len();
-                let name = loop {
-                    let name = identifier(&format!("perry_json_decode_{index}"))?;
-                    if self
-                        .signatures
-                        .values()
-                        .all(|signature| signature.name != name)
-                        && self
-                            .shapes
-                            .decoders
-                            .borrow()
-                            .values()
-                            .all(|other| *other != name)
-                    {
-                        break name;
-                    }
-                    index += 1;
-                };
-                self.shapes.decoders.borrow_mut().insert(
-                    (target, crate::shapes::DecoderInput::Snapshot),
-                    name.clone(),
-                );
-                let signature = Signature {
-                    name: name.clone(),
-                    is_async: false,
-                    await_initialization: false,
-                    params: vec![JsonType::get(ctx).into()],
-                    results: vec![target],
-                };
-                let ty =
-                    FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
-                let function = FuncOp::new(ctx, name.clone(), ty);
-                self.shapes
-                    .module
-                    .append_operation(ctx, function.get_operation(), 0);
-                let input = function.get_entry_block(ctx).deref(ctx).get_argument(0);
-                let mut builder = Self::new(
-                    ctx,
-                    &function,
-                    &signature,
-                    self.signatures,
-                    self.shapes,
-                    self.builtins,
-                );
-                let output = builder.decode_fields(ctx, input, target)?;
-                builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![output]));
-                remove_unreachable(ctx, builder.region);
-                name
-            }
-        };
+        let name = self.json_decoder(
+            ctx,
+            target,
+            crate::shapes::DecoderInput::Snapshot,
+            |builder, ctx, entry| {
+                let input = entry.deref(ctx).get_argument(0);
+                Ok(vec![builder.decode_fields(ctx, input, target)?])
+            },
+        )?;
         let call = CallOp::new(ctx, name, vec![value], vec![target]);
         self.append(ctx, &call);
         Ok(call.get_operation().deref(ctx).get_result(0))
+    }
+
+    pub(super) fn json_decoder(
+        &mut self,
+        ctx: &mut Context,
+        target: TypeHandle,
+        input: crate::shapes::DecoderInput,
+        build: impl FnOnce(&mut Self, &mut Context, Ptr<BasicBlock>) -> Result<Vec<Value>>,
+    ) -> Result<Identifier> {
+        use crate::shapes::DecoderInput;
+        let key = (target, input);
+        if let Some(name) = self.shapes.decoders.borrow().get(&key).cloned() {
+            return Ok(name);
+        }
+        let (prefix, params, results) = match input {
+            DecoderInput::Snapshot => ("decode", vec![JsonType::get(ctx).into()], vec![target]),
+            DecoderInput::Text => ("parse", vec![StringType::get(ctx).into()], vec![target]),
+            DecoderInput::Cursor => (
+                "cursor",
+                vec![
+                    perry_mir::types::JsonCursorType::get(ctx).into(),
+                    IntegerType::get(ctx, 32, Signedness::Signless).into(),
+                ],
+                vec![
+                    target,
+                    IntegerType::get(ctx, 1, Signedness::Signless).into(),
+                ],
+            ),
+        };
+        let mut index = self.shapes.decoders.borrow().len();
+        let name = loop {
+            let candidate = identifier(&format!("perry_json_{prefix}_{index}"))?;
+            if self.signatures.values().all(|s| s.name != candidate)
+                && self
+                    .shapes
+                    .decoders
+                    .borrow()
+                    .values()
+                    .all(|n| *n != candidate)
+            {
+                break candidate;
+            }
+            index += 1;
+        };
+        self.shapes.decoders.borrow_mut().insert(key, name.clone());
+        let signature = Signature {
+            name: name.clone(),
+            is_async: false,
+            await_initialization: false,
+            params,
+            results,
+        };
+        let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
+        let function = FuncOp::new(ctx, name.clone(), ty);
+        if input != DecoderInput::Snapshot {
+            perry_mir::calls::set_atomic_construction(ctx, &function);
+        }
+        self.shapes
+            .module
+            .append_operation(ctx, function.get_operation(), 0);
+        let entry = function.get_entry_block(ctx);
+        let mut builder = Self::new(
+            ctx,
+            &function,
+            &signature,
+            self.signatures,
+            self.shapes,
+            self.builtins,
+        );
+        let results = build(&mut builder, ctx, entry)?;
+        builder.emit(ctx, |ctx| ReturnOp::new(ctx, results));
+        remove_unreachable(ctx, builder.region);
+        Ok(name)
     }
 
     fn decode_fields(

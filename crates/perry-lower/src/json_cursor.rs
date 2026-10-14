@@ -1,9 +1,6 @@
 //! Schema-specific JSON construction in MIR over the shared JSON lexer.
 use super::*;
-use perry_mir::{
-    intrinsics::JsonCursorKeyOp,
-    types::{JsonCursorType, NumberStringType},
-};
+use perry_mir::{intrinsics::JsonCursorKeyOp, types::NumberStringType};
 
 impl<'s> FunctionBuilder<'s> {
     fn cursor_index(&mut self, ctx: &mut Context, n: u32) -> Value {
@@ -64,52 +61,18 @@ impl<'s> FunctionBuilder<'s> {
         text: Value,
         ty: TypeHandle,
     ) -> Result<Value> {
-        let key = (ty, crate::shapes::DecoderInput::Text);
-        let existing = self.shapes.decoders.borrow().get(&key).cloned();
-        let name = if let Some(name) = existing {
-            name
-        } else {
-            let mut index = self.shapes.decoders.borrow().len();
-            let name = loop {
-                let name = identifier(&format!("perry_json_parse_{index}"))?;
-                if self.signatures.values().all(|s| s.name != name)
-                    && self.shapes.decoders.borrow().values().all(|n| *n != name)
-                {
-                    break name;
-                }
-                index += 1;
-            };
-            self.shapes.decoders.borrow_mut().insert(key, name.clone());
-            let string = StringType::get(ctx).into();
-            let signature = Signature {
-                name: name.clone(),
-                is_async: false,
-                await_initialization: false,
-                params: vec![string],
-                results: vec![ty],
-            };
-            let fn_ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
-            let function = FuncOp::new(ctx, name.clone(), fn_ty);
-            perry_mir::calls::set_atomic_construction(ctx, &function);
-            self.shapes
-                .module
-                .append_operation(ctx, function.get_operation(), 0);
-            let input = function.get_entry_block(ctx).deref(ctx).get_argument(0);
-            let mut b = Self::new(
-                ctx,
-                &function,
-                &signature,
-                self.signatures,
-                self.shapes,
-                self.builtins,
-            );
-            let cursor = b.intrinsic(ctx, Intrinsic::JsonCursorBegin, vec![input]);
-            let (value, failed) = b.cursor_value(ctx, cursor, ty)?;
-            b.intrinsic_void(ctx, Intrinsic::JsonCursorFinish, vec![cursor, failed]);
-            b.emit(ctx, |ctx| ReturnOp::new(ctx, vec![value]));
-            remove_unreachable(ctx, b.region);
-            name
-        };
+        let name = self.json_decoder(
+            ctx,
+            ty,
+            crate::shapes::DecoderInput::Text,
+            |b, ctx, entry| {
+                let input = entry.deref(ctx).get_argument(0);
+                let cursor = b.intrinsic(ctx, Intrinsic::JsonCursorBegin, vec![input]);
+                let (value, failed) = b.cursor_value(ctx, cursor, ty)?;
+                b.intrinsic_void(ctx, Intrinsic::JsonCursorFinish, vec![cursor, failed]);
+                Ok(vec![value])
+            },
+        )?;
         let call = CallOp::new(ctx, name, vec![text], vec![ty]);
         self.append(ctx, &call);
         Ok(call.get_operation().deref(ctx).get_result(0))
@@ -181,84 +144,33 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         if ty.deref(ctx).is::<RecordType>() || ty.deref(ctx).is::<ArrayType>() {
-            let name = if let Some(name) = self
-                .shapes
-                .decoders
-                .borrow()
-                .get(&(ty, crate::shapes::DecoderInput::Cursor))
-                .cloned()
-            {
-                name
-            } else {
-                let mut index = self.shapes.decoders.borrow().len();
-                let name = loop {
-                    let candidate = identifier(&format!("perry_json_cursor_{index}"))?;
-                    if self.signatures.values().all(|s| s.name != candidate)
-                        && self
-                            .shapes
-                            .decoders
-                            .borrow()
-                            .values()
-                            .all(|n| *n != candidate)
-                    {
-                        break candidate;
-                    }
-                    index += 1;
-                };
-                self.shapes
-                    .decoders
-                    .borrow_mut()
-                    .insert((ty, crate::shapes::DecoderInput::Cursor), name.clone());
-                let cursor_ty = JsonCursorType::get(ctx).into();
-                let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
-                let signature = Signature {
-                    name: name.clone(),
-                    is_async: false,
-                    await_initialization: false,
-                    params: vec![
-                        cursor_ty,
-                        IntegerType::get(ctx, 32, Signedness::Signless).into(),
-                    ],
-                    results: vec![ty, boolean],
-                };
-                let fn_ty =
-                    FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
-                let function = FuncOp::new(ctx, name.clone(), fn_ty);
-                perry_mir::calls::set_atomic_construction(ctx, &function);
-                self.shapes
-                    .module
-                    .append_operation(ctx, function.get_operation(), 0);
-                let input = function.get_entry_block(ctx).deref(ctx).get_argument(0);
-                let mut b = Self::new(
-                    ctx,
-                    &function,
-                    &signature,
-                    self.signatures,
-                    self.shapes,
-                    self.builtins,
-                );
-                let byte = function.get_entry_block(ctx).deref(ctx).get_argument(1);
-                let array = ty.deref(ctx).is::<ArrayType>()
-                    || TypedHandle::<RecordType>::from_handle(ty, ctx)
-                        .is_ok_and(|r| r.deref(ctx).is_tuple());
-                let wanted = b.cursor_is(ctx, byte, if array { b'[' } else { b'{' });
-                let (v, e) = b.cursor_choice(
-                    ctx,
-                    ty,
-                    wanted,
-                    |b, ctx| {
-                        if array {
-                            b.cursor_array(ctx, input, ty)
-                        } else {
-                            b.cursor_record(ctx, input, ty)
-                        }
-                    },
-                    |b, ctx| Ok(b.cursor_bad(ctx, input, ty)),
-                )?;
-                b.emit(ctx, |ctx| ReturnOp::new(ctx, vec![v, e]));
-                remove_unreachable(ctx, b.region);
-                name
-            };
+            let name = self.json_decoder(
+                ctx,
+                ty,
+                crate::shapes::DecoderInput::Cursor,
+                |b, ctx, entry| {
+                    let input = entry.deref(ctx).get_argument(0);
+                    let byte = entry.deref(ctx).get_argument(1);
+                    let array = ty.deref(ctx).is::<ArrayType>()
+                        || TypedHandle::<RecordType>::from_handle(ty, ctx)
+                            .is_ok_and(|r| r.deref(ctx).is_tuple());
+                    let wanted = b.cursor_is(ctx, byte, if array { b'[' } else { b'{' });
+                    let (value, failed) = b.cursor_choice(
+                        ctx,
+                        ty,
+                        wanted,
+                        |b, ctx| {
+                            if array {
+                                b.cursor_array(ctx, input, ty)
+                            } else {
+                                b.cursor_record(ctx, input, ty)
+                            }
+                        },
+                        |b, ctx| Ok(b.cursor_bad(ctx, input, ty)),
+                    )?;
+                    Ok(vec![value, failed])
+                },
+            )?;
             let call = CallOp::new(
                 ctx,
                 name,
