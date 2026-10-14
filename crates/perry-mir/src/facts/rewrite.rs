@@ -61,6 +61,8 @@ impl Pass for Specialize {
                 numeric_contexts: analysis.keys.len() as u64,
                 constraint_visits: analysis.constraint_visits as u64,
                 summarized_heap_sets: analysis.summarized_heap_sets as u64,
+                summarized_contexts: analysis.summarized_contexts as u64,
+                range_widenings: analysis.range_widenings as u64,
                 specializations: specializations as u64,
                 cleanup_rounds: 0,
             },
@@ -122,6 +124,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
     let mut changed = HashSet::new();
     let mut pending = Vec::new();
     for &id in &reachable {
+        if !analysis.keys[id].specialize {
+            continue;
+        }
         let state = &analysis.states[id];
         let signature = analysis.bodies[&analysis.keys[id].function]
             .function
@@ -154,7 +159,10 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
     }
     while let Some(id) = pending.pop() {
         for &(caller, _) in &analysis.states[id].callers {
-            if reachable.contains(&caller) && changed.insert(caller) {
+            if analysis.keys[caller].specialize
+                && reachable.contains(&caller)
+                && changed.insert(caller)
+            {
                 pending.push(caller);
             }
         }
@@ -413,6 +421,10 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             .0
             .contains_key(&WIT_SIGNATURE)
             && analysis.states[id].callers.is_empty()
+            && analysis
+                .generic
+                .get(&original.get_symbol_name(ctx))
+                .is_none_or(|gid| !reachable.contains(gid))
         {
             let orig_name = original.get_symbol_name(ctx);
             Operation::erase(original.get_operation(), ctx);

@@ -117,7 +117,7 @@ pub fn explain_tiers(
     };
     let mut report = format!("Allocation tiers after MIR optimization: {tier}\n");
     let stats = perry_mir::pipeline::statistics(module.get_operation(), ctx);
-    writeln!(report, "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}", stats.numeric_contexts, stats.constraint_visits, stats.specializations, stats.cleanup_rounds, stats.summarized_heap_sets).expect("string write");
+    writeln!(report, "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}, summarized_contexts={}, range_widenings={}", stats.numeric_contexts, stats.constraint_visits, stats.specializations, stats.cleanup_rounds, stats.summarized_heap_sets, stats.summarized_contexts, stats.range_widenings).expect("string write");
     for function in &functions {
         let name = function.get_symbol_name(ctx);
         let summary = summaries.effects(&name).expect("function effects");

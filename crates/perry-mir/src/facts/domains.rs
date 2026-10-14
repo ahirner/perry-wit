@@ -124,9 +124,23 @@ pub(super) enum Range {
 
 impl Range {
     pub(super) fn join(self, other: Self, domain: Option<Integer>) -> Self {
+        self.join_step(other, domain, true).0
+    }
+
+    /// Join `other` into `self`. When `widen` is false (first expansion), compute the
+    /// exact convex hull clamped to `domain` bounds; when `widen` is true (second or later
+    /// expansion), widen expanding bounds to the enclosing integer domain bounds.
+    /// Returns `(joined_range, expanded, widened)`.
+    pub(super) fn join_step(
+        self,
+        other: Self,
+        domain: Option<Integer>,
+        widen: bool,
+    ) -> (Self, bool, bool) {
         match (self, other) {
-            (Self::Bottom, range) | (range, Self::Bottom) => range,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Bottom, range) => (range, false, false),
+            (range, Self::Bottom) => (range, false, false),
+            (Self::Unknown, _) | (_, Self::Unknown) => (Self::Unknown, false, false),
             (Self::Bounds(old), Self::Bounds(new)) => {
                 let limits = domain.map_or(
                     Interval {
@@ -135,18 +149,35 @@ impl Range {
                     },
                     Integer::bounds,
                 );
-                Self::Bounds(Interval {
-                    lower: if new.lower < old.lower {
+                let expand_lower = new.lower < old.lower;
+                let expand_upper = new.upper > old.upper;
+                let expanded = expand_lower || expand_upper;
+                if !expanded {
+                    return (Self::Bounds(old), false, false);
+                }
+                let lower = if expand_lower {
+                    if widen {
                         limits.lower
                     } else {
-                        old.lower
-                    },
-                    upper: if new.upper > old.upper {
+                        new.lower.max(limits.lower)
+                    }
+                } else {
+                    old.lower
+                };
+                let upper = if expand_upper {
+                    if widen {
                         limits.upper
                     } else {
-                        old.upper
-                    },
-                })
+                        new.upper.min(limits.upper)
+                    }
+                } else {
+                    old.upper
+                };
+                let joined = Self::Bounds(Interval { lower, upper });
+                let widened = widen
+                    && ((expand_lower && lower < new.lower.max(limits.lower))
+                        || (expand_upper && upper > new.upper.min(limits.upper)));
+                (joined, true, widened)
             }
         }
     }

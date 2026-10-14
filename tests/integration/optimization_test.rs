@@ -1183,4 +1183,95 @@ fn aggregate_and_optional_integer_facts_propagate_through_records_and_arrays() -
     Ok(())
 }
 
+#[test]
+fn bounded_context_specialization_and_range_widening_remain_sound() -> Result<()> {
+    let source = r#"
+        import type { u8, s8, u16, s16, u32, s32 } from "perry:types";
+
+        function addPair(a: number, b: number): s32 {
+            return (a + b) as s32;
+        }
+
+        export function run(x: number): number {
+            const v_u8: u8 = x as u8;
+            const v_s8: s8 = x as s8;
+            const v_u16: u16 = x as u16;
+            const v_s16: s16 = x as s16;
+            const v_u32: u32 = x as u32;
+            const v_s32: s32 = x as s32;
+
+            let total: s32 = 0 as s32;
+            // 6 x 6 = 36 distinct (arg0, arg1) integer domain pairs (> 32 precise contexts)
+            total = (total + addPair(v_u8, v_u8)) as s32;
+            total = (total + addPair(v_u8, v_s8)) as s32;
+            total = (total + addPair(v_u8, v_u16)) as s32;
+            total = (total + addPair(v_u8, v_s16)) as s32;
+            total = (total + addPair(v_u8, v_u32)) as s32;
+            total = (total + addPair(v_u8, v_s32)) as s32;
+
+            total = (total + addPair(v_s8, v_u8)) as s32;
+            total = (total + addPair(v_s8, v_s8)) as s32;
+            total = (total + addPair(v_s8, v_u16)) as s32;
+            total = (total + addPair(v_s8, v_s16)) as s32;
+            total = (total + addPair(v_s8, v_u32)) as s32;
+            total = (total + addPair(v_s8, v_s32)) as s32;
+
+            total = (total + addPair(v_u16, v_u8)) as s32;
+            total = (total + addPair(v_u16, v_s8)) as s32;
+            total = (total + addPair(v_u16, v_u16)) as s32;
+            total = (total + addPair(v_u16, v_s16)) as s32;
+            total = (total + addPair(v_u16, v_u32)) as s32;
+            total = (total + addPair(v_u16, v_s32)) as s32;
+
+            total = (total + addPair(v_s16, v_u8)) as s32;
+            total = (total + addPair(v_s16, v_s8)) as s32;
+            total = (total + addPair(v_s16, v_u16)) as s32;
+            total = (total + addPair(v_s16, v_s16)) as s32;
+            total = (total + addPair(v_s16, v_u32)) as s32;
+            total = (total + addPair(v_s16, v_s32)) as s32;
+
+            total = (total + addPair(v_u32, v_u8)) as s32;
+            total = (total + addPair(v_u32, v_s8)) as s32;
+            total = (total + addPair(v_u32, v_u16)) as s32;
+            total = (total + addPair(v_u32, v_s16)) as s32;
+            total = (total + addPair(v_u32, v_u32)) as s32;
+            total = (total + addPair(v_u32, v_s32)) as s32;
+
+            total = (total + addPair(v_s32, v_u8)) as s32;
+            total = (total + addPair(v_s32, v_s8)) as s32;
+            total = (total + addPair(v_s32, v_u16)) as s32;
+            total = (total + addPair(v_s32, v_s16)) as s32;
+            total = (total + addPair(v_s32, v_u32)) as s32;
+            total = (total + addPair(v_s32, v_s32)) as s32;
+
+            // Also exercise loop range widening
+            let i: s32 = 0 as s32;
+            while (i < (3 as s32)) {
+                total = (total + i) as s32;
+                i = (i + (1 as s32)) as s32;
+            }
+            return total;
+        }
+    "#;
+    let compiled = compile(source, "func(x: s32) -> s32")?;
+    assert!(
+        compiled.allocation_report.contains("summarized_contexts=5"),
+        "expected 5 summarized contexts in report: {}",
+        compiled.allocation_report
+    );
+    assert!(
+        !compiled.allocation_report.contains("range_widenings=0"),
+        "expected non-zero range widenings in report: {}",
+        compiled.allocation_report
+    );
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    // 36 pairs * (10 + 10) + (0 + 1 + 2) = 723
+    assert_eq!(
+        program.call("run", &[wasmtime::Val::I32(10)]).0[0].unwrap_i32(),
+        723
+    );
+    Ok(())
+}
+
+
 

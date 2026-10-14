@@ -192,10 +192,13 @@ impl Body {
     }
 }
 
+const MAX_PRECISE_CONTEXTS: usize = 32;
+
 #[derive(Default)]
 struct State {
     facts: HashMap<Value, Fact>,
     ranges: HashMap<Value, Range>,
+    range_expansions: HashMap<Value, u8>,
     required: HashMap<Value, Integer>,
     original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
@@ -211,6 +214,7 @@ struct State {
 struct ResultFact {
     domain: Fact,
     range: Range,
+    expansions: u8,
     heap: Option<usize>,
     outcome: Outcomes,
 }
@@ -242,6 +246,10 @@ pub struct ProgramFacts {
     pub constraint_visits: usize,
     /// Alias sets collapsed to a typed summary after exceeding 32 allocation sites.
     pub summarized_heap_sets: usize,
+    /// Specialized call contexts collapsed to a summary context after exceeding 32 precise contexts per function.
+    pub summarized_contexts: usize,
+    /// Value or result intervals widened to domain bounds after expanding more than once.
+    pub range_widenings: usize,
     heap: heap::HeapFacts,
 }
 
@@ -301,6 +309,8 @@ impl Worklist {
 struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
+    precise_counts: HashMap<Identifier, usize>,
+    summary_contexts: HashMap<Identifier, usize>,
     work: Worklist,
     width_defaults: Vec<(usize, usize, Value)>,
 }
@@ -310,6 +320,109 @@ impl Solver {
         if let Some(&id) = self.contexts.get(&key) {
             return id;
         }
+        if key.specialize {
+            let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
+            if *count >= MAX_PRECISE_CONTEXTS {
+                self.analysis.summarized_contexts += 1;
+                if key.args.iter().all(Option::is_none)
+                    && key.results.iter().all(|r| r.integer().is_none())
+                {
+                    let generic = self.analysis.generic[&key.function];
+                    self.contexts.insert(key, generic);
+                    return generic;
+                }
+                if let Some(&summary_id) = self.summary_contexts.get(&key.function) {
+                    let incompatible = key
+                        .args
+                        .iter()
+                        .zip(&self.analysis.keys[summary_id].args)
+                        .any(|(a, b)| a.is_none() != b.is_none())
+                        || key
+                            .results
+                            .iter()
+                            .zip(&self.analysis.keys[summary_id].results)
+                            .any(|(a, b)| {
+                                (*a == ResultDomain::Original) != (*b == ResultDomain::Original)
+                            });
+                    if incompatible {
+                        let generic = self.analysis.generic[&key.function];
+                        self.contexts.insert(key, generic);
+                        return generic;
+                    }
+                    let parameters = self.analysis.bodies[&key.function].parameters.clone();
+                    let declared_args = self.analysis.bodies[&key.function].declared_args.clone();
+                    for (pos, (&arg, &param)) in key.args.iter().zip(&parameters).enumerate() {
+                        if declared_args.get(pos).copied().flatten().is_some() {
+                            continue;
+                        }
+                        if let (Some(int), Some(cur)) =
+                            (arg, self.analysis.keys[summary_id].args[pos])
+                        {
+                            let wide = cur.common(Integer {
+                                bits: 64,
+                                signed: int.signed || int.bits < 64,
+                            });
+                            if wide != cur {
+                                self.analysis.keys[summary_id].args[pos] = Some(wide);
+                                self.fact(summary_id, param, Fact::Integer(wide));
+                                self.range(summary_id, param, Range::Bounds(wide.bounds()));
+                            }
+                        }
+                    }
+                    self.contexts.insert(key, summary_id);
+                    return summary_id;
+                }
+                let declared_args = self.analysis.bodies[&key.function].declared_args.clone();
+                let declared_results = self.analysis.bodies[&key.function].declared_results.clone();
+                let summary_key = Key {
+                    function: key.function.clone(),
+                    args: key
+                        .args
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, &arg)| {
+                            if let Some(declared) = declared_args.get(pos).copied().flatten() {
+                                Some(declared)
+                            } else {
+                                arg.map(|int| Integer {
+                                    bits: 64,
+                                    signed: int.signed || int.bits < 64,
+                                })
+                            }
+                        })
+                        .collect(),
+                    results: key
+                        .results
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, &res)| {
+                            if res == ResultDomain::Original {
+                                ResultDomain::Original
+                            } else if let Some(declared) =
+                                declared_results.get(pos).copied().flatten()
+                            {
+                                ResultDomain::Integer(declared)
+                            } else {
+                                ResultDomain::Inferred
+                            }
+                        })
+                        .collect(),
+                    specialize: true,
+                };
+                let summary_id = self.allocate_context(ctx, summary_key);
+                self.summary_contexts
+                    .insert(key.function.clone(), summary_id);
+                self.contexts.insert(key, summary_id);
+                return summary_id;
+            }
+            *count += 1;
+        }
+        let id = self.allocate_context(ctx, key.clone());
+        self.contexts.insert(key, id);
+        id
+    }
+
+    fn allocate_context(&mut self, ctx: &Context, key: Key) -> usize {
         let id = self.analysis.keys.len();
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
@@ -345,7 +458,6 @@ impl Solver {
             );
         }
         let constraints = body.constraints.len();
-        self.contexts.insert(key.clone(), id);
         self.analysis.keys.push(key);
         self.analysis.states.push(state);
         self.work.operations.push(vec![false; constraints]);
@@ -504,7 +616,17 @@ impl Solver {
     fn range(&mut self, id: usize, value: Value, range: Range) {
         let state = &self.analysis.states[id];
         let old = state.range(value);
-        let new = old.join(range, state.representation(value));
+        let expansions = state.range_expansions.get(&value).copied().unwrap_or(0);
+        let (new, expanded, widened) =
+            old.join_step(range, state.representation(value), expansions >= 1);
+        if expanded {
+            self.analysis.states[id]
+                .range_expansions
+                .insert(value, expansions.saturating_add(1));
+        }
+        if widened {
+            self.analysis.range_widenings += 1;
+        }
         if old != new {
             self.analysis.states[id].ranges.insert(value, new);
             self.changed(id, value);
@@ -650,12 +772,16 @@ impl Solver {
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             let mut changed = false;
+            let declared_results =
+                self.analysis.bodies[&self.analysis.keys[id].function].declared_results.clone();
             for (position, value) in operation.operands().enumerate() {
                 let required = self.analysis.keys[id].results[position];
                 self.require(id, value, required.integer());
                 let fact = self.analysis.states[id].fact(value);
                 let fact = if required == ResultDomain::Original {
                     Fact::Original
+                } else if let Some(declared) = declared_results.get(position).copied().flatten() {
+                    Fact::Integer(declared)
                 } else if fact == Fact::Literal {
                     required.integer().map_or(Fact::Literal, Fact::Integer)
                 } else {
@@ -664,9 +790,18 @@ impl Solver {
                 let old = self.analysis.states[id].results[position];
                 let outcome = old.outcome.join(self.analysis.states[id].outcome(value));
                 let domain = old.domain.join(fact);
-                let range = old
-                    .range
-                    .join(self.analysis.states[id].range(value), domain.integer());
+                let (range, expanded, widened) = old.range.join_step(
+                    self.analysis.states[id].range(value),
+                    domain.integer(),
+                    old.expansions >= 1,
+                );
+                if expanded {
+                    self.analysis.states[id].results[position].expansions =
+                        old.expansions.saturating_add(1);
+                }
+                if widened {
+                    self.analysis.range_widenings += 1;
+                }
                 if domain != old.domain || range != old.range || outcome != old.outcome {
                     self.analysis.states[id].results[position].domain = domain;
                     self.analysis.states[id].results[position].range = range;
@@ -1011,7 +1146,18 @@ impl Solver {
             if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
                 self.require(id, operand, Some(integer));
                 self.fact(id, result, Fact::Integer(integer));
-                self.range(id, result, Range::Bounds(integer.bounds()));
+                let range = match (
+                    self.analysis.states[id].fact(operand),
+                    self.analysis.states[id].range(operand),
+                ) {
+                    (Fact::Literal | Fact::Integer(_), Range::Bounds(interval))
+                        if interval.fits(integer) =>
+                    {
+                        Range::Bounds(interval)
+                    }
+                    _ => Range::Bounds(integer.bounds()),
+                };
+                self.range(id, result, range);
                 return;
             }
             if let Some(def) = operand.defining_op()
@@ -1101,9 +1247,13 @@ impl Analysis for ProgramFacts {
                 generic: HashMap::new(),
                 constraint_visits: 0,
                 summarized_heap_sets: 0,
+                summarized_contexts: 0,
+                range_widenings: 0,
                 heap: heap::HeapFacts::default(),
             },
             contexts: HashMap::new(),
+            precise_counts: HashMap::new(),
+            summary_contexts: HashMap::new(),
             work: Worklist::default(),
             width_defaults: Vec::new(),
         };
