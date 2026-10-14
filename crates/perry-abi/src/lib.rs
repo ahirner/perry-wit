@@ -11,6 +11,7 @@ use core::ptr;
 
 pub mod json;
 pub mod layout;
+pub mod number;
 // Public because `perry-runtime` compiles this source too and uses the compact counter.
 pub mod utf8;
 /// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.

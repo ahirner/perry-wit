@@ -19,6 +19,7 @@ struct Cursor {
     residue: Residue,
     containers: ArrayVec<u8, { MAX_DEPTH + 1 }>,
     error: Option<Error>,
+    scalar_failed: bool,
 }
 impl Cursor {
     fn text(&self) -> &'static str {
@@ -111,6 +112,7 @@ pub(crate) unsafe extern "C" fn json_cursor_begin(input: *mut u8) -> u32 {
             residue: Residue::new(text),
             containers: ArrayVec::new(),
             error: None,
+            scalar_failed: false,
         })
     };
     result as usize as u32
@@ -155,6 +157,30 @@ pub(crate) unsafe extern "C" fn json_cursor_number(value: u32) -> f64 {
     let c = unsafe { cursor(value) };
     c.scalar_depth();
     c.read_token(0.0, Reader::numeric)
+}
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_i64(value: u32) -> i64 {
+    let c = unsafe { cursor(value) };
+    c.scalar_depth();
+    c.scalar_failed = false;
+    if let Some(int) = c.read_token(Some(0), Reader::signed_integer) {
+        int
+    } else {
+        c.scalar_failed = true;
+        0
+    }
+}
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_u64(value: u32) -> u64 {
+    let c = unsafe { cursor(value) };
+    c.scalar_depth();
+    c.scalar_failed = false;
+    if let Some(int) = c.read_token(Some(0), Reader::unsigned_integer) {
+        int
+    } else {
+        c.scalar_failed = true;
+        0
+    }
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_boolean(value: u32) -> u32 {
@@ -286,6 +312,9 @@ pub(crate) unsafe extern "C" fn json_cursor_tail(value: u32, graph: *mut u8, sta
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_seek(value: u32, position: u32) -> u32 {
     let c = unsafe { cursor(value) };
+    if position == u32::MAX - 1 {
+        return u32::from(core::mem::replace(&mut c.scalar_failed, false));
+    }
     let old = c.position as u32;
     if position != u32::MAX {
         c.position = position as usize;

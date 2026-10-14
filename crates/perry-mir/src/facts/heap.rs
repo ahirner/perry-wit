@@ -18,6 +18,7 @@ struct Cell {
     ty: TypeHandle,
     objects: BTreeSet<usize>,
     summarized: bool,
+    domain: Fact,
     range: Range,
     outcome: Outcomes,
     readers: BTreeSet<Work>,
@@ -239,6 +240,7 @@ impl Solver {
             ty,
             objects: BTreeSet::new(),
             summarized: false,
+            domain: Fact::Bottom,
             range: Range::Bottom,
             outcome: Outcomes::Bottom,
             readers: BTreeSet::new(),
@@ -422,8 +424,9 @@ impl Solver {
         for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
             let ty = self.analysis.heap.cells[cell].ty;
-            let range = Integer::from_type(ctx, payload(ctx, ty))
-                .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
+            let integer = Integer::from_type(ctx, payload(ctx, ty));
+            self.slot_domain(cell, integer.map_or(Fact::Original, Fact::Integer));
+            let range = integer.map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
             self.slot_range(ctx, cell, range);
             self.slot_outcome(cell, Outcomes::unknown(ctx, ty));
             if aggregate(ctx, ty) {
@@ -481,11 +484,21 @@ impl Solver {
         }
     }
 
+    fn slot_domain(&mut self, slot: usize, domain: Fact) {
+        let cell = &mut self.analysis.heap.cells[slot];
+        let joined = cell.domain.join(domain);
+        if joined != cell.domain {
+            cell.domain = joined;
+            self.heap_changed(slot);
+        }
+    }
+
     fn slot_range(&mut self, ctx: &Context, slot: usize, range: Range) {
         let cell = &mut self.analysis.heap.cells[slot];
-        let joined = cell
-            .range
-            .join(range, Integer::from_type(ctx, payload(ctx, cell.ty)));
+        let joined = cell.range.join(
+            range,
+            Integer::from_type(ctx, payload(ctx, cell.ty)).or(cell.domain.integer()),
+        );
         if joined != cell.range {
             cell.range = joined;
             self.heap_changed(slot);
@@ -502,6 +515,7 @@ impl Solver {
     }
 
     fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
+        self.slot_domain(slot, self.analysis.states[id].fact(value));
         self.slot_range(ctx, slot, self.analysis.states[id].range(value));
         self.slot_outcome(slot, self.analysis.states[id].outcome(value));
         if let Some(from) = self.heap_value(ctx, id, value) {
@@ -541,7 +555,7 @@ impl Solver {
         index: usize,
         op: Ptr<Operation>,
         kind: OperationKind,
-    ) -> Option<Range> {
+    ) -> Option<(Fact, Range)> {
         let reader = Work::Operation(id, index);
         let operation = op.deref(ctx);
         match kind {
@@ -578,6 +592,7 @@ impl Solver {
                 } else {
                     None
                 };
+                let mut domain = Fact::Bottom;
                 let mut range = Range::Bottom;
                 let mut outcome = Outcomes::Bottom;
                 let mut previous = None;
@@ -596,12 +611,14 @@ impl Solver {
                         self.write_slot(ctx, id, slot, operation.get_operand(value), reader);
                     } else {
                         self.analysis.heap.cells[slot].readers.insert(reader);
+                        domain = domain.join(self.analysis.heap.cells[slot].domain);
                         range = range.join(
                             self.analysis.heap.cells[slot].range,
                             Integer::from_type(
                                 ctx,
                                 payload(ctx, self.analysis.heap.cells[slot].ty),
-                            ),
+                            )
+                            .or(domain.integer()),
                         );
                         outcome = outcome.join(self.analysis.heap.cells[slot].outcome);
                         if let Some(result) = result {
@@ -612,7 +629,7 @@ impl Solver {
                 if matches!(kind, OperationKind::Read { .. }) {
                     self.outcome(id, operation.get_result(0), outcome);
                 }
-                return matches!(kind, OperationKind::Read { .. }).then_some(range);
+                return matches!(kind, OperationKind::Read { .. }).then_some((domain, range));
             }
             OperationKind::Extend => {
                 let to = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
@@ -629,6 +646,7 @@ impl Solver {
                         target = Some(object);
                         self.grow_array(object, None, reader);
                         let output = self.analysis.heap.objects[object].contents.slots()[0];
+                        self.slot_domain(output, self.analysis.heap.cells[input].domain);
                         self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
                         self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
                         self.copy_aliases(ctx, input, output, reader);
@@ -648,7 +666,7 @@ impl Solver {
                     };
                     readers.insert(reader);
                 }
-                return Some(self.analysis.heap.length(base));
+                return Some((Fact::Original, self.analysis.heap.length(base)));
             }
             OperationKind::Combine(kind) => {
                 let input = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
@@ -664,6 +682,7 @@ impl Solver {
                 } else {
                     Outcomes::Fulfilled
                 };
+                let mut domain = Fact::Bottom;
                 let mut range = Range::Bottom;
                 let mut previous = None;
                 while let Some(object) = self.next_object(input, previous) {
@@ -683,6 +702,7 @@ impl Solver {
                         outcome = outcome.join(self.analysis.heap.cells[element].outcome);
                         if let Some(object) = output {
                             let slot = self.analysis.heap.objects[object].contents.slots()[0];
+                            self.slot_domain(slot, self.analysis.heap.cells[element].domain);
                             self.slot_range(ctx, slot, self.analysis.heap.cells[element].range);
                             self.slot_outcome(
                                 slot,
@@ -690,7 +710,9 @@ impl Solver {
                             );
                             self.copy_aliases(ctx, element, slot, reader);
                         } else {
-                            range = range.join(self.analysis.heap.cells[element].range, None);
+                            domain = domain.join(self.analysis.heap.cells[element].domain);
+                            range = range
+                                .join(self.analysis.heap.cells[element].range, domain.integer());
                             if let Some(result) = self.heap_value(ctx, id, result) {
                                 self.copy_aliases(ctx, element, result, reader);
                             }
@@ -701,7 +723,7 @@ impl Solver {
                     }
                 }
                 self.outcome(id, result, outcome);
-                return (kind == Combinator::Race).then_some(range);
+                return (kind == Combinator::Race).then_some((domain, range));
             }
             OperationKind::Alias { operand } => {
                 let input = operation.get_operand(operand);
@@ -715,7 +737,10 @@ impl Solver {
                         self.analysis.states[id].outcome(input),
                     );
                 }
-                return Some(self.analysis.states[id].range(input));
+                return Some((
+                    self.analysis.states[id].fact(input),
+                    self.analysis.states[id].range(input),
+                ));
             }
             OperationKind::Return => {
                 for (position, value) in operation.operands().enumerate() {

@@ -586,7 +586,7 @@ impl Solver {
             Constraint::Op { op, heap } => (op, heap),
         };
         self.operation_effects(ctx, id, index, op);
-        let heap_range = self.heap_operation(ctx, id, index, op, heap);
+        let heap_facts = self.heap_operation(ctx, id, index, op, heap);
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if Operation::get_op::<AwaitOp>(op, ctx).is_none()
@@ -856,6 +856,143 @@ impl Solver {
             );
             return;
         }
+        if let Some(intrinsic_op) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
+            && let Some(intrinsic) = intrinsic_op.intrinsic(ctx)
+            && let Some(contract) = intrinsic.numeric_contract()
+        {
+            use crate::intrinsics::BuiltinContract;
+            let result = operation.get_result(0);
+            self.outcome(id, result, Outcomes::unknown(ctx, result.get_type(ctx)));
+            match contract {
+                BuiltinContract::Round => {
+                    let input = operation.get_operand(0);
+                    let required = self.analysis.states[id].required.get(&result).copied();
+                    let input_fact = self.analysis.states[id].fact(input);
+                    let fact = if let Some(integer) = input_fact.integer() {
+                        Fact::Integer(integer)
+                    } else if let Some(req) = required {
+                        Fact::Integer(req)
+                    } else {
+                        Fact::Original
+                    };
+                    let range = match self.analysis.states[id].range(input) {
+                        Range::Bounds(interval) => Range::Bounds(interval),
+                        Range::Bottom => Range::Bottom,
+                        Range::Unknown => fact.integer().map_or(Range::Unknown, |integer| {
+                            Range::Bounds(integer.bounds())
+                        }),
+                    };
+                    self.fact(id, result, fact);
+                    self.range(id, result, range);
+                    return;
+                }
+                BuiltinContract::Abs => {
+                    let input = operation.get_operand(0);
+                    let required = self.analysis.states[id].required.get(&result).copied();
+                    self.require(id, input, required);
+                    let fact = self.arithmetic(ctx, id, &[input], result);
+                    let range = match self.analysis.states[id].range(input) {
+                        Range::Bottom => Range::Bottom,
+                        Range::Bounds(interval) => {
+                            let lower = if interval.lower <= 0 && interval.upper >= 0 {
+                                0
+                            } else {
+                                interval.lower.abs().min(interval.upper.abs())
+                            };
+                            let upper = interval.lower.abs().max(interval.upper.abs());
+                            let candidate = Interval { lower, upper };
+                            if fact.integer().is_some_and(|domain| !candidate.fits(domain)) {
+                                Range::Bounds(fact.integer().unwrap().bounds())
+                            } else {
+                                Range::Bounds(candidate)
+                            }
+                        }
+                        Range::Unknown => fact.integer().map_or(Range::Unknown, |integer| {
+                            Range::Bounds(integer.bounds())
+                        }),
+                    };
+                    self.fact(id, result, fact);
+                    self.range(id, result, range);
+                    return;
+                }
+                BuiltinContract::Min | BuiltinContract::Max => {
+                    let lhs = operation.get_operand(0);
+                    let rhs = operation.get_operand(1);
+                    let required = self.analysis.states[id].required.get(&result).copied();
+                    self.require(id, lhs, required);
+                    self.require(id, rhs, required);
+                    let fact = self.arithmetic(ctx, id, &[lhs, rhs], result);
+                    let range = match (
+                        self.analysis.states[id].range(lhs),
+                        self.analysis.states[id].range(rhs),
+                    ) {
+                        (Range::Bottom, _) | (_, Range::Bottom) => Range::Bottom,
+                        (Range::Bounds(a), Range::Bounds(b)) => {
+                            let candidate = if matches!(contract, BuiltinContract::Min) {
+                                Interval {
+                                    lower: a.lower.min(b.lower),
+                                    upper: a.upper.min(b.upper),
+                                }
+                            } else {
+                                Interval {
+                                    lower: a.lower.max(b.lower),
+                                    upper: a.upper.max(b.upper),
+                                }
+                            };
+                            if fact.integer().is_some_and(|domain| !candidate.fits(domain)) {
+                                Range::Bounds(fact.integer().unwrap().bounds())
+                            } else {
+                                Range::Bounds(candidate)
+                            }
+                        }
+                        _ => fact.integer().map_or(Range::Unknown, |integer| {
+                            Range::Bounds(integer.bounds())
+                        }),
+                    };
+                    self.fact(id, result, fact);
+                    self.range(id, result, range);
+                    return;
+                }
+                BuiltinContract::UnsignedCount => {
+                    let u32_int = Integer {
+                        bits: 32,
+                        signed: false,
+                    };
+                    self.fact(id, result, Fact::Integer(u32_int));
+                    self.range(
+                        id,
+                        result,
+                        Range::Bounds(Interval {
+                            lower: 0,
+                            upper: u32::MAX as i128,
+                        }),
+                    );
+                    return;
+                }
+                BuiltinContract::ByteValue => {
+                    let u8_int = Integer {
+                        bits: 8,
+                        signed: false,
+                    };
+                    self.fact(id, result, Fact::Integer(u8_int));
+                    self.range(
+                        id,
+                        result,
+                        Range::Bounds(Interval {
+                            lower: 0,
+                            upper: u8::MAX as i128,
+                        }),
+                    );
+                    return;
+                }
+                BuiltinContract::NumberOnly => {
+                    self.fact(id, result, Fact::Original);
+                    self.range(id, result, Range::Unknown);
+                    return;
+                }
+                BuiltinContract::Predicate => {}
+            }
+        }
         if Operation::get_op::<CompareOp>(op, ctx).is_some()
             && let Some(domain) = comparison_domain(
                 &self.analysis.states[id],
@@ -901,11 +1038,13 @@ impl Solver {
                 Fact::Literal
             } else if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
                 Fact::Integer(integer)
+            } else if let Some((fact, _)) = heap_facts {
+                fact
             } else {
                 Fact::Original
             };
             self.fact(id, result, fact);
-            let range = if let Some(range) = heap_range {
+            let range = if let Some((_, range)) = heap_facts {
                 range
             } else if let Some(range) = constant_range(ctx, op) {
                 Range::Bounds(

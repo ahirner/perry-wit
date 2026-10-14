@@ -120,5 +120,7 @@ pub mod descriptor {
     pub const ARRAY: u32 = 5;
     pub const EXCEPTION: u32 = 6;
     pub const OPTIONAL: u32 = 7;
+    pub const SIGNED_INT: u32 = 8;
+    pub const UNSIGNED_INT: u32 = 9;
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 }

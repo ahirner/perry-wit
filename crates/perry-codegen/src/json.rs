@@ -90,7 +90,7 @@ impl FunctionLowering<'_, '_> {
 
     pub(crate) fn native_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
         use perry_abi::layout::descriptor::{
-            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, STRING,
+            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, SIGNED_INT, STRING, UNSIGNED_INT,
         };
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);
@@ -123,8 +123,14 @@ impl FunctionLowering<'_, '_> {
         } else {
             let kind = if ty.deref(ctx).is::<FP64Type>() {
                 NUMBER
-            } else if ty.deref(ctx).is::<IntegerType>() {
-                BOOLEAN
+            } else if let Some(int) = ty.deref(ctx).downcast_ref::<IntegerType>() {
+                if int.width() == 1 {
+                    BOOLEAN
+                } else if int.signedness() == pliron::builtin::types::Signedness::Unsigned {
+                    UNSIGNED_INT
+                } else {
+                    SIGNED_INT
+                }
             } else if ty.deref(ctx).is::<StringType>() {
                 STRING
             } else if ty.deref(ctx).is::<ExceptionType>() {
@@ -210,16 +216,31 @@ impl FunctionLowering<'_, '_> {
             self.runtime_void(ctx, Runtime::StdJsonValue, vec![writer, value]);
             return Ok(());
         }
-        if deref
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|i| i.width() == 1)
-        {
+        if let Some(int) = deref.downcast_ref::<IntegerType>() {
+            let width = int.width();
+            let unsigned = int.signedness() == pliron::builtin::types::Signedness::Unsigned;
             drop(deref);
-            let (true_data, true_len) = self.static_text(ctx, "true");
-            let (false_data, false_len) = self.static_text(ctx, "false");
-            let data = self.select(ctx, value, true_data, false_data);
-            let len = self.select(ctx, value, true_len, false_len);
-            self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
+            if width == 1 {
+                let (true_data, true_len) = self.static_text(ctx, "true");
+                let (false_data, false_len) = self.static_text(ctx, "false");
+                let data = self.select(ctx, value, true_data, false_data);
+                let len = self.select(ctx, value, true_len, false_len);
+                self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
+            } else {
+                let value = if width == 64 {
+                    value
+                } else if unsigned {
+                    self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
+                } else {
+                    self.num(ctx, NumOpcode::I64ExtendI32S, vec![value])
+                };
+                let runtime = if unsigned {
+                    Runtime::StdJsonWriteU64
+                } else {
+                    Runtime::StdJsonWriteI64
+                };
+                self.runtime_void(ctx, runtime, vec![writer, value]);
+            }
             return Ok(());
         }
         let container = deref.is::<RecordType>()

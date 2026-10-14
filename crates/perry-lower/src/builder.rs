@@ -54,6 +54,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// Imported built-ins by local name.
     pub(super) builtins: &'s HashMap<String, Builtin>,
     pub(super) results: Vec<TypeHandle>,
+    pub(super) integer_result: Option<TypeHandle>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
 }
@@ -166,6 +167,7 @@ impl<'s> FunctionBuilder<'s> {
             shapes,
             builtins,
             results: signature.results.clone(),
+            integer_result: signature.integer_result,
             is_async: signature.is_async,
             labels: 0,
         }

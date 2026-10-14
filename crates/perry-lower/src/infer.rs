@@ -103,15 +103,20 @@ struct FunctionEnv<'a> {
     interfaces: &'a [perry_hir::ir::Interface],
     type_aliases: &'a [perry_hir::ir::TypeAlias],
     locals: &'a mut HashMap<LocalId, HirType>,
-    integer_aliases: &'a HashSet<String>,
+    integer_aliases: &'a HashMap<String, HirType>,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;
+const BIGINT_TYPE: HirType = HirType::BigInt;
 
 impl FunctionEnv<'_> {
     fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
         match ty {
-            HirType::Named(name) if self.integer_aliases.contains(name) => &NUMBER_TYPE,
+            HirType::Named(name) => match self.integer_aliases.get(name) {
+                Some(HirType::BigInt) => &BIGINT_TYPE,
+                Some(_) => &NUMBER_TYPE,
+                None => ty,
+            },
             ty => ty,
         }
     }
@@ -165,7 +170,11 @@ impl HirTypeFacts for FunctionEnv<'_> {
         self.base
             .named_property_type(type_name, property)
             .map(|ty| match ty {
-                HirType::Named(name) if self.integer_aliases.contains(&name) => HirType::Number,
+                HirType::Named(name) => self
+                    .integer_aliases
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(HirType::Named(name)),
                 ty => ty,
             })
     }
@@ -184,17 +193,22 @@ enum ScanMode<'a> {
     ResolveLocals,
 }
 
-fn collect_integer_aliases(hir: &HirModule, foreign: &HashMap<String, HirType>) -> HashSet<String> {
-    let mut names: HashSet<String> = [
-        "perry:types/u8",
-        "perry:types/s8",
-        "perry:types/u16",
-        "perry:types/s16",
-        "perry:types/u32",
-        "perry:types/s32",
+fn collect_integer_aliases(
+    hir: &HirModule,
+    foreign: &HashMap<String, HirType>,
+) -> HashMap<String, HirType> {
+    let mut names: HashMap<String, HirType> = [
+        ("perry:types/u8", HirType::Number),
+        ("perry:types/s8", HirType::Number),
+        ("perry:types/u16", HirType::Number),
+        ("perry:types/s16", HirType::Number),
+        ("perry:types/u32", HirType::Number),
+        ("perry:types/s32", HirType::Number),
+        ("perry:types/u64", HirType::BigInt),
+        ("perry:types/s64", HirType::BigInt),
     ]
     .into_iter()
-    .map(String::from)
+    .map(|(k, v)| (String::from(k), v))
     .collect();
     let user_types: HashSet<&str> = hir
         .interfaces
@@ -211,23 +225,27 @@ fn collect_integer_aliases(hir: &HirModule, foreign: &HashMap<String, HirType>) 
             if user_types.contains(local.as_str()) {
                 continue;
             }
-            if import.source == "perry:types"
-                && matches!(
-                    imported.as_str(),
-                    "u8" | "s8" | "u16" | "s16" | "u32" | "s32"
-                )
-            {
-                names.insert(local.clone());
-                continue;
+            if import.source == "perry:types" {
+                match imported.as_str() {
+                    "u8" | "s8" | "u16" | "s16" | "u32" | "s32" => {
+                        names.insert(local.clone(), HirType::Number);
+                        continue;
+                    }
+                    "u64" | "s64" => {
+                        names.insert(local.clone(), HirType::BigInt);
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             for candidate in [
                 format!("wit:{}#{imported}", import.source),
                 format!("wit:{imported}"),
             ] {
                 if let Some(HirType::Named(target)) = foreign.get(&candidate)
-                    && names.contains(target)
+                    && let Some(carrier) = names.get(target).cloned()
                 {
-                    names.insert(local.clone());
+                    names.insert(local.clone(), carrier);
                     break;
                 }
             }
@@ -238,9 +256,10 @@ fn collect_integer_aliases(hir: &HirModule, foreign: &HashMap<String, HirType>) 
         for alias in &hir.type_aliases {
             if alias.type_params.is_empty()
                 && let HirType::Named(target) = &alias.ty
-                && names.contains(target)
-                && names.insert(alias.name.clone())
+                && let Some(carrier) = names.get(target).cloned()
+                && !names.contains_key(&alias.name)
             {
+                names.insert(alias.name.clone(), carrier);
                 added = true;
             }
         }
@@ -255,7 +274,7 @@ fn clear_inferred_type_vars<V>(
     statements: &mut [Stmt],
     inferred: &HashSet<LocalId>,
     spans: &HashMap<LocalId, V>,
-    integer_aliases: &HashSet<String>,
+    integer_aliases: &HashMap<String, HirType>,
 ) {
     for statement in statements {
         match statement {
@@ -263,9 +282,9 @@ fn clear_inferred_type_vars<V>(
                 if contains_type_var(ty) {
                     *ty = HirType::Any;
                 } else if let HirType::Named(name) = ty
-                    && integer_aliases.contains(name)
+                    && let Some(carrier) = integer_aliases.get(name)
                 {
-                    *ty = HirType::Number;
+                    *ty = carrier.clone();
                 }
             }
             Stmt::If {
@@ -404,7 +423,11 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
     }
 }
 
-fn push_return_type(types: &mut Vec<HirType>, ty: HirType, integer_aliases: &HashSet<String>) {
+fn push_return_type(
+    types: &mut Vec<HirType>,
+    ty: HirType,
+    integer_aliases: &HashMap<String, HirType>,
+) {
     if let HirType::Union(members) = ty {
         if members
             .iter()
@@ -436,7 +459,10 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, integer_aliases: &Has
     }
     let normalized = match ty {
         HirType::Int32 => HirType::Number,
-        HirType::Named(name) if integer_aliases.contains(&name) => HirType::Number,
+        HirType::Named(name) => integer_aliases
+            .get(&name)
+            .cloned()
+            .unwrap_or(HirType::Named(name)),
         HirType::StringLiteral(_) => HirType::String,
         ty => ty,
     };

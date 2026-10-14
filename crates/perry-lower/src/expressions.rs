@@ -104,6 +104,41 @@ impl<'s> FunctionBuilder<'s> {
             Expr::MathMax(values) => {
                 self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
             }
+            Expr::ParseInt { string, radix } => {
+                let value = self.expression(ctx, string)?;
+                let text = self.display(ctx, value)?;
+                let radix = self.number_or(ctx, radix.as_deref(), 0.0)?;
+                self.intrinsic(ctx, Intrinsic::ParseInt, vec![text, radix])
+            }
+            Expr::ParseFloat(string) => {
+                let value = self.expression(ctx, string)?;
+                let text = self.display(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::ParseFloat, vec![text])
+            }
+            Expr::IsNaN(value) => {
+                let value = self.number_coerce(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
+            }
+            Expr::IsFinite(value) => {
+                let value = self.number_coerce(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
+            }
+            Expr::NumberIsNaN(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
+            }
+            Expr::NumberIsFinite(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
+            }
+            Expr::NumberIsInteger(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsInteger, vec![value])
+            }
+            Expr::NumberIsSafeInteger(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsSafeInteger, vec![value])
+            }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
@@ -178,6 +213,42 @@ impl<'s> FunctionBuilder<'s> {
                     self.parse_cursor(ctx, text, target)?
                 } else {
                     self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                }
+            }
+            Expr::JsonParseTyped { text, ty, .. } => {
+                let text = self.string_operand(ctx, text)?;
+                let target = if let Some(int_ty) = self.shapes.integer_type(ctx, ty)
+                    && int_ty
+                        .deref(ctx)
+                        .downcast_ref::<IntegerType>()
+                        .is_some_and(|int| int.width() == 64)
+                {
+                    int_ty
+                } else if matches!(ty, HirType::Any | HirType::Unknown) {
+                    expected.unwrap_or_else(|| JsonType::get(ctx).into())
+                } else {
+                    self.shapes.value_type(ctx, ty)?
+                };
+                let decoded = if !target.deref(ctx).is::<JsonType>()
+                    && crate::json::direct_json_schema(ctx, target)
+                {
+                    self.parse_cursor(ctx, text, target)?
+                } else if target.deref(ctx).is::<JsonType>() {
+                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                } else {
+                    let parsed = self.intrinsic(ctx, Intrinsic::JsonParse, vec![text]);
+                    self.fit(ctx, parsed, target)?
+                };
+                if target
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                    && expected != Some(target)
+                {
+                    let bigint = BigIntType::get(ctx).into();
+                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, decoded, bigint))
+                } else {
+                    decoded
                 }
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
@@ -461,11 +532,31 @@ impl<'s> FunctionBuilder<'s> {
     fn local_set(&mut self, ctx: &mut Context, id: LocalId, value: &'s Expr) -> Result<Value> {
         let slot = self.local(id)?;
         let slot_type = self.slot_type(ctx, slot)?;
-        let value = self.expression_with(ctx, value, Some(slot_type))?;
-        let mut value = self.fit(ctx, value, slot_type)?;
-        if let Some(&int_ty) = self.integer_locals.get(&id) {
-            value = self.wrap_integer(ctx, value, int_ty, slot_type);
-        }
+        let int_ty = self.integer_locals.get(&id).copied();
+        let expr_expected = int_ty
+            .filter(|int_ty| {
+                int_ty
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+            })
+            .or(Some(slot_type));
+        let value = self.expression_with(ctx, value, expr_expected)?;
+        let value = if let Some(int_ty) = int_ty {
+            if int_ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+            {
+                let int_val = self.fit(ctx, value, int_ty)?;
+                self.fit(ctx, int_val, slot_type)?
+            } else {
+                let fitted = self.fit(ctx, value, slot_type)?;
+                self.wrap_integer(ctx, fitted, int_ty, slot_type)
+            }
+        } else {
+            self.fit(ctx, value, slot_type)?
+        };
         self.store(ctx, slot, value);
         Ok(value)
     }
@@ -673,7 +764,18 @@ impl<'s> FunctionBuilder<'s> {
                 let op = FieldGetOp::new(ctx, value, field.to_string()).map_err(|_| {
                     anyhow!("property {field} does not exist on this shape (subset rule R1)")
                 })?;
-                self.append_value(ctx, &op)
+                let loaded = self.append_value(ctx, &op);
+                if loaded
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    let bigint = BigIntType::get(ctx).into();
+                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, loaded, bigint))
+                } else {
+                    loaded
+                }
             }
             (_, property) => bail!("property {property} is not supported on this type yet"),
         })
@@ -715,7 +817,18 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let op = FieldGetOp::new(ctx, array, field.clone())
                     .map_err(|_| anyhow!("record has no field {field}"))?;
-                Ok(self.append_value(ctx, &op))
+                let loaded = self.append_value(ctx, &op);
+                if loaded
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    let bigint = BigIntType::get(ctx).into();
+                    Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, loaded, bigint)))
+                } else {
+                    Ok(loaded)
+                }
             }
             Kind::Array => {
                 let index = self.index(ctx, index)?;

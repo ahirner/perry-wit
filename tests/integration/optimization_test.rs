@@ -946,3 +946,241 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
     Ok(())
 }
 
+#[test]
+fn builtin_numeric_contracts_and_string_number_parsers_match_js_semantics() -> Result<()> {
+    let wit_src = r#"
+        package test:optimization;
+        world test {
+            export parse-int-cases: func() -> s32;
+            export parse-float-cases: func() -> f64;
+            export number-coercion-cases: func() -> f64;
+            export predicates-and-constants: func() -> s32;
+            export math-integer-contracts: func(a: s32, b: s32) -> s32;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let source = r#"
+        import type { s32, u8 } from "perry:types";
+
+        export function parseIntCases(): number {
+            const a = parseInt("  -42px");
+            const b = parseInt("0x10");
+            const c = parseInt("101", 2);
+            const d = Number.parseInt("ff", 16);
+            const bad = parseInt("10", 37);
+            const empty = parseInt("   ");
+            if (!Number.isNaN(bad) || !Number.isNaN(empty)) {
+                return -999;
+            }
+            return a + b + c + d;
+        }
+
+        export function parseFloatCases(): number {
+            const a = parseFloat("  3.5e1abc");
+            const b = Number.parseFloat("-0.25");
+            const inf = parseFloat("Infinity");
+            const empty = parseFloat("   ");
+            if (inf !== Number.POSITIVE_INFINITY || !Number.isNaN(empty)) {
+                return -1;
+            }
+            return a + b;
+        }
+
+        export function numberCoercionCases(): number {
+            const a = Number("  0x20  ");
+            const b = +"0b101";
+            const c = Number("0o10");
+            const d = +"   ";
+            const bad = Number("12px");
+            if (!Number.isNaN(bad)) {
+                return -1;
+            }
+            return a + b + c + d;
+        }
+
+        export function predicatesAndConstants(): number {
+            let score: s32 = 0 as s32;
+            if (Number.isInteger(42) && !Number.isInteger(42.5) && !Number.isInteger(NaN)) {
+                score = (score + 1) as s32;
+            }
+            if (
+                Number.isSafeInteger(Number.MAX_SAFE_INTEGER) &&
+                Number.isSafeInteger(Number.MIN_SAFE_INTEGER) &&
+                !Number.isSafeInteger(Number.MAX_SAFE_INTEGER + 1)
+            ) {
+                score = (score + 2) as s32;
+            }
+            if (
+                Number.isFinite(123.45) &&
+                !Number.isFinite(Infinity) &&
+                isFinite(0) &&
+                !isFinite(NaN)
+            ) {
+                score = (score + 4) as s32;
+            }
+            if (Number.isNaN(NaN) && isNaN(NaN) && !Number.isNaN(0) && Number.EPSILON > 0) {
+                score = (score + 8) as s32;
+            }
+            return score;
+        }
+
+        export function mathIntegerContracts(a: number, b: number): number {
+            const absA = Math.abs(a);
+            const hi = Math.max(absA, b);
+            const lo = Math.min(absA, b);
+            const rounded = Math.floor(hi) + Math.ceil(lo) + Math.trunc(1.0) + Math.round(2.0);
+            const code: u8 = ("A".codePointAt(0)!) as u8;
+            return rounded + code;
+        }
+    "#;
+    let compiled =
+        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program.call("parse-int-cases", &[]).0[0].unwrap_i32(),
+        -42 + 16 + 5 + 255
+    );
+    assert_eq!(
+        program.call("parse-float-cases", &[]).0[0].unwrap_f64(),
+        34.75
+    );
+    assert_eq!(
+        program.call("number-coercion-cases", &[]).0[0].unwrap_f64(),
+        32.0 + 5.0 + 8.0 + 0.0
+    );
+    assert_eq!(
+        program.call("predicates-and-constants", &[]).0[0].unwrap_i32(),
+        15
+    );
+    assert_eq!(
+        program
+            .call(
+                "math-integer-contracts",
+                &[wasmtime::Val::I32(-10), wasmtime::Val::I32(4)],
+            )
+            .0[0]
+            .unwrap_i32(),
+        10 + 4 + 1 + 2 + 65
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_64_bit_json_integer_codecs_preserve_precision() -> Result<()> {
+    let wit_src = r#"
+        package test:optimization;
+        world test {
+            record counters {
+                signed: s64,
+                unsigned: u64,
+            }
+            export roundtrip-signed: func(value: s64) -> s64;
+            export roundtrip-unsigned: func(value: u64) -> u64;
+            export roundtrip-record: func(value: counters) -> counters;
+            export roundtrip-record-check: func(signed: s64, unsigned: u64) -> bool;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let source = r#"
+        import type { s64, u64 } from "perry:types";
+
+        interface Counters {
+            signed: s64;
+            unsigned: u64;
+        }
+
+        export function roundtripSigned(value: s64): s64 {
+            return JSON.parse<s64>(JSON.stringify(value));
+        }
+
+        export function roundtripUnsigned(value: u64): u64 {
+            return JSON.parse<u64>(JSON.stringify(value));
+        }
+
+        export function roundtripRecord(value: Counters): Counters {
+            return JSON.parse<Counters>(JSON.stringify(value));
+        }
+
+        export function roundtripRecordCheck(signed: s64, unsigned: u64): boolean {
+            const input: Counters = { signed, unsigned };
+            const output = JSON.parse<Counters>(JSON.stringify(input));
+            return output.signed === signed && output.unsigned === unsigned;
+        }
+    "#;
+    let compiled =
+        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    for signed in [0i64, 1, -1, 9007199254740993, -9007199254740993, i64::MAX, i64::MIN] {
+        assert_eq!(
+            program
+                .call("roundtrip-signed", &[wasmtime::Val::I64(signed)])
+                .0[0]
+                .unwrap_i64(),
+            signed
+        );
+    }
+    for unsigned in [0u64, 1, 9007199254740993, (i64::MAX as u64) + 42, u64::MAX] {
+        assert_eq!(
+            program
+                .call(
+                    "roundtrip-unsigned",
+                    &[wasmtime::Val::I64(unsigned as i64)],
+                )
+                .0[0]
+                .unwrap_i64() as u64,
+            unsigned
+        );
+        assert_eq!(
+            program
+                .call(
+                    "roundtrip-record-check",
+                    &[
+                        wasmtime::Val::I64(-9007199254740993),
+                        wasmtime::Val::I64(unsigned as i64),
+                    ],
+                )
+                .0[0]
+                .unwrap_i32(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn aggregate_and_optional_integer_facts_propagate_through_records_and_arrays() -> Result<()> {
+    let source = r#"
+        import type { u8, u32 } from "perry:types";
+
+        interface Boxed {
+            head: u8;
+            tail?: u32;
+        }
+
+        export function run(a: number, b: number): number {
+            const box: Boxed = {
+                head: (a as u8),
+                tail: (b as u32),
+            };
+            const tail: u32 = box.tail !== undefined ? box.tail : (0 as u32);
+            const list: u32[] = [box.head as u32, tail];
+            return list[0]! + list[1]!;
+        }
+    "#;
+    let compiled = compile(source, "func(a: u8, b: u32) -> u32")?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("run", &[wasmtime::Val::I32(250), wasmtime::Val::I32(1000)])
+            .0[0]
+            .unwrap_i32(),
+        1250
+    );
+    Ok(())
+}
+
+

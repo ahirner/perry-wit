@@ -1,7 +1,8 @@
 //! Exception cause nodes, native reference reflection, and dynamic JSON equality/display.
 use super::{
-    address, append, array_index, new_node, node, set_word, std_json_from_number,
-    std_json_from_scalar, std_json_from_string, std_json_to_string, string_bytes, word,
+    address, append, array_index, format_integer, new_node, node, set_word, std_json_from_i64,
+    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_from_u64,
+    std_json_to_string, string_bytes, word,
 };
 use crate::runtime::from_static;
 use perry_abi::{
@@ -16,23 +17,67 @@ pub(crate) extern "C" fn std_json_from_exception(exception: *mut u8) -> *mut u8 
     value
 }
 
+fn number_equals_i64(number: f64, integer: i64) -> bool {
+    number.is_finite()
+        && libm::trunc(number) == number
+        && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&number)
+        && (number as i64) == integer
+        && (integer as f64) == number
+}
+
+fn number_equals_u64(number: f64, integer: u64) -> bool {
+    number.is_finite()
+        && (0.0..18_446_744_073_709_551_616.0).contains(&number)
+        && libm::trunc(number) == number
+        && (number as u64) == integer
+        && (integer as f64) == number
+}
+
 /// Strict equality preserves scalar values and identity of live cause references.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_strict_equal(left: *mut u8, right: *mut u8) -> u32 {
     if left.is_null() || right.is_null() {
         return u32::from(left == right);
     }
-    let kind = word(left, 0);
-    if kind != word(right, 0) {
-        return 0;
+    let (left_kind, right_kind) = (word(left, 0), word(right, 0));
+    if left_kind != right_kind {
+        return u32::from(unsafe {
+            match (left_kind, right_kind) {
+                (INT64, UINT64) => {
+                    let (i, u) = (*left.add(8).cast::<i64>(), *right.add(8).cast::<u64>());
+                    i >= 0 && (i as u64) == u
+                }
+                (UINT64, INT64) => {
+                    let (u, i) = (*left.add(8).cast::<u64>(), *right.add(8).cast::<i64>());
+                    i >= 0 && (i as u64) == u
+                }
+                (INT64, NUMBER) => {
+                    number_equals_i64(*right.add(8).cast::<f64>(), *left.add(8).cast::<i64>())
+                }
+                (NUMBER, INT64) => {
+                    number_equals_i64(*left.add(8).cast::<f64>(), *right.add(8).cast::<i64>())
+                }
+                (UINT64, NUMBER) => {
+                    number_equals_u64(*right.add(8).cast::<f64>(), *left.add(8).cast::<u64>())
+                }
+                (NUMBER, UINT64) => {
+                    number_equals_u64(*left.add(8).cast::<f64>(), *right.add(8).cast::<u64>())
+                }
+                _ => false,
+            }
+        });
     }
-    u32::from(match kind {
+    u32::from(match left_kind {
         NULL => true,
         BOOLEAN => word(left, 8) == word(right, 8),
         STRING => string_bytes(left) == string_bytes(right),
         NUMBER => {
             // SAFETY: both nodes hold f64 payloads.
             unsafe { *left.add(8).cast::<f64>() == *right.add(8).cast::<f64>() }
+        }
+        INT64 | UINT64 => {
+            // SAFETY: both nodes hold 64-bit integer payloads.
+            unsafe { *left.add(8).cast::<u64>() == *right.add(8).cast::<u64>() }
         }
         EXCEPTION | NATIVE => word(left, 8) == word(right, 8),
         _ => left == right,
@@ -91,6 +136,12 @@ pub(crate) extern "C" fn std_json_exception_equal(value: *mut u8, exception: *mu
             string_bytes(value) == unsafe { crate::runtime::bytes(node(bits as u32)) }
         }
         (TAG_NUMBER, NUMBER) => f64::from_bits(bits) == unsafe { *value.add(8).cast::<f64>() },
+        (TAG_NUMBER, INT64) => {
+            number_equals_i64(f64::from_bits(bits), unsafe { *value.add(8).cast::<i64>() })
+        }
+        (TAG_NUMBER, UINT64) => {
+            number_equals_u64(f64::from_bits(bits), unsafe { *value.add(8).cast::<u64>() })
+        }
         _ => false,
     })
 }
@@ -132,6 +183,20 @@ pub(crate) extern "C" fn std_json_display(value: *mut u8) -> *mut u8 {
                 from_static("null")
             }
         }
+        INT64 => {
+            let integer = unsafe { *(value.add(8) as *const i64) };
+            let mut digits = [0u8; 21];
+            crate::runtime::from_bytes(format_integer(
+                integer.unsigned_abs(),
+                integer < 0,
+                &mut digits,
+            ))
+        }
+        UINT64 => {
+            let integer = unsafe { *(value.add(8) as *const u64) };
+            let mut digits = [0u8; 21];
+            crate::runtime::from_bytes(format_integer(integer, false, &mut digits))
+        }
         _ => from_static("[object Object]"),
     }
 }
@@ -149,6 +214,8 @@ fn native_slot(bits: u64, desc: *mut u8) -> *mut u8 {
     match word(desc, 0) {
         descriptor::NUMBER => std_json_from_number(f64::from_bits(bits)),
         descriptor::BOOLEAN => std_json_from_scalar(BOOLEAN, bits as u32),
+        descriptor::SIGNED_INT => std_json_from_i64(bits as i64),
+        descriptor::UNSIGNED_INT => std_json_from_u64(bits),
         descriptor::STRING => unsafe { std_json_from_string(node(bits as u32)) },
         descriptor::RECORD | descriptor::ARRAY => std_json_native(node(bits as u32), desc),
         descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),

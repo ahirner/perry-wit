@@ -471,6 +471,186 @@ pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     crate::runtime::from_bytes(scalar.encode_utf8(&mut bytes).as_bytes())
 }
 
+fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
+    let digit = match byte {
+        b'0'..=b'9' => u32::from(byte - b'0'),
+        b'a'..=b'z' => u32::from(byte - b'a') + 10,
+        b'A'..=b'Z' => u32::from(byte - b'A') + 10,
+        _ => return None,
+    };
+    (digit < radix).then_some(digit)
+}
+
+fn parse_decimal_prefix(rest: &[u8]) -> Option<(&[u8], perry_abi::number::Decimal, i64, usize)> {
+    let mut at = 0;
+    let mut fractional = false;
+    let mut digits = 0usize;
+    let mut decimal = perry_abi::number::Decimal::default();
+    while at < rest.len() {
+        match rest[at] {
+            b'0'..=b'9' => {
+                decimal.digit(rest[at], fractional);
+                digits += 1;
+                at += 1;
+            }
+            b'.' if !fractional => {
+                fractional = true;
+                at += 1;
+            }
+            _ => break,
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    let mantissa_end = at;
+    let mut exponent = 0i64;
+    if matches!(rest.get(at), Some(b'e' | b'E')) {
+        let mut exp_at = at + 1;
+        if matches!(rest.get(exp_at), Some(b'+' | b'-')) {
+            exp_at += 1;
+        }
+        let exp_digits_start = exp_at;
+        while matches!(rest.get(exp_at), Some(b'0'..=b'9')) {
+            exp_at += 1;
+        }
+        if exp_at > exp_digits_start {
+            exponent = perry_abi::number::parse_exponent(&rest[at..exp_at]);
+            at = exp_at;
+        }
+    }
+    Some((&rest[..mantissa_end], decimal, exponent, at))
+}
+
+/// ECMAScript `parseInt(string, radix)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
+    let trimmed = view(string).text.trim_start_matches(space).as_bytes();
+    let (negative, mut rest) = match trimmed.first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let r = if !radix.is_finite() || radix == 0.0 || radix.abs() >= 4_294_967_296.0 {
+        0
+    } else {
+        (radix as i64) as i32
+    };
+    let (radix, strip_prefix) = if r == 0 {
+        (10u32, true)
+    } else if !(2..=36).contains(&r) {
+        return f64::NAN;
+    } else {
+        (r as u32, r == 16)
+    };
+    let radix = if strip_prefix
+        && rest.len() >= 2
+        && rest[0] == b'0'
+        && matches!(rest[1], b'x' | b'X')
+    {
+        rest = &rest[2..];
+        16
+    } else {
+        radix
+    };
+    if radix == 10 {
+        let mut decimal = perry_abi::number::Decimal::default();
+        let mut len = 0;
+        while let Some(&byte @ b'0'..=b'9') = rest.get(len) {
+            decimal.digit(byte, false);
+            len += 1;
+        }
+        if len == 0 {
+            return f64::NAN;
+        }
+        return decimal.finish(&rest[..len], negative, 0);
+    }
+    let mut count = 0usize;
+    let mut value = 0.0f64;
+    for &byte in rest {
+        let Some(digit) = ascii_digit(byte, radix) else {
+            break;
+        };
+        value = value * f64::from(radix) + f64::from(digit);
+        count += 1;
+    }
+    if count == 0 {
+        f64::NAN
+    } else if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+/// ECMAScript `parseFloat(string)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
+    let trimmed = view(string).text.trim_start_matches(space).as_bytes();
+    let (negative, rest) = match trimmed.first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    if rest.starts_with(b"Infinity") {
+        return if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    let Some((mantissa, decimal, exponent, _)) = parse_decimal_prefix(rest) else {
+        return f64::NAN;
+    };
+    decimal.finish(mantissa, negative, exponent)
+}
+
+/// ECMAScript `StringToNumber` (`Number(string)`).
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_to_number(string: *mut u8) -> f64 {
+    let trimmed = view(string).text.trim_matches(space).as_bytes();
+    if trimmed.is_empty() {
+        return 0.0;
+    }
+    if trimmed.len() > 2 && trimmed[0] == b'0' {
+        let radix = match trimmed[1] {
+            b'x' | b'X' => Some(16u32),
+            b'o' | b'O' => Some(8u32),
+            b'b' | b'B' => Some(2u32),
+            _ => None,
+        };
+        if let Some(radix) = radix {
+            let mut value = 0.0f64;
+            for &byte in &trimmed[2..] {
+                let Some(digit) = ascii_digit(byte, radix) else {
+                    return f64::NAN;
+                };
+                value = value * f64::from(radix) + f64::from(digit);
+            }
+            return value;
+        }
+    }
+    let (negative, rest) = match trimmed.first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    if rest == b"Infinity" {
+        return if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    let Some((mantissa, decimal, exponent, consumed)) = parse_decimal_prefix(rest) else {
+        return f64::NAN;
+    };
+    if consumed != rest.len() {
+        return f64::NAN;
+    }
+    decimal.finish(mantissa, negative, exponent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{find, rfind};

@@ -104,6 +104,36 @@ impl FunctionLowering<'_, '_> {
                 let rounded = self.select(ctx, up, next, floor);
                 Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
             }
+            Intrinsic::ParseInt => Some(self.runtime(ctx, Runtime::StdParseInt, args)),
+            Intrinsic::ParseFloat => Some(self.runtime(ctx, Runtime::StdParseFloat, args)),
+            Intrinsic::StringToNumber => Some(self.runtime(ctx, Runtime::StdStringToNumber, args)),
+            Intrinsic::NumberIsNaN => {
+                let x = args[0];
+                Some(self.num(ctx, NumOpcode::F64Ne, vec![x, x]))
+            }
+            Intrinsic::NumberIsFinite => {
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![args[0]]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                Some(self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]))
+            }
+            Intrinsic::NumberIsInteger => {
+                let x = args[0];
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
+                Some(self.num(ctx, NumOpcode::I32And, vec![finite, integral]))
+            }
+            Intrinsic::NumberIsSafeInteger => {
+                let x = args[0];
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+                let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
+                let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
+                Some(self.num(ctx, NumOpcode::I32And, vec![in_range, integral]))
+            }
             Intrinsic::DateFromTime
             | Intrinsic::DateTime
             | Intrinsic::DateParse
@@ -177,6 +207,10 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::JsonCursorBegin => Some(self.runtime(ctx, Runtime::JsonCursorBegin, args)),
             Intrinsic::JsonCursorByte => Some(self.runtime(ctx, Runtime::JsonCursorByte, args)),
             Intrinsic::JsonCursorNumber => Some(self.runtime(ctx, Runtime::JsonCursorNumber, args)),
+            Intrinsic::JsonCursorI64 => Some(self.runtime(ctx, Runtime::JsonCursorI64, args)),
+            Intrinsic::JsonCursorU64 => Some(self.runtime(ctx, Runtime::JsonCursorU64, args)),
+            Intrinsic::JsonToI64 => Some(self.runtime(ctx, Runtime::StdJsonToI64, args)),
+            Intrinsic::JsonToU64 => Some(self.runtime(ctx, Runtime::StdJsonToU64, args)),
             Intrinsic::JsonCursorBoolean => {
                 Some(self.runtime(ctx, Runtime::JsonCursorBoolean, args))
             }

@@ -314,6 +314,9 @@ impl<'s> FunctionBuilder<'s> {
                 self.binary(ctx, BinaryKind::Mul, minus_one, value)
             }
             (UnaryOp::Pos, Kind::Number) => value,
+            (UnaryOp::Pos, Kind::String) => {
+                self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
+            }
             (op, _) => bail!("unary {op:?} on this type is not supported yet"),
         })
     }

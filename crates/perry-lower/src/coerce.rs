@@ -121,6 +121,11 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::ReadResult)
     } else if ty
         .downcast_ref::<IntegerType>()
+        .is_some_and(|int| int.width() == 64)
+    {
+        Ok(Kind::BigInt)
+    } else if ty
+        .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
     {
         Ok(Kind::Boolean)
@@ -244,6 +249,14 @@ impl<'s> FunctionBuilder<'s> {
                 Intrinsic::JsonToString
             } else if self.is_bool_type(ctx, target) {
                 Intrinsic::JsonToBool
+            } else if let Some(int) = target.deref(ctx).downcast_ref::<IntegerType>()
+                && int.width() == 64
+            {
+                if int.is_signed() {
+                    Intrinsic::JsonToI64
+                } else {
+                    Intrinsic::JsonToU64
+                }
             } else {
                 return self.decode_aggregate(ctx, value, target);
             };
@@ -265,6 +278,26 @@ impl<'s> FunctionBuilder<'s> {
             let exception = self.defined(ctx, value)?;
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
             return self.fit(ctx, converted, target);
+        }
+        if thrown.deref(ctx).is::<perry_mir::types::BigIntType>()
+            && wanted
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+        {
+            let defined = self.defined(ctx, value)?;
+            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
+            return self.fit(ctx, casted, target);
+        }
+        if thrown
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int| int.width() == 64)
+            && wanted.deref(ctx).is::<perry_mir::types::BigIntType>()
+        {
+            let defined = self.defined(ctx, value)?;
+            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
+            return self.fit(ctx, casted, target);
         }
         if ty == target {
             Ok(value)
@@ -419,7 +452,20 @@ impl<'s> FunctionBuilder<'s> {
                     },
                 )?
             }
-            Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value]),
+            Kind::BigInt => {
+                let value = if value
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    let bigint = perry_mir::types::BigIntType::get(ctx).into();
+                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
+                } else {
+                    value
+                };
+                self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
+            }
             Kind::String => value,
             Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
             Kind::Number => self.intrinsic(ctx, Intrinsic::NumberToString, vec![value]),

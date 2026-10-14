@@ -187,6 +187,11 @@ impl<'s> FunctionBuilder<'s> {
             let op = call.get_operation().deref(ctx);
             return Ok((op.get_result(0), op.get_result(1)));
         }
+        let int64_signed = ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .filter(|int| int.width() == 64)
+            .map(|int| int.is_signed());
         let (matches, intrinsic) = if ty.deref(ctx).is::<FP64Type>() {
             let minus = self.cursor_is(ctx, byte, b'-');
             let zero = self.cursor_index(ctx, u32::from(b'0'));
@@ -205,6 +210,28 @@ impl<'s> FunctionBuilder<'s> {
                 self.cursor_or(ctx, minus, digits)?,
                 Intrinsic::JsonCursorNumber,
             )
+        } else if let Some(signed) = int64_signed {
+            let minus = self.cursor_is(ctx, byte, b'-');
+            let zero = self.cursor_index(ctx, u32::from(b'0'));
+            let nine = self.cursor_index(ctx, u32::from(b'9'));
+            let lower = self.compare(ctx, CompareKind::Ge, byte, zero);
+            let upper = self.compare(ctx, CompareKind::Le, byte, nine);
+            let boolean = lower.get_type(ctx);
+            let digits = self.choose(
+                ctx,
+                boolean,
+                lower,
+                |_, _| Ok(upper),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+            )?;
+            (
+                self.cursor_or(ctx, minus, digits)?,
+                if signed {
+                    Intrinsic::JsonCursorI64
+                } else {
+                    Intrinsic::JsonCursorU64
+                },
+            )
         } else if ty.deref(ctx).is::<StringType>() {
             (self.cursor_is(ctx, byte, b'"'), Intrinsic::JsonCursorString)
         } else if self.is_bool_type(ctx, ty) {
@@ -220,7 +247,14 @@ impl<'s> FunctionBuilder<'s> {
             matches,
             |b, ctx| {
                 let v = b.intrinsic(ctx, intrinsic, vec![cursor]);
-                let e = b.boolean(ctx, false);
+                let e = if int64_signed.is_some() {
+                    let query = b.cursor_index(ctx, u32::MAX - 1);
+                    let failed = b.intrinsic(ctx, Intrinsic::JsonCursorSeek, vec![cursor, query]);
+                    let zero = b.cursor_index(ctx, 0);
+                    b.compare(ctx, CompareKind::Ne, failed, zero)
+                } else {
+                    b.boolean(ctx, false)
+                };
                 Ok((v, e))
             },
             |b, ctx| Ok(b.cursor_bad(ctx, cursor, ty)),

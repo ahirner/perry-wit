@@ -48,6 +48,8 @@ enum Ty {
     Index,
     /// Unicode scalar value, or -1 for the empty result of charAt. Internal MIR only.
     Scalar,
+    I64,
+    U64,
     Number,
     Bool,
     String,
@@ -102,6 +104,8 @@ impl Ty {
         match self {
             Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
             Ty::Index | Ty::Scalar => crate::collections::index_type(ctx),
+            Ty::I64 => IntegerType::get(ctx, 64, Signedness::Signed).into(),
+            Ty::U64 => IntegerType::get(ctx, 64, Signedness::Unsigned).into(),
             Ty::Number => number,
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Ty::String => string,
@@ -202,6 +206,12 @@ impl Ty {
             Ty::Index | Ty::Scalar => deref
                 .downcast_ref::<IntegerType>()
                 .is_some_and(|i| i.width() == 32),
+            Ty::I64 => deref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|i| i.width() == 64 && i.is_signed()),
+            Ty::U64 => deref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|i| i.width() == 64 && i.is_unsigned()),
             Ty::Number => deref.is::<FP64Type>(),
             Ty::Bool => deref
                 .downcast_ref::<IntegerType>()
@@ -366,6 +376,13 @@ intrinsics! {
     MathSqrt = "math_sqrt" (Number) -> (Number), pure, noalloc;
     MathMin = "math_min" (Number, Number) -> (Number), pure, noalloc;
     MathMax = "math_max" (Number, Number) -> (Number), pure, noalloc;
+    ParseInt = "parse_int" (String, Number) -> (Number), pure, noalloc;
+    ParseFloat = "parse_float" (String) -> (Number), pure, noalloc;
+    StringToNumber = "string_to_number" (String) -> (Number), pure, noalloc;
+    NumberIsNaN = "number_is_nan" (Number) -> (Bool), pure, noalloc;
+    NumberIsFinite = "number_is_finite" (Number) -> (Bool), pure, noalloc;
+    NumberIsInteger = "number_is_integer" (Number) -> (Bool), pure, noalloc;
+    NumberIsSafeInteger = "number_is_safe_integer" (Number) -> (Bool), pure, noalloc;
     DateFromTime = "date_from_time" (Number) -> (Date);
     DateTime = "date_time" (Date) -> (Number), noalloc;
     DateParse = "date_parse" (String) -> (Number), pure, noalloc;
@@ -432,6 +449,8 @@ intrinsics! {
     JsonCursorByte = "json_cursor_byte" (JsonCursor) -> (Index), noalloc;
     JsonCursorConsume = "json_cursor_consume" (JsonCursor, Index) -> (), noalloc;
     JsonCursorNumber = "json_cursor_number" (JsonCursor) -> (Number), noalloc;
+    JsonCursorI64 = "json_cursor_i64" (JsonCursor) -> (I64), throws, noalloc;
+    JsonCursorU64 = "json_cursor_u64" (JsonCursor) -> (U64), throws, noalloc;
     JsonCursorBoolean = "json_cursor_boolean" (JsonCursor) -> (Bool), noalloc;
     JsonCursorString = "json_cursor_string" (JsonCursor) -> (String), atomic;
     JsonCursorDiscard = "json_cursor_discard" (JsonCursor) -> (), noalloc;
@@ -447,6 +466,8 @@ intrinsics! {
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
     JsonLength = "json_length" (Json) -> (OptNumber), throws;
     JsonToNumber = "json_to_number" (Json) -> (Number), throws;
+    JsonToI64 = "json_to_i64" (Json) -> (I64), throws;
+    JsonToU64 = "json_to_u64" (Json) -> (U64), throws;
     JsonRequireNumber = "json_require_number" (Json) -> (Number), throws;
     JsonToString = "json_to_string" (Json) -> (String), throws;
     JsonToBool = "json_to_bool" (Json) -> (Bool), throws;
@@ -614,6 +635,53 @@ impl Intrinsic {
     pub fn has_result(self) -> bool {
         !self.types().1.is_empty()
     }
+
+    /// Semantic numeric contract used by `facts` for range and integer domain propagation.
+    pub(crate) fn numeric_contract(self) -> Option<BuiltinContract> {
+        match self {
+            Self::MathFloor | Self::MathCeil | Self::MathTrunc | Self::MathRound => {
+                Some(BuiltinContract::Round)
+            }
+            Self::MathAbs => Some(BuiltinContract::Abs),
+            Self::MathMin => Some(BuiltinContract::Min),
+            Self::MathMax => Some(BuiltinContract::Max),
+            Self::BytesLength | Self::BufferLength | Self::BytesOffset => {
+                Some(BuiltinContract::UnsignedCount)
+            }
+            Self::BytesAt | Self::BytesGet => Some(BuiltinContract::ByteValue),
+            Self::MathSqrt
+            | Self::ParseInt
+            | Self::ParseFloat
+            | Self::StringToNumber
+            | Self::NumberToString => Some(BuiltinContract::NumberOnly),
+            Self::NumberIsNaN
+            | Self::NumberIsFinite
+            | Self::NumberIsInteger
+            | Self::NumberIsSafeInteger => Some(BuiltinContract::Predicate),
+            _ => None,
+        }
+    }
+}
+
+/// Builtin numeric and value-range contract for `ProgramFacts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuiltinContract {
+    /// `Math.floor`, `Math.ceil`, `Math.trunc`, `Math.round`: identity on exact integers.
+    Round,
+    /// `Math.abs`: preserves integer domain and non-negative bounds when negation cannot overflow.
+    Abs,
+    /// `Math.min`: preserves common integer domain and elementwise minimum bounds.
+    Min,
+    /// `Math.max`: preserves common integer domain and elementwise maximum bounds.
+    Max,
+    /// Non-negative 32-bit byte/buffer length or offset (`0..=u32::MAX`).
+    UnsignedCount,
+    /// Unsigned byte read (`0..=255`).
+    ByteValue,
+    /// Produces or consumes an IEEE-754 `f64` number (`Math.sqrt`, `parseInt`, `parseFloat`, `Number(s)`).
+    NumberOnly,
+    /// Boolean numeric predicate (`Number.isInteger`, `Number.isSafeInteger`, `Number.isFinite`, `Number.isNaN`).
+    Predicate,
 }
 
 /// Whether `op` may throw: it implements [MayThrowInterface], and for intrinsics the service

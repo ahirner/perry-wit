@@ -31,6 +31,14 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, value, Some(ty))?;
             let value = self.fit(ctx, value, ty)?;
             self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
+            if ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+            {
+                let bigint = BigIntType::get(ctx).into();
+                return Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint)));
+            }
             return Ok(value);
         }
         ensure!(
@@ -71,6 +79,14 @@ impl<'s> FunctionBuilder<'s> {
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, record, field.to_string(), value)
         });
+        if field_type
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int| int.width() == 64)
+        {
+            let bigint = BigIntType::get(ctx).into();
+            return Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint)));
+        }
         Ok(value)
     }
 

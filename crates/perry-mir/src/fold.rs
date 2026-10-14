@@ -96,6 +96,11 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
         if operand.get_type(ctx) == operation.get_result(0).get_type(ctx) {
             return Some(Replacement::Value(operand));
         }
+        if let Some(inner) = converted_integer(ctx, operand)
+            && inner.get_type(ctx) == operation.get_result(0).get_type(ctx)
+        {
+            return Some(Replacement::Value(inner));
+        }
     }
     None
 }

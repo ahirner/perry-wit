@@ -58,11 +58,15 @@ pub(crate) fn constrain_numbers(
                 continue;
             };
             let wide = matches!(abi, AbiType::S64 | AbiType::U64);
+            let is_wide_int = source
+                .deref(ctx)
+                .downcast_ref::<pliron::builtin::types::IntegerType>()
+                .is_some_and(|int| int.width() == 64);
             ensure!(
-                !wide || source.deref(ctx).is::<perry_mir::types::BigIntType>(),
+                !wide || source.deref(ctx).is::<perry_mir::types::BigIntType>() || is_wide_int,
                 "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
             );
-            if (wide && source.deref(ctx).is::<perry_mir::types::BigIntType>())
+            if (wide && (source.deref(ctx).is::<perry_mir::types::BigIntType>() || is_wide_int))
                 || (!wide
                     && (source.deref(ctx).is::<FP64Type>()
                         || source.deref(ctx).is::<pliron::builtin::types::IntegerType>()))

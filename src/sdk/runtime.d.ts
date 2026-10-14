@@ -101,4 +101,6 @@ declare module "perry:types" {
   export type s16 = number;
   export type u32 = number;
   export type s32 = number;
+  export type u64 = bigint;
+  export type s64 = bigint;
 }

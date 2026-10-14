@@ -128,6 +128,7 @@ impl<'s> FunctionBuilder<'s> {
             params,
             results,
             integer_params: Vec::new(),
+            integer_result: None,
             wit_signature: None,
         };
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
@@ -462,7 +463,7 @@ pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
             || ty.is::<perry_mir::types::NumberStringType>()
             || ty
                 .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 1))
+                .is_some_and(|int| matches!(int.width(), 1 | 64)))
         {
             return false;
         }

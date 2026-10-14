@@ -66,6 +66,8 @@ pub(crate) fn foreign(resolve: &Resolve) -> HashMap<String, HirType> {
         ("wit:s16", "perry:types/s16"),
         ("wit:u32", "perry:types/u32"),
         ("wit:s32", "perry:types/s32"),
+        ("wit:u64", "perry:types/u64"),
+        ("wit:s64", "perry:types/s64"),
     ] {
         types
             .entry(wit_key.to_string())
@@ -106,7 +108,8 @@ pub(super) fn ty(resolve: &Resolve, ty: &Type) -> Option<HirType> {
         Type::S32 => HirType::Named("perry:types/s32".into()),
         Type::F32 | Type::F64 => HirType::Number,
         Type::Char | Type::String => HirType::String,
-        Type::U64 | Type::S64 => HirType::BigInt,
+        Type::U64 => HirType::Named("perry:types/u64".into()),
+        Type::S64 => HirType::Named("perry:types/s64".into()),
         Type::ErrorContext => return None,
         Type::Id(id) => {
             let definition = &resolve.types[*id];

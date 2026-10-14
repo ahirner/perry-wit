@@ -12,6 +12,7 @@ pub(super) struct Signature {
     pub(super) params: Vec<TypeHandle>,
     pub(super) results: Vec<TypeHandle>,
     pub(super) integer_params: Vec<(LocalId, TypeHandle)>,
+    pub(super) integer_result: Option<TypeHandle>,
     pub(super) wit_signature: Option<(Vec<TypeHandle>, Vec<TypeHandle>)>,
 }
 
@@ -103,8 +104,10 @@ pub(super) fn build_module(
         .map_err(|error| locations.annotate_function(error, &function.name))
         .with_context(|| format!("result of {}", function.name))?;
         let mut wit_results = results.clone();
-        if !function.is_async
-            && let Some(int_ty) = shapes.integer_type(ctx, &function.return_type)
+        let integer_result = (!function.is_async)
+            .then(|| shapes.integer_type(ctx, &function.return_type))
+            .flatten();
+        if let Some(int_ty) = integer_result
             && let Some(slot) = wit_results.first_mut()
         {
             *slot = int_ty;
@@ -121,6 +124,7 @@ pub(super) fn build_module(
                 params,
                 results,
                 integer_params,
+                integer_result,
                 wit_signature: has_integer_sig.then_some((wit_params, wit_results)),
             },
         );
@@ -151,6 +155,7 @@ pub(super) fn build_module(
                 vec![shapes.settled_type(ctx, &HirType::Void)?]
             },
             integer_params: vec![],
+            integer_result: None,
             wit_signature: None,
         };
         let func = FunctionBuilder::lower_body(

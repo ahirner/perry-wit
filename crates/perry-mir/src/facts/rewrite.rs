@@ -82,6 +82,34 @@ struct Implementation {
     results: Vec<TypeHandle>,
 }
 
+fn can_specialize_value(ctx: &Context, value: pliron::value::Value) -> bool {
+    if value
+        .get_type(ctx)
+        .deref(ctx)
+        .is::<crate::types::OptionalType>()
+    {
+        return false;
+    }
+    let Some(op) = value.defining_op() else {
+        return true;
+    };
+    if Operation::get_op::<crate::heap::FieldGetOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::collections::ArrayAtOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::optional::WrapOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::optional::UnwrapOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::optional::OptionalCastOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
+    {
+        return false;
+    }
+    if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx) {
+        return intrinsic.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::BigIntNegate);
+    }
+    true
+}
+
 fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     let mut reachable = HashSet::new();
@@ -111,12 +139,13 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
             });
         let values_change = state.facts.keys().any(|&value| {
-            state.representation(value).is_some_and(|domain| {
-                let ty = value.get_type(ctx);
-                let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
-                    .map_or(ty, |promise| promise.deref(ctx).value());
-                Integer::from_type(ctx, ty) != Some(domain)
-            })
+            can_specialize_value(ctx, value)
+                && state.representation(value).is_some_and(|domain| {
+                    let ty = value.get_type(ctx);
+                    let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
+                        .map_or(ty, |promise| promise.deref(ctx).value());
+                    Integer::from_type(ctx, ty) != Some(domain)
+                })
         });
         if result_changes || values_change {
             changed.insert(id);
@@ -206,6 +235,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let state = &analysis.states[id];
         let body = &analysis.bodies[&analysis.keys[id].function];
         for &value in state.facts.keys() {
+            if !can_specialize_value(ctx, value) {
+                continue;
+            }
             if let Some(domain) = state.representation(value) {
                 let cloned = mapping.lookup_value(value).expect("cloned value");
                 let scalar = domain.ty(ctx);

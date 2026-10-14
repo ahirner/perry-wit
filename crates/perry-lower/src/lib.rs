@@ -71,10 +71,10 @@ use perry_mir::{
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, NumericCastOp},
     types::{
-        AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
-        InstantType, JsonType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,
-        ReadableType, ReaderType, RecordType, RequestType, ResponseType, SettledType, StatsType,
-        StringType, WritableType, WriterType,
+        AbortType, ArrayType, BigIntType, BytesType, DateType, ExceptionType, HeadersType,
+        IncomingType, InstantType, JsonType, PlainDateTimeType, PlainDateType, PromiseType,
+        ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType,
+        SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};

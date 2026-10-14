@@ -98,9 +98,31 @@ impl<'s> FunctionBuilder<'s> {
                             .first()
                             .copied()
                             .context("a void function returns a value")?;
-                        let value = self.expression_with(ctx, expr, Some(expected))?;
+                        let expr_expected = self
+                            .integer_result
+                            .filter(|int_ty| {
+                                int_ty
+                                    .deref(ctx)
+                                    .downcast_ref::<IntegerType>()
+                                    .is_some_and(|int| int.width() == 64)
+                            })
+                            .or(Some(expected));
+                        let value = self.expression_with(ctx, expr, expr_expected)?;
                         if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
                             (Vec::with_capacity(1), Some((value, expected)))
+                        } else if let Some(int_ty) = self.integer_result {
+                            let fitted = if int_ty
+                                .deref(ctx)
+                                .downcast_ref::<IntegerType>()
+                                .is_some_and(|int| int.width() == 64)
+                            {
+                                let int_val = self.fit(ctx, value, int_ty)?;
+                                self.fit(ctx, int_val, expected)?
+                            } else {
+                                let fitted = self.fit(ctx, value, expected)?;
+                                self.wrap_integer(ctx, fitted, int_ty, expected)
+                            };
+                            (vec![fitted], None)
                         } else {
                             (vec![self.fit(ctx, value, expected)?], None)
                         }
@@ -273,14 +295,22 @@ impl<'s> FunctionBuilder<'s> {
             HirType::Array(element) if matches!(**element, HirType::Any) => None,
             ty => Some(self.shapes.value_type(ctx, ty)?),
         };
-        let init = init
-            .map(|e| self.expression_with(ctx, e, declared))
-            .transpose()?;
         let int_ty = self
             .shapes
             .is_explicit_binding(id)
             .then(|| self.shapes.integer_type(ctx, ty))
             .flatten();
+        let expr_expected = int_ty
+            .filter(|int_ty| {
+                int_ty
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+            })
+            .or(declared);
+        let init = init
+            .map(|e| self.expression_with(ctx, e, expr_expected))
+            .transpose()?;
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
         let ty = match (declared, init) {
@@ -311,10 +341,21 @@ impl<'s> FunctionBuilder<'s> {
             self.entry_slot(ctx, ty)
         };
         if let Some(value) = init {
-            let mut value = self.fit(ctx, value, ty)?;
-            if let Some(&int_ty) = self.integer_locals.get(&id) {
-                value = self.wrap_integer(ctx, value, int_ty, ty);
-            }
+            let value = if let Some(&int_ty) = self.integer_locals.get(&id) {
+                if int_ty
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    let int_val = self.fit(ctx, value, int_ty)?;
+                    self.fit(ctx, int_val, ty)?
+                } else {
+                    let fitted = self.fit(ctx, value, ty)?;
+                    self.wrap_integer(ctx, fitted, int_ty, ty)
+                }
+            } else {
+                self.fit(ctx, value, ty)?
+            };
             self.store(ctx, slot, value);
         }
         self.locals.insert(id, slot);

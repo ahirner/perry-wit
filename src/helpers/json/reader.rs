@@ -18,12 +18,25 @@ impl<'a> Reader<'a> {
         Self { input, position: 0 }
     }
     pub(super) fn number(&mut self) -> Result<(), Error> {
-        self.number_token::<false>().map(|_| ())
+        self.scan_number::<false>().map(|_| ())
     }
     pub(super) fn numeric(&mut self) -> Result<f64, Error> {
-        self.number_token::<true>()
+        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
+        Ok(decimal.finish(&self.input.as_bytes()[start..end], negative, exponent))
     }
-    fn number_token<const CONVERT: bool>(&mut self) -> Result<f64, Error> {
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn signed_integer(&mut self) -> Result<Option<i64>, Error> {
+        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
+        Ok(decimal.finish_i64(&self.input.as_bytes()[start..end], negative, exponent))
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn unsigned_integer(&mut self) -> Result<Option<u64>, Error> {
+        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
+        Ok(decimal.finish_u64(&self.input.as_bytes()[start..end], negative, exponent))
+    }
+    fn scan_number<const CONVERT: bool>(
+        &mut self,
+    ) -> Result<(super::number::Decimal, usize, usize, bool, i64), Error> {
         let negative = self.peek() == Some(b'-');
         if negative {
             self.position += 1;
@@ -67,11 +80,7 @@ impl<'a> Reader<'a> {
                 exponent = -exponent;
             }
         }
-        Ok(if CONVERT {
-            decimal.finish(&self.input.as_bytes()[start..end], negative, exponent)
-        } else {
-            0.0
-        })
+        Ok((decimal, start, end, negative, exponent))
     }
 
     pub(super) fn string<const COUNT: bool>(

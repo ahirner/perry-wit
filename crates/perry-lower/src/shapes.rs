@@ -109,7 +109,7 @@ impl<'h> Shapes<'h> {
                 if source == "perry:types"
                     && matches!(
                         imported.as_str(),
-                        "u8" | "s8" | "u16" | "s16" | "u32" | "s32"
+                        "u8" | "s8" | "u16" | "s16" | "u32" | "s32" | "u64" | "s64"
                     )
                 {
                     return Some((local.clone(), format!("perry:types/{imported}")));
@@ -285,13 +285,23 @@ impl<'h> Shapes<'h> {
                 if let Some(alternatives) = results {
                     return self.result(ctx, &alternatives);
                 }
-                if members
-                    .iter()
-                    .any(|ty| matches!(ty, HirType::Number) || self.integer_type(ctx, ty).is_some())
-                    && members.iter().any(|ty| matches!(ty, HirType::String))
+                if members.iter().any(|ty| {
+                    matches!(ty, HirType::Number)
+                        || self.integer_type(ctx, ty).is_some_and(|int_ty| {
+                            int_ty
+                                .deref(ctx)
+                                .downcast_ref::<IntegerType>()
+                                .is_some_and(|int| int.width() <= 32)
+                        })
+                }) && members.iter().any(|ty| matches!(ty, HirType::String))
                     && members.iter().all(|ty| {
                         matches!(ty, HirType::Number | HirType::String)
-                            || self.integer_type(ctx, ty).is_some()
+                            || self.integer_type(ctx, ty).is_some_and(|int_ty| {
+                                int_ty
+                                    .deref(ctx)
+                                    .downcast_ref::<IntegerType>()
+                                    .is_some_and(|int| int.width() <= 32)
+                            })
                     })
                 {
                     return Ok(perry_mir::types::NumberStringType::get(ctx).into());
@@ -327,7 +337,19 @@ impl<'h> Shapes<'h> {
                 let fields = elements
                     .iter()
                     .enumerate()
-                    .map(|(i, ty)| Ok((format!("_{i}"), self.value_type(ctx, ty)?)))
+                    .map(|(i, ty)| {
+                        let ty = if let Some(int_ty) = self.integer_type(ctx, ty)
+                            && int_ty
+                                .deref(ctx)
+                                .downcast_ref::<IntegerType>()
+                                .is_some_and(|int| int.width() == 64)
+                        {
+                            int_ty
+                        } else {
+                            self.value_type(ctx, ty)?
+                        };
+                        Ok((format!("_{i}"), ty))
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 self.mir_record_kind(ctx, fields, true)?.into()
             }
@@ -493,6 +515,8 @@ impl<'h> Shapes<'h> {
             "perry:types/s16" => (16, Signedness::Signed),
             "perry:types/u32" => (32, Signedness::Unsigned),
             "perry:types/s32" => (32, Signedness::Signed),
+            "perry:types/u64" => (64, Signedness::Unsigned),
+            "perry:types/s64" => (64, Signedness::Signed),
             _ => return None,
         };
         Some(IntegerType::get(ctx, bits, signedness).into())
@@ -565,16 +589,32 @@ impl<'h> Shapes<'h> {
     }
 
     fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
-        if Self::perry_integer_type(ctx, name).is_some() {
-            return Ok(FP64Type::get(ctx).into());
+        if let Some(int_ty) = Self::perry_integer_type(ctx, name) {
+            return Ok(if int_ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+            {
+                perry_mir::types::BigIntType::get(ctx).into()
+            } else {
+                FP64Type::get(ctx).into()
+            });
         }
         // Built-in classes the subset models (a user type of the same name takes precedence).
         let user = self.hir.interfaces.iter().any(|i| i.name == name)
             || self.hir.type_aliases.iter().any(|a| a.name == name);
         if !user {
             let key = self.aliases.get(name).map_or(name, String::as_str);
-            if Self::perry_integer_type(ctx, key).is_some() {
-                return Ok(FP64Type::get(ctx).into());
+            if let Some(int_ty) = Self::perry_integer_type(ctx, key) {
+                return Ok(if int_ty
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    perry_mir::types::BigIntType::get(ctx).into()
+                } else {
+                    FP64Type::get(ctx).into()
+                });
             }
             if let Some(foreign) = self.foreign.get(key) {
                 return self.value_type(ctx, foreign);
@@ -675,9 +715,18 @@ impl<'h> Shapes<'h> {
         let typed = fields
             .iter()
             .map(|(field, ty, optional)| {
-                let ty = self
-                    .value_type(ctx, ty)
-                    .with_context(|| format!("field {field}"))?;
+                let ty = if !*optional
+                    && let Some(int_ty) = self.integer_type(ctx, ty)
+                    && int_ty
+                        .deref(ctx)
+                        .downcast_ref::<IntegerType>()
+                        .is_some_and(|int| int.width() == 64)
+                {
+                    int_ty
+                } else {
+                    self.value_type(ctx, ty)
+                        .with_context(|| format!("field {field}"))?
+                };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()
                 } else {

@@ -135,6 +135,8 @@ runtime_functions! {
     JsonCursorByte = "json_cursor_byte" (I32) -> I32;
     JsonCursorConsume = "json_cursor_consume" (I32, I32);
     JsonCursorNumber = "json_cursor_number" (I32) -> F64;
+    JsonCursorI64 = "json_cursor_i64" (I32) -> I64;
+    JsonCursorU64 = "json_cursor_u64" (I32) -> I64;
     JsonCursorBoolean = "json_cursor_boolean" (I32) -> I32;
     JsonCursorString = "json_cursor_string" (I32) -> I32;
     JsonCursorDiscard = "json_cursor_discard" (I32);
@@ -254,13 +256,19 @@ runtime_functions! {
     StdJsonSet = "std_json_set" (I32, I32, I32);
     StdJsonToBool = "std_json_to_bool" (I32) -> I32;
     StdJsonToNumber = "std_json_to_number" (I32) -> F64;
+    StdJsonToI64 = "std_json_to_i64" (I32) -> I64;
+    StdJsonToU64 = "std_json_to_u64" (I32) -> I64;
     StdJsonToString = "std_json_to_string" (I32) -> I32;
     StdJsonTruthy = "std_json_truthy" (I32) -> I32;
     StdJsonDisplay = "std_json_display" (I32) -> I32;
     StdJsonTypeOf = "std_json_type_of" (I32) -> I32;
     StdJsonValue = "std_json_value" (I32, I32);
+    StdJsonWriteI64 = "std_json_write_i64" (I32, I64);
+    StdJsonWriteU64 = "std_json_write_u64" (I32, I64);
     StdJsonWriter = "std_json_writer" () -> I32;
     StdMathRandom = "std_math_random" () -> F64;
+    StdParseFloat = "std_parse_float" (I32) -> F64;
+    StdParseInt = "std_parse_int" (I32, F64) -> F64;
     StdRaiseInvalidDate = "std_raise_invalid_date" () -> I32;
     StdRandomUuid = "std_random_uuid" () -> I32;
     StdRegexSearch = "std_regex_search" (I32, I32) -> F64;
@@ -278,6 +286,7 @@ runtime_functions! {
     StdStringSplit = "std_string_split" (I32, I32) -> I32;
     StdStringStartsWith = "std_string_starts_with" (I32, I32, F64) -> I32;
     StdStringSubstring = "std_string_substring" (I32, F64, F64) -> I32;
+    StdStringToNumber = "std_string_to_number" (I32) -> F64;
     StdStringTrim = "std_string_trim" (I32) -> I32;
     StdTextEncode = "std_text_encode" (I32) -> I32;
     StrCaseConvert = "str_case_convert" (I32, I32, I32, I32) -> I64;

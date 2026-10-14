@@ -260,8 +260,17 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `JSON.stringify(value)`.
-    pub(super) fn stringify(&mut self, ctx: &mut Context, value: &'s Expr) -> Result<Value> {
-        let value = self.expression(ctx, value)?;
+    pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        let mut value = self.expression(ctx, expr)?;
+        if let Expr::LocalGet(id) = expr
+            && let Some(&int_ty) = self.integer_locals.get(id)
+            && int_ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+        {
+            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_ty));
+        }
         Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }
 
@@ -362,14 +371,16 @@ impl<'s> FunctionBuilder<'s> {
     /// `Number(value)`.
     pub(super) fn number_coerce(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
+        let value = self.arithmetic(ctx, value);
         ensure!(
             kind(ctx, value)? != Kind::NumberString,
             "narrow number | string before numeric conversion"
         );
-        Ok(if kind(ctx, value)? == Kind::BigInt {
-            self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value])
-        } else {
-            self.arithmetic(ctx, value)
+        Ok(match kind(ctx, value)? {
+            Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value]),
+            Kind::String => self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value]),
+            Kind::Number => value,
+            _ => bail!("Number conversion requires a number, bigint or string"),
         })
     }
 
