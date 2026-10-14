@@ -177,7 +177,7 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = exception.get_type(ctx);
                 let slot = self.entry_slot(ctx, ty);
                 self.store(ctx, slot, exception);
-                self.locals.insert(*id, slot);
+                self.locals.insert(*id, LocalBinding::plain(slot));
             }
             if let Some(rethrow) = rethrow_block {
                 self.finallies.push(outer);

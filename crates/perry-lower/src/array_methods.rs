@@ -231,24 +231,22 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::FuncRef(id) = callback {
             let signature = self.signatures.get(id).context("unknown callback")?;
             ensure!(
-                !signature.is_async
-                    && signature.params.len() <= arguments.len()
-                    && signature.results.len() <= 1,
+                !signature.is_async && signature.params.len() <= arguments.len(),
                 "array callbacks require synchronous functions with at most three parameters"
             );
             let values = arguments
                 .iter()
                 .zip(&signature.params)
-                .map(|(&v, &ty)| self.fit(ctx, v, ty))
+                .map(|(&v, param)| self.fit(ctx, v, param.carrier))
                 .collect::<Result<Vec<_>>>()?;
             let call = CallOp::new(
                 ctx,
                 signature.name.clone(),
                 values,
-                signature.results.clone(),
+                signature.carrier_results(),
             );
             self.append(ctx, &call);
-            return Ok(if signature.results.is_empty() {
+            return Ok(if signature.result.is_none() {
                 let ty = FP64Type::get(ctx).into();
                 self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
             } else {
@@ -279,7 +277,7 @@ impl<'s> FunctionBuilder<'s> {
         for (param, &value) in params.iter().zip(arguments) {
             let slot = self.entry_slot(ctx, value.get_type(ctx));
             self.store(ctx, slot, value);
-            self.locals.insert(param.id, slot);
+            self.locals.insert(param.id, LocalBinding::plain(slot));
         }
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);

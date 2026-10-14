@@ -45,18 +45,14 @@ fn is_resolvable_type(ty: &HirType) -> bool {
 
 fn expression(expr: &Expr, env: &FunctionEnv<'_>) -> HirType {
     let ty = match expr {
-        Expr::Call { callee, .. } | Expr::CallSpread { callee, .. }
-            if matches!(
-                &**callee,
-                Expr::PropertyGet { property, .. }
-                    if matches!(property.as_str(), "concat" | array_methods::CONCAT)
-            ) =>
-        {
-            let Expr::PropertyGet { object, .. } = &**callee else {
-                unreachable!();
-            };
-            expression(object, env)
-        }
+        Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => match callee.as_ref() {
+            Expr::PropertyGet {
+                object, property, ..
+            } if matches!(property.as_str(), "concat" | array_methods::CONCAT) => {
+                expression(object, env)
+            }
+            _ => perry_hir::infer_expr_type(expr, env),
+        },
         Expr::PropertyGet {
             object, property, ..
         } => match expression(object, env) {
@@ -452,8 +448,9 @@ fn push_return_type(
             }
             return;
         }
-        if !types.contains(&HirType::Union(members.clone())) {
-            types.push(HirType::Union(members));
+        let union = HirType::Union(members);
+        if !types.contains(&union) {
+            types.push(union);
         }
         return;
     }

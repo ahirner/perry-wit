@@ -126,6 +126,28 @@ Pliron's `Passes` and `AnalysisManager` schedule verified transformations and ca
 
 WIT constraints enter before arithmetic folding. Cached `ProgramFacts` uses one dependency queue for numeric domains, ranges, result-width requirements, reference-parameter provenance and callee effects. Dependencies connect SSA values, CFG edges, synchronous and asynchronous calls, and every return result. Queue membership bits suppress duplicate work. Local effects are classified once per snapshot; changing a callee summary revisits dependent call sites. Function contexts are keyed by argument domains and result requirements. Finite domain choices, recursive context reuse and conservative range widening ensure termination. Representation rewriting fixes integer wrap points before algebraic optimization. Contexts that preserve representations and callee choices reuse the original body. The same snapshot supplies bounds-check facts. The [numeric semantics](README.md#semantics) define wrapping, widening, exact 64-bit values and floating-point boundaries.
 
+##### Type and Fact Product Lattice
+
+`ProgramFacts` computes the least fixpoint over a reduced product lattice ([Cousot & Cousot 1979]) $\mathcal{L} = \mathcal{D}_{\text{num}} \times \mathcal{I}_{\text{range}} \times \mathcal{R}_{\text{req}} \times \mathcal{O}_{\text{out}} \times \mathcal{H}_{\text{heap}}$ across the interprocedural dependency graph:
+
+1. **Bottom (`never` / $\bot$)**: Unreachable control-flow paths, non-terminating expressions (`throw`, `process.exit`), and unvisited SSA values sit at $\bot$ (`Fact::Bottom`, `Range::Bottom`, `ResultDomain::Bottom`, `Outcomes::default()`), satisfying $\bot \sqcup x = x$ so dead or diverging paths never pollute reachable joins.
+2. **Forward Numeric Domain Lattice ($\mathcal{D}_{\text{num}}$)**:
+   $$\bot < \mathcal{I} < \mathsf{Float}\;(\mathtt{f64})$$
+   where the integer sub-lattice $\mathcal{I} = \{ \mathtt{u8}, \mathtt{s8}, \mathtt{u16}, \mathtt{s16}, \mathtt{u32}, \mathtt{s32}, \mathtt{u64}, \mathtt{s64} \}$ is partially ordered by value-set inclusion (`Integer::common`):
+   - **Same signedness**: $\mathtt{u8} \sqsubset \mathtt{u16} \sqsubset \mathtt{u32} \sqsubset \mathtt{u64}$ and $\mathtt{s8} \sqsubset \mathtt{s16} \sqsubset \mathtt{s32} \sqsubset \mathtt{s64}$ with join $\max(w_1, w_2)$.
+   - **Mixed signedness ($\mathtt{u}w_u \sqcup \mathtt{s}w_s$)**: If $w_s > w_u$, the signed domain already subsumes the unsigned range ($\mathtt{u8} \sqcup \mathtt{s16} = \mathtt{s16}$, $\mathtt{u16} \sqcup \mathtt{s32} = \mathtt{s32}$, $\mathtt{u32} \sqcup \mathtt{s64} = \mathtt{s64}$). If $w_s \le w_u < 64$, the join steps up one bitwidth level in $\{8, 16, 32, 64\}$ to the smallest signed width $w' > w_u$ ($\mathtt{u8} \sqcup \mathtt{s8} = \mathtt{s16}$, $\mathtt{u16} \sqcup \mathtt{s16} = \mathtt{s32}$, $\mathtt{u32} \sqcup \mathtt{s32} = \mathtt{s64}$). At 64 bits, $\mathtt{u64} \sqcup \mathtt{s64} = \mathtt{u64}$.
+   - Joining any integer domain with $\mathsf{Float}$ yields $\mathsf{Float}$ ($\top_{\text{num}}$).
+3. **Backward Result-Requirement Lattice ($\mathcal{R}_{\text{req}}$) and Unconstrained 64-Bit Promotion ([Stephenson et al. 2000])**:
+   $$\bot_{\text{req}}\;(\text{unconstrained}) < \mathsf{Integer}(\mathcal{I}) < \mathsf{Float}\;(\top_{\text{req}})$$
+   Backward demand propagates from WIT export signatures, explicit `perry:types` / WIT integer type annotations and casts, array indices, and bitwise operations. When an integer arithmetic expression (`+`, `-`, `*`) has no narrower backward requirement ($\bot_{\text{req}}$), `width_defaults` promotes its evaluation domain via `integer.unconstrained()` to 64 bits ($\mathtt{s64}$ or $\mathtt{u64}$, lowered to native WebAssembly `i64`). For example, an unconstrained intermediate `const c: number = a + b` over `a: u8` and `b: s16` evaluates in `i64` ($\mathtt{s64}$), preventing premature 16-bit signed overflow while executing in single-instruction native WebAssembly registers without `BigInt` heap allocation.
+4. **Interval Range Lattice ($\mathcal{I}_{\text{range}}$) with Threshold Widening ([Cousot & Cousot 1977], [Rodrigues et al. 2013])**:
+   $$\bot_{\text{range}} < [l, u] \subseteq [-2^{63}, 2^{64}-1] < \top_{\text{range}}$$
+   After 8 updates at a value (`RANGE_WIDEN_STEP`), unstable bounds apply threshold widening $\nabla$ through the bitwidth landmarks of the active integer domain before reaching $\top_{\text{range}}$.
+5. **Aggregate, Optional, and Promise Outcome Lattices ($\mathcal{H}_{\text{heap}}, \mathcal{O}_{\text{out}}$)**:
+   - Optional facts pair `OptionalPresence` ($\bot < \{\mathsf{Present}, \mathsf{Absent}\} < \mathsf{Unknown}$) with the payload `(Fact, Range)` and `Absence` mask ($\emptyset \subset \{\mathsf{Null}, \mathsf{Undefined}\} \subset \mathsf{Both}$).
+   - Record fields and array element summaries propagate `(Fact, Range)` across bounded allocation-site alias sets ($\le 32$ sites before collapsing to a per-type summary site), and `Outcomes` tracks promise settlement sets ($\mathsf{Fulfilled}$ payloads and $\mathsf{Rejected}$ flags).
+6. **Bounded Context Specialization**: At most 32 precise `(arg_domains, required_result)` contexts are specialized per function before additional call sites join monotonically into a `Summarized` context.
+
 Aggregate allocation identities and stable slot ranges participate in the same worklist before decomposition. Record fields, array element summaries, block arguments, retained calls and return values preserve aliases. Writes join into their selected slots, including writes reached through aliases; unrelated record fields retain their facts. Array extension copies element facts while preserving references to shared elements. Unknown storage or calls invalidate reachable objects, and recursive source schemas use finite reserved summary identities. Each alias set holds at most 32 allocation sites before collapsing to a typed summary; the optimizer reports these fallbacks. Collapse also invalidates existing aliases, with a one-time cost proportional to the affected objects. Heap operations and field indices are classified once per MIR snapshot. Range propagation does not change storage types, and does not yet provide aggregate integer specialization, heap versions or refinement after individual writes. The declared ABI and carrier layouts remain authoritative.
 
 Array identities carry length bounds and subscribe their readers to the same queue. Dense literals establish an initialized prefix. Writes inside that prefix preserve the exact length; possible appends and extensions retain the minimum length while widening the maximum. Unknown views or calls remove precise bounds. These are stable bounds across all executions of an allocation site, not lengths at individual program points. The bounds pass borrows the facts to replace fixed lengths with constants and proven reads with unchecked projections. Existing canonicalization and pliron SCCP/DCE remove the resulting optional checks and length-only allocations. Optional elements remain optional; byte-buffer detachment retains its separate legality checks.
@@ -134,9 +156,9 @@ Runtime summaries retain allocation, collection, suspension, reentry, record mut
 
 #### JSON construction
 
-An expected JSON type selects a generated MIR decoder for numbers, booleans, strings, numeric/string unions, optional values, records, arrays and tuples. Recursive schemas reserve decoder identities before constructing their bodies. The decoder writes known fields directly into native storage and retains unknown fields in JSON residue. Dynamic JSON and schemas requiring snapshot conversion use the shared graph destination.
+An expected JSON type selects a generated MIR decoder for numbers, exact 64-bit integers (`s64`/`u64`), booleans, strings, numeric/string unions, optional values, records, arrays and tuples. Recursive schemas reserve decoder identities before constructing their bodies. The decoder writes known fields directly into native storage and retains unknown fields in JSON residue. Dynamic JSON and schemas requiring snapshot conversion use the shared graph destination. When a typed `JSON.parse<T>(JSON.stringify(x))` round-trip operates on a statically known source shape without unknown JSON residue, `NormalizeJsonCopyPass` rewrites it directly into an allocating, schema-normalizing MIR deep copy (`NaN`/`±Infinity` to `null` or `SyntaxError`, `-0.0` to `+0.0`, `undefined` elements to `null`, and dropped omitted fields) without serializing or reparsing text.
 
-Typed construction and dynamic parsing share the JSON lexer, Unicode-escape validation and number conversion. Runtime strings carry validated immutable UTF-8; both parser destinations preserve that contract instead of rescanning it. Raw byte adapters validate UTF-8 before entering the shared lexer. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior. Numeric JSON storage uses the existing floating representation. Fixed-width and exceptional numeric layouts belong to compositional inference.
+Typed construction and dynamic parsing share the JSON lexer, Unicode-escape validation and number conversion. Runtime strings carry validated immutable UTF-8; both parser destinations preserve that contract instead of rescanning it. Raw byte adapters validate UTF-8 before entering the shared lexer. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior, while `s64` and `u64` targets parse and format exact 64-bit signed and unsigned integer tokens directly.
 
 A decoder carries its lookahead through SSA and returns a value plus a deferred schema-failure flag. Repeated object keys replace both the candidate value and its schema result. Syntax errors take precedence at completion; malformed input unwinds bounded container state while partial values remain unpublished. Parsing preserves the depth limit of 128, nullable/absent distinctions and independent mutable views of immutable snapshots.
 
@@ -270,10 +292,18 @@ The scalar artifact test inspects named and stripped Wasm: pure `s32` addition i
 
 ## References
 
+- **[Cousot & Cousot 1977]**: P. Cousot, R. Cousot. *Abstract Interpretation: A Unified Lattice Model for Static Analysis of Programs by Construction or Approximation of Fixpoints*. ACM POPL, pp. 238–252, 1977.
+- **[Cousot & Cousot 1979]**: P. Cousot, R. Cousot. *Systematic Design of Program Analysis Frameworks*. ACM POPL, pp. 269–282, 1979.
 - **[Liskov & Shrira 1988]**: B. Liskov, L. Shrira. *Promises: Linguistic Support for Efficient Asynchronous Procedure Calls in Distributed Systems*. ACM PLDI, pp. 260–267, 1988.
+- **[Stephenson et al. 2000]**: M. Stephenson, J. Babb, S. Amarasinghe. *Bitwidth Analysis with Application to Silicon Compilation*. ACM PLDI, pp. 108–120, 2000.
+- **[Rodrigues et al. 2013]**: R. E. Rodrigues, V. H. S. Campos, F. M. Q. Pereira. *A Fast and Low-Overhead Technique to Secure Programs Against Integer Overflows*. IEEE/ACM CGO, 2013.
 - **[Ramsey 2022]**: N. Ramsey. *Beyond Relooper: Recursive Translation of Unstructured Control Flow to Structured Control Flow (Functional Pearl)*. Proceedings of the ACM on Programming Languages 6(ICFP), 2022.
 - **[Canonical ABI]**: WebAssembly Community Group. *Canonical ABI Explainer*. WebAssembly/component-model, living design document.
 
+[Cousot & Cousot 1977]: https://doi.org/10.1145/512950.512973
+[Cousot & Cousot 1979]: https://doi.org/10.1145/567752.567778
 [Liskov & Shrira 1988]: https://doi.org/10.1145/53990.54016
+[Stephenson et al. 2000]: https://doi.org/10.1145/349299.349317
+[Rodrigues et al. 2013]: https://doi.org/10.1109/CGO.2013.6494993
 [Ramsey 2022]: https://doi.org/10.1145/3547621
 [Canonical ABI]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md

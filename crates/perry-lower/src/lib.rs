@@ -100,14 +100,16 @@ use pliron::{
     utils::apint::{APInt, bw},
     value::Value,
 };
-use shapes::{Shapes, identifier};
+use shapes::{BindingType, Shapes, identifier};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// HIR types, for callers that describe foreign (WIT) types.
 pub mod hir {
     pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
 }
-use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, remove_unreachable};
+use builder::{
+    Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding, remove_unreachable,
+};
 use coerce::{Kind, kind, void_type};
 use program::{Builtin, Signature};
 

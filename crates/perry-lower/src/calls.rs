@@ -7,8 +7,22 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
+        byte_offset: u32,
     ) -> Result<Option<Value>> {
         if let Expr::ExternFuncRef { name, .. } = callee {
+            if matches!(
+                name.as_str(),
+                "js_global_get_or_throw_unresolved"
+                    | "js_global_assign_existing_or_throw"
+                    | "js_global_update"
+            ) && let Some(Expr::String(ident)) = args.first()
+            {
+                return Err(self.shapes.annotate_byte_offset(
+                    anyhow!("cannot find name '{ident}'"),
+                    byte_offset,
+                    ident.len() as u32,
+                ));
+            }
             use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
             match (name.as_str(), args) {
                 (TDZ_CHECK, [Expr::LocalGet(id), Expr::String(_)]) => {
@@ -220,20 +234,20 @@ impl<'s> FunctionBuilder<'s> {
             .iter()
             .zip(params)
             .map(|(arg, param)| {
-                let value = self.expression_with(ctx, arg, Some(*param))?;
-                self.fit(ctx, value, *param)
+                let value = self.expression_with(ctx, arg, Some(param.carrier))?;
+                self.fit(ctx, value, param.carrier)
             })
             .collect::<Result<Vec<_>>>()?;
         if signature.is_async {
-            let &[value] = signature.results.as_slice() else {
+            let Some(result) = signature.result else {
                 bail!("async function {name} settles one result");
             };
             let promise = self.emit_value(ctx, |ctx| {
-                AsyncCallOp::new(ctx, name.clone(), values, value)
+                AsyncCallOp::new(ctx, name.clone(), values, result.carrier)
             });
             return Ok(Some(promise));
         }
-        let op = CallOp::new(ctx, name.clone(), values, signature.results.clone());
+        let op = CallOp::new(ctx, name.clone(), values, signature.carrier_results());
         self.append(ctx, &op);
         let operation = op.get_operation().deref(ctx);
         Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))

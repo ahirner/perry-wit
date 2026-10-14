@@ -6,14 +6,32 @@ pub(super) const ESM_EXPORT_INIT: &str = "js_native_module_named_esm_export_valu
 
 pub(super) struct Signature {
     pub(super) name: Identifier,
-    /// `async`: callers start it with `perry.async_call` and get a promise of `results[0]`.
+    /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
-    pub(super) params: Vec<TypeHandle>,
-    pub(super) results: Vec<TypeHandle>,
-    pub(super) integer_params: Vec<(LocalId, TypeHandle)>,
-    pub(super) integer_result: Option<TypeHandle>,
-    pub(super) wit_signature: Option<(Vec<TypeHandle>, Vec<TypeHandle>)>,
+    pub(super) params: Vec<BindingType>,
+    pub(super) result: Option<BindingType>,
+}
+
+impl Signature {
+    pub(super) fn carrier_params(&self) -> Vec<TypeHandle> {
+        self.params.iter().map(|p| p.carrier).collect()
+    }
+
+    pub(super) fn carrier_results(&self) -> Vec<TypeHandle> {
+        self.result.iter().map(|r| r.carrier).collect()
+    }
+
+    pub(super) fn wit_constraints(&self) -> Option<(Vec<TypeHandle>, Vec<TypeHandle>)> {
+        (self.params.iter().any(|p| p.integer.is_some())
+            || self.result.is_some_and(|r| r.integer.is_some()))
+        .then(|| {
+            (
+                self.params.iter().map(|p| p.wit_type()).collect(),
+                self.result.iter().map(|r| r.wit_type()).collect(),
+            )
+        })
+    }
 }
 
 pub(super) fn build_module(
@@ -68,9 +86,6 @@ pub(super) fn build_module(
             function.name
         );
 
-        let mut integer_params = Vec::new();
-        let mut wit_params = Vec::with_capacity(function.params.len());
-        let mut has_integer_sig = false;
         let params = function
             .params
             .iter()
@@ -80,39 +95,30 @@ pub(super) fn build_module(
                     "default and rest parameters are not supported yet: {}",
                     function.name
                 );
-                let ty = shapes
+                let carrier = shapes
                     .value_type(ctx, &param.ty)
                     .map_err(|error| shapes.annotate_local(error, param.id))
                     .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
-                if let Some(int_ty) = shapes.integer_type(ctx, &param.ty) {
-                    integer_params.push((param.id, int_ty));
-                    wit_params.push(int_ty);
-                    has_integer_sig = true;
-                } else {
-                    wit_params.push(ty);
-                }
-                Ok(ty)
+                let integer = shapes.integer_type(ctx, &param.ty);
+                Ok(BindingType { carrier, integer })
             })
             .collect::<Result<Vec<_>>>()?;
-        let results = match (&function.return_type, function.is_async) {
-            (HirType::Void, false) => Ok(vec![]),
+        let result_carrier = match (&function.return_type, function.is_async) {
+            (HirType::Void, false) => Ok(None),
             // An async function settles its promise with its result; `void` settles `undefined`.
-            (HirType::Promise(inner), true) => shapes.settled_type(ctx, inner).map(|ty| vec![ty]),
-            (ty, true) => shapes.settled_type(ctx, ty).map(|ty| vec![ty]),
-            (ty, false) => shapes.value_type(ctx, ty).map(|ty| vec![ty]),
+            (HirType::Promise(inner), true) => shapes.settled_type(ctx, inner).map(Some),
+            (ty, true) => shapes.settled_type(ctx, ty).map(Some),
+            (ty, false) => shapes.value_type(ctx, ty).map(Some),
         }
         .map_err(|error| locations.annotate_function(error, &function.name))
         .with_context(|| format!("result of {}", function.name))?;
-        let mut wit_results = results.clone();
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
             .flatten();
-        if let Some(int_ty) = integer_result
-            && let Some(slot) = wit_results.first_mut()
-        {
-            *slot = int_ty;
-            has_integer_sig = true;
-        }
+        let result = result_carrier.map(|carrier| BindingType {
+            carrier,
+            integer: integer_result,
+        });
         signatures.insert(
             function.id,
             Signature {
@@ -122,10 +128,7 @@ pub(super) fn build_module(
                     && locations.async_init(),
                 name: identifier(&function.name)?,
                 params,
-                results,
-                integer_params,
-                integer_result,
-                wit_signature: has_integer_sig.then_some((wit_params, wit_results)),
+                result,
             },
         );
     }
@@ -149,14 +152,13 @@ pub(super) fn build_module(
             is_async: !persistent || locations.async_init(),
             await_initialization: false,
             params: vec![],
-            results: if persistent && !locations.async_init() {
-                vec![]
+            result: if persistent && !locations.async_init() {
+                None
             } else {
-                vec![shapes.settled_type(ctx, &HirType::Void)?]
+                Some(BindingType::plain(
+                    shapes.settled_type(ctx, &HirType::Void)?,
+                ))
             },
-            integer_params: vec![],
-            integer_result: None,
-            wit_signature: None,
         };
         let func = FunctionBuilder::lower_body(
             ctx,
@@ -180,8 +182,8 @@ pub(super) fn build_module(
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::diagnostics::set_source_span(ctx, &func, &span);
         }
-        if let Some((wit_params, wit_results)) = &signatures[&function.id].wit_signature {
-            perry_mir::facts::constrain(ctx, &func, wit_params.clone(), wit_results.clone());
+        if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
+            perry_mir::facts::constrain(ctx, &func, wit_params, wit_results);
         }
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);

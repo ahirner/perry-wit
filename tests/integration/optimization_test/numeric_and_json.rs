@@ -63,40 +63,54 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
             return a + b;
         }
     "#;
-    let compiled =
-        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
     let mut program = crate::core_program::Program::from_wasm(compiled.core);
     assert_eq!(
         program
-            .call("wrap-local", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .call(
+                "wrap-local",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)]
+            )
             .0[0]
             .unwrap_i32(),
         254
     );
     assert_eq!(
         program
-            .call("widen-helper", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .call(
+                "widen-helper",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)]
+            )
             .0[0]
             .unwrap_i32(),
         510
     );
     assert_eq!(
         program
-            .call("narrow-helper", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .call(
+                "narrow-helper",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)]
+            )
             .0[0]
             .unwrap_i32(),
         254
     );
     assert_eq!(
         program
-            .call("signed-step", &[wasmtime::Val::I32(120), wasmtime::Val::I32(20)])
+            .call(
+                "signed-step",
+                &[wasmtime::Val::I32(120), wasmtime::Val::I32(20)]
+            )
             .0[0]
             .unwrap_i32(),
         -116
     );
     assert_eq!(
         program
-            .call("wit-alias", &[wasmtime::Val::I32(255), wasmtime::Val::I32(2)])
+            .call(
+                "wit-alias",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(2)]
+            )
             .0[0]
             .unwrap_i32(),
         1
@@ -204,8 +218,7 @@ fn builtin_numeric_contracts_and_string_number_parsers_match_js_semantics() -> R
             return rounded + code;
         }
     "#;
-    let compiled =
-        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
     let mut program = crate::core_program::Program::from_wasm(compiled.core);
     assert_eq!(
         program.call("parse-int-cases", &[]).0[0].unwrap_i32(),
@@ -280,10 +293,17 @@ fn exact_64_bit_json_integer_codecs_preserve_precision() -> Result<()> {
             return output.signed === signed && output.unsigned === unsigned;
         }
     "#;
-    let compiled =
-        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
     let mut program = crate::core_program::Program::from_wasm(compiled.core);
-    for signed in [0i64, 1, -1, 9007199254740993, -9007199254740993, i64::MAX, i64::MIN] {
+    for signed in [
+        0i64,
+        1,
+        -1,
+        9007199254740993,
+        -9007199254740993,
+        i64::MAX,
+        i64::MIN,
+    ] {
         assert_eq!(
             program
                 .call("roundtrip-signed", &[wasmtime::Val::I64(signed)])
@@ -295,10 +315,7 @@ fn exact_64_bit_json_integer_codecs_preserve_precision() -> Result<()> {
     for unsigned in [0u64, 1, 9007199254740993, (i64::MAX as u64) + 42, u64::MAX] {
         assert_eq!(
             program
-                .call(
-                    "roundtrip-unsigned",
-                    &[wasmtime::Val::I64(unsigned as i64)],
-                )
+                .call("roundtrip-unsigned", &[wasmtime::Val::I64(unsigned as i64)],)
                 .0[0]
                 .unwrap_i64() as u64,
             unsigned
@@ -582,8 +599,7 @@ fn normalize_json_copy_rewrites_parse_stringify_and_preserves_edge_cases() -> Re
             return raw !== null && out === '{"count":10,"items":[1],"unknownResidue":77}' ? 1 : 0;
         }
     "#;
-    let compiled =
-        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
     assert!(
         compiled
             .allocation_report
@@ -605,26 +621,154 @@ fn normalize_json_copy_rewrites_parse_stringify_and_preserves_edge_cases() -> Re
         program
             .call(
                 "copy-isolation",
+                &[wasmtime::Val::I64(exact_u64), wasmtime::Val::I64(exact_s64),],
+            )
+            .0[0]
+            .unwrap_i32(),
+        1
+    );
+    assert_eq!(program.call("edge-normalization", &[]).0[0].unwrap_i32(), 1);
+    assert_eq!(program.call("non-finite-throws", &[]).0[0].unwrap_i32(), 11);
+    assert_eq!(program.call("untyped-missed", &[]).0[0].unwrap_i32(), 1);
+    Ok(())
+}
+
+#[test]
+fn zero_perry_types_wit_specialization_and_bitwidth_widening() -> Result<()> {
+    let wit_src = r#"
+        package test:optimization;
+        world test {
+            export u8-plus-s8: func(a: u8, b: s8) -> s16;
+            export u16-plus-s16: func(a: u16, b: s16) -> s32;
+            export u8-plus-s16-unconstrained: func(a: u8, b: s16) -> s32;
+            export u32-plus-s32-unconstrained: func(a: u32, b: s32) -> s32;
+            export u32-plus-u32-unconstrained: func(a: u32, b: u32) -> s32;
+            export bigint-s64: func(a: s64, b: s64) -> s64;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    // Pure TypeScript: zero `perry:types` imports.
+    let source = r#"
+        function addThroughHelper(x: number, y: number): number {
+            const c: number = x + y;
+            return c;
+        }
+
+        export function u8PlusS8(a: number, b: number): number {
+            return addThroughHelper(a, b);
+        }
+
+        export function u16PlusS16(a: number, b: number): number {
+            return addThroughHelper(a, b);
+        }
+
+        export function u8PlusS16Unconstrained(a: number, b: number): number {
+            const c: number = addThroughHelper(a, b);
+            return c > 33000 ? c : -1;
+        }
+
+        export function u32PlusS32Unconstrained(a: number, b: number): number {
+            const c: number = a + b;
+            return c > 4500000000 ? 1 : 0;
+        }
+
+        export function u32PlusU32Unconstrained(a: number, b: number): number {
+            const c: number = a + b;
+            return c > 5000000000 ? 1 : 0;
+        }
+
+        export function bigintS64(a: bigint, b: bigint): bigint {
+            const c: bigint = a + b;
+            return c;
+        }
+    "#;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let wat = wasmprinter::print_bytes(&compiled.core)?;
+    assert!(
+        !wat.contains("f64."),
+        "expected pure integer specialization without f64 ops:\n{wat}"
+    );
+    assert!(
+        wat.contains("i64.add"),
+        "expected unconstrained intermediate additions to widen to i64.add:\n{wat}"
+    );
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    // u8 (255) + s8 (127) -> s16 (382)
+    assert_eq!(
+        program
+            .call(
+                "u8-plus-s8",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(127)],
+            )
+            .0[0]
+            .unwrap_i32(),
+        382
+    );
+    // u16 (65535) + s16 (32767) -> s32 (98302)
+    assert_eq!(
+        program
+            .call(
+                "u16-plus-s16",
+                &[wasmtime::Val::I32(65535), wasmtime::Val::I32(32767)],
+            )
+            .0[0]
+            .unwrap_i32(),
+        98302
+    );
+    // u8 (255) + s16 (32767) -> c: number widens to i64 (33022) without s16 overflow
+    assert_eq!(
+        program
+            .call(
+                "u8-plus-s16-unconstrained",
+                &[wasmtime::Val::I32(255), wasmtime::Val::I32(32767)],
+            )
+            .0[0]
+            .unwrap_i32(),
+        33022
+    );
+    // u32 (4_000_000_000) + s32 (1_000_000_000) -> s64 (5_000_000_000 > 4_500_000_000)
+    assert_eq!(
+        program
+            .call(
+                "u32-plus-s32-unconstrained",
                 &[
-                    wasmtime::Val::I64(exact_u64),
-                    wasmtime::Val::I64(exact_s64),
+                    wasmtime::Val::I32(4_000_000_000u32 as i32),
+                    wasmtime::Val::I32(1_000_000_000),
                 ],
             )
             .0[0]
             .unwrap_i32(),
         1
     );
+    // u32 (3_000_000_000) + u32 (3_000_000_000) -> u64 (6_000_000_000 > 5_000_000_000)
     assert_eq!(
-        program.call("edge-normalization", &[]).0[0].unwrap_i32(),
+        program
+            .call(
+                "u32-plus-u32-unconstrained",
+                &[
+                    wasmtime::Val::I32(3_000_000_000u32 as i32),
+                    wasmtime::Val::I32(3_000_000_000u32 as i32),
+                ],
+            )
+            .0[0]
+            .unwrap_i32(),
         1
     );
+    // bigint (s64) without perry:types
     assert_eq!(
-        program.call("non-finite-throws", &[]).0[0].unwrap_i32(),
-        11
-    );
-    assert_eq!(
-        program.call("untyped-missed", &[]).0[0].unwrap_i32(),
-        1
+        program
+            .call(
+                "bigint-s64",
+                &[
+                    wasmtime::Val::I64(9_007_199_254_740_993),
+                    wasmtime::Val::I64(10),
+                ],
+            )
+            .0[0]
+            .unwrap_i64(),
+        9_007_199_254_741_003
     );
     Ok(())
 }

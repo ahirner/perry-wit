@@ -247,7 +247,11 @@ fn emit_normalize_value(
             } else {
                 CopyPosition::RecordField
             };
-            Some((s_rec.fields()?.to_vec(), t_rec.fields()?.to_vec(), child_pos))
+            Some((
+                s_rec.fields()?.to_vec(),
+                t_rec.fields()?.to_vec(),
+                child_pos,
+            ))
         } else {
             None
         }
@@ -397,8 +401,7 @@ fn emit_normalize_value(
                 next_check_block.insert_before(ctx, merge_block);
                 let tag_const = StringConstOp::new(ctx, case_name);
                 append_op(ctx, cur_check_block, &tag_const);
-                let cmp =
-                    CompareOp::new(ctx, CompareKind::Eq, tag_val, tag_const.get_result(ctx));
+                let cmp = CompareOp::new(ctx, CompareKind::Eq, tag_val, tag_const.get_result(ctx));
                 append_op(ctx, cur_check_block, &cmp);
                 let br = CondBrOp::new(
                     ctx,

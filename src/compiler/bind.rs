@@ -69,7 +69,9 @@ pub(crate) fn constrain_numbers(
             if (wide && (source.deref(ctx).is::<perry_mir::types::BigIntType>() || is_wide_int))
                 || (!wide
                     && (source.deref(ctx).is::<FP64Type>()
-                        || source.deref(ctx).is::<pliron::builtin::types::IntegerType>()))
+                        || source
+                            .deref(ctx)
+                            .is::<pliron::builtin::types::IntegerType>()))
             {
                 *source = integer;
                 constrained = true;

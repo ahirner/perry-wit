@@ -148,7 +148,9 @@ impl Body {
             .deref(ctx)
             .attributes
             .get::<TypeAttr>(&WIT_SIGNATURE)
-            .and_then(|attr| TypedHandle::<FunctionType>::from_handle(attr.get_type(ctx), ctx).ok());
+            .and_then(|attr| {
+                TypedHandle::<FunctionType>::from_handle(attr.get_type(ctx), ctx).ok()
+            });
         let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx).ok();
         let declared_args = match signature {
             Some(sig) => sig
@@ -157,10 +159,7 @@ impl Body {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect(),
-            None => vec![
-                None;
-                fn_ty.map_or(0, |ty| ty.deref(ctx).arg_types().len())
-            ],
+            None => vec![None; fn_ty.map_or(0, |ty| ty.deref(ctx).arg_types().len())],
         };
         let declared_results = match signature {
             Some(sig) => sig
@@ -169,10 +168,7 @@ impl Body {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect(),
-            None => vec![
-                None;
-                fn_ty.map_or(0, |ty| ty.deref(ctx).res_types().len())
-            ],
+            None => vec![None; fn_ty.map_or(0, |ty| ty.deref(ctx).res_types().len())],
         };
         Self {
             external: crate::calls::is_exported(ctx, &function)
@@ -354,12 +350,14 @@ impl Solver {
                         self.contexts.insert(key, generic);
                         return generic;
                     }
-                    let parameters = self.analysis.bodies[&key.function].parameters.clone();
-                    let declared_args = self.analysis.bodies[&key.function].declared_args.clone();
-                    for (pos, (&arg, &param)) in key.args.iter().zip(&parameters).enumerate() {
-                        if declared_args.get(pos).copied().flatten().is_some() {
+                    for (pos, &arg) in key.args.iter().enumerate() {
+                        let body = &self.analysis.bodies[&key.function];
+                        if body.declared_args.get(pos).copied().flatten().is_some() {
                             continue;
                         }
+                        let Some(&param) = body.parameters.get(pos) else {
+                            continue;
+                        };
                         if let (Some(int), Some(cur)) =
                             (arg, self.analysis.keys[summary_id].args[pos])
                         {
@@ -377,42 +375,45 @@ impl Solver {
                     self.contexts.insert(key, summary_id);
                     return summary_id;
                 }
-                let declared_args = self.analysis.bodies[&key.function].declared_args.clone();
-                let declared_results = self.analysis.bodies[&key.function].declared_results.clone();
-                let summary_key = Key {
-                    function: key.function.clone(),
-                    args: key
-                        .args
-                        .iter()
-                        .enumerate()
-                        .map(|(pos, &arg)| {
-                            if let Some(declared) = declared_args.get(pos).copied().flatten() {
-                                Some(declared)
-                            } else {
-                                arg.map(|int| Integer {
-                                    bits: 64,
-                                    signed: int.signed || int.bits < 64,
-                                })
-                            }
-                        })
-                        .collect(),
-                    results: key
-                        .results
-                        .iter()
-                        .enumerate()
-                        .map(|(pos, &res)| {
-                            if res == ResultDomain::Original {
-                                ResultDomain::Original
-                            } else if let Some(declared) =
-                                declared_results.get(pos).copied().flatten()
-                            {
-                                ResultDomain::Integer(declared)
-                            } else {
-                                ResultDomain::Inferred
-                            }
-                        })
-                        .collect(),
-                    specialize: true,
+                let summary_key = {
+                    let body = &self.analysis.bodies[&key.function];
+                    Key {
+                        function: key.function.clone(),
+                        args: key
+                            .args
+                            .iter()
+                            .enumerate()
+                            .map(|(pos, &arg)| {
+                                if let Some(declared) =
+                                    body.declared_args.get(pos).copied().flatten()
+                                {
+                                    Some(declared)
+                                } else {
+                                    arg.map(|int| Integer {
+                                        bits: 64,
+                                        signed: int.signed || int.bits < 64,
+                                    })
+                                }
+                            })
+                            .collect(),
+                        results: key
+                            .results
+                            .iter()
+                            .enumerate()
+                            .map(|(pos, &res)| {
+                                if res == ResultDomain::Original {
+                                    ResultDomain::Original
+                                } else if let Some(declared) =
+                                    body.declared_results.get(pos).copied().flatten()
+                                {
+                                    ResultDomain::Integer(declared)
+                                } else {
+                                    ResultDomain::Inferred
+                                }
+                            })
+                            .collect(),
+                        specialize: true,
+                    }
                 };
                 let summary_id = self.allocate_context(ctx, summary_key);
                 self.summary_contexts
@@ -500,7 +501,7 @@ impl Solver {
         }
         origins.entry(to).or_default();
         let [Some(from), Some(target)] = origins.get_disjoint_mut([&from, &to]) else {
-            unreachable!("origin entries exist")
+            return;
         };
         let previous = target.len();
         target.extend(from.iter().copied());

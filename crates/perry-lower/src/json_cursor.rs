@@ -677,7 +677,8 @@ impl<'s> FunctionBuilder<'s> {
                                 payload_ty,
                                 is_missing,
                                 |b, ctx| {
-                                    if absence(ctx, payload_ty).is_some_and(|a| a.admits_undefined())
+                                    if absence(ctx, payload_ty)
+                                        .is_some_and(|a| a.admits_undefined())
                                     {
                                         let undef = b.emit_value(ctx, |ctx| {
                                             UndefinedOp::with_type(ctx, payload_ty)

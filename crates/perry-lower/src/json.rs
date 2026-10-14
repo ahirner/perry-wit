@@ -125,13 +125,10 @@ impl<'s> FunctionBuilder<'s> {
             name: name.clone(),
             is_async: false,
             await_initialization: false,
-            params,
-            results,
-            integer_params: Vec::new(),
-            integer_result: None,
-            wit_signature: None,
+            params: params.iter().copied().map(BindingType::plain).collect(),
+            result: results.first().copied().map(BindingType::plain),
         };
-        let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
+        let ty = FunctionType::get(ctx, params, results);
         let function = FuncOp::new(ctx, name.clone(), ty);
         if input != DecoderInput::Snapshot {
             perry_mir::calls::set_atomic_construction(ctx, &function);
@@ -306,7 +303,7 @@ impl<'s> FunctionBuilder<'s> {
                     let value = self.json_value(ctx, value)?;
                     let slot = self.entry_slot(ctx, value.get_type(ctx));
                     self.store(ctx, slot, value);
-                    self.locals.insert(*id, slot);
+                    self.locals.insert(*id, LocalBinding::plain(slot));
                 }
                 Stmt::Expr(Expr::Call { callee, args, .. })
                     if matches!(&**callee, Expr::ExternFuncRef { name, .. }

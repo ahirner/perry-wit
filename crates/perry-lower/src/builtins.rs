@@ -263,13 +263,11 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let mut value = self.expression(ctx, expr)?;
         if let Expr::LocalGet(id) = expr
-            && let Some(&int_ty) = self.integer_locals.get(id)
-            && int_ty
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
+            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
+            && int_ty.deref(ctx).width() == 64
         {
-            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_ty));
+            let int_handle: TypeHandle = int_ty.into();
+            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
         }
         Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }

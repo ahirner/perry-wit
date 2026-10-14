@@ -115,20 +115,26 @@ pub(crate) struct ScalarizeCharacters {
     order: HashMap<Ptr<Operation>, HashMap<Ptr<Operation>, usize>>,
 }
 
-impl MatchRewrite for ScalarizeCharacters {
-    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
-        if !matches!(
-            Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)),
-            Some(Intrinsic::StringCharAt | Intrinsic::StringCharAtIndex)
-        ) {
-            return false;
-        }
+impl ScalarizeCharacters {
+    fn matched_scalar_op(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
+        let kind = match Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))? {
+            Intrinsic::StringCharAt => Intrinsic::StringScalarAt,
+            Intrinsic::StringCharAtIndex => Intrinsic::StringScalarAtIndex,
+            _ => return None,
+        };
         let character = op.deref(ctx).get_result(0);
         let users = character.uses(ctx);
-        !users.is_empty()
+        (!users.is_empty()
             && users
                 .iter()
-                .all(|usage| classify_user(ctx, usage.user_op(), character).is_some())
+                .all(|usage| classify_user(ctx, usage.user_op(), character).is_some()))
+        .then_some(kind)
+    }
+}
+
+impl MatchRewrite for ScalarizeCharacters {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        Self::matched_scalar_op(ctx, op).is_some()
     }
 
     fn rewrite(
@@ -137,13 +143,14 @@ impl MatchRewrite for ScalarizeCharacters {
         rewriter: &mut MatchRewriter,
         op: Ptr<Operation>,
     ) -> Result<()> {
-        if !self.r#match(ctx, op) {
+        let Some(kind) = Self::matched_scalar_op(ctx, op) else {
             return Ok(());
-        }
-        let kind = match Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)) {
-            Some(Intrinsic::StringCharAt) => Intrinsic::StringScalarAt,
-            Some(Intrinsic::StringCharAtIndex) => Intrinsic::StringScalarAtIndex,
-            _ => unreachable!("matched character lookup"),
+        };
+        let Some(parent_op) = op.deref(ctx).get_parent_op(ctx) else {
+            return Ok(());
+        };
+        let Some(function) = Operation::get_op::<FuncOp>(parent_op, ctx) else {
+            return Ok(());
         };
         let character = op.deref(ctx).get_result(0);
         let mut users: Vec<_> = character
@@ -151,13 +158,6 @@ impl MatchRewrite for ScalarizeCharacters {
             .iter()
             .map(|usage| usage.user_op())
             .collect();
-        let function = Operation::get_op::<FuncOp>(
-            op.deref(ctx)
-                .get_parent_op(ctx)
-                .expect("character in function"),
-            ctx,
-        )
-        .expect("MIR function");
         let order = self
             .order
             .entry(function.get_operation())

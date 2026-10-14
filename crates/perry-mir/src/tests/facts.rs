@@ -597,4 +597,3 @@ fn range_widens_only_after_two_expanding_visits() -> Result<()> {
     assert!(loop_facts.is_count(ctx, &func, returned));
     Ok(())
 }
-

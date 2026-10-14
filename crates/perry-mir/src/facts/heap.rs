@@ -109,14 +109,13 @@ impl OperationKind {
             .or_else(|| Operation::get_op::<FieldSetOp>(op, ctx).map(|op| (op.field(ctx), false)));
         if let Some((field, read)) = field {
             let ty = operation.get_operand(0).get_type(ctx).deref(ctx);
-            let slot = ty
+            let Some(slot) = ty
                 .downcast_ref::<RecordType>()
-                .unwrap()
-                .fields()
-                .unwrap()
-                .iter()
-                .position(|(name, _)| *name == field)
-                .expect("verified field");
+                .and_then(|rec| rec.fields().ok())
+                .and_then(|fields| fields.iter().position(|(name, _)| *name == field))
+            else {
+                return Self::Unknown;
+            };
             return if read {
                 Self::Read { slot }
             } else {
@@ -171,7 +170,7 @@ impl HeapFacts {
             .iter()
             .fold(Range::Bottom, |range, &object| {
                 let Contents::Array { length, .. } = &self.objects[object].contents else {
-                    unreachable!("array identity")
+                    return range;
                 };
                 match (range, *length) {
                     (Range::Bottom, range) | (range, Range::Bottom) => range,
@@ -301,17 +300,19 @@ impl Solver {
             .unwrap_or_else(|| self.heap_object(ctx, ty, true))
     }
 
-    fn heap_allocation(&mut self, ctx: &Context, id: usize, value: Value) -> usize {
-        let cell = self.heap_value(ctx, id, value).unwrap();
-        self.analysis.heap.cells[cell]
-            .objects
-            .first()
-            .copied()
-            .unwrap_or_else(|| {
-                let object = self.heap_object(ctx, value.get_type(ctx), false);
-                self.add_object(ctx, cell, object);
-                object
-            })
+    fn heap_allocation(&mut self, ctx: &Context, id: usize, value: Value) -> Option<usize> {
+        let cell = self.heap_value(ctx, id, value)?;
+        Some(
+            self.analysis.heap.cells[cell]
+                .objects
+                .first()
+                .copied()
+                .unwrap_or_else(|| {
+                    let object = self.heap_object(ctx, value.get_type(ctx), false);
+                    self.add_object(ctx, cell, object);
+                    object
+                }),
+        )
     }
 
     fn heap_changed(&mut self, cell: usize) {
@@ -464,7 +465,7 @@ impl Solver {
             length, readers, ..
         } = &mut self.analysis.heap.objects[object].contents
         else {
-            unreachable!("array write")
+            return;
         };
         readers.insert(reader);
         if index == Some(Range::Bottom) {
@@ -561,7 +562,7 @@ impl Solver {
         match kind {
             OperationKind::Allocate { array } => {
                 let value = operation.get_result(0);
-                let object = self.heap_allocation(ctx, id, value);
+                let object = self.heap_allocation(ctx, id, value)?;
                 if array {
                     let length = operation.get_num_operands() as i128;
                     self.widen_length(
@@ -585,7 +586,7 @@ impl Solver {
                     OperationKind::Read { slot } | OperationKind::Write { slot, .. } => slot,
                     _ => 0,
                 };
-                let base = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let result = if matches!(kind, OperationKind::Read { .. }) {
                     self.heap_value(ctx, id, operation.get_result(0))
@@ -632,8 +633,8 @@ impl Solver {
                 return matches!(kind, OperationKind::Read { .. }).then_some((domain, range));
             }
             OperationKind::Extend => {
-                let to = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
-                let from = self.heap_value(ctx, id, operation.get_operand(1)).unwrap();
+                let to = self.heap_value(ctx, id, operation.get_operand(0))?;
+                let from = self.heap_value(ctx, id, operation.get_operand(1))?;
                 self.analysis.heap.cells[to].readers.insert(reader);
                 self.analysis.heap.cells[from].readers.insert(reader);
                 let mut source = None;
@@ -654,28 +655,27 @@ impl Solver {
                 }
             }
             OperationKind::Length => {
-                let base = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
                     previous = Some(object);
-                    let Contents::Array { readers, .. } =
+                    if let Contents::Array { readers, .. } =
                         &mut self.analysis.heap.objects[object].contents
-                    else {
-                        unreachable!("array length")
-                    };
-                    readers.insert(reader);
+                    {
+                        readers.insert(reader);
+                    }
                 }
                 return Some((Fact::Original, self.analysis.heap.length(base)));
             }
             OperationKind::Combine(kind) => {
-                let input = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                let input = self.heap_value(ctx, id, operation.get_operand(0))?;
                 self.analysis.heap.cells[input].readers.insert(reader);
                 let result = operation.get_result(0);
                 let output = if kind == Combinator::Race {
                     None
                 } else {
-                    Some(self.heap_allocation(ctx, id, result))
+                    self.heap_allocation(ctx, id, result)
                 };
                 let mut outcome = if kind == Combinator::Race {
                     Outcomes::Bottom
@@ -693,7 +693,7 @@ impl Solver {
                         readers,
                     } = &mut self.analysis.heap.objects[object].contents
                     else {
-                        unreachable!("combinator input")
+                        continue;
                     };
                     readers.insert(reader);
                     let (element, length) = (*element, *length);
@@ -763,8 +763,7 @@ impl Solver {
                         .map(|call| call.callee(ctx))
                         .or_else(|| {
                             Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx))
-                        })
-                        .unwrap();
+                        })?;
                     if self.analysis.bodies.contains_key(&callee) {
                         return None;
                     }

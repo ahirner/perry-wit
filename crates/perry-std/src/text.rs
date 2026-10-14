@@ -543,16 +543,13 @@ pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
     } else {
         (r as u32, r == 16)
     };
-    let radix = if strip_prefix
-        && rest.len() >= 2
-        && rest[0] == b'0'
-        && matches!(rest[1], b'x' | b'X')
-    {
-        rest = &rest[2..];
-        16
-    } else {
-        radix
-    };
+    let radix =
+        if strip_prefix && rest.len() >= 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
+            rest = &rest[2..];
+            16
+        } else {
+            radix
+        };
     if radix == 10 {
         let mut decimal = perry_abi::number::Decimal::default();
         let mut len = 0;

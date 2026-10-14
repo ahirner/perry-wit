@@ -93,38 +93,13 @@ impl<'s> FunctionBuilder<'s> {
                 // the finalizers ran.
                 let (mut values, adopted) = match value {
                     Some(expr) => {
-                        let expected = self
-                            .results
-                            .first()
-                            .copied()
-                            .context("a void function returns a value")?;
-                        let expr_expected = self
-                            .integer_result
-                            .filter(|int_ty| {
-                                int_ty
-                                    .deref(ctx)
-                                    .downcast_ref::<IntegerType>()
-                                    .is_some_and(|int| int.width() == 64)
-                            })
-                            .or(Some(expected));
-                        let value = self.expression_with(ctx, expr, expr_expected)?;
+                        let result = self.result.context("a void function returns a value")?;
+                        let value =
+                            self.expression_with(ctx, expr, Some(result.expected_type(ctx)))?;
                         if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
-                            (Vec::with_capacity(1), Some((value, expected)))
-                        } else if let Some(int_ty) = self.integer_result {
-                            let fitted = if int_ty
-                                .deref(ctx)
-                                .downcast_ref::<IntegerType>()
-                                .is_some_and(|int| int.width() == 64)
-                            {
-                                let int_val = self.fit(ctx, value, int_ty)?;
-                                self.fit(ctx, int_val, expected)?
-                            } else {
-                                let fitted = self.fit(ctx, value, expected)?;
-                                self.wrap_integer(ctx, fitted, int_ty, expected)
-                            };
-                            (vec![fitted], None)
+                            (Vec::with_capacity(1), Some((value, result.carrier)))
                         } else {
-                            (vec![self.fit(ctx, value, expected)?], None)
+                            (vec![self.fit_binding(ctx, value, result)?], None)
                         }
                     }
                     None => (self.implicit_results(ctx), None),
@@ -147,7 +122,7 @@ impl<'s> FunctionBuilder<'s> {
                     values
                         .iter()
                         .map(|v| v.get_type(ctx))
-                        .eq(self.results.iter().copied()),
+                        .eq(self.result.iter().map(|r| r.carrier)),
                     "return value type differs from the declared result"
                 );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
@@ -295,25 +270,21 @@ impl<'s> FunctionBuilder<'s> {
             HirType::Array(element) if matches!(**element, HirType::Any) => None,
             ty => Some(self.shapes.value_type(ctx, ty)?),
         };
-        let int_ty = self
+        let integer = self
             .shapes
             .is_explicit_binding(id)
             .then(|| self.shapes.integer_type(ctx, ty))
             .flatten();
-        let expr_expected = int_ty
-            .filter(|int_ty| {
-                int_ty
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-            })
+        let expr_expected = integer
+            .filter(|int_ty| int_ty.deref(ctx).width() == 64)
+            .map(TypeHandle::from)
             .or(declared);
         let init = init
             .map(|e| self.expression_with(ctx, e, expr_expected))
             .transpose()?;
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
-        let ty = match (declared, init) {
+        let carrier = match (declared, init) {
             (Some(ty), Some(value))
                 if self.shapes.inferred_bindings.contains(&id)
                     && (optional_value(ctx, value.get_type(ctx))
@@ -328,44 +299,31 @@ impl<'s> FunctionBuilder<'s> {
             (None, Some(value)) => value.get_type(ctx),
             (None, None) => bail!("an untyped binding needs an initializer"),
         };
-        if let Some(int_ty) = int_ty {
-            self.integer_locals.insert(id, int_ty);
-            if self.shapes.global_ids.contains(&id) {
-                self.shapes.integer_globals.borrow_mut().insert(id, int_ty);
-            }
-        }
+        let binding = BindingType { carrier, integer };
         let slot = if self.shapes.global_ids.contains(&id) {
-            self.shapes.globals.borrow_mut().insert(id, ty);
-            self.global_slot(ctx, id, ty)?
+            self.shapes.globals.borrow_mut().insert(id, binding);
+            self.global_slot(ctx, id, carrier)?
         } else {
-            self.entry_slot(ctx, ty)
+            self.entry_slot(ctx, carrier)
         };
         if let Some(value) = init {
-            let value = if let Some(&int_ty) = self.integer_locals.get(&id) {
-                if int_ty
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                {
-                    let int_val = self.fit(ctx, value, int_ty)?;
-                    self.fit(ctx, int_val, ty)?
-                } else {
-                    let fitted = self.fit(ctx, value, ty)?;
-                    self.wrap_integer(ctx, fitted, int_ty, ty)
-                }
-            } else {
-                self.fit(ctx, value, ty)?
-            };
+            let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
         }
-        self.locals.insert(id, slot);
+        self.locals.insert(id, LocalBinding { slot, integer });
         Ok(())
     }
 
     /// Lower an expression evaluated for its effects; void calls are allowed here.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
-        if let Expr::Call { callee, args, .. } = expr {
-            self.call(ctx, callee, args)?;
+        if let Expr::Call {
+            callee,
+            args,
+            byte_offset,
+            ..
+        } = expr
+        {
+            self.call(ctx, callee, args, *byte_offset)?;
         } else if let Expr::ProcessExit(code) = expr {
             let code = match code {
                 Some(code) => {

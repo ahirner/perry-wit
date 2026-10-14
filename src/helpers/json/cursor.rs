@@ -321,4 +321,3 @@ pub(crate) unsafe extern "C" fn json_cursor_seek(value: u32, position: u32) -> u
     }
     old
 }
-

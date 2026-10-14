@@ -63,33 +63,33 @@ impl Requirements {
         }
         // A read lowers its payload into guest memory; writes lift existing storage.
         for ty in func.find_futures_and_streams(resolve) {
-            let (TypeDefKind::Future(payload) | TypeDefKind::Stream(payload)) =
-                &resolve.types[ty].kind
-            else {
-                unreachable!()
+            let (payload, is_future) = match &resolve.types[ty].kind {
+                TypeDefKind::Future(payload) => (*payload, true),
+                TypeDefKind::Stream(payload) => (*payload, false),
+                _ => continue,
             };
             if !payload.is_some_and(|ty| lowers_allocation(resolve, ty)) {
                 continue;
             }
             for async_ in [false, true] {
-                let import = match resolve.types[ty].kind {
-                    TypeDefKind::Future(_) => WasmImport::FutureIntrinsic {
+                let import = if is_future {
+                    WasmImport::FutureIntrinsic {
                         interface,
                         func,
                         ty: Some(ty),
                         intrinsic: FutureIntrinsic::Read,
                         exported,
                         async_,
-                    },
-                    TypeDefKind::Stream(_) => WasmImport::StreamIntrinsic {
+                    }
+                } else {
+                    WasmImport::StreamIntrinsic {
                         interface,
                         func,
                         ty: Some(ty),
                         intrinsic: StreamIntrinsic::Read,
                         exported,
                         async_,
-                    },
-                    _ => unreachable!(),
+                    }
                 };
                 self.allocating_imports
                     .insert(resolve.wasm_import_name(mangling, import));
@@ -129,8 +129,8 @@ fn lowers_allocation(resolve: &Resolve, ty: Type) -> bool {
         | TypeDefKind::Flags(_)
         | TypeDefKind::Enum(_)
         | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_) => false,
-        TypeDefKind::Unknown => unreachable!("resolved WIT type"),
+        | TypeDefKind::Stream(_)
+        | TypeDefKind::Unknown => false,
     }
 }
 

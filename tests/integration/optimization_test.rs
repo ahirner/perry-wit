@@ -832,7 +832,3 @@ fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<(
     }
     Ok(())
 }
-
-
-
-

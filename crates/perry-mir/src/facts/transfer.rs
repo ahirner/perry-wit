@@ -1,6 +1,6 @@
 use super::{
-    Body, Constraint, Fact, Integer, Interval, Key, Outcomes, Range, ResultDomain, Solver,
-    Work, arithmetic_range, comparison_domain, constant_range, heap, literal, promise_payload,
+    Body, Constraint, Fact, Integer, Interval, Key, Outcomes, Range, ResultDomain, Solver, Work,
+    arithmetic_range, comparison_domain, constant_range, heap, literal, promise_payload,
 };
 use crate::{
     attrs::BinaryKind,
@@ -11,10 +11,7 @@ use crate::{
     types::PromiseType,
 };
 use pliron::{
-    builtin::{
-        op_interfaces::BranchOpInterface,
-        types::IntegerType,
-    },
+    builtin::{op_interfaces::BranchOpInterface, types::IntegerType},
     context::{Context, Ptr},
     op::op_cast,
     operation::Operation,
@@ -67,9 +64,8 @@ impl Solver {
             || Operation::get_op::<crate::heap::FieldSetOp>(op, ctx).is_some()
             || Operation::get_op::<crate::collections::ArrayPushOp>(op, ctx).is_some()
             || Operation::get_op::<crate::collections::ArrayExtendOp>(op, ctx).is_some()
-            || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                op.intrinsic(ctx) == Some(Intrinsic::ExceptionSetCause)
-            })
+            || Operation::get_op::<IntrinsicOp>(op, ctx)
+                .is_some_and(|op| op.intrinsic(ctx) == Some(Intrinsic::ExceptionSetCause))
         {
             Some(1)
         } else if Operation::get_op::<crate::collections::ArraySetOp>(op, ctx).is_some() {
@@ -285,8 +281,9 @@ impl Solver {
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             let mut changed = false;
-            let declared_results =
-                self.analysis.bodies[&self.analysis.keys[id].function].declared_results.clone();
+            let declared_results = self.analysis.bodies[&self.analysis.keys[id].function]
+                .declared_results
+                .clone();
             for (position, value) in operation.operands().enumerate() {
                 let required = self.analysis.keys[id].results[position];
                 self.require(id, value, required.integer());
@@ -419,11 +416,12 @@ impl Solver {
                 self.heap_call(ctx, id, index, child, op);
                 for (position, input) in operation.operands().enumerate() {
                     let parameter = parameters[position];
-                    let required = declared_args
-                        .get(position)
-                        .copied()
-                        .flatten()
-                        .or_else(|| self.analysis.states[child].required.get(&parameter).copied());
+                    let required = declared_args.get(position).copied().flatten().or_else(|| {
+                        self.analysis.states[child]
+                            .required
+                            .get(&parameter)
+                            .copied()
+                    });
                     self.require(id, input, required);
                 }
                 self.call_results(ctx, id, child, op, asynchronous.is_some());
@@ -525,9 +523,9 @@ impl Solver {
                     let range = match self.analysis.states[id].range(input) {
                         Range::Bounds(interval) => Range::Bounds(interval),
                         Range::Bottom => Range::Bottom,
-                        Range::Unknown => fact.integer().map_or(Range::Unknown, |integer| {
-                            Range::Bounds(integer.bounds())
-                        }),
+                        Range::Unknown => fact
+                            .integer()
+                            .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds())),
                     };
                     self.fact(id, result, fact);
                     self.range(id, result, range);
@@ -556,9 +554,9 @@ impl Solver {
                                 Range::Bounds(candidate)
                             }
                         }
-                        Range::Unknown => fact.integer().map_or(Range::Unknown, |integer| {
-                            Range::Bounds(integer.bounds())
-                        }),
+                        Range::Unknown => fact
+                            .integer()
+                            .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds())),
                     };
                     self.fact(id, result, fact);
                     self.range(id, result, range);
@@ -596,9 +594,9 @@ impl Solver {
                                 Range::Bounds(candidate)
                             }
                         }
-                        _ => fact.integer().map_or(Range::Unknown, |integer| {
-                            Range::Bounds(integer.bounds())
-                        }),
+                        _ => fact
+                            .integer()
+                            .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds())),
                     };
                     self.fact(id, result, fact);
                     self.range(id, result, range);
@@ -717,9 +715,8 @@ impl Solver {
                 )
             } else if Operation::get_op::<crate::collections::StringLenOp>(op, ctx).is_some()
                 || Operation::get_op::<crate::collections::ArrayLenOp>(op, ctx).is_some()
-                || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                    op.intrinsic(ctx) == Some(Intrinsic::BytesLength)
-                })
+                || Operation::get_op::<IntrinsicOp>(op, ctx)
+                    .is_some_and(|op| op.intrinsic(ctx) == Some(Intrinsic::BytesLength))
             {
                 Range::Bounds(Interval {
                     lower: 0,

@@ -25,7 +25,7 @@ pub mod globals;
 pub mod heap;
 pub mod integers;
 pub mod intrinsics;
-pub mod json_copy;
+mod json_copy;
 mod lifetimes;
 pub mod liveness;
 pub mod locals;

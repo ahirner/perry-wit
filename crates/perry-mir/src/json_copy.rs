@@ -32,7 +32,7 @@ use self::emit::{build_json_copy_helper, const_i32};
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy/normalization helper
 /// without constructing intermediate JSON text or a JSON cursor.
-pub struct NormalizeJsonCopy;
+pub(crate) struct NormalizeJsonCopy;
 
 impl Pass for NormalizeJsonCopy {
     fn name(&self) -> &str {
@@ -67,19 +67,18 @@ impl Pass for NormalizeJsonCopy {
                 let source_ty = site.source_value.get_type(ctx);
                 let target_ty = site.target_ty;
                 if can_rewrite_parse_stringify(ctx, &site, source_ty, target_ty) {
-                    let helper_sym = if let Some(sym) =
-                        helper_cache.get(&(source_ty, target_ty)).cloned()
-                    {
-                        sym
-                    } else {
-                        let sym: Identifier = format!("perry_json_copy_{next_helper_id}")
-                            .try_into()
-                            .unwrap();
-                        next_helper_id += 1;
-                        build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
-                        helper_cache.insert((source_ty, target_ty), sym.clone());
-                        sym
-                    };
+                    let helper_sym =
+                        if let Some(sym) = helper_cache.get(&(source_ty, target_ty)).cloned() {
+                            sym
+                        } else {
+                            let sym: Identifier = format!("perry_json_copy_{next_helper_id}")
+                                .try_into()
+                                .unwrap_or_else(|_| pliron::ident!("perry_json_copy"));
+                            next_helper_id += 1;
+                            build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
+                            helper_cache.insert((source_ty, target_ty), sym.clone());
+                            sym
+                        };
 
                     rewrite_site(ctx, &site, helper_sym);
                     rewrites += 1;
@@ -245,7 +244,12 @@ fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringify
     sites
 }
 
-type MatchedParseOfStringify = (Ptr<Operation>, Ptr<Operation>, Option<Ptr<Operation>>, Value);
+type MatchedParseOfStringify = (
+    Ptr<Operation>,
+    Ptr<Operation>,
+    Option<Ptr<Operation>>,
+    Value,
+);
 
 fn match_json_parse_of_stringify(
     ctx: &Context,
@@ -573,10 +577,9 @@ fn schemas_compatible(
             if !variant_is_unambiguous(ctx, var) {
                 return false;
             }
-            return var
-                .cases()
-                .iter()
-                .all(|(_, payload)| payload.is_none_or(|pty| schemas_compatible(ctx, pty, pty, depth + 1)));
+            return var.cases().iter().all(|(_, payload)| {
+                payload.is_none_or(|pty| schemas_compatible(ctx, pty, pty, depth + 1))
+            });
         }
         return is_supported_scalar(ctx, s_inner);
     }

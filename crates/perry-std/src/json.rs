@@ -349,9 +349,7 @@ pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
             }
             NUMBER => {
                 let n = unsafe { *(value.add(8) as *const f64) };
-                if n.is_finite()
-                    && libm::trunc(n) == n
-                    && (0.0..=(1u64 << 53) as f64).contains(&n)
+                if n.is_finite() && libm::trunc(n) == n && (0.0..=(1u64 << 53) as f64).contains(&n)
                 {
                     return n as u64;
                 }

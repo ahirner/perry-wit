@@ -31,14 +31,29 @@ pub(super) struct Finally<'s> {
 /// Status of `process.exit` (`ErrorKind::Exit`): handlers pass it on.
 pub(super) const EXIT_STATUS: u64 = 5;
 
+/// A local or global slot and its optional `perry:types` integer wrapping constraint.
+#[derive(Clone, Copy)]
+pub(super) struct LocalBinding {
+    pub(super) slot: Value,
+    pub(super) integer: Option<TypedHandle<IntegerType>>,
+}
+
+impl LocalBinding {
+    pub(super) const fn plain(slot: Value) -> Self {
+        Self {
+            slot,
+            integer: None,
+        }
+    }
+}
+
 pub(super) struct FunctionBuilder<'s> {
     pub(super) region: Ptr<pliron::region::Region>,
     /// The region's entry block, where slots are allocated so they dominate every use.
     entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
-    pub(super) locals: HashMap<LocalId, Value>,
-    pub(super) integer_locals: HashMap<LocalId, TypeHandle>,
+    pub(super) locals: HashMap<LocalId, LocalBinding>,
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
@@ -53,8 +68,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
     pub(super) builtins: &'s HashMap<String, Builtin>,
-    pub(super) results: Vec<TypeHandle>,
-    pub(super) integer_result: Option<TypeHandle>,
+    pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
 }
@@ -99,31 +113,37 @@ impl<'s> FunctionBuilder<'s> {
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
-        let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
+        let ty = FunctionType::get(ctx, signature.carrier_params(), signature.carrier_results());
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
         let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
         let mut globals: Vec<_> = shapes
             .globals
             .borrow()
             .iter()
-            .map(|(&id, &ty)| (id, ty))
+            .map(|(&id, &binding)| (id, binding))
             .collect();
         globals.sort_by_key(|(id, _)| *id);
-        for (id, ty) in globals {
-            let slot = builder.global_slot(ctx, id, ty)?;
-            builder.locals.insert(id, slot);
+        for (id, binding) in globals {
+            let slot = builder.global_slot(ctx, id, binding.carrier)?;
+            builder.locals.insert(
+                id,
+                LocalBinding {
+                    slot,
+                    integer: binding.integer,
+                },
+            );
         }
-        builder
-            .integer_locals
-            .extend(shapes.integer_globals.borrow().iter().map(|(&k, &v)| (k, v)));
-        for &(id, int_ty) in &signature.integer_params {
-            builder.integer_locals.insert(id, int_ty);
-        }
-        for (index, param) in params.iter().enumerate() {
+        for (index, (&param, &binding)) in params.iter().zip(&signature.params).enumerate() {
             let value = builder.entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
             builder.store(ctx, slot, value);
-            builder.locals.insert(*param, slot);
+            builder.locals.insert(
+                param,
+                LocalBinding {
+                    slot,
+                    integer: binding.integer,
+                },
+            );
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
@@ -155,7 +175,6 @@ impl<'s> FunctionBuilder<'s> {
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
-            integer_locals: HashMap::new(),
             global_slots: HashSet::new(),
             false_guards: HashSet::new(),
             variant_guards: Vec::new(),
@@ -166,8 +185,7 @@ impl<'s> FunctionBuilder<'s> {
             signatures,
             shapes,
             builtins,
-            results: signature.results.clone(),
-            integer_result: signature.integer_result,
+            result: signature.result,
             is_async: signature.is_async,
             labels: 0,
         }
@@ -179,22 +197,45 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         value: Value,
-        int_ty: TypeHandle,
+        int_ty: TypedHandle<IntegerType>,
         carrier_ty: TypeHandle,
     ) -> Value {
-        let wrapped = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_ty));
+        let int_handle: TypeHandle = int_ty.into();
+        let wrapped = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
         self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, wrapped, carrier_ty))
     }
+
+    pub(super) fn fit_binding(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        binding: BindingType,
+    ) -> Result<Value> {
+        match binding.integer {
+            Some(int_ty) if int_ty.deref(ctx).width() == 64 => {
+                let int_val = self.fit(ctx, value, int_ty.into())?;
+                self.fit(ctx, int_val, binding.carrier)
+            }
+            Some(int_ty) => {
+                let fitted = self.fit(ctx, value, binding.carrier)?;
+                Ok(self.wrap_integer(ctx, fitted, int_ty, binding.carrier))
+            }
+            None => self.fit(ctx, value, binding.carrier),
+        }
+    }
+
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
     pub(super) fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
-        self.results
-            .clone()
+        self.result
             .into_iter()
-            .map(|ty| match optional_value(ctx, ty) {
-                Some(_) if absence(ctx, ty).is_some_and(|states| states.admits_undefined()) => {
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+            .map(|r| {
+                let ty = r.carrier;
+                match optional_value(ctx, ty) {
+                    Some(_) if absence(ctx, ty).is_some_and(|states| states.admits_undefined()) => {
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                    }
+                    _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
                 }
-                _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
             })
             .collect()
     }
@@ -322,12 +363,16 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.append_value(ctx, &op))
     }
 
-    pub(super) fn local(&self, id: LocalId) -> Result<Value> {
+    pub(super) fn local_binding(&self, id: LocalId) -> Result<LocalBinding> {
         self.locals.get(&id).copied().ok_or_else(|| {
             anyhow!(
                 "unsupported reference to local {id} (globals and captures are not supported yet)"
             )
         })
+    }
+
+    pub(super) fn local(&self, id: LocalId) -> Result<Value> {
+        Ok(self.local_binding(id)?.slot)
     }
 
     pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {

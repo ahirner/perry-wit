@@ -120,10 +120,29 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
             "MIR backend does not support",
         ),
+        (
+            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+            "cannot find name 'a'",
+        ),
     ] {
         let error = rejected(source);
         assert!(error.contains(expected), "{source}: {error}");
     }
+    let ctx = &mut Context::new();
+    let err = lower_without_foreign(
+        ctx,
+        "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+        "case.ts",
+    )
+    .err()
+    .expect("rejection");
+    let diag = err
+        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+        .expect("diagnostic");
+    assert_eq!(diag.message, "cannot find name 'a'");
+    let span = diag.span.as_ref().expect("span on unresolved identifier");
+    assert_eq!(span.start_line, 5);
+    assert_eq!(span.start_column, 13);
 }
 
 #[test]

@@ -32,10 +32,37 @@ use std::{
 pub(super) mod generics;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum DecoderInput {
+pub(super) enum DecoderInput {
     Snapshot,
     Cursor,
     Text,
+}
+
+/// The runtime carrier type of a binding, paired with its declared WIT integer domain when
+/// annotated with a width-specific integer type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct BindingType {
+    pub(super) carrier: TypeHandle,
+    pub(super) integer: Option<TypedHandle<IntegerType>>,
+}
+
+impl BindingType {
+    pub(super) const fn plain(carrier: TypeHandle) -> Self {
+        Self {
+            carrier,
+            integer: None,
+        }
+    }
+
+    pub(super) fn wit_type(self) -> TypeHandle {
+        self.integer.map_or(self.carrier, Into::into)
+    }
+
+    pub(super) fn expected_type(self, ctx: &Context) -> TypeHandle {
+        self.integer
+            .filter(|int| int.deref(ctx).width() == 64)
+            .map_or(self.carrier, Into::into)
+    }
 }
 
 #[derive(Clone)]
@@ -44,15 +71,14 @@ enum PendingShape {
     Recursive(String),
 }
 
-pub(crate) struct Shapes<'h> {
-    pub(crate) module: pliron::builtin::ops::ModuleOp,
-    pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
-    pub(crate) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
-    pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
-    pub(crate) integer_globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
-    pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(crate) hir: &'h HirModule,
+pub(super) struct Shapes<'h> {
+    pub(super) module: pliron::builtin::ops::ModuleOp,
+    pub(super) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
+    pub(super) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
+    pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
+    pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
+    pub(super) inferred_bindings: HashSet<perry_hir::types::LocalId>,
+    pub(super) hir: &'h HirModule,
     locations: &'h crate::locations::Locations<'h>,
     /// WIT types by SDK name, and the local names they are imported under.
     foreign: &'h HashMap<String, HirType>,
@@ -128,7 +154,6 @@ impl<'h> Shapes<'h> {
             decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
-            integer_globals: RefCell::new(HashMap::new()),
             global_ids: if hir.functions.iter().any(|f| f.is_exported) {
                 hir.init
                     .iter()
@@ -167,6 +192,24 @@ impl<'h> Shapes<'h> {
             ),
             None => error,
         }
+    }
+
+    pub(super) fn annotate_byte_offset(
+        &self,
+        error: anyhow::Error,
+        byte_offset: u32,
+        len: u32,
+    ) -> anyhow::Error {
+        if byte_offset == 0 {
+            return error;
+        }
+        self.locations.annotate(
+            error,
+            swc_common::Span::new(
+                swc_common::BytePos(byte_offset),
+                swc_common::BytePos(byte_offset.saturating_add(len)),
+            ),
+        )
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -287,21 +330,15 @@ impl<'h> Shapes<'h> {
                 }
                 if members.iter().any(|ty| {
                     matches!(ty, HirType::Number)
-                        || self.integer_type(ctx, ty).is_some_and(|int_ty| {
-                            int_ty
-                                .deref(ctx)
-                                .downcast_ref::<IntegerType>()
-                                .is_some_and(|int| int.width() <= 32)
-                        })
+                        || self
+                            .integer_type(ctx, ty)
+                            .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
                 }) && members.iter().any(|ty| matches!(ty, HirType::String))
                     && members.iter().all(|ty| {
                         matches!(ty, HirType::Number | HirType::String)
-                            || self.integer_type(ctx, ty).is_some_and(|int_ty| {
-                                int_ty
-                                    .deref(ctx)
-                                    .downcast_ref::<IntegerType>()
-                                    .is_some_and(|int| int.width() <= 32)
-                            })
+                            || self
+                                .integer_type(ctx, ty)
+                                .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
                     })
                 {
                     return Ok(perry_mir::types::NumberStringType::get(ctx).into());
@@ -339,12 +376,9 @@ impl<'h> Shapes<'h> {
                     .enumerate()
                     .map(|(i, ty)| {
                         let ty = if let Some(int_ty) = self.integer_type(ctx, ty)
-                            && int_ty
-                                .deref(ctx)
-                                .downcast_ref::<IntegerType>()
-                                .is_some_and(|int| int.width() == 64)
+                            && int_ty.deref(ctx).width() == 64
                         {
-                            int_ty
+                            int_ty.into()
                         } else {
                             self.value_type(ctx, ty)?
                         };
@@ -507,7 +541,10 @@ impl<'h> Shapes<'h> {
         }
     }
 
-    pub(super) fn perry_integer_type(ctx: &mut Context, name: &str) -> Option<TypeHandle> {
+    pub(super) fn perry_integer_type(
+        ctx: &mut Context,
+        name: &str,
+    ) -> Option<TypedHandle<IntegerType>> {
         let (bits, signedness) = match name {
             "perry:types/u8" => (8, Signedness::Unsigned),
             "perry:types/s8" => (8, Signedness::Signed),
@@ -519,10 +556,14 @@ impl<'h> Shapes<'h> {
             "perry:types/s64" => (64, Signedness::Signed),
             _ => return None,
         };
-        Some(IntegerType::get(ctx, bits, signedness).into())
+        Some(IntegerType::get(ctx, bits, signedness))
     }
 
-    pub(super) fn integer_type(&self, ctx: &mut Context, ty: &HirType) -> Option<TypeHandle> {
+    pub(super) fn integer_type(
+        &self,
+        ctx: &mut Context,
+        ty: &HirType,
+    ) -> Option<TypedHandle<IntegerType>> {
         let mut seen = HashSet::new();
         self.integer_type_inner(ctx, ty, &mut seen)
     }
@@ -532,7 +573,7 @@ impl<'h> Shapes<'h> {
         ctx: &mut Context,
         ty: &'a HirType,
         seen: &mut HashSet<&'a str>,
-    ) -> Option<TypeHandle> {
+    ) -> Option<TypedHandle<IntegerType>> {
         let HirType::Named(name) = ty else {
             return None;
         };
@@ -590,11 +631,7 @@ impl<'h> Shapes<'h> {
 
     fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
         if let Some(int_ty) = Self::perry_integer_type(ctx, name) {
-            return Ok(if int_ty
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
-            {
+            return Ok(if int_ty.deref(ctx).width() == 64 {
                 perry_mir::types::BigIntType::get(ctx).into()
             } else {
                 FP64Type::get(ctx).into()
@@ -606,11 +643,7 @@ impl<'h> Shapes<'h> {
         if !user {
             let key = self.aliases.get(name).map_or(name, String::as_str);
             if let Some(int_ty) = Self::perry_integer_type(ctx, key) {
-                return Ok(if int_ty
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                {
+                return Ok(if int_ty.deref(ctx).width() == 64 {
                     perry_mir::types::BigIntType::get(ctx).into()
                 } else {
                     FP64Type::get(ctx).into()
@@ -717,12 +750,9 @@ impl<'h> Shapes<'h> {
             .map(|(field, ty, optional)| {
                 let ty = if !*optional
                     && let Some(int_ty) = self.integer_type(ctx, ty)
-                    && int_ty
-                        .deref(ctx)
-                        .downcast_ref::<IntegerType>()
-                        .is_some_and(|int| int.width() == 64)
+                    && int_ty.deref(ctx).width() == 64
                 {
-                    int_ty
+                    int_ty.into()
                 } else {
                     self.value_type(ctx, ty)
                         .with_context(|| format!("field {field}"))?

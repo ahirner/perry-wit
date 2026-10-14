@@ -89,8 +89,13 @@ impl<'s> FunctionBuilder<'s> {
                 self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, separator])
             }
             Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
-            Expr::Call { callee, args, .. } => self
-                .call(ctx, callee, args)?
+            Expr::Call {
+                callee,
+                args,
+                byte_offset,
+                ..
+            } => self
+                .call(ctx, callee, args, *byte_offset)?
                 .context("a void call has no value")?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
@@ -218,12 +223,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::JsonParseTyped { text, ty, .. } => {
                 let text = self.string_operand(ctx, text)?;
                 let target = if let Some(int_ty) = self.shapes.integer_type(ctx, ty)
-                    && int_ty
-                        .deref(ctx)
-                        .downcast_ref::<IntegerType>()
-                        .is_some_and(|int| int.width() == 64)
+                    && int_ty.deref(ctx).width() == 64
                 {
-                    int_ty
+                    int_ty.into()
                 } else if matches!(ty, HirType::Any | HirType::Unknown) {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
@@ -530,34 +532,14 @@ impl<'s> FunctionBuilder<'s> {
 
     /// `local = value`, fitted to the local's type.
     fn local_set(&mut self, ctx: &mut Context, id: LocalId, value: &'s Expr) -> Result<Value> {
-        let slot = self.local(id)?;
-        let slot_type = self.slot_type(ctx, slot)?;
-        let int_ty = self.integer_locals.get(&id).copied();
-        let expr_expected = int_ty
-            .filter(|int_ty| {
-                int_ty
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-            })
-            .or(Some(slot_type));
-        let value = self.expression_with(ctx, value, expr_expected)?;
-        let value = if let Some(int_ty) = int_ty {
-            if int_ty
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
-            {
-                let int_val = self.fit(ctx, value, int_ty)?;
-                self.fit(ctx, int_val, slot_type)?
-            } else {
-                let fitted = self.fit(ctx, value, slot_type)?;
-                self.wrap_integer(ctx, fitted, int_ty, slot_type)
-            }
-        } else {
-            self.fit(ctx, value, slot_type)?
+        let local = self.local_binding(id)?;
+        let binding = BindingType {
+            carrier: self.slot_type(ctx, local.slot)?,
+            integer: local.integer,
         };
-        self.store(ctx, slot, value);
+        let value = self.expression_with(ctx, value, Some(binding.expected_type(ctx)))?;
+        let value = self.fit_binding(ctx, value, binding)?;
+        self.store(ctx, local.slot, value);
         Ok(value)
     }
 
@@ -569,8 +551,8 @@ impl<'s> FunctionBuilder<'s> {
         op: &UpdateOp,
         prefix: bool,
     ) -> Result<Value> {
-        let slot = self.local(id)?;
-        let old = self.load(ctx, slot)?;
+        let local = self.local_binding(id)?;
+        let old = self.load(ctx, local.slot)?;
         let old = self.arithmetic(ctx, old);
         ensure!(kind(ctx, old)? == Kind::Number, "++/-- needs a number");
         let one = self.number(ctx, 1.0);
@@ -579,12 +561,12 @@ impl<'s> FunctionBuilder<'s> {
             UpdateOp::Decrement => BinaryKind::Sub,
         };
         let new = self.binary(ctx, kind, old, one);
-        let slot_type = self.slot_type(ctx, slot)?;
-        let mut stored = self.fit(ctx, new, slot_type)?;
-        if let Some(&int_ty) = self.integer_locals.get(&id) {
-            stored = self.wrap_integer(ctx, stored, int_ty, slot_type);
-        }
-        self.store(ctx, slot, stored);
+        let binding = BindingType {
+            carrier: self.slot_type(ctx, local.slot)?,
+            integer: local.integer,
+        };
+        let stored = self.fit_binding(ctx, new, binding)?;
+        self.store(ctx, local.slot, stored);
         Ok(if prefix { stored } else { old })
     }
 
