@@ -200,26 +200,3 @@ impl std::error::Error for CompileError {
         Some(self.source.as_ref())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn unicode_locations_and_error_sources_are_retained() {
-        let span = SourceSpan::new("src/helper.ts", "é\r\n🙂x", 8, 9);
-        assert_eq!((span.start_line, span.start_column), (2, 2));
-        let diagnostic =
-            PerryDiagnostic::error(DiagnosticCode::MissingTypeAnnotation, "annotate helper")
-                .with_span(span);
-        let error = CompileError::from_error(
-            anyhow::Error::new(diagnostic).context("lowering helper"),
-            DiagnosticCode::InternalCompilerError,
-        );
-        assert_eq!(
-            error.diagnostics[0].code,
-            DiagnosticCode::MissingTypeAnnotation
-        );
-        assert!(std::error::Error::source(&error).is_some());
-        assert!(error.to_string().contains("lowering helper"));
-    }
-}

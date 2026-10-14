@@ -12,12 +12,12 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 type Exports = BTreeMap<String, String>;
 
-pub(crate) struct Loaded<'s> {
-    pub(crate) module: ast::Module,
-    pub(crate) locations: crate::locations::Locations<'s>,
+pub(super) struct Loaded<'s> {
+    pub(super) module: ast::Module,
+    pub(super) locations: crate::locations::Locations<'s>,
 }
 
-pub(crate) fn load<'s>(
+pub(super) fn load<'s>(
     source: &'s str,
     file: &str,
     sources: &'s BTreeMap<String, String>,
@@ -130,14 +130,10 @@ fn wit_imports(
             && !import.specifiers.is_empty()
             && import.specifiers.iter().all(|specifier| match specifier {
                 ast::ImportSpecifier::Named(named) => {
-                    let name = named
-                        .imported
-                        .as_ref()
-                        .map(|name| name.atom().to_string())
-                        .unwrap_or_else(|| named.local.sym.to_string());
+                    let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
+                    let name: &str = imported.as_deref().unwrap_or(&named.local.sym);
                     (import.type_only || named.is_type_only)
-                        && (foreign.contains(&name)
-                            || matches!(name.as_str(), "WitInput" | "WitResource"))
+                        && (foreign.contains(name) || matches!(name, "WitInput" | "WitResource"))
                 }
                 _ => false,
             })
@@ -159,7 +155,7 @@ fn local(name: &str) -> bool {
     name.starts_with("./") || name.starts_with("../")
 }
 
-pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
+pub(super) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
     ensure!(local(name), "Re-exports require a local TypeScript module");
     let path = normalize(&parent.parent().unwrap_or(Path::new("")).join(name));
     let mut candidates = vec![path.clone()];
@@ -176,7 +172,7 @@ pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
     Ok(candidates)
 }
 
-pub(crate) fn normalize(path: &Path) -> PathBuf {
+pub(super) fn normalize(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {
@@ -205,7 +201,7 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         })
 }
 
-pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
+pub(super) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
     let mut cache = Default::default();
     use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
     let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
@@ -254,7 +250,7 @@ pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
     Ok(parsed.module)
 }
 
-pub(crate) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
+pub(super) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
     module
         .body
         .iter()
@@ -449,15 +445,12 @@ fn bind_module<'a>(
                 for specifier in &import.specifiers {
                     match specifier {
                         ast::ImportSpecifier::Named(named) => {
-                            let original = named
-                                .imported
-                                .as_ref()
-                                .map(|name| name.atom().to_string())
-                                .unwrap_or_else(|| named.local.sym.to_string());
+                            let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
+                            let original: &str = imported.as_deref().unwrap_or(&named.local.sym);
                             names.insert(
                                 named.local.to_id(),
                                 dependency
-                                    .get(&original)
+                                    .get(original)
                                     .with_context(|| {
                                         format!(
                                             "Module '{}' has no export '{original}'",
@@ -497,20 +490,20 @@ fn bind_module<'a>(
                     let ast::ExportSpecifier::Named(named) = specifier else {
                         bail!("Only named local re-exports are supported");
                     };
-                    let original = named.orig.atom().to_string();
+                    let original = named.orig.atom();
+                    let original_str: &str = original.as_ref();
                     let binding = if let Some(dependency) = &dependency {
-                        dependency.get(&original)
+                        dependency.get(original_str)
                     } else if let ast::ModuleExportName::Ident(id) = &named.orig {
                         names.get(&id.to_id())
                     } else {
                         None
                     }
-                    .with_context(|| format!("Unknown export '{original}'"))?;
+                    .with_context(|| format!("Unknown export '{original_str}'"))?;
                     let exported = named
                         .exported
                         .as_ref()
-                        .map(|name| name.atom().to_string())
-                        .unwrap_or(original);
+                        .map_or_else(|| original.to_string(), |name| name.atom().to_string());
                     insert_export(&mut exports, exported, binding.clone())?;
                 }
             }
@@ -536,11 +529,14 @@ fn bind_module<'a>(
 }
 
 fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result<()> {
-    ensure!(
-        exports.insert(name.clone(), binding).is_none(),
-        "Ambiguous export '{name}'"
-    );
-    Ok(())
+    use std::collections::btree_map::Entry;
+    match exports.entry(name) {
+        Entry::Vacant(entry) => {
+            entry.insert(binding);
+            Ok(())
+        }
+        Entry::Occupied(entry) => bail!("Ambiguous export '{}'", entry.key()),
+    }
 }
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
     Ok(match decl {
@@ -591,10 +587,10 @@ impl VisitMut for Rename<'_> {
             && let Some(exports) = self.namespaces.get(&namespace.to_id())
         {
             let name = match &member.prop {
-                ast::MemberProp::Ident(id) => Some(id.sym.to_string()),
+                ast::MemberProp::Ident(id) => Some(id.sym.as_ref()),
                 _ => None,
             };
-            if let Some(binding) = name.and_then(|name| exports.get(&name)) {
+            if let Some(binding) = name.and_then(|name| exports.get(name)) {
                 *expression = ast::Expr::Ident(ast::Ident::new(
                     binding.clone().into(),
                     DUMMY_SP,

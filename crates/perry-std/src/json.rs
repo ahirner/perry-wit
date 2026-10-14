@@ -12,15 +12,17 @@
 //! position and its last value) is applied when serializing or enumerating ([canonical]).
 //! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
 //! the same step, so duplicate and numeric keys come out as in Node.
+mod reflection;
+mod writer;
+
+pub(crate) use reflection::std_json_strict_equal;
+use reflection::{native_property, native_snapshot};
+
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
-use perry_abi::json::kind::*;
-use perry_abi::json::{MAX_DEPTH, MEMBER_COUNT};
+use perry_abi::json::{MEMBER_COUNT, kind::*};
+use perry_abi::layout::descriptor;
 
-/// A member a spread set to `undefined`: it hides earlier values and is not serialized.
-const UNDEFINED: u32 = 0;
-const EXCEPTION: u32 = 7;
-const NATIVE: u32 = 8;
 /// Word 28 of an object: nonzero once its members are in property order.
 const CANONICAL: usize = 28;
 const NODE_BYTES: u32 = 32;
@@ -47,8 +49,7 @@ fn address(node: *mut u8) -> u32 {
 fn new_node(kind: u32) -> *mut u8 {
     let shape: &'static [u32] = match kind {
         STRING => &[0, 3, 4, 8, 24],
-        EXCEPTION | NATIVE => &[0, 4, 4, 8, 16, 24],
-        ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
+        EXCEPTION | NATIVE | ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
         _ => &[0, 2, 4, 24],
     };
     // SAFETY: tags select exact pointer fields; scalar payload bits remain opaque.
@@ -65,11 +66,7 @@ fn string_node(bytes: &[u8]) -> *mut u8 {
     set_word(node, 8, bytes.as_ptr() as usize as u32);
     set_word(node, 12, bytes.len() as u32);
     // Word 16 of a string node is its scalar count, as the parser writes it.
-    set_word(
-        node,
-        16,
-        bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32,
-    );
+    set_word(node, 16, scalars_length(bytes));
     node
 }
 
@@ -237,7 +234,7 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     match word(value, 0) {
         STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
         ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
-        NATIVE if word(node(word(value, 12)), 0) == 5 => {
+        NATIVE if word(node(word(value, 12)), 0) == descriptor::ARRAY => {
             f64::from(word(node(word(value, 8)), 0)).to_bits()
         }
         _ => crate::runtime::UNDEFINED_BITS,
@@ -322,120 +319,7 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
             u32::from(number != 0.0 && !number.is_nan())
         }
         STRING => u32::from(word(value, 12) != 0),
-        ARRAY | OBJECT | EXCEPTION | NATIVE => 1,
-        _ => unreachable!("JSON tag"),
-    }
-}
-
-/// The writer of `JSON.stringify` for typed values: compiled serializers call it with
-/// structure and pre-formatted pieces.
-#[repr(C)]
-struct Writer {
-    text: Buffer,
-    /// Bit `d` set: the container at depth `d` already has an element.
-    started: [u64; 2],
-    depth: u32,
-    failed: bool,
-}
-
-fn writer(w: *mut u8) -> &'static mut Writer {
-    // SAFETY: compiled code passes writers from [std_json_writer].
-    unsafe { &mut *(w as *mut Writer) }
-}
-
-/// A new writer in the task region.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_writer() -> *mut u8 {
-    let w = perry_abi::object!(Writer; text);
-    // SAFETY: freshly allocated.
-    unsafe {
-        w.write(Writer {
-            text: Buffer::new(),
-            started: [0; 2],
-            depth: 0,
-            failed: false,
-        })
-    };
-    w as *mut u8
-}
-
-/// Enter a container value; returns 0 (and fails the writer) when nesting is too deep.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
-    let w = writer(w);
-    if w.failed || w.depth >= MAX_DEPTH {
-        w.failed = true;
-        return 0;
-    }
-    w.text.push(bracket as u8);
-    w.depth += 1;
-    let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
-    w.started[word] &= !(1 << bit);
-    1
-}
-
-/// Leave a container value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_close(w: *mut u8, bracket: u32) {
-    let w = writer(w);
-    if w.failed {
-        return;
-    }
-    w.text.push(bracket as u8);
-    w.depth -= 1;
-}
-
-fn separate(w: &mut Writer) {
-    let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
-    if w.started[word] & (1 << bit) != 0 {
-        w.text.push(b',');
-    }
-    w.started[word] |= 1 << bit;
-}
-
-/// Start an array element.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_item(w: *mut u8) {
-    let w = writer(w);
-    if !w.failed {
-        separate(w);
-    }
-}
-
-/// Start an object member; `key` is the already quoted key followed by `:`.
-///
-/// # Safety
-/// `key` must be a string.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_json_key(w: *mut u8, key: *mut u8) {
-    let w = writer(w);
-    if !w.failed {
-        separate(w);
-        // SAFETY: guaranteed by the caller.
-        w.text
-            .extend_from_slice(unsafe { crate::runtime::bytes(key) });
-    }
-}
-
-/// Append raw text (a number's digits, `null`, `true`, `false`).
-/// # Safety
-/// `data` must point to `len` readable bytes.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u32) {
-    let w = writer(w);
-    if !w.failed && len > 0 {
-        // SAFETY: compiled code passes `len` readable bytes.
-        w.text
-            .extend_from_slice(unsafe { core::slice::from_raw_parts(data, len as usize) });
-    }
-}
-
-/// Append an ECMAScript number without allocating a per-number scratch object.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
-    let w = writer(w);
-    if !w.failed {
-        append_number(&mut w.text, number);
+        _ => 1,
     }
 }
 
@@ -447,41 +331,6 @@ fn append_number(text: &mut Buffer, number: f64) {
     } else {
         text.extend_from_slice(b"null");
     }
-}
-
-/// Append a string as a JSON string literal (ECMAScript `QuoteJSONString`).
-///
-/// # Safety
-/// `string` must be a string.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
-    let w = writer(w);
-    if w.failed {
-        return;
-    }
-    // SAFETY: guaranteed by the caller.
-    quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
-}
-
-/// Append a JSON string literal, quotes included.
-pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
-    text.push(b'"');
-    perry_abi::json::quote_contents(bytes, |part| text.extend_from_slice(part));
-    text.push(b'"');
-}
-
-/// The text written, or null after a failure (with a `TypeError` raised).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
-    let w = writer(w);
-    if w.failed {
-        raise(TYPE_ERROR, "Converting circular structure to JSON");
-        return from_static("");
-    }
-    let text = core::mem::take(&mut w.text);
-    let bytes = text.as_slice();
-    // SAFETY: finished UTF-8 output is immutable; the string traces this owned allocation.
-    unsafe { adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
 /// `typeof value`.
@@ -502,155 +351,6 @@ pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_is_null(value: *mut u8) -> u32 {
     u32::from(!value.is_null() && word(value, 0) == NULL)
-}
-
-/// Write a parsed JSON value starting `depth` levels deep; false when it nests deeper than
-/// [MAX_DEPTH]. Iterative, with a fixed stack of open containers, so the linker can bound
-/// the stack of programs that serialize JSON values.
-fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
-    /// An array or object being written: its node, its next member, and whether a member
-    /// was written (for separators).
-    #[derive(Clone, Copy)]
-    struct Open {
-        node: *mut u8,
-        next: u32,
-        written: bool,
-    }
-    let mut stack = arrayvec::ArrayVec::<Open, { MAX_DEPTH as usize + 1 }>::new();
-    let mut current = value;
-    loop {
-        if depth + stack.len() as u32 > MAX_DEPTH {
-            return false;
-        }
-        match word(current, 0) {
-            NATIVE => {
-                current = native_snapshot(current);
-                continue;
-            }
-            EXCEPTION => text.extend_from_slice(b"{}"),
-            NULL => text.extend_from_slice(b"null"),
-            BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
-                b"true"
-            } else {
-                b"false"
-            }),
-            NUMBER => {
-                // SAFETY: number nodes hold an f64 at 8.
-                let number = unsafe { *(current.add(8) as *const f64) };
-                append_number(text, number);
-            }
-            STRING => quote(text, string_bytes(current)),
-            kind @ (ARRAY | OBJECT) => {
-                if kind == OBJECT {
-                    current = canonical(current);
-                }
-                text.push(if kind == ARRAY { b'[' } else { b'{' });
-                stack.push(Open {
-                    node: current,
-                    next: word(current, 16),
-                    written: false,
-                });
-            }
-            _ => return false,
-        }
-        // The next member to write, closing the containers that are done.
-        loop {
-            let Some(container) = stack.last_mut() else {
-                return true;
-            };
-            let mut member = container.next;
-            while member != 0 && word(node(member), 0) == UNDEFINED {
-                member = word(node(member), 4);
-            }
-            let object = word(container.node, 0) == OBJECT;
-            if member == 0 {
-                text.push(if object { b'}' } else { b']' });
-                stack.pop();
-                continue;
-            }
-            if container.written {
-                text.push(b',');
-            }
-            if object {
-                quote(text, string_bytes(node(word(node(member), 24))));
-                text.push(b':');
-            }
-            container.next = word(node(member), 4);
-            container.written = true;
-            current = node(member);
-            break;
-        }
-    }
-}
-
-/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output; `undefined` writes
-/// nothing, so callers check it first).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
-    let w = writer(w);
-    if w.failed || value.is_null() {
-        return;
-    }
-    if !value_text(&mut w.text, value, w.depth) {
-        w.failed = true;
-    }
-}
-
-/// Append undeclared object members or a tuple's remaining elements from its retained graph.
-/// Declared values were already written from their current typed storage.
-///
-/// # Safety
-/// `keys` holds `count` static string addresses sorted by byte length, then UTF-8 bytes.
-/// Arrays do not read it.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_json_extras(
-    w: *mut u8,
-    graph: *mut u8,
-    keys: *const u32,
-    count: u32,
-) {
-    let w = writer(w);
-    if graph.is_null() || w.failed {
-        return;
-    }
-    let object = word(graph, 0) == OBJECT;
-    let graph = if object { canonical(graph) } else { graph };
-    // SAFETY: compiled serializers supply the declared object's static field names.
-    let keys = if object && count != 0 {
-        unsafe { core::slice::from_raw_parts(keys, count as usize) }
-    } else {
-        &[]
-    };
-    let mut member = word(graph, 16);
-    let mut index = 0;
-    while member != 0 {
-        let value = node(member);
-        let keep = if object {
-            let name = key_bytes(member);
-            keys.binary_search_by(|&key| {
-                // SAFETY: every table entry is a static string header.
-                let key = unsafe { crate::runtime::bytes(node(key)) };
-                key.len().cmp(&name.len()).then_with(|| key.cmp(name))
-            })
-            .is_err()
-                && word(value, 0) != UNDEFINED
-        } else {
-            index >= count
-        };
-        if keep {
-            separate(w);
-            if object {
-                quote(&mut w.text, key_bytes(member));
-                w.text.push(b':');
-            }
-            if !value_text(&mut w.text, value, w.depth) {
-                w.failed = true;
-                return;
-            }
-        }
-        index += 1;
-        member = word(value, 4);
-    }
 }
 
 /// The array index a key names (a canonical decimal below 2³² − 1), if any.
@@ -865,7 +565,8 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
         STRING => {
             let text = string_bytes(source);
             let (mut at, mut index) = (0, 0);
-            for character in core::str::from_utf8(text).unwrap_or("").chars() {
+            // SAFETY: JSON string nodes contain validated UTF-8.
+            for character in unsafe { core::str::from_utf8_unchecked(text) }.chars() {
                 let width = character.len_utf8();
                 append(object, string_node(&text[at..at + width]), index_key(index));
                 at += width;
@@ -903,7 +604,13 @@ pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_from_string(value: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller; strings live in the task region.
-    string_node(unsafe { crate::runtime::bytes(value) })
+    let bytes = unsafe { crate::runtime::bytes(value) };
+    let scalars = unsafe { (*value.cast::<perry_abi::layout::string::Header>()).scalars };
+    let node = new_node(STRING);
+    set_word(node, 8, bytes.as_ptr() as usize as u32);
+    set_word(node, 12, bytes.len() as u32);
+    set_word(node, 16, scalars);
+    node
 }
 
 /// A boolean (`kind` 2) or `null` (`kind` 1) as a JSON value.
@@ -937,213 +644,4 @@ pub(crate) extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
     } else {
         node(word(value, 4))
     }
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_from_exception(exception: *mut u8) -> *mut u8 {
-    let value = new_node(EXCEPTION);
-    set_word(value, 8, address(exception));
-    value
-}
-/// Strict equality preserves scalar values and identity of live cause references.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_strict_equal(left: *mut u8, right: *mut u8) -> u32 {
-    if left.is_null() || right.is_null() {
-        return u32::from(left == right);
-    }
-    let kind = word(left, 0);
-    if kind != word(right, 0) {
-        return 0;
-    }
-    u32::from(match kind {
-        NULL => true,
-        BOOLEAN => word(left, 8) == word(right, 8),
-        STRING => string_bytes(left) == string_bytes(right),
-        NUMBER => {
-            // SAFETY: both nodes hold f64 payloads.
-            unsafe { *left.add(8).cast::<f64>() == *right.add(8).cast::<f64>() }
-        }
-        EXCEPTION | NATIVE => word(left, 8) == word(right, 8),
-        _ => left == right,
-    })
-}
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_origin_equal(value: *mut u8, origin: *mut u8) -> u32 {
-    u32::from(
-        !value.is_null()
-            && matches!(word(value, 0), EXCEPTION | NATIVE)
-            && word(value, 8) == address(origin),
-    )
-}
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_to_exception(value: *mut u8) -> *mut u8 {
-    use perry_abi::layout::exception::*;
-    if value.is_null() {
-        return perry_abi::exception_value(TAG_UNDEFINED, 0);
-    }
-    let (tag, bits) = match word(value, 0) {
-        EXCEPTION => return node(word(value, 8)),
-        NULL => (TAG_NULL, 0),
-        BOOLEAN => (TAG_BOOLEAN, word(value, 8) as u64),
-        NUMBER => {
-            // SAFETY: this node holds a numeric payload.
-            (TAG_NUMBER, unsafe { *value.add(8).cast::<u64>() })
-        }
-        STRING => (TAG_STRING, std_json_to_string(value) as usize as u64),
-        _ => (TAG_JSON, value as usize as u64),
-    };
-    perry_abi::exception_value(tag, bits)
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_exception_equal(value: *mut u8, exception: *mut u8) -> u32 {
-    use perry_abi::layout::exception::*;
-    if word(exception, KIND as usize) != THROWN_VALUE {
-        return std_json_origin_equal(value, exception);
-    }
-    let tag = word(exception, TAG as usize);
-    // SAFETY: the tag identifies the exception's value slot.
-    let bits = unsafe { *exception.add(VALUE as usize).cast::<u64>() };
-    if tag == TAG_UNDEFINED {
-        return u32::from(value.is_null());
-    }
-    if tag == TAG_JSON {
-        return std_json_strict_equal(value, node(bits as u32));
-    }
-    if value.is_null() {
-        return 0;
-    }
-    u32::from(match (tag, word(value, 0)) {
-        (TAG_NULL, NULL) => true,
-        (TAG_BOOLEAN, BOOLEAN) => bits == word(value, 8) as u64,
-        (TAG_STRING, STRING) => {
-            string_bytes(value) == unsafe { crate::runtime::bytes(node(bits as u32)) }
-        }
-        (TAG_NUMBER, NUMBER) => f64::from_bits(bits) == unsafe { *value.add(8).cast::<f64>() },
-        _ => false,
-    })
-}
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_exception_is(value: *mut u8, expected: u32) -> u32 {
-    if value.is_null() || word(value, 0) != EXCEPTION {
-        return 0;
-    }
-    let kind = word(node(word(value, 8)), 0);
-    u32::from(if expected == 0 {
-        matches!(kind, 1..=3 | 6 | 7)
-    } else {
-        kind == expected
-    })
-}
-
-/// ECMAScript ToString for supported dynamic primitives and cause references.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_display(value: *mut u8) -> *mut u8 {
-    if value.is_null() {
-        return from_static("undefined");
-    }
-    match word(value, 0) {
-        NULL => from_static("null"),
-        BOOLEAN => from_static(if word(value, 8) == 0 { "false" } else { "true" }),
-        STRING => std_json_to_string(value),
-        NUMBER => {
-            let mut text = Buffer::new();
-            let number = unsafe { *(value.add(8) as *const f64) };
-            append_number(&mut text, number);
-            crate::runtime::from_bytes(text.as_slice())
-        }
-        _ => from_static("[object Object]"),
-    }
-}
-
-/// A live native reference with its compiler-emitted layout descriptor.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -> *mut u8 {
-    let value = new_node(NATIVE);
-    set_word(value, 8, address(origin));
-    set_word(value, 12, address(descriptor));
-    value
-}
-fn native_slot(bits: u64, descriptor: *mut u8) -> *mut u8 {
-    match word(descriptor, 0) {
-        1 => std_json_from_number(f64::from_bits(bits)),
-        2 => std_json_from_scalar(BOOLEAN, bits as u32),
-        3 => unsafe { std_json_from_string(node(bits as u32)) },
-        4 | 5 => std_json_native(node(bits as u32), descriptor),
-        6 => std_json_from_exception(node(bits as u32)),
-        7 => {
-            let inner = node(word(descriptor, 4));
-            let (undefined, null) = match word(inner, 0) {
-                1 => (crate::runtime::UNDEFINED_BITS, 0x7ff0_0000_0000_0002),
-                2 => (2, 3),
-                _ => (0, 1),
-            };
-            if bits == undefined {
-                core::ptr::null_mut()
-            } else if bits == null {
-                std_json_from_scalar(NULL, 0)
-            } else {
-                native_slot(bits, inner)
-            }
-        }
-        _ => unreachable!("native layout descriptor"),
-    }
-}
-fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
-    let (origin, descriptor) = (node(word(value, 8)), node(word(value, 12)));
-    match word(descriptor, 0) {
-        4 => {
-            for index in 0..word(descriptor, 4) {
-                let field = unsafe { descriptor.add(8 + index as usize * 12) };
-                let key = unsafe { crate::runtime::bytes(node(word(field, 0))) };
-                if key == name {
-                    let slot = unsafe { *(origin.add(word(field, 8) as usize).cast::<u64>()) };
-                    return native_slot(slot, node(word(field, 4)));
-                }
-            }
-            core::ptr::null_mut()
-        }
-        5 => {
-            let length = word(origin, 0);
-            if name == b"length" {
-                return std_json_from_number(f64::from(length));
-            }
-            if let Some(index) = array_index(name).filter(|&index| index < length) {
-                let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
-                let slot = unsafe { *data.add(index as usize * 8).cast::<u64>() };
-                native_slot(slot, node(word(descriptor, 4)))
-            } else {
-                core::ptr::null_mut()
-            }
-        }
-        _ => unreachable!("native aggregate descriptor"),
-    }
-}
-fn native_snapshot(value: *mut u8) -> *mut u8 {
-    let descriptor = node(word(value, 12));
-    let result = new_node(if word(descriptor, 0) == 5 {
-        ARRAY
-    } else {
-        OBJECT
-    });
-    let count = if word(descriptor, 0) == 5 {
-        word(node(word(value, 8)), 0)
-    } else {
-        word(descriptor, 4)
-    };
-    for index in 0..count {
-        if word(descriptor, 0) == 5 {
-            let origin = node(word(value, 8));
-            let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
-            let slot = unsafe { *data.add(index as usize * 8).cast::<u64>() };
-            let item = native_slot(slot, node(word(descriptor, 4)));
-            append(result, item, core::ptr::null_mut());
-        } else {
-            let name = node(word(descriptor, 8 + index as usize * 12));
-            let key = unsafe { std_json_from_string(name) };
-            let item = native_property(value, string_bytes(key));
-            append(result, item, key);
-        }
-    }
-    result
 }

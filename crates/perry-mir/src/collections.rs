@@ -31,7 +31,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum CollectionErr {
+enum CollectionErr {
     #[error("{0} expects a perry.array")]
     NotArray(&'static str),
     #[error("{0} element type differs from the array's element type")]
@@ -571,20 +571,11 @@ impl SideEffects for ConcatOp {
 pub struct ConcatReuseOp;
 
 impl ConcatReuseOp {
-    pub fn new(ctx: &mut Context, lhs: Value, rhs: Value) -> Self {
-        Self::with_candidates(ctx, lhs, rhs, ReuseOperands(vec![0]))
-    }
-
-    pub fn with_candidates(
+    pub(crate) fn from_sources(
         ctx: &mut Context,
-        lhs: Value,
-        rhs: Value,
+        sources: Vec<Value>,
         reuse: ReuseOperands,
     ) -> Self {
-        Self::from_sources(ctx, vec![lhs, rhs], reuse)
-    }
-
-    pub fn from_sources(ctx: &mut Context, sources: Vec<Value>, reuse: ReuseOperands) -> Self {
         let ty = sources[0].get_type(ctx);
         let operation = Self {
             op: Operation::new(
@@ -611,7 +602,8 @@ impl Verify for ConcatReuseOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let operation = self.get_operation().deref(ctx);
         let operands: Vec<_> = operation.operands().collect();
-        let candidates = self.candidates(ctx).0;
+        let reuse = self.get_attr_perry_concat_reuse(ctx);
+        let candidates = reuse.as_deref().map_or(&[][..], |reuse| reuse.0.as_slice());
         if !is_sequence(ctx, self.get_result(ctx))
             || operands.is_empty()
             || candidates.is_empty()

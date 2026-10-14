@@ -285,9 +285,12 @@ world boundary {
 }
 "#,
         r#"
+const items: { text: string }[] = [];
+for (let i = 0; i < 200; i++) items.push({ text: "item " + i });
 let saved = "";
 let data = new Uint8Array(0);
 export function remember(text: string, bytes: Uint8Array): number {
+    if (items.length !== 200) throw new Error("init missing");
     saved = text.slice(1); data = bytes.subarray(1); data[0] = 255;
     return data.length;
 }
@@ -866,32 +869,6 @@ export function stringify(value:Page<number>):string {return JSON.stringify(valu
     assert_eq!(
         instance.call_success("stringify", &[page])?,
         Val::String("{\"data\":[1,2],\"next\":null}".into())
-    );
-    Ok(())
-}
-
-#[test]
-fn module_initialization_allocations_do_not_collect_lifted_parameters() -> Result<()> {
-    let wit = r#"package test:init-order;
-world boundary {
-  export check: func(date: string) -> string;
-}"#;
-    let source = r#"
-const items: { text: string }[] = [];
-for (let i = 0; i < 200; i++) {
-  items.push({ text: "item " + i });
-}
-export function check(date: string): string {
-  if (items.length > 0 && date.length > 0) {
-    return date + " ok";
-  }
-  return "none";
-}
-"#;
-    let mut component = Instance::compile(wit, source)?;
-    assert_eq!(
-        component.call("check", &[Val::String("2023-01-10".into())])?,
-        Val::String("2023-01-10 ok".into())
     );
     Ok(())
 }

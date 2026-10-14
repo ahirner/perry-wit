@@ -328,27 +328,17 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        let error = match ty {
-            "Error" => ErrorKind::Any,
-            "TypeError" => ErrorKind::TypeError,
-            "RangeError" => ErrorKind::RangeError,
-            "ReferenceError" => ErrorKind::ReferenceError,
-            "SyntaxError" => ErrorKind::SyntaxError,
+        let (error, code) = match ty {
+            "Error" => (ErrorKind::Any, 0),
+            "TypeError" => (ErrorKind::TypeError, 1),
+            "RangeError" => (ErrorKind::RangeError, 2),
+            "ReferenceError" => (ErrorKind::ReferenceError, 6),
+            "SyntaxError" => (ErrorKind::SyntaxError, 7),
             other => bail!("instanceof {other} is not supported yet"),
         };
         Ok(match kind(ctx, value)? {
             Kind::Json => {
-                let code = self.i32(
-                    ctx,
-                    match error {
-                        ErrorKind::Any => 0,
-                        ErrorKind::TypeError => 1,
-                        ErrorKind::RangeError => 2,
-                        ErrorKind::ReferenceError => 6,
-                        ErrorKind::SyntaxError => 7,
-                        _ => unreachable!(),
-                    },
-                );
+                let code = self.i32(ctx, code);
                 self.intrinsic(ctx, Intrinsic::JsonExceptionIs, vec![value, code])
             }
             Kind::Exception => self.emit_value(ctx, |ctx| ExceptionIsOp::new(ctx, error, value)),

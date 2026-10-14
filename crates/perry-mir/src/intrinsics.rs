@@ -36,7 +36,7 @@ use thiserror::Error;
 
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Ty {
+enum Ty {
     BigInt,
     /// A signless i32 index proven in bounds.
     Index,
@@ -263,7 +263,7 @@ impl Ty {
 /// Operand kinds: a value kind, or an aggregate kind that names no single MIR type and so
 /// cannot be a result ([Ty] has no such kind).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Operand {
+enum Operand {
     Value(Ty),
     /// Records and tagged unions retaining their original JSON graph.
     Aggregate,
@@ -305,7 +305,7 @@ macro_rules! intrinsics {
         }
 
         impl Intrinsic {
-            pub const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
+            const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
 
             pub fn name(self) -> &'static str {
                 match self {
@@ -321,7 +321,7 @@ macro_rules! intrinsics {
             }
 
             /// (operands, results).
-            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
+            fn types(self) -> (&'static [Operand], &'static [Ty]) {
                 match self {
                     $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
                 }
@@ -560,7 +560,7 @@ intrinsics! {
 impl Intrinsic {
     /// Allocation and internal safe-point contract, including hidden temporaries.
     /// Unclassified helpers remain conservative.
-    pub fn allocation(self) -> crate::effects::Allocation {
+    pub(crate) fn allocation(self) -> crate::effects::Allocation {
         if self.flags().contains(&"noalloc") {
             crate::effects::Allocation::None
         } else if self.flags().contains(&"atomic") {
@@ -574,7 +574,7 @@ impl Intrinsic {
         self.allocation() != crate::effects::Allocation::None
     }
 
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
+    fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|i| i.name() == name)
     }
 
@@ -604,7 +604,7 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum IntrinsicErr {
+enum IntrinsicErr {
     #[error("unknown intrinsic {0}")]
     Unknown(String),
     #[error("intrinsic {0} has the wrong operand or result types")]
@@ -685,7 +685,7 @@ impl MayThrowInterface for IntrinsicOp {
 
 #[derive(Debug, Error)]
 #[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
-pub(crate) struct StringifyErr;
+struct StringifyErr;
 
 /// `JSON.stringify(value)` of a typed value: records, arrays, strings, numbers, booleans,
 /// `Uint8Array`s, JSON values and their optionals.
@@ -746,7 +746,7 @@ impl MayThrowInterface for JsonStringifyOp {
 
 #[derive(Debug, Error)]
 #[error("perry.promise_combinator takes an array of promises of one type")]
-pub(crate) struct CombinatorErr;
+struct CombinatorErr;
 
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
@@ -888,7 +888,7 @@ impl Verify for PromiseResolvedOp {
 
 #[derive(Debug, Error)]
 #[error("perry.settled_field reads a perry.settled value")]
-pub(crate) struct SettledErr;
+struct SettledErr;
 
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]

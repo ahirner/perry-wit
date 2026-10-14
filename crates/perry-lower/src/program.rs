@@ -87,16 +87,7 @@ pub(super) fn build_module(
             (ty, true) => shapes.settled_type(ctx, ty).map(|ty| vec![ty]),
             (ty, false) => shapes.value_type(ctx, ty).map(|ty| vec![ty]),
         }
-        .map_err(|error| {
-            locations.annotate(
-                error,
-                locations
-                    .functions
-                    .get(&function.name)
-                    .copied()
-                    .unwrap_or(swc_common::DUMMY_SP),
-            )
-        })
+        .map_err(|error| locations.annotate_function(error, &function.name))
         .with_context(|| format!("result of {}", function.name))?;
         signatures.insert(
             function.id,
@@ -104,7 +95,7 @@ pub(super) fn build_module(
                 is_async: function.is_async,
                 await_initialization: function.is_exported
                     && function.is_async
-                    && locations.async_init,
+                    && locations.async_init(),
                 name: identifier(&function.name)?,
                 params,
                 results,
@@ -128,10 +119,10 @@ pub(super) fn build_module(
             } else {
                 MAIN
             })?,
-            is_async: !persistent || locations.async_init,
+            is_async: !persistent || locations.async_init(),
             await_initialization: false,
             params: vec![],
-            results: if persistent && !locations.async_init {
+            results: if persistent && !locations.async_init() {
                 vec![]
             } else {
                 vec![shapes.settled_type(ctx, &HirType::Void)?]
@@ -154,22 +145,9 @@ pub(super) fn build_module(
     }
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
-            .map_err(|error| {
-                locations.annotate(
-                    error,
-                    locations
-                        .functions
-                        .get(&function.name)
-                        .copied()
-                        .unwrap_or(swc_common::DUMMY_SP),
-                )
-            })
+            .map_err(|error| locations.annotate_function(error, &function.name))
             .with_context(|| format!("lowering function {}", function.name))?;
-        if let Some(span) = locations
-            .functions
-            .get(&function.name)
-            .and_then(|&span| locations.span(span))
-        {
+        if let Some(span) = locations.function_span(&function.name) {
             perry_mir::diagnostics::set_source_span(ctx, &func, &span);
         }
         if function.is_exported {

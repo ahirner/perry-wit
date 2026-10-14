@@ -144,14 +144,7 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
         .collect();
     let bodies: Vec<Vec<_>> = functions
         .iter()
-        .map(|function| {
-            function
-                .get_region(ctx)
-                .deref(ctx)
-                .iter(ctx)
-                .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-                .collect()
-        })
+        .map(|function| crate::aggregates::operations(ctx, function))
         .collect();
     let index_of: HashMap<&Identifier, usize> = names
         .iter()
@@ -213,8 +206,13 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                                 .arguments()
                                 .zip(branch.successor_operand_range(ctx, successor))
                             {
-                                let dependency =
-                                    origins.get(&inputs[operand]).cloned().unwrap_or_default();
+                                let source = inputs[operand];
+                                if source == argument {
+                                    continue;
+                                }
+                                let Some(dependency) = origins.get(&source).cloned() else {
+                                    continue;
+                                };
                                 let set = origins.entry(argument).or_default();
                                 let before = set.len();
                                 set.extend(dependency);

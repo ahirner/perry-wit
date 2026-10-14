@@ -51,6 +51,9 @@ fn json_key(name: &str) -> String {
 
 impl FunctionLowering<'_, '_> {
     pub(crate) fn native_descriptor(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<u32> {
+        use perry_abi::layout::descriptor::{
+            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, STRING,
+        };
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);
         }
@@ -60,10 +63,13 @@ impl FunctionLowering<'_, '_> {
             .transpose()
             .map_err(|_| anyhow!("unresolved native record"))?;
         let count = record_fields.as_ref().map_or(0, Vec::len);
-        let address = self.state.data.append(4, &vec![0; 8 + 12 * count]);
+        let address = self.state.data.align(4);
+        let new_len = self.state.data.bytes.len() + 8 + 12 * count;
+        self.state.data.bytes.resize(new_len, 0);
         self.state.native_descriptors.insert(ty, address);
         let mut words = if let Some(fields) = record_fields {
-            let mut words = vec![4, count as u32];
+            let mut words = Vec::with_capacity(2 + 3 * count);
+            words.extend([RECORD, count as u32]);
             for (index, (name, field)) in fields.into_iter().enumerate() {
                 let name = self.state.data.string(&name);
                 let field = self.native_descriptor(ctx, field)?;
@@ -72,20 +78,20 @@ impl FunctionLowering<'_, '_> {
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
             let inner = self.native_descriptor(ctx, inner)?;
-            vec![7, inner]
+            vec![OPTIONAL, inner]
         } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
             let element = array.deref(ctx).element();
             let element = self.native_descriptor(ctx, element)?;
-            vec![5, element]
+            vec![ARRAY, element]
         } else {
             let kind = if ty.deref(ctx).is::<FP64Type>() {
-                1
+                NUMBER
             } else if ty.deref(ctx).is::<IntegerType>() {
-                2
+                BOOLEAN
             } else if ty.deref(ctx).is::<StringType>() {
-                3
+                STRING
             } else if ty.deref(ctx).is::<ExceptionType>() {
-                6
+                EXCEPTION
             } else {
                 return Err(anyhow!("unsupported native cause field type"));
             };

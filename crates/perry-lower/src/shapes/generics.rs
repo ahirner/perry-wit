@@ -118,7 +118,9 @@ impl Shapes<'_> {
                         !self.pending.borrow().contains_key(&key),
                         "nonproductive recursive type alias {base}"
                     );
-                    self.pending.borrow_mut().insert(key.clone(), None);
+                    self.pending
+                        .borrow_mut()
+                        .insert(key.clone(), PendingShape::Resolving);
                     let value = self.value_type(ctx, &value);
                     self.pending.borrow_mut().remove(&key);
                     value?

@@ -36,7 +36,7 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::ExceptionBigIntEqual => {
                 Some(self.runtime(ctx, Runtime::StdExceptionBigIntEqual, args))
             }
-            Intrinsic::ModuleInitialize => Some(self.initialization_promise(ctx)),
+            Intrinsic::ModuleInitialize => Some(self.initialization_promise(ctx)?),
             Intrinsic::BytesByteInput | Intrinsic::UrlSearchParams => Some(args[0]),
             Intrinsic::PrintOut | Intrinsic::PrintErr => {
                 let (interface, fd) = if intrinsic == Intrinsic::PrintOut {

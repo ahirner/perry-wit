@@ -20,6 +20,25 @@ use pliron::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy)]
+enum CompareOperand {
+    Character,
+    Literal(i32),
+}
+
+enum UserAction {
+    Compare {
+        kind: crate::attrs::CompareKind,
+        lhs: CompareOperand,
+        rhs: CompareOperand,
+    },
+    Length,
+    Concat {
+        prefix: Value,
+        append: bool,
+    },
+}
+
 /// A scalar or the empty string. UTF-8 ordering agrees with scalar ordering; -1 precedes NUL.
 fn literal(ctx: &Context, value: Value) -> Option<i32> {
     let constant = Operation::get_op::<StringConstOp>(value.defining_op()?, ctx)?;
@@ -30,19 +49,58 @@ fn literal(ctx: &Context, value: Value) -> Option<i32> {
     chars.next().is_none().then_some(scalar)
 }
 
-fn supports(ctx: &Context, op: Ptr<Operation>, character: Value) -> bool {
+fn classify_user(ctx: &Context, op: Ptr<Operation>, character: Value) -> Option<UserAction> {
     let operation = op.deref(ctx);
-    if Operation::get_op::<CompareOp>(op, ctx).is_some() {
-        return operation
-            .operands()
-            .all(|value| value == character || literal(ctx, value).is_some());
+    if let Some(compare) = Operation::get_op::<CompareOp>(op, ctx) {
+        let operand = |value: Value| {
+            if value == character {
+                Some(CompareOperand::Character)
+            } else {
+                literal(ctx, value).map(CompareOperand::Literal)
+            }
+        };
+        let lhs = operand(operation.get_operand(0))?;
+        let rhs = operand(operation.get_operand(1))?;
+        drop(operation);
+        return Some(UserAction::Compare {
+            kind: compare.kind(ctx),
+            lhs,
+            rhs,
+        });
     }
     if Operation::get_op::<ConcatOp>(op, ctx).is_some()
         || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
     {
-        return operation.get_operand(1) == character && operation.get_operand(0) != character;
+        let prefix = operation.get_operand(0);
+        let suffix = operation.get_operand(1);
+        drop(operation);
+        return (suffix == character && prefix != character).then(|| UserAction::Concat {
+            prefix,
+            append: Operation::get_op::<ConcatReuseOp>(op, ctx).is_some(),
+        });
     }
-    Operation::get_op::<StringLenOp>(op, ctx).is_some()
+    drop(operation);
+    Operation::get_op::<StringLenOp>(op, ctx)
+        .is_some()
+        .then_some(UserAction::Length)
+}
+
+fn lower_compare_operand(
+    ctx: &mut Context,
+    user: Ptr<Operation>,
+    scalar: Value,
+    operand: CompareOperand,
+) -> Value {
+    match operand {
+        CompareOperand::Character => scalar,
+        CompareOperand::Literal(value) => {
+            let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+            let attr = IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
+            let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+            constant.insert_before(ctx, user);
+            constant.deref(ctx).get_result(0)
+        }
+    }
 }
 
 /// Materialized characters that escape, enter unknown calls or join other string values
@@ -65,47 +123,36 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
         for (op, kind) in candidates {
             let character = op.deref(ctx).get_result(0);
             let mut seen = HashSet::new();
-            let mut users: Vec<_> = character
+            let Some(mut users) = character
                 .uses(ctx)
                 .iter()
                 .map(|usage| usage.user_op())
                 .filter(|user| seen.insert(*user))
-                .collect();
-            if users.is_empty() || !users.iter().all(|&user| supports(ctx, user, character)) {
+                .map(|user| Some((user, classify_user(ctx, user, character)?)))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if users.is_empty() {
                 continue;
             }
-            users.sort_unstable_by_key(|user| order[user]);
+            users.sort_unstable_by_key(|(user, _)| order[user]);
             let args = op.deref(ctx).operands().collect();
             let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
             scalar.insert_before(ctx, op);
             let scalar = scalar.deref(ctx).get_result(0);
-            for user in users {
-                let replacement = if let Some(compare) = Operation::get_op::<CompareOp>(user, ctx) {
-                    let kind = compare.kind(ctx);
-                    let args: Vec<_> = user.deref(ctx).operands().collect();
-                    let args: Vec<_> = args
-                        .into_iter()
-                        .map(|value| {
-                            if value == character {
-                                return scalar;
-                            }
-                            let value = literal(ctx, value).expect("validated character literal");
-                            let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-                            let attr =
-                                IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
-                            let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
-                            constant.insert_before(ctx, user);
-                            constant.deref(ctx).get_result(0)
-                        })
-                        .collect();
-                    CompareOp::new(ctx, kind, args[0], args[1]).get_operation()
-                } else if Operation::get_op::<StringLenOp>(user, ctx).is_some() {
-                    IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
-                        .get_operation()
-                } else {
-                    let append = Operation::get_op::<ConcatReuseOp>(user, ctx).is_some();
-                    let prefix = user.deref(ctx).get_operand(0);
-                    IntrinsicOp::new(
+            for (user, action) in users {
+                let replacement = match action {
+                    UserAction::Compare { kind, lhs, rhs } => {
+                        let lhs = lower_compare_operand(ctx, user, scalar, lhs);
+                        let rhs = lower_compare_operand(ctx, user, scalar, rhs);
+                        CompareOp::new(ctx, kind, lhs, rhs).get_operation()
+                    }
+                    UserAction::Length => {
+                        IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
+                            .get_operation()
+                    }
+                    UserAction::Concat { prefix, append } => IntrinsicOp::new(
                         ctx,
                         if append {
                             Intrinsic::StringScalarAppend
@@ -114,7 +161,7 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
                         },
                         vec![prefix, scalar],
                     )
-                    .get_operation()
+                    .get_operation(),
                 };
                 order.insert(replacement, order[&user]);
                 replacement.insert_before(ctx, user);

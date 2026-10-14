@@ -67,12 +67,12 @@ impl HirTypeFacts for FunctionEnv<'_> {
     }
 }
 
-fn scan(
-    statements: &mut [Stmt],
-    env: &mut FunctionEnv<'_>,
-    returned: &mut Vec<HirType>,
-    resolve: bool,
-) {
+enum ScanMode<'a> {
+    Returns(&'a mut Vec<HirType>),
+    ResolveLocals,
+}
+
+fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<'_>) {
     for statement in statements {
         match statement {
             Stmt::Let {
@@ -82,59 +82,61 @@ fn scan(
                 ..
             } if matches!(ty, HirType::Any | HirType::Unknown) => {
                 let inferred = expression(init, env);
-                env.locals.insert(*id, inferred.clone());
-                if resolve
+                if matches!(mode, ScanMode::ResolveLocals)
                     && !matches!(
                         inferred,
                         HirType::Any | HirType::Unknown | HirType::Void | HirType::Null
                     )
                 {
-                    *ty = inferred;
+                    *ty = inferred.clone();
+                }
+                env.locals.insert(*id, inferred);
+            }
+            Stmt::Return(value) => {
+                if let ScanMode::Returns(returned) = mode {
+                    returned.push(
+                        value
+                            .as_ref()
+                            .map_or(HirType::Void, |value| expression(value, env)),
+                    );
                 }
             }
-            Stmt::Return(value) => returned.push(
-                value
-                    .as_ref()
-                    .map_or(HirType::Void, |value| expression(value, env)),
-            ),
             Stmt::If {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                scan(then_branch, env, returned, resolve);
+                scan(then_branch, env, mode);
                 if let Some(body) = else_branch {
-                    scan(body, env, returned, resolve);
+                    scan(body, env, mode);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                scan(body, env, returned, resolve)
-            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => scan(body, env, mode),
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
-                    scan(std::slice::from_mut(init), env, returned, resolve);
+                    scan(std::slice::from_mut(init), env, mode);
                 }
-                scan(body, env, returned, resolve);
+                scan(body, env, mode);
             }
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                scan(body, env, returned, resolve);
+                scan(body, env, mode);
                 if let Some(catch) = catch {
-                    scan(&mut catch.body, env, returned, resolve);
+                    scan(&mut catch.body, env, mode);
                 }
                 if let Some(body) = finally {
-                    scan(body, env, returned, resolve);
+                    scan(body, env, mode);
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    scan(&mut case.body, env, returned, resolve);
+                    scan(&mut case.body, env, mode);
                 }
             }
-            Stmt::Labeled { body, .. } => scan(std::slice::from_mut(body), env, returned, resolve),
+            Stmt::Labeled { body, .. } => scan(std::slice::from_mut(body), env, mode),
             _ => {}
         }
     }
@@ -146,7 +148,7 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
     for _ in 0..=hir.functions.len() {
         let mut changed = false;
         for function in &mut hir.functions {
-            if locations.explicit_returns.contains(&function.name) {
+            if locations.has_explicit_return(&function.name) {
                 continue;
             }
             locals.clear();
@@ -155,11 +157,15 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
                 locals: &mut locals,
             };
             let mut returned = Vec::new();
-            scan(&mut function.body, &mut env, &mut returned, false);
+            scan(
+                &mut function.body,
+                &mut env,
+                &mut ScanMode::Returns(&mut returned),
+            );
             if function.is_async {
                 for ty in &mut returned {
                     while let HirType::Promise(inner) = ty {
-                        *ty = *inner.clone();
+                        *ty = std::mem::replace(inner.as_mut(), HirType::Void);
                     }
                 }
             }
@@ -180,7 +186,7 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
             }
             let ty = match types.as_slice() {
                 [] => HirType::Void,
-                [ty] => ty.clone(),
+                [_] => types.swap_remove(0),
                 _ if types
                     .iter()
                     .filter(|ty| !matches!(ty, HirType::Null | HirType::Void))
@@ -198,7 +204,6 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
             };
             if inferred != function.return_type {
                 function.return_type = inferred;
-
                 changed = true;
             }
         }
@@ -213,6 +218,6 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
             base: &module_env,
             locals: &mut locals,
         };
-        scan(&mut function.body, &mut env, &mut Vec::new(), true);
+        scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
     }
 }

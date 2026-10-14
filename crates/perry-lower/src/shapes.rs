@@ -28,13 +28,19 @@ use std::{cell::RefCell, collections::HashMap};
 
 mod generics;
 
-pub(crate) struct Shapes<'h> {
-    pub(crate) module: pliron::builtin::ops::ModuleOp,
-    pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
-    pub(crate) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
-    pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
-    pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
+#[derive(Clone)]
+enum PendingShape {
+    Resolving,
+    Recursive(String),
+}
+
+pub(super) struct Shapes<'h> {
+    pub(super) module: pliron::builtin::ops::ModuleOp,
+    pub(super) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
+    pub(super) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
+    pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
+    pub(super) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
+    pub(super) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(super) hir: &'h HirModule,
     locations: &'h crate::locations::Locations<'h>,
     /// WIT types by SDK name, and the local names they are imported under.
@@ -42,7 +48,7 @@ pub(crate) struct Shapes<'h> {
     aliases: HashMap<String, String>,
     /// Named types whose fields are being computed, with the record name reserved when a
     /// field refers back to the type.
-    pending: RefCell<HashMap<String, Option<String>>>,
+    pending: RefCell<HashMap<String, PendingShape>>,
     /// Record names reserved for recursive types.
     reserved: RefCell<usize>,
     /// Resolved named types, so a recursive interface keeps its reserved name.
@@ -50,7 +56,7 @@ pub(crate) struct Shapes<'h> {
     inputs: RefCell<HashMap<TypeHandle, TypeHandle>>,
 }
 
-pub(crate) fn identifier(name: &str) -> Result<Identifier> {
+pub(super) fn identifier(name: &str) -> Result<Identifier> {
     Identifier::try_from(name.to_string()).map_err(|_| anyhow!("{name} is not a MIR identifier"))
 }
 
@@ -74,7 +80,7 @@ fn record_name(fields: &[&str]) -> String {
 }
 
 impl<'h> Shapes<'h> {
-    pub(crate) fn new(
+    pub(super) fn new(
         module: pliron::builtin::ops::ModuleOp,
         hir: &'h HirModule,
         foreign: &'h HashMap<String, HirType>,
@@ -126,7 +132,7 @@ impl<'h> Shapes<'h> {
         }
     }
 
-    pub(crate) fn annotate_local(
+    pub(super) fn annotate_local(
         &self,
         error: anyhow::Error,
         id: perry_hir::types::LocalId,
@@ -143,14 +149,14 @@ impl<'h> Shapes<'h> {
         }
     }
 
-    pub(crate) fn has_function(&self, name: &str) -> bool {
+    pub(super) fn has_function(&self, name: &str) -> bool {
         self.hir
             .functions
             .iter()
             .any(|function| function.name == name)
     }
 
-    pub(crate) fn foreign_function(
+    pub(super) fn foreign_function(
         &self,
         local: &str,
     ) -> Option<(String, &perry_hir::types::FunctionType)> {
@@ -178,7 +184,7 @@ impl<'h> Shapes<'h> {
     }
 
     /// MIR type of a HIR value type, for the types supported so far.
-    pub(crate) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
+    pub(super) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
         Ok(match ty {
             HirType::BigInt => perry_mir::types::BigIntType::get(ctx).into(),
             HirType::Number | HirType::Int32 => FP64Type::get(ctx).into(),
@@ -446,7 +452,7 @@ impl<'h> Shapes<'h> {
     }
 
     /// The value a promise of `ty` settles with; `void` settles `undefined`.
-    pub(crate) fn settled_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
+    pub(super) fn settled_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
         match ty {
             HirType::Void => {
                 let number = FP64Type::get(ctx).into();
@@ -457,7 +463,7 @@ impl<'h> Shapes<'h> {
     }
 
     /// Whether the program declares a type of this name (shadowing a built-in class).
-    pub(crate) fn is_user_type(&self, name: &str) -> bool {
+    pub(super) fn is_user_type(&self, name: &str) -> bool {
         self.hir.interfaces.iter().any(|i| i.name == name)
             || self.hir.type_aliases.iter().any(|a| a.name == name)
             || self.hir.classes.iter().any(|c| c.name == name)
@@ -556,22 +562,24 @@ impl<'h> Shapes<'h> {
         if let Some(named) = named {
             let reentry = self.pending.borrow().get(named).cloned();
             match reentry {
-                Some(Some(reserved)) => {
+                Some(PendingShape::Recursive(reserved)) => {
                     return RecordType::get(ctx, identifier(&reserved)?, None)
                         .map_err(|e| anyhow!("{}", e.disp(ctx)));
                 }
-                Some(None) => {
+                Some(PendingShape::Resolving) => {
                     let mut count = self.reserved.borrow_mut();
                     *count += 1;
                     let reserved = format!("{}_rec{}", record_name(&names), *count);
                     self.pending
                         .borrow_mut()
-                        .insert(named.to_string(), Some(reserved.clone()));
+                        .insert(named.to_string(), PendingShape::Recursive(reserved.clone()));
                     return RecordType::get(ctx, identifier(&reserved)?, None)
                         .map_err(|e| anyhow!("{}", e.disp(ctx)));
                 }
                 None => {
-                    self.pending.borrow_mut().insert(named.to_string(), None);
+                    self.pending
+                        .borrow_mut()
+                        .insert(named.to_string(), PendingShape::Resolving);
                 }
             }
         }
@@ -589,7 +597,10 @@ impl<'h> Shapes<'h> {
                 Ok((field.to_string(), ty))
             })
             .collect::<Result<Vec<_>>>();
-        let reserved = named.and_then(|named| self.pending.borrow_mut().remove(named).flatten());
+        let reserved = named.and_then(|named| match self.pending.borrow_mut().remove(named) {
+            Some(PendingShape::Recursive(name)) => Some(name),
+            _ => None,
+        });
         let typed = typed?;
         match reserved {
             Some(name) => RecordType::get(ctx, identifier(&name)?, Some(typed))
@@ -599,7 +610,7 @@ impl<'h> Shapes<'h> {
     }
 
     /// A record from MIR field types, in any order.
-    pub(crate) fn mir_record(
+    pub(super) fn mir_record(
         &self,
         ctx: &mut Context,
         fields: Vec<(String, TypeHandle)>,
@@ -640,7 +651,7 @@ impl<'h> Shapes<'h> {
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.
-    pub(crate) fn literal_fields(&self, class_name: &str) -> Option<Vec<&'h str>> {
+    pub(super) fn literal_fields(&self, class_name: &str) -> Option<Vec<&'h str>> {
         if !class_name.starts_with("__AnonShape_") {
             return None;
         }

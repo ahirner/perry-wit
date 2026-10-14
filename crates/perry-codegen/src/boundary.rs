@@ -117,6 +117,19 @@ pub struct Import {
     pub asynchronous: bool,
 }
 
+/// Synchronous vs. callback-lifted async export mode.
+#[derive(Clone, Debug)]
+pub enum ExportKind {
+    Sync,
+    Async {
+        /// The import module and WIT function name of `task.return`.
+        task_return: (String, String),
+        /// `wasi:cli/run`'s `run: async func() -> result`, implemented by the top-level
+        /// statements: the result is `err` after an uncaught exception or a non-zero exit code.
+        command: bool,
+    },
+}
+
 /// One component export bound to a TypeScript function.
 #[derive(Clone, Debug)]
 pub struct Export {
@@ -126,12 +139,17 @@ pub struct Export {
     pub function: String,
     pub params: Vec<AbiType>,
     pub result: Option<AbiType>,
-    /// For an async export (lifted with the callback ABI): the import module and WIT function
-    /// name of its `task.return`.
-    pub task_return: Option<(String, String)>,
-    /// `wasi:cli/run`'s `run: async func() -> result`, implemented by the top-level
-    /// statements: the result is `err` after an uncaught exception or a non-zero exit code.
-    pub command: bool,
+    pub kind: ExportKind,
+}
+
+impl Export {
+    pub fn is_async(&self) -> bool {
+        matches!(self.kind, ExportKind::Async { .. })
+    }
+
+    pub fn is_command(&self) -> bool {
+        matches!(self.kind, ExportKind::Async { command: true, .. })
+    }
 }
 
 const MAX_FLAT_PARAMS: usize = 16;
@@ -525,22 +543,20 @@ impl FunctionLowering<'_, '_> {
         values: Vec<(&str, Value)>,
     ) -> Result<Value> {
         let record = self.record_type(ctx, mir_ty)?;
-        let (name, field_count) = {
-            let record = record.deref(ctx);
-            let count = record
-                .fields()
-                .map_err(|_| anyhow!("record without fields"))?
-                .len();
-            (record.name().to_string(), count)
-        };
+        let field_count = record
+            .deref(ctx)
+            .fields()
+            .map_err(|_| anyhow!("record without fields"))?
+            .len();
         ensure!(
             values.len() == field_count,
-            "the WIT record has {} fields but the TypeScript type {name} has {field_count}",
-            values.len()
+            "the WIT record has {} fields but the TypeScript type {} has {field_count}",
+            values.len(),
+            record.deref(ctx).name()
         );
         let size = self.i32_const(ctx, record::field(field_count) as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
-        self.record_header(ctx, object, name);
+        self.record_header(ctx, object, record);
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, field)?;
             let kind = slot_kind(ctx, field_mir)?;

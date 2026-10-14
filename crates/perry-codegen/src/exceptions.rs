@@ -132,7 +132,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// The block that returns zero results with the status in its argument.
-    pub(crate) fn throw_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
+    fn throw_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
         if let Some(block) = self.throw_block {
             return block;
         }

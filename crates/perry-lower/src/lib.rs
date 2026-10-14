@@ -7,7 +7,7 @@
 //!   recursive type inference;
 //! - tiers stay `Unassigned` and layouts abstract; later passes decide them.
 //!
-//! [lower_source] runs the source passes (module graph, validation, stream rewriting),
+//! [lower_sources] runs the source passes (module graph, validation, stream rewriting),
 //! Perry's HIR lowering, and then [program] over the HIR. Each function body is lowered by a
 //! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
 //! Unsupported constructs are rejected with a diagnostic.
@@ -32,6 +32,7 @@ mod program;
 mod shapes;
 mod source;
 pub mod source_files;
+mod spread;
 mod statements;
 mod streams;
 mod temporal;
@@ -114,7 +115,8 @@ pub const MAIN: &str = "perry_main";
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` types by SDK name: WIT types the program imports from its generated declarations.
-pub fn lower_source(
+#[cfg(test)]
+fn lower_source(
     ctx: &mut Context,
     source: &str,
     file: &str,

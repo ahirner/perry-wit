@@ -332,10 +332,7 @@ impl FunctionLowering<'_, '_> {
             let mir_results: Vec<_> = op.deref(ctx).results().collect();
             let mut results = mir_results
                 .iter()
-                .map(|v| v.get_type(ctx))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|t| wasm_type(ctx, t))
+                .map(|v| wasm_type(ctx, v.get_type(ctx)))
                 .collect::<Result<Vec<_>>>()?;
             let callee_throws = self.state.throws.contains(&callee);
             if callee_throws {
