@@ -38,6 +38,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
     pub(super) locals: HashMap<LocalId, Value>,
+    pub(super) integer_locals: HashMap<LocalId, TypeHandle>,
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
@@ -111,6 +112,12 @@ impl<'s> FunctionBuilder<'s> {
             let slot = builder.global_slot(ctx, id, ty)?;
             builder.locals.insert(id, slot);
         }
+        builder
+            .integer_locals
+            .extend(shapes.integer_globals.borrow().iter().map(|(&k, &v)| (k, v)));
+        for &(id, int_ty) in &signature.integer_params {
+            builder.integer_locals.insert(id, int_ty);
+        }
         for (index, param) in params.iter().enumerate() {
             let value = builder.entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
@@ -147,6 +154,7 @@ impl<'s> FunctionBuilder<'s> {
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
+            integer_locals: HashMap::new(),
             global_slots: HashSet::new(),
             false_guards: HashSet::new(),
             variant_guards: Vec::new(),
@@ -165,6 +173,16 @@ impl<'s> FunctionBuilder<'s> {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn wrap_integer(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        int_ty: TypeHandle,
+        carrier_ty: TypeHandle,
+    ) -> Value {
+        let wrapped = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_ty));
+        self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, wrapped, carrier_ty))
+    }
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
     pub(super) fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
         self.results

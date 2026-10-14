@@ -831,3 +831,118 @@ fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<(
     }
     Ok(())
 }
+
+#[test]
+fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening() -> Result<()> {
+    let wit_src = r#"
+        package test:optimization;
+        interface math {
+            type byte = u8;
+        }
+        world test {
+            import math;
+            export wrap-local: func(a: u32, b: u32) -> u32;
+            export widen-helper: func(a: u32, b: u32) -> u32;
+            export narrow-helper: func(a: u32, b: u32) -> u32;
+            export signed-step: func(a: s32, b: s32) -> s32;
+            export wit-alias: func(a: u32, b: u32) -> u32;
+            export user-spelling: func(a: f64, b: f64) -> f64;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let source = r#"
+        import type { u8, s8, u32 } from "perry:types";
+        import type { Byte } from "wit:test:optimization/math";
+
+        type s32 = number;
+
+        function addWiden(x: u8, y: u8): u32 {
+            return x + y;
+        }
+
+        function addNarrow(x: u8, y: u8): u8 {
+            return (x + y) as u8;
+        }
+
+        export function wrapLocal(a: number, b: number): number {
+            const wrapped: u8 = (a + b) as u8;
+            return wrapped;
+        }
+
+        export function widenHelper(a: number, b: number): number {
+            return addWiden(a as u8, b as u8);
+        }
+
+        export function narrowHelper(a: number, b: number): number {
+            return addNarrow(a as u8, b as u8);
+        }
+
+        export function signedStep(a: number, b: number): number {
+            let acc: s8 = a as s8;
+            acc = (acc + (b as s8)) as s8;
+            return acc;
+        }
+
+        export function witAlias(a: number, b: number): number {
+            const wrapped: Byte = (a + b) as Byte;
+            return wrapped;
+        }
+
+        export function userSpelling(a: s32, b: s32): s32 {
+            return a + b;
+        }
+    "#;
+    let compiled =
+        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("wrap-local", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .0[0]
+            .unwrap_i32(),
+        254
+    );
+    assert_eq!(
+        program
+            .call("widen-helper", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .0[0]
+            .unwrap_i32(),
+        510
+    );
+    assert_eq!(
+        program
+            .call("narrow-helper", &[wasmtime::Val::I32(255), wasmtime::Val::I32(255)])
+            .0[0]
+            .unwrap_i32(),
+        254
+    );
+    assert_eq!(
+        program
+            .call("signed-step", &[wasmtime::Val::I32(120), wasmtime::Val::I32(20)])
+            .0[0]
+            .unwrap_i32(),
+        -116
+    );
+    assert_eq!(
+        program
+            .call("wit-alias", &[wasmtime::Val::I32(255), wasmtime::Val::I32(2)])
+            .0[0]
+            .unwrap_i32(),
+        1
+    );
+    let user_res = program
+        .call(
+            "user-spelling",
+            &[
+                wasmtime::Val::F64(1.5f64.to_bits()),
+                wasmtime::Val::F64(2.25f64.to_bits()),
+            ],
+        )
+        .0[0]
+        .unwrap_f64();
+    assert_eq!(user_res, 3.75);
+    Ok(())
+}
+

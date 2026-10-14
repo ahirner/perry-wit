@@ -103,23 +103,42 @@ struct FunctionEnv<'a> {
     interfaces: &'a [perry_hir::ir::Interface],
     type_aliases: &'a [perry_hir::ir::TypeAlias],
     locals: &'a mut HashMap<LocalId, HirType>,
+    integer_aliases: &'a HashSet<String>,
+}
+
+const NUMBER_TYPE: HirType = HirType::Number;
+
+impl FunctionEnv<'_> {
+    fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
+        match ty {
+            HirType::Named(name) if self.integer_aliases.contains(name) => &NUMBER_TYPE,
+            ty => ty,
+        }
+    }
 }
 
 impl HirTypeFacts for FunctionEnv<'_> {
     fn local_type(&self, id: LocalId) -> Option<&HirType> {
-        self.locals.get(&id).or_else(|| self.base.local_type(id))
+        self.locals
+            .get(&id)
+            .or_else(|| self.base.local_type(id))
+            .map(|ty| self.normalize(ty))
     }
 
     fn global_type(&self, id: perry_hir::types::GlobalId) -> Option<&HirType> {
-        self.base.global_type(id)
+        self.base.global_type(id).map(|ty| self.normalize(ty))
     }
 
     fn function_return_type(&self, id: FuncId) -> Option<&HirType> {
-        self.base.function_return_type(id)
+        self.base
+            .function_return_type(id)
+            .map(|ty| self.normalize(ty))
     }
 
     fn extern_function_return_type(&self, name: &str) -> Option<&HirType> {
-        self.base.extern_function_return_type(name)
+        self.base
+            .extern_function_return_type(name)
+            .map(|ty| self.normalize(ty))
     }
 
     fn this_type(&self) -> Option<HirType> {
@@ -131,15 +150,24 @@ impl HirTypeFacts for FunctionEnv<'_> {
     }
 
     fn static_field_type(&self, class_name: &str, field_name: &str) -> Option<&HirType> {
-        self.base.static_field_type(class_name, field_name)
+        self.base
+            .static_field_type(class_name, field_name)
+            .map(|ty| self.normalize(ty))
     }
 
     fn static_method_return_type(&self, class_name: &str, method_name: &str) -> Option<&HirType> {
-        self.base.static_method_return_type(class_name, method_name)
+        self.base
+            .static_method_return_type(class_name, method_name)
+            .map(|ty| self.normalize(ty))
     }
 
     fn named_property_type(&self, type_name: &str, property: &str) -> Option<HirType> {
-        self.base.named_property_type(type_name, property)
+        self.base
+            .named_property_type(type_name, property)
+            .map(|ty| match ty {
+                HirType::Named(name) if self.integer_aliases.contains(&name) => HirType::Number,
+                ty => ty,
+            })
     }
 
     fn super_property_type(&self, property: &str) -> Option<HirType> {
@@ -156,57 +184,139 @@ enum ScanMode<'a> {
     ResolveLocals,
 }
 
+fn collect_integer_aliases(hir: &HirModule, foreign: &HashMap<String, HirType>) -> HashSet<String> {
+    let mut names: HashSet<String> = [
+        "perry:types/u8",
+        "perry:types/s8",
+        "perry:types/u16",
+        "perry:types/s16",
+        "perry:types/u32",
+        "perry:types/s32",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let user_types: HashSet<&str> = hir
+        .interfaces
+        .iter()
+        .map(|i| i.name.as_str())
+        .chain(hir.type_aliases.iter().map(|a| a.name.as_str()))
+        .chain(hir.classes.iter().map(|c| c.name.as_str()))
+        .collect();
+    for import in &hir.imports {
+        for specifier in &import.specifiers {
+            let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
+                continue;
+            };
+            if user_types.contains(local.as_str()) {
+                continue;
+            }
+            if import.source == "perry:types"
+                && matches!(
+                    imported.as_str(),
+                    "u8" | "s8" | "u16" | "s16" | "u32" | "s32"
+                )
+            {
+                names.insert(local.clone());
+                continue;
+            }
+            for candidate in [
+                format!("wit:{}#{imported}", import.source),
+                format!("wit:{imported}"),
+            ] {
+                if let Some(HirType::Named(target)) = foreign.get(&candidate)
+                    && names.contains(target)
+                {
+                    names.insert(local.clone());
+                    break;
+                }
+            }
+        }
+    }
+    loop {
+        let mut added = false;
+        for alias in &hir.type_aliases {
+            if alias.type_params.is_empty()
+                && let HirType::Named(target) = &alias.ty
+                && names.contains(target)
+                && names.insert(alias.name.clone())
+            {
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    names
+}
+
 fn clear_inferred_type_vars<V>(
     statements: &mut [Stmt],
     inferred: &HashSet<LocalId>,
     spans: &HashMap<LocalId, V>,
+    integer_aliases: &HashSet<String>,
 ) {
     for statement in statements {
         match statement {
-            Stmt::Let { id, ty, .. }
-                if (inferred.contains(id) || !spans.contains_key(id)) && contains_type_var(ty) =>
-            {
-                *ty = HirType::Any;
+            Stmt::Let { id, ty, .. } if inferred.contains(id) || !spans.contains_key(id) => {
+                if contains_type_var(ty) {
+                    *ty = HirType::Any;
+                } else if let HirType::Named(name) = ty
+                    && integer_aliases.contains(name)
+                {
+                    *ty = HirType::Number;
+                }
             }
             Stmt::If {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                clear_inferred_type_vars(then_branch, inferred, spans);
+                clear_inferred_type_vars(then_branch, inferred, spans, integer_aliases);
                 if let Some(body) = else_branch {
-                    clear_inferred_type_vars(body, inferred, spans);
+                    clear_inferred_type_vars(body, inferred, spans, integer_aliases);
                 }
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                clear_inferred_type_vars(body, inferred, spans);
+                clear_inferred_type_vars(body, inferred, spans, integer_aliases);
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
-                    clear_inferred_type_vars(std::slice::from_mut(init), inferred, spans);
+                    clear_inferred_type_vars(
+                        std::slice::from_mut(init),
+                        inferred,
+                        spans,
+                        integer_aliases,
+                    );
                 }
-                clear_inferred_type_vars(body, inferred, spans);
+                clear_inferred_type_vars(body, inferred, spans, integer_aliases);
             }
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                clear_inferred_type_vars(body, inferred, spans);
+                clear_inferred_type_vars(body, inferred, spans, integer_aliases);
                 if let Some(catch) = catch {
-                    clear_inferred_type_vars(&mut catch.body, inferred, spans);
+                    clear_inferred_type_vars(&mut catch.body, inferred, spans, integer_aliases);
                 }
                 if let Some(body) = finally {
-                    clear_inferred_type_vars(body, inferred, spans);
+                    clear_inferred_type_vars(body, inferred, spans, integer_aliases);
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    clear_inferred_type_vars(&mut case.body, inferred, spans);
+                    clear_inferred_type_vars(&mut case.body, inferred, spans, integer_aliases);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                clear_inferred_type_vars(std::slice::from_mut(body), inferred, spans);
+                clear_inferred_type_vars(
+                    std::slice::from_mut(body),
+                    inferred,
+                    spans,
+                    integer_aliases,
+                );
             }
             _ => {}
         }
@@ -294,7 +404,7 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
     }
 }
 
-fn push_return_type(types: &mut Vec<HirType>, ty: HirType) {
+fn push_return_type(types: &mut Vec<HirType>, ty: HirType, integer_aliases: &HashSet<String>) {
     if let HirType::Union(members) = ty {
         if members
             .iter()
@@ -311,11 +421,11 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType) {
             }
             match defined.len() {
                 0 => {}
-                1 => push_return_type(types, defined.swap_remove(0)),
-                _ => push_return_type(types, HirType::Union(defined)),
+                1 => push_return_type(types, defined.swap_remove(0), integer_aliases),
+                _ => push_return_type(types, HirType::Union(defined), integer_aliases),
             }
             for absence in absences {
-                push_return_type(types, absence);
+                push_return_type(types, absence, integer_aliases);
             }
             return;
         }
@@ -326,6 +436,7 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType) {
     }
     let normalized = match ty {
         HirType::Int32 => HirType::Number,
+        HirType::Named(name) if integer_aliases.contains(&name) => HirType::Number,
         HirType::StringLiteral(_) => HirType::String,
         ty => ty,
     };
@@ -338,10 +449,22 @@ pub(super) fn unresolved_types(
     hir: &mut HirModule,
     inferred: &HashSet<LocalId>,
     locations: &crate::locations::Locations<'_>,
+    foreign: &HashMap<String, HirType>,
 ) {
-    clear_inferred_type_vars(&mut hir.init, inferred, &hir.local_source_spans);
+    let integer_aliases = collect_integer_aliases(hir, foreign);
+    clear_inferred_type_vars(
+        &mut hir.init,
+        inferred,
+        &hir.local_source_spans,
+        &integer_aliases,
+    );
     for function in &mut hir.functions {
-        clear_inferred_type_vars(&mut function.body, inferred, &hir.local_source_spans);
+        clear_inferred_type_vars(
+            &mut function.body,
+            inferred,
+            &hir.local_source_spans,
+            &integer_aliases,
+        );
     }
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
@@ -360,6 +483,7 @@ pub(super) fn unresolved_types(
                 interfaces: &hir.interfaces,
                 type_aliases: &hir.type_aliases,
                 locals: &mut locals,
+                integer_aliases: &integer_aliases,
             };
             let mut returned = Vec::new();
             scan(
@@ -385,7 +509,7 @@ pub(super) fn unresolved_types(
             }
             let mut types = Vec::new();
             for ty in returned {
-                push_return_type(&mut types, ty);
+                push_return_type(&mut types, ty, &integer_aliases);
             }
             let ty = match types.as_slice() {
                 [] => HirType::Void,
@@ -421,6 +545,7 @@ pub(super) fn unresolved_types(
         interfaces: &hir.interfaces,
         type_aliases: &hir.type_aliases,
         locals: &mut locals,
+        integer_aliases: &integer_aliases,
     };
     scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     for function in &mut hir.functions {
@@ -433,6 +558,7 @@ pub(super) fn unresolved_types(
             interfaces: &hir.interfaces,
             type_aliases: &hir.type_aliases,
             locals: &mut locals,
+            integer_aliases: &integer_aliases,
         };
         scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
     }

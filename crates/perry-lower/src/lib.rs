@@ -163,7 +163,7 @@ pub fn lower_sources(
         .iter()
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
-    infer::unresolved_types(&mut hir, &inferred, &locations);
+    infer::unresolved_types(&mut hir, &inferred, &locations, foreign);
     program::build_module(ctx, &hir, foreign, inferred, &locations)
 }
 

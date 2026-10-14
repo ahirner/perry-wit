@@ -93,3 +93,12 @@ declare module "fs/promises" {
 declare module "node:fs/promises" {
   export { readFile, writeFile, stat, mkdir, unlink, rmdir, readdir, default } from "fs/promises";
 }
+
+declare module "perry:types" {
+  export type u8 = number;
+  export type s8 = number;
+  export type u16 = number;
+  export type s16 = number;
+  export type u32 = number;
+  export type s32 = number;
+}

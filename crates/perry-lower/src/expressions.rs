@@ -462,7 +462,10 @@ impl<'s> FunctionBuilder<'s> {
         let slot = self.local(id)?;
         let slot_type = self.slot_type(ctx, slot)?;
         let value = self.expression_with(ctx, value, Some(slot_type))?;
-        let value = self.fit(ctx, value, slot_type)?;
+        let mut value = self.fit(ctx, value, slot_type)?;
+        if let Some(&int_ty) = self.integer_locals.get(&id) {
+            value = self.wrap_integer(ctx, value, int_ty, slot_type);
+        }
         self.store(ctx, slot, value);
         Ok(value)
     }
@@ -486,9 +489,12 @@ impl<'s> FunctionBuilder<'s> {
         };
         let new = self.binary(ctx, kind, old, one);
         let slot_type = self.slot_type(ctx, slot)?;
-        let stored = self.fit(ctx, new, slot_type)?;
+        let mut stored = self.fit(ctx, new, slot_type)?;
+        if let Some(&int_ty) = self.integer_locals.get(&id) {
+            stored = self.wrap_integer(ctx, stored, int_ty, slot_type);
+        }
         self.store(ctx, slot, stored);
-        Ok(if prefix { new } else { old })
+        Ok(if prefix { stored } else { old })
     }
 
     /// `++object.field` and its relatives, on a numeric record field.

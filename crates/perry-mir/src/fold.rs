@@ -91,6 +91,12 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
             rhs,
         ));
     }
+    if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
+        let operand = operation.get_operand(0);
+        if operand.get_type(ctx) == operation.get_result(0).get_type(ctx) {
+            return Some(Replacement::Value(operand));
+        }
+    }
     None
 }
 

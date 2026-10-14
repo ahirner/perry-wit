@@ -403,6 +403,15 @@ impl Graph<'_> {
                     self.types
                         .extend(declared(decl)?.into_iter().map(|id| id.sym.to_string()));
                 }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
+                    for specifier in &import.specifiers {
+                        if let ast::ImportSpecifier::Named(named) = specifier
+                            && (import.type_only || named.is_type_only)
+                        {
+                            self.types.insert(named.local.sym.to_string());
+                        }
+                    }
+                }
                 _ => {}
             }
             self.body.push(item);

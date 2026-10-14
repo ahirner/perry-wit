@@ -342,6 +342,8 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 }
             } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {
                 expected.clone_from(&implementation.results);
+            } else if Operation::get_op::<NumericCastOp>(original, ctx).is_some() {
+                expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
             } else {
                 let dynamic = Operation::get_op_dyn(op, ctx);
                 if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
@@ -371,7 +373,22 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         if !changed.contains(&id) {
             continue;
         }
-        let name = implementations[&id].function.get_symbol_name(ctx);
+        let implementation = &implementations[&id];
+        if !original
+            .get_operation()
+            .deref(ctx)
+            .attributes
+            .0
+            .contains_key(&WIT_SIGNATURE)
+            && analysis.states[id].callers.is_empty()
+        {
+            let orig_name = original.get_symbol_name(ctx);
+            Operation::erase(original.get_operation(), ctx);
+            implementation.function.set_symbol_name(ctx, orig_name);
+            continue;
+        }
+        crate::calls::set_specialized_entry(ctx, &implementation.function);
+        let name = implementation.function.get_symbol_name(ctx);
         original
             .get_operation()
             .deref_mut(ctx)

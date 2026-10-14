@@ -276,6 +276,11 @@ impl<'s> FunctionBuilder<'s> {
         let init = init
             .map(|e| self.expression_with(ctx, e, declared))
             .transpose()?;
+        let int_ty = self
+            .shapes
+            .is_explicit_binding(id)
+            .then(|| self.shapes.integer_type(ctx, ty))
+            .flatten();
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
         let ty = match (declared, init) {
@@ -293,6 +298,12 @@ impl<'s> FunctionBuilder<'s> {
             (None, Some(value)) => value.get_type(ctx),
             (None, None) => bail!("an untyped binding needs an initializer"),
         };
+        if let Some(int_ty) = int_ty {
+            self.integer_locals.insert(id, int_ty);
+            if self.shapes.global_ids.contains(&id) {
+                self.shapes.integer_globals.borrow_mut().insert(id, int_ty);
+            }
+        }
         let slot = if self.shapes.global_ids.contains(&id) {
             self.shapes.globals.borrow_mut().insert(id, ty);
             self.global_slot(ctx, id, ty)?
@@ -300,7 +311,10 @@ impl<'s> FunctionBuilder<'s> {
             self.entry_slot(ctx, ty)
         };
         if let Some(value) = init {
-            let value = self.fit(ctx, value, ty)?;
+            let mut value = self.fit(ctx, value, ty)?;
+            if let Some(&int_ty) = self.integer_locals.get(&id) {
+                value = self.wrap_integer(ctx, value, int_ty, ty);
+            }
             self.store(ctx, slot, value);
         }
         self.locals.insert(id, slot);

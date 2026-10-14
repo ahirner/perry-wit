@@ -11,6 +11,8 @@ pub(super) struct Signature {
     pub(super) await_initialization: bool,
     pub(super) params: Vec<TypeHandle>,
     pub(super) results: Vec<TypeHandle>,
+    pub(super) integer_params: Vec<(LocalId, TypeHandle)>,
+    pub(super) wit_signature: Option<(Vec<TypeHandle>, Vec<TypeHandle>)>,
 }
 
 pub(super) fn build_module(
@@ -65,6 +67,9 @@ pub(super) fn build_module(
             function.name
         );
 
+        let mut integer_params = Vec::new();
+        let mut wit_params = Vec::with_capacity(function.params.len());
+        let mut has_integer_sig = false;
         let params = function
             .params
             .iter()
@@ -74,10 +79,18 @@ pub(super) fn build_module(
                     "default and rest parameters are not supported yet: {}",
                     function.name
                 );
-                shapes
+                let ty = shapes
                     .value_type(ctx, &param.ty)
                     .map_err(|error| shapes.annotate_local(error, param.id))
-                    .with_context(|| format!("parameter {} of {}", param.name, function.name))
+                    .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
+                if let Some(int_ty) = shapes.integer_type(ctx, &param.ty) {
+                    integer_params.push((param.id, int_ty));
+                    wit_params.push(int_ty);
+                    has_integer_sig = true;
+                } else {
+                    wit_params.push(ty);
+                }
+                Ok(ty)
             })
             .collect::<Result<Vec<_>>>()?;
         let results = match (&function.return_type, function.is_async) {
@@ -89,6 +102,14 @@ pub(super) fn build_module(
         }
         .map_err(|error| locations.annotate_function(error, &function.name))
         .with_context(|| format!("result of {}", function.name))?;
+        let mut wit_results = results.clone();
+        if !function.is_async
+            && let Some(int_ty) = shapes.integer_type(ctx, &function.return_type)
+            && let Some(slot) = wit_results.first_mut()
+        {
+            *slot = int_ty;
+            has_integer_sig = true;
+        }
         signatures.insert(
             function.id,
             Signature {
@@ -99,6 +120,8 @@ pub(super) fn build_module(
                 name: identifier(&function.name)?,
                 params,
                 results,
+                integer_params,
+                wit_signature: has_integer_sig.then_some((wit_params, wit_results)),
             },
         );
     }
@@ -127,6 +150,8 @@ pub(super) fn build_module(
             } else {
                 vec![shapes.settled_type(ctx, &HirType::Void)?]
             },
+            integer_params: vec![],
+            wit_signature: None,
         };
         let func = FunctionBuilder::lower_body(
             ctx,
@@ -149,6 +174,9 @@ pub(super) fn build_module(
             .with_context(|| format!("lowering function {}", function.name))?;
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::diagnostics::set_source_span(ctx, &func, &span);
+        }
+        if let Some((wit_params, wit_results)) = &signatures[&function.id].wit_signature {
+            perry_mir::facts::constrain(ctx, &func, wit_params.clone(), wit_results.clone());
         }
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);

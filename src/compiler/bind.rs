@@ -39,8 +39,9 @@ pub(crate) fn constrain_numbers(
         else {
             continue;
         };
-        let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
-            .expect("function type");
+        let existing = perry_mir::facts::wit_signature(ctx, function)
+            .unwrap_or_else(|| function.get_type(ctx));
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if args.len() != export.params.len()
             || results.len() != usize::from(export.result.is_some())
@@ -62,7 +63,9 @@ pub(crate) fn constrain_numbers(
                 "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
             );
             if (wide && source.deref(ctx).is::<perry_mir::types::BigIntType>())
-                || (!wide && source.deref(ctx).is::<FP64Type>())
+                || (!wide
+                    && (source.deref(ctx).is::<FP64Type>()
+                        || source.deref(ctx).is::<pliron::builtin::types::IntegerType>()))
             {
                 *source = integer;
                 constrained = true;

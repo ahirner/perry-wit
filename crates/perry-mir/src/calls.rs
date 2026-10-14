@@ -243,6 +243,27 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
         .is_some_and(|flag| bool::from(flag.clone()))
 }
 
+pub(crate) const SPECIALIZED_ENTRY_KEY: &str = "perry_specialized_entry";
+
+pub fn set_specialized_entry(ctx: &mut Context, function: &FuncOp) {
+    let key: Identifier = SPECIALIZED_ENTRY_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+}
+
+pub fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
+    let key: Identifier = SPECIALIZED_ENTRY_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<pliron::builtin::attributes::BoolAttr>(&key)
+        .is_some_and(|flag| bool::from(flag.clone()))
+}
+
 pliron::dict_key!(ATOMIC_CONSTRUCTION, "perry_atomic_construction");
 
 /// Request one uninterrupted construction scope. ProgramFacts verifies the closed

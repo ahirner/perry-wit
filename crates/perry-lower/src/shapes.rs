@@ -24,7 +24,10 @@ use pliron::{
     identifier::Identifier,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 pub(super) mod generics;
 
@@ -46,6 +49,7 @@ pub(crate) struct Shapes<'h> {
     pub(crate) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
     pub(crate) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
     pub(crate) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
+    pub(crate) integer_globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
     pub(crate) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) hir: &'h HirModule,
@@ -102,6 +106,14 @@ impl<'h> Shapes<'h> {
                 let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
                     return None;
                 };
+                if source == "perry:types"
+                    && matches!(
+                        imported.as_str(),
+                        "u8" | "s8" | "u16" | "s16" | "u32" | "s32"
+                    )
+                {
+                    return Some((local.clone(), format!("perry:types/{imported}")));
+                }
                 [
                     format!("wit:{source}#{imported}"),
                     format!("wit:{imported}"),
@@ -116,6 +128,7 @@ impl<'h> Shapes<'h> {
             decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
+            integer_globals: RefCell::new(HashMap::new()),
             global_ids: if hir.functions.iter().any(|f| f.is_exported) {
                 hir.init
                     .iter()
@@ -272,11 +285,14 @@ impl<'h> Shapes<'h> {
                 if let Some(alternatives) = results {
                     return self.result(ctx, &alternatives);
                 }
-                if members.iter().any(|ty| matches!(ty, HirType::Number))
+                if members
+                    .iter()
+                    .any(|ty| matches!(ty, HirType::Number) || self.integer_type(ctx, ty).is_some())
                     && members.iter().any(|ty| matches!(ty, HirType::String))
-                    && members
-                        .iter()
-                        .all(|ty| matches!(ty, HirType::Number | HirType::String))
+                    && members.iter().all(|ty| {
+                        matches!(ty, HirType::Number | HirType::String)
+                            || self.integer_type(ctx, ty).is_some()
+                    })
                 {
                     return Ok(perry_mir::types::NumberStringType::get(ctx).into());
                 }
@@ -469,6 +485,66 @@ impl<'h> Shapes<'h> {
         }
     }
 
+    pub(super) fn perry_integer_type(ctx: &mut Context, name: &str) -> Option<TypeHandle> {
+        let (bits, signedness) = match name {
+            "perry:types/u8" => (8, Signedness::Unsigned),
+            "perry:types/s8" => (8, Signedness::Signed),
+            "perry:types/u16" => (16, Signedness::Unsigned),
+            "perry:types/s16" => (16, Signedness::Signed),
+            "perry:types/u32" => (32, Signedness::Unsigned),
+            "perry:types/s32" => (32, Signedness::Signed),
+            _ => return None,
+        };
+        Some(IntegerType::get(ctx, bits, signedness).into())
+    }
+
+    pub(super) fn integer_type(&self, ctx: &mut Context, ty: &HirType) -> Option<TypeHandle> {
+        let mut seen = HashSet::new();
+        self.integer_type_inner(ctx, ty, &mut seen)
+    }
+
+    fn integer_type_inner<'a>(
+        &'a self,
+        ctx: &mut Context,
+        ty: &'a HirType,
+        seen: &mut HashSet<&'a str>,
+    ) -> Option<TypeHandle> {
+        let HirType::Named(name) = ty else {
+            return None;
+        };
+        if let Some(int_ty) = Self::perry_integer_type(ctx, name) {
+            return Some(int_ty);
+        }
+        if !seen.insert(name.as_str()) {
+            return None;
+        }
+        let user = self.hir.interfaces.iter().any(|i| i.name == *name)
+            || self.hir.type_aliases.iter().any(|a| a.name == *name)
+            || self.hir.classes.iter().any(|c| c.name == *name);
+        if !user {
+            let key = self.aliases.get(name).map_or(name.as_str(), String::as_str);
+            if let Some(int_ty) = Self::perry_integer_type(ctx, key) {
+                return Some(int_ty);
+            }
+            if let Some(foreign) = self.foreign.get(key) {
+                return self.integer_type_inner(ctx, foreign, seen);
+            }
+        }
+        if let Some(alias) = self
+            .hir
+            .type_aliases
+            .iter()
+            .find(|a| a.name == *name && a.type_params.is_empty())
+        {
+            return self.integer_type_inner(ctx, &alias.ty, seen);
+        }
+        None
+    }
+
+    pub(super) fn is_explicit_binding(&self, id: perry_hir::types::LocalId) -> bool {
+        self.hir.local_source_spans.contains_key(&id) && !self.inferred_bindings.contains(&id)
+    }
+
     /// Whether the program declares a type of this name (shadowing a built-in class).
     pub(super) fn is_user_type(&self, name: &str) -> bool {
         self.hir.interfaces.iter().any(|i| i.name == name)
@@ -489,11 +565,17 @@ impl<'h> Shapes<'h> {
     }
 
     fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
+        if Self::perry_integer_type(ctx, name).is_some() {
+            return Ok(FP64Type::get(ctx).into());
+        }
         // Built-in classes the subset models (a user type of the same name takes precedence).
         let user = self.hir.interfaces.iter().any(|i| i.name == name)
             || self.hir.type_aliases.iter().any(|a| a.name == name);
         if !user {
             let key = self.aliases.get(name).map_or(name, String::as_str);
+            if Self::perry_integer_type(ctx, key).is_some() {
+                return Ok(FP64Type::get(ctx).into());
+            }
             if let Some(foreign) = self.foreign.get(key) {
                 return self.value_type(ctx, foreign);
             }

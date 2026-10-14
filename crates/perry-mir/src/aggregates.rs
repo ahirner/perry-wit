@@ -123,6 +123,12 @@ pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus
                 && callee != name
                 && leaves.contains_key(&callee)
                 && !caught
+                && !function
+                    .get_operation()
+                    .deref(ctx)
+                    .attributes
+                    .0
+                    .contains_key(&crate::facts::SPECIALIZATION)
             {
                 sites.push((op, callee, name.clone()));
             }
@@ -132,7 +138,9 @@ pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus
     let mut inlined: HashMap<Identifier, usize> = HashMap::new();
     for (call, callee, caller) in sites {
         let (function, size) = leaves[&callee];
-        let single = callers[&callee] == 1 && !is_exported(ctx, &function);
+        let external =
+            is_exported(ctx, &function) || crate::calls::is_specialized_entry(ctx, &function);
+        let single = callers[&callee] == 1 && !external;
         if size > SMALL && !single {
             continue;
         }
@@ -148,7 +156,9 @@ pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus
     // Callees with no call left go, unless the world exports them.
     for (callee, count) in inlined {
         let (function, _) = leaves[&callee];
-        if count == callers[&callee] && !is_exported(ctx, &function) {
+        let external =
+            is_exported(ctx, &function) || crate::calls::is_specialized_entry(ctx, &function);
+        if count == callers[&callee] && !external {
             Operation::erase(function.get_operation(), ctx);
         }
     }
@@ -241,6 +251,7 @@ pub(crate) fn promote_arguments(
     for function in &functions {
         let name = function.get_symbol_name(ctx);
         if is_exported(ctx, function)
+            || crate::calls::is_specialized_entry(ctx, function)
             || is_async(ctx, function)
             || effects
                 .effects(&name)

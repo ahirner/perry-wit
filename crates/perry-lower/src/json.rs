@@ -127,6 +127,8 @@ impl<'s> FunctionBuilder<'s> {
             await_initialization: false,
             params,
             results,
+            integer_params: Vec::new(),
+            wit_signature: None,
         };
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
         let function = FuncOp::new(ctx, name.clone(), ty);

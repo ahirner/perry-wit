@@ -60,6 +60,16 @@ pub fn constrain(
         .set(WIT_SIGNATURE.clone(), TypeAttr::new(signature.into()));
 }
 
+/// Return the attached WIT signature constraint, if any.
+pub fn wit_signature(ctx: &Context, function: &FuncOp) -> Option<TypeHandle> {
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<TypeAttr>(&WIT_SIGNATURE)
+        .map(|attr| attr.get_type(ctx))
+}
+
 /// Implementation selected for a constrained boundary, or the original function.
 pub fn implementation(ctx: &Context, function: &FuncOp) -> Identifier {
     function
@@ -97,6 +107,8 @@ struct Body {
     constraints: Vec<Constraint>,
     dependents: HashMap<Value, Vec<usize>>,
     parameters: Vec<Value>,
+    declared_args: Vec<Option<Integer>>,
+    declared_results: Vec<Option<Integer>>,
     effects: crate::effects::LocalEffects,
     external: bool,
 }
@@ -131,6 +143,32 @@ impl Body {
                 }
             }
         }
+        let signature = function
+            .get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<TypeAttr>(&WIT_SIGNATURE)
+            .and_then(|attr| TypedHandle::<FunctionType>::from_handle(attr.get_type(ctx), ctx).ok());
+        let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
+            .expect("function type");
+        let declared_args = match signature {
+            Some(sig) => sig
+                .deref(ctx)
+                .arg_types()
+                .iter()
+                .map(|&ty| Integer::from_type(ctx, ty))
+                .collect(),
+            None => vec![None; fn_ty.deref(ctx).arg_types().len()],
+        };
+        let declared_results = match signature {
+            Some(sig) => sig
+                .deref(ctx)
+                .res_types()
+                .iter()
+                .map(|&ty| Integer::from_type(ctx, ty))
+                .collect(),
+            None => vec![None; fn_ty.deref(ctx).res_types().len()],
+        };
         Self {
             external: crate::calls::is_exported(ctx, &function)
                 || function
@@ -148,6 +186,8 @@ impl Body {
                 .deref(ctx)
                 .arguments()
                 .collect(),
+            declared_args,
+            declared_results,
         }
     }
 }
@@ -665,8 +705,16 @@ impl Solver {
                         .contains(&operation.get_result(0));
                 let args = operation
                     .operands()
-                    .map(|value| {
-                        if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                    .enumerate()
+                    .map(|(position, value)| {
+                        if let Some(declared) = self.analysis.bodies[&callee]
+                            .declared_args
+                            .get(position)
+                            .copied()
+                            .flatten()
+                        {
+                            Some(declared)
+                        } else if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
                             None
                         } else {
                             match self.analysis.states[id].fact(value) {
@@ -694,9 +742,17 @@ impl Solver {
                         args,
                         results: operation
                             .results()
-                            .map(|value| {
+                            .enumerate()
+                            .map(|(position, value)| {
                                 if preserve_result {
                                     ResultDomain::Original
+                                } else if let Some(declared) = self.analysis.bodies[&callee]
+                                    .declared_results
+                                    .get(position)
+                                    .copied()
+                                    .flatten()
+                                {
+                                    ResultDomain::Integer(declared)
                                 } else {
                                     self.analysis.states[id]
                                         .required
@@ -714,14 +770,13 @@ impl Solver {
                 self.heap_call(ctx, id, index, child, op);
                 for (position, input) in operation.operands().enumerate() {
                     let parameter = self.analysis.bodies[&callee].parameters[position];
-                    self.require(
-                        id,
-                        input,
-                        self.analysis.states[child]
-                            .required
-                            .get(&parameter)
-                            .copied(),
-                    );
+                    let required = self.analysis.bodies[&callee]
+                        .declared_args
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .or_else(|| self.analysis.states[child].required.get(&parameter).copied());
+                    self.require(id, input, required);
                 }
                 self.call_results(ctx, id, child, op, asynchronous.is_some());
                 return;
@@ -813,6 +868,24 @@ impl Solver {
                 }
             }
         }
+        if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
+            let operand = operation.get_operand(0);
+            let result = operation.get_result(0);
+            if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
+                self.require(id, operand, Some(integer));
+                self.fact(id, result, Fact::Integer(integer));
+                self.range(id, result, Range::Bounds(integer.bounds()));
+                return;
+            }
+            if let Some(def) = operand.defining_op()
+                && Operation::get_op::<NumericCastOp>(def, ctx).is_some()
+                && let Some(integer) = Integer::from_type(ctx, operand.get_type(ctx))
+            {
+                self.fact(id, result, Fact::Integer(integer));
+                self.range(id, result, self.analysis.states[id].range(operand));
+                return;
+            }
+        }
         for result in operation.results() {
             if Operation::get_op::<crate::intrinsics::PromiseRejectedOp>(op, ctx).is_some() {
                 self.outcome(id, result, Outcomes::Rejected);
@@ -895,6 +968,22 @@ impl Analysis for ProgramFacts {
             work: Worklist::default(),
             width_defaults: Vec::new(),
         };
+        let has_integer_constraints = functions.iter().any(|function| {
+            (!crate::calls::is_exported(ctx, function)
+                && function
+                    .get_operation()
+                    .deref(ctx)
+                    .attributes
+                    .0
+                    .contains_key(&WIT_SIGNATURE))
+                || crate::aggregates::operations(ctx, function)
+                    .into_iter()
+                    .any(|op| {
+                        Operation::get_op::<NumericCastOp>(op, ctx).is_some()
+                            && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+                                .is_some()
+                    })
+        });
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
             let args = ty
@@ -936,22 +1025,47 @@ impl Analysis for ProgramFacts {
                 .attributes
                 .get::<TypeAttr>(&WIT_SIGNATURE)
                 .map(|attr| attr.get_type(ctx));
-            let Some(signature) = signature else {
+            let is_root = signature.is_some()
+                || (has_integer_constraints
+                    && (crate::calls::is_exported(ctx, &function)
+                        || function.get_symbol_name(ctx).as_ref() == crate::globals::INITIALIZER
+                        || function.get_symbol_name(ctx).as_ref() == "perry_main"));
+            if !is_root {
                 continue;
+            }
+            let (args, results) = if let Some(signature) = signature {
+                let signature = TypedHandle::<FunctionType>::from_handle(signature, ctx)?;
+                (
+                    signature
+                        .deref(ctx)
+                        .arg_types()
+                        .iter()
+                        .map(|&ty| Integer::from_type(ctx, ty))
+                        .collect(),
+                    signature
+                        .deref(ctx)
+                        .res_types()
+                        .iter()
+                        .map(|&ty| Integer::from_type(ctx, ty).into())
+                        .collect(),
+                )
+            } else {
+                (
+                    ty.deref(ctx)
+                        .arg_types()
+                        .iter()
+                        .map(|&ty| Integer::from_type(ctx, ty))
+                        .collect(),
+                    ty.deref(ctx)
+                        .res_types()
+                        .iter()
+                        .map(|&ty| {
+                            Integer::from_type(ctx, ty)
+                                .map_or(ResultDomain::Original, ResultDomain::Integer)
+                        })
+                        .collect(),
+                )
             };
-            let signature = TypedHandle::<FunctionType>::from_handle(signature, ctx)?;
-            let args = signature
-                .deref(ctx)
-                .arg_types()
-                .iter()
-                .map(|&ty| Integer::from_type(ctx, ty))
-                .collect();
-            let results = signature
-                .deref(ctx)
-                .res_types()
-                .iter()
-                .map(|&ty| Integer::from_type(ctx, ty).into())
-                .collect();
             let id = solver.context(
                 ctx,
                 Key {

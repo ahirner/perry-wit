@@ -59,6 +59,18 @@ pub(crate) fn foreign(resolve: &Resolve) -> HashMap<String, HirType> {
         })
         .collect::<Vec<_>>();
     types.extend(inputs);
+    for (wit_key, perry_ty) in [
+        ("wit:u8", "perry:types/u8"),
+        ("wit:s8", "perry:types/s8"),
+        ("wit:u16", "perry:types/u16"),
+        ("wit:s16", "perry:types/s16"),
+        ("wit:u32", "perry:types/u32"),
+        ("wit:s32", "perry:types/s32"),
+    ] {
+        types
+            .entry(wit_key.to_string())
+            .or_insert_with(|| HirType::Named(perry_ty.to_string()));
+    }
     types
 }
 
@@ -86,14 +98,13 @@ fn object(fields: impl IntoIterator<Item = (String, HirType)>) -> HirType {
 pub(super) fn ty(resolve: &Resolve, ty: &Type) -> Option<HirType> {
     Some(match ty {
         Type::Bool => HirType::Boolean,
-        Type::U8
-        | Type::U16
-        | Type::U32
-        | Type::S8
-        | Type::S16
-        | Type::S32
-        | Type::F32
-        | Type::F64 => HirType::Number,
+        Type::U8 => HirType::Named("perry:types/u8".into()),
+        Type::S8 => HirType::Named("perry:types/s8".into()),
+        Type::U16 => HirType::Named("perry:types/u16".into()),
+        Type::S16 => HirType::Named("perry:types/s16".into()),
+        Type::U32 => HirType::Named("perry:types/u32".into()),
+        Type::S32 => HirType::Named("perry:types/s32".into()),
+        Type::F32 | Type::F64 => HirType::Number,
         Type::Char | Type::String => HirType::String,
         Type::U64 | Type::S64 => HirType::BigInt,
         Type::ErrorContext => return None,
