@@ -36,8 +36,25 @@ struct AtomicConstructionError {
 pub enum Failure {
     #[default]
     None,
-    Throws,
-    Rejects,
+    Throws {
+        escapes: bool,
+    },
+    Rejects {
+        escapes: bool,
+    },
+}
+
+impl Failure {
+    pub fn throws(self) -> bool {
+        matches!(self, Self::Throws { .. })
+    }
+
+    pub fn escapes(self) -> bool {
+        matches!(
+            self,
+            Self::Throws { escapes: true } | Self::Rejects { escapes: true }
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +65,10 @@ pub struct Effects {
     pub may_collect: bool,
     pub may_suspend: bool,
     pub may_reenter: bool,
+    /// A host operation can remain pending when the source function returns.
+    pub host_work: bool,
+    /// An unhandled await or synchronous callee exposes the async boundary's error channel.
+    pub unhandled_await: bool,
     pub writes_record: bool,
     pub failure: Failure,
     /// Runtime-managed values or effectful services whose task independence is unproven.
@@ -84,9 +105,19 @@ pub(crate) struct LocalEffects {
     asynchronous: bool,
     recursive: bool,
     loop_calls: HashSet<Ptr<Operation>>,
+    handled: HashSet<Ptr<Operation>>,
 }
 
 impl LocalEffects {
+    pub(crate) fn fail(&self, current: Failure, op: Ptr<Operation>, escapes: bool) -> Failure {
+        let escapes = current.escapes() || escapes && !self.handled.contains(&op);
+        if self.asynchronous {
+            Failure::Rejects { escapes }
+        } else {
+            Failure::Throws { escapes }
+        }
+    }
+
     pub(crate) fn inherit(
         &self,
         mut current: Effects,
@@ -99,14 +130,13 @@ impl LocalEffects {
             !current.atomic_construction && (callee.may_collect || callee.allocates);
         current.may_suspend |= callee.may_suspend;
         current.may_reenter |= callee.may_reenter;
+        current.host_work |= callee.host_work;
+        current.unhandled_await |=
+            synchronous && callee.unhandled_await && !self.handled.contains(&call);
         current.writes_record |= callee.writes_record;
         current.task_state |= callee.task_state;
-        if synchronous && callee.failure == Failure::Throws {
-            current.failure = if self.asynchronous {
-                Failure::Rejects
-            } else {
-                Failure::Throws
-            };
+        if synchronous && callee.failure.throws() {
+            current.failure = self.fail(current.failure, call, callee.failure.escapes());
         }
         current.repeated_allocations |= callee.repeated_allocations
             || (self.recursive || self.loop_calls.contains(&call)) && callee.allocates;
@@ -242,6 +272,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
             asynchronous: is_async(ctx, f),
             recursive: false,
             loop_calls: HashSet::new(),
+            handled: HashSet::new(),
         })
         .collect();
     let mut callees = vec![Vec::new(); functions.len()];
@@ -258,7 +289,6 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
             );
         }
         let mut effects = local[index].effects;
-        let mut fails = false;
         let cyclic_blocks: HashSet<_> = sccs_in_topological_order(ctx, &function.get_region(ctx))
             .into_iter()
             .filter(|component| component.is_cyclic)
@@ -268,6 +298,9 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
             for op in block.deref(ctx).iter(ctx) {
                 let callee = callee(ctx, op);
                 let target = callee.as_ref().and_then(|name| indices.get(name)).copied();
+                if crate::exceptions::is_handled(ctx, op) {
+                    local[index].handled.insert(op);
+                }
                 let allocation = allocation(ctx, op);
                 if atomic {
                     let closed = callee.is_none()
@@ -299,9 +332,15 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     .any(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
                     || Operation::get_op::<IntrinsicOp>(op, ctx)
                         .is_some_and(|i| i.intrinsic(ctx).is_none_or(|i| !i.pure()));
-                if Operation::get_op::<CallOp>(op, ctx).is_none() {
-                    fails |= crate::intrinsics::may_throw(ctx, op);
+                if Operation::get_op::<CallOp>(op, ctx).is_none()
+                    && Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_none()
+                    && crate::intrinsics::may_throw(ctx, op)
+                {
+                    effects.failure = local[index].fail(effects.failure, op, true);
                 }
+                effects.unhandled_await |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
+                    .is_some()
+                    && !local[index].handled.contains(&op);
                 let allocates = allocation != Allocation::None
                     || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
                 effects.allocates |= allocates;
@@ -317,6 +356,15 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
                 effects.may_reenter |=
                     Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+                effects.host_work |= Operation::get_op::<TimerOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
+                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some()
+                        && op.deref(ctx).results().any(|value| {
+                            value
+                                .get_type(ctx)
+                                .deref(ctx)
+                                .is::<crate::types::PromiseType>()
+                        });
                 effects.unknown_helper_bound |=
                     Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
                         || Operation::get_op::<IntrinsicOp>(op, ctx)
@@ -331,20 +379,16 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     effects.may_collect = true;
                     effects.may_suspend = true;
                     effects.may_reenter = true;
+                    effects.host_work = true;
                     effects.writes_record = true;
                     effects.task_state = true;
                     effects.unknown_helper_bound = true;
-                    fails |= Operation::get_op::<CallOp>(op, ctx).is_some();
+                    if Operation::get_op::<CallOp>(op, ctx).is_some() {
+                        effects.failure = local[index].fail(effects.failure, op, true);
+                    }
                 }
             }
         }
-        effects.failure = if !fails {
-            Failure::None
-        } else if local[index].asynchronous {
-            Failure::Rejects
-        } else {
-            Failure::Throws
-        };
         effects.allocates |= local[index].asynchronous;
         effects.may_suspend |= local[index].asynchronous;
         effects.may_collect |= effects.may_suspend || effects.may_reenter;

@@ -482,6 +482,11 @@ builtin.module @effects {
         .find(|f| f.get_symbol_name(ctx).as_ref() == "worker")
         .unwrap();
     crate::calls::set_async(ctx, worker);
+    let wait = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "wait")
+        .unwrap();
+    crate::calls::set_exported(ctx, wait);
     verify_operation(module, ctx)?;
     let mut analyses = AnalysisManager::default();
     let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
@@ -492,16 +497,16 @@ builtin.module @effects {
         assert_eq!(
             summary.effects.failure,
             match name {
-                "worker" => Failure::Rejects,
+                "worker" => Failure::Rejects { escapes: true },
                 "launch" => Failure::None,
-                _ => Failure::Throws,
+                _ => Failure::Throws { escapes: true },
             },
             "{name}"
         );
     }
     let wait = effects.effects(&pliron::ident!("wait")).unwrap();
     assert!(wait.effects.may_mutate_records());
-    assert_eq!(wait.effects.failure, Failure::Throws);
+    assert_eq!(wait.effects.failure, Failure::Throws { escapes: true });
     let launch = effects.effects(&pliron::ident!("launch")).unwrap();
     assert!(launch.effects.allocates && launch.effects.may_collect && launch.effects.may_suspend);
     assert_eq!(
@@ -627,14 +632,14 @@ fn runtime_effects_cache_tracks_mir_mutations() -> Result<()> {
         pass::{Analysis, AnalysisManager, PassResult},
     };
     let ctx = &mut Context::new();
-    let module = parse(ctx, ASYNC_STEP);
+    let module = parse(ctx, &ASYNC_STEP.replace("perry.return i", "absent = perry.undefined : perry.optional <builtin.fp64,Undefined>; value = perry.unwrap absent : builtin.fp64; perry.return value"));
     let mut analyses = AnalysisManager::default();
     let run = pliron::ident!("run");
     {
         let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
         assert_eq!(
             effects.effects(&run).unwrap().effects.failure,
-            Failure::Throws
+            Failure::Throws { escapes: true }
         );
     }
     let function = crate::aggregates::functions(module, ctx)
@@ -649,7 +654,7 @@ fn runtime_effects_cache_tracks_mir_mutations() -> Result<()> {
     let effects = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
     assert_eq!(
         effects.effects(&run).unwrap().effects.failure,
-        Failure::Rejects
+        Failure::Rejects { escapes: true }
     );
     let fresh = ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())?;
     for function in crate::aggregates::functions(module, ctx) {
@@ -924,6 +929,155 @@ builtin.module @lengths { ^module():
             expected.0 > 0 && expected.0 != expected.1,
             "{mutation}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn promise_outcomes_follow_aggregate_aliases_and_recursive_calls() -> Result<()> {
+    use crate::{effects::Failure, facts::ProgramFacts};
+    use pliron::{
+        builtin::op_interfaces::SymbolOpInterface,
+        pass::{Analysis, AnalysisManager},
+    };
+    let fixture = r#"
+builtin.module @outcomes { ^module():
+  builtin.func @identity: builtin.function <(perry.promise <builtin.fp64>, builtin.integer i1) -> (perry.promise <builtin.fp64>)> {
+    ^entry(job: perry.promise <builtin.fp64>, again: builtin.integer i1):
+      perry.cond_br if again ^recurse() else ^done(job)
+    ^recurse():
+      no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+      recursive = perry.call identity (job, no) : perry.promise <builtin.fp64>;
+      perry.br ^done(recursive)
+    ^done(result: perry.promise <builtin.fp64>):
+      perry.return result
+  };
+  builtin.func @write: builtin.function <(perry.record <Holder { jobs: perry.array <perry.promise <builtin.fp64>> }>, perry.promise <builtin.fp64>) -> ()> {
+    ^entry(holder: perry.record <Holder>, replacement: perry.promise <builtin.fp64>):
+      jobs = perry.array_new Unassigned (replacement) : perry.array <perry.promise <builtin.fp64>>;
+      perry.field_set holder."jobs" = jobs;
+      perry.return
+  };
+  builtin.func @run: builtin.function <(perry.promise <builtin.fp64>, builtin.integer i1) -> (builtin.fp64)> {
+    ^entry(unknown: perry.promise <builtin.fp64>, again: builtin.integer i1):
+      one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+      ready = perry.promise_resolved one : perry.promise <builtin.fp64>;
+      failed = perry.promise_rejected one : perry.promise <builtin.fp64>;
+      jobs = perry.array_new Unassigned (ready) : perry.array <perry.promise <builtin.fp64>>;
+      holder = perry.alloc Unassigned (jobs) : perry.record <Holder>;
+      MUTATE
+      zero = builtin.constant <builtin.integer <0: i32>> : builtin.integer i32;
+      alias = perry.field_get holder."jobs" : perry.array <perry.promise <builtin.fp64>>;
+      picked = perry.array_at alias[zero] : perry.promise <builtin.fp64>;
+      pending = perry.call identity (picked, again) : perry.promise <builtin.fp64>;
+      value = perry.await pending : builtin.fp64;
+      HANDLE
+      perry.return value
+  }
+}
+"#;
+    for handled in [false, true] {
+        for (mutation, rejects) in [
+            ("", false),
+            ("perry.call write (holder, ready) : ;", false),
+            ("perry.call write (holder, failed) : ;", true),
+            ("perry.call write (holder, unknown) : ;", true),
+            ("view = perry.json_native holder : perry.json;", true),
+        ] {
+            let ctx = &mut Context::new();
+            let text = fixture.replace("MUTATE", mutation).replace(
+                "HANDLE",
+                if handled {
+                    "status = perry.caught : builtin.integer i32;"
+                } else {
+                    ""
+                },
+            );
+            let root = parse(ctx, &text);
+            let run = crate::aggregates::functions(root, ctx)
+                .into_iter()
+                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
+                .unwrap();
+            crate::calls::set_async(ctx, &run);
+            crate::calls::set_exported(ctx, &run);
+            verify_operation(root, ctx)?;
+            let pending = crate::aggregates::operations(ctx, &run)
+                .into_iter()
+                .find(|&op| Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some())
+                .unwrap()
+                .deref(ctx)
+                .get_operand(0);
+            let mut analyses = AnalysisManager::default();
+            let cached = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+            let fresh = ProgramFacts::compute(root, ctx, &mut AnalysisManager::default())?;
+            for facts in [&*cached, &fresh] {
+                assert_eq!(facts.may_reject(ctx, &run, pending), rejects, "{mutation}");
+                let expected = if rejects {
+                    Failure::Rejects { escapes: !handled }
+                } else {
+                    Failure::None
+                };
+                assert_eq!(
+                    facts
+                        .effects(&pliron::ident!("run"))
+                        .unwrap()
+                        .effects
+                        .failure,
+                    expected,
+                    "{mutation}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn combinator_outcomes_join_inputs_without_mutating_them() -> Result<()> {
+    use crate::{
+        facts::ProgramFacts,
+        intrinsics::{Combinator, PromiseCombinatorOp},
+    };
+    use pliron::{builtin::op_interfaces::OneResultInterface, op::Op, pass::AnalysisManager};
+    for kind in [Combinator::All, Combinator::Race, Combinator::AllSettled] {
+        for rejected in [false, true] {
+            let ctx = &mut Context::new();
+            let text = format!(
+                r#"builtin.module @combine {{ ^module():
+              builtin.func @run: builtin.function <() -> (builtin.fp64)> {{ ^entry():
+                one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+                job = perry.promise_{} one : perry.promise <builtin.fp64>;
+                jobs = perry.array_new Unassigned (job) : perry.array <perry.promise <builtin.fp64>>;
+                perry.return one
+              }}
+            }}"#,
+                if rejected { "rejected" } else { "resolved" }
+            );
+            let root = parse(ctx, &text);
+            let run = crate::aggregates::functions(root, ctx)[0];
+            crate::calls::set_async(ctx, &run);
+            crate::calls::set_exported(ctx, &run);
+            let ops = crate::aggregates::operations(ctx, &run);
+            let array = ops
+                .iter()
+                .find_map(|&op| Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx))
+                .unwrap()
+                .get_result(ctx);
+            let end = *ops.last().unwrap();
+            let group = PromiseCombinatorOp::new(ctx, kind, array).unwrap();
+            group.get_operation().insert_before(ctx, end);
+            let pending = group.get_result(ctx);
+            let wait = crate::calls::AwaitOp::new(ctx, pending)?;
+            wait.get_operation().insert_before(ctx, end);
+            verify_operation(root, ctx)?;
+            let mut analyses = AnalysisManager::default();
+            let facts = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+            assert_eq!(
+                facts.may_reject(ctx, &run, pending),
+                rejected && kind != Combinator::AllSettled
+            );
+            assert_eq!(facts.array_length(ctx, &run, array), Some((1, 1)));
+        }
     }
     Ok(())
 }

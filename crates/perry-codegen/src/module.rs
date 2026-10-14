@@ -146,7 +146,7 @@ impl ModuleState<'_> {
     pub(crate) fn may_throw(&self, function: &Identifier) -> bool {
         self.program_facts
             .effects(function)
-            .is_none_or(|summary| summary.effects.failure == perry_mir::effects::Failure::Throws)
+            .is_none_or(|summary| summary.effects.failure.throws())
     }
 
     /// Whether the WIT world imports `interface` (always, without a world).
@@ -363,16 +363,46 @@ fn bind_exports(
     }) {
         state.uses_streams = true;
     }
-    let escaping = perry_mir::exceptions::escaping_functions(ctx, functions);
-    let initialization_escapes = escaping
+    let mir_functions: HashMap<String, FuncOp> = functions
         .iter()
-        .any(|name| name.as_ref() == perry_mir::globals::INITIALIZER);
+        .map(|f| (f.get_symbol_name(ctx).into(), *f))
+        .collect();
+    let initialization = state
+        .program_facts
+        .effects(&Identifier::new(perry_mir::globals::INITIALIZER));
+    let initialization_escapes =
+        initialization.is_some_and(|summary| summary.effects.failure.escapes());
     let stderr = state.imports.as_ref().is_some_and(|imports| {
         imports
             .iter()
             .any(|name| name.starts_with("wasi:cli/stderr@"))
     });
     for export in exports {
+        let function = mir_functions.get(&export.function).ok_or_else(|| {
+            anyhow!(
+                "WIT export {} has no function {}",
+                export.core_name,
+                export.function
+            )
+        })?;
+        let effects = &state
+            .program_facts
+            .effects(&function.get_symbol_name(ctx))
+            .expect("function effects")
+            .effects;
+        if export.task_return.is_some()
+            && stderr
+            && ((effects.host_work
+                || initialization.is_some_and(|summary| summary.effects.host_work))
+                && (effects.unhandled_await
+                    || initialization.is_some_and(|summary| summary.effects.unhandled_await)))
+            && !export
+                .result
+                .as_ref()
+                .is_some_and(boundary::AbiType::accepts_exception)
+        {
+            state.uses_io = true;
+        }
         if export.task_return.is_none()
             && state
                 .async_functions
@@ -385,8 +415,7 @@ fn bind_exports(
                 .with_help("Declare this WIT export async so it can await module initialization and its error channel.").into());
         }
         if !export.command
-            && (initialization_escapes
-                || escaping.iter().any(|name| name.as_ref() == export.function))
+            && (initialization_escapes || effects.failure.escapes())
             && !export
                 .result
                 .as_ref()
@@ -408,10 +437,6 @@ fn bind_exports(
             }
         }
     }
-    let mir_functions: HashMap<String, FuncOp> = functions
-        .iter()
-        .map(|f| (f.get_symbol_name(ctx).into(), *f))
-        .collect();
     let lowered: HashMap<_, _> = crate::analysis::module_functions(ctx, &state.wasm)
         .into_iter()
         .map(|function| (function.get_symbol_name(ctx), function))

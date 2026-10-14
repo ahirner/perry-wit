@@ -132,6 +132,19 @@ async fn uncaught_values_report_the_actual_failure() -> Result<()> {
             assert_eq!(stderr, format!("Uncaught {expected}\n"), "{source}");
         }
     }
+    let (mut store, instance, output) = instantiate(
+        "import {setTimeout} from 'node:timers/promises'; export async function run():Promise<string>{setTimeout(60000);return await Promise.resolve('ready');}",
+        "package test:detached; world boundary {import wasi:clocks/monotonic-clock@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func()->string;}",
+    ).await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, ())).await?;
+    assert!(result.is_err());
+    assert_eq!(
+        String::from_utf8(output.contents().to_vec())?,
+        "Uncaught Error: Unresolved detached work at task boundary; pending operations cancelled\n"
+    );
+    assert!(store.data().table.is_empty());
     Ok(())
 }
 

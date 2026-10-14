@@ -44,6 +44,8 @@ use pliron::{
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 mod heap;
+mod outcomes;
+use outcomes::Outcomes;
 
 pliron::dict_key!(WIT_SIGNATURE, "perry_wit_signature");
 pliron::dict_key!(SPECIALIZATION, "perry_specialization");
@@ -360,6 +362,7 @@ struct State {
     origins: HashMap<Value, BTreeSet<usize>>,
     summary: crate::effects::Summary,
     heap_values: HashMap<Value, usize>,
+    outcomes: HashMap<Value, Outcomes>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -367,6 +370,7 @@ struct ResultFact {
     domain: Fact,
     range: Range,
     heap: Option<usize>,
+    outcome: Outcomes,
 }
 
 impl State {
@@ -474,6 +478,11 @@ impl Solver {
             ..State::default()
         };
         for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
+            if body.external {
+                state
+                    .outcomes
+                    .insert(parameter, Outcomes::unknown(ctx, parameter.get_type(ctx)));
+            }
             if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
                 state.origins.insert(parameter, BTreeSet::from([position]));
             }
@@ -554,6 +563,20 @@ impl Solver {
 
     fn operation_effects(&mut self, ctx: &Context, id: usize, index: usize, op: Ptr<Operation>) {
         let operation = op.deref(ctx);
+        if Operation::get_op::<AwaitOp>(op, ctx).is_some()
+            && self.analysis.states[id]
+                .outcome(operation.get_operand(0))
+                .may_reject()
+        {
+            let current = self.analysis.states[id].summary.effects.failure;
+            let failure = self.analysis.bodies[&self.analysis.keys[id].function]
+                .effects
+                .fail(current, op, true);
+            if failure != current {
+                self.analysis.states[id].summary.effects.failure = failure;
+                self.notify_callers(id);
+            }
+        }
         for result in operation
             .results()
             .filter(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
@@ -641,6 +664,36 @@ impl Solver {
         }
     }
 
+    fn call_results(
+        &mut self,
+        ctx: &Context,
+        id: usize,
+        child: usize,
+        op: Ptr<Operation>,
+        asynchronous: bool,
+    ) {
+        for (position, result) in op.deref(ctx).results().enumerate() {
+            let facts = self.analysis.states[child].results[position];
+            let outcome = if asynchronous {
+                if self.analysis.states[child]
+                    .summary
+                    .effects
+                    .failure
+                    .escapes()
+                {
+                    Outcomes::Either
+                } else {
+                    Outcomes::Fulfilled
+                }
+            } else {
+                facts.outcome
+            };
+            self.outcome(id, result, outcome);
+            self.fact(id, result, facts.domain);
+            self.range(id, result, facts.range);
+        }
+    }
+
     fn require(&mut self, id: usize, value: Value, required: Option<Integer>) {
         let Some(required) = required else {
             return;
@@ -692,6 +745,7 @@ impl Solver {
     fn process(&mut self, ctx: &Context, id: usize, index: usize) {
         let constraint = self.analysis.bodies[&self.analysis.keys[id].function].constraints[index];
         if let Constraint::Edge { from, to } = constraint {
+            self.outcome(id, to, self.analysis.states[id].outcome(from));
             self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index));
             self.propagate_origins(id, from, to);
             if from.get_type(ctx).deref(ctx).is::<PromiseType>()
@@ -729,6 +783,15 @@ impl Solver {
         if let Some(index) = promise_payload(ctx, op) {
             let value = operation.get_operand(index);
             let promise = operation.get_result(0);
+            self.outcome(
+                id,
+                promise,
+                if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
+                    Outcomes::Fulfilled
+                } else {
+                    Outcomes::Either
+                },
+            );
             if self.analysis.states[id]
                 .original_payloads
                 .contains(&promise)
@@ -748,6 +811,7 @@ impl Solver {
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
             let promise = operation.get_operand(0);
             let result = operation.get_result(0);
+            self.outcome(id, result, Outcomes::unknown(ctx, result.get_type(ctx)));
             let fact = self.analysis.states[id].fact(promise);
             if fact == Fact::Original {
                 self.preserve_promise_payload(id, promise);
@@ -780,13 +844,15 @@ impl Solver {
                     fact
                 };
                 let old = self.analysis.states[id].results[position];
+                let outcome = old.outcome.join(self.analysis.states[id].outcome(value));
                 let domain = old.domain.join(fact);
                 let range = old
                     .range
                     .join(self.analysis.states[id].range(value), domain.integer());
-                if domain != old.domain || range != old.range {
+                if domain != old.domain || range != old.range || outcome != old.outcome {
                     self.analysis.states[id].results[position].domain = domain;
                     self.analysis.states[id].results[position].range = range;
+                    self.analysis.states[id].results[position].outcome = outcome;
                     changed = true;
                 }
             }
@@ -805,11 +871,7 @@ impl Solver {
             {
                 self.analysis.states[child].callers.insert((id, index));
                 self.heap_call(ctx, id, index, child, op);
-                for (position, result) in operation.results().enumerate() {
-                    let facts = self.analysis.states[child].results[position];
-                    self.fact(id, result, facts.domain);
-                    self.range(id, result, facts.range);
-                }
+                self.call_results(ctx, id, child, op, asynchronous.is_some());
                 return;
             }
             if operation
@@ -883,11 +945,7 @@ impl Solver {
                             .copied(),
                     );
                 }
-                for (position, result) in operation.results().enumerate() {
-                    let facts = self.analysis.states[child].results[position];
-                    self.fact(id, result, facts.domain);
-                    self.range(id, result, facts.range);
-                }
+                self.call_results(ctx, id, child, op, asynchronous.is_some());
                 return;
             }
         }
@@ -973,6 +1031,16 @@ impl Solver {
             }
         }
         for result in operation.results() {
+            if Operation::get_op::<crate::intrinsics::PromiseRejectedOp>(op, ctx).is_some() {
+                self.outcome(id, result, Outcomes::Rejected);
+            } else if !matches!(
+                heap,
+                heap::OperationKind::Read { .. }
+                    | heap::OperationKind::Alias { .. }
+                    | heap::OperationKind::Combine(_)
+            ) {
+                self.outcome(id, result, Outcomes::unknown(ctx, result.get_type(ctx)));
+            }
             let fact = if literal(ctx, op).is_some() {
                 Fact::Literal
             } else if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {

@@ -408,51 +408,18 @@ pub fn set_exit_only(ctx: &mut Context, op: &RethrowOp) {
     );
 }
 
-/// Functions whose exceptions can escape, including rejection from an async body.
-/// Handled operations retain their status convention but do not require an export channel.
-pub fn escaping_functions(
-    ctx: &Context,
-    functions: &[pliron::builtin::ops::FuncOp],
-) -> std::collections::HashSet<pliron::identifier::Identifier> {
-    use crate::calls::CallOp;
-    use pliron::{builtin::op_interfaces::SymbolOpInterface, linked_list::LinkedList};
-    let mut escaping = std::collections::HashSet::new();
-    loop {
-        let before = escaping.len();
-        for function in functions {
-            if crate::aggregates::operations(ctx, function)
-                .iter()
-                .any(|&op| {
-                    if op
-                        .deref(ctx)
-                        .get_next()
-                        .is_some_and(|next| Operation::get_op::<CaughtOp>(next, ctx).is_some())
-                    {
-                        return false;
-                    }
-                    if Operation::get_op::<RethrowOp>(op, ctx).is_some()
-                        && op
-                            .deref(ctx)
-                            .attributes
-                            .get::<pliron::builtin::attributes::BoolAttr>(
-                                &pliron::identifier::Identifier::new("perry_exit_only"),
-                            )
-                            .is_some_and(|flag| bool::from(flag.clone()))
-                    {
-                        return false;
-                    }
-                    if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                        escaping.contains(&call.callee(ctx))
-                    } else {
-                        crate::intrinsics::may_throw(ctx, op)
-                    }
-                })
-            {
-                escaping.insert(function.get_symbol_name(ctx));
-            }
-        }
-        if before == escaping.len() {
-            return escaping;
-        }
-    }
+/// Local handling suppresses an export error channel, while retaining the operation's status.
+pub(crate) fn is_handled(ctx: &Context, op: pliron::context::Ptr<Operation>) -> bool {
+    use pliron::linked_list::LinkedList;
+    op.deref(ctx)
+        .get_next()
+        .is_some_and(|next| Operation::get_op::<CaughtOp>(next, ctx).is_some())
+        || Operation::get_op::<RethrowOp>(op, ctx).is_some()
+            && op
+                .deref(ctx)
+                .attributes
+                .get::<pliron::builtin::attributes::BoolAttr>(&pliron::identifier::Identifier::new(
+                    "perry_exit_only",
+                ))
+                .is_some_and(|flag| bool::from(flag.clone()))
 }

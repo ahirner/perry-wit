@@ -69,14 +69,23 @@ fn throwing_exports_require_a_declared_channel_but_catches_do_not() {
             .unwrap()
             .contains("async")
     );
-    api::compile(
-        &program(
-            "export async function run():Promise<number> {try{throw new Error('handled');}catch(e){return 7;}}",
-        ),
+    for source in [
+        "export async function run():Promise<number> {try{throw new Error('handled');}catch(e){return 7;}}",
+        "async function value(n:number):Promise<number>{return n+1;} export async function run():Promise<number>{return await value(6);}",
+        "async function value():Promise<number>{throw 'handled';} export async function run():Promise<number>{try{return await value();}catch{return 7;}}",
+        "export async function run():Promise<number>{const holder:{jobs:Promise<number>[]}={jobs:[Promise.resolve(7)]};const job:Promise<number>=holder.jobs[0];return await job;}",
+    ] {
+        api::compile(&program(source), &wit, &Options::default()).unwrap();
+    }
+    let error = api::compile(
+        &program("async function value():Promise<number>{throw 'unhandled';} export async function run():Promise<number>{const values=await Promise.all([value()]);return values[0];}"),
         &wit,
         &Options::default(),
-    )
-    .unwrap();
+    ).unwrap_err();
+    assert_eq!(
+        error.diagnostics[0].code,
+        DiagnosticCode::MissingErrorChannel
+    );
 }
 
 #[test]

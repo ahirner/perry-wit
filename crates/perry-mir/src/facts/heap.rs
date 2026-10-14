@@ -6,6 +6,7 @@ use crate::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
+    intrinsics::{Combinator, PromiseCombinatorOp},
     optional::{OptionalCastOp, UnwrapOp, WrapOp},
     types::{ArrayType, RecordType},
 };
@@ -18,6 +19,7 @@ struct Cell {
     objects: BTreeSet<usize>,
     summarized: bool,
     range: Range,
+    outcome: Outcomes,
     readers: BTreeSet<Work>,
 }
 
@@ -58,6 +60,7 @@ pub(super) enum OperationKind {
     Write { slot: usize, value: usize },
     ArrayWrite { index: Option<usize>, value: usize },
     Length,
+    Combine(Combinator),
     Extend,
     Alias { operand: usize },
     Return,
@@ -96,6 +99,9 @@ impl OperationKind {
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
             return Self::Allocate { array: true };
+        }
+        if let Some(combine) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
+            return Self::Combine(combine.combinator(ctx));
         }
         let field = Operation::get_op::<FieldGetOp>(op, ctx)
             .map(|op| (op.field(ctx), true))
@@ -227,13 +233,14 @@ fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
 }
 
 impl Solver {
-    fn heap_cell(&mut self, ctx: &Context, ty: TypeHandle) -> usize {
+    fn heap_cell(&mut self, ty: TypeHandle) -> usize {
         let id = self.analysis.heap.cells.len();
         self.analysis.heap.cells.push(Cell {
-            ty: payload(ctx, ty),
+            ty,
             objects: BTreeSet::new(),
             summarized: false,
             range: Range::Bottom,
+            outcome: Outcomes::Bottom,
             readers: BTreeSet::new(),
         });
         id
@@ -246,7 +253,7 @@ impl Solver {
         if let Some(&cell) = self.analysis.states[id].heap_values.get(&value) {
             return Some(cell);
         }
-        let cell = self.heap_cell(ctx, value.get_type(ctx));
+        let cell = self.heap_cell(value.get_type(ctx));
         self.analysis.states[id].heap_values.insert(value, cell);
         Some(cell)
     }
@@ -261,13 +268,13 @@ impl Solver {
                     .fields()
                     .expect("resolved record schema")
                     .iter()
-                    .map(|&(_, ty)| self.heap_cell(ctx, ty))
+                    .map(|&(_, ty)| self.heap_cell(ty))
                     .collect(),
             )
         } else {
             let array = shape.downcast_ref::<ArrayType>().expect("aggregate schema");
             Contents::Array {
-                element: self.heap_cell(ctx, array.element()),
+                element: self.heap_cell(array.element()),
                 length: Range::Bottom,
                 readers: BTreeSet::new(),
             }
@@ -290,6 +297,19 @@ impl Solver {
             .get(&ty)
             .copied()
             .unwrap_or_else(|| self.heap_object(ctx, ty, true))
+    }
+
+    fn heap_allocation(&mut self, ctx: &Context, id: usize, value: Value) -> usize {
+        let cell = self.heap_value(ctx, id, value).unwrap();
+        self.analysis.heap.cells[cell]
+            .objects
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                let object = self.heap_object(ctx, value.get_type(ctx), false);
+                self.add_object(ctx, cell, object);
+                object
+            })
     }
 
     fn heap_changed(&mut self, cell: usize) {
@@ -402,9 +422,10 @@ impl Solver {
         for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
             let ty = self.analysis.heap.cells[cell].ty;
-            let range = Integer::from_type(ctx, ty)
+            let range = Integer::from_type(ctx, payload(ctx, ty))
                 .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
             self.slot_range(ctx, cell, range);
+            self.slot_outcome(cell, Outcomes::unknown(ctx, ty));
             if aggregate(ctx, ty) {
                 self.open_aliases(cell, Work::OpenObject(object));
                 let summary = self.heap_summary(ctx, ty);
@@ -462,15 +483,27 @@ impl Solver {
 
     fn slot_range(&mut self, ctx: &Context, slot: usize, range: Range) {
         let cell = &mut self.analysis.heap.cells[slot];
-        let joined = cell.range.join(range, Integer::from_type(ctx, cell.ty));
+        let joined = cell
+            .range
+            .join(range, Integer::from_type(ctx, payload(ctx, cell.ty)));
         if joined != cell.range {
             cell.range = joined;
             self.heap_changed(slot);
         }
     }
 
+    fn slot_outcome(&mut self, slot: usize, outcome: Outcomes) {
+        let cell = &mut self.analysis.heap.cells[slot];
+        let joined = cell.outcome.join(outcome);
+        if joined != cell.outcome {
+            cell.outcome = joined;
+            self.heap_changed(slot);
+        }
+    }
+
     fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
         self.slot_range(ctx, slot, self.analysis.states[id].range(value));
+        self.slot_outcome(slot, self.analysis.states[id].outcome(value));
         if let Some(from) = self.heap_value(ctx, id, value) {
             self.copy_aliases(ctx, from, slot, reader);
         }
@@ -489,6 +522,7 @@ impl Solver {
             let parameter =
                 self.analysis.bodies[&self.analysis.keys[child].function].parameters[position];
             self.range(child, parameter, self.analysis.states[id].range(input));
+            self.outcome(child, parameter, self.analysis.states[id].outcome(input));
             self.heap_alias(ctx, id, input, child, parameter, reader);
         }
         for (position, result) in op.deref(ctx).results().enumerate() {
@@ -513,16 +547,7 @@ impl Solver {
         match kind {
             OperationKind::Allocate { array } => {
                 let value = operation.get_result(0);
-                let cell = self.heap_value(ctx, id, value).unwrap();
-                let object = self.analysis.heap.cells[cell]
-                    .objects
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| {
-                        let object = self.heap_object(ctx, value.get_type(ctx), false);
-                        self.add_object(ctx, cell, object);
-                        object
-                    });
+                let object = self.heap_allocation(ctx, id, value);
                 if array {
                     let length = operation.get_num_operands() as i128;
                     self.widen_length(
@@ -554,6 +579,7 @@ impl Solver {
                     None
                 };
                 let mut range = Range::Bottom;
+                let mut outcome = Outcomes::Bottom;
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
                     previous = Some(object);
@@ -572,12 +598,19 @@ impl Solver {
                         self.analysis.heap.cells[slot].readers.insert(reader);
                         range = range.join(
                             self.analysis.heap.cells[slot].range,
-                            Integer::from_type(ctx, self.analysis.heap.cells[slot].ty),
+                            Integer::from_type(
+                                ctx,
+                                payload(ctx, self.analysis.heap.cells[slot].ty),
+                            ),
                         );
+                        outcome = outcome.join(self.analysis.heap.cells[slot].outcome);
                         if let Some(result) = result {
                             self.copy_aliases(ctx, slot, result, reader);
                         }
                     }
+                }
+                if matches!(kind, OperationKind::Read { .. }) {
+                    self.outcome(id, operation.get_result(0), outcome);
                 }
                 return matches!(kind, OperationKind::Read { .. }).then_some(range);
             }
@@ -597,6 +630,7 @@ impl Solver {
                         self.grow_array(object, None, reader);
                         let output = self.analysis.heap.objects[object].contents.slots()[0];
                         self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
+                        self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
                         self.copy_aliases(ctx, input, output, reader);
                     }
                 }
@@ -616,9 +650,71 @@ impl Solver {
                 }
                 return Some(self.analysis.heap.length(base));
             }
+            OperationKind::Combine(kind) => {
+                let input = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                self.analysis.heap.cells[input].readers.insert(reader);
+                let result = operation.get_result(0);
+                let output = if kind == Combinator::Race {
+                    None
+                } else {
+                    Some(self.heap_allocation(ctx, id, result))
+                };
+                let mut outcome = if kind == Combinator::Race {
+                    Outcomes::Bottom
+                } else {
+                    Outcomes::Fulfilled
+                };
+                let mut range = Range::Bottom;
+                let mut previous = None;
+                while let Some(object) = self.next_object(input, previous) {
+                    previous = Some(object);
+                    let Contents::Array {
+                        element,
+                        length,
+                        readers,
+                    } = &mut self.analysis.heap.objects[object].contents
+                    else {
+                        unreachable!("combinator input")
+                    };
+                    readers.insert(reader);
+                    let (element, length) = (*element, *length);
+                    self.analysis.heap.cells[element].readers.insert(reader);
+                    if kind != Combinator::AllSettled {
+                        outcome = outcome.join(self.analysis.heap.cells[element].outcome);
+                        if let Some(object) = output {
+                            let slot = self.analysis.heap.objects[object].contents.slots()[0];
+                            self.slot_range(ctx, slot, self.analysis.heap.cells[element].range);
+                            self.slot_outcome(
+                                slot,
+                                Outcomes::unknown(ctx, self.analysis.heap.cells[slot].ty),
+                            );
+                            self.copy_aliases(ctx, element, slot, reader);
+                        } else {
+                            range = range.join(self.analysis.heap.cells[element].range, None);
+                            if let Some(result) = self.heap_value(ctx, id, result) {
+                                self.copy_aliases(ctx, element, result, reader);
+                            }
+                        }
+                    }
+                    if let Some(object) = output {
+                        self.widen_length(object, length);
+                    }
+                }
+                self.outcome(id, result, outcome);
+                return (kind == Combinator::Race).then_some(range);
+            }
             OperationKind::Alias { operand } => {
                 let input = operation.get_operand(operand);
                 self.heap_alias(ctx, id, input, id, operation.get_result(0), reader);
+                if promise_payload(ctx, op).is_none()
+                    && Operation::get_op::<AwaitOp>(op, ctx).is_none()
+                {
+                    self.outcome(
+                        id,
+                        operation.get_result(0),
+                        self.analysis.states[id].outcome(input),
+                    );
+                }
                 return Some(self.analysis.states[id].range(input));
             }
             OperationKind::Return => {
@@ -627,7 +723,7 @@ impl Solver {
                         let to = if let Some(to) = self.analysis.states[id].results[position].heap {
                             to
                         } else {
-                            let to = self.heap_cell(ctx, value.get_type(ctx));
+                            let to = self.heap_cell(value.get_type(ctx));
                             self.analysis.states[id].results[position].heap = Some(to);
                             self.notify_callers(id);
                             to

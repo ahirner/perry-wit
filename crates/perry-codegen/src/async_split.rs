@@ -326,18 +326,26 @@ impl FunctionLowering<'_, '_> {
         let promise = take.deref(ctx).get_argument(0);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, frame, AWAITED, zero);
-        let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
-        let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
-        let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        // A rejection makes its exception object pending again and throws its status.
-        let rethrow = self.new_block(ctx, vec![]);
-        let fulfilled = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
-        self.block = rethrow;
-        let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
-        let (throw, args) = self.throw_target(ctx, status);
-        self.br(ctx, throw, args);
-        self.block = fulfilled;
+        let parent = op.deref(ctx).get_parent_op(ctx).expect("MIR function");
+        let function = Operation::get_op::<FuncOp>(parent, ctx).expect("MIR function");
+        if self
+            .state
+            .program_facts
+            .may_reject(ctx, &function, op.deref(ctx).get_operand(0))
+        {
+            let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
+            let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
+            let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
+            // A rejection makes its exception object pending again and throws its status.
+            let rethrow = self.new_block(ctx, vec![]);
+            let fulfilled = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
+            self.block = rethrow;
+            let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
+            let (throw, args) = self.throw_target(ctx, status);
+            self.br(ctx, throw, args);
+            self.block = fulfilled;
+        }
         let ty = op.deref(ctx).get_result(0).get_type(ctx);
         let value = self.load(ctx, slot_kind(ctx, ty)?, promise, promises::VALUE);
         self.define(ctx, op, value);

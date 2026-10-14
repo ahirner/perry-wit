@@ -1004,8 +1004,8 @@ fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<(
     Ok(())
 }
 
-#[test]
-fn async_dispatch_roots_only_constructed_frame_handlers() -> Result<()> {
+#[tokio::test(flavor = "current_thread")]
+async fn async_dispatch_roots_only_constructed_frame_handlers() -> Result<()> {
     for (body, combinator) in [
         ("return await value(n);", false),
         (
@@ -1021,6 +1021,19 @@ fn async_dispatch_roots_only_constructed_frame_handlers() -> Result<()> {
         )?;
         let wat = wasmprinter::print_bytes(&compiled.core)?;
         assert_eq!(wat.contains("(func $perry_combinator_step "), combinator);
+        assert!(
+            !wat.contains("wasi:cli/stderr"),
+            "fulfilled jobs need no error reporting"
+        );
+        let component = compiled.component.as_ref().unwrap();
+        for bytes in [&component.bytes, &component.stripped] {
+            let (mut store, instance) = instantiate_async(bytes).await?;
+            let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+            let (value,) = run.call_async(&mut store, (3.0,)).await?;
+            assert_eq!(value, if combinator { 7.0 } else { 4.0 });
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
     }
     Ok(())
 }
