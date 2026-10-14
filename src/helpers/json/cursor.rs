@@ -170,9 +170,7 @@ pub(crate) unsafe extern "C" fn json_cursor_boolean(value: u32) -> u32 {
 pub(crate) unsafe extern "C" fn json_cursor_string(value: u32) -> u32 {
     let c = unsafe { cursor(value) };
     c.scalar_depth();
-    c.read_token(0, |r| {
-        Ok(pool::text::<true>(r)?.decoded(r.input) as usize as u32)
-    })
+    c.read_token(0, |r| Ok(pool::text::<true>(r)?.decoded() as usize as u32))
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_key(value: u32, table: *const u32, count: u32) -> u32 {
@@ -191,10 +189,8 @@ pub(crate) unsafe extern "C" fn json_cursor_key(value: u32, table: *const u32, c
         .as_chunks::<2>()
         .0;
     let compare = |entry: &[u32; 2]| {
-        key.compare(c.text(), unsafe {
-            runtime::bytes(entry[0] as usize as *mut u8)
-        })
-        .reverse()
+        key.compare(unsafe { runtime::bytes(entry[0] as usize as *mut u8) })
+            .reverse()
     };
     let index = if count < 16 {
         names.iter().position(|entry| compare(entry).is_eq())
@@ -226,11 +222,7 @@ pub(crate) unsafe extern "C" fn json_cursor_member(value: u32, graph: *mut u8) -
     if c.error.is_some() {
         return graph as usize as u32;
     }
-    let key = pool::json_text(
-        key.expect("successful current member key"),
-        c.text(),
-        &mut c.residue,
-    );
+    let key = pool::json_text(key.expect("successful current member key"), &mut c.residue);
     set_word(item, 24, key as usize as u32);
     let graph = if graph.is_null() {
         pool::json_node(6, &mut c.residue)

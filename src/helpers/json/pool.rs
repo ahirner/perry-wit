@@ -7,21 +7,22 @@ fn set_word(value: *mut u8, offset: usize, word: u32) {
 
 #[derive(Clone, Copy)]
 pub(super) struct Text<'a> {
-    raw: &'a str,
-    start: usize,
+    literal: &'a str,
     bytes: u32,
     scalars: Option<u32>,
     escaped: bool,
 }
 impl Text<'_> {
-    fn data_in(self, input: &str, allocate: impl FnOnce(u32) -> *mut u8) -> *mut u8 {
+    fn raw(&self) -> &str {
+        &self.literal[1..self.literal.len() - 1]
+    }
+    fn data_in(self, allocate: impl FnOnce(u32) -> *mut u8) -> *mut u8 {
         if !self.escaped {
-            self.raw.as_ptr().cast_mut()
+            self.raw().as_ptr().cast_mut()
         } else {
             let data = allocate(self.bytes);
             let mut at = 0;
-            let mut reader = Reader::new(input);
-            reader.position = self.start;
+            let mut reader = Reader::new(self.literal);
             reader
                 .string::<false>(|chunk| {
                     unsafe {
@@ -34,43 +35,41 @@ impl Text<'_> {
             data
         }
     }
-    pub(super) fn decoded(self, input: &str) -> *mut u8 {
+    pub(super) fn decoded(self) -> *mut u8 {
         unsafe {
             runtime::adopt_counted(
-                self.data_in(input, runtime::alloc),
+                self.data_in(runtime::alloc),
                 self.bytes,
-                self.scalar_count(input),
+                self.scalar_count(),
             )
         }
     }
-    fn scalar_count(self, input: &str) -> u32 {
+    fn scalar_count(self) -> u32 {
         if let Some(count) = self.scalars {
             return count;
         }
         if !self.escaped {
-            return runtime::scalars_length(self.raw.as_bytes());
+            return runtime::scalars_length(self.raw().as_bytes());
         }
-        let mut reader = Reader::new(input);
-        reader.position = self.start;
+        let mut reader = Reader::new(self.literal);
         reader
             .string::<true>(|_| Ok(()))
             .expect("key was validated")
             .scalars
             .unwrap()
     }
-    pub(super) fn compare(self, input: &str, expected: &[u8]) -> core::cmp::Ordering {
+    pub(super) fn compare(self, expected: &[u8]) -> core::cmp::Ordering {
         use core::cmp::Ordering;
         let length = (self.bytes as usize).cmp(&expected.len());
         if length != Ordering::Equal {
             return length;
         }
         if !self.escaped {
-            return self.raw.as_bytes().cmp(expected);
+            return self.raw().as_bytes().cmp(expected);
         }
         let mut at = 0;
         let mut order = Ordering::Equal;
-        let mut reader = Reader::new(input);
-        reader.position = self.start;
+        let mut reader = Reader::new(self.literal);
         reader
             .string::<false>(|bytes| {
                 if order == Ordering::Equal {
@@ -88,10 +87,8 @@ pub(super) fn text<'a, const COUNT: bool>(reader: &mut Reader<'a>) -> Result<Tex
     let start = reader.position;
     let facts = reader.string::<COUNT>(|_| Ok(()))?;
     let end = reader.position;
-    let raw = &reader.input[start + 1..end - 1];
     Ok(Text {
-        raw,
-        start,
+        literal: &reader.input[start..end],
         bytes: facts.bytes,
         scalars: facts.scalars,
         escaped: facts.escaped,
@@ -149,17 +146,17 @@ pub(super) fn json_node(kind: u32, residue: &mut Residue) -> *mut u8 {
     set_word(node, 0, kind);
     node
 }
-pub(super) fn json_text(value: Text<'_>, input: &str, residue: &mut Residue) -> *mut u8 {
+pub(super) fn json_text(value: Text<'_>, residue: &mut Residue) -> *mut u8 {
     let size = 32u32
         .checked_add(if value.escaped { value.bytes } else { 0 })
         .expect("string size");
     let node = residue.alloc(size, 8);
     unsafe { core::ptr::write_bytes(node, 0, 32) };
     set_word(node, 0, 4);
-    let data = value.data_in(input, |_| unsafe { node.add(32) });
+    let data = value.data_in(|_| unsafe { node.add(32) });
     set_word(node, 8, data as usize as u32);
     set_word(node, 12, value.bytes);
-    set_word(node, 16, value.scalar_count(input));
+    set_word(node, 16, value.scalar_count());
     if !value.escaped && value.bytes != 0 {
         set_word(residue.data, 0, residue.input as usize as u32);
     }
@@ -185,7 +182,7 @@ impl GraphStorage for Pooled<'_> {
     }
     fn string(&mut self, reader: &mut Reader<'_>) -> Result<usize, Error> {
         let value = text::<true>(reader)?;
-        Ok(json_text(value, reader.input, self.0) as usize)
+        Ok(json_text(value, self.0) as usize)
     }
 }
 
