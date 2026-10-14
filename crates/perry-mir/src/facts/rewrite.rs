@@ -31,7 +31,7 @@ use pliron::{
     operation::Operation,
     pass::{AnalysisManager, Pass, PassResult},
     result::Result,
-    r#type::{Typed, TypedHandle},
+    r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::{APInt, bw},
 };
 use std::collections::{HashMap, HashSet};
@@ -73,6 +73,13 @@ impl Pass for Specialize {
         };
         Ok(result)
     }
+}
+
+struct Implementation {
+    function: FuncOp,
+    mapping: IrMapping,
+    arguments: Vec<TypeHandle>,
+    results: Vec<TypeHandle>,
 }
 
 fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
@@ -123,8 +130,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             }
         }
     }
-    let mut clones = HashMap::new();
-    let mut signatures = HashMap::new();
+    let mut implementations = HashMap::new();
     for (id, key) in analysis
         .keys
         .iter()
@@ -137,14 +143,15 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             let signature =
                 TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
                     .expect("function type");
-            signatures.insert(
+            implementations.insert(
                 id,
-                (
-                    signature.deref(ctx).arg_types(),
-                    signature.deref(ctx).res_types(),
-                ),
+                Implementation {
+                    function: body.function,
+                    mapping,
+                    arguments: signature.deref(ctx).arg_types(),
+                    results: signature.deref(ctx).res_types(),
+                },
             );
-            clones.insert(id, (body.function, mapping));
             continue;
         }
         let cloned = clone_operation(
@@ -184,8 +191,15 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             let argument = entry.deref(ctx).get_argument(index);
             argument.set_type(ctx, ty);
         }
-        signatures.insert(id, (args, results));
-        clones.insert(id, (function, mapping));
+        implementations.insert(
+            id,
+            Implementation {
+                function,
+                mapping,
+                arguments: args,
+                results,
+            },
+        );
     }
     for (id, _) in analysis
         .keys
@@ -196,7 +210,8 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         if !changed.contains(&id) {
             continue;
         }
-        let (_, mapping) = &clones[&id];
+        let implementation = &implementations[&id];
+        let mapping = &implementation.mapping;
         let state = &analysis.states[id];
         let body = &analysis.bodies[&analysis.keys[id].function];
         for &value in state.facts.keys() {
@@ -291,7 +306,8 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 }
             }
             if let Some(&child) = state.calls.get(&original) {
-                let name = IdentifierAttr::new(clones[&child].0.get_symbol_name(ctx));
+                let callee = &implementations[&child];
+                let name = IdentifierAttr::new(callee.function.get_symbol_name(ctx));
                 let asynchronous = if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
                     call.set_attr_perry_async_callee(ctx, name);
                     true
@@ -301,9 +317,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                         .set_attr_perry_callee(ctx, name);
                     false
                 };
-                expected.clone_from(&signatures[&child].0);
+                expected.clone_from(&callee.arguments);
                 let results = op.deref(ctx).get_num_results();
-                for (index, ty) in (0..results).zip(&signatures[&child].1) {
+                for (index, ty) in (0..results).zip(&callee.results) {
                     let value = op.deref(ctx).get_result(index);
                     let ty = if asynchronous {
                         PromiseType::get(ctx, *ty).into()
@@ -334,7 +350,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     expected.fill(domain.ty(ctx));
                 }
             } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {
-                expected.clone_from(&signatures[&id].1);
+                expected.clone_from(&implementation.results);
             } else {
                 let dynamic = Operation::get_op_dyn(op, ctx);
                 if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
@@ -364,7 +380,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         if !changed.contains(&id) {
             continue;
         }
-        let name = clones[&id].0.get_symbol_name(ctx);
+        let name = implementations[&id].function.get_symbol_name(ctx);
         original
             .get_operation()
             .deref_mut(ctx)
