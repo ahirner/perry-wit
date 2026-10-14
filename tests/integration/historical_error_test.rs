@@ -53,10 +53,7 @@ impl WasiHttpView for Host {
     }
 }
 
-async fn instantiate(
-    source: &str,
-    wit: &str,
-) -> Result<(Store<Host>, Instance, output_capture::MemoryOutput)> {
+fn compile_component(source: &str, wit: &str) -> Result<(Engine, Component, Linker<Host>)> {
     let (resolve, package) = perry_wit::component::wit::resolve_source("errors.wit", wit)?;
     let world = resolve.select_world(&[package], Some("boundary"))?;
     let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
@@ -76,9 +73,17 @@ async fn instantiate(
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    Ok((engine, component, linker))
+}
+
+async fn instantiate_compiled(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<Host>,
+) -> Result<(Store<Host>, Instance, output_capture::MemoryOutput)> {
     let output = output_capture::MemoryOutput::new(8192);
     let mut store = Store::new(
-        &engine,
+        engine,
         Host {
             wasi: WasiCtx::builder().stderr(output.clone()).build(),
             http: WasiHttpCtx::new(),
@@ -86,16 +91,21 @@ async fn instantiate(
             failure: Failure(wasmtime_wasi_http::Error::ConnectionRefused),
         },
     );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let instance = linker.instantiate_async(&mut store, component).await?;
     Ok((store, instance, output))
 }
 
-async fn invoke(source: &str, asynchronous: bool) -> Result<(wasmtime::Result<(String,)>, String)> {
-    let wit = format!(
-        "package test:errors; world boundary {{ import wasi:http/client@0.3.0; import wasi:cli/stderr@0.3.0; export run: {}func()->string; }}",
-        if asynchronous { "async " } else { "" }
-    );
-    let (mut store, instance, output) = instantiate(source, &wit).await?;
+async fn instantiate(
+    source: &str,
+    wit: &str,
+) -> Result<(Store<Host>, Instance, output_capture::MemoryOutput)> {
+    let (engine, component, linker) = compile_component(source, wit)?;
+    instantiate_compiled(&engine, &component, &linker).await
+}
+
+async fn invoke(source: &str) -> Result<(wasmtime::Result<(String,)>, String)> {
+    let wit = "package test:errors; world boundary { import wasi:http/client@0.3.0; import wasi:cli/stderr@0.3.0; export run: async func()->string; }";
+    let (mut store, instance, output) = instantiate(source, wit).await?;
     let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
     let result =
         tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, ())).await?;
@@ -104,33 +114,47 @@ async fn invoke(source: &str, asynchronous: bool) -> Result<(wasmtime::Result<(S
 
 #[tokio::test(flavor = "current_thread")]
 async fn uncaught_values_report_the_actual_failure() -> Result<()> {
-    for (value, expected) in [
-        ("new Error('broken')", "Error: broken"),
-        ("new TypeError('invalid')", "TypeError: invalid"),
-        ("new RangeError('range')", "RangeError: range"),
-        (
-            "new ReferenceError('reference')",
-            "ReferenceError: reference",
-        ),
-        ("new SyntaxError('syntax')", "SyntaxError: syntax"),
-        ("'text\\0雪'", "text\0雪"),
-        ("false", "false"),
-        ("undefined", "undefined"),
-        ("null", "null"),
-        ("42", "42"),
-    ] {
-        for asynchronous in [true] {
-            let source = if asynchronous {
-                format!(
-                    "async function fail():Promise<string>{{throw {value};}} export async function run():Promise<string>{{return fail();}}"
-                )
-            } else {
-                format!("export function run():string{{throw {value};}}")
-            };
-            let (result, stderr) = invoke(&source, asynchronous).await?;
-            assert!(result.is_err(), "{source}");
-            assert_eq!(stderr, format!("Uncaught {expected}\n"), "{source}");
+    let source = r#"
+        async function fail(which: number): Promise<string> {
+            if (which === 0) throw new Error('broken');
+            if (which === 1) throw new TypeError('invalid');
+            if (which === 2) throw new RangeError('range');
+            if (which === 3) throw new ReferenceError('reference');
+            if (which === 4) throw new SyntaxError('syntax');
+            if (which === 5) throw 'text\0雪';
+            if (which === 6) throw false;
+            if (which === 7) throw undefined;
+            if (which === 8) throw null;
+            throw 42;
         }
+        export async function run(which: number): Promise<string> { return fail(which); }
+    "#;
+    let wit = "package test:errors; world boundary { import wasi:http/client@0.3.0; import wasi:cli/stderr@0.3.0; export run: async func(which: f64)->string; }";
+    let (engine, component, linker) = compile_component(source, wit)?;
+    for (which, expected) in [
+        (0.0, "Error: broken"),
+        (1.0, "TypeError: invalid"),
+        (2.0, "RangeError: range"),
+        (3.0, "ReferenceError: reference"),
+        (4.0, "SyntaxError: syntax"),
+        (5.0, "text\0雪"),
+        (6.0, "false"),
+        (7.0, "undefined"),
+        (8.0, "null"),
+        (9.0, "42"),
+    ] {
+        let (mut store, instance, output) =
+            instantiate_compiled(&engine, &component, &linker).await?;
+        let run = instance.get_typed_func::<(f64,), (String,)>(&mut store, "run")?;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (which,)))
+                .await?;
+        assert!(result.is_err(), "which={which}");
+        assert_eq!(
+            String::from_utf8(output.contents().to_vec())?,
+            format!("Uncaught {expected}\n"),
+            "which={which}"
+        );
     }
     let (mut store, instance, output) = instantiate(
         "import {setTimeout} from 'node:timers/promises'; export async function run():Promise<string>{setTimeout(60000);return await Promise.resolve('ready');}",
@@ -203,7 +227,6 @@ async fn caught_fetch_does_not_replace_a_later_uncaught_error() -> Result<()> {
             throw new Error('later failure');
         }
     "#,
-        true,
     )
     .await?;
     assert!(result.is_err());
@@ -215,7 +238,6 @@ async fn caught_fetch_does_not_replace_a_later_uncaught_error() -> Result<()> {
             return 'unexpected success';
         }
     "#,
-        true,
     )
     .await?;
     assert!(result.is_err());
@@ -235,57 +257,46 @@ struct ExportError {
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_failures_keep_their_domain_at_the_error_boundary() -> Result<()> {
-    for (operation, name, message) in [
+    let source = r#"
+        export function run(which: number): string {
+            if (which === 0) new Date(NaN).toISOString();
+            if (which === 1) new TextDecoder('invalid');
+            if (which === 2) new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([255]));
+            if (which === 3) String.fromCodePoint(1114112);
+            if (which === 4) new Uint8Array(-1);
+            if (which === 5) Temporal.Instant.from('bad');
+            return 'unexpected success';
+        }
+    "#;
+    let (mut store, instance, _) = instantiate(
+        source,
+        "package test:errors; world boundary {
+            record failure {name:string,message:string}
+            export run:func(which:f64)->result<string,failure>;
+        }",
+    )
+    .await?;
+    let run =
+        instance.get_typed_func::<(f64,), (Result<String, ExportError>,)>(&mut store, "run")?;
+    for (which, name, message) in [
+        (0.0, "RangeError", "Invalid time value"),
+        (1.0, "RangeError", "Unsupported text encoding"),
         (
-            "new Date(NaN).toISOString()",
-            "RangeError",
-            "Invalid time value",
-        ),
-        (
-            "new TextDecoder('invalid')",
-            "RangeError",
-            "Unsupported text encoding",
-        ),
-        (
-            "new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array([255]))",
+            2.0,
             "TypeError",
             "The encoded data was not valid for encoding utf-8",
         ),
-        (
-            "String.fromCodePoint(1114112)",
-            "RangeError",
-            "Invalid Unicode scalar value",
-        ),
-        (
-            "new Uint8Array(-1)",
-            "RangeError",
-            "Invalid typed array length",
-        ),
-        (
-            "Temporal.Instant.from('bad')",
-            "RangeError",
-            "Invalid time value for Temporal",
-        ),
+        (3.0, "RangeError", "Invalid Unicode scalar value"),
+        (4.0, "RangeError", "Invalid typed array length"),
+        (5.0, "RangeError", "Invalid time value for Temporal"),
     ] {
-        let source =
-            format!("export function run():string{{{operation}; return 'unexpected success';}}");
-        let (mut store, instance, _) = instantiate(
-            &source,
-            "package test:errors; world boundary {
-            record failure {name:string,message:string}
-            export run:func()->result<string,failure>;
-        }",
-        )
-        .await?;
-        let run =
-            instance.get_typed_func::<(), (Result<String, ExportError>,)>(&mut store, "run")?;
         assert_eq!(
-            run.call_async(&mut store, ()).await?.0,
+            run.call_async(&mut store, (which,)).await?.0,
             Err(ExportError {
                 name: name.into(),
                 message: message.into()
             }),
-            "{operation}"
+            "which={which}"
         );
     }
     Ok(())

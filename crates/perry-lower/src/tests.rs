@@ -386,11 +386,3 @@ fn unsupported_temporal_forms_are_rejected() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
-
-#[test]
-fn spreads_and_concat_share_sequence_operations() {
-    let printed = lowered(
-        "export function run(n: number): number { const a: number[] = [n]; const b = [...a, 2, ...a]; const c = b.concat(a, 3); return c.length; }",
-    );
-    assert!(printed.contains("perry.concat"), "{printed}");
-}

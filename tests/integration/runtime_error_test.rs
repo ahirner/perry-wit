@@ -1,10 +1,11 @@
 use crate::core_program::Program;
 
 #[test]
-fn error_classes_causes_rethrows_and_absence_preserve_values() {
+fn error_classes_causes_rethrows_primitives_and_rejections_preserve_values() {
     let source = r#"
 interface Detail { code:string }
-export function run():number {
+async function fail():Promise<number> {const values:number[]=[];return values[0];}
+export async function run():Promise<number> {
  const original=new ReferenceError('original');
  const detail:Detail={code:'E_TEST'};
  const error=new SyntaxError('outer',{cause:original});
@@ -21,6 +22,20 @@ export function run():number {
  if(arrayError.cause.length!==1 || arrayError.cause[0]!==detail)return 10;
  try{throw null;}catch(e){if(e!==null)return 6;}
  try{throw undefined;}catch(e){if(e!==undefined)return 7;}
+ let first=new Error('placeholder');
+ try{throw 42;}catch(e){first=e;if(e!==42)return 11;}
+ try{throw 42;}catch(e){if(e!==first)return 12;}
+ try{throw false;}catch(e){if(e!==false)return 13;}
+ try{throw 'value';}catch(e){if(e!=='value')return 14;}
+ try{throw 9007199254740993n;}catch(e){first=e;if(e!==9007199254740993n || 1n===e)return 15;}
+ try{throw 9007199254740993n;}catch(e){if(e!==first)return 16;}
+ const a=new Error('same');const b=new Error('same');if(a===b)return 17;
+ const nanPending=Promise.reject(NaN);
+ try{await nanPending;}catch(e){first=e;}
+ try{await nanPending;}catch(e){if(e===first)return 18;}
+ const pending=fail();let saved=new Error('placeholder');
+ try{await pending;}catch(e){saved=e;}
+ try{await pending;}catch(e){if(e!==saved || !(e instanceof TypeError))return 19;}
  try{try{throw error;}finally{return 0;}}catch(e){return 8;}
 }
 "#;
@@ -73,43 +88,4 @@ fn initialization_failures_use_declared_results_and_remain_stable() -> anyhow::R
         );
     }
     Ok(())
-}
-
-#[test]
-fn rejected_promises_keep_implicit_error_identity_across_observations() {
-    let source = r#"
-async function fail():Promise<number> {const values:number[]=[];return values[0];}
-export async function run():Promise<number> {
- const pending=fail();let saved=new Error('placeholder');
- try{await pending;}catch(e){saved=e;}
- try{await pending;}catch(e){return e===saved && e instanceof TypeError ? 0 : 1;}
- return 2;
-}
-"#;
-    let mut program = Program::checked(source, "rejection-identity.ts");
-    program.stress_collection(true);
-    assert_eq!(program.outcome("run", &[]), (0.0, 0));
-}
-
-#[test]
-fn thrown_primitives_compare_by_value_and_errors_compare_by_identity() {
-    let source = r#"
-export async function run():Promise<number> {
- let first=new Error('placeholder');
- try{throw 42;}catch(e){first=e;if(e!==42)return 1;}
- try{throw 42;}catch(e){if(e!==first)return 2;}
- try{throw false;}catch(e){if(e!==false)return 3;}
- try{throw 'value';}catch(e){if(e!=='value')return 4;}
- try{throw 9007199254740993n;}catch(e){first=e;if(e!==9007199254740993n || 1n===e)return 7;}
- try{throw 9007199254740993n;}catch(e){if(e!==first)return 8;}
- const a=new Error('same');const b=new Error('same');if(a===b)return 5;
- const pending=Promise.reject(NaN);
- try{await pending;}catch(e){first=e;}
- try{await pending;}catch(e){if(e===first)return 6;}
- return 0;
-}
-"#;
-    let mut program = Program::checked(source, "primitive-errors.ts");
-    program.stress_collection(true);
-    assert_eq!(program.outcome("run", &[]), (0.0, 0));
 }

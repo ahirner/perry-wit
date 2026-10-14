@@ -11,7 +11,7 @@ impl Scope {
     pub(crate) fn for_function(state: &ModuleState, name: &Identifier) -> Self {
         if state.initializer.is_some()
             || state.memory_checks
-            || state.root_metrics.is_some()
+            || state.count_roots
             || state
                 .program_facts
                 .effects(name)
@@ -40,7 +40,7 @@ impl Scope {
                     | AbiType::F64
             )
         });
-        if marshalling || export.params.len() > MAX_FLAT_PARAMS || export.task_return.is_some() {
+        if marshalling || export.params.len() > MAX_FLAT_PARAMS || export.is_async() {
             Self::Task
         } else {
             Self::for_function(state, function)

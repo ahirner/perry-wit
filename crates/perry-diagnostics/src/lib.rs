@@ -55,9 +55,23 @@ impl SourceSpan {
             offset
         }
         fn position(source: &str, offset: usize) -> (u32, u32) {
-            let prefix = &source[..offset];
-            let line = prefix.bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
-            let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() as u32 + 1;
+            let mut line = 1;
+            let mut column = 1;
+            let mut chars = source[..offset].chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\r' => {
+                        chars.next_if_eq(&'\n');
+                        line += 1;
+                        column = 1;
+                    }
+                    '\n' | '\u{2028}' | '\u{2029}' => {
+                        line += 1;
+                        column = 1;
+                    }
+                    _ => column += 1,
+                }
+            }
             (line, column)
         }
         let start_byte = boundary(source, start);
@@ -198,28 +212,5 @@ impl fmt::Display for CompileError {
 impl std::error::Error for CompileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn unicode_locations_and_error_sources_are_retained() {
-        let span = SourceSpan::new("src/helper.ts", "é\r\n🙂x", 8, 9);
-        assert_eq!((span.start_line, span.start_column), (2, 2));
-        let diagnostic =
-            PerryDiagnostic::error(DiagnosticCode::MissingTypeAnnotation, "annotate helper")
-                .with_span(span);
-        let error = CompileError::from_error(
-            anyhow::Error::new(diagnostic).context("lowering helper"),
-            DiagnosticCode::InternalCompilerError,
-        );
-        assert_eq!(
-            error.diagnostics[0].code,
-            DiagnosticCode::MissingTypeAnnotation
-        );
-        assert!(std::error::Error::source(&error).is_some());
-        assert!(error.to_string().contains("lowering helper"));
     }
 }

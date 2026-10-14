@@ -389,6 +389,7 @@ impl Solver {
             }
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::exceptions::RaiseOp>(op, ctx).is_some()
             || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx)
                 .is_some_and(|op| op.phase(ctx) == crate::foreign::Phase::Start)
             || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
@@ -401,6 +402,9 @@ impl Solver {
             || Operation::get_op::<crate::heap::FieldSetOp>(op, ctx).is_some()
             || Operation::get_op::<crate::collections::ArrayPushOp>(op, ctx).is_some()
             || Operation::get_op::<crate::collections::ArrayExtendOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                op.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ExceptionSetCause)
+            })
         {
             Some(1)
         } else if Operation::get_op::<crate::collections::ArraySetOp>(op, ctx).is_some() {

@@ -11,7 +11,10 @@
 //! `process.exitCode` and `process.exit` are instance state ([perry_exit_code_set],
 //! [perry_exit]); `process.exit` unwinds with status 5, which no handler catches.
 use crate::{
-    exception::{ERROR, EXIT, KIND, TAG, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING, TYPE_ERROR, VALUE},
+    exception::{
+        ERROR, EXIT, KIND, REFERENCE_ERROR, SYNTAX_ERROR, TAG, TAG_BOOLEAN, TAG_JSON, TAG_NULL,
+        TAG_NUMBER, TAG_STRING, TAG_UNDEFINED, TYPE_ERROR, VALUE,
+    },
     host::{self, BLOCKED, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_WRITE},
     instance::instance_state,
     region::current,
@@ -545,7 +548,7 @@ pub(crate) unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
 /// # Safety
 /// `promise` is rejected in the current task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
     if current().outcome.is_some() {
         return;
     }
@@ -553,9 +556,9 @@ pub unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
     text.push_str("Uncaught ");
     unsafe {
         crate::promise::perry_promise_rethrow(promise);
-        let status = *(promise.add(crate::promise::STATUS as usize) as *const u32);
+        let status = *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32;
         let exception =
-            *(promise.add(crate::promise::VALUE as usize) as *const u32) as usize as *mut u8;
+            *(promise.add(crate::promise::VALUE as usize) as *const u64) as usize as *mut u8;
         describe(&mut text, status, exception);
     }
     print_bytes(1, text.as_slice(), true);
@@ -603,7 +606,7 @@ unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
         unsafe { crate::string::bytes(value as usize as *mut u8) }
     };
     match (kind, tag) {
-        (TYPE_ERROR..=ERROR | 6 | 7, _) => {
+        (TYPE_ERROR..=ERROR | REFERENCE_ERROR | SYNTAX_ERROR, _) => {
             push_error_name(text, kind);
             let message = string(value);
             if !message.is_empty() {
@@ -648,9 +651,9 @@ unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
                 }
             }
         }
-        (_, 5) => text.push_str("undefined"),
-        (_, 6) => text.push_str("null"),
-        (_, 7) => text.push_str("[object Object]"),
+        (_, TAG_UNDEFINED) => text.push_str("undefined"),
+        (_, TAG_NULL) => text.push_str("null"),
+        (_, TAG_JSON) => text.push_str("[object Object]"),
         (_, TAG_BOOLEAN) => text.push_str(if value != 0 { "true" } else { "false" }),
         (_, TAG_STRING) => text.extend_from_slice(string(value)),
         _ => text.push_str("exception"),

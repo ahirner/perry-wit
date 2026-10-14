@@ -327,7 +327,7 @@ interface Page<T> {items:T[];next:string|null}
 interface Entry<T=string> {value:T}
 type Box<T> = {item:T};
 interface Link<T> {value:T;next:Link<T>|null}
-function size(page:Page<Entry>):number {return page.items[0].value.length;}
+function size(page:Page<Entry>) {const items = page.items; const first = items[0]; return first.value.length;}
 function unbox(box:Box<number>):number {return box.item;}
 export function run():number {
  const value:Pair<string,Item> = {a:'x',b:{n:17}};

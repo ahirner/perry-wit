@@ -3,56 +3,23 @@
 use crate::core_program::{Counter, Program};
 
 #[test]
-fn array_combination_preserves_snapshots_and_identity() {
-    let mut program = Program::checked(
-        r#"
-function mutate(a: number[]): number[] { a[0] = 9; return [3]; }
-export function run(n: number): number {
-  const a: number[] = [1, 2];
-  const alias = a;
-  const spread = [...a, ...mutate(a), n];
-  if (spread[0] !== 1 || spread[2] !== 3 || alias[0] !== 9) return -1;
-  const combined = a.concat(mutate(a), 4, ...[5, 6]);
-  if (combined === a || combined[0] !== 9 || combined[2] !== 3 || combined[5] !== 6) return -2;
-  combined[0] = 7;
-  if (a[0] !== 9) return -3;
-  const copied = a.concat();
-  copied[0] = 8;
-  if (a[0] !== 9) return -4;
-  return spread.length + combined.length + copied.length;
-}
-"#,
-        "array-combination.ts",
-    );
-    program.stress_collection(true);
-    assert_eq!(program.throwing("run", 10.0), (12.0, 0));
-}
-
-#[test]
-fn owned_array_combination_reuses_capacity_and_retains_children() {
-    let mut program = Program::checked(
-        r#"
-interface Cell { value: number }
-export function run(n: number): number {
-  let items: Cell[] = [];
-  for (let i = 0; i < n; i++) items = [...items, { value: i }];
-  return items.length + items[0].value + items[items.length - 1].value;
-}
-"#,
-        "owned-array-combination.ts",
-    );
-    program.stress_collection(true);
-    assert_eq!(program.throwing("run", 1000.0), (1999.0, 0));
-    assert!(program.counter(Counter::Allocations) < 3200);
-}
-
-#[test]
 fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
     let source = r#"
 interface Cell { value:number }
 interface Holder { items:Cell[] }
 function mutate(items:Cell[]):number { items[0].value=9;return 3; }
+function mutateNumbers(a:number[]):number[] { a[0]=9;return [3]; }
 export function run():number {
+ const a:number[]=[1,2];
+ const alias=a;
+ const spread=[...a,...mutateNumbers(a),10];
+ if(spread[0]!==1 || spread[2]!==3 || alias[0]!==9)return 9;
+ const combined=a.concat(mutateNumbers(a),4,...[5,6]);
+ if(combined===a || combined[0]!==9 || combined[2]!==3 || combined[5]!==6)return 10;
+ combined[0]=7;
+ const copiedNumbers=a.concat();
+ copiedNumbers[0]=8;
+ if(a[0]!==9 || spread.length+combined.length+copiedNumbers.length!==12)return 12;
  const cell:Cell={value:1};const values:Cell[]=[cell];
  const copied=[...values];copied[0].value=2;
  if(values[0]!==cell || cell.value!==2)return 1;
@@ -129,17 +96,23 @@ fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
             program.counter(Counter::Allocations)
         );
     }
-    let source = "export function run(n:number):number{let items:number[]=[];for(let i=0;i<n;i++){if(i%2===0)items=[i].concat(items);else items=items.concat([i]);}return items.length+items[0];}";
+    let source = r#"
+interface Cell { value: number }
+export function run(n: number): number {
+  let numbers: number[] = [];
+  let cells: Cell[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) numbers = [i].concat(numbers);
+    else numbers = numbers.concat([i]);
+    cells = [...cells, { value: i }];
+  }
+  return numbers.length + numbers[0] + cells.length + cells[0].value + cells[cells.length - 1].value;
+}
+"#;
     let mut program = Program::checked(source, "concat-join.ts");
     program.stress_collection(true);
-    let results = program
-        .call("run", &[wasmtime::Val::F64(1000.0f64.to_bits())])
-        .0;
-    assert_eq!(results[0].unwrap_f64(), 1998.0);
-    if let Some(status) = results.get(1) {
-        assert_eq!(status.unwrap_i32(), 0);
-    }
-    assert!(program.counter(Counter::Allocations) < 2200);
+    assert_eq!(program.throwing("run", 1000.0), (3997.0, 0));
+    assert!(program.counter(Counter::Allocations) < 5400);
 }
 
 #[test]

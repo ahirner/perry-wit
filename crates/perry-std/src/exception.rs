@@ -99,12 +99,13 @@ pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 
 /// `error.name`: the constructor's name of an `Error` object (thrown values have none).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
+    use perry_abi::layout::exception::{ERROR, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR};
     from_static(match parts(exception).0 {
         TYPE_ERROR => "TypeError",
-        2 => "RangeError",
-        3 => "Error",
-        6 => "ReferenceError",
-        7 => "SyntaxError",
+        RANGE_ERROR => "RangeError",
+        ERROR => "Error",
+        REFERENCE_ERROR => "ReferenceError",
+        SYNTAX_ERROR => "SyntaxError",
         _ => "",
     })
 }
@@ -112,8 +113,9 @@ pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
 /// A thrown boolean; other thrown values produce a checked TypeError.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_to_bool(exception: *mut u8) -> u32 {
+    use perry_abi::layout::exception::TAG_BOOLEAN;
     match parts(exception) {
-        (THROWN_VALUE, 2, value) => u32::from(value != 0),
+        (THROWN_VALUE, TAG_BOOLEAN, value) => u32::from(value != 0),
         _ => {
             raise(TYPE_ERROR, "Thrown value is not a boolean");
             0

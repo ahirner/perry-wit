@@ -14,18 +14,18 @@ pub(crate) fn export(
         .async_functions
         .contains(&function.get_symbol_name(ctx));
     ensure!(
-        is_async == export.task_return.is_some(),
+        is_async == export.is_async(),
         "{} is {}async but the WIT export is {}async",
         export.function,
         if is_async { "" } else { "not " },
-        if export.task_return.is_some() {
-            ""
-        } else {
-            "not "
-        },
+        if export.is_async() { "" } else { "not " },
     );
-    if let Some(task_return) = &export.task_return {
-        return async_export(ctx, state, function, export, task_return);
+    if let ExportKind::Async {
+        task_return,
+        command,
+    } = &export.kind
+    {
+        return async_export(ctx, state, function, export, task_return, *command);
     }
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
@@ -57,15 +57,17 @@ pub(crate) fn export(
         .as_ref()
         .map(AbiType::flat)
         .unwrap_or_default();
-    let core_results: Vec<Flat> = if flat_result.len() > 1 {
+    let flat_result_len = flat_result.len();
+    let core_results: Vec<Flat> = if flat_result_len > 1 {
         vec![Flat::I32]
     } else {
-        flat_result.clone()
+        flat_result
     };
 
     let params: Vec<_> = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
     let results: Vec<_> = core_results.iter().map(|f| flat_type(ctx, *f)).collect();
-    let fn_ty = FunctionType::get(ctx, params, results.clone());
+    let post_ty = FunctionType::get(ctx, results.clone(), vec![]);
+    let fn_ty = FunctionType::get(ctx, params, results);
     let glue = FuncOp::new(ctx, identifier(&export.core_name), fn_ty);
     set_export(ctx, &glue, &export.core_name);
     let entry = glue.get_entry_block(ctx);
@@ -138,12 +140,12 @@ pub(crate) fn export(
             let ty = completion.result;
             let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
             let payload = b.completion_error(ctx, completion, exception)?;
-            let returned = if flat_result.len() == 1 {
-                b.completion_flat(ctx, ty, 1, payload)?
+            let returned = if flat_result_len == 1 {
+                b.completion_flat(ctx, completion, 1, payload)?
             } else {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);
-                b.completion_store(ctx, ty, 1, payload, area)?;
+                b.completion_store(ctx, completion, 1, payload, area)?;
                 vec![area]
             };
             let ret = ReturnOp::new(ctx, returned).get_operation();
@@ -171,17 +173,17 @@ pub(crate) fn export(
     let returned = if let Some(completion) = completion {
         let ty = completion.result;
         let payload = mir_results.first().map(|ty| (*ty, values[0]));
-        if flat_result.len() == 1 {
-            b.completion_flat(ctx, ty, 0, payload)?
+        if flat_result_len == 1 {
+            b.completion_flat(ctx, completion, 0, payload)?
         } else {
             let size = b.i32_const(ctx, ty.size() as i32);
             let area = b.alloc(ctx, size);
-            b.completion_store(ctx, ty, 0, payload, area)?;
+            b.completion_store(ctx, completion, 0, payload, area)?;
             vec![area]
         }
     } else {
         match (&export.result, mir_results.first()) {
-            (Some(ty), Some(mir_ty)) if flat_result.len() == 1 => {
+            (Some(ty), Some(mir_ty)) if flat_result_len == 1 => {
                 vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
             }
             (Some(ty), Some(mir_ty)) => {
@@ -205,7 +207,6 @@ pub(crate) fn export(
     }
 
     // `cabi_post_<export>` receives the core results and ends the task.
-    let post_ty = FunctionType::get(ctx, results, vec![]);
     let post_name = format!("cabi_post_{}", export.core_name);
     let post = FuncOp::new(ctx, identifier(&post_name), post_ty);
     set_export(ctx, &post, &post_name);
@@ -229,6 +230,7 @@ fn async_export(
     function: &FuncOp,
     export: &Export,
     (module, wit_name): &(String, String),
+    command: bool,
 ) -> Result<()> {
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
@@ -249,7 +251,7 @@ fn async_export(
     );
     let flat_params = parameters::export_signature(&export.params);
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
-    let result_flat = if export.command {
+    let result_flat = if command {
         vec![Flat::I32]
     } else {
         export
@@ -328,7 +330,7 @@ fn async_export(
             let filesystem = b.runtime(ctx, Runtime::FsClose, vec![]);
             detached = b.num(ctx, NumOpcode::I32Add, vec![detached, filesystem]);
         }
-        if export.command {
+        if command {
             let message = b
                 .state
                 .data
@@ -370,7 +372,7 @@ fn async_export(
             promise = completion.deref(ctx).get_argument(0);
             settled = completion.deref(ctx).get_argument(1);
         }
-        let outcome = if export.command {
+        let outcome = if command {
             Some(b.runtime(ctx, Runtime::CommandOutcome, vec![promise]))
         } else {
             let rejected_state = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
@@ -406,10 +408,10 @@ fn async_export(
                     if indirect {
                         let size = b.i32_const(ctx, ty.size() as i32);
                         let area = b.alloc(ctx, size);
-                        b.completion_store(ctx, ty, 1, payload, area)?;
+                        b.completion_store(ctx, completion, 1, payload, area)?;
                         values.push(area);
                     } else {
-                        values = b.completion_flat(ctx, ty, 1, payload)?;
+                        values = b.completion_flat(ctx, completion, 1, payload)?;
                     }
                 } else if let Some(AbiType::OkHandle { flat, error_case }) = &export.result {
                     // `err(error_case(some(description)))`, then end the task.
@@ -482,15 +484,15 @@ fn async_export(
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);
-                if completion.is_some() {
-                    b.completion_store(ctx, ty, 0, Some((*mir_ty, value)), area)?;
+                if let Some(completion) = completion {
+                    b.completion_store(ctx, completion, 0, Some((*mir_ty, value)), area)?;
                 } else {
                     b.lower_store(ctx, ty, *mir_ty, value, area, 0)?;
                 }
                 flat.push(area);
             } else {
-                if completion.is_some() {
-                    flat = b.completion_flat(ctx, ty, 0, Some((*mir_ty, value)))?;
+                if let Some(completion) = completion {
+                    flat = b.completion_flat(ctx, completion, 0, Some((*mir_ty, value)))?;
                 } else {
                     b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
                 }

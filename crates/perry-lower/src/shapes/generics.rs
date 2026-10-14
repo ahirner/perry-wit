@@ -118,7 +118,9 @@ impl Shapes<'_> {
                         !self.pending.borrow().contains_key(&key),
                         "nonproductive recursive type alias {base}"
                     );
-                    self.pending.borrow_mut().insert(key.clone(), None);
+                    self.pending
+                        .borrow_mut()
+                        .insert(key.clone(), PendingShape::Resolving);
                     let value = self.value_type(ctx, &value);
                     self.pending.borrow_mut().remove(&key);
                     value?
@@ -137,6 +139,89 @@ impl Shapes<'_> {
 enum Declaration<'a> {
     Interface(&'a Interface),
     Alias(&'a TypeAlias),
+}
+
+/// The substituted HIR type of `property` on `base<arguments>`, if `base` resolves to a record shape.
+pub(crate) fn property_type(
+    interfaces: &[Interface],
+    type_aliases: &[TypeAlias],
+    base: &str,
+    arguments: &[HirType],
+    property: &str,
+) -> Option<HirType> {
+    property_type_depth(interfaces, type_aliases, base, arguments, property, 0)
+}
+
+fn property_type_depth(
+    interfaces: &[Interface],
+    type_aliases: &[TypeAlias],
+    base: &str,
+    arguments: &[HirType],
+    property: &str,
+    depth: usize,
+) -> Option<HirType> {
+    if depth >= 32 {
+        return None;
+    }
+    let declaration = match interfaces.iter().find(|i| i.name == base) {
+        Some(interface) => Declaration::Interface(interface),
+        None => Declaration::Alias(type_aliases.iter().find(|a| a.name == base)?),
+    };
+    let parameters = match declaration {
+        Declaration::Interface(interface) => &interface.type_params,
+        Declaration::Alias(alias) => &alias.type_params,
+    };
+    if arguments.len() > parameters.len() {
+        return None;
+    }
+    let mut substitutions = HashMap::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let argument = match arguments.get(index) {
+            Some(argument) => argument.clone(),
+            None => substitute(parameter.default.as_deref()?, &substitutions),
+        };
+        substitutions.insert(parameter.name.as_str(), argument);
+    }
+    match declaration {
+        Declaration::Interface(interface) => {
+            let prop = interface.properties.iter().find(|p| p.name == property)?;
+            let ty = substitute(&prop.ty, &substitutions);
+            Some(optional_property(ty, prop.optional))
+        }
+        Declaration::Alias(alias) => match substitute(&alias.ty, &substitutions) {
+            HirType::Object(object) => {
+                let prop = object.properties.get(property)?;
+                Some(optional_property(prop.ty.clone(), prop.optional))
+            }
+            HirType::Generic { base, type_args } => property_type_depth(
+                interfaces,
+                type_aliases,
+                &base,
+                &type_args,
+                property,
+                depth + 1,
+            ),
+            HirType::Named(name) => {
+                property_type_depth(interfaces, type_aliases, &name, &[], property, depth + 1)
+            }
+            _ => None,
+        },
+    }
+}
+
+fn optional_property(ty: HirType, optional: bool) -> HirType {
+    if !optional {
+        return ty;
+    }
+    match ty {
+        HirType::Union(mut items) => {
+            if !items.contains(&HirType::Void) {
+                items.push(HirType::Void);
+            }
+            HirType::Union(items)
+        }
+        other => HirType::Union(vec![other, HirType::Void]),
+    }
 }
 
 /// `ty` with its type variables (and same-named type references) replaced by `arguments`.

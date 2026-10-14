@@ -81,6 +81,9 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn native_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
+        use perry_abi::layout::descriptor::{
+            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, STRING,
+        };
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);
         }
@@ -94,7 +97,8 @@ impl FunctionLowering<'_, '_> {
         let address = self.state.data.append(4, &vec![0; 8 + 12 * count]);
         self.state.native_descriptors.insert(ty, address);
         let words = if let Some(fields) = record_fields {
-            let mut words = vec![4, count as u32];
+            let mut words = Vec::with_capacity(2 + 3 * count);
+            words.extend([RECORD, count as u32]);
             for (index, (name, field)) in fields.iter().enumerate() {
                 let name = self.state.data.string(name);
                 let field = self.native_descriptor(ctx, *field)?;
@@ -103,20 +107,20 @@ impl FunctionLowering<'_, '_> {
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
             let inner = self.native_descriptor(ctx, inner)?;
-            vec![7, inner]
+            vec![OPTIONAL, inner]
         } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
             let element = array.deref(ctx).element();
             let element = self.native_descriptor(ctx, element)?;
-            vec![5, element]
+            vec![ARRAY, element]
         } else {
             let kind = if ty.deref(ctx).is::<FP64Type>() {
-                1
+                NUMBER
             } else if ty.deref(ctx).is::<IntegerType>() {
-                2
+                BOOLEAN
             } else if ty.deref(ctx).is::<StringType>() {
-                3
+                STRING
             } else if ty.deref(ctx).is::<ExceptionType>() {
-                6
+                EXCEPTION
             } else {
                 return Err(anyhow!("unsupported native cause field type"));
             };

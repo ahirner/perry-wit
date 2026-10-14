@@ -238,9 +238,9 @@ fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     }
 }
 
-pub(crate) const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\n\n";
+const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\n\n";
 
-pub(crate) fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
+fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
     let mut out = String::new();
     let mut emitted_types = HashSet::new();
 

@@ -1,11 +1,14 @@
 //! Allocation-free JSON conventions shared by compiler passes and linked helpers.
 pub mod kind {
+    pub const UNDEFINED: u32 = 0;
     pub const NULL: u32 = 1;
     pub const BOOLEAN: u32 = 2;
     pub const NUMBER: u32 = 3;
     pub const STRING: u32 = 4;
     pub const ARRAY: u32 = 5;
     pub const OBJECT: u32 = 6;
+    pub const EXCEPTION: u32 = 7;
+    pub const NATIVE: u32 = 8;
 }
 pub const MAX_DEPTH: u32 = 128;
 pub const MEMBER_COUNT: usize = 20;

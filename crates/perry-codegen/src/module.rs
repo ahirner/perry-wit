@@ -37,7 +37,14 @@ use pliron_wasm::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The symbol of module initialization, checked to be an identifier at compile time.
-const INITIALIZER: Identifier = Identifier::new(perry_mir::globals::INITIALIZER);
+pub(crate) const INITIALIZER: Identifier = Identifier::new(perry_mir::globals::INITIALIZER);
+
+/// Module initialization mode and the address of its state cell in static data.
+#[derive(Clone, Copy)]
+pub(crate) enum Initializer {
+    Sync(u32),
+    Async(u32),
+}
 
 /// Static data placed at [DATA_BASE].
 #[derive(Default)]
@@ -131,15 +138,15 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) collectible: bool,
     pub(crate) program_facts: &'e perry_mir::facts::ProgramFacts,
     pub(crate) live: &'e perry_mir::liveness::LiveValues,
-    /// Address of the compiled-roots counter of [Exports::RawChecked].
-    pub(crate) root_metrics: Option<u32>,
+    /// Whether to count compiled roots published at [DATA_BASE] for [Exports::RawChecked].
+    pub(crate) count_roots: bool,
     pub(crate) memory_checks: bool,
     /// Pointer-map addresses of record types in collectible storage.
     pub(crate) pointer_maps: HashMap<TypeHandle, u32>,
     /// Address and slot type of each module binding.
     pub(crate) globals: HashMap<Identifier, (u32, TypeHandle)>,
     /// The initializer and the address of its state cell, if the module has one.
-    pub(crate) initializer: Option<(Identifier, u32)>,
+    pub(crate) initializer: Option<Initializer>,
 }
 
 impl ModuleState<'_> {
@@ -262,7 +269,7 @@ pub(crate) fn lower(
         memory_checks,
         program_facts: &effects,
         live: &live,
-        root_metrics: matches!(exports, Exports::RawChecked).then_some(DATA_BASE),
+        count_roots: matches!(exports, Exports::RawChecked),
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),
         initializer: None,
@@ -272,7 +279,11 @@ pub(crate) fn lower(
         .any(|f| f.get_symbol_name(ctx) == INITIALIZER)
     {
         let address = state.data.append(8, &[0; 32]);
-        state.initializer = Some((INITIALIZER, address));
+        state.initializer = Some(if state.async_functions.contains(&INITIALIZER) {
+            Initializer::Async(address)
+        } else {
+            Initializer::Sync(address)
+        });
         state.collectible = true;
     }
     for function in &functions {
@@ -345,7 +356,7 @@ fn bind_exports(
     exports: &[boundary::Export],
 ) -> Result<()> {
     if state.uses_io
-        && let Some(export) = exports.iter().find(|e| e.task_return.is_none())
+        && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
         bail!(
             "console output needs async exports: WASI P3 output streams are asynchronous, but {} is a synchronous export",
@@ -353,7 +364,7 @@ fn bind_exports(
         );
     }
     // A command reports uncaught exceptions on stderr.
-    if exports.iter().any(|e| e.command) {
+    if exports.iter().any(boundary::Export::is_command) {
         state.uses_io = true;
     }
     if exports.iter().any(|e| {
@@ -390,7 +401,7 @@ fn bind_exports(
             .effects(&function.get_symbol_name(ctx))
             .expect("function effects")
             .effects;
-        if export.task_return.is_some()
+        if export.is_async()
             && stderr
             && ((effects.host_work
                 || initialization.is_some_and(|summary| summary.effects.host_work))
@@ -403,25 +414,20 @@ fn bind_exports(
         {
             state.uses_io = true;
         }
-        if export.task_return.is_none()
-            && state
-                .async_functions
-                .iter()
-                .any(|name| name.as_ref() == perry_mir::globals::INITIALIZER)
-        {
+        if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
             return Err(perry_wit_diagnostics::PerryDiagnostic::error(
                 perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
                 format!("{} requires asynchronous module initialization", export.core_name))
                 .with_help("Declare this WIT export async so it can await module initialization and its error channel.").into());
         }
-        if !export.command
+        if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
             && !export
                 .result
                 .as_ref()
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
-            if export.task_return.is_some() && !stderr {
+            if export.is_async() && !stderr {
                 let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::error(
                     perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
                     format!("{} can throw without a compatible WIT error channel", export.core_name))
@@ -432,7 +438,7 @@ fn bind_exports(
                     .and_then(|function| perry_mir::diagnostics::source_span(ctx, function));
                 return Err(diagnostic.into());
             }
-            if export.task_return.is_some() {
+            if export.is_async() {
                 state.uses_io = true;
             }
         }

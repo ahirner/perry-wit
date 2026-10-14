@@ -1,5 +1,7 @@
-//! Stateful serialization of typed values and dynamic JSON residue.
-use super::*;
+//! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
+use super::{append_number, canonical, key_bytes, native_snapshot, node, string_bytes, word};
+use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
+use perry_abi::json::{MAX_DEPTH, kind::*};
 
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
@@ -113,16 +115,6 @@ pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
     }
 }
 
-pub(super) fn append_number(text: &mut Buffer, number: f64) {
-    if number.is_finite() {
-        let mut digits = [0; 40];
-        let len = crate::runtime::number_format(number, &mut digits);
-        text.extend_from_slice(&digits[..len]);
-    } else {
-        text.extend_from_slice(b"null");
-    }
-}
-
 /// Append a string as a JSON string literal (ECMAScript `QuoteJSONString`).
 ///
 /// # Safety
@@ -182,7 +174,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                 continue;
             }
             EXCEPTION => text.extend_from_slice(b"{}"),
-            NULL => text.extend_from_slice(b"null"),
+            NULL | UNDEFINED => text.extend_from_slice(b"null"),
             BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
                 b"true"
             } else {
@@ -212,11 +204,11 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             let Some(container) = stack.last_mut() else {
                 return true;
             };
+            let object = word(container.node, 0) == OBJECT;
             let mut member = container.next;
-            while member != 0 && word(node(member), 0) == UNDEFINED {
+            while object && member != 0 && word(node(member), 0) == UNDEFINED {
                 member = word(node(member), 4);
             }
-            let object = word(container.node, 0) == OBJECT;
             if member == 0 {
                 text.push(if object { b'}' } else { b']' });
                 stack.pop();

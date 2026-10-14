@@ -7,6 +7,7 @@ use perry_mir::optional::{absence, optional_value};
 #[derive(Clone, Copy)]
 pub(super) struct Completion<'a> {
     pub(super) result: &'a AbiType,
+    ok: Option<&'a AbiType>,
     err: Option<&'a AbiType>,
 }
 
@@ -24,6 +25,7 @@ impl AbiType {
         };
         let completion = Completion {
             result: self,
+            ok: ok.as_deref(),
             err: err.as_deref(),
         };
         let Some(record) = mir.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
@@ -41,11 +43,12 @@ impl AbiType {
         (!tagged).then_some(completion)
     }
     pub(super) fn error_completion(&self) -> Option<Completion<'_>> {
-        let Self::Result { err, .. } = self else {
+        let Self::Result { ok, err } = self else {
             return None;
         };
         Some(Completion {
             result: self,
+            ok: ok.as_deref(),
             err: err.as_deref(),
         })
     }
@@ -93,7 +96,7 @@ impl AbiType {
             Self::Option(inner) => vec![None, Some(inner)],
             Self::Result { ok, err } => vec![ok.as_deref(), err.as_deref()],
             Self::Enum(names) => vec![None; names.len()],
-            _ => unreachable!("not a sum"),
+            _ => vec![],
         }
     }
 
@@ -161,14 +164,20 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn completion_store(
         &mut self,
         ctx: &mut Context,
-        ty: &AbiType,
+        completion: Completion<'_>,
         case: usize,
         payload: Option<(TypeHandle, Value)>,
         address: Value,
     ) -> Result<()> {
+        let ty = completion.result;
         let tag = self.i32_const(ctx, case as i32);
         self.store(ctx, MemKind::I32U8, address, 0, tag);
-        if let Some(abi) = ty.cases()[case] {
+        let abi = if case == 0 {
+            completion.ok
+        } else {
+            completion.err
+        };
+        if let Some(abi) = abi {
             let (mir, value) =
                 payload.ok_or_else(|| anyhow!("WIT result payload requires a return value"))?;
             self.lower_store(ctx, abi, mir, value, address, ty.payload_offset())?;
@@ -179,13 +188,19 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn completion_flat(
         &mut self,
         ctx: &mut Context,
-        ty: &AbiType,
+        completion: Completion<'_>,
         case: usize,
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Vec<Value>> {
+        let ty = completion.result;
         let mut out = vec![self.i32_const(ctx, case as i32)];
         let layout = ty.sum_flat();
-        if let Some(abi) = ty.cases()[case] {
+        let abi = if case == 0 {
+            completion.ok
+        } else {
+            completion.err
+        };
+        if let Some(abi) = abi {
             let (mir, value) =
                 payload.ok_or_else(|| anyhow!("WIT result payload requires a return value"))?;
             let mut flat = Vec::new();

@@ -125,7 +125,7 @@ pub extern "C" fn perry_status() -> u32 {
 
 /// Replace a stale handled exception when compiled checks raise a fresh implicit failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_exception_implicit(failed: u32, status: u32) -> u32 {
+pub(crate) extern "C" fn perry_exception_implicit(failed: u32, status: u32) -> u32 {
     if failed != 0 {
         current().exception = ptr::null_mut();
     }

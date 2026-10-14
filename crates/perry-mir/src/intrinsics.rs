@@ -314,7 +314,7 @@ macro_rules! intrinsics {
         }
 
         impl Intrinsic {
-            pub const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
+            const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
 
             pub fn name(self) -> &'static str {
                 match self {
@@ -581,7 +581,7 @@ intrinsics! {
 impl Intrinsic {
     /// Allocation and internal safe-point contract, including hidden temporaries.
     /// Unclassified helpers remain conservative.
-    pub fn allocation(self) -> crate::effects::Allocation {
+    pub(crate) fn allocation(self) -> crate::effects::Allocation {
         if self.flags().contains(&"noalloc") {
             crate::effects::Allocation::None
         } else if self.flags().contains(&"atomic") {

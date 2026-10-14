@@ -66,9 +66,18 @@ enum Stage {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
     Nothing,
-    Subtask,
-    Stream,
-    Future,
+    Subtask(u32),
+    Stream(u32),
+    Future(u32),
+}
+
+impl Wait {
+    fn handle(self) -> Option<u32> {
+        match self {
+            Wait::Nothing => None,
+            Wait::Subtask(handle) | Wait::Stream(handle) | Wait::Future(handle) => Some(handle),
+        }
+    }
 }
 
 struct Op {
@@ -88,7 +97,6 @@ struct Op {
     dir: u32,
     file: u32,
     wait: Wait,
-    waiting: u32,
     stream: u32,
     future: u32,
     /// Result area of async calls and futures (8-aligned, large enough for a stat result).
@@ -132,7 +140,6 @@ fn start(kind: Kind, path: *mut u8, data: &[u8]) -> *mut u8 {
             dir: 0,
             file: 0,
             wait: Wait::Nothing,
-            waiting: 0,
             stream: 0,
             future: 0,
             area: alloc(AREA),
@@ -147,13 +154,13 @@ fn start(kind: Kind, path: *mut u8, data: &[u8]) -> *mut u8 {
 
 /// `readFile(path, 'utf8')`: the contents as a string (invalid UTF-8 replaced).
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_read_text(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_read_text(path: *mut u8) -> *mut u8 {
     start(Kind::ReadText, path, &[])
 }
 
 /// `readFile(path)`: the contents as a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_read_bytes(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_read_bytes(path: *mut u8) -> *mut u8 {
     start(Kind::ReadBytes, path, &[])
 }
 
@@ -162,7 +169,7 @@ pub extern "C" fn fs_read_bytes(path: *mut u8) -> *mut u8 {
 /// # Safety
 /// `text` must be a string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fs_write_text(path: *mut u8, text: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn fs_write_text(path: *mut u8, text: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     start(Kind::Write, path, unsafe { bytes(text) })
 }
@@ -172,38 +179,38 @@ pub unsafe extern "C" fn fs_write_text(path: *mut u8, text: *mut u8) -> *mut u8 
 /// # Safety
 /// `view` must be a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fs_write_bytes(path: *mut u8, view: *mut u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn fs_write_bytes(path: *mut u8, view: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     start(Kind::Write, path, unsafe { view_bytes(view) })
 }
 
 /// `stat(path)`: a stats object ([fs_stats_is_file], [fs_stats_size]).
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_stat(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_stat(path: *mut u8) -> *mut u8 {
     start(Kind::Stat, path, &[])
 }
 
 /// `readdir(path)`: entry names in host order.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_readdir(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_readdir(path: *mut u8) -> *mut u8 {
     start(Kind::Readdir, path, &[])
 }
 
 /// `mkdir(path)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_mkdir(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_mkdir(path: *mut u8) -> *mut u8 {
     start(Kind::Mkdir, path, &[])
 }
 
 /// `unlink(path)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_unlink(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_unlink(path: *mut u8) -> *mut u8 {
     start(Kind::Unlink, path, &[])
 }
 
 /// `rmdir(path)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_rmdir(path: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn fs_rmdir(path: *mut u8) -> *mut u8 {
     start(Kind::Rmdir, path, &[])
 }
 
@@ -219,7 +226,7 @@ struct Stats {
 /// # Safety
 /// `stats` must come from [fs_stat].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fs_stats_is_file(stats: *mut u8) -> u32 {
+pub(crate) unsafe extern "C" fn fs_stats_is_file(stats: *mut u8) -> u32 {
     // SAFETY: guaranteed by the caller.
     u32::from(unsafe { (*(stats as *const Stats)).kind } == u32::from(wasi::TYPE_REGULAR_FILE))
 }
@@ -229,7 +236,7 @@ pub unsafe extern "C" fn fs_stats_is_file(stats: *mut u8) -> u32 {
 /// # Safety
 /// `stats` must come from [fs_stat].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fs_stats_is_directory(stats: *mut u8) -> u32 {
+pub(crate) unsafe extern "C" fn fs_stats_is_directory(stats: *mut u8) -> u32 {
     // SAFETY: guaranteed by the caller.
     u32::from(unsafe { (*(stats as *const Stats)).kind } == u32::from(wasi::TYPE_DIRECTORY))
 }
@@ -239,7 +246,7 @@ pub unsafe extern "C" fn fs_stats_is_directory(stats: *mut u8) -> u32 {
 /// # Safety
 /// `stats` must come from [fs_stat].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fs_stats_size(stats: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn fs_stats_size(stats: *mut u8) -> f64 {
     // SAFETY: guaranteed by the caller.
     unsafe { (*(stats as *const Stats)).size }
 }
@@ -247,19 +254,19 @@ pub unsafe extern "C" fn fs_stats_size(stats: *mut u8) -> f64 {
 /// A callback event of the current task: advance the operation waiting on `handle`.
 /// Returns 1 if the event was one of an operation.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
+pub(crate) extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
     let wait = match event {
-        EVENT_SUBTASK => Wait::Subtask,
-        EVENT_STREAM_READ | EVENT_STREAM_WRITE => Wait::Stream,
-        EVENT_FUTURE_READ => Wait::Future,
+        EVENT_SUBTASK => Wait::Subtask(handle),
+        EVENT_STREAM_READ | EVENT_STREAM_WRITE => Wait::Stream(handle),
+        EVENT_FUTURE_READ => Wait::Future(handle),
         _ => return 0,
     };
     let mut op = *ops();
     // SAFETY: listed operations are live until they settle.
     unsafe {
         while !op.is_null() {
-            if (*op).task == perry_abi::task() && (*op).wait == wait && (*op).waiting == handle {
-                if wait == Wait::Subtask {
+            if (*op).task == perry_abi::task() && (*op).wait == wait {
+                if matches!(wait, Wait::Subtask(_)) {
                     if code != SUBTASK_RETURNED {
                         return 1;
                     }
@@ -279,7 +286,7 @@ pub extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
 /// Cancel this task's outstanding operations before releasing any borrowed buffer.
 /// Returns the number of detached calls, for the task-boundary diagnostic.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_close() -> u32 {
+pub(crate) extern "C" fn fs_close() -> u32 {
     let task = perry_abi::task();
     let mut cursor = *ops();
     let mut cancelled = 0;
@@ -289,12 +296,12 @@ pub extern "C" fn fs_close() -> u32 {
             let op = &mut *cursor;
             if op.task == task {
                 cancelled += 1;
-                if op.wait != Wait::Nothing {
-                    unjoin(op.waiting);
+                if let Some(waiting) = op.wait.handle() {
+                    unjoin(waiting);
                 }
                 match op.wait {
-                    Wait::Subtask => {
-                        let status = perry_abi::subtask_cancel(op.waiting);
+                    Wait::Subtask(waiting) => {
+                        let status = perry_abi::subtask_cancel(waiting);
                         if status == SUBTASK_RETURNED {
                             canonical::release_result(op);
                         }
@@ -304,9 +311,9 @@ pub extern "C" fn fs_close() -> u32 {
                         {
                             op.file = word(op.area, 4);
                         }
-                        subtask_drop(op.waiting);
+                        subtask_drop(waiting);
                     }
-                    Wait::Stream => {
+                    Wait::Stream(_) => {
                         let copied = perry_abi::acknowledged(|| match op.kind {
                             Kind::Write => wasi::bytes_write_cancel(op.stream),
                             Kind::Readdir => wasi::entries_read_cancel(op.stream),
@@ -317,7 +324,7 @@ pub extern "C" fn fs_close() -> u32 {
                                 .advance((copied >> 4) as usize * wasi::ENTRY_SIZE);
                         }
                     }
-                    Wait::Future => {
+                    Wait::Future(_) => {
                         let result = perry_abi::acknowledged(|| match op.kind {
                             Kind::Write => wasi::bytes_write_result_cancel(op.future),
                             Kind::Readdir => wasi::entries_read_result_cancel(op.future),
@@ -363,16 +370,16 @@ fn called(op: &mut Op, status: u32) -> bool {
     }
     let subtask = status >> 4;
     join(subtask);
-    op.wait = Wait::Subtask;
-    op.waiting = subtask;
+    op.wait = Wait::Subtask(subtask);
     true
 }
 
 /// Wait on a stream or future that blocked.
-fn blocked(op: &mut Op, wait: Wait, handle: u32) {
-    join(handle);
+fn blocked(op: &mut Op, wait: Wait) {
+    if let Some(handle) = wait.handle() {
+        join(handle);
+    }
     op.wait = wait;
-    op.waiting = handle;
 }
 
 fn word(area: *mut u8, offset: usize) -> u32 {
@@ -483,7 +490,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                         // SAFETY: the reserved bytes stay valid until the copy completes.
                         let result = unsafe { wasi::bytes_read(op.stream, spare, room as u32) };
                         if result == BLOCKED {
-                            return blocked(op, Wait::Stream, op.stream);
+                            return blocked(op, Wait::Stream(op.stream));
                         }
                         result
                     }
@@ -502,7 +509,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     // SAFETY: the future of `read-via-stream`, read into the result area.
                     let result = unsafe { wasi::bytes_read_result(op.future, op.area) };
                     if result == BLOCKED {
-                        return blocked(op, Wait::Future, op.future);
+                        return blocked(op, Wait::Future(op.future));
                     }
                 }
                 unjoin(op.future);
@@ -534,7 +541,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     let result =
                         unsafe { wasi::bytes_write(op.stream, rest.as_ptr(), rest.len() as u32) };
                     if result == BLOCKED {
-                        return blocked(op, Wait::Stream, op.stream);
+                        return blocked(op, Wait::Stream(op.stream));
                     }
                     code = Some(result);
                     continue;
@@ -550,7 +557,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     // SAFETY: the future of `write-via-stream`, read into the result area.
                     let result = unsafe { wasi::bytes_write_result(op.future, op.area) };
                     if result == BLOCKED {
-                        return blocked(op, Wait::Future, op.future);
+                        return blocked(op, Wait::Future(op.future));
                     }
                 }
                 unjoin(op.future);
@@ -576,7 +583,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                         // SAFETY: the reserved entries stay valid until the copy completes.
                         let result = unsafe { wasi::entries_read(op.stream, spare, count) };
                         if result == BLOCKED {
-                            return blocked(op, Wait::Stream, op.stream);
+                            return blocked(op, Wait::Stream(op.stream));
                         }
                         result
                     }
@@ -596,7 +603,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     // SAFETY: the future of `read-directory`, read into the result area.
                     let result = unsafe { wasi::entries_read_result(op.future, op.area) };
                     if result == BLOCKED {
-                        return blocked(op, Wait::Future, op.future);
+                        return blocked(op, Wait::Future(op.future));
                     }
                 }
                 unjoin(op.future);

@@ -612,15 +612,13 @@ pub fn reject_native(
     location: &[u8],
 ) {
     fn string(bytes: &[u8]) -> *mut u8 {
-        let text = from_bytes(bytes);
+        let data = alloc(bytes.len() as u32);
         let node = unsafe { alloc_shaped(32, &[0, 3, 4, 8, 24]) };
         unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
             ptr::write_bytes(node, 0, 32);
             ptr::write(node.cast::<u32>(), json::kind::STRING);
-            ptr::write(
-                node.add(8).cast::<u32>(),
-                *text.add(layout::string::DATA as usize).cast::<u32>(),
-            );
+            ptr::write(node.add(8).cast::<u32>(), data as usize as u32);
             ptr::write(node.add(12).cast::<u32>(), bytes.len() as u32);
             ptr::write(node.add(16).cast::<u32>(), scalars_length(bytes));
         }

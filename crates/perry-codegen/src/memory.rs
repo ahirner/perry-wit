@@ -51,7 +51,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
             let zero = b.i32_const(ctx, 0);
             args[0] = b.select(ctx, compiled, zero, args[0]);
             let counted = b.runtime(ctx, runtime, args);
-            let address = b.i32_const(ctx, b.state.root_metrics.expect("checked counter") as i32);
+            let address = b.i32_const(ctx, crate::DATA_BASE as i32);
             let count = b.load(ctx, MemKind::I64, address, 0);
             vec![b.select(ctx, compiled, count, counted)]
         } else {
@@ -92,10 +92,7 @@ pub fn explain_tiers(
     exports: &crate::Exports,
     analyses: &mut AnalysisManager,
 ) -> Result<String> {
-    use pliron::{
-        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
-        linked_list::ContainsLinkedList,
-    };
+    use pliron::builtin::op_interfaces::SymbolOpInterface;
     use std::fmt::Write;
     let functions = crate::analysis::reachable_functions(ctx, module, exports);
     analyses
@@ -124,18 +121,13 @@ pub fn explain_tiers(
     for function in &functions {
         let name = function.get_symbol_name(ctx);
         let summary = summaries.effects(&name).expect("function effects");
-        let sites = function
-            .get_region(ctx)
-            .deref(ctx)
-            .iter(ctx)
-            .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-            .filter(|&op| perry_mir::effects::allocates(ctx, op))
+        let ops = crate::analysis::function_ops(ctx, function);
+        let sites = ops
+            .iter()
+            .filter(|&&op| perry_mir::effects::allocates(ctx, op))
             .count();
-        let frames = function
-            .get_region(ctx)
-            .deref(ctx)
-            .iter(ctx)
-            .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
+        let frames = ops
+            .into_iter()
             .filter_map(|op| Operation::get_op::<perry_mir::heap::AllocOp>(op, ctx))
             .filter(|allocation| allocation.tier(ctx) == perry_mir::attrs::Tier::Frame)
             .count();
@@ -209,10 +201,10 @@ impl FunctionLowering<'_, '_> {
     /// Initialize once, retaining a failed exception as an instance root for later callers.
     pub(super) fn initialization_status(&mut self, ctx: &mut Context) -> Option<Value> {
         use pliron_wasm::{attrs::NumOpcode, ops::CallOp};
-        let (function, address) = self.state.initializer.clone()?;
-        if self.state.async_functions.contains(&function) {
+        let Some(crate::module::Initializer::Sync(address)) = self.state.initializer else {
             return None;
-        }
+        };
+        let function = crate::module::INITIALIZER;
         let cell = self.i32_const(ctx, address as i32);
         let error_cell = self.i32_const(ctx, (address + 16) as i32);
         self.runtime_void(ctx, Runtime::GcGlobal, vec![error_cell]);
@@ -278,9 +270,12 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Start asynchronous initialization once and share its fulfillment or rejection.
-    pub(super) fn initialization_promise(&mut self, ctx: &mut Context) -> Value {
+    pub(super) fn initialization_promise(&mut self, ctx: &mut Context) -> Result<Value> {
         use pliron_wasm::ops::CallOp;
-        let (function, address) = self.state.initializer.clone().expect("async initializer");
+        let Some(crate::module::Initializer::Async(address)) = self.state.initializer else {
+            anyhow::bail!("module_initialize without an async initializer");
+        };
+        let function = crate::module::INITIALIZER;
         let cell = self.i32_const(ctx, address as i32);
         self.runtime_void(ctx, Runtime::GcGlobal, vec![cell]);
         let previous = self.load(ctx, MemKind::I32, cell, 0);
@@ -295,7 +290,7 @@ impl FunctionLowering<'_, '_> {
         self.store(ctx, MemKind::I32, cell, 0, promise);
         self.br(ctx, done, vec![promise]);
         self.block = done;
-        done.deref(ctx).get_argument(0)
+        Ok(done.deref(ctx).get_argument(0))
     }
 
     fn root_stack(&mut self, ctx: &mut Context) -> Value {
@@ -347,8 +342,8 @@ impl FunctionLowering<'_, '_> {
             self.store(ctx, MemKind::I32, base, index as u32 * 4, value);
         }
         self.store(ctx, MemKind::I32, stack, root_stack::LENGTH, end);
-        if let Some(address) = self.state.root_metrics {
-            let counter = self.i32_const(ctx, address as i32);
+        if self.state.count_roots {
+            let counter = self.i32_const(ctx, crate::DATA_BASE as i32);
             let before = self.load(ctx, MemKind::I64, counter, 0);
             let count = self.i64_const(ctx, values.len() as u64);
             let total = self.num(ctx, NumOpcode::I64Add, vec![before, count]);

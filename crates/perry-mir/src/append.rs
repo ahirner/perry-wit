@@ -23,6 +23,16 @@ struct Transfer {
     argument: Value,
 }
 
+struct FunctionCfg {
+    name: pliron::identifier::Identifier,
+    blocks: Vec<Ptr<BasicBlock>>,
+    ops: Vec<Ptr<Operation>>,
+    returns: Vec<Ptr<Operation>>,
+    incoming: HashMap<Value, Vec<Value>>,
+    passed: HashMap<(Ptr<Operation>, Value), Vec<Transfer>>,
+    aliases: HashMap<Value, HashSet<Value>>,
+}
+
 /// Analyze exclusive sequence headers and their final observations without changing MIR.
 /// Direct return summaries start unresolved; fresh allocations prove them monotonically.
 fn reuse_candidates(
@@ -44,17 +54,56 @@ fn reuse_candidates(
     use pliron::builtin::op_interfaces::{
         BranchOpInterface, OneRegionInterface, SymbolOpInterface,
     };
-    let mut candidates = HashMap::new();
-    let functions = functions(root, ctx);
-    let mut fresh_returns = HashSet::new();
-    loop {
-        candidates.clear();
-        let mut gained = false;
-        for function in &functions {
+    let is_sequence = |ctx: &Context, v: Value| {
+        let ty = v.get_type(ctx).deref(ctx);
+        ty.is::<StringType>() || ty.is::<ArrayType>()
+    };
+    let is_concat = |ctx: &Context, op: Ptr<Operation>| {
+        Operation::get_op::<ConcatOp>(op, ctx).is_some()
+            || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
+    };
+    let is_constant = |ctx: &Context, v: Value| {
+        v.defining_op()
+            .is_some_and(|op| Operation::get_op::<StringConstOp>(op, ctx).is_some())
+    };
+    let reads = |ctx: &Context, op: Ptr<Operation>, value: Value| {
+        is_concat(ctx, op)
+            || Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
+            || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
+            || ((Operation::get_op::<ArrayLenOp>(op, ctx).is_some()
+                || Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
+                || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
+                || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+                || Operation::get_op::<ArraySetOp>(op, ctx).is_some())
+                && op.deref(ctx).get_operand(0) == value
+                && !op.deref(ctx).operands().skip(1).any(|v| v == value))
+            || Operation::get_op::<StringLenOp>(op, ctx).is_some()
+            || Operation::get_op::<CompareOp>(op, ctx).is_some()
+            || Operation::get_op::<ReturnOp>(op, ctx).is_some()
+            || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
+                matches!(
+                    op.intrinsic(ctx),
+                    Some(
+                        Intrinsic::StringCharAt
+                            | Intrinsic::StringCharAtIndex
+                            | Intrinsic::StringIndex
+                            | Intrinsic::StringCodePointAt
+                            | Intrinsic::StringSlice
+                            | Intrinsic::StringSubstring
+                            | Intrinsic::StringIndexOf
+                            | Intrinsic::StringLastIndexOf
+                            | Intrinsic::StringStartsWith
+                            | Intrinsic::StringEndsWith
+                    )
+                )
+            })
+    };
+    let cfgs: Vec<FunctionCfg> = functions(root, ctx)
+        .into_iter()
+        .map(|function| {
             let blocks: Vec<Ptr<BasicBlock>> =
                 function.get_region(ctx).deref(ctx).iter(ctx).collect();
-            // Block arguments with their incoming values, and branches with the arguments each
-            // of their operands is passed to.
+            let ops = operations(ctx, &function);
             let mut incoming: HashMap<Value, Vec<Value>> = HashMap::new();
             let mut passed: HashMap<(Ptr<Operation>, Value), Vec<Transfer>> = HashMap::new();
             for &block in &blocks {
@@ -63,38 +112,68 @@ fn reuse_candidates(
                 };
                 let dests: Vec<Ptr<BasicBlock>> = terminator.deref(ctx).successors().collect();
                 let dyn_op = Operation::get_op_dyn(terminator, ctx);
-                let Some(branch) = pliron::op::op_cast::<dyn BranchOpInterface>(dyn_op.as_ref())
-                else {
-                    continue;
-                };
-                for (succ, dest) in dests.into_iter().enumerate() {
-                    for (index, value) in
-                        branch.successor_operands(ctx, succ).into_iter().enumerate()
-                    {
-                        let argument = dest.deref(ctx).get_argument(index);
-                        incoming.entry(argument).or_default().push(value);
-                        passed
-                            .entry((terminator, value))
-                            .or_default()
-                            .push(Transfer {
-                                block: dest,
-                                argument,
-                            });
+                if let Some(branch) = pliron::op::op_cast::<dyn BranchOpInterface>(dyn_op.as_ref())
+                {
+                    for (succ, &dest) in dests.iter().enumerate() {
+                        for (index, value) in
+                            branch.successor_operands(ctx, succ).into_iter().enumerate()
+                        {
+                            let argument = dest.deref(ctx).get_argument(index);
+                            incoming.entry(argument).or_default().push(value);
+                            passed
+                                .entry((terminator, value))
+                                .or_default()
+                                .push(Transfer {
+                                    block: dest,
+                                    argument,
+                                });
+                        }
                     }
                 }
             }
-            let is_sequence = |ctx: &Context, v: Value| {
-                let ty = v.get_type(ctx).deref(ctx);
-                ty.is::<StringType>() || ty.is::<ArrayType>()
-            };
-            let is_concat = |ctx: &Context, op: Ptr<Operation>| {
-                Operation::get_op::<ConcatOp>(op, ctx).is_some()
-                    || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
-            };
-            let is_constant = |ctx: &Context, v: Value| {
-                v.defining_op()
-                    .is_some_and(|op| Operation::get_op::<StringConstOp>(op, ctx).is_some())
-            };
+            let mut aliases: HashMap<Value, HashSet<Value>> = HashMap::new();
+            for &op in &ops {
+                if Operation::get_op::<AggregateViewOp>(op, ctx).is_some() {
+                    let (source, view) =
+                        (op.deref(ctx).get_operand(0), op.deref(ctx).get_result(0));
+                    if is_sequence(ctx, view) {
+                        aliases.entry(source).or_default().insert(view);
+                        aliases.entry(view).or_default().insert(source);
+                    }
+                }
+            }
+            let returns = ops
+                .iter()
+                .copied()
+                .filter(|&op| Operation::get_op::<ReturnOp>(op, ctx).is_some())
+                .collect();
+            FunctionCfg {
+                name: function.get_symbol_name(ctx),
+                blocks,
+                ops,
+                returns,
+                incoming,
+                passed,
+                aliases,
+            }
+        })
+        .collect();
+    let alias_set = |aliases: &HashMap<Value, HashSet<Value>>, value: Value| {
+        let mut seen = HashSet::new();
+        let mut work = vec![value];
+        while let Some(next) = work.pop() {
+            if seen.insert(next) {
+                work.extend(aliases.get(&next).into_iter().flatten().copied());
+            }
+        }
+        seen
+    };
+    let mut fresh_returns = HashSet::new();
+    let mut owned_by_fn = vec![HashSet::new(); cfgs.len()];
+    loop {
+        let mut gained = false;
+        for (cfg, owned) in cfgs.iter().zip(owned_by_fn.iter_mut()) {
+            owned.clear();
             let fresh_header = |ctx: &Context, op: Ptr<Operation>| {
                 Operation::get_op::<CallOp>(op, ctx)
                     .is_some_and(|call| fresh_returns.contains(&call.callee(ctx)))
@@ -113,73 +192,19 @@ fn reuse_candidates(
                         )
                     })
             };
-            let reads = |ctx: &Context, op: Ptr<Operation>, value: Value| {
-                is_concat(ctx, op)
-                    || Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-                    || ((Operation::get_op::<ArrayLenOp>(op, ctx).is_some()
-                        || Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
-                        || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
-                        || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                        || Operation::get_op::<ArraySetOp>(op, ctx).is_some())
-                        && op.deref(ctx).get_operand(0) == value
-                        && !op.deref(ctx).operands().skip(1).any(|v| v == value))
-                    || Operation::get_op::<StringLenOp>(op, ctx).is_some()
-                    || Operation::get_op::<CompareOp>(op, ctx).is_some()
-                    || Operation::get_op::<ReturnOp>(op, ctx).is_some()
-                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                        matches!(
-                            op.intrinsic(ctx),
-                            Some(
-                                Intrinsic::StringCharAt
-                                    | Intrinsic::StringCharAtIndex
-                                    | Intrinsic::StringIndex
-                                    | Intrinsic::StringCodePointAt
-                                    | Intrinsic::StringSlice
-                                    | Intrinsic::StringSubstring
-                                    | Intrinsic::StringIndexOf
-                                    | Intrinsic::StringLastIndexOf
-                                    | Intrinsic::StringStartsWith
-                                    | Intrinsic::StringEndsWith
-                            )
-                        )
-                    })
-            };
-            let mut aliases: HashMap<Value, HashSet<Value>> = HashMap::new();
-            for op in operations(ctx, function) {
-                if Operation::get_op::<AggregateViewOp>(op, ctx).is_some() {
-                    let (source, view) =
-                        (op.deref(ctx).get_operand(0), op.deref(ctx).get_result(0));
-                    if is_sequence(ctx, view) {
-                        aliases.entry(source).or_default().insert(view);
-                        aliases.entry(view).or_default().insert(source);
-                    }
-                }
-            }
-            let alias_set = |value: Value| {
-                let mut seen = HashSet::new();
-                let mut work = vec![value];
-                while let Some(next) = work.pop() {
-                    if seen.insert(next) {
-                        work.extend(aliases.get(&next).into_iter().flatten().copied());
-                    }
-                }
-                seen
-            };
-            let mut owned: HashSet<Value> = HashSet::new();
-            for &block in &blocks {
+            for &block in &cfg.blocks {
                 for argument in block.deref(ctx).arguments() {
-                    if incoming.contains_key(&argument) && is_sequence(ctx, argument) {
+                    if cfg.incoming.contains_key(&argument) && is_sequence(ctx, argument) {
                         owned.insert(argument);
                     }
                 }
-                for op in block.deref(ctx).iter(ctx) {
-                    if fresh_header(ctx, op)
-                        || (Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
-                            && is_sequence(ctx, op.deref(ctx).get_result(0)))
-                    {
-                        owned.insert(op.deref(ctx).get_result(0));
-                    }
+            }
+            for &op in &cfg.ops {
+                if fresh_header(ctx, op)
+                    || (Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
+                        && is_sequence(ctx, op.deref(ctx).get_result(0)))
+                {
+                    owned.insert(op.deref(ctx).get_result(0));
                 }
             }
             loop {
@@ -188,9 +213,11 @@ fn reuse_candidates(
                     .copied()
                     .filter(|&value| {
                         if value.defining_op().is_none()
-                            && !incoming[&value]
-                                .iter()
-                                .all(|v| owned.contains(v) || is_constant(ctx, *v))
+                            && cfg.incoming.get(&value).is_none_or(|values| {
+                                !values
+                                    .iter()
+                                    .all(|v| owned.contains(v) || is_constant(ctx, *v))
+                            })
                         {
                             return true;
                         }
@@ -207,14 +234,23 @@ fn reuse_candidates(
                                 return true;
                             }
                             // Transfer the header only after its final direct observation.
-                            let Some(arguments) = passed.get(&(user, value)) else {
-                                return !alias_set(value)
+                            let Some(arguments) = cfg.passed.get(&(user, value)) else {
+                                return !alias_set(&cfg.aliases, value)
                                     .iter()
                                     .any(|&alias| live.after(user).contains(&alias));
                             };
+                            let aliases = alias_set(&cfg.aliases, value);
                             arguments.len() == 1
                                 && owned.contains(&arguments[0].argument)
-                                && !live.on_entry(arguments[0].block, value)
+                                && aliases
+                                    .iter()
+                                    .filter_map(|&alias| cfg.passed.get(&(user, alias)))
+                                    .map(Vec::len)
+                                    .sum::<usize>()
+                                    == 1
+                                && !aliases
+                                    .iter()
+                                    .any(|&alias| live.on_entry(arguments[0].block, alias))
                         })
                     })
                     .collect();
@@ -222,55 +258,54 @@ fn reuse_candidates(
                     break;
                 }
                 for value in removed {
-                    for alias in alias_set(value) {
+                    for alias in alias_set(&cfg.aliases, value) {
                         owned.remove(&alias);
                     }
                 }
             }
-            let returns: Vec<_> = operations(ctx, function)
-                .into_iter()
-                .filter(|&op| Operation::get_op::<ReturnOp>(op, ctx).is_some())
-                .collect();
-            if !returns.is_empty()
-                && returns.iter().all(|&op| {
+            if !cfg.returns.is_empty()
+                && cfg.returns.iter().all(|&op| {
                     op.deref(ctx).get_num_operands() == 1
                         && owned.contains(&op.deref(ctx).get_operand(0))
                 })
             {
-                gained |= fresh_returns.insert(function.get_symbol_name(ctx));
-            }
-            for op in operations(ctx, function) {
-                if Operation::get_op::<ConcatOp>(op, ctx).is_none() {
-                    continue;
-                }
-                let operands: Vec<_> = op.deref(ctx).operands().collect();
-                let array = operands[0].get_type(ctx).deref(ctx).is::<ArrayType>();
-                let indices = operands
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, &value)| {
-                        if !(array || index == 0) || !owned.contains(&value) {
-                            return None;
-                        }
-                        let aliases = alias_set(value);
-                        (operands
-                            .iter()
-                            .filter(|&&other| aliases.contains(&other))
-                            .count()
-                            == 1
-                            && !aliases.iter().any(|&alias| live.after(op).contains(&alias)))
-                        .then_some(index as u32)
-                    })
-                    .collect::<Vec<_>>();
-                if indices.is_empty() {
-                    continue;
-                }
-                let reuse = crate::attrs::ReuseOperands(indices);
-                candidates.insert(op, reuse);
+                gained |= fresh_returns.insert(cfg.name.clone());
             }
         }
         if !gained {
             break;
+        }
+    }
+    let mut candidates = HashMap::new();
+    for (cfg, owned) in cfgs.iter().zip(owned_by_fn.iter()) {
+        for &op in &cfg.ops {
+            if Operation::get_op::<ConcatOp>(op, ctx).is_none() {
+                continue;
+            }
+            let operands: Vec<_> = op.deref(ctx).operands().collect();
+            let array = operands[0].get_type(ctx).deref(ctx).is::<ArrayType>();
+            let indices = operands
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &value)| {
+                    if !(array || index == 0) || !owned.contains(&value) {
+                        return None;
+                    }
+                    let aliases = alias_set(&cfg.aliases, value);
+                    (operands
+                        .iter()
+                        .filter(|&&other| aliases.contains(&other))
+                        .count()
+                        == 1
+                        && !aliases.iter().any(|&alias| live.after(op).contains(&alias)))
+                    .then_some(index as u32)
+                })
+                .collect::<Vec<_>>();
+            if indices.is_empty() {
+                continue;
+            }
+            let reuse = crate::attrs::ReuseOperands(indices);
+            candidates.insert(op, reuse);
         }
     }
     candidates

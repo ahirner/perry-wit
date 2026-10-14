@@ -113,18 +113,15 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<AllocOp>(op, ctx).is_some() {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let (name, fields) = {
-                let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                    .map_err(|_| anyhow!("expected a record"))?;
-                let record = record.deref(ctx);
-                let fields: Vec<_> = record
-                    .fields()
-                    .map_err(|_| anyhow!("record without fields"))?
-                    .iter()
-                    .map(|(_, ty)| *ty)
-                    .collect();
-                (record.name().to_string(), fields)
-            };
+            let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
+                .map_err(|_| anyhow!("expected a record"))?;
+            let fields: Vec<_> = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .iter()
+                .map(|(_, ty)| *ty)
+                .collect();
             let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
@@ -136,7 +133,7 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            self.record_header(ctx, object, name);
+            self.record_header(ctx, object, record);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, record::field(index), value);
@@ -294,7 +291,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
-    pub(crate) fn element_index(
+    fn element_index(
         &mut self,
         ctx: &mut Context,
         index: Value,
@@ -320,7 +317,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Append `value` to `array`, growing it through the runtime when full.
-    pub(crate) fn push(
+    fn push(
         &mut self,
         ctx: &mut Context,
         array: Value,
@@ -357,11 +354,7 @@ impl FunctionLowering<'_, '_> {
         Ok(ty.deref(ctx).element())
     }
 
-    pub(crate) fn field_slot(
-        ctx: &Context,
-        record: Value,
-        field: &str,
-    ) -> Result<(u32, TypeHandle)> {
+    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?;
         let ty = ty.deref(ctx);
@@ -371,11 +364,25 @@ impl FunctionLowering<'_, '_> {
         Ok((record::field(index), field_ty))
     }
 
-    /// Initialize the header of fresh record storage: the id of shape `name` and, when the
+    /// Initialize the header of fresh record storage: the id of shape `record` and, when the
     /// module retains parsed JSON, an empty source word.
-    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, name: String) {
-        let next_shape = self.state.shapes.len() as i32 + 1;
-        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+    pub(crate) fn record_header(
+        &mut self,
+        ctx: &mut Context,
+        object: Value,
+        record: TypedHandle<RecordType>,
+    ) {
+        let shape = {
+            let record = record.deref(ctx);
+            let name: &str = record.name().as_ref();
+            if let Some(&shape) = self.state.shapes.get(name) {
+                shape
+            } else {
+                let next_shape = self.state.shapes.len() as i32 + 1;
+                self.state.shapes.insert(name.to_string(), next_shape);
+                next_shape
+            }
+        };
         if self.state.retains_json {
             let zero = self.i32_const(ctx, 0);
             self.store(ctx, MemKind::I32, object, record::JSON, zero);

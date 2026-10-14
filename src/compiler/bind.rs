@@ -4,7 +4,7 @@ use crate::{
     sdk::to_camel_case,
 };
 use anyhow::{Result, bail, ensure};
-use perry_codegen::boundary::{AbiType, Export};
+use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_mir::calls::is_exported;
 use pliron::{
     builtin::{
@@ -143,11 +143,13 @@ pub(crate) fn exports(
                     function: perry_lower::MAIN.to_string(),
                     params: vec![],
                     result: None,
-                    task_return: Some((
-                        format!("[export]{}", resolve.name_world_key(key)),
-                        function.name.clone(),
-                    )),
-                    command: true,
+                    kind: ExportKind::Async {
+                        task_return: (
+                            format!("[export]{}", resolve.name_world_key(key)),
+                            function.name.clone(),
+                        ),
+                        command: true,
+                    },
                 });
                 continue;
             }
@@ -162,22 +164,26 @@ pub(crate) fn exports(
                 .map(|ty| abi_type(resolve, ty))
                 .transpose()?;
             // Async exports return through `task.return`, imported from `[export]<interface>`.
-            let task_return = function.kind.is_async().then(|| {
+            let kind = if function.kind.is_async() {
                 let module = match item {
                     WorldItem::Interface { .. } => {
                         format!("[export]{}", resolve.name_world_key(key))
                     }
                     _ => "[export]$root".to_string(),
                 };
-                (module, function.name.clone())
-            });
+                ExportKind::Async {
+                    task_return: (module, function.name.clone()),
+                    command: false,
+                }
+            } else {
+                ExportKind::Sync
+            };
             bound.push(Export {
                 core_name,
                 function: implementation,
                 params,
                 result,
-                task_return,
-                command: false,
+                kind,
             });
         }
     }
@@ -206,7 +212,7 @@ fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
 /// Top-level statements only run as a command; elsewhere they are an error, not dead code.
 pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
     ensure!(
-        !has_main(ctx, mir) || exports.iter().any(|e| e.command),
+        !has_main(ctx, mir) || exports.iter().any(Export::is_command),
         "top-level statements need a command world (one exporting wasi:cli/run)"
     );
     Ok(())

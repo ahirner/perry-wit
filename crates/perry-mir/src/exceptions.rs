@@ -56,7 +56,7 @@ pub trait MayThrowInterface {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ExceptionErr {
+enum ExceptionErr {
     #[error("{0} expects a perry.exception operand")]
     Exception(&'static str),
     #[error("{0} expects a signless i32 status")]

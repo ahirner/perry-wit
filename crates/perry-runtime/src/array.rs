@@ -164,7 +164,7 @@ pub unsafe extern "C" fn perry_array_grow_typed(array: *mut u8, references: u32)
 /// Both arrays are live, have the same element representation, and every operand selected
 /// by `reuse` is exclusively owned and unobserved after this call. Allocation never collects.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_array_concat(
+pub(crate) unsafe extern "C" fn perry_array_concat(
     left: *mut u8,
     right: *mut u8,
     references: u32,
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn perry_array_concat(
 /// `sources` describes `count` live arrays with identical element representation. Selected
 /// headers and storage are exclusive, and their old identities cannot be observed afterwards.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_array_concat_many(
+pub(crate) unsafe extern "C" fn perry_array_concat_many(
     sources: *const *mut u8,
     count: u32,
     references: u32,
@@ -284,7 +284,11 @@ unsafe fn reserve(array: *mut Array, len: u32, references: u32) {
 /// # Safety
 /// Both operands are live arrays with identical element representation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_array_extend(target: *mut u8, source: *mut u8, references: u32) {
+pub(crate) unsafe extern "C" fn perry_array_extend(
+    target: *mut u8,
+    source: *mut u8,
+    references: u32,
+) {
     unsafe {
         let (target, source) = (target.cast::<Array>(), source.cast::<Array>());
         let (before, added) = ((*target).len, (*source).len);
@@ -305,7 +309,7 @@ pub unsafe extern "C" fn perry_array_extend(target: *mut u8, source: *mut u8, re
 /// # Safety
 /// `segments` is an array of live arrays with the requested element representation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_array_concat_segments(
+pub(crate) unsafe extern "C" fn perry_array_concat_segments(
     segments: *mut u8,
     references: u32,
 ) -> *mut u8 {
@@ -319,11 +323,19 @@ pub unsafe extern "C" fn perry_array_concat_segments(
             })
             .expect("array length overflow");
         slot_bytes(len);
-        let result = perry_array_new_typed(len, references);
+        let result = perry_array_new_typed(len, references).cast::<Array>();
+        let mut offset = 0;
         for &source in sources {
-            perry_array_extend(result, source as usize as *mut u8, references);
+            let source = &*(source as usize as *const Array);
+            core::ptr::copy_nonoverlapping(
+                source.data,
+                (*result).data.add(offset),
+                source.len as usize,
+            );
+            offset += source.len as usize;
         }
-        result
+        (*result).len = len;
+        result.cast()
     }
 }
 
