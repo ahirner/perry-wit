@@ -41,12 +41,24 @@ impl FunctionLowering<'_, '_> {
                 vec![operands[0], operands[1], references, reuse],
             )
         } else {
-            let mark = self.publish_roots(ctx, &operands);
-            let stack = self.runtime(ctx, Runtime::RootsState, vec![]);
-            let data = self.load(ctx, MemKind::I32, stack, perry_abi::layout::roots::DATA);
-            let two = self.i32_const(ctx, 2);
-            let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
-            let sources = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+            let (sources, mark) = if self.state.collectible {
+                let mark = self.publish_roots(ctx, &operands);
+                let stack = self.runtime(ctx, Runtime::RootsState, vec![]);
+                let data = self.load(ctx, MemKind::I32, stack, perry_abi::layout::roots::DATA);
+                let two = self.i32_const(ctx, 2);
+                let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
+                (
+                    self.num(ctx, NumOpcode::I32Add, vec![data, offset]),
+                    Some(mark),
+                )
+            } else {
+                let size = self.i32_const(ctx, (operands.len() * 4) as i32);
+                let sources = self.alloc(ctx, size);
+                for (index, value) in operands.iter().copied().enumerate() {
+                    self.store(ctx, MemKind::I32, sources, index as u32 * 4, value);
+                }
+                (sources, None)
+            };
             let count = self.i32_const(ctx, operands.len() as i32);
             let indices = reuse
                 .iter()
@@ -64,7 +76,9 @@ impl FunctionLowering<'_, '_> {
                 Runtime::ArrayConcatMany,
                 vec![sources, count, references, candidates, candidate_count],
             );
-            self.reset_roots(ctx, mark);
+            if let Some(mark) = mark {
+                self.reset_roots(ctx, mark);
+            }
             value
         };
         self.define(ctx, op, value);

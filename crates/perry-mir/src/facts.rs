@@ -598,6 +598,7 @@ impl Solver {
                     .inherit(
                         current,
                         self.analysis.states[child].summary.effects,
+                        op,
                         call.is_some(),
                     );
                 if effects != current {

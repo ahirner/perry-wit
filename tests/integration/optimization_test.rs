@@ -576,6 +576,31 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
              }}"
         );
         let mut program = crate::core_program::Program::new(&source);
+        let mut retained_helper = false;
+        for payload in Parser::new(0).parse_all(&program.wasm) {
+            if let Payload::CustomSection(section) = payload?
+                && let wasmparser::KnownCustom::Name(names) = section.as_known()
+            {
+                for subsection in names {
+                    if let wasmparser::Name::Function(names) = subsection? {
+                        for entry in names {
+                            let name = entry?.name;
+                            retained_helper |= name == "read";
+                            assert!(
+                                !name.starts_with("perry_gc_")
+                                    && !name.starts_with("perry_roots_")
+                                    && name != "perry_frame_free",
+                                "bounded allocations retain {name}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            retained_helper,
+            "inspect the retained helper and named runtime roots"
+        );
         for (index, expected) in [(-1.0, -1.0), (0.25, -1.0), (1.0, 22.0), (3.0, -2.0)] {
             for again in [0, 1] {
                 let result = program
@@ -599,6 +624,24 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
                 );
             }
         }
+        let warmed_memory = program.memory_bytes();
+        for _ in 0..1000 {
+            assert_eq!(
+                program
+                    .call(
+                        "run",
+                        &[wasmtime::Val::F64(1.0f64.to_bits()), wasmtime::Val::I32(1)]
+                    )
+                    .0[0]
+                    .unwrap_f64(),
+                22.0
+            );
+        }
+        assert_eq!(
+            program.memory_bytes(),
+            warmed_memory,
+            "task regions must be reused across invocations"
+        );
     }
     Ok(())
 }

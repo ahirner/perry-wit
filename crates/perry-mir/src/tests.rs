@@ -508,6 +508,114 @@ builtin.module @effects {
         effects.effects(&pliron::ident!("rotate")).unwrap().escapes,
         std::collections::BTreeSet::from([0, 1])
     );
+    for name in ["left", "right", "worker", "launch", "rotate"] {
+        assert!(
+            !effects
+                .effects(&name.try_into().unwrap())
+                .unwrap()
+                .effects
+                .repeated_allocations,
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_allocation_depends_on_call_and_allocation_placement() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::pass::AnalysisManager;
+    let fixture = r#"
+builtin.module @repetition { ^module():
+  builtin.func @pure: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.fp64)> {
+    ^entry(value: builtin.fp64, recurse: builtin.integer i1):
+      perry.cond_br if recurse ^again() else ^done(value)
+    ^again():
+      no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+      next = perry.call pure (value, no) : builtin.fp64;
+      perry.br ^done(next)
+    ^done(result: builtin.fp64):
+      perry.return result
+  };
+  builtin.func @allocate: builtin.function <(builtin.fp64) -> (perry.record <Cell { value: builtin.fp64 }>)> {
+    ^entry(value: builtin.fp64):
+      cell = perry.alloc Unassigned (value) : perry.record <Cell>;
+      perry.return cell
+  };
+  builtin.func @recursive: builtin.function <(builtin.fp64, builtin.integer i1) -> (perry.record <Cell>)> {
+    ^entry(value: builtin.fp64, again: builtin.integer i1):
+      cell = perry.call allocate (value) : perry.record <Cell>;
+      perry.cond_br if again ^recurse() else ^done(cell)
+    ^recurse():
+      no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+      next = perry.call recursive (value, no) : perry.record <Cell>;
+      perry.br ^done(next)
+    ^done(result: perry.record <Cell>):
+      perry.return result
+  };
+  builtin.func @run: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.fp64)> {
+    ^entry(value: builtin.fp64, again: builtin.integer i1):
+      ENTER
+      perry.br ^loop()
+    ^loop():
+      BODY
+      perry.cond_br if again ^loop() else ^done()
+    ^done():
+      EXIT
+      perry.return value
+  }
+}
+"#;
+    for statement in [
+        "cell = perry.alloc Unassigned (value) : perry.record <Cell>;",
+        "cell = perry.call allocate (value) : perry.record <Cell>;",
+        "result = perry.call pure (value, again) : builtin.fp64;",
+        "cell = perry.call recursive (value, again) : perry.record <Cell>;",
+    ] {
+        for position in ["ENTER", "BODY", "EXIT"] {
+            let mut input = fixture.replace(position, statement);
+            for unused in ["ENTER", "BODY", "EXIT"] {
+                input = input.replace(unused, "");
+            }
+            let ctx = &mut Context::new();
+            let module = parse(ctx, &input);
+            verify_operation(module, ctx)?;
+            let mut analyses = AnalysisManager::default();
+            let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+            assert!(
+                !facts
+                    .effects(&pliron::ident!("pure"))
+                    .unwrap()
+                    .effects
+                    .repeated_allocations
+            );
+            assert!(
+                !facts
+                    .effects(&pliron::ident!("allocate"))
+                    .unwrap()
+                    .effects
+                    .repeated_allocations
+            );
+            assert!(
+                facts
+                    .effects(&pliron::ident!("recursive"))
+                    .unwrap()
+                    .effects
+                    .repeated_allocations
+            );
+            let expected = !statement.contains("call pure")
+                && (position == "BODY" || statement.contains("call recursive"));
+            assert_eq!(
+                facts
+                    .effects(&pliron::ident!("run"))
+                    .unwrap()
+                    .effects
+                    .repeated_allocations,
+                expected,
+                "{position}: {statement}"
+            );
+        }
+    }
     Ok(())
 }
 

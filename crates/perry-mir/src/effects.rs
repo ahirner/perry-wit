@@ -22,7 +22,7 @@ use pliron::{
     result::Result,
     r#type::Typed,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{function} contains {operation} outside its atomic construction group")]
@@ -44,7 +44,7 @@ pub enum Failure {
 pub struct Effects {
     pub allocates: bool,
     pub atomic_construction: bool,
-    /// The compiled body contains a safe point, including those in direct callees.
+    /// A safepoint is required when this module uses collection, including in callees.
     pub may_collect: bool,
     pub may_suspend: bool,
     pub may_reenter: bool,
@@ -52,7 +52,8 @@ pub struct Effects {
     pub failure: Failure,
     /// Runtime-managed values or effectful services whose task independence is unproven.
     pub task_state: bool,
-    pub repeated: bool,
+    /// An allocation site or allocating call can execute repeatedly within one task.
+    pub repeated_allocations: bool,
     pub unknown_helper_bound: bool,
 }
 
@@ -81,7 +82,8 @@ impl Effects {
 pub(crate) struct LocalEffects {
     pub effects: Effects,
     asynchronous: bool,
-    repeated: bool,
+    recursive: bool,
+    loop_calls: HashSet<Ptr<Operation>>,
 }
 
 impl LocalEffects {
@@ -89,6 +91,7 @@ impl LocalEffects {
         &self,
         mut current: Effects,
         callee: Effects,
+        call: Ptr<Operation>,
         synchronous: bool,
     ) -> Effects {
         current.allocates |= callee.allocates;
@@ -105,7 +108,8 @@ impl LocalEffects {
                 Failure::Throws
             };
         }
-        current.repeated |= callee.repeated || self.repeated && current.allocates;
+        current.repeated_allocations |= callee.repeated_allocations
+            || (self.recursive || self.loop_calls.contains(&call)) && callee.allocates;
         current.unknown_helper_bound |= callee.unknown_helper_bound;
         current.may_collect |= current.may_suspend || current.may_reenter;
         current
@@ -236,7 +240,8 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 ..Effects::default()
             },
             asynchronous: is_async(ctx, f),
-            repeated: false,
+            recursive: false,
+            loop_calls: HashSet::new(),
         })
         .collect();
     let mut callees = vec![Vec::new(); functions.len()];
@@ -254,6 +259,11 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
         }
         let mut effects = local[index].effects;
         let mut fails = false;
+        let cyclic_blocks: HashSet<_> = sccs_in_topological_order(ctx, &function.get_region(ctx))
+            .into_iter()
+            .filter(|component| component.is_cyclic)
+            .flat_map(|component| component.nodes)
+            .collect();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
                 let callee = callee(ctx, op);
@@ -292,8 +302,15 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 if Operation::get_op::<CallOp>(op, ctx).is_none() {
                     fails |= crate::intrinsics::may_throw(ctx, op);
                 }
-                effects.allocates |= allocation != Allocation::None
+                let allocates = allocation != Allocation::None
                     || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                effects.allocates |= allocates;
+                if cyclic_blocks.contains(&block) {
+                    effects.repeated_allocations |= allocates;
+                    if callee.is_some() {
+                        local[index].loop_calls.insert(op);
+                    }
+                }
                 effects.may_collect |= !atomic && allocation != Allocation::None;
                 effects.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
                     .is_some()
@@ -337,21 +354,13 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
         callees: &callees,
         callers: &callers,
     };
-    for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
-        let repeated = component.is_cyclic
-            || component
-                .nodes
-                .iter()
-                .any(|node| callees[node.0].iter().any(|&callee| local[callee].repeated));
-        for node in component.nodes {
-            local[node.0].repeated = repeated;
+    for component in sccs_in_topological_order(&(), &graph) {
+        if component.is_cyclic {
+            for node in component.nodes {
+                local[node.0].recursive = true;
+                local[node.0].effects.repeated_allocations |= local[node.0].effects.allocates;
+            }
         }
-    }
-    for (function, local) in functions.iter().zip(&mut local) {
-        local.repeated |= sccs_in_topological_order(ctx, &function.get_region(ctx))
-            .iter()
-            .any(|scc| scc.is_cyclic);
-        local.effects.repeated |= local.repeated && local.effects.allocates;
     }
     Ok(local)
 }

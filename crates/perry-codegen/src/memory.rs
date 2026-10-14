@@ -66,42 +66,23 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
     }
 }
 
-/// A module uses the compact task allocator only when all remaining allocations are bounded.
-/// Aggregate and builtin sites default to collection until a stronger lifetime proof exists.
+/// Task regions suffice when allocations do not repeat, suspend or outlive the task.
+/// Resource-bearing boundaries and checked builds select collection at their callers.
 pub(crate) fn needs_collector(
     ctx: &Context,
     functions: &[pliron::builtin::ops::FuncOp],
     summaries: &perry_mir::facts::ProgramFacts,
 ) -> bool {
-    use pliron::{
-        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
-        linked_list::ContainsLinkedList,
-    };
-    !crate::boundary::used_keys(ctx, functions).is_empty()
-        || functions
-            .iter()
-            .map(|f| {
-                summaries
-                    .effects(&f.get_symbol_name(ctx))
-                    .expect("function effects")
-            })
-            .any(|summary| summary.effects.repeated || summary.effects.unknown_helper_bound)
-        || functions.iter().any(|function| {
-            perry_mir::calls::is_async(ctx, function)
-                || {
-                    use pliron::builtin::op_interfaces::SymbolOpInterface;
-                    function.get_symbol_name(ctx).as_ref() == perry_mir::globals::INITIALIZER
-                }
-                || function.get_region(ctx).deref(ctx).iter(ctx).any(|block| {
-                    block.deref(ctx).iter(ctx).any(|op| {
-                        Operation::get_op::<perry_mir::heap::AllocOp>(op, ctx).is_some()
-                            || Operation::get_op::<perry_mir::variants::VariantNewOp>(op, ctx)
-                                .is_some()
-                            || Operation::get_op::<perry_mir::collections::ArrayNewOp>(op, ctx)
-                                .is_some()
-                    })
-                })
-        })
+    use pliron::builtin::op_interfaces::SymbolOpInterface;
+    functions.iter().any(|function| {
+        let name = function.get_symbol_name(ctx);
+        let effects = &summaries.effects(&name).expect("function effects").effects;
+        name.as_ref() == perry_mir::globals::INITIALIZER
+            || effects.repeated_allocations
+            || effects.unknown_helper_bound
+            || effects.may_suspend
+            || effects.may_reenter
+    })
 }
 
 /// Explain the conservative allocation decisions for the optimized MIR actually emitted.
@@ -130,7 +111,8 @@ pub fn explain_tiers(
     let live = analyses
         .try_get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation())
         .expect("liveness");
-    let collectible = needs_collector(ctx, &functions, summaries);
+    let collectible = !crate::boundary::used_keys(ctx, &functions).is_empty()
+        || needs_collector(ctx, &functions, summaries);
     let tier = if collectible {
         "instance (precise collection)"
     } else {
@@ -158,10 +140,10 @@ pub fn explain_tiers(
             .filter(|allocation| allocation.tier(ctx) == perry_mir::attrs::Tier::Frame)
             .count();
         let leases = crate::lease::leased(ctx, function, &live).len();
-        writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
-            summary.effects.repeated, summary.effects.unknown_helper_bound, summary.escapes).expect("string write");
+        writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
+            summary.effects.repeated_allocations, summary.effects.unknown_helper_bound, summary.escapes).expect("string write");
     }
-    report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use instance storage\n  buffer: host operations pin owners until acknowledgement\n");
+    report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use the selected task or instance storage\n  buffer: host operations pin owners until acknowledgement\n");
     Ok(report)
 }
 
@@ -192,11 +174,16 @@ impl FunctionLowering<'_, '_> {
         }
         if bytes != 0 {
             let size = self.i32_const(ctx, bytes as i32);
-            let shape = self.i32_const(ctx, 0);
-            let frame = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
-            if !self.atomic_construction {
-                self.publish_roots(ctx, &[frame]);
-            }
+            let frame = if self.state.collectible {
+                let shape = self.i32_const(ctx, 0);
+                let frame = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
+                if !self.atomic_construction {
+                    self.publish_roots(ctx, &[frame]);
+                }
+                frame
+            } else {
+                self.alloc(ctx, size)
+            };
             self.local_frame = Some(frame);
         }
         Ok(())
@@ -417,7 +404,9 @@ impl FunctionLowering<'_, '_> {
         if let Some(base) = self.root_base {
             self.reset_roots(ctx, base);
         }
-        if let Some(frame) = self.local_frame {
+        if self.state.collectible
+            && let Some(frame) = self.local_frame
+        {
             self.runtime_void(ctx, Runtime::FrameFree, vec![frame]);
         }
     }
