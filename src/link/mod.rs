@@ -232,7 +232,7 @@ pub(crate) fn link_helpers_with(
         let mut added = Vec::new();
         for (lib_id, entries) in &requested_by_lib {
             let lib = Library::parse(lib_id.for_memory(collectible))?;
-            let reachable = lib.reachable(entries.iter().map(String::as_str))?;
+            let reachable = lib.reachable(entries.iter().map(String::as_str), &BTreeSet::new())?;
             for &orig in reachable
                 .iter()
                 .filter(|&&orig| orig < lib.imports.len() as u32)
@@ -289,7 +289,7 @@ pub(crate) fn link_helpers_with(
     let mut prepared_libs = Vec::new();
     for (lib_id, entries) in requested_by_lib {
         let lib = Library::parse(lib_id.for_memory(collectible))?;
-        let reachable = lib.reachable(entries.iter().map(String::as_str))?;
+        let reachable = lib.reachable(entries.iter().map(String::as_str), &BTreeSet::new())?;
         let type_base = new_types.len();
         for ty in &lib.types {
             push_type(&mut new_types, ty)?;
@@ -355,6 +355,76 @@ pub(crate) fn link_helpers_with(
         let old_func_idx = next_import_func_idx + i;
         let new_func_idx = num_new_imported_funcs + i;
         old_to_new_func_index.insert(old_func_idx, new_func_idx);
+    }
+
+    // Determine existing static data extent from core module
+    let mut existing_data_end = 1024u32;
+    for seg in &core_data {
+        if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
+            let mut reader = offset_expr.get_operators_reader();
+            if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
+                let end = (value as u32).saturating_add(seg.data.len() as u32);
+                existing_data_end = existing_data_end.max(end);
+            }
+        }
+    }
+
+    // Allocate memory and table placements for each helper library
+    struct LibPlacement {
+        memory_base: u32,
+        table_base: u32,
+    }
+    let mut helper_memory = HelperMemory::new(existing_data_end);
+    let mut current_table_size = if !core_tables.is_empty() {
+        core_tables[0].ty.initial as u32
+    } else {
+        0
+    };
+    let mut lib_placements = Vec::new();
+    for prep in &prepared_libs {
+        let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
+
+        let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
+        current_table_size = table_base
+            .checked_add(prep.lib.table_size)
+            .context("helper table exceeds table32")?;
+
+        lib_placements.push(LibPlacement {
+            memory_base,
+            table_base,
+        });
+    }
+
+    let needs_stack = helper_memory.needs_stack;
+    let stack_global_index = core_globals.len() as u32;
+    let stack_top = helper_memory.stack_top()?;
+
+    if needs_stack && !core_memories.is_empty() {
+        let needed_pages = stack_top.div_ceil(65_536) as u64;
+        if core_memories[0].initial < needed_pages {
+            core_memories[0].initial = needed_pages;
+        }
+    }
+
+    let folded: Vec<_> = prepared_libs
+        .iter()
+        .zip(&lib_placements)
+        .map(|(prep, placement)| {
+            data_relocations::fold(
+                &prep.lib,
+                placement.memory_base,
+                placement.table_base,
+                stack_top,
+            )
+        })
+        .collect();
+
+    for (prep, folded) in prepared_libs.iter_mut().zip(&folded) {
+        if let Some(folded) = folded {
+            prep.reachable = prep
+                .lib
+                .reachable(prep.entries.iter().map(String::as_str), &folded.functions)?;
+        }
     }
 
     // 4. Assign indices to the selected helper functions
@@ -430,55 +500,6 @@ pub(crate) fn link_helpers_with(
         new_code.function(&rewritten);
     }
 
-    // Determine existing static data extent from core module
-    let mut existing_data_end = 1024u32;
-    for seg in &core_data {
-        if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
-            let mut reader = offset_expr.get_operators_reader();
-            if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
-                let end = (value as u32).saturating_add(seg.data.len() as u32);
-                existing_data_end = existing_data_end.max(end);
-            }
-        }
-    }
-
-    // Allocate memory and table placements for each helper library
-    struct LibPlacement {
-        memory_base: u32,
-        table_base: u32,
-    }
-    let mut helper_memory = HelperMemory::new(existing_data_end);
-    let mut current_table_size = if !core_tables.is_empty() {
-        core_tables[0].ty.initial as u32
-    } else {
-        0
-    };
-    let mut lib_placements = Vec::new();
-    for prep in &prepared_libs {
-        let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
-
-        let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
-        current_table_size = table_base
-            .checked_add(prep.lib.table_size)
-            .context("helper table exceeds table32")?;
-
-        lib_placements.push(LibPlacement {
-            memory_base,
-            table_base,
-        });
-    }
-
-    let needs_stack = helper_memory.needs_stack;
-    let stack_global_index = core_globals.len() as u32;
-    let stack_top = helper_memory.stack_top()?;
-
-    if needs_stack && !core_memories.is_empty() {
-        let needed_pages = stack_top.div_ceil(65_536) as u64;
-        if core_memories[0].initial < needed_pages {
-            core_memories[0].initial = needed_pages;
-        }
-    }
-
     // Emit helper functions
     for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         let mut relocation = Relocations {
@@ -513,24 +534,14 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    let folded: Vec<_> = prepared_libs
-        .iter()
-        .zip(&lib_placements)
-        .map(|(prep, placement)| {
-            data_relocations::fold(
-                &prep.lib,
-                placement.memory_base,
-                placement.table_base,
-                stack_top,
-            )
-        })
-        .collect();
-
     // Helper initialization
     let mut helper_inits = Vec::new();
     for (prep, folded) in prepared_libs.iter().zip(&folded) {
         for orig in prep.lib.initializers() {
-            if folded.as_ref().is_some_and(|data| data.function == orig) {
+            if folded
+                .as_ref()
+                .is_some_and(|data| data.functions.contains(&orig))
+            {
                 continue;
             }
             if let Some(&new_idx) = prep.helper_defined_indices.get(&orig)

@@ -692,7 +692,23 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
         let compiled = compile(source, "func(a:f64)->f64")?;
         let mut exports = Vec::new();
         for payload in Parser::new(0).parse_all(&compiled.core) {
-            if let Payload::ExportSection(section) = payload? {
+            let payload = payload?;
+            assert!(
+                !matches!(payload, Payload::StartSection { .. }),
+                "constant helper initialization must be resolved before instantiation"
+            );
+            if let Payload::CustomSection(section) = &payload
+                && let wasmparser::KnownCustom::Name(names) = section.as_known()
+            {
+                for subsection in names {
+                    if let wasmparser::Name::Function(names) = subsection? {
+                        for entry in names {
+                            assert_ne!(entry?.name, "__wasm_apply_data_relocs");
+                        }
+                    }
+                }
+            }
+            if let Payload::ExportSection(section) = payload {
                 exports = section
                     .into_iter()
                     .map(|e| e.map(|e| e.name.to_owned()))

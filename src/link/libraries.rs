@@ -635,6 +635,7 @@ impl Library {
     pub(crate) fn reachable<'a>(
         &self,
         entries: impl IntoIterator<Item = &'a str>,
+        folded_initializers: &BTreeSet<u32>,
     ) -> Result<BTreeSet<u32>> {
         let mut pending = entries
             .into_iter()
@@ -645,7 +646,10 @@ impl Library {
                     .with_context(|| format!("missing internal helper export {entry}"))
             })
             .collect::<Result<Vec<_>>>()?;
-        pending.extend(self.initializers());
+        pending.extend(
+            self.initializers()
+                .filter(|f| !folded_initializers.contains(f)),
+        );
         let mut reachable = BTreeSet::new();
         while let Some(function) = pending.pop() {
             if !reachable.insert(function) {
@@ -865,7 +869,9 @@ mod tests {
                     .exports
                     .keys()
                     .filter(|entry| {
-                        let reachable = library.reachable([entry.as_str()]).expect("reachable");
+                        let reachable = library
+                            .reachable([entry.as_str()], &BTreeSet::new())
+                            .expect("reachable");
                         library.fixed_stack_bound(Some(&reachable)).is_none()
                     })
                     .collect::<Vec<_>>()

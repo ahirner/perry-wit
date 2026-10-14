@@ -229,7 +229,7 @@ Complex algorithmic operations—including JSON serialization, date calculations
 Helper libraries compile to standalone `wasm32-unknown-unknown` binaries without allocators or system runtimes. The resulting bytecode artifacts embed directly into the compiler binary during build time, removing any runtime dependency on Rust or LLVM.
 
 ### Capability Pruning
-The linker computes transitive function reachability from surviving core calls and required ABI exports. Reachable canonical imports contribute allocator roots when their ABI requires host allocation. Ordinary calls carry helper dependencies; unreferenced functions and data are pruned.
+The linker computes transitive function reachability from surviving core calls and required ABI exports. Reachable canonical imports contribute allocator roots when their ABI requires host allocation. Ordinary calls carry helper dependencies; unreferenced functions are pruned. Helper data retains each library's private placement. Constant address stores and zero fills are evaluated in initialization order before function indices are assigned. Fully evaluated initialization sequences lose their startup roots; ordinary calls and table references still retain callable functions. Unsupported instructions or writes outside the supported private segments preserve the complete runtime initialization sequence.
 
 ### Static Relocation
 During code generation, the compiler relocates helper functions, signatures, and element tables directly into the target WebAssembly module. Instructions are re-encoded to target local function indices, allowing pure helper routines to execute with zero call overhead.
