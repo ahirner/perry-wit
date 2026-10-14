@@ -438,7 +438,7 @@ fn async_export(
                 let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
                 b.insert(ctx, ret);
             } else {
-                if uses_io {
+                if uses_io || b.state.reports_rejection {
                     b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
                     let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
                     let closed = b.new_block(ctx, vec![]);
@@ -666,7 +666,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);
         b.br(ctx, next, vec![]);
         b.block = other;
-        if b.state.uses_io {
+        if b.state.uses_io || b.state.reports_rejection {
             b.runtime(ctx, Runtime::IoEvent, vec![event, handle, subtask_state]);
         }
         b.br(ctx, next, vec![]);

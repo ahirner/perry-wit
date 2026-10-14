@@ -674,20 +674,31 @@ fn start_listing(op: &mut Op, fd: u32) {
 
 /// Contents as a string, replacing invalid UTF-8 as `TextDecoder` does.
 fn text(contents: &[u8]) -> *mut u8 {
-    if core::str::from_utf8(contents).is_ok() {
-        // SAFETY: valid UTF-8 in the task region.
-        return unsafe { adopt(contents.as_ptr() as *mut u8, contents.len() as u32) };
-    }
     let mut out = Buffer::new();
-    for chunk in contents.utf8_chunks() {
-        out.extend_from_slice(chunk.valid().as_bytes());
-        if !chunk.invalid().is_empty() {
-            out.extend_from_slice("\u{FFFD}".as_bytes());
+    let mut rest = contents;
+    loop {
+        match core::str::from_utf8(rest) {
+            Ok(valid) => {
+                let slice = if out.is_empty() {
+                    contents
+                } else {
+                    out.extend_from_slice(valid.as_bytes());
+                    out.as_slice()
+                };
+                // SAFETY: valid UTF-8 in the task region.
+                return unsafe { adopt(slice.as_ptr() as *mut u8, slice.len() as u32) };
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                out.extend_from_slice(&rest[..valid]);
+                out.extend_from_slice("\u{FFFD}".as_bytes());
+                rest = match err.error_len() {
+                    Some(len) => &rest[valid + len..],
+                    None => &[],
+                };
+            }
         }
     }
-    let out = out.as_slice();
-    // SAFETY: valid UTF-8 in the task region.
-    unsafe { adopt(out.as_ptr() as *mut u8, out.len() as u32) }
 }
 
 /// Take preopen handles, keep the one whose name is the longest prefix of the path, drop the

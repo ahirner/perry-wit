@@ -143,7 +143,10 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if ty.deref(ctx).is::<RecordType>() || ty.deref(ctx).is::<ArrayType>() {
+        if ty.deref(ctx).is::<RecordType>()
+            || ty.deref(ctx).is::<ArrayType>()
+            || ty.deref(ctx).is::<perry_mir::types::VariantType>()
+        {
             let name = self.json_decoder(
                 ctx,
                 ty,
@@ -151,6 +154,7 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx, entry| {
                     let input = entry.deref(ctx).get_argument(0);
                     let byte = entry.deref(ctx).get_argument(1);
+                    let variant = ty.deref(ctx).is::<perry_mir::types::VariantType>();
                     let array = ty.deref(ctx).is::<ArrayType>()
                         || TypedHandle::<RecordType>::from_handle(ty, ctx)
                             .is_ok_and(|r| r.deref(ctx).is_tuple());
@@ -162,6 +166,8 @@ impl<'s> FunctionBuilder<'s> {
                         |b, ctx| {
                             if array {
                                 b.cursor_array(ctx, input, ty)
+                            } else if variant {
+                                b.cursor_variant(ctx, input, ty)
                             } else {
                                 b.cursor_record(ctx, input, ty)
                             }
@@ -450,5 +456,250 @@ impl<'s> FunctionBuilder<'s> {
         let graph = self.load(ctx, residue)?;
         self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![native, graph]);
         Ok((native, failed))
+    }
+    fn cursor_variant(
+        &mut self,
+        ctx: &mut Context,
+        cursor: Value,
+        ty: TypeHandle,
+    ) -> Result<(Value, Value)> {
+        let cases = perry_mir::variants::cases(ctx, ty)?;
+        let string_ty: TypeHandle = StringType::get(ctx).into();
+        let boolean: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let index_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Signless).into();
+        let json_ty: TypeHandle = JsonType::get(ctx).into();
+
+        let tag_slot = self.entry_slot(ctx, string_ty);
+        let undef_tag = self.emit_value(ctx, |ctx| UndefOp::new(ctx, string_ty));
+        self.store(ctx, tag_slot, undef_tag);
+
+        let tag_failed = self.entry_slot(ctx, boolean);
+        let yes = self.boolean(ctx, true);
+        self.store(ctx, tag_failed, yes);
+
+        let val_case = self.entry_slot(ctx, index_ty);
+        let missing_case = self.cursor_index(ctx, u32::MAX);
+        self.store(ctx, val_case, missing_case);
+
+        let val_failed = self.entry_slot(ctx, boolean);
+        let no = self.boolean(ctx, false);
+        self.store(ctx, val_failed, no);
+
+        let deferred_pos = self.entry_slot(ctx, index_ty);
+        let zero = self.cursor_index(ctx, 0);
+        self.store(ctx, deferred_pos, zero);
+
+        let residue = self.entry_slot(ctx, json_ty);
+        let empty = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
+        self.store(ctx, residue, empty);
+
+        let mut payload_slots = Vec::with_capacity(cases.len());
+        for (_, payload) in &cases {
+            if let Some(payload_ty) = *payload {
+                let slot = self.entry_slot(ctx, payload_ty);
+                let undef = self.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty));
+                self.store(ctx, slot, undef);
+                payload_slots.push(Some(slot));
+            } else {
+                payload_slots.push(None);
+            }
+        }
+
+        self.cursor_consume(ctx, cursor, b'{');
+        let header = self.new_block(ctx, "json_variant_members");
+        let body = self.new_block(ctx, "json_variant_member");
+        let step = self.new_block(ctx, "json_variant_delimiter");
+        let done = self.new_block(ctx, "json_variant_done");
+        self.jump(ctx, header);
+        self.switch_to(header);
+        let byte = self.intrinsic(ctx, Intrinsic::JsonCursorByte, vec![cursor]);
+        let end = self.cursor_is(ctx, byte, b'}');
+        self.branch(ctx, end, done, body);
+
+        self.switch_to(body);
+        let key = self.emit_value(ctx, |ctx| JsonCursorKeyOp::new(ctx, cursor, ty));
+        let arm_tag = self.new_block(ctx, "json_variant_tag");
+        let arm_val = self.new_block(ctx, "json_variant_val");
+        let arm_unknown = self.new_block(ctx, "json_variant_unknown");
+        self.cursor_dispatch(ctx, key, 0, &[arm_tag, arm_val, arm_unknown])?;
+
+        self.switch_to(arm_tag);
+        let (v, e) = self.cursor_value(ctx, cursor, string_ty)?;
+        self.store(ctx, tag_slot, v);
+        self.store(ctx, tag_failed, e);
+        self.jump(ctx, step);
+
+        self.switch_to(arm_val);
+        let mark_arg = self.cursor_index(ctx, u32::MAX);
+        let pos = self.intrinsic(ctx, Intrinsic::JsonCursorSeek, vec![cursor, mark_arg]);
+        self.store(ctx, deferred_pos, pos);
+        let no_tag = self.load(ctx, tag_failed)?;
+        let dispatch_val = self.new_block(ctx, "json_variant_val_dispatch");
+        let defer_val = self.new_block(ctx, "json_variant_val_defer");
+        self.branch(ctx, no_tag, defer_val, dispatch_val);
+
+        self.switch_to(dispatch_val);
+        let current_tag = self.load(ctx, tag_slot)?;
+        for (case_i, (name, payload)) in cases.iter().enumerate() {
+            let Some(payload_ty) = *payload else {
+                continue;
+            };
+            let expected = self.string(ctx, name);
+            let matched = self.compare(ctx, CompareKind::Eq, current_tag, expected);
+            let hit = self.new_block(ctx, "json_variant_val_hit");
+            let miss = self.new_block(ctx, "json_variant_val_miss");
+            self.branch(ctx, matched, hit, miss);
+            self.switch_to(hit);
+            let (v, e) = self.cursor_value(ctx, cursor, payload_ty)?;
+            if let Some(slot) = payload_slots[case_i] {
+                self.store(ctx, slot, v);
+            }
+            self.store(ctx, val_failed, e);
+            let idx = self.cursor_index(ctx, case_i as u32);
+            self.store(ctx, val_case, idx);
+            self.jump(ctx, step);
+            self.switch_to(miss);
+        }
+        self.jump(ctx, defer_val);
+
+        self.switch_to(defer_val);
+        let graph = self.load(ctx, residue)?;
+        let graph = self.intrinsic(ctx, Intrinsic::JsonCursorMember, vec![cursor, graph]);
+        self.store(ctx, residue, graph);
+        let deferred_marker = self.cursor_index(ctx, u32::MAX - 1);
+        self.store(ctx, val_case, deferred_marker);
+        self.jump(ctx, step);
+
+        self.switch_to(arm_unknown);
+        let graph = self.load(ctx, residue)?;
+        let graph = self.intrinsic(ctx, Intrinsic::JsonCursorMember, vec![cursor, graph]);
+        self.store(ctx, residue, graph);
+        self.jump(ctx, step);
+
+        self.switch_to(step);
+        let byte = self.intrinsic(ctx, Intrinsic::JsonCursorByte, vec![cursor]);
+        let end = self.cursor_is(ctx, byte, b'}');
+        let more = self.new_block(ctx, "json_variant_more");
+        self.branch(ctx, end, done, more);
+        self.switch_to(more);
+        self.cursor_consume(ctx, cursor, b',');
+        self.jump(ctx, body);
+
+        self.switch_to(done);
+        let result_slot = self.entry_slot(ctx, ty);
+        let undef_result = self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty));
+        self.store(ctx, result_slot, undef_result);
+        let failed_slot = self.entry_slot(ctx, boolean);
+        let yes = self.boolean(ctx, true);
+        self.store(ctx, failed_slot, yes);
+
+        let finish = self.new_block(ctx, "json_variant_finish");
+        let check_cases = self.new_block(ctx, "json_variant_cases");
+        let no_tag = self.load(ctx, tag_failed)?;
+        self.branch(ctx, no_tag, finish, check_cases);
+
+        self.switch_to(check_cases);
+        let final_tag = self.load(ctx, tag_slot)?;
+        let vc = self.load(ctx, val_case)?;
+        for (case_i, (name, payload)) in cases.iter().enumerate() {
+            let expected = self.string(ctx, name);
+            let matched = self.compare(ctx, CompareKind::Eq, final_tag, expected);
+            let case_block = self.new_block(ctx, "json_variant_case");
+            let next_case = self.new_block(ctx, "json_variant_next");
+            self.branch(ctx, matched, case_block, next_case);
+            self.switch_to(case_block);
+            match *payload {
+                None => {
+                    let decoded = self.emit_value(ctx, |ctx| {
+                        perry_mir::variants::VariantNewOp::new(ctx, ty, name, None)
+                    });
+                    let graph = self.load(ctx, residue)?;
+                    self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![decoded, graph]);
+                    let ok = self.boolean(ctx, false);
+                    self.store(ctx, result_slot, decoded);
+                    self.store(ctx, failed_slot, ok);
+                    self.jump(ctx, finish);
+                }
+                Some(payload_ty) => {
+                    let idx = self.cursor_index(ctx, case_i as u32);
+                    let already = self.compare(ctx, CompareKind::Eq, vc, idx);
+                    let slot = payload_slots[case_i];
+                    let (payload_val, payload_err) = self.cursor_choice(
+                        ctx,
+                        payload_ty,
+                        already,
+                        |b, ctx| {
+                            let v = match slot {
+                                Some(slot) => b.load(ctx, slot)?,
+                                None => b.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty)),
+                            };
+                            Ok((v, b.load(ctx, val_failed)?))
+                        },
+                        |b, ctx| {
+                            let missing_idx = b.cursor_index(ctx, u32::MAX);
+                            let is_missing = b.compare(ctx, CompareKind::Eq, vc, missing_idx);
+                            b.cursor_choice(
+                                ctx,
+                                payload_ty,
+                                is_missing,
+                                |b, ctx| {
+                                    if absence(ctx, payload_ty).is_some_and(|a| a.admits_undefined())
+                                    {
+                                        let undef = b.emit_value(ctx, |ctx| {
+                                            UndefinedOp::with_type(ctx, payload_ty)
+                                        });
+                                        let ok = b.boolean(ctx, false);
+                                        Ok((undef, ok))
+                                    } else if payload_ty.deref(ctx).is::<JsonType>() {
+                                        let undef =
+                                            b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
+                                        let ok = b.boolean(ctx, false);
+                                        Ok((undef, ok))
+                                    } else {
+                                        let undef =
+                                            b.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty));
+                                        let err = b.boolean(ctx, true);
+                                        Ok((undef, err))
+                                    }
+                                },
+                                |b, ctx| {
+                                    let pos = b.load(ctx, deferred_pos)?;
+                                    let saved = b.intrinsic(
+                                        ctx,
+                                        Intrinsic::JsonCursorSeek,
+                                        vec![cursor, pos],
+                                    );
+                                    let (v, e) = b.cursor_value(ctx, cursor, payload_ty)?;
+                                    let _ = b.intrinsic(
+                                        ctx,
+                                        Intrinsic::JsonCursorSeek,
+                                        vec![cursor, saved],
+                                    );
+                                    Ok((v, e))
+                                },
+                            )
+                        },
+                    )?;
+                    let build_ok = self.new_block(ctx, "json_variant_build");
+                    self.branch(ctx, payload_err, finish, build_ok);
+                    self.switch_to(build_ok);
+                    let decoded = self.emit_value(ctx, |ctx| {
+                        perry_mir::variants::VariantNewOp::new(ctx, ty, name, Some(payload_val))
+                    });
+                    let graph = self.load(ctx, residue)?;
+                    self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![decoded, graph]);
+                    let ok = self.boolean(ctx, false);
+                    self.store(ctx, result_slot, decoded);
+                    self.store(ctx, failed_slot, ok);
+                    self.jump(ctx, finish);
+                }
+            }
+            self.switch_to(next_case);
+        }
+        self.jump(ctx, finish);
+
+        self.switch_to(finish);
+        self.cursor_consume(ctx, cursor, b'}');
+        Ok((self.load(ctx, result_slot)?, self.load(ctx, failed_slot)?))
     }
 }

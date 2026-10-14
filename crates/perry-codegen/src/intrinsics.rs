@@ -192,6 +192,7 @@ impl FunctionLowering<'_, '_> {
                 None
             }
             Intrinsic::JsonCursorTail => Some(self.runtime(ctx, Runtime::JsonCursorTail, args)),
+            Intrinsic::JsonCursorSeek => Some(self.runtime(ctx, Runtime::JsonCursorSeek, args)),
             Intrinsic::JsonCursorFinish => {
                 self.runtime_void(ctx, Runtime::JsonCursorFinish, args);
                 None

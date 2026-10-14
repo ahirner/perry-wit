@@ -438,6 +438,7 @@ intrinsics! {
     JsonCursorValue = "json_cursor_value" (JsonCursor) -> (Json), atomic;
     JsonCursorMember = "json_cursor_member" (JsonCursor, Json) -> (Json), atomic;
     JsonCursorTail = "json_cursor_tail" (JsonCursor, Json, Index) -> (Json), atomic;
+    JsonCursorSeek = "json_cursor_seek" (JsonCursor, Index) -> (Index), noalloc;
     JsonCursorFinish = "json_cursor_finish" (JsonCursor, Bool) -> (), throws, atomic;
     JsonResidue = "json_residue" (Aggregate, Json) -> (), noalloc;
     JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
@@ -798,8 +799,11 @@ impl JsonCursorKeyOp {
 impl Verify for JsonCursorKeyOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
+        let schema = self.record(ctx);
+        let schema_ref = schema.deref(ctx);
         if !operand.deref(ctx).is::<crate::types::JsonCursorType>()
-            || !self.record(ctx).deref(ctx).is::<crate::types::RecordType>()
+            || !(schema_ref.is::<crate::types::RecordType>()
+                || schema_ref.is::<crate::types::VariantType>())
         {
             verify_err!(
                 self.loc(ctx),

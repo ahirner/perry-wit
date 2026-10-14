@@ -117,6 +117,8 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) shapes: HashMap<String, i32>,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
+    /// Whether any async library export reports uncaught rejections to stderr.
+    pub(crate) reports_rejection: bool,
     /// Whether any function starts a `node:fs` operation (callbacks pass it events).
     pub(crate) uses_fs: bool,
     /// Whether the module reads `stream<u8>`s (callbacks pass them events; tasks close them).
@@ -237,6 +239,7 @@ pub(crate) fn lower(
         runtime_frames: BTreeMap::new(),
         shapes: HashMap::new(),
         uses_io: false,
+        reports_rejection: false,
         uses_fs: false,
         uses_streams: false,
         uses_fetch: false,
@@ -412,7 +415,7 @@ fn bind_exports(
                 .as_ref()
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
-            state.uses_io = true;
+            state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
             return Err(perry_wit_diagnostics::PerryDiagnostic::error(
@@ -439,7 +442,7 @@ fn bind_exports(
                 return Err(diagnostic.into());
             }
             if export.is_async() {
-                state.uses_io = true;
+                state.reports_rejection = true;
             }
         }
     }

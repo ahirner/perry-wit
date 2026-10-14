@@ -283,3 +283,13 @@ pub(crate) unsafe extern "C" fn json_cursor_tail(value: u32, graph: *mut u8, sta
     set_word(graph, 20, word(graph, 20) + 1);
     graph as usize as u32
 }
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_seek(value: u32, position: u32) -> u32 {
+    let c = unsafe { cursor(value) };
+    let old = c.position as u32;
+    if position != u32::MAX {
+        c.position = position as usize;
+    }
+    old
+}
+

@@ -56,8 +56,7 @@ impl FunctionLowering<'_, '_> {
         op: Ptr<Operation>,
         ty: TypeHandle,
     ) -> Result<()> {
-        let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
-        let (table, count) = {
+        let (table, count) = if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
             let record = record.deref(ctx);
             let mut names = record.fields()?.iter().enumerate().collect::<Vec<_>>();
             names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
@@ -71,6 +70,15 @@ impl FunctionLowering<'_, '_> {
                 bytes.extend_from_slice(&(*index as u32).to_le_bytes());
             }
             (self.state.data.append(4, &bytes), names.len())
+        } else if ty.deref(ctx).is::<perry_mir::types::VariantType>() {
+            let mut bytes = Vec::with_capacity(16);
+            for (index, name) in [(0u32, "tag"), (1u32, "val")] {
+                bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
+                bytes.extend_from_slice(&index.to_le_bytes());
+            }
+            (self.state.data.append(4, &bytes), 2)
+        } else {
+            return Err(anyhow!("unsupported json_cursor_key schema"));
         };
         let table = self.i32_const(ctx, table as i32);
         let count = self.i32_const(ctx, count as i32);

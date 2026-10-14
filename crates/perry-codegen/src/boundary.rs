@@ -332,7 +332,10 @@ impl FunctionLowering<'_, '_> {
             (self.state.uses_http_server, Runtime::WebServeClose),
             (self.state.uses_fetch, Runtime::WebFetchClose),
             (self.state.uses_streams, Runtime::WebStreamsClose),
-            (self.state.uses_io, Runtime::IoCancel),
+            (
+                self.state.uses_io || self.state.reports_rejection,
+                Runtime::IoCancel,
+            ),
         ] {
             if used {
                 self.runtime_void(ctx, function, vec![]);

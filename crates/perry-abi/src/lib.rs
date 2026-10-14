@@ -232,6 +232,7 @@ pub fn unpin(token: u32) {
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes of valid UTF-8.
+#[inline(never)]
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     unsafe {
@@ -517,6 +518,7 @@ impl Buffer {
     }
 
     /// Make room for at least `additional` more bytes.
+    #[inline(never)]
     pub fn reserve(&mut self, additional: usize) {
         let required = self
             .len
@@ -552,6 +554,7 @@ impl Buffer {
         self.len = (self.len + count).min(self.cap);
     }
 
+    #[inline(never)]
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
         self.reserve(bytes.len());
         // SAFETY: capacity was ensured above.
@@ -602,6 +605,7 @@ pub fn exception_value(tag: u32, value: u64) -> *mut u8 {
 
 /// Reject a native operation with category, code and its original path or URL.
 #[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
+#[inline(never)]
 pub fn reject_native(
     promise: *mut u8,
     kind: u32,
@@ -611,6 +615,7 @@ pub fn reject_native(
     location_key: &str,
     location: &[u8],
 ) {
+    #[inline(never)]
     fn string(bytes: &[u8]) -> *mut u8 {
         let data = alloc(bytes.len() as u32);
         let node = unsafe { alloc_shaped(32, &[0, 3, 4, 8, 24]) };

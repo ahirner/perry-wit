@@ -166,7 +166,8 @@ pub(crate) fn compile_sources(
     let streams = bind::stream_anchor(resolve, world);
     let stdout = imports
         .iter()
-        .any(|name| name.starts_with("wasi:cli/stdout@"));
+        .any(|name| name.starts_with("wasi:cli/stdout@"))
+        && uses_stdout(ctx, &mir);
     let stderr = imports
         .iter()
         .any(|name| name.starts_with("wasi:cli/stderr@"));
@@ -281,6 +282,31 @@ fn finish(
     let core = link::compact(&core).context("interning core function signatures")?;
     audit::validate_guest(&core).context("validating stackless core Wasm")?;
     Ok((core, helpers))
+}
+
+fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
+    use perry_mir::intrinsics::{Intrinsic, IntrinsicOp};
+    use pliron::{
+        builtin::{
+            op_interfaces::{OneRegionInterface, SingleBlockRegionInterface},
+            ops::FuncOp,
+        },
+        linked_list::ContainsLinkedList,
+        operation::Operation,
+    };
+    mir.get_body(ctx, 0)
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .flat_map(|f| f.get_region(ctx).deref(ctx).iter(ctx).collect::<Vec<_>>())
+        .flat_map(|b| b.deref(ctx).iter(ctx).collect::<Vec<_>>())
+        .filter_map(|op| Operation::get_op::<IntrinsicOp>(op, ctx))
+        .any(|op| {
+            matches!(
+                op.intrinsic(ctx),
+                Some(Intrinsic::PrintOut | Intrinsic::WritableStdout)
+            )
+        })
 }
 
 pub fn compile_file(

@@ -141,6 +141,7 @@ runtime_functions! {
     JsonCursorValue = "json_cursor_value" (I32) -> I32;
     JsonCursorMember = "json_cursor_member" (I32, I32) -> I32;
     JsonCursorTail = "json_cursor_tail" (I32, I32, I32) -> I32;
+    JsonCursorSeek = "json_cursor_seek" (I32, I32) -> I32;
     JsonCursorFinish = "json_cursor_finish" (I32, I32);
     JsonCursorKey = "json_cursor_key" (I32, I32, I32) -> I32;
     JsonParseString = "json_parse_string" (I32) -> I32;

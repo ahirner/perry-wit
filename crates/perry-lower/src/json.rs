@@ -450,6 +450,8 @@ pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
             pending.extend(fields.iter().map(|(_, ty)| *ty));
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             pending.push(array.element());
+        } else if let Some(variant) = ty.downcast_ref::<perry_mir::types::VariantType>() {
+            pending.extend(variant.cases().iter().filter_map(|(_, ty)| *ty));
         } else if let Some(optional) = ty.downcast_ref::<perry_mir::types::OptionalType>() {
             pending.push(optional.value());
         } else if !(ty.is::<FP64Type>()
