@@ -16,9 +16,7 @@ use crate::{
 use pliron::{
     builtin::{
         attributes::{FPDoubleAttr, IdentifierAttr, IntegerAttr, TypeAttr},
-        op_interfaces::{
-            BranchOpInterface, OneRegionInterface, OneResultInterface, SymbolOpInterface,
-        },
+        op_interfaces::{BranchOpInterface, OneResultInterface, SymbolOpInterface},
         ops::{ConstantOp, FuncOp},
         type_interfaces::FunctionTypeInterface,
         types::{FunctionType, IntegerType, Signedness},
@@ -32,7 +30,6 @@ use pliron::{
         listener::DummyListener,
         rewriter::{IRRewriter, Rewriter},
     },
-    linked_list::ContainsLinkedList,
     op::{Op, op_cast},
     operation::Operation,
     pass::{Analysis, AnalysisManager, Pass, PassResult},
@@ -1485,13 +1482,10 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         }
         let signature = FunctionType::get(ctx, args.clone(), results.clone());
         function.set_attr_builtin_func_type(ctx, TypeAttr::new(signature.into()));
-        let arguments: Vec<_> = function
-            .get_entry_block(ctx)
-            .deref(ctx)
-            .arguments()
-            .collect();
-        for (argument, ty) in arguments.into_iter().zip(&args) {
-            argument.set_type(ctx, *ty);
+        let entry = function.get_entry_block(ctx);
+        for (index, &ty) in args.iter().enumerate() {
+            let argument = entry.deref(ctx).get_argument(index);
+            argument.set_type(ctx, ty);
         }
         signatures.insert(id, (args, results));
         clones.insert(id, (function, mapping));
@@ -1508,25 +1502,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let (_, mapping) = &clones[&id];
         let state = &analysis.states[id];
         let body = &analysis.bodies[&analysis.keys[id].function];
-        let values: Vec<_> = body
-            .function
-            .get_region(ctx)
-            .deref(ctx)
-            .iter(ctx)
-            .flat_map(|block| {
-                block
-                    .deref(ctx)
-                    .arguments()
-                    .chain(
-                        block
-                            .deref(ctx)
-                            .iter(ctx)
-                            .flat_map(|op| op.deref(ctx).results().collect::<Vec<_>>()),
-                    )
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for value in values {
+        for &value in state.facts.keys() {
             if let Some(domain) = state.representation(value) {
                 let cloned = mapping.lookup_value(value).expect("cloned value");
                 let scalar = domain.ty(ctx);
@@ -1538,12 +1514,15 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 cloned.set_type(ctx, ty);
             }
         }
-        for original in crate::aggregates::operations(ctx, &body.function) {
+        let mut expected = Vec::new();
+        for &constraint in &body.constraints {
+            let Constraint::Op { op: original, .. } = constraint else {
+                continue;
+            };
             let op = mapping.lookup_op(original).expect("cloned operation");
-            let inputs: Vec<_> = original.deref(ctx).operands().collect();
-            let results: Vec<_> = original.deref(ctx).results().collect();
+            let result = original.deref(ctx).results().next();
             rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(op));
-            if let Some(&value) = results.first()
+            if let Some(value) = result
                 && let Some(domain) = state.representation(value)
                 && let Some(bits) = literal(ctx, original)
             {
@@ -1561,7 +1540,13 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 rewriter.replace_operation(ctx, op, constant);
                 continue;
             }
-            let mut expected: Vec<_> = inputs.iter().map(|value| value.get_type(ctx)).collect();
+            expected.clear();
+            expected.extend(
+                original
+                    .deref(ctx)
+                    .operands()
+                    .map(|value| value.get_type(ctx)),
+            );
             if let Some(intrinsic) =
                 Operation::get_op::<crate::intrinsics::IntrinsicOp>(original, ctx)
                     .and_then(|op| op.intrinsic(ctx))
@@ -1582,7 +1567,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     continue;
                 }
                 if intrinsic == crate::intrinsics::Intrinsic::BigIntNegate
-                    && let Some(domain) = state.representation(results[0])
+                    && let Some(domain) = state.representation(result.expect("intrinsic result"))
                 {
                     let ty = TypedHandle::<IntegerType>::from_handle(domain.ty(ctx), ctx)
                         .expect("integer type");
@@ -1620,8 +1605,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     false
                 };
                 expected.clone_from(&signatures[&child].0);
-                let values: Vec<_> = op.deref(ctx).results().collect();
-                for (value, ty) in values.into_iter().zip(&signatures[&child].1) {
+                let results = op.deref(ctx).get_num_results();
+                for (index, ty) in (0..results).zip(&signatures[&child].1) {
+                    let value = op.deref(ctx).get_result(index);
                     let ty = if asynchronous {
                         PromiseType::get(ctx, *ty).into()
                     } else {
@@ -1643,6 +1629,10 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             } else if Operation::get_op::<BinaryOp>(original, ctx).is_some() {
                 expected.fill(op.deref(ctx).get_result(0).get_type(ctx));
             } else if Operation::get_op::<CompareOp>(original, ctx).is_some() {
+                let inputs = [
+                    original.deref(ctx).get_operand(0),
+                    original.deref(ctx).get_operand(1),
+                ];
                 if let Some(domain) = comparison_domain(state, &inputs) {
                     expected.fill(domain.ty(ctx));
                 }
@@ -1663,7 +1653,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     }
                 }
             }
-            for (index, ty) in expected.into_iter().enumerate() {
+            for (index, &ty) in expected.iter().enumerate() {
                 let value = op.deref(ctx).get_operand(index);
                 if value.get_type(ctx) != ty {
                     let cast = NumericCastOp::new(ctx, value, ty);
