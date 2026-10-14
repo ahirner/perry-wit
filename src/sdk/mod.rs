@@ -44,15 +44,18 @@ pub struct SdkResult {
 pub fn generate_sdk_files(
     options: &SdkOptions,
 ) -> std::result::Result<SdkResult, crate::CompileError> {
-    generate_sdk_files_impl(options).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
-    })
+    generate_sdk_files_impl(options)
+        .map_err(|error| crate::CompileError::from_error(error, crate::DiagnosticCode::Io))
 }
 
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
-    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
-    let world = resolve.select_world(&[package], options.world.as_deref())?;
-    let artifacts = declarations(&resolve, world)?;
+    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let world = resolve
+        .select_world(&[package], options.world.as_deref())
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let artifacts = declarations(&resolve, world)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
             "Failed to create SDK output directory at {}",

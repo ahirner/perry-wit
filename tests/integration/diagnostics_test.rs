@@ -1,6 +1,7 @@
 use perry_wit::{
-    DiagnosticCode,
+    DiagnosticCode, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
+    generate_sdk_files,
 };
 
 #[test]
@@ -26,7 +27,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert!(diagnostic.help.is_some());
     assert!(std::error::Error::source(&error).is_some());
 
-    let parse_source = "// é🙂\r\nexport const missing;";
+    let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&Program {
         source: Source {
             name: Some("parse.ts".into()),
@@ -38,7 +39,34 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert_eq!(parse_error.diagnostics[0].code, DiagnosticCode::ParseError);
     let span = parse_error.diagnostics[0].span.as_ref().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
-    assert_eq!((span.start_line, span.start_column), (2, 14));
+    assert_eq!((span.start_line, span.start_column), (5, 14));
+
+    let temp = tempfile::tempdir().unwrap();
+    let wit_dir = temp.path().join("wit");
+    std::fs::create_dir_all(&wit_dir).unwrap();
+    std::fs::write(wit_dir.join("world.wit"), "not valid wit").unwrap();
+    let wit_err = generate_sdk_files(&SdkOptions {
+        wit_dir: wit_dir.clone(),
+        out_dir: temp.path().join("out"),
+        ..SdkOptions::default()
+    })
+    .unwrap_err();
+    assert_eq!(wit_err.diagnostics[0].code, DiagnosticCode::WitResolution);
+
+    std::fs::write(
+        wit_dir.join("world.wit"),
+        "package test:sdk; world app { export run: func() -> f64; }",
+    )
+    .unwrap();
+    let blocker = temp.path().join("blocker");
+    std::fs::write(&blocker, "file").unwrap();
+    let io_err = generate_sdk_files(&SdkOptions {
+        wit_dir,
+        out_dir: blocker.join("types"),
+        ..SdkOptions::default()
+    })
+    .unwrap_err();
+    assert_eq!(io_err.diagnostics[0].code, DiagnosticCode::Io);
 }
 
 #[test]

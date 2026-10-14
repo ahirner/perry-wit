@@ -55,9 +55,23 @@ impl SourceSpan {
             offset
         }
         fn position(source: &str, offset: usize) -> (u32, u32) {
-            let prefix = &source[..offset];
-            let line = prefix.bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
-            let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() as u32 + 1;
+            let mut line = 1;
+            let mut column = 1;
+            let mut chars = source[..offset].chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\r' => {
+                        chars.next_if_eq(&'\n');
+                        line += 1;
+                        column = 1;
+                    }
+                    '\n' | '\u{2028}' | '\u{2029}' => {
+                        line += 1;
+                        column = 1;
+                    }
+                    _ => column += 1,
+                }
+            }
             (line, column)
         }
         let start_byte = boundary(source, start);
