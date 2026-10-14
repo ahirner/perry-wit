@@ -1273,5 +1273,193 @@ fn bounded_context_specialization_and_range_widening_remain_sound() -> Result<()
     Ok(())
 }
 
+#[test]
+fn normalize_json_copy_rewrites_parse_stringify_and_preserves_edge_cases() -> Result<()> {
+    let wit_src = r#"
+        package test:optimization;
+        world test {
+            export copy-isolation: func(id: u64, delta: s64) -> s32;
+            export edge-normalization: func() -> s32;
+            export non-finite-throws: func() -> s32;
+            export untyped-missed: func() -> s32;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let source = r#"
+        import type { s32, s64, u64 } from "perry:types";
+
+        interface Inner {
+            count: s32;
+            items: number[];
+        }
+
+        interface FullItem {
+            id: u64;
+            delta: s64;
+            inner: Inner;
+            opt?: number;
+            extra: string;
+        }
+
+        interface ProjectedItem {
+            id: u64;
+            delta: s64;
+            inner: Inner;
+            opt?: number;
+            missingOpt?: string;
+        }
+
+        interface NullableNums {
+            nanVal: number | null;
+            infVal: number | null;
+            negZero: number;
+            arr: (number | null)[];
+        }
+
+        interface SourceNums {
+            nanVal: number;
+            infVal: number;
+            negZero: number;
+            arr: (number | undefined)[];
+        }
+
+        type Tagged = { tag: "num"; val: number } | { tag: "empty" };
+
+        export function copyIsolation(id: u64, delta: s64): number {
+            const orig: FullItem = {
+                id,
+                delta,
+                inner: { count: 10 as s32, items: [1, 2, 3] },
+                extra: "dropped",
+            };
+            const copy = JSON.parse<ProjectedItem>(JSON.stringify(orig));
+            copy.inner.count = 99 as s32;
+            copy.inner.items[0] = 100;
+
+            const vOrig: Tagged = { tag: "num", val: -0.0 };
+            const vCopy = JSON.parse<Tagged>(JSON.stringify(vOrig));
+            let variantCheck = 0;
+            if (vCopy.tag === "num" && 1 / vCopy.val === Number.POSITIVE_INFINITY) {
+                variantCheck = 1;
+            }
+
+            const tupleOrig: [number, string] = [-0.0, "ok"];
+            const tupleCopy = JSON.parse<[number, string]>(JSON.stringify(tupleOrig));
+            const tupleCheck =
+                1 / tupleCopy[0] === Number.POSITIVE_INFINITY && tupleCopy[1] === "ok" ? 1 : 0;
+
+            if (
+                orig.inner.count === (10 as s32) &&
+                orig.inner.items[0] === 1 &&
+                copy.id === id &&
+                copy.delta === delta &&
+                copy.opt === undefined &&
+                copy.missingOpt === undefined &&
+                variantCheck === 1 &&
+                tupleCheck === 1
+            ) {
+                return 1;
+            }
+            return 0;
+        }
+
+        export function edgeNormalization(): number {
+            const src: SourceNums = {
+                nanVal: Number.NaN,
+                infVal: Number.POSITIVE_INFINITY,
+                negZero: -0.0,
+                arr: [1.5, undefined, -0.0],
+            };
+            const dst = JSON.parse<NullableNums>(JSON.stringify(src));
+            if (
+                dst.nanVal === null &&
+                dst.infVal === null &&
+                1 / dst.negZero === Number.POSITIVE_INFINITY &&
+                dst.arr.length === 3 &&
+                dst.arr[0] === 1.5 &&
+                dst.arr[1] === null &&
+                dst.arr[2] !== null &&
+                1 / dst.arr[2]! === Number.POSITIVE_INFINITY
+            ) {
+                return 1;
+            }
+            return 0;
+        }
+
+        export function nonFiniteThrows(): number {
+            let caught = 0;
+            try {
+                const bad: { x: number } = { x: Number.NaN };
+                const _res = JSON.parse<{ x: number }>(JSON.stringify(bad));
+            } catch (_e) {
+                caught += 1;
+            }
+            try {
+                const badInf: { x: number } = { x: Number.NEGATIVE_INFINITY };
+                const _res = JSON.parse<{ x: number }>(JSON.stringify(badInf));
+            } catch (_e) {
+                caught += 10;
+            }
+            return caught;
+        }
+
+        export function untypedMissed(): number {
+            const raw = JSON.parse(JSON.stringify({ a: 7 }));
+            const parsed = JSON.parse<Inner>('{"count":10,"items":[1],"unknownResidue":77}');
+            const roundtripped = JSON.parse<Inner>(JSON.stringify(parsed));
+            const out = JSON.stringify(roundtripped);
+            return raw !== null && out === '{"count":10,"items":[1],"unknownResidue":77}' ? 1 : 0;
+        }
+    "#;
+    let compiled =
+        perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    assert!(
+        compiled
+            .allocation_report
+            .contains("parse_stringify_rewrites=6"),
+        "expected 6 parse_stringify_rewrites in report: {}",
+        compiled.allocation_report
+    );
+    assert!(
+        compiled
+            .allocation_report
+            .contains("parse_stringify_missed=2"),
+        "expected 2 parse_stringify_missed in report: {}",
+        compiled.allocation_report
+    );
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    let exact_u64 = 9_007_199_254_740_993_u64 as i64;
+    let exact_s64 = -9_007_199_254_740_993_i64;
+    assert_eq!(
+        program
+            .call(
+                "copy-isolation",
+                &[
+                    wasmtime::Val::I64(exact_u64),
+                    wasmtime::Val::I64(exact_s64),
+                ],
+            )
+            .0[0]
+            .unwrap_i32(),
+        1
+    );
+    assert_eq!(
+        program.call("edge-normalization", &[]).0[0].unwrap_i32(),
+        1
+    );
+    assert_eq!(
+        program.call("non-finite-throws", &[]).0[0].unwrap_i32(),
+        11
+    );
+    assert_eq!(
+        program.call("untyped-missed", &[]).0[0].unwrap_i32(),
+        1
+    );
+    Ok(())
+}
+
+
 
 

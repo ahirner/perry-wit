@@ -12,6 +12,8 @@ pub struct OptimizationStatistics {
     pub range_widenings: u64,
     pub specializations: u64,
     pub cleanup_rounds: u64,
+    pub parse_stringify_rewrites: u64,
+    pub parse_stringify_missed: u64,
 }
 
 /// Absence states admitted by a statically typed value.

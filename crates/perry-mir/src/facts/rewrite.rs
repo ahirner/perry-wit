@@ -55,6 +55,7 @@ impl Pass for Specialize {
         } else {
             rewrite(ctx, &analysis)
         };
+        let previous = crate::pipeline::statistics(root, ctx);
         root.deref_mut(ctx).attributes.set(
             crate::pipeline::STATISTICS.clone(),
             crate::attrs::OptimizationStatistics {
@@ -65,6 +66,8 @@ impl Pass for Specialize {
                 range_widenings: analysis.range_widenings as u64,
                 specializations: specializations as u64,
                 cleanup_rounds: 0,
+                parse_stringify_rewrites: previous.parse_stringify_rewrites,
+                parse_stringify_missed: previous.parse_stringify_missed,
             },
         );
         let mut result = PassResult::default();

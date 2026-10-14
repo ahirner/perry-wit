@@ -447,3 +447,46 @@ fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn normalize_json_copy_rewrites_typed_parse_of_stringify_and_tracks_missed() -> Result<()> {
+    let rec = r#"perry.record <Point { x: builtin.fp64 }>"#;
+    let opt_str = r#"perry.optional <perry.string,Undefined>"#;
+    let src = format!(
+        r#"builtin.module @m {{
+  ^module():
+    builtin.func @perry_json_parse_0: builtin.function <(perry.string) -> ({rec})> {{
+      ^entry(text: perry.string):
+        z = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        r = perry.alloc Unassigned (z) : {rec};
+        perry.return r
+    }};
+    builtin.func @run: builtin.function <({rec}) -> ({rec})> {{
+      ^entry(input: {rec}):
+        raw = perry.json_stringify input : {opt_str};
+        text = perry.unwrap raw : perry.string;
+        copied = perry.call perry_json_parse_0 (text) : {rec};
+        raw2 = perry.json_stringify input : {opt_str};
+        text2 = perry.unwrap raw2 : perry.string;
+        untyped = perry.intrinsic json_parse (text2) : perry.json;
+        _keep = perry.intrinsic json_is_null (untyped) : builtin.integer i1;
+        perry.return copied
+    }}
+}}"#
+    );
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &src);
+    let function = crate::aggregates::functions(module, ctx)[1];
+    crate::calls::set_exported(ctx, &function);
+    crate::pipeline::canonicalize(module, ctx)?;
+    verify_operation(module, ctx)?;
+    let stats = crate::pipeline::statistics(module, ctx);
+    assert_eq!(stats.parse_stringify_rewrites, 1);
+    assert_eq!(stats.parse_stringify_missed, 1);
+    let printed = print(ctx, module);
+    assert!(
+        !printed.contains("perry_json_parse_0 ("),
+        "expected call to perry_json_parse_0 to be rewritten in:\n{printed}"
+    );
+    Ok(())
+}

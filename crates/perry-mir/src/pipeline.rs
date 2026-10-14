@@ -32,6 +32,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     });
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
+    preparation.add_pass(crate::json_copy::NormalizeJsonCopy);
     preparation.add_pass(crate::facts::Specialize);
     preparation.add_pass(Transform("inline-leaves", |root, ctx| {
         Ok(crate::aggregates::inline_leaves(root, ctx))
