@@ -467,7 +467,8 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
         assert_eq!(facts.summarized_heap_sets > 0, size > 32);
         visits.push(facts.constraint_visits);
     }
-    assert!(visits[1] < 5 * visits[0], "{visits:?}");
-    assert!(visits[3] < 5 * visits[2], "{visits:?}");
+    for pair in visits.windows(2) {
+        assert!(pair[1] < 5 * pair[0], "{visits:?}");
+    }
     Ok(())
 }
