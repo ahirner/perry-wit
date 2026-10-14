@@ -67,7 +67,7 @@ impl<'s> FunctionBuilder<'s> {
             .map(|array| array.deref(ctx).element());
         let fixed_element = element.is_some();
         if element.is_none() {
-            let env = perry_hir::HirTypeEnv::from_module(self.shapes.hir);
+            let env = &self.shapes.type_env;
             element = items.iter().find_map(|item| {
                 let (expression, spread) = match item {
                     perry_hir::ArrayElement::Expr(Expr::Null | Expr::Undefined)
@@ -75,7 +75,7 @@ impl<'s> FunctionBuilder<'s> {
                     perry_hir::ArrayElement::Expr(expr) => (expr, false),
                     perry_hir::ArrayElement::Spread(expr) => (expr, true),
                 };
-                let ty = perry_hir::infer_expr_type(expression, &env);
+                let ty = perry_hir::infer_expr_type(expression, env);
                 let ty = if spread {
                     if let HirType::Array(inner) = ty {
                         *inner

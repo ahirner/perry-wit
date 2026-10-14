@@ -44,6 +44,9 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             method
         };
+        if let Some(value) = self.collection_method(ctx, object, receiver, method, args)? {
+            return Ok(value);
+        }
         let value = match (kind(ctx, receiver)?, method) {
             (Kind::Array, "push") => Some(self.push_values(ctx, receiver, args)?),
             (Kind::String, "concat") => {
@@ -64,6 +67,61 @@ impl<'s> FunctionBuilder<'s> {
                     bail!("array.{method} requires one static callback")
                 };
                 Some(self.array_transform(ctx, receiver, callback, method == "filter")?)
+            }
+            (Kind::Array, "find" | "findIndex") => {
+                let [callback] = args else {
+                    bail!("array.{method} requires one static callback")
+                };
+                Some(self.array_find(ctx, receiver, callback, method == "findIndex")?)
+            }
+            (Kind::Array, "some" | "every") => {
+                let [callback] = args else {
+                    bail!("array.{method} requires one static callback")
+                };
+                Some(self.array_quantifier(ctx, receiver, callback, method == "every")?)
+            }
+            (Kind::Array, "flatMap") => {
+                let [callback] = args else {
+                    bail!("array.flatMap requires one static callback")
+                };
+                Some(self.array_flat_map(ctx, receiver, callback)?)
+            }
+            (Kind::Array, "sort" | "toSorted") => {
+                ensure!(
+                    args.len() <= 1,
+                    "array.{method} accepts at most one comparator callback"
+                );
+                Some(self.array_sort(ctx, receiver, arg(0), method == "toSorted")?)
+            }
+            (Kind::Array, "reduce" | "reduceRight") => {
+                let (Some(callback), true) = (arg(0), args.len() <= 2) else {
+                    bail!("array.{method} requires a callback and optional initial value")
+                };
+                Some(self.array_reduce(ctx, receiver, callback, arg(1), method == "reduceRight")?)
+            }
+            (Kind::String, "localeCompare") => {
+                let [other] = args else {
+                    bail!("string.localeCompare requires one string");
+                };
+                let other = self.string_operand(ctx, other)?;
+                let num_ty = FP64Type::get(ctx).into();
+                let lt = self.compare(ctx, CompareKind::Lt, receiver, other);
+                Some(self.choose(
+                    ctx,
+                    num_ty,
+                    lt,
+                    |b, ctx| Ok(b.number(ctx, -1.0)),
+                    |b, ctx| {
+                        let gt = b.compare(ctx, CompareKind::Gt, receiver, other);
+                        b.choose(
+                            ctx,
+                            num_ty,
+                            gt,
+                            |b, ctx| Ok(b.number(ctx, 1.0)),
+                            |b, ctx| Ok(b.number(ctx, 0.0)),
+                        )
+                    },
+                )?)
             }
             (Kind::Array, "includes" | "indexOf") => {
                 let (value, from_index) = match args {
@@ -246,7 +304,12 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.call_intrinsic(ctx, intrinsic, vec![receiver])
             }
-            (_, method) => bail!("method {method} is not supported on this type yet"),
+            (receiver_kind, method) => {
+                bail!(
+                    "method {method} is not supported on {} yet",
+                    receiver_kind.label()
+                )
+            }
         };
         Ok(value)
     }

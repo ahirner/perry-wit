@@ -127,7 +127,7 @@ impl<'s> FunctionBuilder<'s> {
                     names.len() == args.len(),
                     "init object arity differs from its shape"
                 );
-                Ok(names.into_iter().zip(args.iter()).collect())
+                Ok(names.iter().copied().zip(args.iter()).collect())
             }
             Some(_) => bail!(NOT_LITERAL),
         }
@@ -357,7 +357,9 @@ impl<'s> FunctionBuilder<'s> {
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
             }
-            (_, name, _) => bail!("{name} is not supported on this type yet"),
+            (receiver_kind, name, _) => {
+                bail!("{name} is not supported on {} yet", receiver_kind.label())
+            }
         };
         if args.is_some_and(|args| !args.is_empty()) && !matches!(receiver_kind, Kind::Headers) {
             bail!("{name} takes no arguments");

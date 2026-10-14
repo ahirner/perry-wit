@@ -276,7 +276,25 @@ impl FunctionLowering<'_, '_> {
         let record_type = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
         let tuple = record_type.is_some_and(|record| record.deref(ctx).is_tuple());
         let variant_type = TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx).ok();
-        let (open, close) = if (record_type.is_some() && !tuple) || variant_type.is_some() {
+        let dict_entry = TypedHandle::<ArrayType>::from_handle(ty, ctx)
+            .ok()
+            .map(|a| a.deref(ctx).element())
+            .and_then(|elem| {
+                let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
+                let rec_ref = rec.deref(ctx);
+                if !rec_ref.is_tuple() || !rec_ref.name().as_ref().starts_with("dict_tuple_") {
+                    return None;
+                }
+                let fields = rec_ref.fields().ok()?;
+                if fields.len() != 2 {
+                    return None;
+                }
+                Some((elem, fields[0].1, fields[1].1))
+            });
+        let (open, close) = if (record_type.is_some() && !tuple)
+            || variant_type.is_some()
+            || dict_entry.is_some()
+        {
             ('{', '}')
         } else {
             ('[', ']')
@@ -319,6 +337,40 @@ impl FunctionLowering<'_, '_> {
                 &["tag", "val"],
                 count,
             );
+        } else if let Some((tuple_ty, _k_ty, v_ty)) = dict_entry {
+            let kind = slot_kind(ctx, tuple_ty)?;
+            let k_kind = slot_kind(ctx, _k_ty)?;
+            let v_kind = slot_kind(ctx, v_ty)?;
+            let len = b.load(ctx, MemKind::I32, value, array::LEN);
+            let data = b.load(ctx, MemKind::I32, value, array::DATA);
+            b.counted_loop(ctx, len, |b, ctx, i| {
+                let slot = b.slot_address(ctx, data, i);
+                let item = b.load(ctx, kind, slot, 0);
+                let key = b.load(ctx, k_kind, item, record::field(0));
+                let val = b.load(ctx, v_kind, item, record::field(1));
+                let present = match optional_inner(ctx, v_ty) {
+                    Some(_) => {
+                        let undefined = b.absence_test(ctx, val, v_ty, false)?;
+                        Some(b.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
+                    }
+                    None => None,
+                };
+                let member = b.new_block(ctx, vec![]);
+                let next = b.new_block(ctx, vec![]);
+                match present {
+                    Some(present) => b.cond_br(ctx, present, (member, vec![]), (next, vec![])),
+                    None => b.br(ctx, member, vec![]),
+                }
+                b.block = member;
+                b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
+                b.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, key]);
+                b.json_raw(ctx, writer, ":");
+                let val_write_ty = optional_inner(ctx, v_ty).unwrap_or(v_ty);
+                b.json_value(ctx, writer, val, val_write_ty)?;
+                b.br(ctx, next, vec![]);
+                b.block = next;
+                Ok(())
+            })?;
         } else {
             let element = FunctionLowering::element_type(ctx, value).or_else(|_| {
                 TypedHandle::<ArrayType>::from_handle(ty, ctx)

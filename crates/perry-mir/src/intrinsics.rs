@@ -17,13 +17,12 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        attributes::{IdentifierAttr, TypeAttr},
+        attributes::TypeAttr,
         types::{FP64Type, IntegerType, Signedness},
     },
     common_traits::Verify,
     context::{Context, Ptr},
-    derive::{op_interface_impl, pliron_op},
-    identifier::Identifier,
+    derive::{op_interface_impl, pliron_attr, pliron_op},
     op::{Op, op_cast},
     operation::Operation,
     opts::dce::SideEffects,
@@ -318,24 +317,16 @@ macro_rules! operand {
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
+        #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
         pub enum Intrinsic {
             $($variant,)*
         }
 
         impl Intrinsic {
-            const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
-
             pub fn name(self) -> &'static str {
                 match self {
                     $(Intrinsic::$variant => $name,)*
-                }
-            }
-
-            /// The name as an identifier, validated at compile time.
-            fn identifier(self) -> Identifier {
-                match self {
-                    $(Intrinsic::$variant => pliron::ident!($name),)*
                 }
             }
 
@@ -617,10 +608,6 @@ impl Intrinsic {
         self.allocation() != crate::effects::Allocation::None
     }
 
-    fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|i| i.name() == name)
-    }
-
     /// Pure services can be removed when unused.
     pub fn pure(self) -> bool {
         self.flags().contains(&"pure")
@@ -695,8 +682,8 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 
 #[derive(Debug, Error)]
 enum IntrinsicErr {
-    #[error("unknown intrinsic {0}")]
-    Unknown(String),
+    #[error("missing intrinsic attribute")]
+    Missing,
     #[error("intrinsic {0} has the wrong operand or result types")]
     Signature(String),
 }
@@ -704,8 +691,8 @@ enum IntrinsicErr {
 /// A call of a host or runtime service.
 #[pliron_op(
     name = "perry.intrinsic",
-    format = "attr($perry_intrinsic, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
-    attributes = (perry_intrinsic: IdentifierAttr)
+    format = "attr($perry_intrinsic, $Intrinsic) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
+    attributes = (perry_intrinsic: Intrinsic)
 )]
 pub struct IntrinsicOp;
 
@@ -720,24 +707,19 @@ impl IntrinsicOp {
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
-        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(intrinsic.identifier()));
+        op.set_attr_perry_intrinsic(ctx, intrinsic);
         op
     }
 
     pub fn intrinsic(&self, ctx: &Context) -> Option<Intrinsic> {
-        let name: Identifier = self.get_attr_perry_intrinsic(ctx)?.clone().into();
-        Intrinsic::from_name(name.as_ref())
+        self.get_attr_perry_intrinsic(ctx).map(|i| *i)
     }
 }
 
 impl Verify for IntrinsicOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let Some(intrinsic) = self.intrinsic(ctx) else {
-            let name = format!(
-                "{:?}",
-                self.get_attr_perry_intrinsic(ctx).map(|a| a.clone())
-            );
-            return verify_err!(self.loc(ctx), IntrinsicErr::Unknown(name));
+            return verify_err!(self.loc(ctx), IntrinsicErr::Missing);
         };
         let op = self.get_operation().deref(ctx);
         let operands: Vec<_> = op.operands().map(|v| v.get_type(ctx)).collect();

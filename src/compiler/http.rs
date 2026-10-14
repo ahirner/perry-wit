@@ -114,7 +114,7 @@ pub(crate) fn compile(
         &program,
         file_name,
         modules,
-        &wit_types::foreign(types),
+        &wit_types::foreign(types, None),
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;

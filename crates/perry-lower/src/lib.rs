@@ -17,6 +17,7 @@ mod builder;
 mod builtins;
 mod calls;
 mod coerce;
+mod collections;
 mod control_flow;
 mod dates;
 mod decoder;
@@ -103,9 +104,20 @@ use pliron::{
 use shapes::{BindingType, Shapes, identifier};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// HIR types, for callers that describe foreign (WIT) types.
+/// HIR types and structural foreign (WIT) symbol descriptors.
 pub mod hir {
     pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
+    pub use pliron::builtin::types::Signedness;
+
+    /// A foreign (WIT) symbol in the world's symbol table.
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Foreign {
+        Type(Type),
+        Integer { width: u32, signedness: Signedness },
+        Resource(u32),
+        Input(Box<Foreign>),
+        Function(FunctionType),
+    }
 }
 use builder::{
     Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding, remove_unreachable,
@@ -117,13 +129,13 @@ use program::{Builtin, Signature};
 pub const MAIN: &str = "perry_main";
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
-/// `foreign` types by SDK name: WIT types the program imports from its generated declarations.
+/// `foreign` symbols by SDK name: WIT types and functions the program imports.
 #[cfg(test)]
 fn lower_source(
     ctx: &mut Context,
     source: &str,
     file: &str,
-    foreign: &HashMap<String, HirType>,
+    foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<ModuleOp> {
     let modules = source_files::load(source, file)?;
     lower_sources(ctx, source, file, &modules, foreign)
@@ -135,16 +147,17 @@ pub fn lower_sources(
     source: &str,
     identity: &str,
     modules: &BTreeMap<String, String>,
-    foreign: &HashMap<String, HirType>,
+    foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<ModuleOp> {
     let loaded = modules::load(source, identity, modules, foreign)?;
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
     locations.collect(&ast);
-    source::validate(&ast)?;
+    source::validate(&ast, &locations)?;
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
     array_methods::preserve_arguments(&mut ast);
+    collections::preserve_type_args(&mut ast);
     let mut hir = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()

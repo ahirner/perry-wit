@@ -37,7 +37,7 @@ impl Signature {
 pub(super) fn build_module(
     ctx: &mut Context,
     hir: &HirModule,
-    foreign: &HashMap<String, HirType>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
     inferred: HashSet<LocalId>,
     locations: &crate::locations::Locations<'_>,
 ) -> Result<ModuleOp> {
@@ -60,41 +60,58 @@ pub(super) fn build_module(
                 source,
                 "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
             );
-        ensure!(
-            !matches!(source, "fs" | "node:fs"),
-            "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
-        );
-        ensure!(
-            module.is_some() || !builtin,
-            "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
-        );
+        if matches!(source, "fs" | "node:fs") {
+            return Err(locations.annotate_import(
+                anyhow!(
+                    "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
+                ),
+                source,
+            ));
+        }
+        if module.is_none() && builtin {
+            return Err(locations.annotate_import(
+                anyhow!(
+                    "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
+                ),
+                source,
+            ));
+        }
         let Some(module) = module else { continue };
         for specifier in &import.specifiers {
             let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                bail!("only named imports from {source} are supported yet");
+                return Err(locations.annotate_import(
+                    anyhow!("only named imports from {source} are supported yet"),
+                    source,
+                ));
             };
             let builtin = Builtin::from_import(module, imported)
-                .with_context(|| format!("{imported} from {source} is not supported yet"))?;
+                .with_context(|| format!("{imported} from {source} is not supported yet"))
+                .map_err(|error| locations.annotate_import(error, source))?;
             builtins.insert(local.clone(), builtin);
         }
     }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
-        ensure!(
-            !function.is_generator,
-            "generator function {} is not supported yet",
-            function.name
-        );
+        if function.is_generator {
+            return Err(locations.annotate_function(
+                anyhow!("generator function {} is not supported yet", function.name),
+                &function.name,
+            ));
+        }
 
         let params = function
             .params
             .iter()
             .map(|param| {
-                ensure!(
-                    param.default.is_none() && !param.is_rest,
-                    "default and rest parameters are not supported yet: {}",
-                    function.name
-                );
+                if param.default.is_some() || param.is_rest {
+                    return Err(shapes.annotate_local(
+                        anyhow!(
+                            "default and rest parameters are not supported yet: {}",
+                            function.name
+                        ),
+                        param.id,
+                    ));
+                }
                 let carrier = shapes
                     .value_type(ctx, &param.ty)
                     .map_err(|error| shapes.annotate_local(error, param.id))

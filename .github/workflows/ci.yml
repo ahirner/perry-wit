@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   conformance-and-tests:
     runs-on: ubuntu-latest
@@ -30,9 +34,15 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix develop -c cargo test --workspace --locked
-    - name: Compare deterministic compiler benchmarks
-      run: nix develop -c cargo test --locked --test benchmark -- --ignored --nocapture
+    - name: Run tests, benchmarks, conformance, and clippy
+      run: |
+        nix develop -c bash -euo pipefail -c '
+          cargo test --workspace --locked
+          cargo test --locked --test benchmark -- --ignored --nocapture
+          cargo test -p perry-runtime --all-features --locked
+          cargo run --locked -p perry-conformance -- check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        '
       env:
         PERRY_BENCH_BASELINE: tests/baselines/pliron.json
         PERRY_BENCH_REPORT: benchmark-report.json
@@ -42,9 +52,6 @@ jobs:
         name: compiler-benchmark-report
         path: benchmark-report.json
         if-no-files-found: warn
-    - run: nix develop -c cargo test -p perry-runtime --all-features --locked
-    - run: nix develop -c cargo run --locked -p perry-conformance -- check
-    - run: nix develop -c cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   flake-build:
     strategy:
@@ -73,12 +80,10 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix --version
     - run: nix flake check -L --keep-going
-    - run: nix flake show
-    - run: nix develop -L -c echo built
-    - run: nix build -L .#perry-wit
+      if: matrix.os == 'ubuntu-latest'
     - run: |
+        nix build -L .#perry-wit
         mkdir -p dist
         tar -czf "dist/perry-wit-${{ matrix.target }}.tar.gz" -C result/bin perry-wit
     - uses: actions/upload-artifact@v7
@@ -86,24 +91,22 @@ jobs:
         name: perry-wit-${{ matrix.target }}
         path: dist/perry-wit-${{ matrix.target }}.tar.gz
         if-no-files-found: error
-    - run: nix build -L .#core-helpers --out-link result-helpers
-    - run: |
-        mkdir -p dist
+    - name: Package core helpers and Wasm compiler
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        nix build -L .#core-helpers --out-link result-helpers
         tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib
+        nix build -L .#perry-wit-wasm --out-link result-compiler
+        mkdir -p dist/compiler
+        cp result-compiler/lib/perry-wit.wasm dist/compiler/
+        cp result-compiler/share/perry-wit/compiler.wit dist/compiler/
+        cp result-compiler/share/perry-wit/metadata.json dist/compiler/compiler.metadata.json
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:
         name: perry-wit-core-helpers
         path: dist/perry-wit-core-helpers.tar.gz
         if-no-files-found: error
-    - name: Package Wasm compiler
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        nix build -L .#perry-wit-wasm --out-link result-compiler
-        mkdir -p dist/compiler
-        cp result-compiler/lib/perry-wit.wasm dist/compiler/
-        cp result-compiler/share/perry-wit/compiler.wit dist/compiler/
-        cp result-compiler/share/perry-wit/metadata.json dist/compiler/compiler.metadata.json
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:
@@ -139,8 +142,11 @@ jobs:
         name: cybertreiber
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: nix run -L .#site
-    - run: nix develop .#browser -c npm ci --prefix site --ignore-scripts --no-audit --no-fund
-    - run: nix develop .#browser -c node site/check-browser.mjs
+    - run: |
+        nix develop .#browser -c bash -euo pipefail -c '
+          npm ci --prefix site --ignore-scripts --no-audit --no-fund
+          node site/check-browser.mjs
+        '
       env:
         DEBUG: pw:browser
     - uses: actions/upload-artifact@v7

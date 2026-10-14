@@ -39,7 +39,8 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         field: &str,
     ) -> Result<Value> {
-        let date = kind(ctx, value)? == Kind::PlainDate;
+        let receiver_kind = kind(ctx, value)?;
+        let date = receiver_kind == Kind::PlainDate;
         let part = match field {
             "year" => 0,
             "month" => 1,
@@ -51,7 +52,12 @@ impl<'s> FunctionBuilder<'s> {
             "millisecond" if !date => 6,
             "microsecond" if !date => 7,
             "nanosecond" if !date => 8,
-            other => bail!("property {other} is not supported on this Temporal type yet"),
+            other => {
+                bail!(
+                    "property {other} is not supported on {} yet",
+                    receiver_kind.label()
+                )
+            }
         };
         let part = self.number(ctx, f64::from(part));
         let intrinsic = if date {
@@ -69,13 +75,14 @@ impl<'s> FunctionBuilder<'s> {
         method: &str,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        Ok(match (kind(ctx, receiver)?, method) {
+        let receiver_kind = kind(ctx, receiver)?;
+        Ok(match (receiver_kind, method) {
             (Kind::Instant | Kind::PlainDate | Kind::PlainDateTime, "toString" | "toJSON") => {
                 ensure!(
                     args.is_empty(),
                     "Temporal toString options are not supported yet"
                 );
-                let intrinsic = match kind(ctx, receiver)? {
+                let intrinsic = match receiver_kind {
                     Kind::Instant => Intrinsic::InstantString,
                     Kind::PlainDate => Intrinsic::PlainDateString,
                     _ => Intrinsic::PlainDateTimeString,
@@ -101,14 +108,17 @@ impl<'s> FunctionBuilder<'s> {
                     _ => bail!("Temporal add takes a literal {{ days }}"),
                 };
                 let days = self.typed_operand(ctx, days, Kind::Number, "a number of days")?;
-                let intrinsic = if kind(ctx, receiver)? == Kind::PlainDate {
+                let intrinsic = if receiver_kind == Kind::PlainDate {
                     Intrinsic::PlainDateAddDays
                 } else {
                     Intrinsic::PlainDateTimeAddDays
                 };
                 self.call_intrinsic(ctx, intrinsic, vec![receiver, days])
             }
-            _ => bail!("Temporal method {method} is not supported"),
+            _ => bail!(
+                "Temporal method {method} is not supported on {}",
+                receiver_kind.label()
+            ),
         })
     }
 }

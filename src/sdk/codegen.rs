@@ -46,7 +46,7 @@ pub(crate) fn to_pascal_case(s: &str) -> String {
     result
 }
 
-fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
+pub(crate) fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     while let TypeDefKind::Type(Type::Id(inner)) = &resolve.types[id].kind {
         if resolve.types[id].name != resolve.types[*inner].name {
             break;
@@ -56,11 +56,121 @@ fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     id
 }
 
+pub(crate) fn qualified_type_name(resolve: &Resolve, id: TypeId) -> String {
+    let id = declaration_id(resolve, id);
+    let definition = &resolve.types[id];
+    let name = to_pascal_case(
+        definition
+            .name
+            .as_deref()
+            .expect("callers name only named WIT types; aliases keep their declaration's name"),
+    );
+    let owner = match definition.owner {
+        TypeOwner::Interface(interface) => resolve
+            .id_of(interface)
+            .unwrap_or_else(|| format!("interface-{}", interface.index())),
+        TypeOwner::World(world) => {
+            let world = &resolve.worlds[world];
+            world
+                .package
+                .map(|package| resolve.id_of_name(package, &world.name))
+                .unwrap_or_else(|| world.name.clone())
+        }
+        TypeOwner::None => format!("type-{}", id.index()),
+    };
+    format!("{}{name}", to_pascal_case(&owner))
+}
+
+pub(crate) fn collect_world_types(resolve: &Resolve, world: &World) -> HashSet<TypeId> {
+    fn collect_type(
+        resolve: &Resolve,
+        ty: &Type,
+        seen: &mut HashSet<TypeId>,
+        out: &mut HashSet<TypeId>,
+    ) {
+        let Type::Id(id) = ty else {
+            return;
+        };
+        let decl = declaration_id(resolve, *id);
+        if !seen.insert(decl) {
+            return;
+        }
+        if resolve.types[decl].name.is_some() {
+            out.insert(decl);
+        }
+        if let TypeDefKind::Handle(
+            wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
+        ) = resolve.types[decl].kind
+        {
+            collect_type(resolve, &Type::Id(resource), seen, out);
+        }
+        visit_type_children(&resolve.types[decl].kind, |child| {
+            collect_type(resolve, child, seen, out);
+        });
+    }
+    let mut seen = HashSet::new();
+    let mut out = HashSet::new();
+    for (_, item) in world.imports.iter().chain(world.exports.iter()) {
+        match item {
+            WorldItem::Interface { id, .. } => {
+                let iface = &resolve.interfaces[*id];
+                for &type_id in iface.types.values() {
+                    collect_type(resolve, &Type::Id(type_id), &mut seen, &mut out);
+                }
+                for func in iface.functions.values() {
+                    for param in &func.params {
+                        collect_type(resolve, &param.ty, &mut seen, &mut out);
+                    }
+                    if let Some(ret) = &func.result {
+                        collect_type(resolve, ret, &mut seen, &mut out);
+                    }
+                }
+            }
+            WorldItem::Function(func) => {
+                for param in &func.params {
+                    collect_type(resolve, &param.ty, &mut seen, &mut out);
+                }
+                if let Some(ret) = &func.result {
+                    collect_type(resolve, ret, &mut seen, &mut out);
+                }
+            }
+            WorldItem::Type { id, .. } => {
+                collect_type(resolve, &Type::Id(*id), &mut seen, &mut out);
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn world_type_name(
+    resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
+    id: TypeId,
+) -> String {
+    let id = declaration_id(resolve, id);
+    let definition = &resolve.types[id];
+    let name = to_pascal_case(
+        definition
+            .name
+            .as_deref()
+            .expect("callers name only named WIT types; aliases keep their declaration's name"),
+    );
+    let collides = world_types.iter().any(|&other| {
+        let other = declaration_id(resolve, other);
+        other != id
+            && resolve.types[other]
+                .name
+                .as_deref()
+                .is_some_and(|other| to_pascal_case(other) == name)
+    });
+    if !collides {
+        return name;
+    }
+    qualified_type_name(resolve, id)
+}
+
 /// The TypeScript name of a named WIT type, owner-qualified when another declaration shares
-/// its PascalCase name.
-///
-/// Callers pass only named types (declarations, resources, or ids filtered on `name`); an
-/// invented name for an anonymous type would reference a declaration that does not exist.
+/// its PascalCase name across `resolve`.
 pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = declaration_id(resolve, id);
     let definition = &resolve.types[id];
@@ -80,24 +190,11 @@ pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
     if !collides {
         return name;
     }
-    let owner = match definition.owner {
-        TypeOwner::Interface(interface) => resolve
-            .id_of(interface)
-            .unwrap_or_else(|| format!("interface-{}", interface.index())),
-        TypeOwner::World(world) => {
-            let world = &resolve.worlds[world];
-            world
-                .package
-                .map(|package| resolve.id_of_name(package, &world.name))
-                .unwrap_or_else(|| world.name.clone())
-        }
-        TypeOwner::None => format!("type-{}", id.index()),
-    };
-    format!("{}{name}", to_pascal_case(&owner))
+    qualified_type_name(resolve, id)
 }
 
 /// Formats a WIT Type into its corresponding TypeScript representation.
-fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
+fn wit_type_to_ts(resolve: &Resolve, world_types: &HashSet<TypeId>, ty: &Type) -> String {
     match ty {
         Type::Bool => "boolean".to_string(),
         Type::U8
@@ -114,38 +211,38 @@ fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
         Type::Id(id) => {
             let type_def = &resolve.types[*id];
             if type_def.name.is_some() {
-                type_name(resolve, *id)
+                world_type_name(resolve, world_types, *id)
             } else {
-                type_kind_to_ts(resolve, &type_def.kind)
+                type_kind_to_ts(resolve, world_types, &type_def.kind)
             }
         }
     }
 }
 
-fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
+fn type_kind_to_ts(resolve: &Resolve, world_types: &HashSet<TypeId>, kind: &TypeDefKind) -> String {
     match kind {
         TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            type_name(resolve, *id)
+            world_type_name(resolve, world_types, *id)
         }
         TypeDefKind::Stream(Some(Type::U8)) => "ReadableStream<Uint8Array>".into(),
         TypeDefKind::List(elem) => {
             if matches!(elem, Type::U8) {
                 "Uint8Array".to_string()
             } else {
-                format!("Array<{}>", wit_type_to_ts(resolve, elem))
+                format!("Array<{}>", wit_type_to_ts(resolve, world_types, elem))
             }
         }
         TypeDefKind::Option(inner) => {
-            format!("{} | null", wit_type_to_ts(resolve, inner))
+            format!("{} | null", wit_type_to_ts(resolve, world_types, inner))
         }
         TypeDefKind::Result(WitResult { ok, err }) => {
             let ok = ok
                 .as_ref()
-                .map(|ty| format!("; value: {}", wit_type_to_ts(resolve, ty)))
+                .map(|ty| format!("; value: {}", wit_type_to_ts(resolve, world_types, ty)))
                 .unwrap_or_default();
             let err = err
                 .as_ref()
-                .map(|ty| format!("; error: {}", wit_type_to_ts(resolve, ty)))
+                .map(|ty| format!("; error: {}", wit_type_to_ts(resolve, world_types, ty)))
                 .unwrap_or_default();
             format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
         }
@@ -153,7 +250,7 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
             let items: Vec<String> = tuple
                 .types
                 .iter()
-                .map(|t| wit_type_to_ts(resolve, t))
+                .map(|t| wit_type_to_ts(resolve, world_types, t))
                 .collect();
             format!("[{}]", items.join(", "))
         }
@@ -172,8 +269,8 @@ fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
     });
     found
 }
-fn outbound_ts(resolve: &Resolve, ty: &Type) -> String {
-    let ordinary = wit_type_to_ts(resolve, ty);
+fn outbound_ts(resolve: &Resolve, world_types: &HashSet<TypeId>, ty: &Type) -> String {
+    let ordinary = wit_type_to_ts(resolve, world_types, ty);
     if has_bytes(resolve, ty) {
         format!("import(\"./world\").WitInput<{ordinary}>")
     } else {
@@ -182,31 +279,38 @@ fn outbound_ts(resolve: &Resolve, ty: &Type) -> String {
 }
 
 /// Result exports accept either explicit tagged results or completion payloads.
-fn export_result_types(resolve: &Resolve, function: &Function) -> Vec<String> {
-    let mut types = vec![
-        function
-            .result
-            .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
-    ];
+fn export_result_types(
+    resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
+    function: &Function,
+) -> Vec<String> {
+    let mut types = vec![function.result.map_or_else(
+        || "void".into(),
+        |ty| outbound_ts(resolve, world_types, &ty),
+    )];
     if let Some(result) = function
         .result
         .and_then(|ty| crate::abi::result_type(resolve, ty))
     {
-        types.push(
-            result
-                .ok
-                .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
-        );
+        types.push(result.ok.map_or_else(
+            || "void".into(),
+            |ty| outbound_ts(resolve, world_types, &ty),
+        ));
     }
     types
 }
 
-fn implementation_signature(resolve: &Resolve, function: &Function, allow_promise: bool) -> String {
-    let mut signatures: Vec<String> = export_result_types(resolve, function)
+fn implementation_signature(
+    resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
+    function: &Function,
+    allow_promise: bool,
+) -> String {
+    let mut signatures: Vec<String> = export_result_types(resolve, world_types, function)
         .into_iter()
         .map(|result| {
             let mut signature = String::from("(");
-            emit_params(&mut signature, resolve, function);
+            emit_params(&mut signature, resolve, world_types, function);
             signature.push_str(") => ");
             if allow_promise {
                 signature.push_str(&format!("({result}) | Promise<{result}>"));
@@ -226,10 +330,10 @@ fn implementation_signature(resolve: &Resolve, function: &Function, allow_promis
 }
 
 /// Formats a WIT function return type into TypeScript.
-fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
+fn wit_result_to_ts(resolve: &Resolve, world_types: &HashSet<TypeId>, func: &Function) -> String {
     let result = match &func.result {
         None => "void".to_string(),
-        Some(ty) => wit_type_to_ts(resolve, ty),
+        Some(ty) => wit_type_to_ts(resolve, world_types, ty),
     };
     if func.kind.is_async() {
         format!("Promise<{result}>")
@@ -240,7 +344,11 @@ fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
 
 const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\nexport type u8 = number;\nexport type s8 = number;\nexport type u16 = number;\nexport type s16 = number;\nexport type u32 = number;\nexport type s32 = number;\nexport type u64 = bigint;\nexport type s64 = bigint;\n\n";
 
-fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
+fn world_type_declarations(
+    resolve: &Resolve,
+    world: &World,
+    world_types: &HashSet<TypeId>,
+) -> String {
     let mut out = String::new();
     let mut emitted_types = HashSet::new();
 
@@ -250,21 +358,27 @@ fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];
                 for &type_id in iface.types.values() {
-                    emit_type_def(resolve, type_id, &mut emitted_types, &mut out);
+                    emit_type_def(resolve, world_types, type_id, &mut emitted_types, &mut out);
                 }
             }
             WorldItem::Function(func) => {
                 for param in &func.params {
-                    emit_nested_types(resolve, &param.ty, &mut emitted_types, &mut out);
+                    emit_nested_types(
+                        resolve,
+                        world_types,
+                        &param.ty,
+                        &mut emitted_types,
+                        &mut out,
+                    );
                 }
                 if let Some(ret) = &func.result {
-                    emit_nested_types(resolve, ret, &mut emitted_types, &mut out);
+                    emit_nested_types(resolve, world_types, ret, &mut emitted_types, &mut out);
                 }
             }
             WorldItem::Type { id: type_id, .. } => {
                 let td = &resolve.types[*type_id];
                 if td.name.is_some() {
-                    emit_type_def(resolve, *type_id, &mut emitted_types, &mut out);
+                    emit_type_def(resolve, world_types, *type_id, &mut emitted_types, &mut out);
                 }
             }
         }
@@ -276,6 +390,7 @@ fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
+    let world_types = collect_world_types(resolve, world);
     let mut out = String::new();
 
     out.push_str("/**\n * Auto-generated TypeScript definitions for WIT world `");
@@ -283,7 +398,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
     out.push_str("`.\n * Generated by Perry-WIT SDK compiler.\n */\n\n");
 
     out.push_str(SUPPORT_TYPES);
-    out.push_str(&world_type_declarations(resolve, world));
+    out.push_str(&world_type_declarations(resolve, world, &world_types));
 
     // 2. Emit exported functions
     out.push_str("/* =========================================================================\n");
@@ -302,7 +417,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                     WorldKey::Interface(_) => func.name.clone(),
                 };
                 let ts_func_name = to_camel_case(&export_name);
-                let ret_ty = export_result_types(resolve, func).join(" | ");
+                let ret_ty = export_result_types(resolve, &world_types, func).join(" | ");
                 let ret_ty = if func.kind.is_async() {
                     format!("Promise<{ret_ty}>")
                 } else {
@@ -314,7 +429,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 out.push_str("`\n */\nexport declare function ");
                 out.push_str(&ts_func_name);
                 out.push('(');
-                emit_params(&mut out, resolve, func);
+                emit_params(&mut out, resolve, &world_types, func);
                 out.push_str("): ");
                 out.push_str(&ret_ty);
                 out.push_str(";\n");
@@ -323,7 +438,12 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 out.push_str("export type ");
                 out.push_str(&to_pascal_case(&export_name));
                 out.push_str("Fn = ");
-                out.push_str(&implementation_signature(resolve, func, false));
+                out.push_str(&implementation_signature(
+                    resolve,
+                    &world_types,
+                    func,
+                    false,
+                ));
                 out.push_str(";\n\n");
             }
             WorldItem::Interface { id, .. } => {
@@ -342,7 +462,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 out.push_str(" {\n");
                 for (_, func) in &iface.functions {
                     let ts_name = to_camel_case(&func.name);
-                    let ret_ty = export_result_types(resolve, func).join(" | ");
+                    let ret_ty = export_result_types(resolve, &world_types, func).join(" | ");
                     let ret_ty = if func.kind.is_async() {
                         format!("Promise<{ret_ty}>")
                     } else {
@@ -351,7 +471,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                     out.push_str("  export function ");
                     out.push_str(&ts_name);
                     out.push('(');
-                    emit_params(&mut out, resolve, func);
+                    emit_params(&mut out, resolve, &world_types, func);
                     out.push_str("): ");
                     out.push_str(&ret_ty);
                     out.push_str(";\n");
@@ -394,7 +514,12 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 out.push('?');
             }
             out.push_str(": ");
-            out.push_str(&implementation_signature(resolve, function, true));
+            out.push_str(&implementation_signature(
+                resolve,
+                &world_types,
+                function,
+                true,
+            ));
             out.push_str(";\n");
         }
     }
@@ -422,6 +547,7 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
             collect(resolve, ty, ids);
         });
     }
+    let world_types = collect_world_types(resolve, world);
     let mut out = String::new();
     let mut emitted = HashSet::new();
     for (imported, (key, item)) in world
@@ -453,7 +579,7 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         let mut names: Vec<_> = ids
             .into_iter()
             .filter(|id| resolve.types[*id].name.is_some())
-            .map(|id| type_name(resolve, id))
+            .map(|id| world_type_name(resolve, &world_types, id))
             .collect();
         names.sort();
         names.dedup();
@@ -465,13 +591,13 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         for (name, id) in &interface.types {
             if has_bytes(resolve, &Type::Id(*id)) {
                 let local = to_pascal_case(name);
-                let target = type_name(resolve, *id);
+                let target = world_type_name(resolve, &world_types, *id);
                 out.push_str(&format!(
                     "  export type {local}Input = import(\"./world\").WitInput<{target}>;\n"
                 ));
             }
             let local = to_pascal_case(name);
-            let target = type_name(resolve, *id);
+            let target = world_type_name(resolve, &world_types, *id);
             if local == target {
                 out.push_str(&format!("  export {{ type {target} }};\n"));
             } else {
@@ -482,7 +608,7 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
             if !matches!(resolve.types[*id].kind, TypeDefKind::Resource) {
                 continue;
             }
-            let resource = type_name(resolve, *id);
+            let resource = world_type_name(resolve, &world_types, *id);
             let suffix = to_pascal_case(name);
             out.push_str(&format!("  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;\n"));
             if !imported {
@@ -495,8 +621,11 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
                     "  export function {}(",
                     to_camel_case(&function.name)
                 ));
-                emit_outbound_params(&mut out, resolve, function);
-                out.push_str(&format!("): {};\n", wit_result_to_ts(resolve, function)));
+                emit_outbound_params(&mut out, resolve, &world_types, function);
+                out.push_str(&format!(
+                    "): {};\n",
+                    wit_result_to_ts(resolve, &world_types, function)
+                ));
             }
         }
         out.push_str("}\n\n");
@@ -504,19 +633,30 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
     out
 }
 
-fn emit_outbound_params(out: &mut String, resolve: &Resolve, function: &Function) {
-    emit_function_params(out, resolve, function, outbound_ts);
+fn emit_outbound_params(
+    out: &mut String,
+    resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
+    function: &Function,
+) {
+    emit_function_params(out, resolve, world_types, function, outbound_ts);
 }
 
-fn emit_params(out: &mut String, resolve: &Resolve, function: &Function) {
-    emit_function_params(out, resolve, function, wit_type_to_ts);
+fn emit_params(
+    out: &mut String,
+    resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
+    function: &Function,
+) {
+    emit_function_params(out, resolve, world_types, function, wit_type_to_ts);
 }
 
 fn emit_function_params(
     out: &mut String,
     resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
     function: &Function,
-    type_to_ts: fn(&Resolve, &Type) -> String,
+    type_to_ts: fn(&Resolve, &HashSet<TypeId>, &Type) -> String,
 ) {
     for (index, param) in function.params.iter().enumerate() {
         if index != 0 {
@@ -528,12 +668,13 @@ fn emit_function_params(
             .unwrap_or(name);
         out.push_str(&name);
         out.push_str(": ");
-        out.push_str(&type_to_ts(resolve, &param.ty));
+        out.push_str(&type_to_ts(resolve, world_types, &param.ty));
     }
 }
 
 fn emit_nested_types(
     resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
     ty: &Type,
     emitted: &mut HashSet<TypeId>,
     out: &mut String,
@@ -544,13 +685,13 @@ fn emit_nested_types(
             wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
         ) = td.kind
         {
-            emit_type_def(resolve, resource, emitted, out);
+            emit_type_def(resolve, world_types, resource, emitted, out);
         }
         if td.name.is_some() {
-            emit_type_def(resolve, *id, emitted, out);
+            emit_type_def(resolve, world_types, *id, emitted, out);
         } else {
             visit_type_children(&td.kind, |child| {
-                emit_nested_types(resolve, child, emitted, out);
+                emit_nested_types(resolve, world_types, child, emitted, out);
             });
         }
     }
@@ -575,6 +716,7 @@ fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
 
 fn emit_type_def(
     resolve: &Resolve,
+    world_types: &HashSet<TypeId>,
     type_id: wit_parser::TypeId,
     emitted: &mut HashSet<TypeId>,
     out: &mut String,
@@ -583,7 +725,7 @@ fn emit_type_def(
     if !emitted.insert(type_id) {
         return;
     }
-    let type_name = type_name(resolve, type_id);
+    let type_name = world_type_name(resolve, world_types, type_id);
     let td = &resolve.types[type_id];
     if has_bytes(resolve, &Type::Id(type_id)) {
         out.push_str(&format!(
@@ -602,7 +744,7 @@ fn emit_type_def(
             out.push_str(" {\n");
             for field in &record.fields {
                 let fname = to_camel_case(&field.name);
-                let fty = wit_type_to_ts(resolve, &field.ty);
+                let fty = wit_type_to_ts(resolve, world_types, &field.ty);
                 out.push_str("  ");
                 out.push_str(&fname);
                 out.push_str(": ");
@@ -625,7 +767,7 @@ fn emit_type_def(
                 .iter()
                 .map(|c| {
                     if let Some(payload) = &c.ty {
-                        let ty_str = wit_type_to_ts(resolve, payload);
+                        let ty_str = wit_type_to_ts(resolve, world_types, payload);
                         format!("{{ tag: \"{}\"; val: {ty_str} }}", c.name)
                     } else {
                         format!("{{ tag: \"{}\" }}", c.name)
@@ -650,7 +792,7 @@ fn emit_type_def(
             out.push_str("}\n\n");
         }
         TypeDefKind::Type(alias) => {
-            let alias_ty = wit_type_to_ts(resolve, alias);
+            let alias_ty = wit_type_to_ts(resolve, world_types, alias);
             out.push_str("export type ");
             out.push_str(&type_name);
             out.push_str(" = ");
@@ -664,13 +806,13 @@ fn emit_type_def(
             out.push_str("export type ");
             out.push_str(&type_name);
             out.push_str(" = ");
-            out.push_str(&type_kind_to_ts(resolve, &td.kind));
+            out.push_str(&type_kind_to_ts(resolve, world_types, &td.kind));
             out.push_str(";\n\n");
         }
         _ => {}
     }
     visit_type_children(&td.kind, |child| {
-        emit_nested_types(resolve, child, emitted, out);
+        emit_nested_types(resolve, world_types, child, emitted, out);
     });
 }
 
@@ -726,5 +868,52 @@ world complex-processor {
         assert!(dts.contains(
             "export declare function process(data: Payload, stat: Status): OutputResult;"
         ));
+    }
+
+    #[test]
+    fn unreferenced_sibling_interfaces_do_not_prefix_world_type_names() {
+        let wit_code = r#"
+package test:multi@0.1.0;
+
+interface alpha {
+    record parameters {
+        url: string,
+    }
+    record product {
+        name: string,
+    }
+    fetch: func(params: parameters) -> list<product>;
+}
+
+interface beta {
+    record parameters {
+        token: string,
+    }
+    record product {
+        id: u32,
+    }
+}
+
+world alpha-worker {
+    import alpha;
+    use alpha.{parameters, product};
+    export run: func(params: parameters) -> list<product>;
+}
+"#;
+        let (resolve, package) =
+            crate::component::wit::resolve_source("world.wit", wit_code).unwrap();
+        let world = resolve
+            .select_world(&[package], Some("alpha-worker"))
+            .unwrap();
+        let world_dts = generate_world_declarations(&resolve, &resolve.worlds[world]).unwrap();
+        assert!(world_dts.contains("export interface Parameters {"));
+        assert!(world_dts.contains("export interface Product {"));
+        assert!(!world_dts.contains("TestMulti010AlphaParameters"));
+        assert!(!world_dts.contains("TestMulti010AlphaProduct"));
+
+        let import_dts = generate_import_declarations(&resolve, &resolve.worlds[world]);
+        assert!(import_dts.contains("type Parameters = import(\"./world\").Parameters;"));
+        assert!(import_dts.contains("export { type Parameters };"));
+        assert!(import_dts.contains("export function fetch(params: Parameters): Array<Product>;"));
     }
 }

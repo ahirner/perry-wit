@@ -50,6 +50,47 @@ pub(super) enum Kind {
     PlainDateTime,
 }
 
+impl Kind {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Kind::BigInt => "bigint",
+            Kind::Url => "URL",
+            Kind::SearchParams => "URLSearchParams",
+            Kind::Number => "number",
+            Kind::Boolean => "boolean",
+            Kind::String => "string",
+            Kind::Record => "record",
+            Kind::Variant => "variant",
+            Kind::NumberString => "number | string",
+            Kind::Resource => "WIT resource",
+            Kind::Array => "array",
+            Kind::Exception => "Error",
+            Kind::Bytes => "Uint8Array",
+            Kind::ByteBuffer => "ArrayBuffer",
+            Kind::ByobReader => "ReadableStreamBYOBReader",
+            Kind::Json => "JSON value",
+            Kind::Date => "Date",
+            Kind::Decoder => "TextDecoder",
+            Kind::Regex => "RegExp",
+            Kind::Settled => "PromiseSettlementResult",
+            Kind::Stats => "Stats",
+            Kind::Headers => "Headers",
+            Kind::Response => "Response",
+            Kind::Request => "Request",
+            Kind::Writable => "WritableStream",
+            Kind::Writer => "WritableStreamDefaultWriter",
+            Kind::Readable => "ReadableStream",
+            Kind::Reader => "ReadableStreamDefaultReader",
+            Kind::ReadResult => "ReadableStreamReadResult",
+            Kind::Incoming => "IncomingRequest",
+            Kind::Abort => "AbortController",
+            Kind::Instant => "Temporal.Instant",
+            Kind::PlainDate => "Temporal.PlainDate",
+            Kind::PlainDateTime => "Temporal.PlainDateTime",
+        }
+    }
+}
+
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);

@@ -60,8 +60,12 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }
-            (op, _, _) => {
-                bail!("operator {op:?} on these operand types is not supported yet")
+            (op, left_kind, right_kind) => {
+                bail!(
+                    "operator {op:?} on {} and {} is not supported yet",
+                    left_kind.label(),
+                    right_kind.label()
+                )
             }
         })
     }
@@ -74,15 +78,20 @@ impl<'s> FunctionBuilder<'s> {
         left: &'s Expr,
         right: &'s Expr,
     ) -> Result<Value> {
-        let equality = match op {
-            CompareOp::Eq => Some(CompareKind::Eq),
-            CompareOp::Ne => Some(CompareKind::Ne),
-            _ => None,
+        let (equality, loose) = match op {
+            CompareOp::Eq => (Some(CompareKind::Eq), false),
+            CompareOp::Ne => (Some(CompareKind::Ne), false),
+            CompareOp::LooseEq => (Some(CompareKind::Eq), true),
+            CompareOp::LooseNe => (Some(CompareKind::Ne), true),
+            _ => (None, false),
         };
         if let Some(equality) = equality
-            && let Some(value) = self.absence_test(ctx, equality, left, right)?
+            && let Some(value) = self.absence_test(ctx, equality, loose, left, right)?
         {
             return Ok(value);
+        }
+        if loose {
+            bail!("loose equality is not supported; use === or !==");
         }
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
@@ -174,7 +183,9 @@ impl<'s> FunctionBuilder<'s> {
         );
         ensure!(
             left_kind == right_kind,
-            "comparison of different types is not supported"
+            "comparison of different types ({} and {}) is not supported",
+            left_kind.label(),
+            right_kind.label()
         );
         let kind = match op {
             CompareOp::Eq => CompareKind::Eq,
@@ -195,18 +206,19 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.compare(ctx, kind, lhs, rhs))
     }
 
-    /// Strict (in)equality with a `null` or `undefined` literal: a test of the other
+    /// Strict or loose (in)equality with a `null` or `undefined` literal: a test of the other
     /// operand's absence state. `None` when neither side is such a literal.
     fn absence_test(
         &mut self,
         ctx: &mut Context,
         equality: CompareKind,
+        loose: bool,
         left: &'s Expr,
         right: &'s Expr,
     ) -> Result<Option<Value>> {
         let absent = |expr: &'s Expr| matches!(expr, Expr::Null | Expr::Undefined);
         if absent(left) && absent(right) {
-            let equal = matches!(left, Expr::Null) == matches!(right, Expr::Null);
+            let equal = loose || (matches!(left, Expr::Null) == matches!(right, Expr::Null));
             return Ok(Some(
                 self.boolean(ctx, equal == (equality == CompareKind::Eq)),
             ));
@@ -217,7 +229,9 @@ impl<'s> FunctionBuilder<'s> {
         };
         let null = matches!(left, Expr::Null) || matches!(right, Expr::Null);
         let value = self.expression(ctx, other)?;
-        let absent = if let Some(json) = self.json_operand(ctx, value)? {
+        let absent = if loose {
+            self.is_nullish(ctx, value)?
+        } else if let Some(json) = self.json_operand(ctx, value)? {
             let intrinsic = if null {
                 Intrinsic::JsonIsNull
             } else {
@@ -246,6 +260,41 @@ impl<'s> FunctionBuilder<'s> {
         Ok(Some(self.equality_result(ctx, equality, absent)))
     }
 
+    /// Whether `value` is `null` or `undefined`.
+    pub(super) fn is_nullish(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        if let Some(json) = self.json_operand(ctx, value)? {
+            let null = self.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json]);
+            self.choose(
+                ctx,
+                ty,
+                null,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])),
+            )
+        } else if value.get_type(ctx).deref(ctx).is::<ExceptionType>() {
+            let null = self.intrinsic(ctx, Intrinsic::ExceptionIsNull, vec![value]);
+            self.choose(
+                ctx,
+                ty,
+                null,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::ExceptionIsUndefined, vec![value])),
+            )
+        } else if self.is_optional(ctx, value) {
+            let undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            self.choose(
+                ctx,
+                ty,
+                undef,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |b, ctx| Ok(b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))),
+            )
+        } else {
+            Ok(self.boolean(ctx, false))
+        }
+    }
+
     /// `equal` for `===` (`CompareKind::Eq`), its negation for `!==`.
     fn equality_result(&mut self, ctx: &mut Context, equality: CompareKind, equal: Value) -> Value {
         if equality == CompareKind::Eq {
@@ -261,19 +310,19 @@ impl<'s> FunctionBuilder<'s> {
         self.compare(ctx, CompareKind::Eq, value, no)
     }
 
-    /// `left && right` and `left || right` over truthiness.
+    /// `left && right`, `left || right` over truthiness, and `left ?? right` over nullishness.
     pub(super) fn logical(
         &mut self,
         ctx: &mut Context,
         op: &LogicalOp,
         left: &'s Expr,
         right: &'s Expr,
+        expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if matches!(op, LogicalOp::Coalesce) {
+            return self.coalesce(ctx, left, right, expected);
+        }
         // Short-circuit through a result slot; mem2reg turns it into a block argument.
-        ensure!(
-            !matches!(op, LogicalOp::Coalesce),
-            "?? is not supported yet"
-        );
         let lhs = self.condition(ctx, left)?;
         let result = self.entry_slot(ctx, lhs.get_type(ctx));
         self.store(ctx, result, lhs);
@@ -286,6 +335,66 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(rhs_block);
         let rhs = self.condition(ctx, right)?;
         self.store(ctx, result, rhs);
+        self.jump(ctx, join);
+        self.switch_to(join);
+        self.load(ctx, result)
+    }
+
+    /// `left ?? right`: evaluates `right` only when `left` is `null` or `undefined`.
+    fn coalesce(
+        &mut self,
+        ctx: &mut Context,
+        left: &'s Expr,
+        right: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        if matches!(left, Expr::Null | Expr::Undefined) {
+            return self.expression_with(ctx, right, expected);
+        }
+        let lhs = self.expression(ctx, left)?;
+        if !self.is_optional(ctx, lhs) && kind(ctx, lhs)? != Kind::Json {
+            return match expected {
+                Some(ty) => self.fit(ctx, lhs, ty),
+                None => Ok(lhs),
+            };
+        }
+        let nullish = self.is_nullish(ctx, lhs)?;
+        let present = self.new_block(ctx, "coalesce_present");
+        let fallback = self.new_block(ctx, "coalesce_fallback");
+        let join = self.new_block(ctx, "coalesce_join");
+        self.branch(ctx, nullish, fallback, present);
+        self.switch_to(present);
+        let defined_lhs = if self.is_optional(ctx, lhs) {
+            self.defined(ctx, lhs)?
+        } else {
+            lhs
+        };
+        let present_end = self.block;
+        self.switch_to(fallback);
+        let rhs_expected = expected.or_else(|| Some(defined_lhs.get_type(ctx)));
+        let rhs = self.expression_with(ctx, right, rhs_expected)?;
+        let fallback_end = self.block;
+        let result_ty = match expected {
+            Some(ty) => ty,
+            None => {
+                let left_ty = defined_lhs.get_type(ctx);
+                let right_ty = rhs.get_type(ctx);
+                if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
+                    let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
+                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                } else {
+                    left_ty
+                }
+            }
+        };
+        let result = self.entry_slot(ctx, result_ty);
+        self.switch_to(present_end);
+        let lhs_fitted = self.fit(ctx, defined_lhs, result_ty)?;
+        self.store(ctx, result, lhs_fitted);
+        self.jump(ctx, join);
+        self.switch_to(fallback_end);
+        let rhs_fitted = self.fit(ctx, rhs, result_ty)?;
+        self.store(ctx, result, rhs_fitted);
         self.jump(ctx, join);
         self.switch_to(join);
         self.load(ctx, result)

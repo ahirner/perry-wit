@@ -45,6 +45,13 @@ impl<'s> FunctionBuilder<'s> {
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
         );
+        if let Some((k_ty, v_ty, tuple_rec)) =
+            crate::collections::dict_entry_types(ctx, array.get_type(ctx))
+        {
+            let key = self.expression_with(ctx, index, Some(k_ty))?;
+            let val = self.expression_with(ctx, value, Some(v_ty))?;
+            return self.kv_set(ctx, array, key, val, k_ty, v_ty, tuple_rec);
+        }
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
         let value = self.expression_with(ctx, value, Some(element))?;
@@ -62,6 +69,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        if let Some((k_ty, v_ty, tuple_rec)) =
+            crate::collections::dict_entry_types(ctx, record.get_type(ctx))
+        {
+            let key = self.string(ctx, field);
+            let val = self.expression_with(ctx, value, Some(v_ty))?;
+            return self.kv_set(ctx, record, key, val, k_ty, v_ty, tuple_rec);
+        }
         ensure!(
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"
@@ -104,6 +118,11 @@ impl<'s> FunctionBuilder<'s> {
             && ty.deref(ctx).is::<perry_mir::types::VariantType>()
         {
             return self.variant_literal(ctx, ty, names, args);
+        }
+        if let Some(ty) = expected
+            && let Some((k_ty, v_ty, tuple_rec)) = crate::collections::dict_entry_types(ctx, ty)
+        {
+            return self.dict_literal(ctx, names, args, k_ty, v_ty, tuple_rec);
         }
         if let Some(record) =
             expected.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
@@ -212,7 +231,7 @@ impl<'s> FunctionBuilder<'s> {
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
-        self.record_literal(ctx, &names, args, expected)
+        self.record_literal(ctx, names, args, expected)
     }
 
     /// `[…]`, with the element type from `expected` or from the items.

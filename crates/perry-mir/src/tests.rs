@@ -468,8 +468,8 @@ fn normalize_json_copy_rewrites_typed_parse_of_stringify_and_tracks_missed() -> 
         copied = perry.call perry_json_parse_0 (text) : {rec};
         raw2 = perry.json_stringify input : {opt_str};
         text2 = perry.unwrap raw2 : perry.string;
-        untyped = perry.intrinsic json_parse (text2) : perry.json;
-        _keep = perry.intrinsic json_is_null (untyped) : builtin.integer i1;
+        untyped = perry.intrinsic JsonParse (text2) : perry.json;
+        _keep = perry.intrinsic JsonIsNull (untyped) : builtin.integer i1;
         perry.return copied
     }}
 }}"#

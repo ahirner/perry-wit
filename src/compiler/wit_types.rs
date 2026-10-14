@@ -2,82 +2,91 @@
 //! declarations (which the parser does not read). The mapping mirrors the SDK's TypeScript:
 //! records are object types, variants unions of `{ tag, val }` objects, options
 //! `T | null`, tuples tuples and `list<u8>` a `Uint8Array`.
-use crate::sdk::{to_camel_case, to_pascal_case, type_name};
-use perry_lower::hir::{ObjectType, PropertyInfo, Type as HirType};
+use crate::sdk::{
+    collect_world_types, declaration_id, qualified_type_name, to_camel_case, to_pascal_case,
+    type_name, world_type_name,
+};
+use perry_lower::hir::{Foreign, ObjectType, PropertyInfo, Signedness, Type as HirType};
 use std::collections::HashMap;
-use wit_parser::{Resolve, Type, TypeDefKind};
+use wit_parser::{Resolve, Type, TypeDefKind, WorldId};
 
-/// Every named WIT type of `resolve` that has a HIR equivalent, by SDK name prefixed with
-/// `wit:` (references between them use these names too), so that only imported names reach
-/// them and a WIT `headers` does not shadow the `Headers` class.
-pub(crate) fn foreign(resolve: &Resolve) -> HashMap<String, HirType> {
-    let mut types: HashMap<String, HirType> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| definition.name.is_some())
-        // A `use` makes an alias with the declaration's SDK name: keep the declaration.
-        .filter(|(id, definition)| {
-            !matches!(definition.kind, TypeDefKind::Type(Type::Id(inner))
-                if resolve.types[inner].name.is_some()
-                    && type_name(resolve, inner) == type_name(resolve, *id))
-        })
-        .filter_map(|(id, definition)| {
-            Some((
-                foreign_name(resolve, id),
-                if matches!(definition.kind, TypeDefKind::Resource) {
-                    super::resources::source_type(resolve, id)
-                } else {
-                    kind(resolve, &definition.kind)?
-                },
-            ))
-        })
-        .collect();
+/// Every named WIT type of `resolve` that has a HIR equivalent, registered under its
+/// qualified SDK name, world-scoped SDK name (when non-colliding), and `module#Name`
+/// interface binding.
+pub(crate) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<String, Foreign> {
+    let world_types = world.map(|w| collect_world_types(resolve, &resolve.worlds[w]));
+    let mut types = HashMap::new();
+    for (id, definition) in &resolve.types {
+        if definition.name.is_none() || declaration_id(resolve, id) != id {
+            continue;
+        }
+        let entry = if matches!(definition.kind, TypeDefKind::Resource) {
+            Foreign::Resource(super::resources::canonical(resolve, id).index() as u32)
+        } else {
+            let Some(ty) = kind(resolve, &definition.kind) else {
+                continue;
+            };
+            Foreign::Type(ty)
+        };
+        let qualified = qualified_type_name(resolve, id);
+        let input_entry =
+            Foreign::Input(Box::new(Foreign::Type(HirType::Named(qualified.clone()))));
+        types.insert(qualified.clone(), entry);
+        types.insert(format!("{qualified}Input"), input_entry);
+        for alias in [
+            Some(type_name(resolve, id)),
+            world_types
+                .as_ref()
+                .map(|wt| world_type_name(resolve, wt, id)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if alias != qualified {
+                types
+                    .entry(alias.clone())
+                    .or_insert_with(|| Foreign::Type(HirType::Named(qualified.clone())));
+                types.entry(format!("{alias}Input")).or_insert_with(|| {
+                    Foreign::Input(Box::new(Foreign::Type(HirType::Named(qualified.clone()))))
+                });
+            }
+        }
+    }
     for (id, interface) in &resolve.interfaces {
         let Some(module) = resolve.id_of(id) else {
             continue;
         };
         for (name, id) in &interface.types {
-            let target = foreign_name(resolve, *id);
+            let decl = declaration_id(resolve, *id);
+            let target = qualified_type_name(resolve, decl);
             if types.contains_key(&target) {
+                let local = to_pascal_case(name);
                 types.insert(
-                    format!("wit:{module}#{}", to_pascal_case(name)),
-                    HirType::Named(target),
+                    format!("{module}#{local}"),
+                    Foreign::Type(HirType::Named(target.clone())),
+                );
+                types.insert(
+                    format!("{module}#{local}Input"),
+                    Foreign::Input(Box::new(Foreign::Type(HirType::Named(target)))),
                 );
             }
         }
     }
-    let inputs = types
-        .keys()
-        .map(|name| {
-            (
-                format!("{name}Input"),
-                HirType::Generic {
-                    base: "WitInput".into(),
-                    type_args: vec![HirType::Named(name.clone())],
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    types.extend(inputs);
-    for (wit_key, perry_ty) in [
-        ("wit:u8", "perry:types/u8"),
-        ("wit:s8", "perry:types/s8"),
-        ("wit:u16", "perry:types/u16"),
-        ("wit:s16", "perry:types/s16"),
-        ("wit:u32", "perry:types/u32"),
-        ("wit:s32", "perry:types/s32"),
-        ("wit:u64", "perry:types/u64"),
-        ("wit:s64", "perry:types/s64"),
+    for (wit_key, width, signedness) in [
+        ("u8", 8, Signedness::Unsigned),
+        ("s8", 8, Signedness::Signed),
+        ("u16", 16, Signedness::Unsigned),
+        ("s16", 16, Signedness::Signed),
+        ("u32", 32, Signedness::Unsigned),
+        ("s32", 32, Signedness::Signed),
+        ("u64", 64, Signedness::Unsigned),
+        ("s64", 64, Signedness::Signed),
     ] {
         types
             .entry(wit_key.to_string())
-            .or_insert_with(|| HirType::Named(perry_ty.to_string()));
+            .or_insert(Foreign::Integer { width, signedness });
     }
     types
-}
-
-fn foreign_name(resolve: &Resolve, id: wit_parser::TypeId) -> String {
-    format!("wit:{}", type_name(resolve, id))
 }
 
 fn object(fields: impl IntoIterator<Item = (String, HirType)>) -> HirType {
@@ -114,7 +123,7 @@ pub(super) fn ty(resolve: &Resolve, ty: &Type) -> Option<HirType> {
         Type::Id(id) => {
             let definition = &resolve.types[*id];
             if definition.name.is_some() {
-                HirType::Named(foreign_name(resolve, *id))
+                HirType::Named(qualified_type_name(resolve, *id))
             } else {
                 kind(resolve, &definition.kind)?
             }

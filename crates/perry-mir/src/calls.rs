@@ -219,91 +219,69 @@ impl crate::exceptions::MayThrowInterface for AwaitOp {
     }
 }
 
-/// Function attribute marking a module export; each call of one is a task (D3, D5).
-pub(crate) const EXPORT_KEY: &str = "perry_export";
+pliron::dict_key!(FUNCTION_META, "perry_function_meta");
 
-/// Mark `function` as exported from the component.
-pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
+fn update_meta(
+    ctx: &mut Context,
+    function: &FuncOp,
+    update: impl FnOnce(&mut crate::attrs::FunctionMeta),
+) {
+    let mut meta = function_meta(ctx, function);
+    update(&mut meta);
     function
         .get_operation()
         .deref_mut(ctx)
         .attributes
-        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+        .set(FUNCTION_META.clone(), meta);
+}
+
+/// Read the function's [crate::attrs::FunctionMeta] flags.
+pub fn function_meta(ctx: &Context, function: &FuncOp) -> crate::attrs::FunctionMeta {
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<crate::attrs::FunctionMeta>(&FUNCTION_META)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Mark `function` as exported from the component; each call of one is a task (D3, D5).
+pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
+    update_meta(ctx, function, |m| m.exported = true);
 }
 
 /// Whether `function` is exported from the component.
 pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&key)
-        .is_some_and(|flag| bool::from(flag.clone()))
+    function_meta(ctx, function).exported
 }
 
-pub(crate) const SPECIALIZED_ENTRY_KEY: &str = "perry_specialized_entry";
-
 pub fn set_specialized_entry(ctx: &mut Context, function: &FuncOp) {
-    let key: Identifier = SPECIALIZED_ENTRY_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref_mut(ctx)
-        .attributes
-        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+    update_meta(ctx, function, |m| m.specialized_entry = true);
 }
 
 pub fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
-    let key: Identifier = SPECIALIZED_ENTRY_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&key)
-        .is_some_and(|flag| bool::from(flag.clone()))
+    function_meta(ctx, function).specialized_entry
 }
-
-pliron::dict_key!(ATOMIC_CONSTRUCTION, "perry_atomic_construction");
 
 /// Request one uninterrupted construction scope. ProgramFacts verifies the closed
 /// synchronous call group and each operation before codegen omits internal safe points.
 pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
-    function.get_operation().deref_mut(ctx).attributes.set(
-        ATOMIC_CONSTRUCTION.clone(),
-        pliron::builtin::attributes::BoolAttr::from(true),
-    );
+    update_meta(ctx, function, |m| m.atomic_construction = true);
 }
+
 pub fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&ATOMIC_CONSTRUCTION)
-        .is_some_and(|v| bool::from(v.clone()))
+    function_meta(ctx, function).atomic_construction
 }
 
-/// Function attribute marking an `async` function. Its body may `perry.await`; callers start it
+/// Mark `function` as an `async` function. Its body may `perry.await`; callers start it
 /// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
-pub(crate) const ASYNC_KEY: &str = "perry_async";
-
 pub fn set_async(ctx: &mut Context, function: &FuncOp) {
-    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref_mut(ctx)
-        .attributes
-        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+    update_meta(ctx, function, |m| m.asynchronous = true);
 }
 
 pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
-    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&key)
-        .is_some_and(|flag| bool::from(flag.clone()))
+    function_meta(ctx, function).asynchronous
 }
 
 #[derive(Debug, Error)]

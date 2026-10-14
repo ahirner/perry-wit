@@ -1,0 +1,634 @@
+//! Key-value operations, `Record<K, V>` dictionaries, `Object.*`, `Array.isArray`, `in`, and `delete`.
+
+use super::*;
+
+impl<'s> FunctionBuilder<'s> {
+    pub(crate) fn kv_get(
+        &mut self,
+        ctx: &mut Context,
+        arr: Value,
+        key: Value,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+    ) -> Result<Value> {
+        let key = self.fit(ctx, key, k_ty)?;
+        let states = crate::coerce::merge_absence(
+            absence(ctx, v_ty),
+            Some(perry_mir::attrs::Absence::Undefined),
+        )
+        .unwrap_or(perry_mir::attrs::Absence::Undefined);
+        let inner = optional_value(ctx, v_ty).unwrap_or(v_ty);
+        let opt_v_ty: TypeHandle = OptionalType::get_with(ctx, inner, states).into();
+        let miss = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_v_ty));
+        let result = self.entry_slot(ctx, opt_v_ty);
+        self.store(ctx, result, miss);
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_get", zero, limit, |b, ctx, idx, next, done| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let cand_k = b.append_value(ctx, &k_op);
+            let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
+            let hit = b.new_block(ctx, "kv_get_hit");
+            b.branch(ctx, matched, hit, next);
+            b.switch_to(hit);
+            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+            let cand_v = b.append_value(ctx, &v_op);
+            let wrapped = b.fit(ctx, cand_v, opt_v_ty)?;
+            b.store(ctx, result, wrapped);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        self.load(ctx, result)
+    }
+
+    /// Insert or overwrite `(key, val)` in a `Map<K, V>` or `Record<K, V>` backing array.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kv_set(
+        &mut self,
+        ctx: &mut Context,
+        arr: Value,
+        key: Value,
+        val: Value,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        let key = self.fit(ctx, key, k_ty)?;
+        let val = self.fit(ctx, val, v_ty)?;
+        let new_entry = self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![key, val]));
+        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let found_slot = self.entry_slot(ctx, bool_ty);
+        let false_val = self.boolean(ctx, false);
+        self.store(ctx, found_slot, false_val);
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_set", zero, limit, |b, ctx, idx, next, done| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let cand_k = b.append_value(ctx, &k_op);
+            let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
+            let hit = b.new_block(ctx, "kv_set_hit");
+            b.branch(ctx, matched, hit, next);
+            b.switch_to(hit);
+            b.emit(ctx, |ctx| ArraySetOp::new(ctx, arr, idx, new_entry));
+            let true_val = b.boolean(ctx, true);
+            b.store(ctx, found_slot, true_val);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        let was_found = self.load(ctx, found_slot)?;
+        let append_bb = self.new_block(ctx, "kv_set_append");
+        let after_bb = self.new_block(ctx, "kv_set_after");
+        self.branch(ctx, was_found, after_bb, append_bb);
+        self.switch_to(append_bb);
+        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, new_entry));
+        self.jump(ctx, after_bb);
+        self.switch_to(after_bb);
+        Ok(arr)
+    }
+
+    pub(crate) fn kv_has(
+        &mut self,
+        ctx: &mut Context,
+        arr: Value,
+        key: Value,
+        k_ty: TypeHandle,
+    ) -> Result<Value> {
+        let key = self.fit(ctx, key, k_ty)?;
+        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let found_slot = self.entry_slot(ctx, bool_ty);
+        let false_val = self.boolean(ctx, false);
+        self.store(ctx, found_slot, false_val);
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_has", zero, limit, |b, ctx, idx, next, done| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let cand_k = b.append_value(ctx, &k_op);
+            let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
+            let hit = b.new_block(ctx, "kv_has_hit");
+            b.branch(ctx, matched, hit, next);
+            b.switch_to(hit);
+            let true_val = b.boolean(ctx, true);
+            b.store(ctx, found_slot, true_val);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        self.load(ctx, found_slot)
+    }
+
+    pub(super) fn update_collection_target(
+        &mut self,
+        ctx: &mut Context,
+        target: &'s Expr,
+        new_arr: Value,
+    ) -> Result<()> {
+        match target {
+            Expr::LocalGet(id) => {
+                let slot = self.local(*id)?;
+                self.store(ctx, slot, new_arr);
+            }
+            Expr::GlobalGet(id) => {
+                let slot = self.global_slot(ctx, *id, new_arr.get_type(ctx))?;
+                self.store(ctx, slot, new_arr);
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } => {
+                let rec = self.expression(ctx, object)?;
+                let rec = self.defined(ctx, rec)?;
+                if kind(ctx, rec)? == Kind::Record {
+                    self.emit(ctx, |ctx| {
+                        FieldSetOp::new(ctx, rec, property.clone(), new_arr)
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn kv_delete(
+        &mut self,
+        ctx: &mut Context,
+        target: &'s Expr,
+        arr: Value,
+        key: Value,
+        k_ty: TypeHandle,
+    ) -> Result<Value> {
+        let key = self.fit(ctx, key, k_ty)?;
+        let elem_ty = self.array_element(ctx, arr)?;
+        let new_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let found_slot = self.entry_slot(ctx, bool_ty);
+        let false_val = self.boolean(ctx, false);
+        self.store(ctx, found_slot, false_val);
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_delete", zero, limit, |b, ctx, idx, next, _| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let cand_k = b.append_value(ctx, &k_op);
+            let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
+            let hit = b.new_block(ctx, "kv_delete_hit");
+            let keep = b.new_block(ctx, "kv_delete_keep");
+            b.branch(ctx, matched, hit, keep);
+            b.switch_to(hit);
+            let true_val = b.boolean(ctx, true);
+            b.store(ctx, found_slot, true_val);
+            b.jump(ctx, next);
+            b.switch_to(keep);
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, new_arr, entry));
+            Ok(())
+        })?;
+        self.update_collection_target(ctx, target, new_arr)?;
+        self.load(ctx, found_slot)
+    }
+
+    pub(super) fn collection_clear(
+        &mut self,
+        ctx: &mut Context,
+        target: &'s Expr,
+        arr: Value,
+    ) -> Result<Value> {
+        let elem_ty = self.array_element(ctx, arr)?;
+        let new_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+        self.update_collection_target(ctx, target, new_arr)?;
+        let ty = void_type(ctx);
+        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+    }
+
+    pub(crate) fn kv_keys(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
+        let (k_ty, _, _) =
+            kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
+        let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, k_ty, vec![]));
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_keys", zero, limit, |b, ctx, idx, _, _| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let k = b.append_value(ctx, &k_op);
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, k));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub(crate) fn kv_values(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
+        let (_, v_ty, _) =
+            kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
+        let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, v_ty, vec![]));
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "kv_values", zero, limit, |b, ctx, idx, _, _| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+            let v = b.append_value(ctx, &v_op);
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, v));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Lower an object literal `{ k1: v1, ... }` when expected type is `Record<K, V>`.
+    pub(crate) fn dict_literal(
+        &mut self,
+        ctx: &mut Context,
+        names: &[&str],
+        args: &'s [Expr],
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        for (name, val_expr) in names.iter().zip(args) {
+            let k = self.string(ctx, name);
+            let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
+            self.kv_set(ctx, dict, k, v, k_ty, v_ty, tuple_rec)?;
+        }
+        Ok(dict)
+    }
+
+    /// Dynamic string indexing `rec[key]` on a closed `RecordType` when all fields share a uniform type.
+    pub(crate) fn record_dynamic_get(
+        &mut self,
+        ctx: &mut Context,
+        rec: Value,
+        key: Value,
+        rec_handle: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        let (fields, uniform_ty) = record_uniform_field_type(ctx, rec_handle).context(
+            "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>",
+        )?;
+        let states = crate::coerce::merge_absence(
+            absence(ctx, uniform_ty),
+            Some(perry_mir::attrs::Absence::Undefined),
+        )
+        .unwrap_or(perry_mir::attrs::Absence::Undefined);
+        let inner = optional_value(ctx, uniform_ty).unwrap_or(uniform_ty);
+        let opt_ty: TypeHandle = OptionalType::get_with(ctx, inner, states).into();
+        let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
+        for (name, _) in fields.into_iter().rev() {
+            let name_str = self.string(ctx, &name);
+            let eq = self.compare(ctx, CompareKind::Eq, key, name_str);
+            let op = FieldGetOp::new(ctx, rec, name)?;
+            let field_val = self.append_value(ctx, &op);
+            let field_opt = self.fit(ctx, field_val, opt_ty)?;
+            acc = self.choose(ctx, opt_ty, eq, |_, _| Ok(field_opt), |_, _| Ok(acc))?;
+        }
+        Ok(acc)
+    }
+
+    /// `Object.keys(obj)` and `for (const k in obj)`.
+    pub(crate) fn object_keys(&mut self, ctx: &mut Context, obj_expr: &'s Expr) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if dict_entry_types(ctx, ty).is_some() {
+            return self.kv_keys(ctx, obj);
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let fields = rec
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .to_vec();
+            let str_ty: TypeHandle = StringType::get(ctx).into();
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, str_ty, vec![]));
+            for (name, field_ty) in fields {
+                let name_val = self.string(ctx, &name);
+                if optional_value(ctx, field_ty).is_some()
+                    && absence(ctx, field_ty).is_some_and(|a| a.admits_undefined())
+                {
+                    let op = FieldGetOp::new(ctx, obj, name)?;
+                    let val = self.append_value(ctx, &op);
+                    let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
+                    let keep_bb = self.new_block(ctx, "obj_key_keep");
+                    let after_bb = self.new_block(ctx, "obj_key_after");
+                    self.branch(ctx, is_undef, after_bb, keep_bb);
+                    self.switch_to(keep_bb);
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, name_val));
+                    self.jump(ctx, after_bb);
+                    self.switch_to(after_bb);
+                } else {
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, name_val));
+                }
+            }
+            return Ok(out);
+        }
+        if let Some(json) = self.json_operand(ctx, obj)? {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
+        }
+        bail!("Object.keys requires a Record, interface/object shape, or JSON value")
+    }
+
+    /// `Object.values(obj)`.
+    pub(crate) fn object_values(&mut self, ctx: &mut Context, obj_expr: &'s Expr) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if dict_entry_types(ctx, ty).is_some() {
+            return self.kv_values(ctx, obj);
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let (fields, uniform_ty) = record_uniform_field_type(ctx, rec).context(
+                "Object.values on a closed record requires all fields to share a uniform value type",
+            )?;
+            let elem_ty = optional_value(ctx, uniform_ty).unwrap_or(uniform_ty);
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+            for (name, field_ty) in fields {
+                let op = FieldGetOp::new(ctx, obj, name)?;
+                let val = self.append_value(ctx, &op);
+                if optional_value(ctx, field_ty).is_some()
+                    && absence(ctx, field_ty).is_some_and(|a| a.admits_undefined())
+                {
+                    let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
+                    let keep_bb = self.new_block(ctx, "obj_val_keep");
+                    let after_bb = self.new_block(ctx, "obj_val_after");
+                    self.branch(ctx, is_undef, after_bb, keep_bb);
+                    self.switch_to(keep_bb);
+                    let unwrapped = self.defined(ctx, val)?;
+                    let fitted = self.fit(ctx, unwrapped, elem_ty)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, fitted));
+                    self.jump(ctx, after_bb);
+                    self.switch_to(after_bb);
+                } else {
+                    let fitted = self.fit(ctx, val, elem_ty)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, fitted));
+                }
+            }
+            return Ok(out);
+        }
+        bail!("Object.values requires a Record<K, V> or uniform record shape")
+    }
+
+    /// `Object.entries(obj)`.
+    pub(crate) fn object_entries(
+        &mut self,
+        ctx: &mut Context,
+        obj_expr: &'s Expr,
+    ) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) {
+            let tuple_rec = self.shapes.mir_record_prefix(
+                ctx,
+                vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                Some("tuple"),
+            )?;
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+            let limit = self.array_length(ctx, obj);
+            let zero = self.number(ctx, 0.0);
+            self.index_loop(ctx, "dict_entries", zero, limit, |b, ctx, idx, _, _| {
+                let entry = b.element_at(ctx, obj, idx)?;
+                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                let k = b.append_value(ctx, &k_op);
+                let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+                let v = b.append_value(ctx, &v_op);
+                let pair = b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v]));
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
+                Ok(())
+            })?;
+            return Ok(out);
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let (fields, uniform_ty) = record_uniform_field_type(ctx, rec).context(
+                "Object.entries on a closed record requires all fields to share a uniform value type",
+            )?;
+            let str_ty: TypeHandle = StringType::get(ctx).into();
+            let elem_ty = optional_value(ctx, uniform_ty).unwrap_or(uniform_ty);
+            let tuple_rec = self.shapes.mir_record_prefix(
+                ctx,
+                vec![("_0".to_string(), str_ty), ("_1".to_string(), elem_ty)],
+                Some("tuple"),
+            )?;
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+            for (name, field_ty) in fields {
+                let name_val = self.string(ctx, &name);
+                let op = FieldGetOp::new(ctx, obj, name)?;
+                let val = self.append_value(ctx, &op);
+                if optional_value(ctx, field_ty).is_some()
+                    && absence(ctx, field_ty).is_some_and(|a| a.admits_undefined())
+                {
+                    let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
+                    let keep_bb = self.new_block(ctx, "obj_ent_keep");
+                    let after_bb = self.new_block(ctx, "obj_ent_after");
+                    self.branch(ctx, is_undef, after_bb, keep_bb);
+                    self.switch_to(keep_bb);
+                    let unwrapped = self.defined(ctx, val)?;
+                    let fitted = self.fit(ctx, unwrapped, elem_ty)?;
+                    let pair = self.emit_value(ctx, |ctx| {
+                        AllocOp::new(ctx, tuple_rec, vec![name_val, fitted])
+                    });
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
+                    self.jump(ctx, after_bb);
+                    self.switch_to(after_bb);
+                } else {
+                    let fitted = self.fit(ctx, val, elem_ty)?;
+                    let pair = self.emit_value(ctx, |ctx| {
+                        AllocOp::new(ctx, tuple_rec, vec![name_val, fitted])
+                    });
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
+                }
+            }
+            return Ok(out);
+        }
+        bail!("Object.entries requires a Record<K, V> or uniform record shape")
+    }
+
+    /// `Object.fromEntries(entries)`.
+    pub(crate) fn object_from_entries(
+        &mut self,
+        ctx: &mut Context,
+        entries_expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let entries_val = self.expression_with(ctx, entries_expr, expected)?;
+        let entries_val = self.defined(ctx, entries_val)?;
+        let (k_ty, v_ty, _) = kv_entry_types(ctx, entries_val.get_type(ctx))
+            .or_else(|| expected.and_then(|e| kv_entry_types(ctx, e)))
+            .context("Object.fromEntries requires an iterable of [key, value] pairs")?;
+        let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
+            Some(r) => r,
+            None => self.shapes.mir_record_prefix(
+                ctx,
+                vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                Some("dict_tuple"),
+            )?,
+        };
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
+        let limit = self.array_length(ctx, entries_val);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "from_entries", zero, limit, |b, ctx, idx, _, _| {
+            let entry = b.element_at(ctx, entries_val, idx)?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let k = b.append_value(ctx, &k_op);
+            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+            let v = b.append_value(ctx, &v_op);
+            b.kv_set(ctx, dict, k, v, k_ty, v_ty, dict_tuple)?;
+            Ok(())
+        })?;
+        Ok(dict)
+    }
+
+    /// `Object.is(a, b)` — SameValue equality (`NaN` equals `NaN`, `+0` does not equal `-0`).
+    pub(crate) fn object_is(
+        &mut self,
+        ctx: &mut Context,
+        left: &'s Expr,
+        right: &'s Expr,
+    ) -> Result<Value> {
+        let lhs = self.expression(ctx, left)?;
+        let rhs = self.expression(ctx, right)?;
+        if lhs.get_type(ctx).deref(ctx).is::<FP64Type>()
+            && rhs.get_type(ctx).deref(ctx).is::<FP64Type>()
+        {
+            let eq = self.compare(ctx, CompareKind::Eq, lhs, rhs);
+            let bool_ty = eq.get_type(ctx);
+            let a_nan = self.compare(ctx, CompareKind::Ne, lhs, lhs);
+            let b_nan = self.compare(ctx, CompareKind::Ne, rhs, rhs);
+            let both_nan = self.choose(ctx, bool_ty, a_nan, |_, _| Ok(b_nan), |_, _| Ok(a_nan))?;
+            let zero = self.number(ctx, 0.0);
+            let is_zero = self.compare(ctx, CompareKind::Eq, lhs, zero);
+            let one = self.number(ctx, 1.0);
+            let inv_a = self.binary(ctx, BinaryKind::Div, one, lhs);
+            let inv_b = self.binary(ctx, BinaryKind::Div, one, rhs);
+            let same_sign_zero = self.compare(ctx, CompareKind::Eq, inv_a, inv_b);
+            let eq_non_neg_zero = self.choose(
+                ctx,
+                bool_ty,
+                is_zero,
+                |_, _| Ok(same_sign_zero),
+                |b, ctx| Ok(b.boolean(ctx, true)),
+            )?;
+            return self.choose(
+                ctx,
+                bool_ty,
+                eq,
+                |_, _| Ok(eq_non_neg_zero),
+                |_, _| Ok(both_nan),
+            );
+        }
+        self.comparison(ctx, &CompareOp::Eq, left, right)
+    }
+
+    /// `Array.isArray(val)`.
+    pub(crate) fn array_is_array(
+        &mut self,
+        ctx: &mut Context,
+        val_expr: &'s Expr,
+    ) -> Result<Value> {
+        let val = self.expression(ctx, val_expr)?;
+        let ty = val.get_type(ctx);
+        let inner = optional_value(ctx, ty).unwrap_or(ty);
+        let is_plain_array = inner.deref(ctx).is::<ArrayType>()
+            && map_entry_types(ctx, inner).is_none()
+            && dict_entry_types(ctx, inner).is_none();
+        if ty.deref(ctx).is::<OptionalType>() {
+            if !is_plain_array {
+                return Ok(self.boolean(ctx, false));
+            }
+            let nullish = self.is_nullish(ctx, val)?;
+            let false_val = self.boolean(ctx, false);
+            return Ok(self.compare(ctx, CompareKind::Eq, nullish, false_val));
+        }
+        Ok(self.boolean(ctx, is_plain_array))
+    }
+
+    /// `key in obj`.
+    pub(crate) fn in_operator(
+        &mut self,
+        ctx: &mut Context,
+        prop_expr: &'s Expr,
+        obj_expr: &'s Expr,
+    ) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if let Some((k_ty, _, _)) = dict_entry_types(ctx, ty) {
+            let k = self.expression_with(ctx, prop_expr, Some(k_ty))?;
+            return self.kv_has(ctx, obj, k, k_ty);
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let k = self.string_operand(ctx, prop_expr)?;
+            let fields = rec
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .to_vec();
+            let mut acc = self.boolean(ctx, false);
+            let bool_ty = acc.get_type(ctx);
+            for (name, _) in fields {
+                let name_val = self.string(ctx, &name);
+                let eq = self.compare(ctx, CompareKind::Eq, k, name_val);
+                acc = self.choose(
+                    ctx,
+                    bool_ty,
+                    eq,
+                    |b, ctx| Ok(b.boolean(ctx, true)),
+                    |_, _| Ok(acc),
+                )?;
+            }
+            return Ok(acc);
+        }
+        bail!("'in' operator requires a Record<K, V> or closed record shape")
+    }
+
+    /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary.
+    pub(crate) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
+        match inner {
+            Expr::IndexGet { object, index } => {
+                let obj = self.expression(ctx, object)?;
+                let obj = self.defined(ctx, obj)?;
+                if let Some((k_ty, _, _)) = dict_entry_types(ctx, obj.get_type(ctx)) {
+                    let k = self.expression_with(ctx, index, Some(k_ty))?;
+                    self.kv_delete(ctx, object, obj, k, k_ty)?;
+                    return Ok(self.boolean(ctx, true));
+                }
+                bail!("delete operator is only supported on Record<K, V> dictionary types")
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } => {
+                let obj = self.expression(ctx, object)?;
+                let obj = self.defined(ctx, obj)?;
+                if let Some((k_ty, _, _)) = dict_entry_types(ctx, obj.get_type(ctx)) {
+                    let k = self.string(ctx, property);
+                    self.kv_delete(ctx, object, obj, k, k_ty)?;
+                    return Ok(self.boolean(ctx, true));
+                }
+                bail!("delete operator is only supported on Record<K, V> dictionary types")
+            }
+            _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
+        }
+    }
+
+    /// Convert a JSON object snapshot `{"k": v, ...}` into a `Record<string, V>` dictionary array.
+    pub(crate) fn decode_dict(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        _k_ty: TypeHandle,
+        v_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
+        let keys = self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value]);
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        let limit = self.array_length(ctx, keys);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "json_dict", zero, limit, |b, ctx, idx, _, _| {
+            let key_str = b.element_at(ctx, keys, idx)?;
+            let raw_val = b.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key_str]);
+            let decoded_val = b.fit(ctx, raw_val, v_ty)?;
+            let entry = b.emit_value(ctx, |ctx| {
+                AllocOp::new(ctx, tuple_rec, vec![key_str, decoded_val])
+            });
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, dict, entry));
+            Ok(())
+        })?;
+        Ok(dict)
+    }
+}

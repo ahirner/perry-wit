@@ -34,6 +34,24 @@ impl<'s> FunctionBuilder<'s> {
                     self.load(ctx, self.local(*id)?)?;
                     return Ok(Some(value));
                 }
+                ("js_map_compaction_epoch" | "js_set_compaction_epoch", _) => {
+                    return Ok(Some(self.number(ctx, 0.0)));
+                }
+                ("js_map_cursor_next" | "js_set_cursor_next", [coll, idx, _]) => {
+                    let coll_val = self.expression(ctx, coll)?;
+                    let idx_val = self.expression(ctx, idx)?;
+                    let len = self.array_length(ctx, coll_val);
+                    let in_bounds = self.compare(ctx, CompareKind::Lt, idx_val, len);
+                    let neg_one = self.number(ctx, -1.0);
+                    let res = self.choose(
+                        ctx,
+                        FP64Type::get(ctx).into(),
+                        in_bounds,
+                        |_, _| Ok(idx_val),
+                        |_, _| Ok(neg_one),
+                    )?;
+                    return Ok(Some(res));
+                }
                 _ => {}
             }
         }
@@ -216,7 +234,27 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(op.get_operation().deref(ctx).results().next());
         }
         let Expr::FuncRef(id) = callee else {
-            bail!("only direct calls to module functions are supported yet");
+            return Err(match callee {
+                Expr::LocalGet(id) => {
+                    let error = anyhow!(
+                        "indirect calls through local or parameter bindings are not supported yet; call a declared module function directly"
+                    );
+                    let error = self.shapes.annotate_call(error, byte_offset);
+                    self.shapes.annotate_local(error, *id)
+                }
+                Expr::Closure { .. } => anyhow!(
+                    "immediately invoked function expressions and closure calls are not supported yet; declare a named function instead"
+                ),
+                Expr::ExternFuncRef { name, .. } => {
+                    anyhow!("call to external or unresolved function '{name}' is not supported yet")
+                }
+                Expr::IndexGet { .. } => {
+                    anyhow!("computed method or element calls are not supported yet")
+                }
+                _ => anyhow!(
+                    "indirect function calls are not supported yet; call a declared module function directly"
+                ),
+            });
         };
         let signature = self
             .signatures

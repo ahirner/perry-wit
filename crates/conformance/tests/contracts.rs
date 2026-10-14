@@ -148,10 +148,10 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
     let exited = command(
         Command::new("node").args(["-e", "process.exit(7)"]),
         directory.path(),
-        Duration::from_secs(5),
+        Duration::from_secs(Limits::default().timeout_seconds),
     )?;
+    assert!(!exited.timed_out && !exited.success());
     assert_eq!(exited.exit, Some(7));
-    assert!(!exited.success());
     let stalled = command(
         Command::new("node").args(["-e", "for(;;){}"]),
         directory.path(),

@@ -190,7 +190,7 @@ builtin.module @appends {
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     assert_eq!(
-        printed.matches("perry.intrinsic string_try_append").count(),
+        printed.matches("perry.intrinsic StringTryAppend").count(),
         2,
         "{printed}"
     );

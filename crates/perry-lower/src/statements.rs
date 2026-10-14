@@ -235,6 +235,7 @@ impl<'s> FunctionBuilder<'s> {
                 catch,
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
+            Stmt::PreallocateBoxes { .. } => {}
             // Perry HIR exposes no variant names, only `Debug`: show the whole node.
             other => bail!("MIR backend does not support statement {other:?} yet"),
         }
@@ -266,8 +267,33 @@ impl<'s> FunctionBuilder<'s> {
         // type. An explicit type the subset cannot represent is an error, not a fallback.
         // `Array(Any)` is such a binding too (array destructuring's element source).
         let declared = match ty {
-            HirType::Any | HirType::Unknown => None,
-            HirType::Array(element) if matches!(**element, HirType::Any) => None,
+            HirType::Any | HirType::Unknown | HirType::TypeVar(_) => None,
+            HirType::Array(element)
+                if matches!(
+                    **element,
+                    HirType::Any | HirType::Unknown | HirType::TypeVar(_)
+                ) =>
+            {
+                None
+            }
+            HirType::Generic { base, type_args }
+                if matches!(
+                    base.as_str(),
+                    "Map"
+                        | "ReadonlyMap"
+                        | "Set"
+                        | "ReadonlySet"
+                        | "Array"
+                        | "ReadonlyArray"
+                        | "Record"
+                ) && (type_args.is_empty()
+                    || type_args.iter().any(|t| {
+                        matches!(t, HirType::Any | HirType::Unknown | HirType::TypeVar(_))
+                    })) =>
+            {
+                None
+            }
+            ty if !self.shapes.is_explicit_binding(id) && infer::contains_type_var(ty) => None,
             ty => Some(self.shapes.value_type(ctx, ty)?),
         };
         let integer = self
@@ -323,7 +349,8 @@ impl<'s> FunctionBuilder<'s> {
             ..
         } = expr
         {
-            self.call(ctx, callee, args, *byte_offset)?;
+            self.call(ctx, callee, args, *byte_offset)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
         } else if let Expr::ProcessExit(code) = expr {
             let code = match code {
                 Some(code) => {
@@ -367,8 +394,11 @@ impl<'s> FunctionBuilder<'s> {
             _ => return Ok(false),
         };
         let source = self.expression(ctx, source)?;
+        let source = self.defined(ctx, source)?;
+        let is_tuple_rec = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+            .is_ok_and(|r| r.deref(ctx).is_tuple());
         ensure!(
-            kind(ctx, source)? == Kind::Array,
+            kind(ctx, source)? == Kind::Array || is_tuple_rec,
             "array destructuring is supported for arrays so far"
         );
         Ok(true)

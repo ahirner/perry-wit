@@ -28,6 +28,9 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(value) = self.url_expression(ctx, expr)? {
             return Ok(value);
         }
+        if let Some(value) = self.collection_expression(ctx, expr, expected)? {
+            return self.narrow_primitive(ctx, expr, value);
+        }
         let value = match expr {
             Expr::RegExp { pattern, flags } => self.emit_value(ctx, |ctx| {
                 perry_mir::regex::RegexConstOp::new(ctx, pattern, flags)
@@ -52,14 +55,21 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Bool(value) => self.boolean(ctx, *value),
             Expr::String(text) => self.string(ctx, text),
             Expr::LocalGet(id) => {
-                let slot = self.local(*id)?;
-                self.load(ctx, slot)?
+                let slot = self
+                    .local(*id)
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?;
+                self.load(ctx, slot)
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?
             }
             Expr::Null | Expr::Undefined => {
                 self.absent_literal(ctx, matches!(expr, Expr::Null), expected)?
             }
-            Expr::LocalSet(id, value) => self.local_set(ctx, *id, value)?,
-            Expr::Update { id, op, prefix } => self.update(ctx, *id, op, *prefix)?,
+            Expr::LocalSet(id, value) => self
+                .local_set(ctx, *id, value)
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Expr::Update { id, op, prefix } => self
+                .update(ctx, *id, op, *prefix)
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::PropertyUpdate {
                 object,
                 property,
@@ -69,7 +79,20 @@ impl<'s> FunctionBuilder<'s> {
             } => self.property_update(ctx, object, property, op, *prefix)?,
             Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
             Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
-            Expr::Logical { op, left, right } => self.logical(ctx, op, left, right)?,
+            Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
+            Expr::ScopedTemp { id, value, body } => {
+                let temp = self.expression(ctx, value)?;
+                let slot = self.entry_slot(ctx, temp.get_type(ctx));
+                self.store(ctx, slot, temp);
+                let prev = self.locals.insert(*id, LocalBinding::plain(slot));
+                let out = self.expression_with(ctx, body, expected);
+                if let Some(prev) = prev {
+                    self.locals.insert(*id, prev);
+                } else {
+                    self.locals.remove(id);
+                }
+                out?
+            }
             Expr::Conditional {
                 condition,
                 else_expr,
@@ -95,8 +118,9 @@ impl<'s> FunctionBuilder<'s> {
                 byte_offset,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset)?
-                .context("a void call has no value")?,
+                .call(ctx, callee, args, *byte_offset)
+                .and_then(|value| value.context("a void call has no value"))
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
             Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
@@ -291,14 +315,7 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => {
                 self.intrinsic(ctx, Intrinsic::EnvKeys, vec![])
             }
-            Expr::ObjectKeys(object) => {
-                let object = self.expression(ctx, object)?;
-                ensure!(
-                    kind(ctx, object)? == Kind::Json,
-                    "Object.keys requires a JSON snapshot"
-                );
-                self.intrinsic(ctx, Intrinsic::JsonKeys, vec![object])
-            }
+            Expr::ObjectKeys(object) | Expr::ForInKeys(object) => self.object_keys(ctx, object)?,
             Expr::PerformanceNow => self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]),
             Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
             Expr::ErrorNew(message) => {
@@ -437,6 +454,41 @@ impl<'s> FunctionBuilder<'s> {
                     matches!(expr, Expr::ArrayFilter { .. }),
                 )?
             }
+            Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
+                let array = self.expression(ctx, array)?;
+                self.array_find(
+                    ctx,
+                    array,
+                    callback,
+                    matches!(expr, Expr::ArrayFindIndex { .. }),
+                )?
+            }
+            Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } => {
+                let array = self.expression(ctx, array)?;
+                self.array_quantifier(
+                    ctx,
+                    array,
+                    callback,
+                    matches!(expr, Expr::ArrayEvery { .. }),
+                )?
+            }
+            Expr::ArrayFlatMap { array, callback } => {
+                let array = self.expression(ctx, array)?;
+                self.array_flat_map(ctx, array, callback)?
+            }
+            Expr::ArraySort { array, comparator } => {
+                let array = self.expression(ctx, array)?;
+                let comparator =
+                    (!matches!(**comparator, Expr::Undefined)).then_some(comparator.as_ref());
+                self.array_sort(ctx, array, comparator, false)?
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                let array = self.expression(ctx, array)?;
+                let comparator = comparator
+                    .as_deref()
+                    .filter(|c| !matches!(c, Expr::Undefined));
+                self.array_sort(ctx, array, comparator, true)?
+            }
             Expr::ArrayIncludes {
                 array,
                 value,
@@ -458,7 +510,9 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::ArrayPush {
                 array_id, value, ..
-            } => self.array_push(ctx, *array_id, value)?,
+            } => self
+                .array_push(ctx, *array_id, value)
+                .map_err(|error| self.shapes.annotate_local(error, *array_id))?,
             Expr::IndexGet { object, index } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
                 object,
@@ -619,6 +673,38 @@ impl<'s> FunctionBuilder<'s> {
         let otherwise = self.new_block(ctx, "else");
         let join = self.new_block(ctx, "join");
         self.branch(ctx, test, then, otherwise);
+        if expected.is_none()
+            && matches!(then_expr, Expr::Null | Expr::Undefined)
+            && !matches!(else_expr, Expr::Null | Expr::Undefined)
+        {
+            self.switch_to(otherwise);
+            self.variant_condition(condition, false);
+            let else_value = self.expression_with(ctx, else_expr, None)?;
+            let else_ty = else_value.get_type(ctx);
+            let then_absence = if matches!(then_expr, Expr::Null) {
+                perry_mir::attrs::Absence::Null
+            } else {
+                perry_mir::attrs::Absence::Undefined
+            };
+            let states = crate::coerce::merge_absence(absence(ctx, else_ty), Some(then_absence))
+                .unwrap_or(then_absence);
+            let inner = optional_value(ctx, else_ty).unwrap_or(else_ty);
+            let ty = perry_mir::types::OptionalType::get_with(ctx, inner, states).into();
+            let result = self.entry_slot(ctx, ty);
+            let else_value = self.fit(ctx, else_value, ty)?;
+            self.store(ctx, result, else_value);
+            self.jump(ctx, join);
+            self.variant_guards.truncate(guards);
+            self.switch_to(then);
+            self.variant_condition(condition, true);
+            let then_value = self.expression_with(ctx, then_expr, Some(ty))?;
+            let then_value = self.fit(ctx, then_value, ty)?;
+            self.store(ctx, result, then_value);
+            self.jump(ctx, join);
+            self.variant_guards.truncate(guards);
+            self.switch_to(join);
+            return self.load(ctx, result);
+        }
         self.switch_to(then);
         // With an expected type both arms fit it (`cond ? value : undefined`).
         self.variant_condition(condition, true);
@@ -627,15 +713,50 @@ impl<'s> FunctionBuilder<'s> {
             Some(expected) => self.fit(ctx, then_value, expected)?,
             None => then_value,
         };
-        let ty = then_value.get_type(ctx);
-        // The slot is created in the entry block so it dominates both arms.
-        let result = self.entry_slot(ctx, ty);
-        self.store(ctx, result, then_value);
-        self.jump(ctx, join);
+        let then_end = self.block;
+        let then_ty = then_value.get_type(ctx);
         self.switch_to(otherwise);
         self.variant_guards.truncate(guards);
         self.variant_condition(condition, false);
-        let else_value = self.expression_with(ctx, else_expr, Some(ty))?;
+        let else_expected = match expected {
+            Some(expected) => expected,
+            None if matches!(else_expr, Expr::Null | Expr::Undefined) => {
+                let else_absence = if matches!(else_expr, Expr::Null) {
+                    perry_mir::attrs::Absence::Null
+                } else {
+                    perry_mir::attrs::Absence::Undefined
+                };
+                let states =
+                    crate::coerce::merge_absence(absence(ctx, then_ty), Some(else_absence))
+                        .unwrap_or(else_absence);
+                let inner = optional_value(ctx, then_ty).unwrap_or(then_ty);
+                perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+            }
+            None => then_ty,
+        };
+        let else_value = self.expression_with(ctx, else_expr, Some(else_expected))?;
+        let else_end = self.block;
+        let ty = match expected {
+            Some(expected) => expected,
+            None => {
+                let else_ty = else_value.get_type(ctx);
+                if let Some(states) =
+                    crate::coerce::merge_absence(absence(ctx, then_ty), absence(ctx, else_ty))
+                {
+                    let inner = optional_value(ctx, then_ty).unwrap_or(then_ty);
+                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                } else {
+                    then_ty
+                }
+            }
+        };
+        // The slot is created in the entry block so it dominates both arms.
+        let result = self.entry_slot(ctx, ty);
+        self.switch_to(then_end);
+        let then_value = self.fit(ctx, then_value, ty)?;
+        self.store(ctx, result, then_value);
+        self.jump(ctx, join);
+        self.switch_to(else_end);
         let else_value = self.fit(ctx, else_value, ty)?;
         self.store(ctx, result, else_value);
         self.jump(ctx, join);
@@ -683,11 +804,20 @@ impl<'s> FunctionBuilder<'s> {
                     NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
             }
-            (Kind::Array, "length") => {
+            (Kind::Array, "length" | "size") => {
                 let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, value));
                 self.emit_value(ctx, |ctx| {
                     NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
+            }
+            (Kind::Array, field)
+                if crate::collections::dict_entry_types(ctx, value.get_type(ctx)).is_some() =>
+            {
+                let (k_ty, v_ty, _) =
+                    crate::collections::dict_entry_types(ctx, value.get_type(ctx))
+                        .context("MIR backend expected dictionary entry types")?;
+                let key = self.string(ctx, field);
+                self.kv_get(ctx, value, key, k_ty, v_ty)?
             }
             (Kind::Bytes, "buffer") => self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value]),
             (Kind::Bytes, "byteOffset") => self.intrinsic(ctx, Intrinsic::BytesOffset, vec![value]),
@@ -743,6 +873,18 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
             (Kind::Record, field) => {
+                if field == "length"
+                    && let Ok(record) =
+                        TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
+                    && record.deref(ctx).is_tuple()
+                {
+                    let len = record
+                        .deref(ctx)
+                        .fields()
+                        .map_err(|_| anyhow!("tuple without fields"))?
+                        .len();
+                    return Ok(self.number(ctx, len as f64));
+                }
                 let op = FieldGetOp::new(ctx, value, field.to_string()).map_err(|_| {
                     anyhow!("property {field} does not exist on this shape (subset rule R1)")
                 })?;
@@ -759,7 +901,12 @@ impl<'s> FunctionBuilder<'s> {
                     loaded
                 }
             }
-            (_, property) => bail!("property {property} is not supported on this type yet"),
+            (receiver_kind, property) => {
+                bail!(
+                    "property {property} is not supported on {} yet",
+                    receiver_kind.label()
+                )
+            }
         })
     }
 
@@ -793,9 +940,15 @@ impl<'s> FunctionBuilder<'s> {
                         format!("_{}", *n as u64)
                     }
                     Expr::Integer(n) if *n >= 0 => format!("_{n}"),
-                    _ => bail!(
-                        "closed records require literal keys; tuples require literal positions"
-                    ),
+                    _ => {
+                        let Ok(rec) =
+                            TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
+                        else {
+                            bail!("expected a record for dynamic index");
+                        };
+                        let key = self.string_operand(ctx, index)?;
+                        return self.record_dynamic_get(ctx, array, key, rec);
+                    }
                 };
                 let op = FieldGetOp::new(ctx, array, field.clone())
                     .map_err(|_| anyhow!("record has no field {field}"))?;
@@ -813,6 +966,12 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
             Kind::Array => {
+                if let Some((k_ty, v_ty, _)) =
+                    crate::collections::dict_entry_types(ctx, array.get_type(ctx))
+                {
+                    let key = self.expression_with(ctx, index, Some(k_ty))?;
+                    return self.kv_get(ctx, array, key, k_ty, v_ty);
+                }
                 let index = self.index(ctx, index)?;
                 let op = ArrayGetOp::new(ctx, array, index)?;
                 Ok(self.append_value(ctx, &op))

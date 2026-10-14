@@ -117,12 +117,28 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "generator function",
         ),
         (
-            "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
+            "export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }",
             "MIR backend does not support",
         ),
         (
             "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
             "cannot find name 'a'",
+        ),
+        (
+            "export function run(cb: number): number {\n  return (cb as any)(1);\n}",
+            "indirect calls through local or parameter bindings are not supported yet",
+        ),
+        (
+            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+            "method toFixed is not supported on number yet",
+        ),
+        (
+            "export function run(s: string): number {\n  return (s as any).byteLength;\n}",
+            "property byteLength is not supported on string yet",
+        ),
+        (
+            "export function run(a: bigint, b: bigint): bigint {\n  return a / b;\n}",
+            "operator Div on bigint and bigint is not supported yet",
         ),
     ] {
         let error = rejected(source);
@@ -143,6 +159,24 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
     let span = diag.span.as_ref().expect("span on unresolved identifier");
     assert_eq!(span.start_line, 5);
     assert_eq!(span.start_column, 13);
+
+    let call_err = lower_without_foreign(
+        ctx,
+        "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+        "case.ts",
+    )
+    .err()
+    .expect("rejection");
+    let call_diag = call_err
+        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+        .expect("diagnostic");
+    assert_eq!(
+        call_diag.message,
+        "method toFixed is not supported on number yet"
+    );
+    let call_span = call_diag.span.as_ref().expect("span on method call");
+    assert_eq!(call_span.start_line, 2);
+    assert_eq!(call_span.start_column, 10);
 }
 
 #[test]
@@ -344,7 +378,7 @@ export async function run(x: number): Promise<number> {
         "perry.await",
         "perry.timer",
         "perry.promise <builtin.fp64 >",
-        "perry_async",
+        "asynchronous=true",
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
@@ -404,4 +438,145 @@ fn unsupported_temporal_forms_are_rejected() {
         let error = rejected(source);
         assert!(error.contains(message), "{source}: {error}");
     }
+}
+
+#[test]
+fn nullish_coalescing_and_optional_chaining() {
+    let printed = lowered(
+        r#"
+interface Leaf { count?: number; label: string | null }
+interface Branch { leaf?: Leaf | null; tags?: string[] }
+interface Root { branch?: Branch | null }
+
+export function run(root: Root | null, fallback: number): string {
+  const n = root?.branch?.leaf?.count ?? fallback;
+  const tag = root?.branch?.tags?.[0] ?? "none";
+  const label = root?.branch?.leaf?.label ?? "unnamed";
+  return `${label}:${tag}:${n}`;
+}
+"#,
+    );
+    assert!(printed.contains("perry.is_undefined"), "{printed}");
+}
+
+#[test]
+fn array_higher_order_methods_and_locale_compare() {
+    let printed = lowered(
+        r#"
+interface Item { name: string; score: number; tags: string[] }
+
+export function run(items: Item[]): number {
+  const active = items.filter((item) => item.score > 0);
+  const sorted = active.toSorted((a, b) => a.name.localeCompare(b.name));
+  const scores = sorted.map((item, idx) => item.score + idx);
+  const allTags = sorted.flatMap((item) => item.tags);
+  const found = sorted.find((item) => item.name === "target");
+  const foundIdx = sorted.findIndex((item) => item.score >= 10);
+  const hasHigh = sorted.some((item) => item.score > 100);
+  const allPos = sorted.every((item) => item.score > 0);
+  let bonus = 0;
+  scores.forEach((s) => {
+    bonus = bonus + s;
+  });
+  const sum = scores.reduce((acc, s) => acc + s, 0);
+  const rsum = scores.reduceRight((acc, s) => acc + s, 0);
+  const extra = (found?.score ?? 0) + foundIdx + allTags.length + (hasHigh ? 1 : 0) + (allPos ? 1 : 0);
+  return sum + rsum + bonus + extra;
+}
+"#,
+    );
+    assert!(printed.contains("perry.compare Lt"), "{printed}");
+}
+
+#[test]
+fn collections_map_set_record_and_object_helpers() {
+    let printed = lowered(
+        r#"
+export function run(seed: string): number {
+  const m = new Map<string, number>();
+  m.set(seed, 10);
+  m.set("b", 20);
+  const hasSeed = m.has(seed);
+  const got = m.get(seed) ?? 0;
+  m.delete("b");
+
+  let mapSum = 0;
+  for (const [k, v] of m.entries()) {
+    if (k.length > 0) {
+      mapSum = mapSum + v;
+    }
+  }
+
+  const s = new Set<string>([seed, "x"]);
+  s.add("y");
+  const hasX = s.has("x");
+  s.delete("x");
+
+  const dict: Record<string, number> = { a: 1, b: 2 };
+  dict[seed] = 3;
+  const hasA = "a" in dict;
+  delete dict["b"];
+
+  let keyCount = 0;
+  for (const k in dict) {
+    keyCount = keyCount + k.length;
+  }
+
+  const keys = Object.keys(dict);
+  const vals = Object.values(dict);
+  const entries = Object.entries(dict);
+  const rebuilt = Object.fromEntries(entries);
+  const same = Object.is(got, 10) && Array.isArray(keys);
+
+  return (
+    mapSum +
+    m.size +
+    s.size +
+    keys.length +
+    vals.length +
+    (rebuilt[seed] ?? 0) +
+    keyCount +
+    (hasSeed && !hasX && hasA && same ? 1 : 0)
+  );
+}
+"#,
+    );
+    assert!(printed.contains("map_tuple_"), "{printed}");
+    assert!(printed.contains("dict_tuple_"), "{printed}");
+}
+
+#[test]
+fn generic_interfaces_and_type_aliases() {
+    let printed = lowered(
+        r#"
+interface Boxed<T> {
+  value: T;
+}
+
+interface Page<T> extends Boxed<T[]> {
+  total: number;
+  nextCursor?: string | null;
+}
+
+type Maybe<T> = T | null;
+type StringMap<V> = Record<string, V>;
+interface User {
+  id: string;
+  name: string;
+  age?: number;
+}
+type UserPreview = Pick<User, "id" | "name">;
+type PartialUser = Partial<User>;
+
+export function run(page: Page<UserPreview>, extra: Maybe<PartialUser>): number {
+  const map: StringMap<number> = {};
+  for (const u of page.value) {
+    map[u.id] = u.name.length;
+  }
+  const fallback = extra?.name?.length ?? 0;
+  return page.total + (map["root"] ?? fallback);
+}
+"#,
+    );
+    assert!(printed.contains("shape_"), "{printed}");
 }

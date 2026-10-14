@@ -222,7 +222,7 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Apply an array callback (a named function or an inline closure) to `arguments`; an
     /// inline closure's body is lowered in place, its `return`s leaving to a `done` block.
-    fn array_callback(
+    pub(super) fn array_callback(
         &mut self,
         ctx: &mut Context,
         callback: &'s Expr,
@@ -476,6 +476,275 @@ impl<'s> FunctionBuilder<'s> {
             },
         )?;
         self.load(ctx, result)
+    }
+
+    /// `array.find(callback)` or `array.findIndex(callback)` when `index_only`.
+    pub(super) fn array_find(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        index_only: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let limit = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let miss = if index_only {
+            self.number(ctx, -1.0)
+        } else {
+            let states = crate::coerce::merge_absence(
+                absence(ctx, element),
+                Some(perry_mir::attrs::Absence::Undefined),
+            )
+            .unwrap();
+            let inner = optional_value(ctx, element).unwrap_or(element);
+            let opt_ty = OptionalType::get_with(ctx, inner, states).into();
+            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
+        };
+        let result_ty = miss.get_type(ctx);
+        let result = self.entry_slot(ctx, result_ty);
+        self.store(ctx, result, miss);
+        self.index_loop(ctx, "find", zero, limit, |b, ctx, current, next, done| {
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, current, available);
+            let read = b.new_block(ctx, "find_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, current)?;
+            let matched = b.array_callback(ctx, callback, &[item, current, array])?;
+            let keep = b.truthy(ctx, matched)?;
+            let hit = b.new_block(ctx, "find_hit");
+            b.branch(ctx, keep, hit, next);
+            b.switch_to(hit);
+            let value = if index_only {
+                current
+            } else {
+                b.fit(ctx, item, result_ty)?
+            };
+            b.store(ctx, result, value);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        self.load(ctx, result)
+    }
+
+    /// `array.some(callback)` or `array.every(callback)` when `every`.
+    pub(super) fn array_quantifier(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        every: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let limit = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let initial = self.boolean(ctx, every);
+        let result = self.entry_slot(ctx, initial.get_type(ctx));
+        self.store(ctx, result, initial);
+        self.index_loop(
+            ctx,
+            if every { "every" } else { "some" },
+            zero,
+            limit,
+            |b, ctx, current, next, done| {
+                let available = b.array_length(ctx, array);
+                let present = b.compare(ctx, CompareKind::Lt, current, available);
+                let read = b.new_block(ctx, "quantifier_read");
+                b.branch(ctx, present, read, next);
+                b.switch_to(read);
+                let item = b.element_at(ctx, array, current)?;
+                let tested = b.array_callback(ctx, callback, &[item, current, array])?;
+                let truthy = b.truthy(ctx, tested)?;
+                let stop = b.new_block(ctx, "quantifier_stop");
+                if every {
+                    b.branch(ctx, truthy, next, stop);
+                } else {
+                    b.branch(ctx, truthy, stop, next);
+                }
+                b.switch_to(stop);
+                let outcome = b.boolean(ctx, !every);
+                b.store(ctx, result, outcome);
+                b.jump(ctx, done);
+                Ok(())
+            },
+        )?;
+        self.load(ctx, result)
+    }
+
+    /// `array.flatMap(callback)`: maps each element to an array and flattens one level.
+    pub(super) fn array_flat_map(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let limit = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let prepare = self.block;
+        self.index_loop(ctx, "flat_map", zero, limit, |b, ctx, current, next, _| {
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, current, available);
+            let read = b.new_block(ctx, "flat_map_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, current)?;
+            let mapped = b.array_callback(ctx, callback, &[item, current, array])?;
+            let mapped = b.defined(ctx, mapped)?;
+            let inner_element = b
+                .array_element(ctx, mapped)
+                .context("flatMap callback must return an array")?;
+            let append = b.block;
+            let allocation = ArrayNewOp::new(ctx, inner_element, vec![]);
+            insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
+            let result = allocation.get_result(ctx);
+            b.switch_to(append);
+            let inner_limit = b.array_length(ctx, mapped);
+            let inner_zero = b.number(ctx, 0.0);
+            b.index_loop(
+                ctx,
+                "flat_map_inner",
+                inner_zero,
+                inner_limit,
+                |b, ctx, inner_idx, _, _| {
+                    let elem = b.element_at(ctx, mapped, inner_idx)?;
+                    b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, elem));
+                    Ok(())
+                },
+            )?;
+            Ok(result)
+        })
+    }
+
+    /// `array.sort(comparator?)` or `array.toSorted(comparator?)` when `clone_first`.
+    pub(super) fn array_sort(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        comparator: Option<&'s Expr>,
+        clone_first: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let target = if clone_first {
+            let copy = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+            let limit = self.array_length(ctx, array);
+            let zero = self.number(ctx, 0.0);
+            self.index_loop(ctx, "sort_clone", zero, limit, |b, ctx, idx, _, _| {
+                let item = b.element_at(ctx, array, idx)?;
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, copy, item));
+                Ok(())
+            })?;
+            copy
+        } else {
+            array
+        };
+        let limit = self.array_length(ctx, target);
+        let one = self.number(ctx, 1.0);
+        self.index_loop(ctx, "sort_outer", one, limit, |b, ctx, i, _, _| {
+            let key = b.element_at(ctx, target, i)?;
+            let j_slot = b.entry_slot(ctx, i.get_type(ctx));
+            let one = b.number(ctx, 1.0);
+            let zero = b.number(ctx, 0.0);
+            let j_init = b.binary(ctx, BinaryKind::Sub, i, one);
+            b.store(ctx, j_slot, j_init);
+            let inner_header = b.new_block(ctx, "sort_inner_header");
+            let inner_cmp = b.new_block(ctx, "sort_inner_cmp");
+            let inner_shift = b.new_block(ctx, "sort_inner_shift");
+            let inner_done = b.new_block(ctx, "sort_inner_done");
+            b.jump(ctx, inner_header);
+            b.switch_to(inner_header);
+            let j = b.load(ctx, j_slot)?;
+            let ge_zero = b.compare(ctx, CompareKind::Ge, j, zero);
+            b.branch(ctx, ge_zero, inner_cmp, inner_done);
+            b.switch_to(inner_cmp);
+            let candidate = b.element_at(ctx, target, j)?;
+            let gt = if let Some(comparator) = comparator {
+                let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
+                let cmp = b.arithmetic(ctx, cmp);
+                ensure!(
+                    kind(ctx, cmp)? == Kind::Number,
+                    "sort comparator must return a number"
+                );
+                b.compare(ctx, CompareKind::Gt, cmp, zero)
+            } else {
+                let cand_str = b.display(ctx, candidate)?;
+                let key_str = b.display(ctx, key)?;
+                b.compare(ctx, CompareKind::Gt, cand_str, key_str)
+            };
+            b.branch(ctx, gt, inner_shift, inner_done);
+            b.switch_to(inner_shift);
+            let j_plus_one = b.binary(ctx, BinaryKind::Add, j, one);
+            b.emit(ctx, |ctx| {
+                ArraySetOp::new(ctx, target, j_plus_one, candidate)
+            });
+            let j_minus_one = b.binary(ctx, BinaryKind::Sub, j, one);
+            b.store(ctx, j_slot, j_minus_one);
+            b.jump(ctx, inner_header);
+            b.switch_to(inner_done);
+            let j_final = b.load(ctx, j_slot)?;
+            let insert_pos = b.binary(ctx, BinaryKind::Add, j_final, one);
+            b.emit(ctx, |ctx| ArraySetOp::new(ctx, target, insert_pos, key));
+            Ok(())
+        })?;
+        Ok(target)
+    }
+
+    /// `array.reduce(callback, initial?)` or `array.reduceRight(callback, initial?)`.
+    pub(super) fn array_reduce(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        initial: Option<&'s Expr>,
+        from_right: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        let (acc_slot, start_step) = if let Some(init_expr) = initial {
+            let init_val = self.expression(ctx, init_expr)?;
+            let slot = self.entry_slot(ctx, init_val.get_type(ctx));
+            self.store(ctx, slot, init_val);
+            (slot, zero)
+        } else {
+            let first_idx = if from_right {
+                self.binary(ctx, BinaryKind::Sub, len, one)
+            } else {
+                zero
+            };
+            let first_elem = self.element_at(ctx, array, first_idx)?;
+            let slot = self.entry_slot(ctx, first_elem.get_type(ctx));
+            self.store(ctx, slot, first_elem);
+            (slot, one)
+        };
+        let acc_ty = self.slot_type(ctx, acc_slot)?;
+        self.index_loop(ctx, "reduce", start_step, len, |b, ctx, step, next, _| {
+            let current = if from_right {
+                let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                b.binary(ctx, BinaryKind::Sub, last, step)
+            } else {
+                step
+            };
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, current, available);
+            let read = b.new_block(ctx, "reduce_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, current)?;
+            let acc = b.load(ctx, acc_slot)?;
+            let next_acc = b.array_callback(ctx, callback, &[acc, item, current, array])?;
+            let fitted = b.fit(ctx, next_acc, acc_ty)?;
+            b.store(ctx, acc_slot, fitted);
+            Ok(())
+        })?;
+        self.load(ctx, acc_slot)
     }
 
     /// `for (i = start; i < limit; i++) body` over `f64` indices. `body` gets `i`, the block

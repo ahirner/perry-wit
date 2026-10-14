@@ -97,3 +97,13 @@ pub enum ErrorKind {
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct ReuseOperands(pub Vec<u32>);
+
+/// Per-function metadata flags for exports, async splitting, entry specialization, and atomic construction.
+#[pliron_attr(name = "perry.function_meta", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
+pub struct FunctionMeta {
+    pub exported: bool,
+    pub asynchronous: bool,
+    pub specialized_entry: bool,
+    pub atomic_construction: bool,
+}

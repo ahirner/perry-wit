@@ -21,12 +21,13 @@ pub(super) fn load<'s>(
     source: &'s str,
     file: &str,
     sources: &'s BTreeMap<String, String>,
-    foreign: &HashMap<String, perry_hir::types::Type>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
 ) -> Result<Loaded<'s>> {
     let mut initial = parse(source, file)?;
     let foreign: BTreeSet<_> = foreign
-        .keys()
-        .filter_map(|name| name.strip_prefix("wit:").map(str::to_owned))
+        .iter()
+        .filter(|&(_, item)| !matches!(item, crate::hir::Foreign::Function(_)))
+        .map(|(name, _)| name.clone())
         .collect();
     wit_imports(&mut initial, &foreign, Path::new(file), sources);
     let needs_graph = initial.body.iter().any(|item| match item {
@@ -307,7 +308,6 @@ impl Graph<'_> {
         Ok(path)
     }
     fn module(&mut self, path: &Path, mut module: ast::Module) -> Result<Exports> {
-        super::source::validate(&module)?;
         wit_imports(&mut module, &self.foreign, path, self.sources);
         // Each parser invocation owns a source map; give merged bindings disjoint spans.
         struct Rebase {
@@ -335,6 +335,7 @@ impl Graph<'_> {
         self.locations.add(path.to_owned(), text, self.next_span);
         module.visit_mut_with(&mut rebase);
         self.next_span = rebase.end + 1;
+        super::source::validate(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {

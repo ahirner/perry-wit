@@ -4,7 +4,7 @@ use super::*;
 use perry_hir::HirTypeFacts;
 use std::collections::HashMap;
 
-fn contains_type_var(ty: &HirType) -> bool {
+pub(super) fn contains_type_var(ty: &HirType) -> bool {
     match ty {
         HirType::TypeVar(_) => true,
         HirType::Array(inner) | HirType::Promise(inner) => contains_type_var(inner),
@@ -15,84 +15,8 @@ fn contains_type_var(ty: &HirType) -> bool {
     }
 }
 
-fn is_resolvable_type(ty: &HirType) -> bool {
-    match ty {
-        HirType::Any | HirType::Unknown | HirType::Void | HirType::Null | HirType::TypeVar(_) => {
-            false
-        }
-        HirType::Named(name) => !name.starts_with("__AnonShape_"),
-        HirType::Array(inner) | HirType::Promise(inner) => is_resolvable_type(inner),
-        HirType::Tuple(items) => items.iter().all(is_resolvable_type),
-        HirType::Union(items) => {
-            items
-                .iter()
-                .any(|item| !matches!(item, HirType::Void | HirType::Null))
-                && items.iter().all(|item| {
-                    matches!(item, HirType::Void | HirType::Null) || is_resolvable_type(item)
-                })
-        }
-        HirType::Generic { type_args, .. } => type_args.iter().all(is_resolvable_type),
-        HirType::Object(object) => {
-            object.index_signature.is_none()
-                && object
-                    .properties
-                    .values()
-                    .all(|p| is_resolvable_type(&p.ty))
-        }
-        _ => true,
-    }
-}
-
-fn expression(expr: &Expr, env: &FunctionEnv<'_>) -> HirType {
-    let ty = match expr {
-        Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => match callee.as_ref() {
-            Expr::PropertyGet {
-                object, property, ..
-            } if matches!(property.as_str(), "concat" | array_methods::CONCAT) => {
-                expression(object, env)
-            }
-            _ => perry_hir::infer_expr_type(expr, env),
-        },
-        Expr::PropertyGet {
-            object, property, ..
-        } => match expression(object, env) {
-            HirType::Generic { base, type_args } => shapes::generics::property_type(
-                env.interfaces,
-                env.type_aliases,
-                &base,
-                &type_args,
-                property,
-            )
-            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::Named(base) => shapes::generics::property_type(
-                env.interfaces,
-                env.type_aliases,
-                &base,
-                &[],
-                property,
-            )
-            .or_else(|| env.named_property_type(&base, property))
-            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::Object(object) => object
-                .properties
-                .get(property)
-                .map(|p| p.ty.clone())
-                .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::String | HirType::Array(_) if property == "length" => HirType::Number,
-            _ => perry_hir::infer_expr_type(expr, env),
-        },
-        Expr::IndexGet { object, .. } => match expression(object, env) {
-            HirType::Array(element) => *element,
-            _ => perry_hir::infer_expr_type(expr, env),
-        },
-        _ => perry_hir::infer_expr_type(expr, env),
-    };
-    if contains_type_var(&ty) {
-        HirType::Any
-    } else {
-        ty
-    }
-}
+mod expressions;
+use expressions::*;
 
 struct FunctionEnv<'a> {
     base: &'a perry_hir::HirTypeEnv,
@@ -100,12 +24,14 @@ struct FunctionEnv<'a> {
     type_aliases: &'a [perry_hir::ir::TypeAlias],
     locals: &'a mut HashMap<LocalId, HirType>,
     integer_aliases: &'a HashMap<String, HirType>,
+    imported_types: &'a HashMap<String, String>,
+    foreign: &'a HashMap<String, crate::hir::Foreign>,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;
 const BIGINT_TYPE: HirType = HirType::BigInt;
 
-impl FunctionEnv<'_> {
+impl<'a> FunctionEnv<'a> {
     fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
         match ty {
             HirType::Named(name) => match self.integer_aliases.get(name) {
@@ -115,6 +41,42 @@ impl FunctionEnv<'_> {
             },
             ty => ty,
         }
+    }
+
+    fn normalize_owned(&self, ty: HirType) -> HirType {
+        match ty {
+            HirType::Named(name) => self
+                .integer_aliases
+                .get(&name)
+                .cloned()
+                .unwrap_or(HirType::Named(name)),
+            HirType::Array(inner) => HirType::Array(Box::new(self.normalize_owned(*inner))),
+            HirType::Promise(inner) => HirType::Promise(Box::new(self.normalize_owned(*inner))),
+            HirType::Tuple(items) => {
+                HirType::Tuple(items.into_iter().map(|t| self.normalize_owned(t)).collect())
+            }
+            HirType::Union(items) => {
+                HirType::Union(items.into_iter().map(|t| self.normalize_owned(t)).collect())
+            }
+            ty => ty,
+        }
+    }
+
+    fn resolve_foreign_type(&self, type_name: &str) -> Option<&'a HirType> {
+        let mut current = self
+            .imported_types
+            .get(type_name)
+            .map_or(type_name, String::as_str);
+        for _ in 0..8 {
+            match self.foreign.get(current)? {
+                crate::hir::Foreign::Type(HirType::Named(next)) if next != current => {
+                    current = next;
+                }
+                crate::hir::Foreign::Type(ty) => return Some(ty),
+                _ => return None,
+            }
+        }
+        None
     }
 }
 
@@ -163,16 +125,20 @@ impl HirTypeFacts for FunctionEnv<'_> {
     }
 
     fn named_property_type(&self, type_name: &str, property: &str) -> Option<HirType> {
-        self.base
+        let ty = self
+            .base
             .named_property_type(type_name, property)
-            .map(|ty| match ty {
-                HirType::Named(name) => self
-                    .integer_aliases
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or(HirType::Named(name)),
-                ty => ty,
-            })
+            .or_else(|| {
+                let HirType::Object(object) = self.resolve_foreign_type(type_name)? else {
+                    return None;
+                };
+                let prop = object.properties.get(property)?;
+                Some(shapes::generics::optional_property(
+                    prop.ty.clone(),
+                    prop.optional,
+                ))
+            })?;
+        Some(self.normalize_owned(ty))
     }
 
     fn super_property_type(&self, property: &str) -> Option<HirType> {
@@ -189,10 +155,10 @@ enum ScanMode<'a> {
     ResolveLocals,
 }
 
-fn collect_integer_aliases(
+fn collect_foreign_imports(
     hir: &HirModule,
-    foreign: &HashMap<String, HirType>,
-) -> HashMap<String, HirType> {
+    foreign: &HashMap<String, crate::hir::Foreign>,
+) -> (HashMap<String, HirType>, HashMap<String, String>) {
     let mut names: HashMap<String, HirType> = [
         ("perry:types/u8", HirType::Number),
         ("perry:types/s8", HirType::Number),
@@ -206,6 +172,18 @@ fn collect_integer_aliases(
     .into_iter()
     .map(|(k, v)| (String::from(k), v))
     .collect();
+    for (key, entry) in foreign {
+        if let crate::hir::Foreign::Integer { width, .. } = entry {
+            names.insert(
+                key.clone(),
+                if *width == 64 {
+                    HirType::BigInt
+                } else {
+                    HirType::Number
+                },
+            );
+        }
+    }
     let user_types: HashSet<&str> = hir
         .interfaces
         .iter()
@@ -213,7 +191,12 @@ fn collect_integer_aliases(
         .chain(hir.type_aliases.iter().map(|a| a.name.as_str()))
         .chain(hir.classes.iter().map(|c| c.name.as_str()))
         .collect();
+    let mut imported_types = HashMap::new();
     for import in &hir.imports {
+        let source_module = import
+            .source
+            .strip_prefix("wit:")
+            .unwrap_or(import.source.as_str());
         for specifier in &import.specifiers {
             let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
                 continue;
@@ -234,15 +217,36 @@ fn collect_integer_aliases(
                     _ => {}
                 }
             }
-            for candidate in [
-                format!("wit:{}#{imported}", import.source),
-                format!("wit:{imported}"),
-            ] {
-                if let Some(HirType::Named(target)) = foreign.get(&candidate)
-                    && let Some(carrier) = names.get(target).cloned()
-                {
-                    names.insert(local.clone(), carrier);
-                    break;
+            for candidate in [format!("{source_module}#{imported}"), imported.clone()] {
+                match foreign.get(&candidate) {
+                    Some(crate::hir::Foreign::Integer { width, .. }) => {
+                        names.insert(
+                            local.clone(),
+                            if *width == 64 {
+                                HirType::BigInt
+                            } else {
+                                HirType::Number
+                            },
+                        );
+                        imported_types.insert(local.clone(), candidate);
+                        break;
+                    }
+                    Some(crate::hir::Foreign::Type(HirType::Named(target))) => {
+                        if let Some(carrier) = names.get(target).cloned() {
+                            names.insert(local.clone(), carrier);
+                        }
+                        imported_types.insert(local.clone(), candidate);
+                        break;
+                    }
+                    Some(
+                        crate::hir::Foreign::Type(_)
+                        | crate::hir::Foreign::Resource(_)
+                        | crate::hir::Foreign::Input(_),
+                    ) => {
+                        imported_types.insert(local.clone(), candidate);
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -263,7 +267,7 @@ fn collect_integer_aliases(
             break;
         }
     }
-    names
+    (names, imported_types)
 }
 
 fn clear_inferred_type_vars<V>(
@@ -275,7 +279,9 @@ fn clear_inferred_type_vars<V>(
     for statement in statements {
         match statement {
             Stmt::Let { id, ty, .. } if inferred.contains(id) || !spans.contains_key(id) => {
-                if contains_type_var(ty) {
+                if contains_type_var(ty)
+                    || matches!(ty, HirType::Named(name) if name == "Map" || name == "Set")
+                {
                     *ty = HirType::Any;
                 } else if let HirType::Named(name) = ty
                     && let Some(carrier) = integer_aliases.get(name)
@@ -346,7 +352,12 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
                 ty,
                 init: Some(init),
                 ..
-            } if matches!(ty, HirType::Any | HirType::Unknown)
+            } if (matches!(&*ty, HirType::Any | HirType::Unknown)
+                || matches!(
+                    &*ty,
+                    HirType::Generic { base, type_args }
+                        if matches!(base.as_str(), "Map" | "Set") && type_args.is_empty()
+                ))
                 && !matches!(init, Expr::Undefined) =>
             {
                 let inferred = expression(init, env);
@@ -472,9 +483,9 @@ pub(super) fn unresolved_types(
     hir: &mut HirModule,
     inferred: &HashSet<LocalId>,
     locations: &crate::locations::Locations<'_>,
-    foreign: &HashMap<String, HirType>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
 ) {
-    let integer_aliases = collect_integer_aliases(hir, foreign);
+    let (integer_aliases, imported_types) = collect_foreign_imports(hir, foreign);
     clear_inferred_type_vars(
         &mut hir.init,
         inferred,
@@ -491,6 +502,19 @@ pub(super) fn unresolved_types(
     }
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
+    {
+        let mut env = FunctionEnv {
+            base: &module_env,
+            interfaces: &hir.interfaces,
+            type_aliases: &hir.type_aliases,
+            locals: &mut locals,
+            integer_aliases: &integer_aliases,
+            foreign,
+            imported_types: &imported_types,
+        };
+        scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
+    }
+    module_env = perry_hir::HirTypeEnv::from_module(hir);
     for _ in 0..=hir.functions.len() {
         let mut changed = false;
         for function in &mut hir.functions {
@@ -507,6 +531,8 @@ pub(super) fn unresolved_types(
                 type_aliases: &hir.type_aliases,
                 locals: &mut locals,
                 integer_aliases: &integer_aliases,
+                foreign,
+                imported_types: &imported_types,
             };
             let mut returned = Vec::new();
             scan(
@@ -569,8 +595,11 @@ pub(super) fn unresolved_types(
         type_aliases: &hir.type_aliases,
         locals: &mut locals,
         integer_aliases: &integer_aliases,
+        foreign,
+        imported_types: &imported_types,
     };
     scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
+    module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
         locals.clear();
         for param in &function.params {
@@ -582,6 +611,8 @@ pub(super) fn unresolved_types(
             type_aliases: &hir.type_aliases,
             locals: &mut locals,
             integer_aliases: &integer_aliases,
+            foreign,
+            imported_types: &imported_types,
         };
         scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
     }

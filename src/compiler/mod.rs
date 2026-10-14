@@ -144,7 +144,7 @@ pub(crate) fn compile_sources(
         );
     }
     let ctx = &mut Context::new();
-    let mut foreign = wit_types::foreign(resolve);
+    let mut foreign = wit_types::foreign(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let mir =
@@ -252,7 +252,7 @@ fn lower(
     source: &str,
     file_name: &str,
     modules: &BTreeMap<String, String>,
-    foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
+    foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let mir =
         perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {

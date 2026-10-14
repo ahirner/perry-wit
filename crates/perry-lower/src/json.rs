@@ -246,6 +246,9 @@ impl<'s> FunctionBuilder<'s> {
             self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
             return Ok(decoded);
         }
+        if let Some((k_ty, v_ty, tuple_rec)) = crate::collections::dict_entry_types(ctx, target) {
+            return self.decode_dict(ctx, value, k_ty, v_ty, tuple_rec);
+        }
         if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
             let element = array_type.deref(ctx).element();
             let first = self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value]);
@@ -441,6 +444,11 @@ pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
     while let Some(ty) = pending.pop() {
         if !visited.insert(ty) {
             continue;
+        }
+        if crate::collections::dict_entry_types(ctx, ty).is_some()
+            || crate::collections::map_entry_types(ctx, ty).is_some()
+        {
+            return false;
         }
         let ty = ty.deref(ctx);
         if let Some(record) = ty.downcast_ref::<RecordType>() {
