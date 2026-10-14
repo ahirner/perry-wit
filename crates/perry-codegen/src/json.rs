@@ -80,23 +80,24 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    pub(crate) fn native_descriptor(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<u32> {
+    pub(crate) fn native_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);
         }
-        let record_fields = TypedHandle::<RecordType>::from_handle(ty, ctx)
-            .ok()
-            .map(|record| record.deref(ctx).fields().map(|fields| fields.to_vec()))
+        let definition = ty.deref(ctx);
+        let record_fields = definition
+            .downcast_ref::<RecordType>()
+            .map(RecordType::fields)
             .transpose()
             .map_err(|_| anyhow!("unresolved native record"))?;
-        let count = record_fields.as_ref().map_or(0, Vec::len);
+        let count = record_fields.map_or(0, <[_]>::len);
         let address = self.state.data.append(4, &vec![0; 8 + 12 * count]);
         self.state.native_descriptors.insert(ty, address);
-        let mut words = if let Some(fields) = record_fields {
+        let words = if let Some(fields) = record_fields {
             let mut words = vec![4, count as u32];
-            for (index, (name, field)) in fields.into_iter().enumerate() {
-                let name = self.state.data.string(&name);
-                let field = self.native_descriptor(ctx, field)?;
+            for (index, (name, field)) in fields.iter().enumerate() {
+                let name = self.state.data.string(name);
+                let field = self.native_descriptor(ctx, *field)?;
                 words.extend([name, field, record::field(index)]);
             }
             words
@@ -122,7 +123,7 @@ impl FunctionLowering<'_, '_> {
             vec![kind, 0]
         };
         let offset = (address - crate::DATA_BASE) as usize;
-        for (index, word) in words.drain(..).enumerate() {
+        for (index, word) in words.into_iter().enumerate() {
             self.state.data.bytes[offset + index * 4..offset + index * 4 + 4]
                 .copy_from_slice(&word.to_le_bytes());
         }
