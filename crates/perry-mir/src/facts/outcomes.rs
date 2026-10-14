@@ -58,3 +58,13 @@ impl Solver {
         }
     }
 }
+
+pub(super) fn promise_payload(ctx: &Context, op: Ptr<Operation>) -> Option<usize> {
+    if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
+        Some(0)
+    } else if Operation::get_op::<TimerOp>(op, ctx).is_some() {
+        Some(1)
+    } else {
+        None
+    }
+}
