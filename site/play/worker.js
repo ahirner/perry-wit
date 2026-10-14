@@ -1,3 +1,4 @@
+import { formatDiagnostics } from './diagnostics.js';
 import { instantiateCompiler } from './compiler-host.js';
 import * as compilerCli from '@bytecodealliance/preview2-shim/cli';
 import { $init as bindgenReady, generate } from '@bytecodealliance/jco-transpile/component';
@@ -95,6 +96,6 @@ self.onmessage = async ({ data }) => {
     send('complete', { result, needsExport, log: log + decoder.decode() });
   } catch (error) {
     const payload = error?.payload;
-    send('error', { phase, log, message: typeof payload === 'string' ? payload : payload ? JSON.stringify(payload, null, 2) : error?.message || String(error) });
+    send('error', { phase, log, diagnostics: Array.isArray(payload) ? payload : [], message: Array.isArray(payload) ? formatDiagnostics(payload) : typeof payload === 'string' ? payload : payload ? JSON.stringify(payload, null, 2) : error?.message || String(error) });
   }
 };

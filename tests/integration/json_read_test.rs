@@ -128,7 +128,7 @@ export function duplicates():number {
  if(overwritten.result.val !== 'yes') return 4;
  if(JSON.stringify(overwritten)!=='{"result":{"tag":"err","val":"yes"}}')return 5;
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"missing"},"ignored":[1,]}');return 6;}
- catch(e) {if(!e.message.includes('SyntaxError')) return 7;}
+ catch(e) {if(!(e instanceof SyntaxError) || !e.message.includes('Invalid JSON at byte')) return 7;}
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok"}}');return 8;} catch(e) {}
  const row:Row = JSON.parse('{"name":false,"inner":{"n":false},"name":"é🙂","inner":{"n":3}}');
  if(row.name.length !== 2 || row.inner.n !== 3 || row.extra !== undefined) return 9;

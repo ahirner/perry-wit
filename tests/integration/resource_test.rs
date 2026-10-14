@@ -29,7 +29,7 @@ interface secrets {
     take: func(value:secret)->u32;
     pair: func(a:secret,b:secret)->u32;
 }
-world boundary { import secrets; export run:func(value:u32)->u32; }";
+world boundary { import secrets; export run:func(value:u32)->result<u32>; }";
 struct Secret;
 #[derive(Default)]
 struct Counts {
@@ -104,11 +104,13 @@ fn imported_resources_transfer_borrow_collect_and_rollback() -> Result<()> {
         )?;
         let mut store = Store::new(&engine, Counts::default());
         let instance = linker.instantiate(&mut store, &component)?;
-        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        let run = instance
+            .get_typed_func::<(u32,), (std::result::Result<u32, ()>,)>(&mut store, "run")?;
         assert_eq!(
             run.call(&mut store, (42,))
                 .map_err(|error| anyhow::anyhow!("{body}: {error:?}"))?
-                .0,
+                .0
+                .unwrap(),
             expected,
             "{body}"
         );
@@ -123,7 +125,7 @@ fn imported_resources_transfer_borrow_collect_and_rollback() -> Result<()> {
 
 #[test]
 fn exported_resources_preserve_representations_and_expire_saved_borrows() -> Result<()> {
-    let wit = "package test:boundary; interface secrets {resource secret; get:func(value:u32)->secret; reveal:func(value:borrow<secret>)->u32; stale:func()->u32;} world boundary {export secrets;}";
+    let wit = "package test:boundary; interface secrets {resource secret; get:func(value:u32)->result<secret>; reveal:func(value:borrow<secret>)->result<u32>; stale:func()->result<u32>;} world boundary {export secrets;}";
     let source = "import type {Secret} from 'test:boundary/secrets'; import {newSecret,secretRep} from 'test:boundary/secrets'; let saved:Secret|undefined=undefined; export function secretsGet(value:number):Secret {return newSecret(value);} export function secretsReveal(value:Secret):number {saved=value;return secretRep(value);} export function secretsStale():number {try {return secretRep(saved);} catch(e) {if(e instanceof TypeError)return 7;return 0;}}";
     let engine = Engine::default();
     let component = Component::new(&engine, compile(source, wit)?)?;
@@ -141,15 +143,18 @@ fn exported_resources_preserve_representations_and_expire_saved_borrows() -> Res
     let (_, stale) = instance
         .get_export(&mut store, Some(&interface), "stale")
         .unwrap();
-    let get = instance.get_typed_func::<(u32,), (ResourceAny,)>(&mut store, get)?;
-    let reveal = instance.get_typed_func::<(ResourceAny,), (u32,)>(&mut store, reveal)?;
-    let stale = instance.get_typed_func::<(), (u32,)>(&mut store, stale)?;
+    let get = instance
+        .get_typed_func::<(u32,), (std::result::Result<ResourceAny, ()>,)>(&mut store, get)?;
+    let reveal = instance
+        .get_typed_func::<(ResourceAny,), (std::result::Result<u32, ()>,)>(&mut store, reveal)?;
+    let stale =
+        instance.get_typed_func::<(), (std::result::Result<u32, ()>,)>(&mut store, stale)?;
     for value in [0, 42, u32::MAX] {
-        let secret = get.call(&mut store, (value,))?.0;
+        let secret = get.call(&mut store, (value,))?.0.unwrap();
         for _ in 0..3 {
-            assert_eq!(reveal.call(&mut store, (secret,))?.0, value);
+            assert_eq!(reveal.call(&mut store, (secret,))?.0.unwrap(), value);
         }
-        assert_eq!(stale.call(&mut store, ())?.0, 7);
+        assert_eq!(stale.call(&mut store, ())?.0.unwrap(), 7);
         secret.resource_drop(&mut store)?;
     }
     Ok(())
@@ -167,7 +172,7 @@ async fn async_resource_borrows_release_only_after_acknowledgement() -> Result<(
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    let wit = "package test:boundary; interface secrets {resource secret;get:func(value:u32)->secret;work:async func(value:borrow<secret>)->u32;} world boundary {import secrets;export run:async func(value:u32)->u32;}";
+    let wit = "package test:boundary; interface secrets {resource secret;get:func(value:u32)->secret;work:async func(value:borrow<secret>)->u32;} world boundary {import secrets;export run:async func(value:u32)->result<u32>;}";
     for detached in [false, true] {
         let body = if detached {
             "return 7;"
@@ -214,7 +219,8 @@ async fn async_resource_borrows_release_only_after_acknowledgement() -> Result<(
         })?;
         let mut store = Store::new(&engine, Counts::default());
         let instance = linker.instantiate_async(&mut store, &component).await?;
-        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        let run = instance
+            .get_typed_func::<(u32,), (std::result::Result<u32, ()>,)>(&mut store, "run")?;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             run.call_async(&mut store, (42,)),
@@ -222,11 +228,11 @@ async fn async_resource_borrows_release_only_after_acknowledgement() -> Result<(
         .await?;
         if detached {
             assert!(
-                result.is_err(),
+                result?.0.is_err(),
                 "detached borrow must fail at task boundary"
             );
         } else {
-            assert_eq!(result?.0, 43);
+            assert_eq!(result?.0.unwrap(), 43);
         }
         assert_eq!(ack.load(Ordering::SeqCst), 1);
         assert_eq!(store.data().drops, 1);
@@ -242,7 +248,7 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
     };
     let wit = "package test:boundary;
         interface secrets {resource secret;get:func(value:u32)->secret;inspect:async func(value:borrow<secret>)->u32;}
-        interface service {use secrets.{secret};get:func(value:u32)->secret;run:async func(value:borrow<secret>)->u32;}
+        interface service {use secrets.{secret};get:func(value:u32)->result<secret>;run:async func(value:borrow<secret>)->result<u32>;}
         world boundary {import secrets;export service;}";
     let source = "import type {Secret} from 'test:boundary/secrets'; import {get,inspect} from 'test:boundary/secrets'; export function serviceGet(value:number):Secret {return get(value);} export async function serviceRun(value:Secret):Promise<number> {return await inspect(value);}";
     let engine = async_engine()?;
@@ -279,10 +285,12 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
     let (_, run) = instance
         .get_export(&mut store, Some(&interface), "run")
         .unwrap();
-    let get = instance.get_typed_func::<(u32,), (ResourceAny,)>(&mut store, get)?;
-    let run = instance.get_typed_func::<(ResourceAny,), (u32,)>(&mut store, run)?;
-    let a = get.call_async(&mut store, (11,)).await?.0;
-    let b = get.call_async(&mut store, (29,)).await?.0;
+    let get = instance
+        .get_typed_func::<(u32,), (std::result::Result<ResourceAny, ()>,)>(&mut store, get)?;
+    let run = instance
+        .get_typed_func::<(ResourceAny,), (std::result::Result<u32, ()>,)>(&mut store, run)?;
+    let a = get.call_async(&mut store, (11,)).await?.0.unwrap();
+    let b = get.call_async(&mut store, (29,)).await?.0.unwrap();
     for _ in 0..100 {
         let pair = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -291,7 +299,7 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
                     run.call_concurrent(accessor, (a,)),
                     run.call_concurrent(accessor, (b,))
                 );
-                Ok((a?.0, b?.0))
+                Ok((a?.0.unwrap(), b?.0.unwrap()))
             }),
         )
         .await???;

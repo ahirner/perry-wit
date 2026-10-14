@@ -8,7 +8,10 @@ use anyhow::{Result, anyhow};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     attrs::ErrorKind,
-    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
+    collections::{
+        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+        ConcatSegmentsOp,
+    },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     types::{ArrayType, RecordType},
     variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
@@ -23,6 +26,50 @@ use pliron::{
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
+    pub(crate) fn array_concat(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
+        let operands = self.operands(ctx, op)?;
+        let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+        let reuse = Operation::get_op::<perry_mir::collections::ConcatReuseOp>(op, ctx)
+            .map_or_else(Vec::new, |concat| concat.candidates(ctx).0);
+        let value = if operands.len() == 2 {
+            let mask = reuse.iter().fold(0, |mask, index| mask | (1 << index));
+            let reuse = self.i32_const(ctx, mask);
+            self.runtime(
+                ctx,
+                Runtime::ArrayConcat,
+                vec![operands[0], operands[1], references, reuse],
+            )
+        } else {
+            let mark = self.publish_roots(ctx, &operands);
+            let stack = self.runtime(ctx, Runtime::RootsState, vec![]);
+            let data = self.load(ctx, MemKind::I32, stack, perry_abi::layout::roots::DATA);
+            let two = self.i32_const(ctx, 2);
+            let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
+            let sources = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+            let count = self.i32_const(ctx, operands.len() as i32);
+            let indices = reuse
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect::<Vec<_>>();
+            let address = if indices.is_empty() {
+                0
+            } else {
+                self.state.data.append(4, &indices)
+            };
+            let candidates = self.i32_const(ctx, address as i32);
+            let candidate_count = self.i32_const(ctx, reuse.len() as i32);
+            let value = self.runtime(
+                ctx,
+                Runtime::ArrayConcatMany,
+                vec![sources, count, references, candidates, candidate_count],
+            );
+            self.reset_roots(ctx, mark);
+            value
+        };
+        self.define(ctx, op, value);
+        Ok(())
+    }
     /// Lower a record, array or variant op; `false` if `op` is none.
     pub(crate) fn aggregate_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<bool> {
         if let Some(variant) = Operation::get_op::<VariantNewOp>(op, ctx) {
@@ -52,18 +99,15 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<AllocOp>(op, ctx).is_some() {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let (name, fields) = {
-                let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                    .map_err(|_| anyhow!("expected a record"))?;
-                let record = record.deref(ctx);
-                let fields: Vec<_> = record
-                    .fields()
-                    .map_err(|_| anyhow!("record without fields"))?
-                    .iter()
-                    .map(|(_, ty)| *ty)
-                    .collect();
-                (record.name().to_string(), fields)
-            };
+            let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
+                .map_err(|_| anyhow!("expected a record"))?;
+            let fields: Vec<_> = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .iter()
+                .map(|(_, ty)| *ty)
+                .collect();
             let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
@@ -75,7 +119,7 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            self.record_header(ctx, object, name);
+            self.record_header(ctx, object, record);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, record::field(index), value);
@@ -121,6 +165,35 @@ impl FunctionLowering<'_, '_> {
             let array = self.operands(ctx, op)?[0];
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             self.define(ctx, op, len);
+            return Ok(true);
+        }
+        if let Some(native) = Operation::get_op::<perry_mir::collections::NativeJsonOp>(op, ctx) {
+            use pliron::builtin::op_interfaces::OneOpdInterface;
+            let source = native.get_operand(ctx);
+            let descriptor = self.native_descriptor(ctx, source.get_type(ctx))?;
+            let descriptor = self.i32_const(ctx, descriptor as i32);
+            let source = self.mapped(ctx, source)?;
+            let value = self.runtime(ctx, Runtime::StdJsonNative, vec![source, descriptor]);
+            self.define(ctx, op, value);
+            return Ok(true);
+        }
+        if Operation::get_op::<ConcatSegmentsOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
+            let sources = self.operand(ctx, op, 0)?;
+            let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+            let value = self.runtime(ctx, Runtime::ArrayConcatSegments, vec![sources, references]);
+            self.define(ctx, op, value);
+            return Ok(true);
+        }
+        if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let operands = self.operands(ctx, op)?;
+            let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+            self.runtime_void(
+                ctx,
+                Runtime::ArrayExtend,
+                vec![operands[0], operands[1], references],
+            );
             return Ok(true);
         }
         if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
@@ -204,7 +277,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
-    pub(crate) fn element_index(
+    fn element_index(
         &mut self,
         ctx: &mut Context,
         index: Value,
@@ -230,7 +303,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Append `value` to `array`, growing it through the runtime when full.
-    pub(crate) fn push(
+    fn push(
         &mut self,
         ctx: &mut Context,
         array: Value,
@@ -267,11 +340,7 @@ impl FunctionLowering<'_, '_> {
         Ok(ty.deref(ctx).element())
     }
 
-    pub(crate) fn field_slot(
-        ctx: &Context,
-        record: Value,
-        field: &str,
-    ) -> Result<(u32, TypeHandle)> {
+    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?;
         let ty = ty.deref(ctx);
@@ -281,11 +350,25 @@ impl FunctionLowering<'_, '_> {
         Ok((record::field(index), field_ty))
     }
 
-    /// Initialize the header of fresh record storage: the id of shape `name` and, when the
+    /// Initialize the header of fresh record storage: the id of shape `record` and, when the
     /// module retains parsed JSON, an empty source word.
-    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, name: String) {
-        let next_shape = self.state.shapes.len() as i32 + 1;
-        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+    pub(crate) fn record_header(
+        &mut self,
+        ctx: &mut Context,
+        object: Value,
+        record: TypedHandle<RecordType>,
+    ) {
+        let shape = {
+            let record = record.deref(ctx);
+            let name: &str = record.name().as_ref();
+            if let Some(&shape) = self.state.shapes.get(name) {
+                shape
+            } else {
+                let next_shape = self.state.shapes.len() as i32 + 1;
+                self.state.shapes.insert(name.to_string(), next_shape);
+                next_shape
+            }
+        };
         if self.state.retains_json {
             let zero = self.i32_const(ctx, 0);
             self.store(ctx, MemKind::I32, object, record::JSON, zero);

@@ -124,6 +124,8 @@ pub fn status_code(kind: ErrorKind) -> i32 {
         ErrorKind::Any => 3,
         ErrorKind::TypeError => 1,
         ErrorKind::RangeError => 2,
+        ErrorKind::ReferenceError => 6,
+        ErrorKind::SyntaxError => 7,
         ErrorKind::Value => 4,
         ErrorKind::Exit => 5,
     }

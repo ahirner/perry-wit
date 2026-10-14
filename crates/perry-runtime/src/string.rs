@@ -28,10 +28,19 @@ const _: () = {
 
 /// Uninitialized header storage whose shape traces only the owner field.
 fn header() -> *mut Str {
-    static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];
-    // SAFETY: the only owner field retains the immutable payload allocation.
-    unsafe { crate::region::perry_alloc_shaped(core::mem::size_of::<Str>() as u32, SHAPE.as_ptr()) }
+    #[cfg(feature = "collectible")]
+    {
+        static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];
+        // SAFETY: the map traces only the immutable payload owner.
+        unsafe {
+            crate::region::perry_alloc_shaped(core::mem::size_of::<Str>() as u32, SHAPE.as_ptr())
+        }
         .cast()
+    }
+    #[cfg(not(feature = "collectible"))]
+    {
+        perry_alloc(core::mem::size_of::<Str>() as u32).cast()
+    }
 }
 
 fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
@@ -107,7 +116,7 @@ pub unsafe extern "C" fn perry_string_adopt_counted(
 fn append_buffer(len: u32) -> *mut Buffer {
     assert!(len <= (u32::MAX - 8) / 2, "string too long");
     let cap = (len * 2).max(MIN_BUFFER);
-    let buffer = perry_alloc(cap + 8) as *mut Buffer;
+    let buffer = perry_alloc(crate::sequence::byte_size(cap, 1, 8)) as *mut Buffer;
     // SAFETY: the allocation reserves the header and its capacity; no collection occurs here.
     unsafe { buffer.write(Buffer { cap, used: len }) };
     buffer
@@ -149,7 +158,7 @@ unsafe fn shared(string: *mut Str) -> *mut u8 {
     }
 }
 
-/// `a + b` where `a` is not used afterwards (compiled code proved it, `perry.string_append`):
+/// `a + b` where `a` is not used afterwards (compiled code proved it, `perry.concat_reuse`):
 /// a header made by concatenation is updated in place instead of allocating a new one, so a
 /// loop of `text = text + x` allocates only when its buffer doubles.
 ///
@@ -176,10 +185,7 @@ pub(crate) unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *
 #[inline(always)]
 unsafe fn append_text<const REUSE: bool>(s: *mut Str, suffix: *const Str) -> *mut u8 {
     unsafe {
-        let len = (*s)
-            .len
-            .checked_add((*suffix).len)
-            .expect("string too long");
+        let len = crate::sequence::length((*s).len, (*suffix).len);
         let scalars = (*s).scalars + (*suffix).scalars;
         let buffer = (*s).buffer;
         if !buffer.is_null() {

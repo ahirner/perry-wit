@@ -1,11 +1,11 @@
-//! Dense-array methods lowered inline: callbacks of `map`/`filter`, `indexOf`/`includes`,
-//! and variadic or spread `push`.
+//! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
 use perry_mir::{collections::ArrayAtOp, types::OptionalType};
 use perry_parser::swc_ecma_ast as ast;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 pub(super) const PUSH: &str = "$$perryArrayPush";
+pub(super) const CONCAT: &str = "$$perryArrayConcat";
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
 pub(super) fn preserve_arguments(module: &mut ast::Module) {
@@ -13,13 +13,15 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
     impl VisitMut for Arguments {
         fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
             call.visit_mut_children_with(self);
-            if (call.args.len() != 1 || call.args.iter().any(|argument| argument.spread.is_some()))
-                && let ast::Callee::Expr(callee) = &mut call.callee
+            if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
-                && method.sym == "push"
+                && (method.sym == "concat"
+                    || (method.sym == "push"
+                        && (call.args.len() != 1
+                            || call.args.iter().any(|argument| argument.spread.is_some()))))
             {
-                method.sym = PUSH.into();
+                method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
             }
         }
     }
@@ -142,6 +144,10 @@ fn completions(statements: &[Stmt]) -> u8 {
             };
     }
     result
+}
+
+pub(super) fn returns_optional(statements: &[Stmt]) -> bool {
+    completions(statements) & (FALLTHROUGH | EMPTY_RETURN) != 0
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -474,68 +480,9 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, result)
     }
 
-    /// `array.push(…)` with spread arguments: all values are collected before the receiver
-    /// grows, so spreading the receiver into itself appends its original elements.
-    pub(super) fn array_push_spread(
-        &mut self,
-        ctx: &mut Context,
-        callee: &'s Expr,
-        args: &'s [perry_hir::CallArg],
-    ) -> Result<Value> {
-        let Expr::PropertyGet {
-            object, property, ..
-        } = callee
-        else {
-            bail!("spread calls require a dense array push receiver")
-        };
-        ensure!(
-            property == PUSH || property == "push",
-            "spread calls are supported for dense array push"
-        );
-        let receiver = self.expression(ctx, object)?;
-        let receiver = self.defined(ctx, receiver)?;
-        ensure!(
-            kind(ctx, receiver)? == Kind::Array,
-            "push requires a dense array receiver"
-        );
-        let element = self.array_element(ctx, receiver)?;
-        let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-        for argument in args {
-            match argument {
-                perry_hir::CallArg::Expr(expression) => {
-                    let value = self.expression_with(ctx, expression, Some(element))?;
-                    let value = self.fit(ctx, value, element)?;
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, values, value));
-                }
-                perry_hir::CallArg::Spread(expression) => {
-                    let source = self.expression(ctx, expression)?;
-                    let source = self.defined(ctx, source)?;
-                    ensure!(
-                        self.array_element(ctx, source)? == element,
-                        "spread elements must fit the destination array"
-                    );
-                    self.append_array(ctx, values, source)?;
-                }
-            }
-        }
-        self.append_array(ctx, receiver, values)?;
-        Ok(self.array_length(ctx, receiver))
-    }
-
-    /// Push every element of `source` onto `target`.
-    fn append_array(&mut self, ctx: &mut Context, target: Value, source: Value) -> Result<()> {
-        let limit = self.array_length(ctx, source);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "spread", zero, limit, |b, ctx, current, _, _| {
-            let value = b.element_at(ctx, source, current)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, target, value));
-            Ok(())
-        })
-    }
-
     /// `for (i = start; i < limit; i++) body` over `f64` indices. `body` gets `i`, the block
     /// that advances to the next index, and the loop's exit, where lowering continues.
-    fn index_loop<T>(
+    pub(super) fn index_loop<T>(
         &mut self,
         ctx: &mut Context,
         label: &str,
@@ -567,7 +514,12 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `array[index]` for an `f64` index the caller checked against the length.
-    fn element_at(&mut self, ctx: &mut Context, array: Value, index: Value) -> Result<Value> {
+    pub(super) fn element_at(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+    ) -> Result<Value> {
         let at = self.emit_value(ctx, |ctx| ConvertOp::new(ctx, ConvertKind::F64ToU32, index));
         let op = ArrayAtOp::new(ctx, array, at)?;
         Ok(self.append_value(ctx, &op))

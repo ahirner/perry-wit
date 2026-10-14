@@ -7,6 +7,7 @@ use perry_mir::optional::{absence, optional_value};
 #[derive(Clone, Copy)]
 pub(super) struct Completion<'a> {
     pub(super) result: &'a AbiType,
+    ok: Option<&'a AbiType>,
     err: Option<&'a AbiType>,
 }
 
@@ -24,6 +25,7 @@ impl AbiType {
         };
         let completion = Completion {
             result: self,
+            ok: ok.as_deref(),
             err: err.as_deref(),
         };
         let Some(record) = mir.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
@@ -40,6 +42,47 @@ impl AbiType {
                 .is_none_or(|_| record_field(ctx, record, "error").is_ok());
         (!tagged).then_some(completion)
     }
+    pub(super) fn error_completion(&self) -> Option<Completion<'_>> {
+        let Self::Result { ok, err } = self else {
+            return None;
+        };
+        Some(Completion {
+            result: self,
+            ok: ok.as_deref(),
+            err: err.as_deref(),
+        })
+    }
+
+    pub(crate) fn accepts_exception(&self) -> bool {
+        match self {
+            Self::Result { err, .. } => err.as_deref().is_none_or(|err| match err {
+                Self::Bool
+                | Self::S8
+                | Self::U8
+                | Self::S16
+                | Self::U16
+                | Self::S32
+                | Self::U32
+                | Self::S64
+                | Self::U64
+                | Self::F32
+                | Self::F64
+                | Self::String
+                | Self::Enum(_) => true,
+                Self::Record(fields) => {
+                    fields.len() == 2
+                        && ["name", "message"].iter().all(|name| {
+                            fields
+                                .iter()
+                                .any(|(field, ty)| field == name && *ty == Self::String)
+                        })
+                }
+                _ => false,
+            }),
+            Self::OkHandle { .. } => true,
+            _ => false,
+        }
+    }
     pub(super) fn is_sum(&self) -> bool {
         matches!(
             self,
@@ -53,7 +96,7 @@ impl AbiType {
             Self::Option(inner) => vec![None, Some(inner)],
             Self::Result { ok, err } => vec![ok.as_deref(), err.as_deref()],
             Self::Enum(names) => vec![None; names.len()],
-            _ => unreachable!("not a sum"),
+            _ => vec![],
         }
     }
 
@@ -121,14 +164,20 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn completion_store(
         &mut self,
         ctx: &mut Context,
-        ty: &AbiType,
+        completion: Completion<'_>,
         case: usize,
         payload: Option<(TypeHandle, Value)>,
         address: Value,
     ) -> Result<()> {
+        let ty = completion.result;
         let tag = self.i32_const(ctx, case as i32);
         self.store(ctx, MemKind::I32U8, address, 0, tag);
-        if let Some(abi) = ty.cases()[case] {
+        let abi = if case == 0 {
+            completion.ok
+        } else {
+            completion.err
+        };
+        if let Some(abi) = abi {
             let (mir, value) =
                 payload.ok_or_else(|| anyhow!("WIT result payload requires a return value"))?;
             self.lower_store(ctx, abi, mir, value, address, ty.payload_offset())?;
@@ -139,13 +188,19 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn completion_flat(
         &mut self,
         ctx: &mut Context,
-        ty: &AbiType,
+        completion: Completion<'_>,
         case: usize,
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Vec<Value>> {
+        let ty = completion.result;
         let mut out = vec![self.i32_const(ctx, case as i32)];
         let layout = ty.sum_flat();
-        if let Some(abi) = ty.cases()[case] {
+        let abi = if case == 0 {
+            completion.ok
+        } else {
+            completion.err
+        };
+        if let Some(abi) = abi {
             let (mir, value) =
                 payload.ok_or_else(|| anyhow!("WIT result payload requires a return value"))?;
             let mut flat = Vec::new();
@@ -188,7 +243,12 @@ impl FunctionLowering<'_, '_> {
             let maximum = self.i32_const(ctx, exception_layout::ERROR as i32);
             let at_least = self.num(ctx, NumOpcode::I32GeU, vec![kind, minimum]);
             let at_most = self.num(ctx, NumOpcode::I32LeU, vec![kind, maximum]);
-            let matches = self.num(ctx, NumOpcode::I32And, vec![at_least, at_most]);
+            let basic = self.num(ctx, NumOpcode::I32And, vec![at_least, at_most]);
+            let six = self.i32_const(ctx, 6);
+            let offset = self.num(ctx, NumOpcode::I32Sub, vec![kind, six]);
+            let two = self.i32_const(ctx, 2);
+            let native = self.num(ctx, NumOpcode::I32LtU, vec![offset, two]);
+            let matches = self.num(ctx, NumOpcode::I32Or, vec![basic, native]);
             let valid = self.new_block(ctx, vec![]);
             let invalid = self.new_block(ctx, vec![]);
             self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));
@@ -352,10 +412,10 @@ impl FunctionLowering<'_, '_> {
                 );
                 match payload {
                     Some(value) => Ok(value),
-                    None if absence(ctx, mir).is_some_and(|a| a.admits_undefined()) => {
-                        self.undefined(ctx, mir)
+                    None if absence(ctx, mir).is_some_and(|a| a.admits_null()) => {
+                        self.null(ctx, mir)
                     }
-                    None => self.null(ctx, mir),
+                    None => self.undefined(ctx, mir),
                 }
             }
             AbiType::Result { .. } => {

@@ -1,7 +1,7 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
 use anyhow::{Context, Result, bail, ensure};
-use perry_parser::{parse_typescript_with_cache, swc_ecma_ast as ast};
+use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -12,12 +12,17 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 type Exports = BTreeMap<String, String>;
 
-pub(crate) fn load(
-    source: &str,
+pub(super) struct Loaded<'s> {
+    pub(super) module: ast::Module,
+    pub(super) locations: crate::locations::Locations<'s>,
+}
+
+pub(super) fn load<'s>(
+    source: &'s str,
     file: &str,
-    sources: &BTreeMap<String, String>,
+    sources: &'s BTreeMap<String, String>,
     foreign: &HashMap<String, perry_hir::types::Type>,
-) -> Result<ast::Module> {
+) -> Result<Loaded<'s>> {
     let mut initial = parse(source, file)?;
     let foreign: BTreeSet<_> = foreign
         .keys()
@@ -34,7 +39,12 @@ pub(crate) fn load(
         _ => false,
     });
     if !needs_graph {
-        return Ok(initial);
+        let mut locations = crate::locations::Locations::default();
+        locations.add(PathBuf::from(file), source, 0);
+        return Ok(Loaded {
+            module: initial,
+            locations,
+        });
     }
     GLOBALS.set(&Globals::new(), || {
         let mut graph = Graph {
@@ -47,6 +57,9 @@ pub(crate) fn load(
             types: BTreeSet::new(),
             next: 0,
             next_span: 0,
+            locations: crate::locations::Locations::default(),
+            entry_path: normalize(Path::new(file)),
+            entry_source: source,
         };
         let path = normalize(Path::new(file));
         let exports = graph.module(&path, initial)?;
@@ -97,7 +110,10 @@ pub(crate) fn load(
             ..Default::default()
         };
         module.visit_mut_with(&mut ClearContexts);
-        Ok(module)
+        Ok(Loaded {
+            module,
+            locations: graph.locations,
+        })
     })
 }
 
@@ -114,14 +130,10 @@ fn wit_imports(
             && !import.specifiers.is_empty()
             && import.specifiers.iter().all(|specifier| match specifier {
                 ast::ImportSpecifier::Named(named) => {
-                    let name = named
-                        .imported
-                        .as_ref()
-                        .map(|name| name.atom().to_string())
-                        .unwrap_or_else(|| named.local.sym.to_string());
+                    let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
+                    let name: &str = imported.as_deref().unwrap_or(&named.local.sym);
                     (import.type_only || named.is_type_only)
-                        && (foreign.contains(&name)
-                            || matches!(name.as_str(), "WitInput" | "WitResource"))
+                        && (foreign.contains(name) || matches!(name, "WitInput" | "WitResource"))
                 }
                 _ => false,
             })
@@ -143,7 +155,7 @@ fn local(name: &str) -> bool {
     name.starts_with("./") || name.starts_with("../")
 }
 
-pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
+pub(super) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
     ensure!(local(name), "Re-exports require a local TypeScript module");
     let path = normalize(&parent.parent().unwrap_or(Path::new("")).join(name));
     let mut candidates = vec![path.clone()];
@@ -160,7 +172,7 @@ pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
     Ok(candidates)
 }
 
-pub(crate) fn normalize(path: &Path) -> PathBuf {
+pub(super) fn normalize(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {
@@ -180,27 +192,65 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
     candidates(parent, name)?
         .into_iter()
         .find(|path| sources.contains_key(path.to_string_lossy().as_ref()))
-        .with_context(|| format!("Cannot resolve '{name}' from {}", parent.display()))
+        .ok_or_else(|| {
+            perry_wit_diagnostics::PerryDiagnostic::error(
+                perry_wit_diagnostics::DiagnosticCode::ModuleResolution,
+                format!("Cannot resolve '{name}' from {}", parent.display()),
+            )
+            .into()
+        })
 }
 
-pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
+pub(super) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
     let mut cache = Default::default();
+    use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
     let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
-        .with_context(|| format!("Parsing {identity}"))?;
-    ensure!(
-        parsed.diagnostics.is_empty(),
-        "Parsing {identity}: {}",
-        parsed
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
-    );
+        .map_err(|error| {
+            // The pinned wrapper discards fatal spans; recover SWC metadata directly.
+            use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
+            let lexer = Lexer::new(
+                Syntax::Typescript(TsSyntax::default()),
+                Default::default(),
+                swc_common::input::StringInput::new(
+                    source,
+                    swc_common::BytePos(1),
+                    swc_common::BytePos(source.len() as u32 + 1),
+                ),
+                None,
+            );
+            let mut parser = Parser::new_from(lexer);
+            let mut diagnostic = PerryDiagnostic::error(
+                DiagnosticCode::ParseError,
+                format!("Parsing {identity}: {error}"),
+            );
+            if let Err(failure) = parser.parse_module() {
+                let span = failure.span();
+                diagnostic.span = Some(SourceSpan::new(
+                    identity,
+                    source,
+                    span.lo.0.saturating_sub(1) as usize,
+                    span.hi.0.saturating_sub(1) as usize,
+                ));
+            }
+            error.context(diagnostic)
+        })?;
+    if let Some(diagnostic) = parsed.diagnostics.iter().next() {
+        return Err(PerryDiagnostic::error(
+            DiagnosticCode::ParseError,
+            format!("Parsing {identity}: {}", diagnostic.message),
+        )
+        .with_span(SourceSpan::new(
+            identity,
+            source,
+            diagnostic.span.start.saturating_sub(1) as usize,
+            diagnostic.span.end.saturating_sub(1) as usize,
+        ))
+        .into());
+    }
     Ok(parsed.module)
 }
 
-pub(crate) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
+pub(super) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
     module
         .body
         .iter()
@@ -226,6 +276,9 @@ struct Graph<'a> {
     types: BTreeSet<String>,
     next: usize,
     next_span: u32,
+    locations: crate::locations::Locations<'a>,
+    entry_path: PathBuf,
+    entry_source: &'a str,
 }
 impl Graph<'_> {
     /// The function declaration recorded at `index` of the body.
@@ -237,7 +290,8 @@ impl Graph<'_> {
     }
 
     fn dependency(&mut self, parent: &Path, source: &ast::Str) -> Result<PathBuf> {
-        let path = resolve(parent, &source.value.to_string_lossy(), self.sources)?;
+        let path = resolve(parent, &source.value.to_string_lossy(), self.sources)
+            .map_err(|error| self.locations.annotate(error, source.span))?;
         if self.loaded.contains_key(&path) {
             return Ok(path);
         }
@@ -273,6 +327,12 @@ impl Graph<'_> {
             offset: self.next_span,
             end: self.next_span,
         };
+        let text = if path == self.entry_path {
+            self.entry_source
+        } else {
+            &self.sources[path.to_string_lossy().as_ref()]
+        };
+        self.locations.add(path.to_owned(), text, self.next_span);
         module.visit_mut_with(&mut rebase);
         self.next_span = rebase.end + 1;
         self.active.insert(path.to_owned());
@@ -385,15 +445,12 @@ fn bind_module<'a>(
                 for specifier in &import.specifiers {
                     match specifier {
                         ast::ImportSpecifier::Named(named) => {
-                            let original = named
-                                .imported
-                                .as_ref()
-                                .map(|name| name.atom().to_string())
-                                .unwrap_or_else(|| named.local.sym.to_string());
+                            let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
+                            let original: &str = imported.as_deref().unwrap_or(&named.local.sym);
                             names.insert(
                                 named.local.to_id(),
                                 dependency
-                                    .get(&original)
+                                    .get(original)
                                     .with_context(|| {
                                         format!(
                                             "Module '{}' has no export '{original}'",
@@ -433,20 +490,20 @@ fn bind_module<'a>(
                     let ast::ExportSpecifier::Named(named) = specifier else {
                         bail!("Only named local re-exports are supported");
                     };
-                    let original = named.orig.atom().to_string();
+                    let original = named.orig.atom();
+                    let original_str: &str = original.as_ref();
                     let binding = if let Some(dependency) = &dependency {
-                        dependency.get(&original)
+                        dependency.get(original_str)
                     } else if let ast::ModuleExportName::Ident(id) = &named.orig {
                         names.get(&id.to_id())
                     } else {
                         None
                     }
-                    .with_context(|| format!("Unknown export '{original}'"))?;
+                    .with_context(|| format!("Unknown export '{original_str}'"))?;
                     let exported = named
                         .exported
                         .as_ref()
-                        .map(|name| name.atom().to_string())
-                        .unwrap_or(original);
+                        .map_or_else(|| original.to_string(), |name| name.atom().to_string());
                     insert_export(&mut exports, exported, binding.clone())?;
                 }
             }
@@ -472,11 +529,14 @@ fn bind_module<'a>(
 }
 
 fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result<()> {
-    ensure!(
-        exports.insert(name.clone(), binding).is_none(),
-        "Ambiguous export '{name}'"
-    );
-    Ok(())
+    use std::collections::btree_map::Entry;
+    match exports.entry(name) {
+        Entry::Vacant(entry) => {
+            entry.insert(binding);
+            Ok(())
+        }
+        Entry::Occupied(entry) => bail!("Ambiguous export '{}'", entry.key()),
+    }
 }
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
     Ok(match decl {
@@ -527,10 +587,10 @@ impl VisitMut for Rename<'_> {
             && let Some(exports) = self.namespaces.get(&namespace.to_id())
         {
             let name = match &member.prop {
-                ast::MemberProp::Ident(id) => Some(id.sym.to_string()),
+                ast::MemberProp::Ident(id) => Some(id.sym.as_ref()),
                 _ => None,
             };
-            if let Some(binding) = name.and_then(|name| exports.get(&name)) {
+            if let Some(binding) = name.and_then(|name| exports.get(name)) {
                 *expression = ast::Expr::Ident(ast::Ident::new(
                     binding.clone().into(),
                     DUMMY_SP,

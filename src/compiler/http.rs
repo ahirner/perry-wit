@@ -12,7 +12,7 @@ use crate::component;
 use anyhow::{Context as _, Result};
 use perry_codegen::{
     Exports,
-    boundary::{AbiType, Export, Flat},
+    boundary::{AbiType, Export, ExportKind, Flat},
 };
 use pliron::context::Context;
 use wit_parser::{
@@ -138,8 +138,10 @@ pub(crate) fn compile(
             flat: flat(&resolve, &result),
             error_case: internal_error(&resolve, &result)?,
         }),
-        task_return: Some((format!("[export]{name}"), "handle".into())),
-        command: false,
+        kind: ExportKind::Async {
+            task_return: (format!("[export]{name}"), "handle".into()),
+            command: false,
+        },
     }];
     let imports = bind::imports(&resolve, world);
     let streams = bind::stream_anchor(&resolve, world);

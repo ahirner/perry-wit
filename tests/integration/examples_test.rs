@@ -218,7 +218,7 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
     .await?
     .context("malformed document merge")?;
     let error = result.expect_err("invalid document must become a WIT error");
-    assert_eq!(error.name, "Error");
+    assert_eq!(error.name, "SyntaxError");
     assert!(error.message.contains("JSON"), "{}", error.message);
     assert!(
         store.data().table.is_empty(),

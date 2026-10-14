@@ -16,6 +16,7 @@ use wasmtime::{
     ResourceLimiter, Store,
     component::{Component, Linker, ResourceTable},
 };
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
     Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
 };
@@ -115,10 +116,19 @@ impl WasiHttpHooks for Fixture {
     }
 }
 struct Host {
+    wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
     fixture: Fixture,
     peak: usize,
+}
+impl WasiView for Host {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
 }
 impl WasiHttpView for Host {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
@@ -148,7 +158,7 @@ impl ResourceLimiter for Host {
 async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
     let (resolve, package) = perry_wit::component::wit::resolve_source(
         "cancel.wit",
-        "package test:fetch-cancel; world run {import wasi:http/client@0.3.0;export run:async func();}",
+        "package test:fetch-cancel; world run {import wasi:http/client@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func();}",
     )?;
     let world = resolve.select_world(&[package], Some("run"))?;
     let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
@@ -165,6 +175,7 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
     for phase in [Phase::Request, Phase::Body] {
         let observations = Arc::new(Observations::default());
         let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
         let readiness = observations.clone();
         linker.instance("test:control/cancellation")?.func_wrap(
@@ -176,6 +187,7 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
         let mut store = Store::new(
             &engine,
             Host {
+                wasi: WasiCtx::builder().build(),
                 http: WasiHttpCtx::new(),
                 table: ResourceTable::new(),
                 fixture: Fixture {

@@ -32,6 +32,11 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<()> {
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
+            Intrinsic::ExceptionEqual => Some(self.runtime(ctx, Runtime::StdExceptionEqual, args)),
+            Intrinsic::ExceptionBigIntEqual => {
+                Some(self.runtime(ctx, Runtime::StdExceptionBigIntEqual, args))
+            }
+            Intrinsic::ModuleInitialize => Some(self.initialization_promise(ctx)?),
             Intrinsic::BytesByteInput | Intrinsic::UrlSearchParams => Some(args[0]),
             Intrinsic::PrintOut | Intrinsic::PrintErr => {
                 let (interface, fd) = if intrinsic == Intrinsic::PrintOut {
@@ -216,7 +221,8 @@ impl FunctionLowering<'_, '_> {
                 let valid = self.new_block(ctx, vec![]);
                 self.cond_br(ctx, error, (failed, vec![]), (valid, vec![]));
                 self.block = failed;
-                let status = self.runtime(ctx, Runtime::StdRaiseSyntax, vec![]);
+                let offset = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
+                let status = self.runtime(ctx, Runtime::StdRaiseSyntax, vec![data, len, offset]);
                 let (target, throw_args) = self.throw_target(ctx, status);
                 self.br(ctx, target, throw_args);
                 self.block = valid;
@@ -262,6 +268,50 @@ impl FunctionLowering<'_, '_> {
                     cause,
                 );
                 None
+            }
+            Intrinsic::JsonStrictEqual => {
+                Some(self.runtime(ctx, Runtime::StdJsonStrictEqual, args))
+            }
+            Intrinsic::JsonExceptionEqual => {
+                Some(self.runtime(ctx, Runtime::StdJsonExceptionEqual, args))
+            }
+            Intrinsic::JsonOriginEqual => {
+                Some(self.runtime(ctx, Runtime::StdJsonOriginEqual, args))
+            }
+            Intrinsic::JsonFromException => {
+                Some(self.runtime(ctx, Runtime::StdJsonFromException, args))
+            }
+            Intrinsic::JsonToException => {
+                Some(self.runtime(ctx, Runtime::StdJsonToException, args))
+            }
+            Intrinsic::JsonExceptionIs => {
+                Some(self.runtime(ctx, Runtime::StdJsonExceptionIs, args))
+            }
+            Intrinsic::ExceptionIsNull | Intrinsic::ExceptionIsUndefined => {
+                let kind = self.load(
+                    ctx,
+                    MemKind::I32,
+                    args[0],
+                    perry_abi::layout::exception::KIND,
+                );
+                let tag = self.load(
+                    ctx,
+                    MemKind::I32,
+                    args[0],
+                    perry_abi::layout::exception::TAG,
+                );
+                let thrown = self.i32_const(ctx, perry_abi::layout::exception::THROWN_VALUE as i32);
+                let is_value = self.num(ctx, NumOpcode::I32Eq, vec![kind, thrown]);
+                let expected = self.i32_const(
+                    ctx,
+                    if intrinsic == Intrinsic::ExceptionIsNull {
+                        perry_abi::layout::exception::TAG_NULL as i32
+                    } else {
+                        perry_abi::layout::exception::TAG_UNDEFINED as i32
+                    },
+                );
+                let matches = self.num(ctx, NumOpcode::I32Eq, vec![tag, expected]);
+                Some(self.num(ctx, NumOpcode::I32And, vec![is_value, matches]))
             }
             Intrinsic::ExceptionCause => Some(self.load(
                 ctx,
@@ -408,6 +458,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::UrlAppend => Runtime::WebUrlAppend,
                     Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
                     Intrinsic::RegexSearch => Runtime::StdRegexSearch,
+                    Intrinsic::DecoderValidateLabel => Runtime::StdDecoderValidateLabel,
                     Intrinsic::DecoderNew => Runtime::StdDecoderNew,
                     Intrinsic::TextDecode => Runtime::StdDecoderDecode,
                     Intrinsic::JsonMember => Runtime::StdJsonMember,
@@ -419,6 +470,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::JsonToString => Runtime::StdJsonToString,
                     Intrinsic::JsonToBool => Runtime::StdJsonToBool,
                     Intrinsic::JsonTruthy => Runtime::StdJsonTruthy,
+                    Intrinsic::JsonDisplay => Runtime::StdJsonDisplay,
                     Intrinsic::JsonTypeOf => Runtime::StdJsonTypeOf,
                     Intrinsic::JsonRequireObject => Runtime::StdJsonRequireObject,
                     Intrinsic::JsonFirst => Runtime::StdJsonFirst,
@@ -479,6 +531,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::ReadValue => Runtime::WebReadValue,
                     Intrinsic::RequestUrl => Runtime::WebRequestUrl,
                     Intrinsic::RequestHeaders => Runtime::WebRequestHeaders,
+                    Intrinsic::ExceptionToBool => Runtime::StdExceptionToBool,
                     Intrinsic::ExceptionToNumber => Runtime::StdExceptionToNumber,
                     Intrinsic::ExceptionName => Runtime::StdExceptionName,
                     Intrinsic::ExceptionToString => Runtime::StdExceptionToString,

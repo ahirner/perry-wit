@@ -257,8 +257,10 @@ impl<'s> FunctionBuilder<'s> {
                 Intrinsic::ExceptionToNumber
             } else if wanted.deref(ctx).is::<StringType>() {
                 Intrinsic::ExceptionToString
+            } else if wanted.deref(ctx).is::<IntegerType>() {
+                Intrinsic::ExceptionToBool
             } else {
-                bail!("thrown values can only be used as numbers and strings yet")
+                bail!("thrown values require a supported scalar type")
             };
             let exception = self.defined(ctx, value)?;
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
@@ -279,11 +281,25 @@ impl<'s> FunctionBuilder<'s> {
                 perry_mir::views::AggregateViewOp::new(ctx, value, target)
             }))
         } else {
-            bail!(
-                "value type {} differs from the expected type {}",
-                ty.disp(ctx),
-                target.disp(ctx)
+            let source = optional_value(ctx, ty).unwrap_or(ty);
+            let wanted = optional_value(ctx, target).unwrap_or(target);
+            let code =
+                if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
+                    DiagnosticCode::IncompatibleRecordLayout
+                } else if absence(ctx, ty) != absence(ctx, target) {
+                    DiagnosticCode::AbsenceMismatch
+                } else {
+                    DiagnosticCode::UnsupportedType
+                };
+            Err(PerryDiagnostic::error(
+                code,
+                format!(
+                    "value type {} differs from the expected type {}",
+                    ty.disp(ctx),
+                    target.disp(ctx)
+                ),
             )
+            .into())
         }
     }
 
@@ -405,6 +421,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value]),
             Kind::String => value,
+            Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
             Kind::Number => self.intrinsic(ctx, Intrinsic::NumberToString, vec![value]),
             Kind::Boolean => self.choose_string(
                 ctx,

@@ -84,6 +84,11 @@ pub mod exception {
     pub const TYPE_ERROR: u32 = 1;
     pub const RANGE_ERROR: u32 = 2;
     pub const ERROR: u32 = 3;
+    pub const REFERENCE_ERROR: u32 = 6;
+    pub const SYNTAX_ERROR: u32 = 7;
+    pub const TAG_UNDEFINED: u32 = 5;
+    pub const TAG_NULL: u32 = 6;
+    pub const TAG_JSON: u32 = 7;
     pub const THROWN_VALUE: u32 = 4;
     pub const TAG_NUMBER: u32 = 1;
     pub const TAG_BOOLEAN: u32 = 2;
@@ -104,4 +109,16 @@ pub mod roots {
     pub const DATA: u32 = 0;
     pub const LENGTH: u32 = 4;
     pub const CAPACITY: u32 = 8;
+}
+
+/// Compiler-emitted native layout descriptors read by `perry-std` cause reflection.
+pub mod descriptor {
+    pub const NUMBER: u32 = 1;
+    pub const BOOLEAN: u32 = 2;
+    pub const STRING: u32 = 3;
+    pub const RECORD: u32 = 4;
+    pub const ARRAY: u32 = 5;
+    pub const EXCEPTION: u32 = 6;
+    pub const OPTIONAL: u32 = 7;
+    pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 }

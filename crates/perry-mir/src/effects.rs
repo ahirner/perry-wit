@@ -1,7 +1,7 @@
 //! Conservative interprocedural allocation and reference-escape summaries.
 use crate::{
     calls::{AsyncCallOp, CallOp, TimerOp, is_async},
-    collections::{ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp},
+    collections::{ArrayExtendOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp},
     control::ReturnOp,
     exceptions::{CatchOp, ErrorNewOp, RaiseOp},
     heap::{AllocOp, FieldSetOp},
@@ -51,6 +51,12 @@ pub enum Allocation {
 
 /// Allocation includes hidden temporaries and exception construction inside helpers.
 pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
+    if Operation::get_op::<crate::collections::NativeJsonOp>(op, ctx).is_some() {
+        return Allocation::Atomic;
+    }
+    if Operation::get_op::<crate::collections::ConcatSegmentsOp>(op, ctx).is_some() {
+        return Allocation::Atomic;
+    }
     if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
         return intrinsic
             .intrinsic(ctx)
@@ -59,9 +65,10 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
     if Operation::get_op::<AllocOp>(op, ctx).is_some()
         || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
         || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+        || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
         || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-        || Operation::get_op::<StringConcatOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::collections::StringAppendOp>(op, ctx).is_some()
+        || Operation::get_op::<ConcatOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::collections::ConcatReuseOp>(op, ctx).is_some()
     {
         return Allocation::Atomic;
     }
@@ -137,14 +144,7 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
         .collect();
     let bodies: Vec<Vec<_>> = functions
         .iter()
-        .map(|function| {
-            function
-                .get_region(ctx)
-                .deref(ctx)
-                .iter(ctx)
-                .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-                .collect()
-        })
+        .map(|function| crate::aggregates::operations(ctx, function))
         .collect();
     let index_of: HashMap<&Identifier, usize> = names
         .iter()
@@ -206,8 +206,13 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                                 .arguments()
                                 .zip(branch.successor_operand_range(ctx, successor))
                             {
-                                let dependency =
-                                    origins.get(&inputs[operand]).cloned().unwrap_or_default();
+                                let source = inputs[operand];
+                                if source == argument {
+                                    continue;
+                                }
+                                let Some(dependency) = origins.get(&source).cloned() else {
+                                    continue;
+                                };
                                 let set = origins.entry(argument).or_default();
                                 let before = set.len();
                                 set.extend(dependency);
@@ -239,6 +244,7 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                     let stored = if Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
                         || Operation::get_op::<FieldSetOp>(op, ctx).is_some()
                         || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+                        || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
                     {
                         Some(1)
                     } else if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {

@@ -41,13 +41,13 @@ impl Drop for Active {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_exports_release_pending_host_calls_before_acknowledging() -> Result<()> {
-    let wit = "package test:cancel; interface host {wait:async func(mode:u32)->u32;} world callee {import host;export run:async func(mode:u32)->u32;}";
+    let wit = "package test:cancel; interface host {wait:async func(mode:u32)->u32;} world callee {import host;export run:async func(mode:u32)->result<u32>;} ";
     let (resolve, package) = perry_wit::component::wit::resolve_source("cancel.wit", wit)?;
     let world = resolve.select_world(&[package], Some("callee"))?;
     let directory = tempfile::tempdir()?;
     std::fs::write(
         directory.path().join("world.wit"),
-        "package test:cancel; world caller {import wait:async func(mode:u32)->u32;import operation:async func(mode:u32)->u32;export run:async func(mode:u32)->u32;}",
+        "package test:cancel; world caller {import wait:async func(mode:u32)->u32;import operation:async func(mode:u32)->result<u32>;export run:async func(mode:u32)->u32;}",
     )?;
     let caller = perry_wit::component::embed_and_encode(
         &wat::parse_str(CALLER)?,

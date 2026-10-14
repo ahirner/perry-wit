@@ -96,7 +96,7 @@ export function run(x: number): number {
 }
 "#,
     );
-    assert!(printed.contains("perry.string_append"), "{printed}");
+    assert!(printed.contains("perry.concat_reuse"), "{printed}");
     assert!(printed.contains("perry.convert I32ToF64"), "{printed}");
 }
 
@@ -129,6 +129,7 @@ interface Point { x: number; y: number }
 function make(i: number): Point {
   return { y: i * 2, x: i };
 }
+
 export function run(x: number): number {
   const items: Point[] = [];
   for (let i = 0; i < x; i++) {

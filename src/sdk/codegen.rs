@@ -136,7 +136,7 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
             }
         }
         TypeDefKind::Option(inner) => {
-            format!("{} | null | undefined", wit_type_to_ts(resolve, inner))
+            format!("{} | null", wit_type_to_ts(resolve, inner))
         }
         TypeDefKind::Result(WitResult { ok, err }) => {
             let ok = ok
@@ -238,9 +238,9 @@ fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     }
 }
 
-pub(crate) const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\n\n";
+const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\n\n";
 
-pub(crate) fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
+fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
     let mut out = String::new();
     let mut emitted_types = HashSet::new();
 
@@ -718,7 +718,7 @@ world complex-processor {
         assert!(dts.contains("id: number;"));
         assert!(dts.contains("title: string;"));
         assert!(dts.contains("tags: Array<string>;"));
-        assert!(dts.contains("meta: string | null | undefined;"));
+        assert!(dts.contains("meta: string | null;"));
         assert!(dts.contains("export type Status = \"pending\" | \"active\" | \"failed\";"));
         assert!(dts.contains("export type OutputResult ="));
         assert!(dts.contains("tag: \"success\"; val: string"));

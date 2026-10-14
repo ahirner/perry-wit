@@ -223,16 +223,20 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, message))
             }
-            Expr::TypeErrorNew(message) | Expr::RangeErrorNew(message) => {
-                let kind = if matches!(expr, Expr::TypeErrorNew(_)) {
-                    ErrorKind::TypeError
-                } else {
-                    ErrorKind::RangeError
+            Expr::TypeErrorNew(message)
+            | Expr::RangeErrorNew(message)
+            | Expr::ReferenceErrorNew(message)
+            | Expr::SyntaxErrorNew(message) => {
+                let kind = match expr {
+                    Expr::TypeErrorNew(_) => ErrorKind::TypeError,
+                    Expr::RangeErrorNew(_) => ErrorKind::RangeError,
+                    Expr::ReferenceErrorNew(_) => ErrorKind::ReferenceError,
+                    _ => ErrorKind::SyntaxError,
                 };
                 let message = self.string_operand(ctx, message)?;
                 self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message))
             }
-            // `new Error(message, { cause })`: causes are strings (accepted deviation).
+            // Literal causes keep their authored value through the shared cause conversion.
             Expr::ErrorNewWithCause { message, cause } => {
                 self.error_with_cause(ctx, ErrorKind::Any, message, cause)?
             }
@@ -338,6 +342,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.record_literal(ctx, &names, items, expected)?
             }
             Expr::Array(items) => self.array_literal(ctx, items, expected)?,
+            Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
             Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
                 let array = self.expression(ctx, array)?;
                 self.array_transform(

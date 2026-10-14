@@ -4,7 +4,7 @@
 //! subset rule R8: reads miss with `undefined`, writes past `length` throw `RangeError`.
 //! P3.5 narrows indices to `i32` and removes checks where ranges are proven.
 use crate::{
-    attrs::{ErrorKind, Tier},
+    attrs::{ErrorKind, ReuseOperands, Tier},
     exceptions::MayThrowInterface,
     types::{ArrayType, OptionalType, StringType},
 };
@@ -31,7 +31,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum CollectionErr {
+enum CollectionErr {
     #[error("{0} expects a perry.array")]
     NotArray(&'static str),
     #[error("{0} element type differs from the array's element type")]
@@ -42,6 +42,8 @@ pub(crate) enum CollectionErr {
     NumberIndex(&'static str),
     #[error("{0} expects perry.string operands and result")]
     NotString(&'static str),
+    #[error("{0} requires compatible sequence operands and valid exclusive reuse candidates")]
+    Sequence(&'static str),
 }
 
 /// Signless `i32`, the type of lengths and indices.
@@ -72,6 +74,11 @@ fn is_number(ctx: &Context, value: Value) -> bool {
         .get_type(ctx)
         .deref(ctx)
         .is::<pliron::builtin::types::FP64Type>()
+}
+
+fn is_sequence(ctx: &Context, value: Value) -> bool {
+    let ty = value.get_type(ctx).deref(ctx);
+    ty.is::<StringType>() || ty.is::<ArrayType>()
 }
 
 fn is_string(ctx: &Context, value: Value) -> bool {
@@ -392,29 +399,136 @@ impl SideEffects for StringConstOp {
     }
 }
 
-/// Concatenate two strings.
+/// Extend a mutable array with a snapshot of another array's slots.
+#[pliron_op(name = "perry.array_extend", format = "$0 `, ` $1 ` : ` type($0)", interfaces = [NOpdsInterface<2>, NResultsInterface<0>, SameOperandsType])]
+pub struct ArrayExtendOp;
+impl ArrayExtendOp {
+    pub fn new(ctx: &mut Context, target: Value, source: Value) -> Self {
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![],
+                vec![target, source],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+impl Verify for ArrayExtendOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        element(
+            ctx,
+            self.get_operation().deref(ctx).get_operand(0),
+            "perry.array_extend",
+        )?;
+        Ok(())
+    }
+}
+#[op_interface_impl]
+impl SideEffects for ArrayExtendOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        true
+    }
+}
+
+/// A dynamic view of a native aggregate, retaining its mutable identity and typed layout.
+#[pliron_op(name = "perry.json_native", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
+pub struct NativeJsonOp;
+impl NativeJsonOp {
+    pub fn new(ctx: &mut Context, value: Value) -> Self {
+        let json = crate::types::JsonType::get(ctx).into();
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![json],
+                vec![value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+impl Verify for NativeJsonOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if !crate::types::is_reference(ctx, self.get_operand(ctx).get_type(ctx)) {
+            verify_err!(self.loc(ctx), CollectionErr::Sequence("perry.json_native"))?
+        }
+        Ok(())
+    }
+}
+#[op_interface_impl]
+impl SideEffects for NativeJsonOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        false
+    }
+}
+
+/// Dynamic argument spreads normalize to a sequence of typed dense segments.
+#[pliron_op(name = "perry.concat_segments", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
+pub struct ConcatSegmentsOp;
+impl ConcatSegmentsOp {
+    pub fn new(ctx: &mut Context, sources: Value) -> Self {
+        let ty = element(ctx, sources, "perry.concat_segments").expect("typed segment array");
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![ty],
+                vec![sources],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+impl Verify for ConcatSegmentsOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let source = element(ctx, self.get_operand(ctx), "perry.concat_segments")?;
+        if !source.deref(ctx).is::<ArrayType>() || source != self.get_result(ctx).get_type(ctx) {
+            verify_err!(
+                self.loc(ctx),
+                CollectionErr::Sequence("perry.concat_segments")
+            )?
+        }
+        Ok(())
+    }
+}
+#[op_interface_impl]
+impl SideEffects for ConcatSegmentsOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        false
+    }
+}
+
+/// Combine strings or dense arrays in operand order.
 #[pliron_op(
-    name = "perry.string_concat",
-    format = "$0 `, ` $1 ` : ` type($0)",
+    name = "perry.concat",
+    format = "operands(CharSpace(`,`)) ` : ` type($0)",
     interfaces = [
-        NOpdsInterface<2>,
         OneResultInterface,
         SameOperandsType,
         SameResultsType,
         SameOperandsAndResultType
     ]
 )]
-pub struct StringConcatOp;
+pub struct ConcatOp;
 
-impl StringConcatOp {
+impl ConcatOp {
     pub fn new(ctx: &mut Context, lhs: Value, rhs: Value) -> Self {
-        let ty = StringType::get(ctx).into();
-        StringConcatOp {
+        Self::from_sources(ctx, vec![lhs, rhs])
+    }
+
+    pub fn from_sources(ctx: &mut Context, sources: Vec<Value>) -> Self {
+        let ty = sources[0].get_type(ctx);
+        ConcatOp {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
                 vec![ty],
-                vec![lhs, rhs],
+                sources,
                 vec![],
                 0,
             ),
@@ -422,70 +536,93 @@ impl StringConcatOp {
     }
 }
 
-impl Verify for StringConcatOp {
+impl Verify for ConcatOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !is_string(ctx, self.get_result(ctx)) {
-            verify_err!(
-                self.loc(ctx),
-                CollectionErr::NotString("perry.string_concat")
-            )?
+        let count = self.get_operation().deref(ctx).get_num_operands();
+        if !is_sequence(ctx, self.get_result(ctx))
+            || count == 0
+            || (is_string(ctx, self.get_result(ctx)) && count != 2)
+        {
+            verify_err!(self.loc(ctx), CollectionErr::Sequence("perry.concat"))?
         }
         Ok(())
     }
 }
 
 #[op_interface_impl]
-impl SideEffects for StringConcatOp {
+impl SideEffects for ConcatOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         false
     }
 }
 
-/// `a + b` where `a` is dead afterwards and was made by concatenation or is a constant
-/// (`perry_mir::append::append_in_place`): the runtime may update `a`'s header in place.
+/// Concatenate sequences with verified exclusive operands eligible for storage reuse.
 #[pliron_op(
-    name = "perry.string_append",
-    format = "$0 `, ` $1 ` : ` type($0)",
+    name = "perry.concat_reuse",
+    format = "attr($perry_concat_reuse, $ReuseOperands) ` ` operands(CharSpace(`,`)) ` : ` type($0)",
+    attributes = (perry_concat_reuse: ReuseOperands),
     interfaces = [
-        NOpdsInterface<2>,
         OneResultInterface,
         SameOperandsType,
         SameResultsType,
         SameOperandsAndResultType
     ]
 )]
-pub struct StringAppendOp;
+pub struct ConcatReuseOp;
 
-impl StringAppendOp {
-    pub fn new(ctx: &mut Context, lhs: Value, rhs: Value) -> Self {
-        let ty = StringType::get(ctx).into();
-        StringAppendOp {
+impl ConcatReuseOp {
+    pub(crate) fn from_sources(
+        ctx: &mut Context,
+        sources: Vec<Value>,
+        reuse: ReuseOperands,
+    ) -> Self {
+        let ty = sources[0].get_type(ctx);
+        let operation = Self {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
                 vec![ty],
-                vec![lhs, rhs],
+                sources,
                 vec![],
                 0,
             ),
-        }
+        };
+        operation.set_attr_perry_concat_reuse(ctx, reuse);
+        operation
+    }
+
+    pub fn candidates(&self, ctx: &Context) -> ReuseOperands {
+        self.get_attr_perry_concat_reuse(ctx)
+            .expect("concat reuse candidates")
+            .clone()
     }
 }
 
-impl Verify for StringAppendOp {
+impl Verify for ConcatReuseOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !is_string(ctx, self.get_result(ctx)) {
-            verify_err!(
-                self.loc(ctx),
-                CollectionErr::NotString("perry.string_append")
-            )?
+        let operation = self.get_operation().deref(ctx);
+        let operands: Vec<_> = operation.operands().collect();
+        let reuse = self.get_attr_perry_concat_reuse(ctx);
+        let candidates = reuse.as_deref().map_or(&[][..], |reuse| reuse.0.as_slice());
+        if !is_sequence(ctx, self.get_result(ctx))
+            || operands.is_empty()
+            || candidates.is_empty()
+            || candidates.windows(2).any(|pair| pair[0] >= pair[1])
+            || (is_string(ctx, self.get_result(ctx)) && (operands.len() != 2 || candidates != [0]))
+            || candidates.iter().any(|&index| {
+                operands.get(index as usize).is_none_or(|candidate| {
+                    operands.iter().filter(|value| *value == candidate).count() != 1
+                })
+            })
+        {
+            verify_err!(self.loc(ctx), CollectionErr::Sequence("perry.concat_reuse"))?
         }
         Ok(())
     }
 }
 
 #[op_interface_impl]
-impl SideEffects for StringAppendOp {
+impl SideEffects for ConcatReuseOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         true
     }

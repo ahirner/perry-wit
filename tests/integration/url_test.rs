@@ -20,11 +20,13 @@ export function inspect(input: string, base: string): string {
     return JSON.stringify([before, protocol, username, password, hash, url.pathname, url.toString(), encodeURIComponent("é🙂 !~*'()/?:")]);
 }
 "#;
-    let wit = "package test:url; world urls { export inspect: func(input: string, base: string) -> string; }";
+    let wit = "package test:url; world urls { export inspect: func(input: string, base: string) -> result<string>; }";
     let component = world::component(wit, "urls", "url.ts", source)?;
     let engine = Engine::default();
     let (mut store, instance) = world::instantiate(&engine, &component)?;
-    let inspect = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "inspect")?;
+    let inspect = instance.get_typed_func::<(&str, &str), (std::result::Result<String, ()>,)>(
+        &mut store, "inspect",
+    )?;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("url.mts");
     std::fs::write(
@@ -58,6 +60,7 @@ export function inspect(input: string, base: string): string {
         );
         let expected = String::from_utf8(node.stdout)?.trim_end().to_owned();
         let (actual,) = inspect.call(&mut store, (input, base))?;
+        let actual = actual.expect("fixture has no escaping failure");
         assert_eq!(actual, expected, "new URL({input:?}, {base:?})");
     }
     Ok(())

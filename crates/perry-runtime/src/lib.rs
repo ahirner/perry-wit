@@ -25,6 +25,7 @@ pub mod region;
 #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
 mod resources;
 pub mod roots;
+mod sequence;
 pub mod string;
 // `perry-abi` owns these shared sources; this dependency-free crate compiles its own copy.
 // They stay public: their `pub` items serve `perry-abi`'s API, and this crate uses only a

@@ -47,7 +47,7 @@ fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
     std::fs::write(
         directory.path().join("world.wit"),
         format!(
-            "package test:filesystem; world filesystem {{ import wasi:filesystem/types@0.3.0; import wasi:filesystem/preopens@0.3.0; {exports} }}"
+            "package test:filesystem; world filesystem {{ import wasi:filesystem/types@0.3.0; import wasi:filesystem/preopens@0.3.0; import wasi:cli/stderr@0.3.0; {exports} }}"
         ),
     )?;
     let (resolve, package) = resolve_wit(directory.path())?;

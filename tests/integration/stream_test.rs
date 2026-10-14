@@ -49,7 +49,7 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
     };
     let (resolve, package) = perry_wit::component::wit::resolve_source(
         "detached.wit",
-        "package test:detached; world run {export run:async func(input:stream<u8>, mode:u32)->u32;}",
+        "package test:detached; world run {export run:async func(input:stream<u8>, mode:u32)->result<u32>;}",
     )?;
     let world = resolve.select_world(&[package], Some("run"))?;
     let compiled = compile_for_world(
@@ -85,7 +85,10 @@ export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise
         let instance = Linker::new(&engine)
             .instantiate_async(&mut store, &component)
             .await?;
-        let run = instance.get_typed_func::<(StreamReader<u8>, u32), (u32,)>(&mut store, "run")?;
+        let run = instance
+            .get_typed_func::<(StreamReader<u8>, u32), (std::result::Result<u32, ()>,)>(
+                &mut store, "run",
+            )?;
         let acknowledged = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
         let input = StreamReader::new(
@@ -102,11 +105,11 @@ export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise
         .await?;
         if mode == 0 || mode == 5 {
             assert!(
-                result.is_err(),
+                result?.0.is_err(),
                 "unresolved detached read must fail the task"
             );
         } else {
-            assert_eq!(result?.0, 7);
+            assert_eq!(result?.0.unwrap(), 7);
         }
         assert!(acknowledged.load(Ordering::SeqCst), "mode={mode}");
         assert!(dropped.load(Ordering::SeqCst), "mode={mode}");

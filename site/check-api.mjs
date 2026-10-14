@@ -10,6 +10,11 @@ const preopens = imports.find(name => name.split('@')[0] === 'wasi:filesystem/pr
 assert.deepEqual(host[preopens].getDirectories(), []);
 const compiler = await instantiateCompiler(await readFile(resolve(process.env.SITE_OUTPUT || 'site/dist', 'downloads/perry-wit.wasm')));
 const api = compiler.api;
+function diagnosticsMatch(pattern) {
+  return error => Array.isArray(error.payload) && error.payload.length > 0
+    && error.payload.every(diagnostic => diagnostic.code && diagnostic.severity && diagnostic.message)
+    && pattern.test(error.payload.map(diagnostic => [diagnostic.message, ...diagnostic.notes].join('\n')).join('\n'));
+}
 const encode = text => new TextEncoder().encode(text);
 const source = 'export function run(n: number): number { return n * 2; }';
 const contract = 'package test:parity; world app { export run: func(n: f64) -> f64; }';
@@ -22,7 +27,7 @@ const coreOnly = api.compile(program, wit, { coreOnly: true });
 assert.deepEqual(coreOnly.core, compiled.core);
 assert.equal(coreOnly.component, undefined);
 assert.equal(coreOnly.allocationReport, compiled.allocationReport);
-assert.throws(() => api.compile(program, { application: { tag: 'sources', val: [{ contents: encode('package test:missing; world app { export missing: func(); }') }] }, dependencies: [] }, { coreOnly: true }), /missing/);
+assert.throws(() => api.compile(program, { application: { tag: 'sources', val: [{ contents: encode('package test:missing; world app { export missing: func(); }') }] }, dependencies: [] }, { coreOnly: true }), diagnosticsMatch(/missing/));
 const raw = api.compileCore({ source: { contents: encode(source + ' export function extra(): number { return 7; }') }, modules: [] });
 assert(WebAssembly.Module.exports(new WebAssembly.Module(raw)).some(entry => entry.name === 'extra'));
 const declaration = await readFile(new URL('./.generated/compiler/interfaces/perry-compiler-api.d.ts', import.meta.url), 'utf8');
@@ -32,9 +37,22 @@ assert.match(declaration, /allocationReport: string/);
 const sdk = api.generateSdk(wit);
 assert.deepEqual(sdk.map(file => file.name), ['world.d.ts', 'imports.d.ts', 'runtime.d.ts']);
 for (const bytes of [new Uint8Array([255]), encode('export function {')]) {
-  assert.throws(() => api.compile({ source: { contents: bytes }, modules: [] }, wit, { coreOnly: false }), /UTF-8|Parsing/);
+  assert.throws(() => api.compile({ source: { contents: bytes }, modules: [] }, wit, { coreOnly: false }), diagnosticsMatch(/UTF-8|Parsing/));
 }
-assert.throws(() => api.compileCore({ source: { contents: encode("export { run } from './missing';") }, modules: [] }), /Cannot resolve/);
+assert.throws(() => api.compileCore({ source: { contents: encode("export { run } from './missing';") }, modules: [] }), diagnosticsMatch(/Cannot resolve/));
+const helperSource = '// é🙂\r\nexport function helper(value) { return value; }';
+assert.throws(() => api.compileCore({source:{name:'src/main.ts',contents:encode("import { helper } from './helper'; export function run():number{return helper(1);}")},modules:[{name:'src/helper.ts',contents:encode(helperSource)}]}), error => {
+  const diagnostic = error.payload[0];
+  assert.equal(diagnostic.code, 'missing-type-annotation');
+  assert.equal(diagnostic.severity, 'error');
+  assert.equal(diagnostic.span.file, 'src/helper.ts');
+  assert.equal(diagnostic.span.startLine, 2);
+  const start = BigInt(encode(helperSource.slice(0, helperSource.indexOf('value'))).length);
+  assert(diagnostic.span.startByte <= start && diagnostic.span.endByte >= start + 5n);
+  assert.equal('sanitized' in diagnostic, false);
+  assert(diagnostic.help);
+  return true;
+});
 const bundled = { source: { name: 'src/main.ts', contents: encode("import { twice } from './math.js'; export function run(n: number): number { return twice(n); }") },
   modules: [{ name: 'src/math.ts', contents: encode('export function twice(n: number): number { return n * 2; }') }] };
 const grouped = { application: { tag: 'sources', val: [
@@ -43,8 +61,8 @@ const grouped = { application: { tag: 'sources', val: [
 ] }, dependencies: [{ tag: 'sources', val: [{ contents: encode('package test:types; interface numbers { type number = f64; }') }] }] };
 assert(api.compile(bundled, grouped, { coreOnly: false }).component.stripped.length > 0);
 assert.equal(api.generateSdk(grouped).length, 3);
-assert.throws(() => api.compile(bundled, { ...grouped, dependencies: [] }, { coreOnly: false }), /test:types/);
-assert.throws(() => api.generateSdk({ application: { tag: 'sources', val: [{ contents: new Uint8Array([255]) }] }, dependencies: [] }), /UTF-8/);
+assert.throws(() => api.compile(bundled, { ...grouped, dependencies: [] }, { coreOnly: false }), diagnosticsMatch(/test:types/));
+assert.throws(() => api.generateSdk({ application: { tag: 'sources', val: [{ contents: new Uint8Array([255]) }] }, dependencies: [] }), diagnosticsMatch(/UTF-8/));
 assert.equal(api.generateSdk({ application: { tag: 'sources', val: [{ contents: encode('package test:http; world app { import wasi:http/client@0.3.0; }') }] }, dependencies: [] }).length, 3);
 console.log('Wasm library: anonymous buffers, supplied modules, grouped/embedded WIT, core output, SDK and invalid inputs; standard WASI imports, no filesystem grants');
 

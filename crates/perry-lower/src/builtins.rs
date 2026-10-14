@@ -39,11 +39,26 @@ impl<'s> FunctionBuilder<'s> {
             "decode"
         } else if method == array_methods::PUSH {
             "push"
+        } else if method == array_methods::CONCAT {
+            "concat"
         } else {
             method
         };
         let value = match (kind(ctx, receiver)?, method) {
             (Kind::Array, "push") => Some(self.push_values(ctx, receiver, args)?),
+            (Kind::String, "concat") => {
+                let mut segments = Vec::with_capacity(args.len());
+                for argument in args {
+                    let value = self.expression(ctx, argument)?;
+                    segments.push(self.display(ctx, value)?);
+                }
+                let mut result = receiver;
+                for segment in segments {
+                    result = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, result, segment));
+                }
+                Some(result)
+            }
+            (Kind::Array, "concat") => Some(self.concat_values(ctx, receiver, args)?),
             (Kind::Array, "map" | "filter") => {
                 let [callback] = args else {
                     bail!("array.{method} requires one static callback")
@@ -250,7 +265,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }
 
-    /// `new Error(message, { cause })` of `kind`: causes are strings (accepted profile).
+    /// Construct an Error with a supported scalar or reference cause.
     pub(super) fn error_with_cause(
         &mut self,
         ctx: &mut Context,
@@ -260,7 +275,8 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let message = self.string_operand(ctx, message)?;
         let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
-        let cause = self.typed_operand(ctx, cause, Kind::String, "a string error cause")?;
+        let cause = self.expression(ctx, cause)?;
+        let cause = self.error_cause(ctx, cause)?;
         self.intrinsic_void(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
         Ok(error)
     }
@@ -273,33 +289,38 @@ impl<'s> FunctionBuilder<'s> {
         message: &'s Expr,
         options: &'s Expr,
     ) -> Result<Value> {
-        let kind = match error_kind {
+        let error_class = match error_kind {
             0 => ErrorKind::Any,
             1 => ErrorKind::TypeError,
             2 => ErrorKind::RangeError,
-            _ => bail!("only Error, TypeError and RangeError are supported yet"),
+            3 => ErrorKind::ReferenceError,
+            4 => ErrorKind::SyntaxError,
+            _ => bail!("unsupported Error constructor kind {error_kind}"),
         };
-        let cause = match options {
-            Expr::New {
-                class_name, args, ..
-            } if self
-                .shapes
-                .literal_fields(class_name)
-                .is_some_and(|names| names == ["cause"]) =>
-            {
-                args.first()
+        let message = self.string_operand(ctx, message)?;
+        let options = self.expression(ctx, options)?;
+        let cause = match kind(ctx, options)? {
+            Kind::Record => FieldGetOp::new(ctx, options, "cause".into())
+                .ok()
+                .map(|op| {
+                    self.append(ctx, &op);
+                    op.get_result(ctx)
+                }),
+            Kind::Json => {
+                let field = self.string(ctx, "cause");
+                Some(self.intrinsic(ctx, Intrinsic::JsonMember, vec![options, field]))
             }
-            Expr::Object(fields) => match fields.as_slice() {
-                [(name, cause)] if name == "cause" => Some(cause),
-                _ => None,
-            },
             _ => None,
+        };
+        let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, error_class, message));
+        if let Some(cause) = cause {
+            let cause = self.error_cause(ctx, cause)?;
+            self.intrinsic_void(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
         }
-        .context("error options must be a literal { cause }")?;
-        self.error_with_cause(ctx, kind, message, cause)
+        Ok(error)
     }
 
-    /// `value instanceof Error` (or `TypeError`, `RangeError`).
+    /// `value instanceof Error` or a supported Error subclass.
     pub(super) fn instance_of(
         &mut self,
         ctx: &mut Context,
@@ -307,13 +328,19 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        let error = match ty {
-            "Error" => ErrorKind::Any,
-            "TypeError" => ErrorKind::TypeError,
-            "RangeError" => ErrorKind::RangeError,
+        let (error, code) = match ty {
+            "Error" => (ErrorKind::Any, 0),
+            "TypeError" => (ErrorKind::TypeError, 1),
+            "RangeError" => (ErrorKind::RangeError, 2),
+            "ReferenceError" => (ErrorKind::ReferenceError, 6),
+            "SyntaxError" => (ErrorKind::SyntaxError, 7),
             other => bail!("instanceof {other} is not supported yet"),
         };
         Ok(match kind(ctx, value)? {
+            Kind::Json => {
+                let code = self.i32(ctx, code);
+                self.intrinsic(ctx, Intrinsic::JsonExceptionIs, vec![value, code])
+            }
             Kind::Exception => self.emit_value(ctx, |ctx| ExceptionIsOp::new(ctx, error, value)),
             _ => self.boolean(ctx, false),
         })
@@ -411,11 +438,11 @@ impl<'s> FunctionBuilder<'s> {
         fatal: &'s Expr,
         ignore_bom: &'s Expr,
     ) -> Result<Value> {
-        ensure!(
-            matches!(label, Expr::Undefined)
-                || matches!(label, Expr::String(l) if l.eq_ignore_ascii_case("utf-8") || l.eq_ignore_ascii_case("utf8")),
-            "TextDecoder supports UTF-8 only"
-        );
+        let label = if matches!(label, Expr::Undefined) {
+            None
+        } else {
+            Some(self.string_operand(ctx, label)?)
+        };
         let fatal = match fatal {
             Expr::Undefined => self.boolean(ctx, false),
             fatal => self.condition(ctx, fatal)?,
@@ -424,6 +451,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Undefined => self.boolean(ctx, false),
             ignore_bom => self.condition(ctx, ignore_bom)?,
         };
+        if let Some(label) = label {
+            self.intrinsic_void(ctx, Intrinsic::DecoderValidateLabel, vec![label]);
+        }
         Ok(self.intrinsic(ctx, Intrinsic::DecoderNew, vec![fatal, ignore_bom]))
     }
 
@@ -437,8 +467,8 @@ impl<'s> FunctionBuilder<'s> {
                 None => text,
                 Some(line) => {
                     let space = self.string(ctx, " ");
-                    let spaced = self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, line, space));
-                    self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, spaced, text))
+                    let spaced = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, line, space));
+                    self.emit_value(ctx, |ctx| ConcatOp::new(ctx, spaced, text))
                 }
             });
         }

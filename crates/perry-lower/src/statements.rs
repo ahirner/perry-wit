@@ -11,7 +11,10 @@ impl<'s> FunctionBuilder<'s> {
                     after
                 }
                 None => {
-                    self.statement(ctx, first)?;
+                    self.statement(ctx, first).map_err(|error| match first {
+                        Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
+                        _ => error,
+                    })?;
                     tail
                 }
             };
@@ -76,7 +79,9 @@ impl<'s> FunctionBuilder<'s> {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::Let { id, ty, init, .. } => self.binding(ctx, *id, ty, init.as_ref())?,
+            Stmt::Let { id, ty, init, .. } => self
+                .binding(ctx, *id, ty, init.as_ref())
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
@@ -210,11 +215,13 @@ impl<'s> FunctionBuilder<'s> {
             }
             Stmt::Throw(value) => {
                 let value = self.expression(ctx, value)?;
-                let value = self.defined(ctx, value)?;
                 ensure!(
                     matches!(
-                        kind(ctx, value)?,
+                        kind(ctx, value).or_else(|_| optional_value(ctx, value.get_type(ctx))
+                            .map(|_| Kind::Number)
+                            .context("unsupported thrown value"))?,
                         Kind::Exception
+                            | Kind::Json
                             | Kind::Number
                             | Kind::Boolean
                             | Kind::String
@@ -274,7 +281,9 @@ impl<'s> FunctionBuilder<'s> {
         let ty = match (declared, init) {
             (Some(ty), Some(value))
                 if self.shapes.inferred_bindings.contains(&id)
-                    && (optional_value(ctx, value.get_type(ctx)) == Some(ty)
+                    && (optional_value(ctx, value.get_type(ctx))
+                        .unwrap_or(value.get_type(ctx))
+                        == optional_value(ctx, ty).unwrap_or(ty)
                         || (ty.deref(ctx).is::<ReaderType>()
                             && kind(ctx, value)? == Kind::ByobReader)) =>
             {

@@ -36,7 +36,7 @@ use thiserror::Error;
 
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Ty {
+enum Ty {
     BigInt,
     /// A signless i32 index proven in bounds.
     Index,
@@ -263,16 +263,18 @@ impl Ty {
 /// Operand kinds: a value kind, or an aggregate kind that names no single MIR type and so
 /// cannot be a result ([Ty] has no such kind).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Operand {
+enum Operand {
     Value(Ty),
     /// Records and tagged unions retaining their original JSON graph.
     Aggregate,
+    Reference,
 }
 
 impl Operand {
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
             Operand::Value(kind) => kind.matches(ctx, ty),
+            Operand::Reference => crate::types::is_reference(ctx, ty),
             Operand::Aggregate => {
                 let deref = ty.deref(ctx);
                 deref.is::<crate::types::RecordType>() || deref.is::<crate::types::VariantType>()
@@ -283,6 +285,9 @@ impl Operand {
 
 /// The [Operand] an `intrinsics!` operand name denotes.
 macro_rules! operand {
+    (Reference) => {
+        Operand::Reference
+    };
     (Aggregate) => {
         Operand::Aggregate
     };
@@ -300,7 +305,7 @@ macro_rules! intrinsics {
         }
 
         impl Intrinsic {
-            pub const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
+            const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
 
             pub fn name(self) -> &'static str {
                 match self {
@@ -316,7 +321,7 @@ macro_rules! intrinsics {
             }
 
             /// (operands, results).
-            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
+            fn types(self) -> (&'static [Operand], &'static [Ty]) {
                 match self {
                     $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
                 }
@@ -410,6 +415,7 @@ intrinsics! {
     DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure, noalloc;
     DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure, noalloc;
     RegexSearch = "regex_search" (String, Regex) -> (Number), pure, noalloc;
+    DecoderValidateLabel = "decoder_validate_label" (String) -> (), throws, atomic;
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws;
@@ -426,6 +432,7 @@ intrinsics! {
     JsonIsUndefined = "json_is_undefined" (Json) -> (Bool), pure, noalloc;
     JsonIsNull = "json_is_null" (Json) -> (Bool), pure, noalloc;
     JsonSerialize = "json_serialize" (Json) -> (OptString), throws;
+    JsonDisplay = "json_display" (Json) -> (String);
     JsonTypeOf = "json_type_of" (Json) -> (String), pure;
     JsonRequireObject = "json_require_object" (Json) -> (), throws;
     JsonFirst = "json_first" (Json) -> (Json), throws;
@@ -456,17 +463,29 @@ intrinsics! {
     PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure;
 
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
-    ExceptionSetCause = "exception_set_cause" (Exception, String) -> (), noalloc;
-    ExceptionCause = "exception_cause" (Exception) -> (OptString), noalloc;
+    JsonStrictEqual = "json_strict_equal" (Json, Json) -> (Bool), pure, noalloc;
+    JsonExceptionEqual = "json_exception_equal" (Json, Exception) -> (Bool), pure, noalloc;
+    JsonOriginEqual = "json_origin_equal" (Json, Reference) -> (Bool), pure;
+    JsonFromException = "json_from_exception" (Exception) -> (Json);
+    JsonToException = "json_to_exception" (Json) -> (Exception), throws;
+    JsonExceptionIs = "json_exception_is" (Json, Index) -> (Bool), pure;
+    ExceptionSetCause = "exception_set_cause" (Exception, Json) -> (), noalloc;
+    ExceptionIsNull = "exception_is_null" (Exception) -> (Bool), pure;
+    ExceptionIsUndefined = "exception_is_undefined" (Exception) -> (Bool), pure;
+    ExceptionCause = "exception_cause" (Exception) -> (Json), noalloc;
     ExceptionName = "exception_name" (Exception) -> (String), pure;
+    ExceptionEqual = "exception_equal" (Exception, Exception) -> (Bool), pure, noalloc;
+    ExceptionBigIntEqual = "exception_bigint_equal" (Exception, BigInt) -> (Bool), pure, noalloc;
     MathRandom = "math_random" () -> (Number), noalloc;
     RandomUuid = "random_uuid" () -> (String);
     BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes), noalloc;
+    ExceptionToBool = "exception_to_bool" (Exception) -> (Bool), throws;
     ExceptionToNumber = "exception_to_number" (Exception) -> (Number), throws;
     ExceptionToString = "exception_to_string" (Exception) -> (String), throws;
     FsReadText = "fs_read_text" (String) -> (PromiseString);
     FsReadBytes = "fs_read_bytes" (String) -> (PromiseBytes);
     FsWriteText = "fs_write_text" (String, String) -> (PromiseVoid);
+    ModuleInitialize = "module_initialize" () -> (PromiseVoid);
     FsWriteBytes = "fs_write_bytes" (String, Bytes) -> (PromiseVoid);
     FsStat = "fs_stat" (String) -> (PromiseStats);
     FsReaddir = "fs_readdir" (String) -> (PromiseStringArray);
@@ -541,7 +560,7 @@ intrinsics! {
 impl Intrinsic {
     /// Allocation and internal safe-point contract, including hidden temporaries.
     /// Unclassified helpers remain conservative.
-    pub fn allocation(self) -> crate::effects::Allocation {
+    pub(crate) fn allocation(self) -> crate::effects::Allocation {
         if self.flags().contains(&"noalloc") {
             crate::effects::Allocation::None
         } else if self.flags().contains(&"atomic") {
@@ -555,7 +574,7 @@ impl Intrinsic {
         self.allocation() != crate::effects::Allocation::None
     }
 
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
+    fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|i| i.name() == name)
     }
 
@@ -585,7 +604,7 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum IntrinsicErr {
+enum IntrinsicErr {
     #[error("unknown intrinsic {0}")]
     Unknown(String),
     #[error("intrinsic {0} has the wrong operand or result types")]
@@ -666,7 +685,7 @@ impl MayThrowInterface for IntrinsicOp {
 
 #[derive(Debug, Error)]
 #[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
-pub(crate) struct StringifyErr;
+struct StringifyErr;
 
 /// `JSON.stringify(value)` of a typed value: records, arrays, strings, numbers, booleans,
 /// `Uint8Array`s, JSON values and their optionals.
@@ -727,7 +746,7 @@ impl MayThrowInterface for JsonStringifyOp {
 
 #[derive(Debug, Error)]
 #[error("perry.promise_combinator takes an array of promises of one type")]
-pub(crate) struct CombinatorErr;
+struct CombinatorErr;
 
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
@@ -869,7 +888,7 @@ impl Verify for PromiseResolvedOp {
 
 #[derive(Debug, Error)]
 #[error("perry.settled_field reads a perry.settled value")]
-pub(crate) struct SettledErr;
+struct SettledErr;
 
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]

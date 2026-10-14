@@ -15,6 +15,26 @@ const ANCHOR: &str = "perry-internal-promise";
 /// `core` with its promise-signal and waitable-set imports replaced by trapping functions,
 /// so raw modules instantiate without a component-model host.
 pub(crate) fn without_p3(core: Vec<u8>) -> Result<Vec<u8>> {
+    stub_imports(core, |module, name| {
+        name.ends_with(ANCHOR)
+            || (module == "$root"
+                && matches!(
+                    name,
+                    "[waitable-set-new]" | "[waitable-set-drop]" | "[waitable-join]"
+                ))
+    })
+}
+
+/// Remove the unreachable side of the runtime's shared stdout/stderr dispatcher.
+/// Capability validation rejects authored writes before this rewrite runs.
+pub(crate) fn available_stdio(core: Vec<u8>, stdout: bool, stderr: bool) -> Result<Vec<u8>> {
+    stub_imports(core, |module, _| {
+        (!stdout && module.starts_with("wasi:cli/stdout@"))
+            || (!stderr && module.starts_with("wasi:cli/stderr@"))
+    })
+}
+
+fn stub_imports(core: Vec<u8>, replace: impl Fn(&str, &str) -> bool) -> Result<Vec<u8>> {
     let mut imported = 0;
     let mut defined = 0;
     // Function index and type of each replaced import, in import order.
@@ -25,15 +45,7 @@ pub(crate) fn without_p3(core: Vec<u8>) -> Result<Vec<u8>> {
                 for import in section.into_imports() {
                     let import = import?;
                     if let TypeRef::Func(ty) = import.ty {
-                        if import.name.ends_with(ANCHOR)
-                            || (import.module == "$root"
-                                && matches!(
-                                    import.name,
-                                    "[waitable-set-new]"
-                                        | "[waitable-set-drop]"
-                                        | "[waitable-join]"
-                                ))
-                        {
+                        if replace(import.module, import.name) {
                             stubs.push((imported, ty));
                         }
                         imported += 1;
@@ -84,6 +96,51 @@ impl Reencode for Raw {
     type Error = Infallible;
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
         Ok(self.indices[index as usize])
+    }
+    fn parse_custom_name_subsection(
+        &mut self,
+        names: &mut NameSection,
+        section: wasmparser::Name<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        use std::collections::BTreeMap;
+        let labels = matches!(&section, wasmparser::Name::Label(_));
+        match section {
+            wasmparser::Name::Function(entries) => {
+                let mut sorted = BTreeMap::new();
+                for entry in entries {
+                    let entry = entry?;
+                    sorted.insert(self.indices[entry.index as usize], entry.name);
+                }
+                let mut map = NameMap::new();
+                for (index, name) in sorted {
+                    map.append(index, name);
+                }
+                names.functions(&map);
+            }
+            wasmparser::Name::Local(entries) | wasmparser::Name::Label(entries) => {
+                let mut sorted = BTreeMap::new();
+                for entry in entries {
+                    let entry = entry?;
+                    let mut map = NameMap::new();
+                    for name in entry.names {
+                        let name = name?;
+                        map.append(name.index, name.name);
+                    }
+                    sorted.insert(self.indices[entry.index as usize], map);
+                }
+                let mut map = IndirectNameMap::new();
+                for (index, names) in sorted {
+                    map.append(index, &names);
+                }
+                if labels {
+                    names.labels(&map);
+                } else {
+                    names.locals(&map);
+                }
+            }
+            other => reencode::utils::parse_custom_name_subsection(self, names, other)?,
+        }
+        Ok(())
     }
     fn parse_import_section(
         &mut self,

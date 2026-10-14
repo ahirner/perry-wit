@@ -43,11 +43,12 @@ export function inspect(input: string, delta: number): string {
     return JSON.stringify({ parsed, original, year, month, day, weekday, hour, minute, second, ms, changed, seen, copied: copy.getTime(), iso, changedMonth, final, utc, constructed, zero, invalid, invalidJson, recovered, embedded });
 }
 "#;
-    let wit = "package test:dates; world dates { export inspect: func(input: string, delta: f64) -> string; }";
+    let wit = "package test:dates; world dates { export inspect: func(input: string, delta: f64) -> result<string>; }";
     let component = world::component(wit, "dates", "date.ts", source)?;
     let engine = Engine::default();
     let (mut store, instance) = world::instantiate(&engine, &component)?;
-    let inspect = instance.get_typed_func::<(&str, f64), (String,)>(&mut store, "inspect")?;
+    let inspect = instance
+        .get_typed_func::<(&str, f64), (std::result::Result<String, ()>,)>(&mut store, "inspect")?;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("date.mts");
     std::fs::write(
@@ -81,6 +82,7 @@ export function inspect(input: string, delta: number): string {
         );
         let expected = String::from_utf8(node.stdout)?.trim_end().to_owned();
         let (actual,) = inspect.call(&mut store, (input, delta))?;
+        let actual = actual.expect("fixture has no escaping failure");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&actual)?,
             serde_json::from_str::<serde_json::Value>(&expected)?,

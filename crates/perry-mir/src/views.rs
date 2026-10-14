@@ -1,5 +1,5 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
-use crate::types::{ArrayType, OptionalType, RecordType};
+use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType};
 use pliron::{
     builtin::op_interfaces::{OneOpdInterface, OneResultInterface},
     common_traits::Verify,
@@ -28,6 +28,14 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             return true;
         }
         let (a, b) = (source.deref(ctx), target.deref(ctx));
+        if a.is::<BytesType>() && b.is::<ByteInputType>() {
+            return true;
+        }
+        if !a.is::<OptionalType>()
+            && let Some(b) = b.downcast_ref::<OptionalType>()
+        {
+            return compatible(ctx, source, b.value(), seen);
+        }
         if let (Some(a), Some(b)) = (
             a.downcast_ref::<OptionalType>(),
             b.downcast_ref::<OptionalType>(),

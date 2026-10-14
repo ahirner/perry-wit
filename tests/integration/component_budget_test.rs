@@ -15,12 +15,12 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         (
             "identity",
             "export function run(input: string): string { return input; }",
-            3059,
+            3123,
         ),
         (
             "append",
             "export function run(input: string): string { return \"TASK_PROCESSED: \" + input; }",
-            3458,
+            3522,
         ),
     ] {
         let compiled = compile_for_world(source, name, &resolve, world, true)?;

@@ -31,6 +31,12 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
+        if kind(ctx, scalar)? == Kind::Exception {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonExceptionEqual, vec![json, scalar]));
+        }
+        if matches!(kind(ctx, scalar)?, Kind::Record | Kind::Array) {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonOriginEqual, vec![json, scalar]));
+        }
         let tag = match kind(ctx, scalar)? {
             Kind::String => "string",
             Kind::Number => "number",
@@ -87,6 +93,7 @@ impl<'s> FunctionBuilder<'s> {
                 let signature = Signature {
                     name: name.clone(),
                     is_async: false,
+                    await_initialization: false,
                     params: vec![JsonType::get(ctx).into()],
                     results: vec![target],
                 };
@@ -330,6 +337,49 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| b.defined(ctx, value),
         )
         .map(Some)
+    }
+
+    /// Retain supported Error causes, preserving reference identity alongside their readable fields.
+    pub(super) fn error_cause(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if let Some(json) = self.json_operand(ctx, value)? {
+            return Ok(json);
+        }
+        if self.is_optional(ctx, value) {
+            let json = JsonType::get(ctx).into();
+            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            return self.choose(
+                ctx,
+                json,
+                undefined,
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
+                |b, ctx| {
+                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                    b.choose(
+                        ctx,
+                        json,
+                        null,
+                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
+                        |b, ctx| {
+                            let value = b.defined(ctx, value)?;
+                            b.error_cause(ctx, value)
+                        },
+                    )
+                },
+            );
+        }
+        let intrinsic = match kind(ctx, value)? {
+            Kind::Number => Intrinsic::JsonFromNumber,
+            Kind::String => Intrinsic::JsonFromString,
+            Kind::Boolean => Intrinsic::JsonFromBool,
+            Kind::Exception => Intrinsic::JsonFromException,
+            Kind::Record | Kind::Array => {
+                return Ok(self.emit_value(ctx, |ctx| {
+                    perry_mir::collections::NativeJsonOp::new(ctx, value)
+                }));
+            }
+            _ => bail!("unsupported Error cause type"),
+        };
+        Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
 
     /// A member value of a JSON object literal: a JSON value, or a number, string, boolean

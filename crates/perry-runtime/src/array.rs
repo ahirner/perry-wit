@@ -69,7 +69,7 @@ fn doubled(cap: u32) -> (u32, u32) {
 
 /// Byte size of `cap` slots; traps when it exceeds the 32-bit address space.
 fn slot_bytes(cap: u32) -> u32 {
-    cap.checked_mul(SLOT).expect("array capacity overflow")
+    crate::sequence::byte_size(cap, SLOT, 0)
 }
 
 const ARRAY_SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Array, data) as u32];
@@ -136,5 +136,282 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
     {
         let _ = references;
         perry_array_new(capacity)
+    }
+}
+
+/// Concatenate arrays, consuming only headers and buffers proved exclusive by MIR.
+///
+/// # Safety
+/// Both arrays are live, have the same element representation, and every operand selected
+/// by `reuse` is exclusively owned and unobserved after this call. Allocation never collects.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn perry_array_concat(
+    left: *mut u8,
+    right: *mut u8,
+    references: u32,
+    reuse: u32,
+) -> *mut u8 {
+    let candidates = if reuse == 2 { [1, 0] } else { [0, 1] };
+    let count = reuse.count_ones();
+    unsafe {
+        perry_array_concat_many(
+            [left, right].as_ptr(),
+            2,
+            references,
+            candidates.as_ptr(),
+            count,
+        )
+    }
+}
+
+/// Combine all segments with one reservation. Sources remain stable throughout this atomic helper.
+///
+/// # Safety
+/// `sources` describes `count` live arrays with identical element representation. Selected
+/// headers and storage are exclusive, and their old identities cannot be observed afterwards.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn perry_array_concat_many(
+    sources: *const *mut u8,
+    count: u32,
+    references: u32,
+    candidates: *const u32,
+    candidate_count: u32,
+) -> *mut u8 {
+    unsafe {
+        let reuse = if candidate_count == 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(candidates, candidate_count as usize)
+        };
+        let sources = core::slice::from_raw_parts(sources, count as usize);
+        let len = sources
+            .iter()
+            .try_fold(0u32, |len, &array| {
+                len.checked_add((*array.cast::<Array>()).len)
+            })
+            .expect("array length overflow");
+        slot_bytes(len.max(MIN_CAPACITY));
+        let eligible = |index: usize, array: *mut u8| {
+            reuse.contains(&(index as u32))
+                && sources.iter().filter(|&&other| other == array).count() == 1
+        };
+        let candidates = || {
+            sources
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|&(index, array)| eligible(index, array))
+        };
+        let selected = candidates()
+            .find(|&(_, array)| (*array.cast::<Array>()).cap >= len)
+            .or_else(|| candidates().next());
+        let target = selected
+            .map_or_else(
+                || perry_array_new_typed(len, references),
+                |(_, array)| array,
+            )
+            .cast::<Array>();
+        reserve(target, len, references);
+        if let Some((index, _)) = selected {
+            let prefix = sources[..index]
+                .iter()
+                .map(|&array| (*array.cast::<Array>()).len as usize)
+                .sum::<usize>();
+            core::ptr::copy(
+                (*target).data,
+                (*target).data.add(prefix),
+                (*target).len as usize,
+            );
+        }
+        let mut offset = 0;
+        for &source in sources {
+            let source = source.cast::<Array>();
+            if source != target {
+                core::ptr::copy_nonoverlapping(
+                    (*source).data,
+                    (*target).data.add(offset),
+                    (*source).len as usize,
+                );
+            }
+            offset += (*source).len as usize;
+        }
+        (*target).len = len;
+        target.cast()
+    }
+}
+
+/// Reserve live dense slots, retaining their reference shape.
+unsafe fn reserve(array: *mut Array, len: u32, references: u32) {
+    unsafe {
+        if (*array).cap >= len {
+            return;
+        }
+        let cap = len.max((*array).cap.saturating_mul(2).min(u32::MAX / SLOT));
+        let data = crate::region::perry_buffer_resize(
+            (*array).data.cast(),
+            slot_bytes((*array).cap),
+            slot_bytes(cap),
+            slot_bytes((*array).len),
+            element_shape(references),
+        )
+        .cast::<u64>();
+        (*array).data = data;
+        (*array).cap = cap;
+    }
+}
+
+/// Append a snapshot of source slots, including explicit self-extension.
+///
+/// # Safety
+/// Both operands are live arrays with identical element representation.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn perry_array_extend(
+    target: *mut u8,
+    source: *mut u8,
+    references: u32,
+) {
+    unsafe {
+        let (target, source) = (target.cast::<Array>(), source.cast::<Array>());
+        let (before, added) = ((*target).len, (*source).len);
+        let len = crate::sequence::length(before, added);
+        slot_bytes(len);
+        reserve(target, len, references);
+        core::ptr::copy(
+            (*source).data,
+            (*target).data.add(before as usize),
+            added as usize,
+        );
+        (*target).len = len;
+    }
+}
+
+/// Combine normalized spread-call arguments, reserving their total size once.
+///
+/// # Safety
+/// `segments` is an array of live arrays with the requested element representation.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn perry_array_concat_segments(
+    segments: *mut u8,
+    references: u32,
+) -> *mut u8 {
+    unsafe {
+        let segments = &*segments.cast::<Array>();
+        let sources = core::slice::from_raw_parts(segments.data, segments.len as usize);
+        let len = sources
+            .iter()
+            .try_fold(0u32, |len, &source| {
+                len.checked_add((*(source as usize as *const Array)).len)
+            })
+            .expect("array length overflow");
+        slot_bytes(len);
+        let result = perry_array_new_typed(len, references).cast::<Array>();
+        let mut offset = 0;
+        for &source in sources {
+            let source = &*(source as usize as *const Array);
+            core::ptr::copy_nonoverlapping(
+                source.data,
+                (*result).data.add(offset),
+                source.len as usize,
+            );
+            offset += source.len as usize;
+        }
+        (*result).len = len;
+        result.cast()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allocate_array(values: &[u64], capacity: u32) -> *mut u8 {
+        let array = perry_array_new_typed(capacity, 0).cast::<Array>();
+        // SAFETY: capacity covers these dense scalar slots.
+        unsafe {
+            core::ptr::copy_nonoverlapping(values.as_ptr(), (*array).data, values.len());
+            (*array).len = values.len() as u32;
+        }
+        array.cast()
+    }
+
+    #[test]
+    fn concat_prefers_existing_capacity_and_grows_the_earliest_candidate() {
+        crate::RuntimeInstance::default().enter(|| {
+            crate::region::perry_task_enter();
+            let sources = [
+                allocate_array(&[10, 11, 12], 4),
+                allocate_array(&[20, 21], 8),
+                allocate_array(&[30], 16),
+            ];
+            // SAFETY: sources are exclusive scalar arrays with no external observers.
+            unsafe {
+                let result = perry_array_concat_many(sources.as_ptr(), 3, 0, [0, 1, 2].as_ptr(), 3);
+                assert_eq!(result, sources[1]);
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).data, 6),
+                    &[10, 11, 12, 20, 21, 30]
+                );
+                let sources = [
+                    allocate_array(&[1, 2, 3], 4),
+                    allocate_array(&[4, 5, 6], 4),
+                    allocate_array(&[7, 8, 9], 4),
+                ];
+                let result = perry_array_concat_many(sources.as_ptr(), 3, 0, [0, 1, 2].as_ptr(), 3);
+                assert_eq!(result, sources[0]);
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).data, 9),
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9]
+                );
+            }
+            crate::region::perry_task_free();
+        });
+    }
+
+    #[test]
+    fn concat_rejects_duplicates_and_supports_later_candidates_without_allocation() {
+        crate::RuntimeInstance::default().enter(|| {
+            crate::region::perry_task_enter();
+            let repeated = allocate_array(&[1, 2], 8);
+            // SAFETY: the helper must reject a duplicated candidate before mutation.
+            unsafe {
+                let result = perry_array_concat(repeated, repeated, 0, 3);
+                assert_ne!(result, repeated);
+                assert_eq!((*repeated.cast::<Array>()).len, 2);
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).data, 4),
+                    &[1, 2, 1, 2]
+                );
+                let sources = (0..40)
+                    .map(|value| allocate_array(&[value], if value == 39 { 64 } else { 4 }))
+                    .collect::<Vec<_>>();
+                let before = crate::roots::perry_gc_counter(0);
+                let result = perry_array_concat_many(sources.as_ptr(), 40, 0, [39].as_ptr(), 1);
+                assert_eq!(result, sources[39]);
+                assert_eq!(crate::roots::perry_gc_counter(0), before);
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).data, 40),
+                    &(0..40).collect::<Vec<u64>>()
+                );
+            }
+            crate::region::perry_task_free();
+        });
+    }
+
+    #[test]
+    fn bulk_extension_snapshots_self_before_growth() {
+        crate::RuntimeInstance::default().enter(|| {
+            crate::region::perry_task_enter();
+            let array = allocate_array(&[1, 2], 4);
+            // SAFETY: explicit self-extension snapshots the original length and slots.
+            unsafe {
+                perry_array_extend(array, array, 0);
+                perry_array_extend(array, array, 0);
+                assert_eq!(
+                    core::slice::from_raw_parts((*array.cast::<Array>()).data, 8),
+                    &[1, 2, 1, 2, 1, 2, 1, 2]
+                );
+            }
+            crate::region::perry_task_free();
+        });
     }
 }

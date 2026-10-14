@@ -3,6 +3,119 @@
 use crate::core_program::{Counter, Program};
 
 #[test]
+fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
+    let source = r#"
+interface Cell { value:number }
+interface Holder { items:Cell[] }
+function mutate(items:Cell[]):number { items[0].value=9;return 3; }
+function mutateNumbers(a:number[]):number[] { a[0]=9;return [3]; }
+export function run():number {
+ const a:number[]=[1,2];
+ const alias=a;
+ const spread=[...a,...mutateNumbers(a),10];
+ if(spread[0]!==1 || spread[2]!==3 || alias[0]!==9)return 9;
+ const combined=a.concat(mutateNumbers(a),4,...[5,6]);
+ if(combined===a || combined[0]!==9 || combined[2]!==3 || combined[5]!==6)return 10;
+ combined[0]=7;
+ const copiedNumbers=a.concat();
+ copiedNumbers[0]=8;
+ if(a[0]!==9 || spread.length+combined.length+copiedNumbers.length!==12)return 12;
+ const cell:Cell={value:1};const values:Cell[]=[cell];
+ const copied=[...values];copied[0].value=2;
+ if(values[0]!==cell || cell.value!==2)return 1;
+ const nested:number[][]=[[1],[2]];
+ const flat=nested.concat([[3]]);
+ if(flat.length!==3 || flat[0]!==nested[0])return 2;
+ const text:string[]=['é','🙂'];
+ const emptyMix=[...[],...text];const emptyCopy=values.concat(...[]);
+ if(emptyMix.length!==2 || emptyCopy===values || ''.concat(...[])!=='')return 11;
+ const nullable=[null,...text,undefined];
+ if(nullable[0]!==null || nullable[1]!=='é' || nullable[3]!==undefined)return 3;
+ const optional:(number|null)[]=[1,null];
+ const joined=optional.concat(null,[2]);
+ if(joined.length!==4 || joined[2]!==null)return 4;
+ const repeated=values.concat(values);
+ repeated[0].value=7;
+ if(repeated[1]!==cell || values[0].value!==7)return 5;
+ const empty:number[]=[];empty.push(...empty);
+ const self:number[]=[1,2];self.push(...self);
+ if(self.length!==4 || self[2]!==1 || self[3]!==2)return 6;
+ const words='start'.concat(...text,mutate(values));
+ if(words!=='starté🙂3' || cell.value!==9)return 7;
+ const holder:Holder={items:values};
+ const escape=holder.items.concat([{value:4}]);escape[0]={value:8};
+ if(holder.items[0]!==cell || holder.items.length!==1)return 8;
+ return 0;
+}
+"#;
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("concat.mts");
+    std::fs::write(&script, format!("{source}\nconsole.log(run());"))?;
+    let node = std::process::Command::new("node")
+        .arg("--experimental-strip-types")
+        .arg(script)
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected = String::from_utf8(node.stdout)?.trim().parse::<f64>()?;
+    let mut program = Program::checked(source, "concat.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (expected, 0));
+    Ok(())
+}
+
+#[test]
+fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
+    for expression in [
+        "owned.concat(borrowed)",
+        "borrowed.concat(owned)",
+        "owned.concat([2,3])",
+    ] {
+        let source = format!(
+            "export function run(n:number):number{{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){{const owned:number[]=[1];const joined={expression};total+=joined.length+joined[0];}}return total;}}"
+        );
+        let mut program = Program::checked(&source, "concat-capacity.ts");
+        program.stress_collection(true);
+        let expected = if expression.starts_with("borrowed") {
+            5000.0
+        } else {
+            4000.0
+        };
+        assert_eq!(program.number("run", 1000.0), expected);
+        assert!(
+            program.counter(Counter::Allocations)
+                < if expression.ends_with("[2,3])") {
+                    4100
+                } else {
+                    2100
+                },
+            "{expression}: {} allocations",
+            program.counter(Counter::Allocations)
+        );
+    }
+    let source = r#"
+interface Cell { value: number }
+export function run(n: number): number {
+  let numbers: number[] = [];
+  let cells: Cell[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) numbers = [i].concat(numbers);
+    else numbers = numbers.concat([i]);
+    cells = [...cells, { value: i }];
+  }
+  return numbers.length + numbers[0] + cells.length + cells[0].value + cells[cells.length - 1].value;
+}
+"#;
+    let mut program = Program::checked(source, "concat-join.ts");
+    program.stress_collection(true);
+    assert_eq!(program.throwing("run", 1000.0), (3997.0, 0));
+    assert!(program.counter(Counter::Allocations) < 5400);
+}
+
+#[test]
 fn unchanged_module_graph_does_not_collect_on_every_export() {
     let source = r#"
 interface Cell { value: number; next: Cell | null }

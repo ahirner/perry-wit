@@ -59,26 +59,29 @@ impl ComponentOutput {
     }
 }
 
-pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
+fn compile_file_impl(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
     let source = fs::read_to_string(input_file)
         .with_context(|| format!("Reading TypeScript source {}", input_file.display()))?;
-    compile_typescript(&source, &input_file.to_string_lossy(), options)
+    compile_typescript_impl(&source, &input_file.to_string_lossy(), options)
 }
 
 /// Compile against the world selected from `options.wit_dir`.
-pub fn compile_typescript(
+fn compile_typescript_impl(
     source: &str,
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
-    let world = resolve.select_world(&[package], options.world.as_deref())?;
-    compile_for_world(source, file_name, &resolve, world, !options.core_only)
+    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let world = resolve
+        .select_world(&[package], options.world.as_deref())
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }
 
 /// Compile against an already resolved world; the component is omitted when `componentize`
 /// is false.
-pub fn compile_for_world(
+fn compile_for_world_impl(
     source: &str,
     file_name: &str,
     resolve: &wit_parser::Resolve,
@@ -90,7 +93,7 @@ pub fn compile_for_world(
 
 /// Compile a component test with forced safe-point collection and reclaimed-memory poisoning.
 /// Production compilation omits the instrumentation.
-pub fn compile_for_world_with_memory_checks(
+fn compile_for_world_with_memory_checks_impl(
     source: &str,
     file_name: &str,
     resolve: &wit_parser::Resolve,
@@ -145,10 +148,20 @@ pub(crate) fn compile_sources(
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let mir = lower(ctx, source, identity, modules, &foreign)?;
-    let exports = bind::exports(ctx, &mir, resolve, world)?;
-    bind::check_main(ctx, &mir, &exports)?;
+    let exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
+    })?;
+    bind::check_main(ctx, &mir, &exports).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
+    })?;
     let imports = bind::imports(resolve, world);
     let streams = bind::stream_anchor(resolve, world);
+    let stdout = imports
+        .iter()
+        .any(|name| name.starts_with("wasi:cli/stdout@"));
+    let stderr = imports
+        .iter()
+        .any(|name| name.starts_with("wasi:cli/stderr@"));
     let exports = Exports::Canonical {
         memory_checks,
         exports,
@@ -157,11 +170,21 @@ pub(crate) fn compile_sources(
         resources,
     };
     let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports)?;
-    let core = finish(core, streams.as_ref())?;
+    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+    })?;
+    let core = finish(core, streams.as_ref()).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+    })?;
+    let core = link::raw::available_stdio(core, stdout, stderr).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+    })?;
     let component = componentize
         .then(|| ComponentOutput::encode(&core, resolve, world))
-        .transpose()?;
+        .transpose()
+        .map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
     Ok(Compiled {
         core,
         component,
@@ -172,7 +195,7 @@ pub(crate) fn compile_sources(
 /// A linked core module exporting every exported TypeScript function with its raw core
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
 /// functions that may throw). For tests and inspection; components use [compile_for_world].
-pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
+fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let modules = perry_lower::source_files::load(source, file_name)?;
     compile_core_sources(source, file_name, &modules, false)
 }
@@ -183,7 +206,7 @@ pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
 /// live bytes (2), reserved bytes (3), transfer-copy bytes (4), active pins (5), active roots (6),
 /// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
 /// bytes (10). Canonical production components omit these exports.
-pub fn compile_core_with_memory_checks(source: &str, file_name: &str) -> Result<Vec<u8>> {
+fn compile_core_with_memory_checks_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let modules = perry_lower::source_files::load(source, file_name)?;
     compile_core_sources(source, file_name, &modules, true)
 }
@@ -201,7 +224,11 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    link::raw::without_p3(finish(perry_codegen::compile(ctx, &mir, &exports)?, None)?)
+    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+    })?;
+    link::raw::without_p3(finish(core, None)?)
+        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
 }
 
 fn lower(
@@ -211,10 +238,16 @@ fn lower(
     modules: &BTreeMap<String, String>,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
 ) -> Result<pliron::builtin::ops::ModuleOp> {
-    let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)?;
+    let mir =
+        perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
+        })?;
     perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
-        .context("optimizing MIR")?;
+        .context("optimizing MIR")
+        .map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
     Ok(mir)
 }
 
@@ -224,4 +257,63 @@ fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>
     let core = link::compact(&core).context("interning core function signatures")?;
     audit::validate_guest(&core).context("validating stackless core Wasm")?;
     Ok(core)
+}
+
+pub fn compile_file(
+    input_file: &Path,
+    options: &CompileOptions,
+) -> std::result::Result<Compiled, crate::CompileError> {
+    compile_file_impl(input_file, options)
+        .map_err(|error| crate::CompileError::from_error(error, crate::DiagnosticCode::Io))
+}
+
+pub fn compile_typescript(
+    source: &str,
+    file_name: &str,
+    options: &CompileOptions,
+) -> std::result::Result<Compiled, crate::CompileError> {
+    compile_typescript_impl(source, file_name, options).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+    })
+}
+
+pub fn compile_for_world(
+    source: &str,
+    file_name: &str,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    componentize: bool,
+) -> std::result::Result<Compiled, crate::CompileError> {
+    compile_for_world_impl(source, file_name, resolve, world, componentize).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })
+}
+
+pub fn compile_for_world_with_memory_checks(
+    source: &str,
+    file_name: &str,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> std::result::Result<Compiled, crate::CompileError> {
+    compile_for_world_with_memory_checks_impl(source, file_name, resolve, world).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })
+}
+
+pub fn compile_core(
+    source: &str,
+    file_name: &str,
+) -> std::result::Result<Vec<u8>, crate::CompileError> {
+    compile_core_impl(source, file_name).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })
+}
+
+pub fn compile_core_with_memory_checks(
+    source: &str,
+    file_name: &str,
+) -> std::result::Result<Vec<u8>, crate::CompileError> {
+    compile_core_with_memory_checks_impl(source, file_name).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })
 }

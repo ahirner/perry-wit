@@ -222,7 +222,15 @@ impl<'s> FunctionBuilder<'s> {
         let stay = self.new_block(ctx, "handle");
         self.branch(ctx, exiting, leave, stay);
         self.switch_to(leave);
-        self.propagate(ctx, status);
+        if self.handlers.is_empty() {
+            self.emit(ctx, |ctx| {
+                let rethrow = RethrowOp::new(ctx, status);
+                perry_mir::exceptions::set_exit_only(ctx, &rethrow);
+                rethrow
+            });
+        } else {
+            self.propagate(ctx, status);
+        }
         self.switch_to(stay);
     }
 

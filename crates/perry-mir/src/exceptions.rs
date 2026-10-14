@@ -56,7 +56,7 @@ pub trait MayThrowInterface {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ExceptionErr {
+enum ExceptionErr {
     #[error("{0} expects a perry.exception operand")]
     Exception(&'static str),
     #[error("{0} expects a signless i32 status")]
@@ -399,3 +399,60 @@ impl Verify for ExceptionMessageOp {
 
 effects!(false; ErrorNewOp, ExceptionIsOp, ExceptionMessageOp);
 effects!(true; RaiseOp, ExitOp, CaughtOp, CatchOp);
+
+/// Mark the status-only bypass that sends process.exit around catch and finally.
+pub fn set_exit_only(ctx: &mut Context, op: &RethrowOp) {
+    op.get_operation().deref_mut(ctx).attributes.set(
+        pliron::identifier::Identifier::new("perry_exit_only"),
+        pliron::builtin::attributes::BoolAttr::from(true),
+    );
+}
+
+/// Functions whose exceptions can escape, including rejection from an async body.
+/// Handled operations retain their status convention but do not require an export channel.
+pub fn escaping_functions(
+    ctx: &Context,
+    functions: &[pliron::builtin::ops::FuncOp],
+) -> std::collections::HashSet<pliron::identifier::Identifier> {
+    use crate::calls::CallOp;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, linked_list::LinkedList};
+    let mut escaping = std::collections::HashSet::new();
+    loop {
+        let before = escaping.len();
+        for function in functions {
+            if crate::aggregates::operations(ctx, function)
+                .iter()
+                .any(|&op| {
+                    if op
+                        .deref(ctx)
+                        .get_next()
+                        .is_some_and(|next| Operation::get_op::<CaughtOp>(next, ctx).is_some())
+                    {
+                        return false;
+                    }
+                    if Operation::get_op::<RethrowOp>(op, ctx).is_some()
+                        && op
+                            .deref(ctx)
+                            .attributes
+                            .get::<pliron::builtin::attributes::BoolAttr>(
+                                &pliron::identifier::Identifier::new("perry_exit_only"),
+                            )
+                            .is_some_and(|flag| bool::from(flag.clone()))
+                    {
+                        return false;
+                    }
+                    if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
+                        escaping.contains(&call.callee(ctx))
+                    } else {
+                        crate::intrinsics::may_throw(ctx, op)
+                    }
+                })
+            {
+                escaping.insert(function.get_symbol_name(ctx));
+            }
+        }
+        if before == escaping.len() {
+            return escaping;
+        }
+    }
+}

@@ -59,7 +59,7 @@ export function double(count: number): number { return count * 2; }
 #[test]
 fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
     let mut component = Instance::compile(
-        "package test:reachability; world boundary {export run:func()->u32;}",
+        "package test:reachability; world boundary {export run:func()->result<u32>;}",
         r#"
         function initial(n:number):number { if(n <= 0) return 7; return initial(n - 1) + 1; }
         let count = initial(3);
@@ -67,8 +67,8 @@ fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
         export async function unused():Promise<void> { console.log('not in this world'); }
         "#,
     )?;
-    assert_eq!(component.call("run", &[])?, Val::U32(11));
-    assert_eq!(component.call("run", &[])?, Val::U32(12));
+    assert_eq!(component.call_success("run", &[])?, Val::U32(11));
+    assert_eq!(component.call_success("run", &[])?, Val::U32(12));
     Ok(())
 }
 
@@ -254,6 +254,13 @@ impl Instance {
         Ok(Instance { store, instance })
     }
 
+    fn call_success(&mut self, name: &str, args: &[Val]) -> Result<Val> {
+        match self.call(name, args)? {
+            Val::Result(Ok(Some(value))) => Ok(*value),
+            other => anyhow::bail!("unexpected fixture completion: {other:?}"),
+        }
+    }
+
     fn call(&mut self, name: &str, args: &[Val]) -> Result<Val> {
         let function = self
             .instance
@@ -272,15 +279,18 @@ fn canonical_inputs_survive_their_call_and_collectible_churn() -> Result<()> {
         r#"
 package test:owners;
 world boundary {
-    export remember: func(text: string, bytes: list<u8>) -> u32;
-    export recall: func(n: u32) -> string;
-    export bytes: func() -> list<u8>;
+    export remember: func(text: string, bytes: list<u8>) -> result<u32>;
+    export recall: func(n: u32) -> result<string>;
+    export bytes: func() -> result<list<u8>>;
 }
 "#,
         r#"
+const items: { text: string }[] = [];
+for (let i = 0; i < 200; i++) items.push({ text: "item " + i });
 let saved = "";
 let data = new Uint8Array(0);
 export function remember(text: string, bytes: Uint8Array): number {
+    if (items.length !== 200) throw new Error("init missing");
     saved = text.slice(1); data = bytes.subarray(1); data[0] = 255;
     return data.length;
 }
@@ -293,7 +303,7 @@ export function bytes(): Uint8Array { return data; }
 "#,
     )?;
     assert_eq!(
-        component.call(
+        component.call_success(
             "remember",
             &[
                 Val::String("!hé🙂".into()),
@@ -303,11 +313,11 @@ export function bytes(): Uint8Array { return data; }
         Val::U32(2)
     );
     assert_eq!(
-        component.call("recall", &[Val::U32(200_000)])?,
+        component.call_success("recall", &[Val::U32(200_000)])?,
         Val::String("hé🙂:255:temporary:199999".into())
     );
     assert_eq!(
-        component.call("bytes", &[])?,
+        component.call_success("bytes", &[])?,
         Val::List(vec![Val::U8(255), Val::U8(3)])
     );
     Ok(())
@@ -535,10 +545,17 @@ package test:input;
 world boundary {
     record payload { text: list<u8>, parts: list<list<u8>> }
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
+    export regular: func(bytes: list<u8>) -> payload;
 }
 "#,
         r#"
 import type { Payload, PayloadInput, WitInput } from './types/world';
+interface Ordinary { text: Uint8Array; parts: Uint8Array[] }
+function ordinary(value: Ordinary): WitInput<Payload> { return value; }
+export function regular(bytes: Uint8Array): PayloadInput {
+    const record: Ordinary = {text: bytes, parts: [bytes]};
+    return ordinary(record);
+}
 function make(text: string, bytes: Uint8Array, textFirst: boolean): WitInput<Payload> {
     let selected: WitInput<Uint8Array> = bytes;
     if (textFirst) selected = text;
@@ -550,6 +567,13 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean): Pay
 "#,
     )?;
     let bytes = |s: &str| Val::List(s.bytes().map(Val::U8).collect());
+    assert_eq!(
+        component.call("regular", &[bytes("é🙂")])?,
+        record([
+            ("text", bytes("é🙂")),
+            ("parts", Val::List(vec![bytes("é🙂")]))
+        ])
+    );
     for text_first in [true, false] {
         assert_eq!(
             component.call(
@@ -666,7 +690,7 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             export echo: func(values: list<value>) -> list<value>;
             export inspect: func(value: packet) -> packet;
             export make: func(which: u32) -> value;
-            export describe: func(value: value) -> string;
+            export describe: func(value: value) -> result<string>;
         }
         "#,
         r#"
@@ -716,7 +740,7 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
     {
         assert_eq!(component.call("make", &[Val::U32(index as u32)])?, *value);
         assert_eq!(
-            component.call("describe", std::slice::from_ref(value))?,
+            component.call_success("describe", std::slice::from_ref(value))?,
             Val::String(expected.into())
         );
     }
@@ -819,8 +843,8 @@ fn generic_pages_and_results_use_concrete_wit_records() -> Result<()> {
 world boundary {
   record page { data: list<f64>, next: option<string> }
   export echo: func(value: page) -> result<page, string>;
-  export parsed: func() -> page;
-  export stringify: func(value: page) -> string;
+  export parsed: func() -> result<page>;
+  export stringify: func(value: page) -> result<string>;
 }"#;
     let source = r#"
 interface Page<T> {data:T[];next:string|null}
@@ -837,13 +861,13 @@ export function stringify(value:Page<number>):string {return JSON.stringify(valu
         ),
         ("next".into(), Val::Option(None)),
     ]);
-    assert_eq!(instance.call("parsed", &[])?, page);
+    assert_eq!(instance.call_success("parsed", &[])?, page);
     assert_eq!(
         instance.call("echo", std::slice::from_ref(&page))?,
         Val::Result(Ok(Some(Box::new(page.clone()))))
     );
     assert_eq!(
-        instance.call("stringify", &[page])?,
+        instance.call_success("stringify", &[page])?,
         Val::String("{\"data\":[1,2],\"next\":null}".into())
     );
     Ok(())
