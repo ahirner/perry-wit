@@ -812,6 +812,123 @@ builtin.module @aggregate_facts {
 }
 
 #[test]
+fn array_lengths_follow_aliases_calls_and_growth() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{
+        builtin::op_interfaces::SymbolOpInterface,
+        pass::{Analysis, AnalysisManager},
+    };
+    let fixture = r#"
+builtin.module @lengths { ^module():
+  builtin.func @identity: builtin.function <(perry.array <builtin.fp64>, builtin.integer i1) -> (perry.array <builtin.fp64>)> {
+    ^entry(items: perry.array <builtin.fp64>, again: builtin.integer i1):
+      perry.cond_br if again ^recurse() else ^done(items)
+    ^recurse():
+      no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+      result = perry.call identity (items, no) : perry.array <builtin.fp64>;
+      perry.br ^done(result)
+    ^done(value: perry.array <builtin.fp64>):
+      perry.return value
+  };
+  builtin.func @write: builtin.function <(perry.array <builtin.fp64>, builtin.fp64) -> ()> {
+    ^entry(alias: perry.array <builtin.fp64>, index: builtin.fp64):
+      zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+      MUTATE
+      perry.return
+  };
+  builtin.func @run: builtin.function <(builtin.integer i1, builtin.fp64) -> (builtin.integer i32, perry.optional <builtin.fp64,Undefined>)> {
+    ^entry(flag: builtin.integer i1, index: builtin.fp64):
+      one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+      zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+      items = perry.array_new Unassigned (one, one) : perry.array <builtin.fp64>;
+      record = perry.alloc Unassigned (items) : perry.record <Holder { items: perry.array <builtin.fp64> }>;
+      selected = perry.field_get record."items" : perry.array <builtin.fp64>;
+      alias = perry.call identity (selected, flag) : perry.array <builtin.fp64>;
+      length = perry.array_len items : builtin.integer i32;
+      perry.call write (alias, index) : ;
+      value = perry.array_get items[zero] : perry.optional <builtin.fp64,Undefined>;
+      perry.return length, value
+  }
+}
+"#;
+    for (mutation, expected) in [
+        ("", (2, 2)),
+        ("perry.array_set alias[zero] = zero;", (2, 2)),
+        ("perry.array_set alias[index] = zero;", (2, u32::MAX)),
+        ("perry.array_push alias <- zero;", (2, u32::MAX)),
+        ("extend", (2, u32::MAX)),
+        (
+            "view = perry.json_native alias : perry.json;",
+            (0, u32::MAX),
+        ),
+    ] {
+        let ctx = &mut Context::new();
+        let module = parse(
+            ctx,
+            &fixture.replace("MUTATE", if mutation == "extend" { "" } else { mutation }),
+        );
+        if mutation == "extend" {
+            use pliron::op::Op;
+            let write = crate::aggregates::functions(module, ctx)
+                .into_iter()
+                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("write"))
+                .unwrap();
+            let entry = write.get_entry_block(ctx);
+            let alias = entry.deref(ctx).get_argument(0);
+            let end = entry.deref(ctx).get_terminator(ctx).unwrap();
+            crate::collections::ArrayExtendOp::new(ctx, alias, alias)
+                .get_operation()
+                .insert_before(ctx, end);
+        }
+        verify_operation(module, ctx)?;
+        let run = crate::aggregates::functions(module, ctx)
+            .into_iter()
+            .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
+            .unwrap();
+        crate::calls::set_exported(ctx, &run);
+        let read = crate::aggregates::operations(ctx, &run)
+            .into_iter()
+            .find(|&op| Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some())
+            .unwrap();
+        let array = read.deref(ctx).get_operand(0);
+        let index = read.deref(ctx).get_operand(1);
+        let mut analyses = AnalysisManager::default();
+        {
+            let cached = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+            let fresh = ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())?;
+            for facts in [&*cached, &fresh] {
+                assert_eq!(
+                    facts.array_length(ctx, &run, array),
+                    Some(expected),
+                    "{mutation}"
+                );
+                assert_eq!(
+                    facts.array_in_bounds(ctx, &run, array, index),
+                    expected.0 > 0,
+                    "{mutation}"
+                );
+            }
+        }
+        crate::pipeline::canonicalize(module, ctx)?;
+        let operations = crate::aggregates::operations(ctx, &run);
+        let checked = operations
+            .iter()
+            .any(|&op| Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some());
+        let length = operations
+            .iter()
+            .any(|&op| Operation::get_op::<crate::collections::ArrayLenOp>(op, ctx).is_some());
+        assert!(!checked, "{mutation}");
+        // An unused native view is eliminated before the fresh facts query.
+        assert_eq!(
+            length,
+            expected.0 > 0 && expected.0 != expected.1,
+            "{mutation}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
     use crate::facts::ProgramFacts;
     use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
@@ -828,7 +945,7 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
         "#,
         );
         for index in 1..size {
-            writeln!(text, "cell{index} = perry.alloc Unassigned (one) : perry.record <Cell>; perry.array_push items <- cell{index};").unwrap();
+            writeln!(text, "cell{index} = perry.alloc Unassigned (one) : perry.record <Cell>; perry.array_push items <- cell{index}; length{index} = perry.array_len items : builtin.integer i32;").unwrap();
         }
         text.push_str(
             r#"result = perry.field_get first."value" : builtin.fp64; perry.return result } }"#,
@@ -842,6 +959,13 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
         assert_eq!(run.get_symbol_name(ctx), pliron::ident!("run"));
         let mut analyses = AnalysisManager::default();
         let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+        let array = crate::aggregates::operations(ctx, &run)
+            .into_iter()
+            .find(|&op| Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx).is_some())
+            .unwrap()
+            .deref(ctx)
+            .get_result(0);
+        assert_eq!(facts.array_length(ctx, &run, array), Some((1, u32::MAX)));
         let returned = run
             .get_entry_block(ctx)
             .deref(ctx)

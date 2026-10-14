@@ -650,6 +650,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
 fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
     for source in [
         "export function run(a:number,b:number):number { return a+b; }",
+        "export function run(a:number,b:number):number { return [a,b].length+a; }",
         "export function run(a:number,b:number):number { let sum=b; for(let i=0;i<a;i++)sum+=1; return sum; }",
         "export function run(a:number,b:number):number { return a+b; } export function unused():string { return String(Math.random()); }",
     ] {

@@ -34,8 +34,9 @@ use crate::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
+        attributes::IntegerAttr,
         op_interfaces::{OneRegionInterface, OneResultInterface},
-        ops::FuncOp,
+        ops::{ConstantOp, FuncOp},
         types::{FP64Type, IntegerType, Signedness},
     },
     context::{Context, Ptr},
@@ -46,6 +47,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     r#type::Typed,
+    utils::apint::{APInt, bw},
     value::Value,
 };
 use std::collections::{HashMap, HashSet};
@@ -129,8 +131,7 @@ impl Function {
             let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
                 continue;
             };
-            let dests: Vec<Ptr<BasicBlock>> = terminator.deref(ctx).successors().collect();
-            for dest in dests {
+            for dest in terminator.deref(ctx).successors() {
                 successors.entry(block).or_default().push(dest);
                 predecessors.entry(dest).or_default().push(block);
             }
@@ -170,7 +171,7 @@ struct Fact {
     length: Length,
 }
 
-/// Replace reads proven in bounds with unchecked reads; see the module documentation.
+/// Fold stable array lengths and replace reads proven in bounds with unchecked reads.
 pub(crate) fn prove_bounds(
     root: Ptr<Operation>,
     ctx: &mut Context,
@@ -180,28 +181,24 @@ pub(crate) fn prove_bounds(
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
         let info = Function::new(ctx, &function);
-        let counts: HashSet<_> = info
-            .blocks
-            .iter()
-            .flat_map(|block| {
-                block
-                    .deref(ctx)
-                    .arguments()
-                    .chain(
-                        block
-                            .deref(ctx)
-                            .iter(ctx)
-                            .flat_map(|op| op.deref(ctx).results().collect::<Vec<_>>()),
-                    )
-                    .collect::<Vec<_>>()
-            })
-            .filter(|&value| numeric.is_count(ctx, &function, value))
-            .collect();
-        let facts = facts(ctx, &info, &counts);
-        if facts.is_empty() {
-            continue;
-        }
+        let facts = facts(ctx, &info, numeric, &function);
         for op in operations(ctx, &function) {
+            if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
+                let array = op.deref(ctx).get_operand(0);
+                if let Some((minimum, maximum)) = numeric.array_length(ctx, &function, array)
+                    && minimum == maximum
+                {
+                    let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+                    let attr = IntegerAttr::new(ty, APInt::from_u64(minimum.into(), bw(32)));
+                    let constant = ConstantOp::new(ctx, Box::new(attr));
+                    constant.get_operation().insert_before(ctx, op);
+                    let result = op.deref(ctx).get_result(0);
+                    result.replace_all_uses_with(ctx, &constant.get_result(ctx));
+                    Operation::erase(op, ctx);
+                    status = IRStatus::Changed;
+                }
+                continue;
+            }
             let kind = if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
                 Object::Array
             } else if intrinsic(ctx, op) == Some(Intrinsic::BytesGet) {
@@ -227,19 +224,21 @@ pub(crate) fn prove_bounds(
                     continue;
                 }
             }
-            if !counts.contains(&index) {
+            if !numeric.is_count(ctx, &function, index) {
                 continue;
             }
             let block = op.deref(ctx).get_parent_block().expect("in a block");
-            let proven = facts
-                .get(&(object, index, kind))
-                .into_iter()
-                .flatten()
-                .any(|fact| {
-                    (fact.target == block
-                        || dominance.block_strictly_dominates_block(ctx, fact.target, block))
-                        && (!bytes || stays_attached(ctx, &info, fact, block))
-                });
+            let proven = (kind == Object::Array
+                && numeric.array_in_bounds(ctx, &function, object, index))
+                || facts
+                    .get(&(object, index, kind))
+                    .into_iter()
+                    .flatten()
+                    .any(|fact| {
+                        (fact.target == block
+                            || dominance.block_strictly_dominates_block(ctx, fact.target, block))
+                            && (!bytes || stays_attached(ctx, &info, fact, block))
+                    });
             if proven {
                 unchecked(ctx, op, object, index, kind);
                 status = IRStatus::Changed;
@@ -252,7 +251,8 @@ pub(crate) fn prove_bounds(
 fn facts(
     ctx: &Context,
     info: &Function,
-    counts: &HashSet<Value>,
+    numeric: &crate::facts::ProgramFacts,
+    function: &FuncOp,
 ) -> HashMap<(Value, Value, Object), Vec<Fact>> {
     let mut facts = HashMap::new();
     for &block in &info.blocks {
@@ -286,7 +286,7 @@ fn facts(
             .predecessors
             .get(&target)
             .is_some_and(|preds| preds.len() == 1);
-        if target == other || !single || !counts.contains(&index) {
+        if target == other || !single || !numeric.is_count(ctx, function, index) {
             continue;
         }
         let Some(length) = length(ctx, len) else {

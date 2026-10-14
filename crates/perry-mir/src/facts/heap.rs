@@ -2,7 +2,9 @@
 //! Writes join into slots; readers subscribe to slots and possible object identities.
 use super::*;
 use crate::{
-    collections::{ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
+    collections::{
+        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+    },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     optional::{OptionalCastOp, UnwrapOp, WrapOp},
     types::{ArrayType, RecordType},
@@ -20,8 +22,26 @@ struct Cell {
 }
 
 struct Object {
-    slots: Vec<usize>,
+    contents: Contents,
     open: bool,
+}
+
+enum Contents {
+    Record(Vec<usize>),
+    Array {
+        element: usize,
+        length: Range,
+        readers: BTreeSet<Work>,
+    },
+}
+
+impl Contents {
+    fn slots(&self) -> &[usize] {
+        match self {
+            Self::Record(slots) => slots,
+            Self::Array { element, .. } => std::slice::from_ref(element),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -36,6 +56,8 @@ pub(super) enum OperationKind {
     Allocate { array: bool },
     Read { slot: usize },
     Write { slot: usize, value: usize },
+    ArrayWrite { index: Option<usize>, value: usize },
+    Length,
     Extend,
     Alias { operand: usize },
     Return,
@@ -100,10 +122,19 @@ impl OperationKind {
             return Self::Read { slot: 0 };
         }
         if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-            return Self::Write { slot: 0, value: 2 };
+            return Self::ArrayWrite {
+                index: Some(1),
+                value: 2,
+            };
         }
         if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
-            return Self::Write { slot: 0, value: 1 };
+            return Self::ArrayWrite {
+                index: None,
+                value: 1,
+            };
+        }
+        if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
+            return Self::Length;
         }
         if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
             return Self::Extend;
@@ -117,13 +148,64 @@ impl OperationKind {
             return Self::Call;
         }
         if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
-            || Operation::get_op::<crate::collections::ArrayLenOp>(op, ctx).is_some()
             || Operation::get_op::<crate::optional::IsUndefinedOp>(op, ctx).is_some()
             || Operation::get_op::<crate::optional::IsNullOp>(op, ctx).is_some()
         {
             return Self::None;
         }
         Self::Unknown
+    }
+}
+
+impl HeapFacts {
+    fn length(&self, base: usize) -> Range {
+        self.cells[base]
+            .objects
+            .iter()
+            .fold(Range::Bottom, |range, &object| {
+                let Contents::Array { length, .. } = &self.objects[object].contents else {
+                    unreachable!("array identity")
+                };
+                match (range, *length) {
+                    (Range::Bottom, range) | (range, Range::Bottom) => range,
+                    (Range::Bounds(a), Range::Bounds(b)) => Range::Bounds(Interval {
+                        lower: a.lower.min(b.lower),
+                        upper: a.upper.max(b.upper),
+                    }),
+                    _ => Range::Unknown,
+                }
+            })
+    }
+}
+
+impl ProgramFacts {
+    pub(crate) fn array_length(
+        &self,
+        ctx: &Context,
+        function: &FuncOp,
+        array: Value,
+    ) -> Option<(u32, u32)> {
+        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+        let base = *state.heap_values.get(&array)?;
+        let Range::Bounds(length) = self.heap.length(base) else {
+            return None;
+        };
+        Some((length.lower.try_into().ok()?, length.upper.try_into().ok()?))
+    }
+
+    pub(crate) fn array_in_bounds(
+        &self,
+        ctx: &Context,
+        function: &FuncOp,
+        array: Value,
+        index: Value,
+    ) -> bool {
+        let Some((minimum, _)) = self.array_length(ctx, function, array) else {
+            return false;
+        };
+        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+        crate::optional::optional_value(ctx, index.get_type(ctx)).is_none()
+            && matches!(state.range(index), Range::Bounds(Interval { lower: 0.., upper }) if upper < i128::from(minimum))
     }
 }
 
@@ -171,27 +253,30 @@ impl Solver {
 
     fn heap_object(&mut self, ctx: &Context, ty: TypeHandle, open: bool) -> usize {
         let id = self.analysis.heap.objects.len();
-        self.analysis.heap.objects.push(Object {
-            slots: Vec::new(),
-            open,
-        });
-        self.work.objects.push(false);
         let ty = payload(ctx, ty);
-        if open {
-            // Reserve the identity before following recursive schema edges.
-            self.analysis.heap.summaries.insert(ty, id);
-        }
         let shape = ty.deref(ctx);
-        if let Some(record) = shape.downcast_ref::<RecordType>() {
-            for &(_, ty) in record.fields().expect("resolved record schema") {
-                let cell = self.heap_cell(ctx, ty);
-                self.analysis.heap.objects[id].slots.push(cell);
+        let contents = if let Some(record) = shape.downcast_ref::<RecordType>() {
+            Contents::Record(
+                record
+                    .fields()
+                    .expect("resolved record schema")
+                    .iter()
+                    .map(|&(_, ty)| self.heap_cell(ctx, ty))
+                    .collect(),
+            )
+        } else {
+            let array = shape.downcast_ref::<ArrayType>().expect("aggregate schema");
+            Contents::Array {
+                element: self.heap_cell(ctx, array.element()),
+                length: Range::Bottom,
+                readers: BTreeSet::new(),
             }
-        } else if let Some(array) = shape.downcast_ref::<ArrayType>() {
-            let cell = self.heap_cell(ctx, array.element());
-            self.analysis.heap.objects[id].slots.push(cell);
-        }
+        };
+        self.analysis.heap.objects.push(Object { contents, open });
+        self.work.objects.push(false);
         if open {
+            // Reserve the identity before the queued work follows recursive schema edges.
+            self.analysis.heap.summaries.insert(ty, id);
             self.work.enqueue(Work::OpenObject(id));
         }
         id
@@ -304,8 +389,18 @@ impl Solver {
     }
 
     pub(super) fn open_object(&mut self, ctx: &Context, object: usize) {
-        for position in 0..self.analysis.heap.objects[object].slots.len() {
-            let cell = self.analysis.heap.objects[object].slots[position];
+        self.widen_length(
+            object,
+            Range::Bounds(
+                Integer {
+                    bits: 32,
+                    signed: false,
+                }
+                .bounds(),
+            ),
+        );
+        for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
+            let cell = self.analysis.heap.objects[object].contents.slots()[position];
             let ty = self.analysis.heap.cells[cell].ty;
             let range = Integer::from_type(ctx, ty)
                 .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
@@ -315,6 +410,53 @@ impl Solver {
                 let summary = self.heap_summary(ctx, ty);
                 self.add_object(ctx, cell, summary);
             }
+        }
+    }
+
+    fn widen_length(&mut self, object: usize, range: Range) {
+        let Contents::Array {
+            length, readers, ..
+        } = &mut self.analysis.heap.objects[object].contents
+        else {
+            return;
+        };
+        let joined = length.join(
+            range,
+            Some(Integer {
+                bits: 32,
+                signed: false,
+            }),
+        );
+        if joined != *length {
+            *length = joined;
+            for &reader in readers.iter() {
+                self.work.enqueue(reader);
+            }
+        }
+    }
+
+    fn grow_array(&mut self, object: usize, index: Option<Range>, reader: Work) {
+        let Contents::Array {
+            length, readers, ..
+        } = &mut self.analysis.heap.objects[object].contents
+        else {
+            unreachable!("array write")
+        };
+        readers.insert(reader);
+        if index == Some(Range::Bottom) {
+            return;
+        }
+        if let Range::Bounds(length) = *length {
+            if matches!(index, Some(Range::Bounds(index)) if index.upper < length.lower) {
+                return;
+            }
+            self.widen_length(
+                object,
+                Range::Bounds(Interval {
+                    lower: length.lower,
+                    upper: u32::MAX.into(),
+                }),
+            );
         }
     }
 
@@ -381,14 +523,29 @@ impl Solver {
                         self.add_object(ctx, cell, object);
                         object
                     });
+                if array {
+                    let length = operation.get_num_operands() as i128;
+                    self.widen_length(
+                        object,
+                        Range::Bounds(Interval {
+                            lower: length,
+                            upper: length,
+                        }),
+                    );
+                }
                 for (position, value) in operation.operands().enumerate() {
-                    let slot =
-                        self.analysis.heap.objects[object].slots[if array { 0 } else { position }];
+                    let slot = self.analysis.heap.objects[object].contents.slots()
+                        [if array { 0 } else { position }];
                     self.write_slot(ctx, id, slot, value, reader);
                 }
             }
-            OperationKind::Read { slot: position }
-            | OperationKind::Write { slot: position, .. } => {
+            OperationKind::Read { .. }
+            | OperationKind::Write { .. }
+            | OperationKind::ArrayWrite { .. } => {
+                let position = match kind {
+                    OperationKind::Read { slot } | OperationKind::Write { slot, .. } => slot,
+                    _ => 0,
+                };
                 let base = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let result = if matches!(kind, OperationKind::Read { .. }) {
@@ -400,8 +557,16 @@ impl Solver {
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
                     previous = Some(object);
-                    let slot = self.analysis.heap.objects[object].slots[position];
-                    if let OperationKind::Write { value, .. } = kind {
+                    let slot = self.analysis.heap.objects[object].contents.slots()[position];
+                    if let OperationKind::ArrayWrite { index, .. } = kind {
+                        let range = index.map(|index| {
+                            self.analysis.states[id].range(operation.get_operand(index))
+                        });
+                        self.grow_array(object, range, reader);
+                    }
+                    if let OperationKind::Write { value, .. }
+                    | OperationKind::ArrayWrite { value, .. } = kind
+                    {
                         self.write_slot(ctx, id, slot, operation.get_operand(value), reader);
                     } else {
                         self.analysis.heap.cells[slot].readers.insert(reader);
@@ -424,16 +589,32 @@ impl Solver {
                 let mut source = None;
                 while let Some(object) = self.next_object(from, source) {
                     source = Some(object);
-                    let input = self.analysis.heap.objects[object].slots[0];
+                    let input = self.analysis.heap.objects[object].contents.slots()[0];
                     self.analysis.heap.cells[input].readers.insert(reader);
                     let mut target = None;
                     while let Some(object) = self.next_object(to, target) {
                         target = Some(object);
-                        let output = self.analysis.heap.objects[object].slots[0];
+                        self.grow_array(object, None, reader);
+                        let output = self.analysis.heap.objects[object].contents.slots()[0];
                         self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
                         self.copy_aliases(ctx, input, output, reader);
                     }
                 }
+            }
+            OperationKind::Length => {
+                let base = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                self.analysis.heap.cells[base].readers.insert(reader);
+                let mut previous = None;
+                while let Some(object) = self.next_object(base, previous) {
+                    previous = Some(object);
+                    let Contents::Array { readers, .. } =
+                        &mut self.analysis.heap.objects[object].contents
+                    else {
+                        unreachable!("array length")
+                    };
+                    readers.insert(reader);
+                }
+                return Some(self.analysis.heap.length(base));
             }
             OperationKind::Alias { operand } => {
                 let input = operation.get_operand(operand);

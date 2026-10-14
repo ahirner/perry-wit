@@ -337,7 +337,9 @@ export function run():number {
  return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
 }
 "#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (29.0, 0));
+    let values = Program::new(source).call("run", &[]).0;
+    assert_eq!(values.len(), 1, "the known projection cannot throw");
+    assert_eq!(values[0].unwrap_f64(), 29.0);
 }
 
 #[test]

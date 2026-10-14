@@ -162,13 +162,14 @@ export function run(x: number): number {
         "perry.alloc Instance",
         "perry.array_new Instance",
         "perry.array_push",
-        "perry.array_get",
+        "perry.array_at",
         "perry.array_set",
         "perry.field_set",
-        "perry.unwrap",
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
+    assert!(!printed.contains("perry.array_get"), "{printed}");
+    assert!(!printed.contains("perry.unwrap"), "{printed}");
 }
 
 #[test]
