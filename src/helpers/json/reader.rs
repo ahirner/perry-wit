@@ -1,26 +1,26 @@
 //! Shared UTF-8 JSON lexical operations; storage and schema construction stay in destinations.
 use super::Error;
 
-pub(crate) struct Reader<'a> {
-    pub(crate) input: &'a str,
-    pub(crate) position: usize,
+pub(super) struct Reader<'a> {
+    pub(super) input: &'a str,
+    pub(super) position: usize,
 }
 
-pub(crate) struct StringFacts {
-    pub(crate) bytes: u32,
-    pub(crate) scalars: Option<u32>,
+pub(super) struct StringFacts {
+    pub(super) bytes: u32,
+    pub(super) scalars: Option<u32>,
     #[cfg(target_arch = "wasm32")]
-    pub(crate) escaped: bool,
+    pub(super) escaped: bool,
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(input: &'a str) -> Self {
+    pub(super) fn new(input: &'a str) -> Self {
         Self { input, position: 0 }
     }
-    pub(crate) fn number(&mut self) -> Result<(), Error> {
+    pub(super) fn number(&mut self) -> Result<(), Error> {
         self.number_token::<false>().map(|_| ())
     }
-    pub(crate) fn numeric(&mut self) -> Result<f64, Error> {
+    pub(super) fn numeric(&mut self) -> Result<f64, Error> {
         self.number_token::<true>()
     }
     fn number_token<const CONVERT: bool>(&mut self) -> Result<f64, Error> {
@@ -74,7 +74,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    pub(crate) fn string<const COUNT: bool>(
+    pub(super) fn string<const COUNT: bool>(
         &mut self,
         mut emit: impl FnMut(&[u8]) -> Result<(), Error>,
     ) -> Result<StringFacts, Error> {
@@ -193,20 +193,20 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    pub(crate) fn keyword(&mut self, keyword: &[u8]) -> Result<(), Error> {
+    pub(super) fn keyword(&mut self, keyword: &[u8]) -> Result<(), Error> {
         for &byte in keyword {
             self.expect(byte)?;
         }
         Ok(())
     }
 
-    pub(crate) fn whitespace(&mut self) {
+    pub(super) fn whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
             self.position += 1;
         }
     }
 
-    pub(crate) fn expect(&mut self, byte: u8) -> Result<(), Error> {
+    pub(super) fn expect(&mut self, byte: u8) -> Result<(), Error> {
         if self.peek() != Some(byte) {
             return Err(Error::Syntax(self.position));
         }
@@ -214,7 +214,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    pub(crate) fn peek(&self) -> Option<u8> {
+    pub(super) fn peek(&self) -> Option<u8> {
         self.input.as_bytes().get(self.position).copied()
     }
 }

@@ -41,7 +41,7 @@ pub struct RecordType {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum RecordErr {
+enum RecordErr {
     #[error("record {0} already exists with different fields")]
     Mismatch(String),
     #[error("record {0} has duplicate field {1}")]

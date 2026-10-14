@@ -21,14 +21,14 @@ const EXACT: [f64; 23] = [
 
 /// Decimal facts accumulated by the JSON lexer; no second mantissa scan is required.
 #[derive(Default)]
-pub(crate) struct Decimal {
+pub(super) struct Decimal {
     count: usize,
     trailing: usize,
     leading: u64,
     fraction_digits: i64,
 }
 impl Decimal {
-    pub(crate) fn digit(&mut self, byte: u8, fractional: bool) {
+    pub(super) fn digit(&mut self, byte: u8, fractional: bool) {
         self.fraction_digits += i64::from(fractional);
         if self.count == 0 && byte == b'0' {
             return;
@@ -39,7 +39,7 @@ impl Decimal {
         }
         self.trailing = if byte == b'0' { self.trailing + 1 } else { 0 };
     }
-    pub(crate) fn finish(mut self, mantissa: &[u8], negative: bool, exponent: i64) -> f64 {
+    pub(super) fn finish(mut self, mantissa: &[u8], negative: bool, exponent: i64) -> f64 {
         let significant = self.count - self.trailing;
         let exponent10 = exponent - self.fraction_digits + self.trailing as i64;
         if significant < self.count.min(19) {

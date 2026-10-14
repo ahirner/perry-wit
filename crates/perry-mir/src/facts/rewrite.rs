@@ -138,68 +138,59 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         .filter(|(id, _)| reachable.contains(id))
     {
         let body = &analysis.bodies[&key.function];
-        let mut mapping = IrMapping::new();
-        if !changed.contains(&id) {
-            let signature =
-                TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
-                    .expect("function type");
-            implementations.insert(
-                id,
-                Implementation {
-                    function: body.function,
-                    mapping,
-                    arguments: signature.deref(ctx).arg_types(),
-                    results: signature.deref(ctx).res_types(),
-                },
-            );
-            continue;
-        }
-        let cloned = clone_operation(
-            body.function.get_operation(),
-            ctx,
-            &mut rewriter,
-            &mut mapping,
-        );
-        let function = Operation::get_op::<FuncOp>(cloned, ctx).expect("cloned function");
-        let mut name: Identifier = format!("__perry_integer_{id}_{}", key.function)
-            .try_into()
-            .expect("generated identifier");
-        while analysis.bodies.contains_key(&name) {
-            name = format!("_{name}").try_into().expect("generated identifier");
-        }
-        function.set_symbol_name(ctx, name);
-        cloned.deref_mut(ctx).attributes.0.remove(&WIT_SIGNATURE);
-        cloned.insert_after(ctx, body.function.get_operation());
-        let original = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
+        let signature = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
             .expect("function type");
-        let original_args = original.deref(ctx).arg_types();
-        let args: Vec<_> = original_args
-            .into_iter()
-            .zip(&key.args)
-            .map(|(ty, domain)| domain.map_or(ty, |domain| domain.ty(ctx)))
-            .collect();
-        let mut results = original.deref(ctx).res_types();
-        for (result, facts) in results.iter_mut().zip(&analysis.states[id].results) {
-            if let Some(domain) = facts.domain.integer() {
-                *result = domain.ty(ctx);
+        let mut implementation = Implementation {
+            function: body.function,
+            mapping: IrMapping::new(),
+            arguments: signature.deref(ctx).arg_types(),
+            results: signature.deref(ctx).res_types(),
+        };
+        if changed.contains(&id) {
+            let cloned = clone_operation(
+                body.function.get_operation(),
+                ctx,
+                &mut rewriter,
+                &mut implementation.mapping,
+            );
+            let function = Operation::get_op::<FuncOp>(cloned, ctx).expect("cloned function");
+            let mut name: Identifier = format!("__perry_integer_{id}_{}", key.function)
+                .try_into()
+                .expect("generated identifier");
+            while analysis.bodies.contains_key(&name) {
+                name = format!("_{name}").try_into().expect("generated identifier");
             }
+            function.set_symbol_name(ctx, name);
+            cloned.deref_mut(ctx).attributes.0.remove(&WIT_SIGNATURE);
+            cloned.insert_after(ctx, body.function.get_operation());
+            for (ty, domain) in implementation.arguments.iter_mut().zip(&key.args) {
+                if let Some(domain) = domain {
+                    *ty = domain.ty(ctx);
+                }
+            }
+            for (ty, facts) in implementation
+                .results
+                .iter_mut()
+                .zip(&analysis.states[id].results)
+            {
+                if let Some(domain) = facts.domain.integer() {
+                    *ty = domain.ty(ctx);
+                }
+            }
+            let signature = FunctionType::get(
+                ctx,
+                implementation.arguments.clone(),
+                implementation.results.clone(),
+            );
+            function.set_attr_builtin_func_type(ctx, TypeAttr::new(signature.into()));
+            let entry = function.get_entry_block(ctx);
+            for (index, &ty) in implementation.arguments.iter().enumerate() {
+                let argument = entry.deref(ctx).get_argument(index);
+                argument.set_type(ctx, ty);
+            }
+            implementation.function = function;
         }
-        let signature = FunctionType::get(ctx, args.clone(), results.clone());
-        function.set_attr_builtin_func_type(ctx, TypeAttr::new(signature.into()));
-        let entry = function.get_entry_block(ctx);
-        for (index, &ty) in args.iter().enumerate() {
-            let argument = entry.deref(ctx).get_argument(index);
-            argument.set_type(ctx, ty);
-        }
-        implementations.insert(
-            id,
-            Implementation {
-                function,
-                mapping,
-                arguments: args,
-                results,
-            },
-        );
+        implementations.insert(id, implementation);
     }
     for (id, _) in analysis
         .keys
