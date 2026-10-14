@@ -43,6 +43,8 @@ use pliron::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+mod heap;
+
 pliron::dict_key!(WIT_SIGNATURE, "perry_wit_signature");
 pliron::dict_key!(SPECIALIZATION, "perry_specialization");
 
@@ -276,8 +278,14 @@ struct Key {
 
 #[derive(Clone, Copy)]
 enum Constraint {
-    Op(Ptr<Operation>),
-    Edge { from: Value, to: Value },
+    Op {
+        op: Ptr<Operation>,
+        heap: heap::OperationKind,
+    },
+    Edge {
+        from: Value,
+        to: Value,
+    },
 }
 
 struct Body {
@@ -286,6 +294,7 @@ struct Body {
     dependents: HashMap<Value, Vec<usize>>,
     parameters: Vec<Value>,
     effects: crate::effects::LocalEffects,
+    external: bool,
 }
 
 impl Body {
@@ -294,7 +303,10 @@ impl Body {
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
-            constraints.push(Constraint::Op(op));
+            constraints.push(Constraint::Op {
+                op,
+                heap: heap::OperationKind::classify(ctx, op),
+            });
             for value in op.deref(ctx).operands().chain(op.deref(ctx).results()) {
                 dependents.entry(value).or_default().push(index);
             }
@@ -316,6 +328,13 @@ impl Body {
             }
         }
         Self {
+            external: crate::calls::is_exported(ctx, &function)
+                || function
+                    .get_operation()
+                    .deref(ctx)
+                    .attributes
+                    .0
+                    .contains_key(&WIT_SIGNATURE),
             function,
             effects,
             constraints,
@@ -340,12 +359,14 @@ struct State {
     callers: BTreeSet<(usize, usize)>,
     origins: HashMap<Value, BTreeSet<usize>>,
     summary: crate::effects::Summary,
+    heap_values: HashMap<Value, usize>,
 }
 
 #[derive(Clone, Copy, Default)]
 struct ResultFact {
     domain: Fact,
     range: Range,
+    heap: Option<usize>,
 }
 
 impl State {
@@ -373,6 +394,9 @@ pub struct ProgramFacts {
     roots: Vec<(FuncOp, usize)>,
     generic: HashMap<Identifier, usize>,
     pub constraint_visits: usize,
+    /// Alias sets collapsed to a typed summary after exceeding 32 allocation sites.
+    pub summarized_heap_sets: usize,
+    heap: heap::HeapFacts,
 }
 
 impl ProgramFacts {
@@ -385,28 +409,56 @@ impl ProgramFacts {
     /// Non-negative integral values, including loop-carried counts after range widening.
     pub(crate) fn is_count(&self, ctx: &Context, function: &FuncOp, value: Value) -> bool {
         let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
-        matches!(
-            state.range(value),
-            Range::Bounds(Interval { lower: 0.., .. })
-        )
+        crate::optional::optional_value(ctx, value.get_type(ctx)).is_none()
+            && matches!(
+                state.range(value),
+                Range::Bounds(Interval { lower: 0.., .. })
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Work {
+    Operation(usize, usize),
+    OpenObject(usize),
+}
+
+#[derive(Default)]
+struct Worklist {
+    pending: VecDeque<Work>,
+    operations: Vec<Vec<bool>>,
+    objects: Vec<bool>,
+}
+
+impl Worklist {
+    fn enqueue(&mut self, item: Work) {
+        let queued = match item {
+            Work::Operation(context, index) => &mut self.operations[context][index],
+            Work::OpenObject(object) => &mut self.objects[object],
+        };
+        if !*queued {
+            *queued = true;
+            self.pending.push_back(item);
+        }
+    }
+
+    fn pop(&mut self) -> Option<Work> {
+        let item = self.pending.pop_front()?;
+        match item {
+            Work::Operation(context, index) => self.operations[context][index] = false,
+            Work::OpenObject(object) => self.objects[object] = false,
+        }
+        Some(item)
     }
 }
 
 struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
-    pending: VecDeque<(usize, usize)>,
-    queued: Vec<Vec<bool>>,
+    work: Worklist,
 }
 
 impl Solver {
-    fn enqueue(&mut self, item: (usize, usize)) {
-        if !self.queued[item.0][item.1] {
-            self.queued[item.0][item.1] = true;
-            self.pending.push_back(item);
-        }
-    }
-
     fn context(&mut self, ctx: &Context, key: Key) -> usize {
         if let Some(&id) = self.contexts.get(&key) {
             return id;
@@ -430,17 +482,25 @@ impl Solver {
                 .insert(parameter, domain.map_or(Fact::Original, Fact::Integer));
             state.ranges.insert(
                 parameter,
-                domain.map_or(Range::Unknown, |domain| Range::Bounds(domain.bounds())),
+                domain.map_or(
+                    if body.external {
+                        Range::Unknown
+                    } else {
+                        Range::Bottom
+                    },
+                    |domain| Range::Bounds(domain.bounds()),
+                ),
             );
         }
         let constraints = body.constraints.len();
         self.contexts.insert(key.clone(), id);
         self.analysis.keys.push(key);
         self.analysis.states.push(state);
-        self.queued.push(vec![false; constraints]);
+        self.work.operations.push(vec![false; constraints]);
         for constraint in 0..constraints {
-            self.enqueue((id, constraint));
+            self.work.enqueue(Work::Operation(id, constraint));
         }
+        self.seed_heap_parameters(ctx, id);
         // The signature is fixed for this context, even when requirements propagate
         // through the parameter: conversions belong at its uses, not at its entry.
         id
@@ -451,10 +511,7 @@ impl Solver {
         let dependents = body.dependents.get(&value).into_iter().flatten();
         let parameter = body.parameters.contains(&value);
         for &constraint in dependents {
-            if !self.queued[id][constraint] {
-                self.queued[id][constraint] = true;
-                self.pending.push_back((id, constraint));
-            }
+            self.work.enqueue(Work::Operation(id, constraint));
         }
         if parameter {
             self.notify_callers(id);
@@ -463,10 +520,7 @@ impl Solver {
 
     fn notify_callers(&mut self, id: usize) {
         for &caller in &self.analysis.states[id].callers {
-            if !self.queued[caller.0][caller.1] {
-                self.queued[caller.0][caller.1] = true;
-                self.pending.push_back(caller);
-            }
+            self.work.enqueue(Work::Operation(caller.0, caller.1));
         }
     }
 
@@ -637,6 +691,7 @@ impl Solver {
     fn process(&mut self, ctx: &Context, id: usize, index: usize) {
         let constraint = self.analysis.bodies[&self.analysis.keys[id].function].constraints[index];
         if let Constraint::Edge { from, to } = constraint {
+            self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index));
             self.propagate_origins(id, from, to);
             if from.get_type(ctx).deref(ctx).is::<PromiseType>()
                 && (self.analysis.states[id].original_payloads.contains(&from)
@@ -654,10 +709,11 @@ impl Solver {
             self.range(id, to, self.analysis.states[id].range(from));
             return;
         }
-        let Constraint::Op(op) = constraint else {
+        let Constraint::Op { op, heap } = constraint else {
             unreachable!()
         };
         self.operation_effects(ctx, id, index, op);
+        let heap_range = self.heap_operation(ctx, id, index, op, heap);
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if Operation::get_op::<AwaitOp>(op, ctx).is_none()
@@ -728,7 +784,8 @@ impl Solver {
                     .range
                     .join(self.analysis.states[id].range(value), domain.integer());
                 if domain != old.domain || range != old.range {
-                    self.analysis.states[id].results[position] = ResultFact { domain, range };
+                    self.analysis.states[id].results[position].domain = domain;
+                    self.analysis.states[id].results[position].range = range;
                     changed = true;
                 }
             }
@@ -746,6 +803,7 @@ impl Solver {
                 && let Some(&child) = self.analysis.generic.get(&callee)
             {
                 self.analysis.states[child].callers.insert((id, index));
+                self.heap_call(ctx, id, index, child, op);
                 for (position, result) in operation.results().enumerate() {
                     let facts = self.analysis.states[child].results[position];
                     self.fact(id, result, facts.domain);
@@ -812,6 +870,7 @@ impl Solver {
                 );
                 self.analysis.states[id].calls.insert(op, child);
                 self.analysis.states[child].callers.insert((id, index));
+                self.heap_call(ctx, id, index, child, op);
                 for (position, input) in operation.operands().enumerate() {
                     let parameter = self.analysis.bodies[&callee].parameters[position];
                     self.require(
@@ -921,7 +980,9 @@ impl Solver {
                 Fact::Original
             };
             self.fact(id, result, fact);
-            let range = if let Some(range) = constant_range(ctx, op) {
+            let range = if let Some(range) = heap_range {
+                range
+            } else if let Some(range) = constant_range(ctx, op) {
                 Range::Bounds(
                     self.analysis.states[id]
                         .representation(result)
@@ -1096,10 +1157,11 @@ impl Analysis for ProgramFacts {
                 roots: Vec::new(),
                 generic: HashMap::new(),
                 constraint_visits: 0,
+                summarized_heap_sets: 0,
+                heap: heap::HeapFacts::default(),
             },
             contexts: HashMap::new(),
-            pending: VecDeque::new(),
-            queued: Vec::new(),
+            work: Worklist::default(),
         };
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
@@ -1170,10 +1232,12 @@ impl Analysis for ProgramFacts {
             solver.analysis.roots.push((function, id));
         }
         loop {
-            while let Some((id, index)) = solver.pending.pop_front() {
-                solver.queued[id][index] = false;
+            while let Some(item) = solver.work.pop() {
                 solver.analysis.constraint_visits += 1;
-                solver.process(ctx, id, index);
+                match item {
+                    Work::Operation(id, index) => solver.process(ctx, id, index),
+                    Work::OpenObject(object) => solver.open_object(ctx, object),
+                }
             }
             let defaults: Vec<_> = solver
                 .analysis
@@ -1186,7 +1250,7 @@ impl Analysis for ProgramFacts {
                         .constraints
                         .iter()
                         .filter_map(move |constraint| {
-                            let Constraint::Op(op) = *constraint else {
+                            let Constraint::Op { op, .. } = *constraint else {
                                 return None;
                             };
                             let value = op.deref(ctx).results().next()?;
@@ -1233,6 +1297,7 @@ impl Pass for Specialize {
             crate::attrs::OptimizationStatistics {
                 numeric_contexts: analysis.keys.len() as u64,
                 constraint_visits: analysis.constraint_visits as u64,
+                summarized_heap_sets: analysis.summarized_heap_sets as u64,
                 specializations: specializations as u64,
                 cleanup_rounds: 0,
             },

@@ -1,0 +1,487 @@
+//! Allocation identities and stable slot facts, independent of physical storage.
+//! Writes join into slots; readers subscribe to slots and possible object identities.
+use super::*;
+use crate::{
+    collections::{ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
+    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    optional::{OptionalCastOp, UnwrapOp, WrapOp},
+    types::{ArrayType, RecordType},
+};
+use std::ops::Bound::{Excluded, Unbounded};
+
+const MAX_ORIGINS: usize = 32;
+
+struct Cell {
+    ty: TypeHandle,
+    objects: BTreeSet<usize>,
+    summarized: bool,
+    range: Range,
+    readers: BTreeSet<Work>,
+}
+
+struct Object {
+    slots: Vec<usize>,
+    open: bool,
+}
+
+#[derive(Default)]
+pub(super) struct HeapFacts {
+    cells: Vec<Cell>,
+    objects: Vec<Object>,
+    summaries: HashMap<TypeHandle, usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum OperationKind {
+    Allocate { array: bool },
+    Read { slot: usize },
+    Write { slot: usize, value: usize },
+    Extend,
+    Alias { operand: usize },
+    Return,
+    Call,
+    Unknown,
+    None,
+}
+
+impl OperationKind {
+    pub(super) fn classify(ctx: &Context, op: Ptr<Operation>) -> Self {
+        if Operation::get_op::<crate::optional::UndefinedOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::optional::NullOp>(op, ctx).is_some()
+        {
+            return Self::None;
+        }
+        if Operation::get_op::<WrapOp>(op, ctx).is_some()
+            || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
+            || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
+            || Operation::get_op::<AwaitOp>(op, ctx).is_some()
+        {
+            return Self::Alias { operand: 0 };
+        }
+        if let Some(operand) = promise_payload(ctx, op) {
+            return Self::Alias { operand };
+        }
+        let operation = op.deref(ctx);
+        if !operation
+            .operands()
+            .chain(operation.results())
+            .any(|value| aggregate(ctx, value.get_type(ctx)))
+        {
+            return Self::None;
+        }
+        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
+            return Self::Allocate { array: false };
+        }
+        if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
+            return Self::Allocate { array: true };
+        }
+        let field = Operation::get_op::<FieldGetOp>(op, ctx)
+            .map(|op| (op.field(ctx), true))
+            .or_else(|| Operation::get_op::<FieldSetOp>(op, ctx).map(|op| (op.field(ctx), false)));
+        if let Some((field, read)) = field {
+            let ty = operation.get_operand(0).get_type(ctx).deref(ctx);
+            let slot = ty
+                .downcast_ref::<RecordType>()
+                .unwrap()
+                .fields()
+                .unwrap()
+                .iter()
+                .position(|(name, _)| *name == field)
+                .expect("verified field");
+            return if read {
+                Self::Read { slot }
+            } else {
+                Self::Write { slot, value: 1 }
+            };
+        }
+        if Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
+            || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
+        {
+            return Self::Read { slot: 0 };
+        }
+        if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
+            return Self::Write { slot: 0, value: 2 };
+        }
+        if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
+            return Self::Write { slot: 0, value: 1 };
+        }
+        if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
+            return Self::Extend;
+        }
+        if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
+            return Self::Return;
+        }
+        if Operation::get_op::<CallOp>(op, ctx).is_some()
+            || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
+        {
+            return Self::Call;
+        }
+        if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
+            || Operation::get_op::<crate::collections::ArrayLenOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::optional::IsUndefinedOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::optional::IsNullOp>(op, ctx).is_some()
+        {
+            return Self::None;
+        }
+        Self::Unknown
+    }
+}
+
+fn payload(ctx: &Context, mut ty: TypeHandle) -> TypeHandle {
+    loop {
+        if let Some(inner) = crate::optional::optional_value(ctx, ty) {
+            ty = inner;
+        } else if let Some(promise) = ty.deref(ctx).downcast_ref::<PromiseType>() {
+            ty = promise.value();
+        } else {
+            return ty;
+        }
+    }
+}
+
+fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
+    let ty = payload(ctx, ty).deref(ctx);
+    ty.is::<RecordType>() || ty.is::<ArrayType>()
+}
+
+impl Solver {
+    fn heap_cell(&mut self, ctx: &Context, ty: TypeHandle) -> usize {
+        let id = self.analysis.heap.cells.len();
+        self.analysis.heap.cells.push(Cell {
+            ty: payload(ctx, ty),
+            objects: BTreeSet::new(),
+            summarized: false,
+            range: Range::Bottom,
+            readers: BTreeSet::new(),
+        });
+        id
+    }
+
+    fn heap_value(&mut self, ctx: &Context, id: usize, value: Value) -> Option<usize> {
+        if !aggregate(ctx, value.get_type(ctx)) {
+            return None;
+        }
+        if let Some(&cell) = self.analysis.states[id].heap_values.get(&value) {
+            return Some(cell);
+        }
+        let cell = self.heap_cell(ctx, value.get_type(ctx));
+        self.analysis.states[id].heap_values.insert(value, cell);
+        Some(cell)
+    }
+
+    fn heap_object(&mut self, ctx: &Context, ty: TypeHandle, open: bool) -> usize {
+        let id = self.analysis.heap.objects.len();
+        self.analysis.heap.objects.push(Object {
+            slots: Vec::new(),
+            open,
+        });
+        self.work.objects.push(false);
+        let ty = payload(ctx, ty);
+        if open {
+            // Reserve the identity before following recursive schema edges.
+            self.analysis.heap.summaries.insert(ty, id);
+        }
+        let shape = ty.deref(ctx);
+        if let Some(record) = shape.downcast_ref::<RecordType>() {
+            for &(_, ty) in record.fields().expect("resolved record schema") {
+                let cell = self.heap_cell(ctx, ty);
+                self.analysis.heap.objects[id].slots.push(cell);
+            }
+        } else if let Some(array) = shape.downcast_ref::<ArrayType>() {
+            let cell = self.heap_cell(ctx, array.element());
+            self.analysis.heap.objects[id].slots.push(cell);
+        }
+        if open {
+            self.work.enqueue(Work::OpenObject(id));
+        }
+        id
+    }
+
+    fn heap_summary(&mut self, ctx: &Context, ty: TypeHandle) -> usize {
+        let ty = payload(ctx, ty);
+        self.analysis
+            .heap
+            .summaries
+            .get(&ty)
+            .copied()
+            .unwrap_or_else(|| self.heap_object(ctx, ty, true))
+    }
+
+    fn heap_changed(&mut self, cell: usize) {
+        for &reader in &self.analysis.heap.cells[cell].readers {
+            self.work.enqueue(reader);
+        }
+    }
+
+    fn next_object(&self, cell: usize, previous: Option<usize>) -> Option<usize> {
+        self.analysis.heap.cells[cell]
+            .objects
+            .range((previous.map_or(Unbounded, Excluded), Unbounded))
+            .next()
+            .copied()
+    }
+
+    fn open_aliases(&mut self, cell: usize, reader: Work) {
+        self.analysis.heap.cells[cell].readers.insert(reader);
+        let mut previous = None;
+        while let Some(object) = self.next_object(cell, previous) {
+            previous = Some(object);
+            if !self.analysis.heap.objects[object].open {
+                self.analysis.heap.objects[object].open = true;
+                self.work.enqueue(Work::OpenObject(object));
+            }
+        }
+    }
+
+    fn add_object(&mut self, ctx: &Context, cell: usize, object: usize) {
+        if self.analysis.heap.cells[cell].objects.contains(&object) {
+            return;
+        }
+        if self.analysis.heap.cells[cell].summarized {
+            if !self.analysis.heap.objects[object].open {
+                self.analysis.heap.objects[object].open = true;
+                self.work.enqueue(Work::OpenObject(object));
+            }
+            return;
+        }
+        self.analysis.heap.cells[cell].objects.insert(object);
+        if self.analysis.heap.cells[cell].objects.len() > MAX_ORIGINS {
+            // Existing aliases must also lose precision, including newly arriving objects.
+            let ty = self.analysis.heap.cells[cell].ty;
+            let summary = self.heap_summary(ctx, ty);
+            self.open_aliases(cell, Work::OpenObject(summary));
+            let targets = &mut self.analysis.heap.cells[cell];
+            targets.objects.clear();
+            targets.objects.insert(summary);
+            targets.summarized = true;
+            self.analysis.summarized_heap_sets += 1;
+        }
+        self.heap_changed(cell);
+    }
+
+    fn copy_aliases(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) {
+        if from == to {
+            return;
+        }
+        self.analysis.heap.cells[from].readers.insert(reader);
+        let mut previous = None;
+        while let Some(object) = self.next_object(from, previous) {
+            previous = Some(object);
+            self.add_object(ctx, to, object);
+        }
+    }
+
+    pub(super) fn heap_alias(
+        &mut self,
+        ctx: &Context,
+        from_id: usize,
+        from: Value,
+        to_id: usize,
+        to: Value,
+        reader: Work,
+    ) {
+        if let (Some(from), Some(to)) = (
+            self.heap_value(ctx, from_id, from),
+            self.heap_value(ctx, to_id, to),
+        ) {
+            self.copy_aliases(ctx, from, to, reader);
+        }
+    }
+
+    pub(super) fn seed_heap_parameters(&mut self, ctx: &Context, id: usize) {
+        let body = &self.analysis.bodies[&self.analysis.keys[id].function];
+        if !body.external {
+            return;
+        }
+        for position in 0..body.parameters.len() {
+            let parameter =
+                self.analysis.bodies[&self.analysis.keys[id].function].parameters[position];
+            if let Some(cell) = self.heap_value(ctx, id, parameter) {
+                let object = self.heap_summary(ctx, parameter.get_type(ctx));
+                self.add_object(ctx, cell, object);
+            }
+        }
+    }
+
+    pub(super) fn open_object(&mut self, ctx: &Context, object: usize) {
+        for position in 0..self.analysis.heap.objects[object].slots.len() {
+            let cell = self.analysis.heap.objects[object].slots[position];
+            let ty = self.analysis.heap.cells[cell].ty;
+            let range = Integer::from_type(ctx, ty)
+                .map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
+            self.slot_range(ctx, cell, range);
+            if aggregate(ctx, ty) {
+                self.open_aliases(cell, Work::OpenObject(object));
+                let summary = self.heap_summary(ctx, ty);
+                self.add_object(ctx, cell, summary);
+            }
+        }
+    }
+
+    fn slot_range(&mut self, ctx: &Context, slot: usize, range: Range) {
+        let cell = &mut self.analysis.heap.cells[slot];
+        let joined = cell.range.join(range, Integer::from_type(ctx, cell.ty));
+        if joined != cell.range {
+            cell.range = joined;
+            self.heap_changed(slot);
+        }
+    }
+
+    fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
+        self.slot_range(ctx, slot, self.analysis.states[id].range(value));
+        if let Some(from) = self.heap_value(ctx, id, value) {
+            self.copy_aliases(ctx, from, slot, reader);
+        }
+    }
+
+    pub(super) fn heap_call(
+        &mut self,
+        ctx: &Context,
+        id: usize,
+        index: usize,
+        child: usize,
+        op: Ptr<Operation>,
+    ) {
+        let reader = Work::Operation(id, index);
+        for (position, input) in op.deref(ctx).operands().enumerate() {
+            let parameter =
+                self.analysis.bodies[&self.analysis.keys[child].function].parameters[position];
+            self.range(child, parameter, self.analysis.states[id].range(input));
+            self.heap_alias(ctx, id, input, child, parameter, reader);
+        }
+        for (position, result) in op.deref(ctx).results().enumerate() {
+            if let Some(to) = self.heap_value(ctx, id, result)
+                && let Some(from) = self.analysis.states[child].results[position].heap
+            {
+                self.copy_aliases(ctx, from, to, reader);
+            }
+        }
+    }
+
+    pub(super) fn heap_operation(
+        &mut self,
+        ctx: &Context,
+        id: usize,
+        index: usize,
+        op: Ptr<Operation>,
+        kind: OperationKind,
+    ) -> Option<Range> {
+        let reader = Work::Operation(id, index);
+        let operation = op.deref(ctx);
+        match kind {
+            OperationKind::Allocate { array } => {
+                let value = operation.get_result(0);
+                let cell = self.heap_value(ctx, id, value).unwrap();
+                let object = self.analysis.heap.cells[cell]
+                    .objects
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let object = self.heap_object(ctx, value.get_type(ctx), false);
+                        self.add_object(ctx, cell, object);
+                        object
+                    });
+                for (position, value) in operation.operands().enumerate() {
+                    let slot =
+                        self.analysis.heap.objects[object].slots[if array { 0 } else { position }];
+                    self.write_slot(ctx, id, slot, value, reader);
+                }
+            }
+            OperationKind::Read { slot: position }
+            | OperationKind::Write { slot: position, .. } => {
+                let base = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                self.analysis.heap.cells[base].readers.insert(reader);
+                let result = if matches!(kind, OperationKind::Read { .. }) {
+                    self.heap_value(ctx, id, operation.get_result(0))
+                } else {
+                    None
+                };
+                let mut range = Range::Bottom;
+                let mut previous = None;
+                while let Some(object) = self.next_object(base, previous) {
+                    previous = Some(object);
+                    let slot = self.analysis.heap.objects[object].slots[position];
+                    if let OperationKind::Write { value, .. } = kind {
+                        self.write_slot(ctx, id, slot, operation.get_operand(value), reader);
+                    } else {
+                        self.analysis.heap.cells[slot].readers.insert(reader);
+                        range = range.join(
+                            self.analysis.heap.cells[slot].range,
+                            Integer::from_type(ctx, self.analysis.heap.cells[slot].ty),
+                        );
+                        if let Some(result) = result {
+                            self.copy_aliases(ctx, slot, result, reader);
+                        }
+                    }
+                }
+                return matches!(kind, OperationKind::Read { .. }).then_some(range);
+            }
+            OperationKind::Extend => {
+                let to = self.heap_value(ctx, id, operation.get_operand(0)).unwrap();
+                let from = self.heap_value(ctx, id, operation.get_operand(1)).unwrap();
+                self.analysis.heap.cells[to].readers.insert(reader);
+                self.analysis.heap.cells[from].readers.insert(reader);
+                let mut source = None;
+                while let Some(object) = self.next_object(from, source) {
+                    source = Some(object);
+                    let input = self.analysis.heap.objects[object].slots[0];
+                    self.analysis.heap.cells[input].readers.insert(reader);
+                    let mut target = None;
+                    while let Some(object) = self.next_object(to, target) {
+                        target = Some(object);
+                        let output = self.analysis.heap.objects[object].slots[0];
+                        self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
+                        self.copy_aliases(ctx, input, output, reader);
+                    }
+                }
+            }
+            OperationKind::Alias { operand } => {
+                let input = operation.get_operand(operand);
+                self.heap_alias(ctx, id, input, id, operation.get_result(0), reader);
+                return Some(self.analysis.states[id].range(input));
+            }
+            OperationKind::Return => {
+                for (position, value) in operation.operands().enumerate() {
+                    if let Some(from) = self.heap_value(ctx, id, value) {
+                        let to = if let Some(to) = self.analysis.states[id].results[position].heap {
+                            to
+                        } else {
+                            let to = self.heap_cell(ctx, value.get_type(ctx));
+                            self.analysis.states[id].results[position].heap = Some(to);
+                            self.notify_callers(id);
+                            to
+                        };
+                        self.copy_aliases(ctx, from, to, reader);
+                    }
+                }
+            }
+            OperationKind::Unknown | OperationKind::Call => {
+                if matches!(kind, OperationKind::Call) {
+                    let callee = Operation::get_op::<CallOp>(op, ctx)
+                        .map(|call| call.callee(ctx))
+                        .or_else(|| {
+                            Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx))
+                        })
+                        .unwrap();
+                    if self.analysis.bodies.contains_key(&callee) {
+                        return None;
+                    }
+                }
+                // Unmodelled storage may retain aliases or mutate reachable objects.
+                for value in operation.operands() {
+                    if let Some(cell) = self.heap_value(ctx, id, value) {
+                        self.open_aliases(cell, reader);
+                    }
+                }
+                for value in operation.results() {
+                    if let Some(cell) = self.heap_value(ctx, id, value) {
+                        let object = self.heap_summary(ctx, value.get_type(ctx));
+                        self.add_object(ctx, cell, object);
+                    }
+                }
+            }
+            OperationKind::None => {}
+        }
+        None
+    }
+}

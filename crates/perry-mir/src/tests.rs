@@ -237,6 +237,15 @@ builtin.module @m {
             && printed.contains("next: perry.record <Node> }>"),
         "{printed}"
     );
+    let function = crate::aggregates::functions(module, ctx)[0];
+    crate::calls::set_exported(ctx, &function);
+    let mut analyses = pliron::pass::AnalysisManager::default();
+    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(module, ctx)?;
+    let returned = crate::aggregates::operations(ctx, &function)
+        .into_iter()
+        .find(|&op| Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some())
+        .unwrap();
+    assert!(!facts.is_count(ctx, &function, returned.deref(ctx).get_operand(0)));
     Ok(())
 }
 
@@ -597,6 +606,147 @@ fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
         assert_eq!(identity, &*cached as *const ProgramFacts);
     }
     assert!(visits[1] < 5 * visits[0], "{visits:?}");
+    Ok(())
+}
+
+#[test]
+fn aggregate_facts_follow_calls_elements_and_aliased_writes() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    let fixture = r#"
+builtin.module @aggregate_facts {
+  ^module():
+    builtin.func @make: builtin.function <(perry.string) -> (perry.record <Branch { child: perry.record <Leaf { count: builtin.fp64, stable: builtin.fp64 }> }>)> {
+      ^entry(text: perry.string):
+        length = perry.string_len text : builtin.integer i32;
+        count = perry.numeric_cast length : builtin.fp64;
+        leaf = perry.alloc Unassigned (count, count) : perry.record <Leaf>;
+        branch = perry.alloc Unassigned (leaf) : perry.record <Branch>;
+        perry.return branch
+    };
+    builtin.func @identity: builtin.function <(perry.record <Branch>, builtin.integer i1) -> (perry.record <Branch>)> {
+      ^entry(branch: perry.record <Branch>, recurse: builtin.integer i1):
+        perry.cond_br if recurse ^again() else ^done(branch)
+      ^again():
+        no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+        next = perry.call identity (branch, no) : perry.record <Branch>;
+        perry.br ^done(next)
+      ^done(result: perry.record <Branch>):
+        perry.return result
+    };
+    builtin.func @write: builtin.function <(perry.record <Leaf>, builtin.fp64) -> ()> {
+      ^entry(leaf: perry.record <Leaf>, value: builtin.fp64):
+        perry.field_set leaf."count" = value;
+        perry.return
+    };
+    builtin.func @run: builtin.function <(perry.string, builtin.fp64, builtin.integer i1) -> (builtin.fp64, builtin.fp64)> {
+      ^entry(text: perry.string, value: builtin.fp64, recurse: builtin.integer i1):
+        made = perry.call make (text) : perry.record <Branch>;
+        branch = perry.call identity (made, recurse) : perry.record <Branch>;
+        items = perry.array_new Unassigned (branch) : perry.array <perry.record <Branch>>;
+        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        maybe = perry.array_get items[zero] : perry.optional <perry.record <Branch>,Undefined>;
+        selected = perry.unwrap maybe : perry.record <Branch>;
+        leaf = perry.field_get selected."child" : perry.record <Leaf>;
+        MUTATE
+        again = perry.field_get made."child" : perry.record <Leaf>;
+        count = perry.field_get again."count" : builtin.fp64;
+        stable = perry.field_get again."stable" : builtin.fp64;
+        perry.return count, stable
+    }
+}
+"#;
+    for absence in ["", "perry.undefined", "perry.null"] {
+        for (mutation, expected) in [
+            ("", [true, true]),
+            ("perry.call write (leaf, value) : ;", [false, true]),
+            ("perry.call write (leaf, zero) : ;", [true, true]),
+            (
+                "view = perry.json_native made : perry.json;",
+                [false, false],
+            ),
+            (
+                "replacement = perry.alloc Unassigned (value, zero) : perry.record <Leaf>; perry.field_set selected.\"child\" = replacement;",
+                [false, true],
+            ),
+        ] {
+            let ctx = &mut Context::new();
+            let mut input = fixture.replace("MUTATE", mutation);
+            if !absence.is_empty() {
+                input = input.replace("items = perry.array_new Unassigned (branch)", &format!(
+                "present = perry.wrap branch : perry.optional <perry.record <Branch>,Both>; \
+                 absent = {absence} : perry.optional <perry.record <Branch>,Both>; \
+                 perry.cond_br if recurse ^join(present) else ^join(absent) \
+                 ^join(chosen: perry.optional <perry.record <Branch>,Both>): \
+                 unwrapped = perry.unwrap chosen : perry.record <Branch>; \
+                 items = perry.array_new Unassigned (unwrapped)"
+            ));
+            }
+            let module = parse(ctx, &input);
+            verify_operation(module, ctx)?;
+            let run = crate::aggregates::functions(module, ctx)
+                .into_iter()
+                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
+                .unwrap();
+            crate::calls::set_exported(ctx, &run);
+            let mut analyses = AnalysisManager::default();
+            let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+            let returned = crate::aggregates::operations(ctx, &run)
+                .into_iter()
+                .find(|&op| Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some())
+                .unwrap();
+            for (value, expected) in returned.deref(ctx).operands().zip(expected) {
+                assert_eq!(facts.is_count(ctx, &run, value), expected, "{mutation}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
+    use std::fmt::Write;
+    let mut visits = Vec::new();
+    for size in [8, 32, 128, 512] {
+        let ctx = &mut Context::new();
+        let mut text = String::from(
+            r#"builtin.module @origins { ^module():
+          builtin.func @run: builtin.function <() -> (builtin.fp64)> { ^entry():
+            one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+            first = perry.alloc Unassigned (one) : perry.record <Cell { value: builtin.fp64 }>;
+            items = perry.array_new Unassigned (first) : perry.array <perry.record <Cell>>;
+        "#,
+        );
+        for index in 1..size {
+            writeln!(text, "cell{index} = perry.alloc Unassigned (one) : perry.record <Cell>; perry.array_push items <- cell{index};").unwrap();
+        }
+        text.push_str(
+            r#"result = perry.field_get first."value" : builtin.fp64; perry.return result } }"#,
+        );
+        let module = parse(ctx, &text);
+        verify_operation(module, ctx)?;
+        let run = crate::aggregates::functions(module, ctx)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(run.get_symbol_name(ctx), pliron::ident!("run"));
+        let mut analyses = AnalysisManager::default();
+        let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+        let returned = run
+            .get_entry_block(ctx)
+            .deref(ctx)
+            .get_terminator(ctx)
+            .unwrap()
+            .deref(ctx)
+            .get_operand(0);
+        assert_eq!(facts.is_count(ctx, &run, returned), size <= 32);
+        assert_eq!(facts.summarized_heap_sets > 0, size > 32);
+        visits.push(facts.constraint_visits);
+    }
+    assert!(visits[1] < 5 * visits[0], "{visits:?}");
+    assert!(visits[3] < 5 * visits[2], "{visits:?}");
     Ok(())
 }
 

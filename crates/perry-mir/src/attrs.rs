@@ -7,6 +7,7 @@ use pliron::derive::pliron_attr;
 pub struct OptimizationStatistics {
     pub numeric_contexts: u64,
     pub constraint_visits: u64,
+    pub summarized_heap_sets: u64,
     pub specializations: u64,
     pub cleanup_rounds: u64,
 }

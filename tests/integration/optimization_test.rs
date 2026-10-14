@@ -561,6 +561,45 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
     let run = instance.get_typed_func::<(bool,), (i8,)>(&mut store, "run")?;
     assert_eq!(run.call(&mut store, (true,))?, (7,));
     assert_eq!(run.call(&mut store, (false,))?, (-56,));
+    for initializer in ["{ index: [1].length }", "{ index: supplied }"] {
+        let source = format!(
+            "type Position = {{index:number}}; \
+             function read(position:Position, values:number[], again:boolean):number {{ \
+               if (again) return read(position, values, false); \
+               const index=position.index; \
+               if(index<values.length){{const value=values[index];return value===undefined?-1:value;}} \
+               return -2; \
+             }} \
+             export function run(supplied:number, again:boolean):number {{ \
+               const positions=[{initializer}]; const position=positions[0]; \
+               if(position===undefined)return -3; return read(position,[11,22,33],again); \
+             }}"
+        );
+        let mut program = crate::core_program::Program::new(&source);
+        for (index, expected) in [(-1.0, -1.0), (0.25, -1.0), (1.0, 22.0), (3.0, -2.0)] {
+            for again in [0, 1] {
+                let result = program
+                    .call(
+                        "run",
+                        &[
+                            wasmtime::Val::F64(f64::to_bits(index)),
+                            wasmtime::Val::I32(again),
+                        ],
+                    )
+                    .0[0]
+                    .unwrap_f64();
+                assert_eq!(
+                    result,
+                    if initializer.contains("supplied") {
+                        expected
+                    } else {
+                        22.0
+                    },
+                    "{initializer}, {index}, {again}"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
