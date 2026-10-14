@@ -26,7 +26,7 @@ use pliron::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
-mod generics;
+pub(super) mod generics;
 
 #[derive(Clone)]
 enum PendingShape {

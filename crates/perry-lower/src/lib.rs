@@ -156,13 +156,13 @@ pub fn lower_sources(
             None => error,
         }
     })?;
-    infer::unresolved_types(&mut hir, &locations);
     let spans = source::inferred_bindings(&ast);
     let inferred = hir
         .local_source_spans
         .iter()
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
+    infer::unresolved_types(&mut hir, &inferred, &locations);
     program::build_module(ctx, &hir, foreign, inferred, &locations)
 }
 

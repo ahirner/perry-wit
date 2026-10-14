@@ -4,20 +4,76 @@ use super::*;
 use perry_hir::HirTypeFacts;
 use std::collections::HashMap;
 
-fn expression(expr: &Expr, env: &impl HirTypeFacts) -> HirType {
-    if let Expr::Call { callee, .. } = expr
-        && let Expr::PropertyGet {
-            object, property, ..
-        } = &**callee
-        && matches!(property.as_str(), "concat" | array_methods::CONCAT)
-    {
-        return perry_hir::infer_expr_type(object, env);
+fn contains_type_var(ty: &HirType) -> bool {
+    match ty {
+        HirType::TypeVar(_) => true,
+        HirType::Array(inner) | HirType::Promise(inner) => contains_type_var(inner),
+        HirType::Tuple(items) | HirType::Union(items) => items.iter().any(contains_type_var),
+        HirType::Generic { type_args, .. } => type_args.iter().any(contains_type_var),
+        HirType::Object(object) => object.properties.values().any(|p| contains_type_var(&p.ty)),
+        _ => false,
     }
-    perry_hir::infer_expr_type(expr, env)
+}
+
+fn expression(expr: &Expr, env: &FunctionEnv<'_>) -> HirType {
+    let ty = match expr {
+        Expr::Call { callee, .. }
+            if matches!(
+                &**callee,
+                Expr::PropertyGet { property, .. }
+                    if matches!(property.as_str(), "concat" | array_methods::CONCAT)
+            ) =>
+        {
+            let Expr::PropertyGet { object, .. } = &**callee else {
+                unreachable!();
+            };
+            expression(object, env)
+        }
+        Expr::PropertyGet {
+            object, property, ..
+        } => match expression(object, env) {
+            HirType::Generic { base, type_args } => shapes::generics::property_type(
+                env.interfaces,
+                env.type_aliases,
+                &base,
+                &type_args,
+                property,
+            )
+            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
+            HirType::Named(base) => shapes::generics::property_type(
+                env.interfaces,
+                env.type_aliases,
+                &base,
+                &[],
+                property,
+            )
+            .or_else(|| env.named_property_type(&base, property))
+            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
+            HirType::Object(object) => object
+                .properties
+                .get(property)
+                .map(|p| p.ty.clone())
+                .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
+            HirType::String | HirType::Array(_) if property == "length" => HirType::Number,
+            _ => perry_hir::infer_expr_type(expr, env),
+        },
+        Expr::IndexGet { object, .. } => match expression(object, env) {
+            HirType::Array(element) => *element,
+            _ => perry_hir::infer_expr_type(expr, env),
+        },
+        _ => perry_hir::infer_expr_type(expr, env),
+    };
+    if contains_type_var(&ty) {
+        HirType::Any
+    } else {
+        ty
+    }
 }
 
 struct FunctionEnv<'a> {
     base: &'a perry_hir::HirTypeEnv,
+    interfaces: &'a [perry_hir::ir::Interface],
+    type_aliases: &'a [perry_hir::ir::TypeAlias],
     locals: &'a mut HashMap<LocalId, HirType>,
 }
 
@@ -70,6 +126,63 @@ impl HirTypeFacts for FunctionEnv<'_> {
 enum ScanMode<'a> {
     Returns(&'a mut Vec<HirType>),
     ResolveLocals,
+}
+
+fn clear_inferred_type_vars<V>(
+    statements: &mut [Stmt],
+    inferred: &HashSet<LocalId>,
+    spans: &HashMap<LocalId, V>,
+) {
+    for statement in statements {
+        match statement {
+            Stmt::Let { id, ty, .. }
+                if (inferred.contains(id) || !spans.contains_key(id)) && contains_type_var(ty) =>
+            {
+                *ty = HirType::Any;
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                clear_inferred_type_vars(then_branch, inferred, spans);
+                if let Some(body) = else_branch {
+                    clear_inferred_type_vars(body, inferred, spans);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                clear_inferred_type_vars(body, inferred, spans);
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init) = init {
+                    clear_inferred_type_vars(std::slice::from_mut(init), inferred, spans);
+                }
+                clear_inferred_type_vars(body, inferred, spans);
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                clear_inferred_type_vars(body, inferred, spans);
+                if let Some(catch) = catch {
+                    clear_inferred_type_vars(&mut catch.body, inferred, spans);
+                }
+                if let Some(body) = finally {
+                    clear_inferred_type_vars(body, inferred, spans);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    clear_inferred_type_vars(&mut case.body, inferred, spans);
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                clear_inferred_type_vars(std::slice::from_mut(body), inferred, spans);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<'_>) {
@@ -142,7 +255,15 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
     }
 }
 
-pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations::Locations<'_>) {
+pub(super) fn unresolved_types(
+    hir: &mut HirModule,
+    inferred: &HashSet<LocalId>,
+    locations: &crate::locations::Locations<'_>,
+) {
+    clear_inferred_type_vars(&mut hir.init, inferred, &hir.local_source_spans);
+    for function in &mut hir.functions {
+        clear_inferred_type_vars(&mut function.body, inferred, &hir.local_source_spans);
+    }
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
     for _ in 0..=hir.functions.len() {
@@ -152,8 +273,13 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
                 continue;
             }
             locals.clear();
+            for param in &function.params {
+                locals.insert(param.id, param.ty.clone());
+            }
             let mut env = FunctionEnv {
                 base: &module_env,
+                interfaces: &hir.interfaces,
+                type_aliases: &hir.type_aliases,
                 locals: &mut locals,
             };
             let mut returned = Vec::new();
@@ -212,10 +338,23 @@ pub(super) fn unresolved_types(hir: &mut HirModule, locations: &crate::locations
         }
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
+    locals.clear();
+    let mut env = FunctionEnv {
+        base: &module_env,
+        interfaces: &hir.interfaces,
+        type_aliases: &hir.type_aliases,
+        locals: &mut locals,
+    };
+    scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     for function in &mut hir.functions {
         locals.clear();
+        for param in &function.params {
+            locals.insert(param.id, param.ty.clone());
+        }
         let mut env = FunctionEnv {
             base: &module_env,
+            interfaces: &hir.interfaces,
+            type_aliases: &hir.type_aliases,
             locals: &mut locals,
         };
         scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
