@@ -54,13 +54,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Integer(value) => self.number(ctx, *value as f64),
             Expr::Bool(value) => self.boolean(ctx, *value),
             Expr::String(text) => self.string(ctx, text),
-            Expr::LocalGet(id) => {
-                let slot = self
-                    .local(*id)
-                    .map_err(|error| self.shapes.annotate_local(error, *id))?;
-                self.load(ctx, slot)
-                    .map_err(|error| self.shapes.annotate_local(error, *id))?
-            }
+            Expr::LocalGet(id) => self
+                .load_local(ctx, *id)
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::Null | Expr::Undefined => {
                 self.absent_literal(ctx, matches!(expr, Expr::Null), expected)?
             }

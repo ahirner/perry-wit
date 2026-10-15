@@ -476,8 +476,9 @@ fn normalize_json_copy_rewrites_typed_parse_of_stringify_and_tracks_missed() -> 
     );
     let ctx = &mut Context::new();
     let module = parse(ctx, &src);
-    let function = crate::aggregates::functions(module, ctx)[1];
-    crate::calls::set_exported(ctx, &function);
+    let funcs = crate::aggregates::functions(module, ctx);
+    crate::calls::set_json_decoder(ctx, &funcs[0], crate::attrs::JsonDecoderKind::Parse);
+    crate::calls::set_exported(ctx, &funcs[1]);
     crate::pipeline::canonicalize(module, ctx)?;
     verify_operation(module, ctx)?;
     let stats = crate::pipeline::statistics(module, ctx);

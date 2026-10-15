@@ -2,15 +2,19 @@ mod emit;
 
 use std::collections::HashMap;
 
-use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::{
-    OneRegionInterface, OneResultInterface, SingleBlockRegionInterface,
+    OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface,
 };
 use pliron::builtin::ops::{FuncOp, ModuleOp};
 use pliron::builtin::types::{FP64Type, IntegerType};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::Identifier;
-use pliron::irbuild::IRStatus;
+use pliron::irbuild::{
+    IRStatus,
+    inserter::{Inserter, OpInsertionPoint},
+    listener::DummyListener,
+    rewriter::{IRRewriter, Rewriter},
+};
 use pliron::linked_list::{ContainsLinkedList, LinkedList};
 use pliron::op::Op;
 use pliron::operation::Operation;
@@ -43,11 +47,12 @@ impl Pass for NormalizeJsonCopy {
         &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
-        _analyses: &mut AnalysisManager,
+        analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
         let Some(module) = Operation::get_op::<ModuleOp>(root, ctx) else {
             return Ok(PassResult::default());
         };
+        let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
 
         let mut rewrites = 0u64;
         let mut missed = 0u64;
@@ -60,13 +65,23 @@ impl Pass for NormalizeJsonCopy {
             .iter(ctx)
             .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
             .collect();
+        let funcs_by_name: HashMap<Identifier, FuncOp> =
+            funcs.iter().map(|&f| (f.get_symbol_name(ctx), f)).collect();
 
         for func in funcs {
-            let sites = find_parse_stringify_sites(func, ctx);
+            let sites = find_parse_stringify_sites(func, ctx, &funcs_by_name);
             for site in sites {
                 let source_ty = site.source_value.get_type(ctx);
                 let target_ty = site.target_ty;
-                if can_rewrite_parse_stringify(ctx, &site, source_ty, target_ty) {
+                if can_rewrite_parse_stringify(
+                    ctx,
+                    &facts,
+                    func,
+                    &funcs_by_name,
+                    &site,
+                    source_ty,
+                    target_ty,
+                ) {
                     let helper_sym =
                         if let Some(sym) = helper_cache.get(&(source_ty, target_ty)).cloned() {
                             sym
@@ -116,132 +131,136 @@ struct ParseStringifySite {
     target_ty: TypeHandle,
 }
 
-fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringifySite> {
+fn find_parse_stringify_sites(
+    func: FuncOp,
+    ctx: &Context,
+    funcs_by_name: &HashMap<Identifier, FuncOp>,
+) -> Vec<ParseStringifySite> {
     let mut sites = Vec::new();
-    let mut consumed_parse_ops = std::collections::HashSet::new();
     let region = func.get_region(ctx);
-    let blocks: Vec<Ptr<BasicBlock>> = region.deref(ctx).iter(ctx).collect();
 
-    // First pass: find all typed/decoded consumers of JSON.stringify (either via
-    // `perry_json_parse_*`, `perry_json_decode_*`, or `Intrinsic::JsonTo*`/`JsonRequireNumber`).
-    for &block in &blocks {
-        let ops: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
-        for op in ops {
+    for block in region.deref(ctx).iter(ctx) {
+        for op in block.deref(ctx).iter(ctx) {
+            if op.deref(ctx).get_num_operands() != 1 || op.deref(ctx).get_num_results() != 1 {
+                continue;
+            }
+            let arg = op.deref(ctx).get_operand(0);
+            let target_ty = op.deref(ctx).get_result(0).get_type(ctx);
+
             if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                let callee = call.callee(ctx).to_string();
-                if callee.starts_with("perry_json_parse_") {
-                    let args: Vec<Value> = op.deref(ctx).operands().collect();
-                    if args.len() != 1 || op.deref(ctx).get_num_results() != 1 {
-                        continue;
+                let decoder_kind = funcs_by_name
+                    .get(&call.callee(ctx))
+                    .and_then(|callee| crate::calls::json_decoder_kind(ctx, callee));
+                match decoder_kind {
+                    Some(crate::attrs::JsonDecoderKind::Parse) => {
+                        if let Some((stringify_op, unwrap_op, source_value)) =
+                            match_unwrapped_stringify(ctx, arg)
+                        {
+                            sites.push(ParseStringifySite {
+                                stringify_op,
+                                unwrap_op,
+                                consumer_op: op,
+                                intermediate_parse_op: None,
+                                source_value,
+                                target_ty,
+                            });
+                        }
                     }
-                    let Some((stringify_op, unwrap_op, source_value)) =
-                        match_unwrapped_stringify(ctx, args[0])
-                    else {
-                        continue;
-                    };
-                    let target_ty = op.deref(ctx).get_result(0).get_type(ctx);
-                    sites.push(ParseStringifySite {
-                        stringify_op,
-                        unwrap_op,
-                        consumer_op: op,
-                        intermediate_parse_op: None,
-                        source_value,
-                        target_ty,
-                    });
-                } else if callee.starts_with("perry_json_decode_") {
-                    let args: Vec<Value> = op.deref(ctx).operands().collect();
-                    if args.len() != 1 || op.deref(ctx).get_num_results() != 1 {
-                        continue;
+                    Some(crate::attrs::JsonDecoderKind::Value) => {
+                        if let Some((parse_op, stringify_op, unwrap_op, source_value)) =
+                            match_json_parse_of_stringify(ctx, arg)
+                        {
+                            sites.push(ParseStringifySite {
+                                stringify_op,
+                                unwrap_op,
+                                consumer_op: op,
+                                intermediate_parse_op: Some(parse_op),
+                                source_value,
+                                target_ty,
+                            });
+                        }
                     }
-                    let Some((parse_op, stringify_op, unwrap_op, source_value)) =
-                        match_json_parse_of_stringify(ctx, args[0])
-                    else {
-                        continue;
-                    };
-                    consumed_parse_ops.insert(parse_op);
-                    let target_ty = op.deref(ctx).get_result(0).get_type(ctx);
-                    sites.push(ParseStringifySite {
-                        stringify_op,
-                        unwrap_op,
-                        consumer_op: op,
-                        intermediate_parse_op: Some(parse_op),
-                        source_value,
-                        target_ty,
-                    });
+                    _ => {}
                 }
-            } else if let Some(intrinsic_op) = Operation::get_op::<IntrinsicOp>(op, ctx)
-                && matches!(
-                    intrinsic_op.intrinsic(ctx),
+            } else if let Some(intrinsic_op) = Operation::get_op::<IntrinsicOp>(op, ctx) {
+                match intrinsic_op.intrinsic(ctx) {
                     Some(
                         Intrinsic::JsonRequireNumber
-                            | Intrinsic::JsonToNumber
-                            | Intrinsic::JsonToI64
-                            | Intrinsic::JsonToU64
-                            | Intrinsic::JsonToBool
-                            | Intrinsic::JsonToString
-                    )
-                )
-            {
-                let args: Vec<Value> = op.deref(ctx).operands().collect();
-                if args.len() != 1 || op.deref(ctx).get_num_results() != 1 {
-                    continue;
+                        | Intrinsic::JsonToNumber
+                        | Intrinsic::JsonToI64
+                        | Intrinsic::JsonToU64
+                        | Intrinsic::JsonToBool
+                        | Intrinsic::JsonToString,
+                    ) => {
+                        if let Some((parse_op, stringify_op, unwrap_op, source_value)) =
+                            match_json_parse_of_stringify(ctx, arg)
+                        {
+                            sites.push(ParseStringifySite {
+                                stringify_op,
+                                unwrap_op,
+                                consumer_op: op,
+                                intermediate_parse_op: Some(parse_op),
+                                source_value,
+                                target_ty,
+                            });
+                        }
+                    }
+                    Some(Intrinsic::JsonParse) => {
+                        let parse_res = op.deref(ctx).get_result(0);
+                        if !is_consumed_by_value_decoder(ctx, parse_res, funcs_by_name)
+                            && let Some((stringify_op, unwrap_op, source_value)) =
+                                match_unwrapped_stringify(ctx, arg)
+                        {
+                            sites.push(ParseStringifySite {
+                                stringify_op,
+                                unwrap_op,
+                                consumer_op: op,
+                                intermediate_parse_op: None,
+                                source_value,
+                                target_ty,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-                let Some((parse_op, stringify_op, unwrap_op, source_value)) =
-                    match_json_parse_of_stringify(ctx, args[0])
-                else {
-                    continue;
-                };
-                consumed_parse_ops.insert(parse_op);
-                let target_ty = op.deref(ctx).get_result(0).get_type(ctx);
-                sites.push(ParseStringifySite {
-                    stringify_op,
-                    unwrap_op,
-                    consumer_op: op,
-                    intermediate_parse_op: Some(parse_op),
-                    source_value,
-                    target_ty,
-                });
             }
-        }
-    }
-
-    // Second pass: any remaining `Intrinsic::JsonParse` directly over `JSON.stringify`
-    // (e.g. untyped `JSON.parse(JSON.stringify(x))` or optional `JsonIsNull` branching)
-    // is recorded as a site with `target_ty = JsonType` so `parse_stringify_missed` is tracked.
-    for &block in &blocks {
-        let ops: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
-        for op in ops {
-            if consumed_parse_ops.contains(&op) {
-                continue;
-            }
-            let Some(intrinsic_op) = Operation::get_op::<IntrinsicOp>(op, ctx) else {
-                continue;
-            };
-            if intrinsic_op.intrinsic(ctx) != Some(Intrinsic::JsonParse) {
-                continue;
-            }
-            let args: Vec<Value> = op.deref(ctx).operands().collect();
-            if args.len() != 1 || op.deref(ctx).get_num_results() != 1 {
-                continue;
-            }
-            let Some((stringify_op, unwrap_op, source_value)) =
-                match_unwrapped_stringify(ctx, args[0])
-            else {
-                continue;
-            };
-            let target_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            sites.push(ParseStringifySite {
-                stringify_op,
-                unwrap_op,
-                consumer_op: op,
-                intermediate_parse_op: None,
-                source_value,
-                target_ty,
-            });
         }
     }
 
     sites
+}
+
+fn is_consumed_by_value_decoder(
+    ctx: &Context,
+    parse_res: Value,
+    funcs_by_name: &HashMap<Identifier, FuncOp>,
+) -> bool {
+    parse_res.uses(ctx).iter().any(|use_site| {
+        let user = use_site.user_op();
+        if user.deref(ctx).get_num_operands() != 1 || user.deref(ctx).get_num_results() != 1 {
+            return false;
+        }
+        if let Some(call) = Operation::get_op::<CallOp>(user, ctx) {
+            return funcs_by_name
+                .get(&call.callee(ctx))
+                .and_then(|callee| crate::calls::json_decoder_kind(ctx, callee))
+                == Some(crate::attrs::JsonDecoderKind::Value);
+        }
+        if let Some(intr) = Operation::get_op::<IntrinsicOp>(user, ctx) {
+            return matches!(
+                intr.intrinsic(ctx),
+                Some(
+                    Intrinsic::JsonRequireNumber
+                        | Intrinsic::JsonToNumber
+                        | Intrinsic::JsonToI64
+                        | Intrinsic::JsonToU64
+                        | Intrinsic::JsonToBool
+                        | Intrinsic::JsonToString
+                )
+            );
+        }
+        false
+    })
 }
 
 type MatchedParseOfStringify = (
@@ -257,14 +276,13 @@ fn match_json_parse_of_stringify(
 ) -> Option<MatchedParseOfStringify> {
     let parse_op = parsed_val.defining_op()?;
     let parse_intr = Operation::get_op::<IntrinsicOp>(parse_op, ctx)?;
-    if parse_intr.intrinsic(ctx) != Some(Intrinsic::JsonParse) {
+    if parse_intr.intrinsic(ctx) != Some(Intrinsic::JsonParse)
+        || parse_op.deref(ctx).get_num_operands() != 1
+    {
         return None;
     }
-    let parse_args: Vec<Value> = parse_op.deref(ctx).operands().collect();
-    if parse_args.len() != 1 {
-        return None;
-    }
-    let (stringify_op, unwrap_op, source_value) = match_unwrapped_stringify(ctx, parse_args[0])?;
+    let (stringify_op, unwrap_op, source_value) =
+        match_unwrapped_stringify(ctx, parse_op.deref(ctx).get_operand(0))?;
     Some((parse_op, stringify_op, unwrap_op, source_value))
 }
 
@@ -274,24 +292,25 @@ fn match_unwrapped_stringify(
 ) -> Option<(Ptr<Operation>, Option<Ptr<Operation>>, Value)> {
     let def_op = text_val.defining_op()?;
     if Operation::get_op::<JsonStringifyOp>(def_op, ctx).is_some() {
-        let stringify_args: Vec<Value> = def_op.deref(ctx).operands().collect();
-        if stringify_args.len() != 1 {
+        if def_op.deref(ctx).get_num_operands() != 1 {
             return None;
         }
-        return Some((def_op, None, stringify_args[0]));
+        return Some((def_op, None, def_op.deref(ctx).get_operand(0)));
     }
     if Operation::get_op::<UnwrapOp>(def_op, ctx).is_some() {
-        let unwrap_args: Vec<Value> = def_op.deref(ctx).operands().collect();
-        if unwrap_args.len() != 1 {
+        if def_op.deref(ctx).get_num_operands() != 1 {
             return None;
         }
-        let stringify_op = unwrap_args[0].defining_op()?;
+        let stringify_op = def_op.deref(ctx).get_operand(0).defining_op()?;
         Operation::get_op::<JsonStringifyOp>(stringify_op, ctx)?;
-        let stringify_args: Vec<Value> = stringify_op.deref(ctx).operands().collect();
-        if stringify_args.len() != 1 {
+        if stringify_op.deref(ctx).get_num_operands() != 1 {
             return None;
         }
-        return Some((stringify_op, Some(def_op), stringify_args[0]));
+        return Some((
+            stringify_op,
+            Some(def_op),
+            stringify_op.deref(ctx).get_operand(0),
+        ));
     }
     None
 }
@@ -305,6 +324,9 @@ enum CopyPosition {
 
 fn can_rewrite_parse_stringify(
     ctx: &Context,
+    facts: &crate::facts::ProgramFacts,
+    func: FuncOp,
+    funcs_by_name: &HashMap<Identifier, FuncOp>,
     site: &ParseStringifySite,
     source_ty: TypeHandle,
     target_ty: TypeHandle,
@@ -327,14 +349,28 @@ fn can_rewrite_parse_stringify(
     }
 
     let consumer_res = site.consumer_op.deref(ctx).get_result(0);
-    if value_reaches_stringify(ctx, consumer_res)
-        && (schemas_drop_fields(ctx, source_ty, target_ty, 0)
-            || value_may_have_json_residue(ctx, site.source_value))
+    let reaches_stringify = value_reaches_stringify(ctx, consumer_res, funcs_by_name);
+    if reaches_stringify && schemas_drop_fields(ctx, source_ty, target_ty, 0) {
+        return false;
+    }
+    if (reaches_stringify || schemas_add_optional_fields(ctx, source_ty, target_ty, 0))
+        && facts.may_have_json_residue(ctx, &func, site.source_value)
     {
         return false;
     }
 
-    schemas_compatible(ctx, source_ty, target_ty, 0)
+    if !schemas_compatible(ctx, source_ty, target_ty, 0) {
+        return false;
+    }
+
+    !facts.may_prevent_json_copy_between(
+        ctx,
+        &func,
+        site.source_value,
+        site.stringify_op,
+        (site.unwrap_op, site.intermediate_parse_op),
+        site.consumer_op,
+    )
 }
 
 fn type_may_contain_record(ctx: &Context, ty: TypeHandle, depth: usize) -> bool {
@@ -369,7 +405,11 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, depth: usize) -> bool 
     false
 }
 
-fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
+fn value_reaches_stringify(
+    ctx: &Context,
+    root: Value,
+    funcs_by_name: &HashMap<Identifier, FuncOp>,
+) -> bool {
     if !type_may_contain_record(ctx, root.get_type(ctx), 0) {
         return false;
     }
@@ -395,11 +435,13 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
             {
                 return true;
             }
-            if let Some(call) = Operation::get_op::<CallOp>(user, ctx) {
-                let callee = call.callee(ctx).to_string();
-                if !callee.starts_with("perry_json_") {
-                    return true;
-                }
+            if let Some(call) = Operation::get_op::<CallOp>(user, ctx)
+                && funcs_by_name
+                    .get(&call.callee(ctx))
+                    .and_then(|callee| crate::calls::json_decoder_kind(ctx, callee))
+                    .is_none()
+            {
+                return true;
             }
             if Operation::get_op::<BrOp>(user, ctx).is_some()
                 || Operation::get_op::<CondBrOp>(user, ctx).is_some()
@@ -427,45 +469,53 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
     false
 }
 
-fn value_may_have_json_residue(ctx: &Context, root: Value) -> bool {
-    let mut worklist = vec![root];
-    let mut visited = std::collections::HashSet::new();
-    while let Some(val) = worklist.pop() {
-        if !visited.insert(val) {
-            continue;
-        }
-        if !type_may_contain_record(ctx, val.get_type(ctx), 0) {
-            continue;
-        }
-        let Some(def_op) = val.defining_op() else {
+fn schemas_add_optional_fields(
+    ctx: &Context,
+    source_ty: TypeHandle,
+    target_ty: TypeHandle,
+    depth: usize,
+) -> bool {
+    if depth > 16 {
+        return true;
+    }
+    let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
+    let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+    if s_inner == t_inner {
+        return false;
+    }
+    if let (Some(s_rec), Some(t_rec)) = (
+        s_inner.deref(ctx).downcast_ref::<RecordType>(),
+        t_inner.deref(ctx).downcast_ref::<RecordType>(),
+    ) {
+        let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
             return true;
         };
-        if let Some(intr) = Operation::get_op::<IntrinsicOp>(def_op, ctx)
-            && matches!(
-                intr.intrinsic(ctx),
-                Some(Intrinsic::JsonParse | Intrinsic::JsonResidue | Intrinsic::JsonRetain)
-            )
+        if s_rec.is_tuple() {
+            return s_fields
+                .iter()
+                .zip(t_fields.iter())
+                .any(|((_, se), (_, te))| schemas_add_optional_fields(ctx, *se, *te, depth + 1));
+        }
+        if t_fields
+            .iter()
+            .any(|(t_name, _)| !s_fields.iter().any(|(s_name, _)| s_name == t_name))
         {
             return true;
         }
-        if Operation::get_op::<CallOp>(def_op, ctx).is_some() {
-            return true;
-        }
-        for use_site in val.uses(ctx) {
-            if let Some(intr) = Operation::get_op::<IntrinsicOp>(use_site.user_op(), ctx)
-                && matches!(
-                    intr.intrinsic(ctx),
-                    Some(Intrinsic::JsonResidue | Intrinsic::JsonRetain)
-                )
-            {
-                return true;
-            }
-        }
-        for operand in def_op.deref(ctx).operands() {
-            if type_may_contain_record(ctx, operand.get_type(ctx), 0) {
-                worklist.push(operand);
-            }
-        }
+        return t_fields.iter().any(|(t_name, t_fty)| {
+            s_fields
+                .iter()
+                .find(|(s_name, _)| s_name == t_name)
+                .is_some_and(|(_, s_fty)| {
+                    schemas_add_optional_fields(ctx, *s_fty, *t_fty, depth + 1)
+                })
+        });
+    }
+    if let (Some(s_arr), Some(t_arr)) = (
+        s_inner.deref(ctx).downcast_ref::<ArrayType>(),
+        t_inner.deref(ctx).downcast_ref::<ArrayType>(),
+    ) {
+        return schemas_add_optional_fields(ctx, s_arr.element(), t_arr.element(), depth + 1);
     }
     false
 }
@@ -662,40 +712,40 @@ fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
 }
 
 fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite, helper_sym: Identifier) {
+    let mut rewriter = IRRewriter::<DummyListener>::default();
+    rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(site.consumer_op));
     let call = CallOp::new(
         ctx,
         helper_sym,
         vec![site.source_value],
         vec![site.target_ty],
     );
-    call.get_operation().insert_before(ctx, site.consumer_op);
-    let new_res = call.get_operation().deref(ctx).get_result(0);
-    let old_res = site.consumer_op.deref(ctx).get_result(0);
-    old_res.replace_some_uses_with(ctx, |_, _| true, &new_res);
-
+    rewriter.insert_operation(ctx, call.get_operation());
     // Keep any CaughtOp immediately following `site.consumer_op` intact so it now
     // checks whether `call` (perry_json_copy_*) raised an exception inside a try block.
-    Operation::erase(site.consumer_op, ctx);
+    rewriter.replace_operation(ctx, site.consumer_op, call.get_operation());
     if let Some(parse_op) = site.intermediate_parse_op {
-        erase_op_and_caught(ctx, parse_op);
+        erase_op_and_caught(ctx, &mut rewriter, parse_op);
     }
     if let Some(unwrap_op) = site.unwrap_op {
-        erase_op_and_caught(ctx, unwrap_op);
+        erase_op_and_caught(ctx, &mut rewriter, unwrap_op);
     }
-    erase_op_and_caught(ctx, site.stringify_op);
+    erase_op_and_caught(ctx, &mut rewriter, site.stringify_op);
 }
 
-fn erase_op_and_caught(ctx: &mut Context, op: Ptr<Operation>) {
+fn erase_op_and_caught(
+    ctx: &mut Context,
+    rewriter: &mut IRRewriter<DummyListener>,
+    op: Ptr<Operation>,
+) {
     let next = op.deref(ctx).get_next();
     if let Some(next) = next
         && Operation::get_op::<CaughtOp>(next, ctx).is_some()
     {
+        rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(next));
         let zero = const_i32(ctx, 0);
-        zero.get_operation().insert_before(ctx, next);
-        let zero_val = zero.get_result(ctx);
-        let caught_res = next.deref(ctx).get_result(0);
-        caught_res.replace_some_uses_with(ctx, |_, _| true, &zero_val);
-        Operation::erase(next, ctx);
+        rewriter.insert_operation(ctx, zero.get_operation());
+        rewriter.replace_operation(ctx, next, zero.get_operation());
     }
-    Operation::erase(op, ctx);
+    rewriter.erase_operation(ctx, op);
 }

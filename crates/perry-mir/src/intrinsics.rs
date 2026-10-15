@@ -730,7 +730,25 @@ impl Verify for IntrinsicOp {
             && operands.iter().zip(ins).all(|(t, e)| e.matches(ctx, *t));
         let results_fit = results.len() == outs.len()
             && results.iter().zip(outs).all(|(t, e)| e.matches(ctx, *t));
-        if !operands_fit || !results_fit {
+        let specialized_int_fit = match intrinsic {
+            Intrinsic::MathFloor
+            | Intrinsic::MathCeil
+            | Intrinsic::MathTrunc
+            | Intrinsic::MathRound
+            | Intrinsic::MathAbs
+            | Intrinsic::MathMin
+            | Intrinsic::MathMax => {
+                operands.len() == ins.len()
+                    && results.len() == 1
+                    && results[0].deref(ctx).is::<IntegerType>()
+                    && operands.iter().all(|&t| t == results[0])
+            }
+            Intrinsic::BytesAt => {
+                operands_fit && results.len() == 1 && results[0].deref(ctx).is::<IntegerType>()
+            }
+            _ => false,
+        };
+        if !(operands_fit && results_fit) && !specialized_int_fit {
             verify_err!(
                 self.loc(ctx),
                 IntrinsicErr::Signature(intrinsic.name().into())

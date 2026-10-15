@@ -130,6 +130,15 @@ impl<'s> FunctionBuilder<'s> {
         };
         let ty = FunctionType::get(ctx, params, results);
         let function = FuncOp::new(ctx, name.clone(), ty);
+        perry_mir::calls::set_json_decoder(
+            ctx,
+            &function,
+            match input {
+                DecoderInput::Text => perry_mir::attrs::JsonDecoderKind::Parse,
+                DecoderInput::Snapshot => perry_mir::attrs::JsonDecoderKind::Value,
+                DecoderInput::Cursor => perry_mir::attrs::JsonDecoderKind::Cursor,
+            },
+        );
         if input != DecoderInput::Snapshot {
             perry_mir::calls::set_atomic_construction(ctx, &function);
         }

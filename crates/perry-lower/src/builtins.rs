@@ -325,7 +325,9 @@ impl<'s> FunctionBuilder<'s> {
     /// `JSON.stringify(value)`.
     pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let mut value = self.expression(ctx, expr)?;
-        if let Expr::LocalGet(id) = expr
+        if let Some(src) = self.integer64_source(ctx, value) {
+            value = src;
+        } else if let Expr::LocalGet(id) = expr
             && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
             && int_ty.deref(ctx).width() == 64
         {

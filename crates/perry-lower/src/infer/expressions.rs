@@ -331,13 +331,13 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         Expr::ObjectKeys(_) | Expr::ForInKeys(_) => HirType::Array(Box::new(HirType::String)),
         Expr::ObjectValues(object) => {
             let obj_ty = strip_nullish(expression(object, env)).0;
-            shapes::generics::dict_entry_types(env.interfaces, env.type_aliases, &obj_ty)
+            shapes::generics::dict_entry_types(env.ctx, env.interfaces, env.type_aliases, &obj_ty)
                 .map(|(_, val_ty)| HirType::Array(Box::new(val_ty)))
                 .unwrap_or(HirType::Any)
         }
         Expr::ObjectEntries(object) => {
             let obj_ty = strip_nullish(expression(object, env)).0;
-            shapes::generics::dict_entry_types(env.interfaces, env.type_aliases, &obj_ty)
+            shapes::generics::dict_entry_types(env.ctx, env.interfaces, env.type_aliases, &obj_ty)
                 .map(|(key_ty, val_ty)| {
                     HirType::Array(Box::new(HirType::Tuple(vec![key_ty, val_ty])))
                 })
@@ -483,6 +483,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Number
             }
             HirType::Generic { base, type_args } => shapes::generics::property_type(
+                env.ctx,
                 env.interfaces,
                 env.type_aliases,
                 &base,
@@ -491,6 +492,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             )
             .or_else(|| {
                 shapes::generics::dict_entry_types(
+                    env.ctx,
                     env.interfaces,
                     env.type_aliases,
                     &HirType::Generic { base, type_args },
@@ -499,6 +501,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             })
             .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
             HirType::Named(base) => shapes::generics::property_type(
+                env.ctx,
                 env.interfaces,
                 env.type_aliases,
                 &base,
@@ -508,6 +511,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             .or_else(|| env.named_property_type(&base, property))
             .or_else(|| {
                 shapes::generics::dict_entry_types(
+                    env.ctx,
                     env.interfaces,
                     env.type_aliases,
                     &HirType::Named(base),
@@ -551,9 +555,12 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 type_args[0].clone()
             }
             other => {
-                if let Some((_, val_ty)) =
-                    shapes::generics::dict_entry_types(env.interfaces, env.type_aliases, &other)
-                {
+                if let Some((_, val_ty)) = shapes::generics::dict_entry_types(
+                    env.ctx,
+                    env.interfaces,
+                    env.type_aliases,
+                    &other,
+                ) {
                     with_absences(val_ty, vec![HirType::Void])
                 } else if let HirType::Named(base) = other
                     && let Some(HirType::Array(element)) = env.resolve_foreign_type(&base)

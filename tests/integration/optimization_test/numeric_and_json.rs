@@ -772,3 +772,211 @@ fn zero_perry_types_wit_specialization_and_bitwidth_widening() -> Result<()> {
     );
     Ok(())
 }
+
+fn evaluate_single_export(source: &str, signature: &str, args: &[wasmtime::Val]) -> Result<i32> {
+    let (resolve, package) = perry_wit::component::wit::resolve_source(
+        "review.wit",
+        &format!("package test:review; world test {{ export run: {signature}; }}"),
+    )?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let compiled = perry_wit::compile_for_world(source, "review.ts", &resolve, world, true)?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    Ok(program.call("run", args).0[0].unwrap_i32())
+}
+
+#[test]
+fn branch_review_counterexamples_and_mutation_tracking() -> Result<()> {
+    let cases: [(&str, &str, &str, Vec<wasmtime::Val>, i32); 9] = [
+        (
+            "copy_snapshot",
+            r#"
+                interface Item { n: number }
+                export function run(): number {
+                    const original: Item = { n: 1 };
+                    const text = JSON.stringify(original);
+                    original.n = 2;
+                    return JSON.parse<Item>(text).n;
+                }
+            "#,
+            "func()->s32",
+            vec![],
+            1,
+        ),
+        (
+            "decoder_name_collision",
+            r#"
+                function perry_json_parse_user(text: string): number { return 7; }
+                export function run(): number {
+                    return perry_json_parse_user(JSON.stringify(1));
+                }
+            "#,
+            "func()->s32",
+            vec![],
+            7,
+        ),
+        (
+            "parse_int_radix_wrap",
+            r#"
+                export function run(): number { return parseInt("10", 4294967298); }
+            "#,
+            "func()->s32",
+            vec![],
+            2,
+        ),
+        (
+            "parse_int_overflow",
+            r#"
+                export function run(): number {
+                    return Number.isNaN(parseInt("18446744073709551616")) ? 1 : 0;
+                }
+            "#,
+            "func()->s32",
+            vec![],
+            1,
+        ),
+        (
+            "parse_int_exact",
+            r#"
+                export function run(): number {
+                    return JSON.stringify(parseInt("9007199254740993")) === "9007199254740993" ? 1 : 0;
+                }
+            "#,
+            "func()->s32",
+            vec![],
+            1,
+        ),
+        (
+            "parse_int_exact_through_helper",
+            r#"
+                function forward(value: number): number { return value; }
+                export function run(): number {
+                    return JSON.stringify(forward(parseInt("9007199254740993"))) === "9007199254740993" ? 1 : 0;
+                }
+            "#,
+            "func()->s32",
+            vec![],
+            1,
+        ),
+        (
+            "fixed_integer_local_json",
+            r#"
+                import type { u64 } from "perry:types";
+                export function run(value: u64): number {
+                    return JSON.stringify(value) === "9007199254740993" ? 1 : 0;
+                }
+            "#,
+            "func(value:u64)->s32",
+            vec![wasmtime::Val::I64(9007199254740993)],
+            1,
+        ),
+        (
+            "fixed_integer_return_json",
+            r#"
+                import type { u64 } from "perry:types";
+                function identity(value: u64): u64 { return value; }
+                export function run(value: u64): number {
+                    return JSON.stringify(identity(value)) === "9007199254740993" ? 1 : 0;
+                }
+            "#,
+            "func(value:u64)->s32",
+            vec![wasmtime::Val::I64(9007199254740993)],
+            1,
+        ),
+        (
+            "fixed_integer_projection_json",
+            r#"
+                import type { u64 } from "perry:types";
+                interface Item { value: u64 }
+                export function run(value: u64): number {
+                    const item: Item = { value };
+                    return JSON.stringify(item.value) === "9007199254740993" ? 1 : 0;
+                }
+            "#,
+            "func(value:u64)->s32",
+            vec![wasmtime::Val::I64(9007199254740993)],
+            1,
+        ),
+    ];
+
+    for (name, source, signature, args, expected) in cases {
+        let actual = evaluate_single_export(source, signature, &args)
+            .map_err(|err| anyhow::anyhow!("case `{name}` failed: {err:#}"))?;
+        assert_eq!(actual, expected, "case `{name}` mismatch");
+    }
+
+    // Verify zero false positives in mutation tracking: mutating a disjoint object
+    // between JSON.stringify(original) and JSON.parse<Item>(text) still folds.
+    let disjoint_source = r#"
+        interface Item { n: number }
+        export function run(): number {
+            const original: Item = { n: 1 };
+            const other: Item = { n: 10 };
+            const text = JSON.stringify(original);
+            other.n = 99;
+            return JSON.parse<Item>(text).n + other.n;
+        }
+    "#;
+    let (resolve, package) = perry_wit::component::wit::resolve_source(
+        "disjoint.wit",
+        "package test:review; world test { export run: func() -> s32; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let compiled =
+        perry_wit::compile_for_world(disjoint_source, "disjoint.ts", &resolve, world, true)?;
+    assert!(
+        compiled
+            .allocation_report
+            .contains("parse_stringify_rewrites=1"),
+        "disjoint object mutation must not block JSON copy normalization: {}",
+        compiled.allocation_report
+    );
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(program.call("run", &[]).0[0].unwrap_i32(), 100);
+
+    Ok(())
+}
+
+#[test]
+fn branch_review_context_order_invariance() -> Result<()> {
+    let helper = "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }";
+    let target = "export function run(a:number,b:number):number { return helper(a,b); }";
+    let mut others = String::new();
+    let mut extra_exports = String::new();
+    for a in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+        for b in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+            if a == "u8" && b == "u8" {
+                continue;
+            }
+            let id = format!("e{}", extra_exports.len());
+            others += &format!(
+                "export function {id}(a:number,b:number):number {{ return helper(a,b); }}\n"
+            );
+            extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
+        }
+    }
+    for (name, source, signature) in [
+        (
+            "single",
+            format!("{helper}\n{target}"),
+            "func(a:u8,b:u8)->u8".to_owned(),
+        ),
+        (
+            "target_first",
+            format!("{helper}\n{target}\n{others}"),
+            format!("func(a:u8,b:u8)->u8{extra_exports}"),
+        ),
+        (
+            "target_last",
+            format!("{helper}\n{others}\n{target}"),
+            format!("func(a:u8,b:u8)->u8{extra_exports}"),
+        ),
+    ] {
+        let actual = evaluate_single_export(
+            &source,
+            &signature,
+            &[wasmtime::Val::I32(250), wasmtime::Val::I32(10)],
+        )?;
+        assert_eq!(actual, 252, "context order case `{name}` mismatch");
+    }
+    Ok(())
+}

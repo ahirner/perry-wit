@@ -156,6 +156,7 @@ impl OperationKind {
         if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
             || Operation::get_op::<crate::optional::IsUndefinedOp>(op, ctx).is_some()
             || Operation::get_op::<crate::optional::IsNullOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::intrinsics::JsonStringifyOp>(op, ctx).is_some()
         {
             return Self::None;
         }
@@ -786,3 +787,5 @@ impl Solver {
         None
     }
 }
+
+mod queries;

@@ -287,8 +287,17 @@ impl<'s> FunctionBuilder<'s> {
         }
         let op = CallOp::new(ctx, name.clone(), values, signature.carrier_results());
         self.append(ctx, &op);
-        let operation = op.get_operation().deref(ctx);
-        Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
+        let result = {
+            let operation = op.get_operation().deref(ctx);
+            (operation.get_num_results() == 1).then(|| operation.get_result(0))
+        };
+        if let (Some(mut value), Some(result_ty)) = (result, signature.result) {
+            if let Some(int_ty) = result_ty.integer {
+                value = self.wrap_integer(ctx, value, int_ty, result_ty.carrier);
+            }
+            return Ok(Some(value));
+        }
+        Ok(result)
     }
 
     /// The array literal given to a promise combinator: plain values among promises of `T`

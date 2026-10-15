@@ -78,19 +78,78 @@ impl FunctionLowering<'_, '_> {
                 self.runtime_void(ctx, Runtime::ExitCodeSet, args);
                 None
             }
+            Intrinsic::MathFloor
+            | Intrinsic::MathCeil
+            | Intrinsic::MathTrunc
+            | Intrinsic::MathRound
+                if crate::numeric::integer(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+                    .is_some() =>
+            {
+                Some(args[0])
+            }
             Intrinsic::MathFloor => Some(self.num(ctx, NumOpcode::F64Floor, args)),
             Intrinsic::MathCeil => Some(self.num(ctx, NumOpcode::F64Ceil, args)),
             Intrinsic::MathTrunc => Some(self.num(ctx, NumOpcode::F64Trunc, args)),
-            Intrinsic::MathAbs => Some(self.num(ctx, NumOpcode::F64Abs, args)),
+            Intrinsic::MathAbs => {
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
+                    if !signed {
+                        Some(args[0])
+                    } else if bits == 64 {
+                        let x = args[0];
+                        let zero = self.i64_const(ctx, 0);
+                        let neg = self.num(ctx, NumOpcode::I64Sub, vec![zero, x]);
+                        let is_neg = self.num(ctx, NumOpcode::I64LtS, vec![x, zero]);
+                        Some(self.select(ctx, is_neg, neg, x))
+                    } else {
+                        let x = args[0];
+                        let zero = self.i32_const(ctx, 0);
+                        let neg = self.num(ctx, NumOpcode::I32Sub, vec![zero, x]);
+                        let is_neg = self.num(ctx, NumOpcode::I32LtS, vec![x, zero]);
+                        let abs = self.select(ctx, is_neg, neg, x);
+                        Some(self.normalize_integer(ctx, abs, ty))
+                    }
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64Abs, args))
+                }
+            }
             Intrinsic::MathSqrt => Some(self.num(ctx, NumOpcode::F64Sqrt, args)),
             Intrinsic::BytesAt => {
                 let data = self.load(ctx, MemKind::I32, args[0], perry_abi::BYTES_DATA as u32);
                 let address = self.num(ctx, NumOpcode::I32Add, vec![data, args[1]]);
                 let byte = self.load(ctx, MemKind::I32U8, address, 0);
-                Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, _)) = crate::numeric::integer(ctx, ty) {
+                    if bits == 64 {
+                        Some(self.num(ctx, NumOpcode::I64ExtendI32U, vec![byte]))
+                    } else {
+                        Some(self.normalize_integer(ctx, byte, ty))
+                    }
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
+                }
             }
-            Intrinsic::MathMin => Some(self.num(ctx, NumOpcode::F64Min, args)),
-            Intrinsic::MathMax => Some(self.num(ctx, NumOpcode::F64Max, args)),
+            Intrinsic::MathMin | Intrinsic::MathMax => {
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
+                    let cmp_op = match (bits == 64, signed) {
+                        (false, false) => NumOpcode::I32LtU,
+                        (false, true) => NumOpcode::I32LtS,
+                        (true, false) => NumOpcode::I64LtU,
+                        (true, true) => NumOpcode::I64LtS,
+                    };
+                    let lt = self.num(ctx, cmp_op, vec![args[0], args[1]]);
+                    if intrinsic == Intrinsic::MathMin {
+                        Some(self.select(ctx, lt, args[0], args[1]))
+                    } else {
+                        Some(self.select(ctx, lt, args[1], args[0]))
+                    }
+                } else if intrinsic == Intrinsic::MathMin {
+                    Some(self.num(ctx, NumOpcode::F64Min, args))
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64Max, args))
+                }
+            }
             Intrinsic::MathRound => {
                 // floor(x), plus one when the fraction is at least ½; the result keeps the
                 // sign of x, so -0.4 rounds to -0 as in ECMAScript.

@@ -284,6 +284,29 @@ pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).asynchronous
 }
 
+pliron::dict_key!(JSON_DECODER_KIND, "perry_json_decoder_kind");
+
+/// Mark `function` as a compiler-generated JSON decoder with semantic `kind`.
+pub fn set_json_decoder(ctx: &mut Context, function: &FuncOp, kind: crate::attrs::JsonDecoderKind) {
+    function
+        .get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(JSON_DECODER_KIND.clone(), kind);
+}
+
+pub fn json_decoder_kind(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Option<crate::attrs::JsonDecoderKind> {
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<crate::attrs::JsonDecoderKind>(&JSON_DECODER_KIND)
+        .copied()
+}
+
 #[derive(Debug, Error)]
 #[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
 pub(crate) struct TimerErr;

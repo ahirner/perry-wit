@@ -19,6 +19,7 @@ mod expressions;
 use expressions::*;
 
 struct FunctionEnv<'a> {
+    ctx: &'a Context,
     base: &'a perry_hir::HirTypeEnv,
     interfaces: &'a [perry_hir::ir::Interface],
     type_aliases: &'a [perry_hir::ir::TypeAlias],
@@ -285,6 +286,7 @@ fn clear_inferred_type_vars<V>(
                     *ty = HirType::Any;
                 } else if let HirType::Named(name) = ty
                     && let Some(carrier) = integer_aliases.get(name)
+                    && *carrier != HirType::BigInt
                 {
                     *ty = carrier.clone();
                 }
@@ -469,6 +471,7 @@ fn push_return_type(
         HirType::Int32 => HirType::Number,
         HirType::Named(name) => integer_aliases
             .get(&name)
+            .filter(|carrier| **carrier != HirType::BigInt)
             .cloned()
             .unwrap_or(HirType::Named(name)),
         HirType::StringLiteral(_) => HirType::String,
@@ -480,6 +483,7 @@ fn push_return_type(
 }
 
 pub(super) fn unresolved_types(
+    ctx: &Context,
     hir: &mut HirModule,
     inferred: &HashSet<LocalId>,
     locations: &crate::locations::Locations<'_>,
@@ -504,6 +508,7 @@ pub(super) fn unresolved_types(
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let mut env = FunctionEnv {
+            ctx,
             base: &module_env,
             interfaces: &hir.interfaces,
             type_aliases: &hir.type_aliases,
@@ -526,6 +531,7 @@ pub(super) fn unresolved_types(
                 locals.insert(param.id, param.ty.clone());
             }
             let mut env = FunctionEnv {
+                ctx,
                 base: &module_env,
                 interfaces: &hir.interfaces,
                 type_aliases: &hir.type_aliases,
@@ -590,6 +596,7 @@ pub(super) fn unresolved_types(
     }
     locals.clear();
     let mut env = FunctionEnv {
+        ctx,
         base: &module_env,
         interfaces: &hir.interfaces,
         type_aliases: &hir.type_aliases,
@@ -606,6 +613,7 @@ pub(super) fn unresolved_types(
             locals.insert(param.id, param.ty.clone());
         }
         let mut env = FunctionEnv {
+            ctx,
             base: &module_env,
             interfaces: &hir.interfaces,
             type_aliases: &hir.type_aliases,

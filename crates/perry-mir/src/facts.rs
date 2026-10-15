@@ -311,7 +311,6 @@ struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
-    summary_contexts: HashMap<Identifier, usize>,
     work: Worklist,
     width_defaults: Vec<(usize, usize, Value)>,
 }
@@ -325,101 +324,6 @@ impl Solver {
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
             if *count >= MAX_PRECISE_CONTEXTS {
                 self.analysis.summarized_contexts += 1;
-                if key.args.iter().all(Option::is_none)
-                    && key.results.iter().all(|r| r.integer().is_none())
-                {
-                    let generic = self.analysis.generic[&key.function];
-                    self.contexts.insert(key, generic);
-                    return generic;
-                }
-                if let Some(&summary_id) = self.summary_contexts.get(&key.function) {
-                    let incompatible = key
-                        .args
-                        .iter()
-                        .zip(&self.analysis.keys[summary_id].args)
-                        .any(|(a, b)| a.is_none() != b.is_none())
-                        || key
-                            .results
-                            .iter()
-                            .zip(&self.analysis.keys[summary_id].results)
-                            .any(|(a, b)| {
-                                (*a == ResultDomain::Original) != (*b == ResultDomain::Original)
-                            });
-                    if incompatible {
-                        let generic = self.analysis.generic[&key.function];
-                        self.contexts.insert(key, generic);
-                        return generic;
-                    }
-                    for (pos, &arg) in key.args.iter().enumerate() {
-                        let body = &self.analysis.bodies[&key.function];
-                        if body.declared_args.get(pos).copied().flatten().is_some() {
-                            continue;
-                        }
-                        let Some(&param) = body.parameters.get(pos) else {
-                            continue;
-                        };
-                        if let (Some(int), Some(cur)) =
-                            (arg, self.analysis.keys[summary_id].args[pos])
-                        {
-                            let wide = cur.common(Integer {
-                                bits: 64,
-                                signed: int.signed || int.bits < 64,
-                            });
-                            if wide != cur {
-                                self.analysis.keys[summary_id].args[pos] = Some(wide);
-                                self.fact(summary_id, param, Fact::Integer(wide));
-                                self.range(summary_id, param, Range::Bounds(wide.bounds()));
-                            }
-                        }
-                    }
-                    self.contexts.insert(key, summary_id);
-                    return summary_id;
-                }
-                let summary_key = {
-                    let body = &self.analysis.bodies[&key.function];
-                    Key {
-                        function: key.function.clone(),
-                        args: key
-                            .args
-                            .iter()
-                            .enumerate()
-                            .map(|(pos, &arg)| {
-                                if let Some(declared) =
-                                    body.declared_args.get(pos).copied().flatten()
-                                {
-                                    Some(declared)
-                                } else {
-                                    arg.map(|int| Integer {
-                                        bits: 64,
-                                        signed: int.signed || int.bits < 64,
-                                    })
-                                }
-                            })
-                            .collect(),
-                        results: key
-                            .results
-                            .iter()
-                            .enumerate()
-                            .map(|(pos, &res)| {
-                                if res == ResultDomain::Original {
-                                    ResultDomain::Original
-                                } else if let Some(declared) =
-                                    body.declared_results.get(pos).copied().flatten()
-                                {
-                                    ResultDomain::Integer(declared)
-                                } else {
-                                    ResultDomain::Inferred
-                                }
-                            })
-                            .collect(),
-                        specialize: true,
-                    }
-                };
-                let summary_id = self.allocate_context(ctx, summary_key);
-                self.summary_contexts
-                    .insert(key.function.clone(), summary_id);
-                self.contexts.insert(key, summary_id);
-                return summary_id;
             }
             *count += 1;
         }
@@ -555,7 +459,6 @@ impl Analysis for ProgramFacts {
             },
             contexts: HashMap::new(),
             precise_counts: HashMap::new(),
-            summary_contexts: HashMap::new(),
             work: Worklist::default(),
             width_defaults: Vec::new(),
         };

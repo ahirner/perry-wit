@@ -403,7 +403,10 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
 }
 
 fn append_number(text: &mut Buffer, number: f64) {
-    if number.is_finite() {
+    if let Some((negative, magnitude)) = crate::integers::exact_parsed_int(number) {
+        let mut digits = [0u8; 21];
+        text.extend_from_slice(format_integer(magnitude, negative, &mut digits));
+    } else if number.is_finite() {
         let mut digits = [0; 40];
         let len = crate::runtime::number_format(number, &mut digits);
         text.extend_from_slice(&digits[..len]);
@@ -702,6 +705,13 @@ pub(crate) unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, valu
 /// A number as a JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
+    if let Some((negative, magnitude)) = crate::integers::exact_parsed_int(value) {
+        return if negative {
+            std_json_from_i64((magnitude as i64).wrapping_neg())
+        } else {
+            std_json_from_u64(magnitude)
+        };
+    }
     let node = new_node(NUMBER);
     // SAFETY: number nodes hold an f64 at 8.
     unsafe { *(node.add(8) as *mut f64) = value };

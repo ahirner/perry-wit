@@ -296,11 +296,9 @@ impl<'s> FunctionBuilder<'s> {
             ty if !self.shapes.is_explicit_binding(id) && infer::contains_type_var(ty) => None,
             ty => Some(self.shapes.value_type(ctx, ty)?),
         };
-        let integer = self
-            .shapes
-            .is_explicit_binding(id)
-            .then(|| self.shapes.integer_type(ctx, ty))
-            .flatten();
+        let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
+            self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
+        });
         let expr_expected = integer
             .filter(|int_ty| int_ty.deref(ctx).width() == 64)
             .map(TypeHandle::from)
@@ -308,6 +306,12 @@ impl<'s> FunctionBuilder<'s> {
         let init = init
             .map(|e| self.expression_with(ctx, e, expr_expected))
             .transpose()?;
+        if integer.is_none()
+            && let Some(value) = init
+            && let Some(src) = self.integer64_source(ctx, value)
+        {
+            integer = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok();
+        }
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
         let carrier = match (declared, init) {

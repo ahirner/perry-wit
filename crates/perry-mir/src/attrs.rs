@@ -107,3 +107,12 @@ pub struct FunctionMeta {
     pub specialized_entry: bool,
     pub atomic_construction: bool,
 }
+
+/// Semantic kind of a compiler-generated JSON decoder function.
+#[pliron_attr(name = "perry.json_decoder_kind", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum JsonDecoderKind {
+    Parse,
+    Value,
+    Cursor,
+}

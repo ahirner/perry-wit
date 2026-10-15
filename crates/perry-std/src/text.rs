@@ -522,7 +522,34 @@ fn parse_decimal_prefix(rest: &[u8]) -> Option<(&[u8], perry_abi::number::Decima
     Some((&rest[..mantissa_end], decimal, exponent, at))
 }
 
-/// ECMAScript `parseInt(string, radix)`.
+/// ECMAScript `ToInt32(value)`.
+fn to_int32(value: f64) -> i32 {
+    if !value.is_finite() || value == 0.0 {
+        return 0;
+    }
+    if let Some((negative, magnitude)) = crate::integers::exact_parsed_int(value) {
+        let low = magnitude as i32;
+        return if negative { low.wrapping_neg() } else { low };
+    }
+    let bits = value.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    if !(0..84).contains(&exp) {
+        return 0;
+    }
+    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let low = if exp <= 52 {
+        (mantissa >> (52 - exp)) as i32
+    } else {
+        (mantissa as u32).wrapping_shl((exp - 52) as u32) as i32
+    };
+    if (bits >> 63) != 0 {
+        low.wrapping_neg()
+    } else {
+        low
+    }
+}
+
+/// ECMAScript `parseInt(string, radix)` under the 64-bit exact integer contract.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
     let trimmed = view(string).text.trim_start_matches(space).as_bytes();
@@ -531,11 +558,7 @@ pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
         Some(b'+') => (false, &trimmed[1..]),
         _ => (false, trimmed),
     };
-    let r = if !radix.is_finite() || radix == 0.0 || radix.abs() >= 4_294_967_296.0 {
-        0
-    } else {
-        (radix as i64) as i32
-    };
+    let r = to_int32(radix);
     let (radix, strip_prefix) = if r == 0 {
         (10u32, true)
     } else if !(2..=36).contains(&r) {
@@ -550,33 +573,31 @@ pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
         } else {
             radix
         };
-    if radix == 10 {
-        let mut decimal = perry_abi::number::Decimal::default();
-        let mut len = 0;
-        while let Some(&byte @ b'0'..=b'9') = rest.get(len) {
-            decimal.digit(byte, false);
-            len += 1;
-        }
-        if len == 0 {
-            return f64::NAN;
-        }
-        return decimal.finish(&rest[..len], negative, 0);
-    }
+    let limit = if negative { 1u64 << 63 } else { u64::MAX };
     let mut count = 0usize;
-    let mut value = 0.0f64;
+    let mut magnitude = 0u64;
+    let mut overflow = false;
     for &byte in rest {
         let Some(digit) = ascii_digit(byte, radix) else {
             break;
         };
-        value = value * f64::from(radix) + f64::from(digit);
         count += 1;
+        if !overflow {
+            if let Some(next) = magnitude
+                .checked_mul(u64::from(radix))
+                .and_then(|v| v.checked_add(u64::from(digit)))
+                .filter(|&v| v <= limit)
+            {
+                magnitude = next;
+            } else {
+                overflow = true;
+            }
+        }
     }
-    if count == 0 {
+    if count == 0 || overflow {
         f64::NAN
-    } else if negative {
-        -value
     } else {
-        value
+        crate::integers::encode_parsed_int(negative, magnitude)
     }
 }
 

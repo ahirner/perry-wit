@@ -375,6 +375,26 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.local_binding(id)?.slot)
     }
 
+    pub(super) fn integer64_source(&self, ctx: &Context, value: Value) -> Option<Value> {
+        let def_op = value.defining_op()?;
+        Operation::get_op::<NumericCastOp>(def_op, ctx)?;
+        let src = def_op.deref(ctx).get_operand(0);
+        let int_ty = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok()?;
+        (int_ty.deref(ctx).width() == 64).then_some(src)
+    }
+
+    pub(super) fn load_local(&mut self, ctx: &mut Context, id: LocalId) -> Result<Value> {
+        let binding = self.local_binding(id)?;
+        let loaded = self.load(ctx, binding.slot)?;
+        if let Some(int_ty) = binding.integer
+            && int_ty.deref(ctx).width() == 64
+        {
+            Ok(self.wrap_integer(ctx, loaded, int_ty, loaded.get_type(ctx)))
+        } else {
+            Ok(loaded)
+        }
+    }
+
     pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {
         let op = ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(value)));
         self.append_value(ctx, &op)

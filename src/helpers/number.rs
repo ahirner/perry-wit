@@ -11,6 +11,40 @@ pub extern "C" fn number_remainder(dividend: f64, divisor: f64) -> f64 {
 /// `output` must point to at least forty writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn number_format(value: f64, output: *mut u8) -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bits = value.to_bits();
+        let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+        if (53..=63).contains(&exp) && ((bits >> 32) & 0xfffff) == 0x9_5049 {
+            let ptr = (bits as u32) as usize as *const u8;
+            if !ptr.is_null()
+                && (ptr as usize).is_multiple_of(8)
+                && unsafe { *(ptr.add(12) as *const u32) } == 0x5049_4e54
+            {
+                let mut rest = unsafe { *(ptr as *const u64) };
+                let negative = (bits >> 63) != 0;
+                let mut digits = [0u8; 21];
+                let mut at = digits.len();
+                loop {
+                    at -= 1;
+                    digits[at] = b'0' + (rest % 10) as u8;
+                    rest /= 10;
+                    if rest == 0 {
+                        break;
+                    }
+                }
+                if negative {
+                    at -= 1;
+                    digits[at] = b'-';
+                }
+                let text = &digits[at..];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(text.as_ptr(), output, text.len());
+                }
+                return text.len() as u32;
+            }
+        }
+    }
     // Every i32 has an exact, non-exponential ECMAScript decimal representation.
     let integer = value as i32;
     let mut digits = [0u8; 11];

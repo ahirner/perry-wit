@@ -674,10 +674,7 @@ impl Solver {
                 self.range(id, result, range);
                 return;
             }
-            if let Some(def) = operand.defining_op()
-                && Operation::get_op::<NumericCastOp>(def, ctx).is_some()
-                && let Some(integer) = Integer::from_type(ctx, operand.get_type(ctx))
-            {
+            if let Some(integer) = Integer::from_type(ctx, operand.get_type(ctx)) {
                 self.fact(id, result, Fact::Integer(integer));
                 self.range(id, result, self.analysis.states[id].range(operand));
                 return;

@@ -36,20 +36,24 @@ fn converted_integer(ctx: &Context, value: Value) -> Option<Value> {
     let op = value.defining_op()?;
     Operation::get_op::<NumericCastOp>(op, ctx)?;
     let input = op.deref(ctx).get_operand(0);
-    (value
-        .get_type(ctx)
-        .deref(ctx)
-        .is::<pliron::builtin::types::FP64Type>()
-        && input
-            .get_type(ctx)
+    let val_ty = value.get_type(ctx);
+    let in_ty = input.get_type(ctx);
+    let is_f64_i32 = val_ty.deref(ctx).is::<pliron::builtin::types::FP64Type>()
+        && in_ty
             .deref(ctx)
             .downcast_ref::<IntegerType>()
-            .is_some_and(|ty| ty.width() <= 32))
-    .then_some(input)
+            .is_some_and(|ty| ty.width() <= 32);
+    let is_bigint_i64 = val_ty.deref(ctx).is::<crate::types::BigIntType>()
+        && in_ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 64);
+    (is_f64_i32 || is_bigint_i64).then_some(input)
 }
 
 enum Replacement {
     Value(Value),
+    Cast(Value, pliron::r#type::TypeHandle),
     Bool(bool),
     Compare(CompareKind, Value, Value),
 }
@@ -93,13 +97,17 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
     }
     if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
         let operand = operation.get_operand(0);
-        if operand.get_type(ctx) == operation.get_result(0).get_type(ctx) {
+        let target = operation.get_result(0).get_type(ctx);
+        if operand.get_type(ctx) == target {
             return Some(Replacement::Value(operand));
         }
-        if let Some(inner) = converted_integer(ctx, operand)
-            && inner.get_type(ctx) == operation.get_result(0).get_type(ctx)
-        {
-            return Some(Replacement::Value(inner));
+        if let Some(inner) = converted_integer(ctx, operand) {
+            if inner.get_type(ctx) == target {
+                return Some(Replacement::Value(inner));
+            }
+            if target.deref(ctx).is::<IntegerType>() {
+                return Some(Replacement::Cast(inner, target));
+            }
         }
     }
     None
@@ -123,6 +131,11 @@ impl MatchRewrite for Canonicalize {
         };
         let value = match replacement {
             Replacement::Value(value) => value,
+            Replacement::Cast(inner, target) => {
+                let cast = NumericCastOp::new(ctx, inner, target).get_operation();
+                rewriter.insert_operation(ctx, cast);
+                cast.deref(ctx).get_result(0)
+            }
             Replacement::Bool(flag) => {
                 let ty = IntegerType::get(ctx, 1, Signedness::Signless);
                 let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(flag), bw(1)));
