@@ -865,6 +865,17 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
             (Kind::Record, field) => {
+                if field == "size"
+                    && (crate::collections::map_box_record(ctx, value.get_type(ctx)).is_some()
+                        || crate::collections::set_box_record(ctx, value.get_type(ctx)).is_some())
+                {
+                    return self.collection_size(ctx, value);
+                }
+                if field == "length"
+                    && crate::collections::is_collection_or_view_record(ctx, value.get_type(ctx))
+                {
+                    return self.collection_backing_length(ctx, value);
+                }
                 if field == "length"
                     && let Ok(record) =
                         TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
@@ -927,6 +938,10 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
             }
             Kind::Record => {
+                if crate::collections::is_collection_or_view_record(ctx, array.get_type(ctx)) {
+                    let idx = self.number_operand(ctx, index)?;
+                    return self.collection_view_element_at(ctx, array, idx);
+                }
                 let field = match index {
                     Expr::String(name) => name.clone(),
                     Expr::Number(n) if n.fract() == 0.0 && *n >= 0.0 => {

@@ -84,6 +84,7 @@ impl OperationKind {
         if Operation::get_op::<WrapOp>(op, ctx).is_some()
             || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
             || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
             || Operation::get_op::<AwaitOp>(op, ctx).is_some()
         {
             return Self::Alias { operand: 0 };
@@ -766,8 +767,13 @@ impl Solver {
                 ));
             }
             OperationKind::Return => {
+                let is_external =
+                    self.analysis.bodies[&self.analysis.keys[id].function].external;
                 for (position, value) in operation.operands().enumerate() {
                     if let Some(from) = self.heap_value(ctx, id, value) {
+                        if is_external {
+                            self.open_aliases(from, reader);
+                        }
                         let to = if let Some(to) = self.analysis.states[id].results[position].heap {
                             to
                         } else {
@@ -805,6 +811,263 @@ impl Solver {
                 }
             }
             OperationKind::None => {}
+        }
+        None
+    }
+
+    pub(super) fn unify_heap_objects(&mut self, ctx: &Context) -> bool {
+        let mut changed = false;
+        let num_cells = self.analysis.heap.cells.len();
+        for cell_idx in 0..num_cells {
+            let summarized = self.analysis.heap.cells[cell_idx].summarized;
+            let objects: Vec<usize> = self.analysis.heap.cells[cell_idx]
+                .objects
+                .iter()
+                .copied()
+                .collect();
+            if objects.is_empty() {
+                continue;
+            }
+            if summarized
+                || objects
+                    .iter()
+                    .any(|&obj| self.analysis.heap.objects[obj].open)
+            {
+                for &obj in &objects {
+                    if !self.analysis.heap.objects[obj].open {
+                        self.analysis.heap.objects[obj].open = true;
+                        self.work.enqueue(Work::OpenObject(obj));
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+            if objects.len() <= 1 {
+                continue;
+            }
+            let slot_count = self.analysis.heap.objects[objects[0]].contents.slots().len();
+            for slot_idx in 0..slot_count {
+                let mut has_numeric = false;
+                for &obj in &objects {
+                    if let Some(&slot) = self.analysis.heap.objects[obj]
+                        .contents
+                        .slots()
+                        .get(slot_idx)
+                        && self.analysis.heap.cells[slot].domain == Fact::Numeric
+                    {
+                        has_numeric = true;
+                        break;
+                    }
+                }
+                if has_numeric {
+                    for &obj in &objects {
+                        if let Some(&slot) = self.analysis.heap.objects[obj]
+                            .contents
+                            .slots()
+                            .get(slot_idx)
+                            && self.analysis.heap.cells[slot].domain != Fact::Numeric
+                        {
+                            self.slot_domain(slot, Fact::Numeric);
+                            self.slot_range(ctx, slot, Range::Unknown);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
+fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
+    if ty.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
+        return Some(crate::types::NumericType::get(ctx).into());
+    }
+    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>()
+        && opt
+            .value()
+            .deref(ctx)
+            .is::<pliron::builtin::types::FP64Type>()
+    {
+        return Some(
+            crate::types::OptionalType::get_with(
+                ctx,
+                crate::types::NumericType::get(ctx).into(),
+                opt.absence(),
+            )
+            .into(),
+        );
+    }
+    None
+}
+
+impl ProgramFacts {
+    pub(super) fn specialized_cell_type(
+        &self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        cell: usize,
+    ) -> Option<TypeHandle> {
+        let c = &self.heap.cells[cell];
+        if c.summarized
+            || c.objects.is_empty()
+            || c.objects.iter().any(|&o| self.heap.objects[o].open)
+        {
+            return None;
+        }
+        if let Some(arr) = ty.deref(ctx).downcast_ref::<ArrayType>() {
+            let elem_ty = arr.element();
+            let all_numeric = c.objects.iter().all(|&o| {
+                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
+                    return false;
+                };
+                self.heap.cells[*element].domain == Fact::Numeric
+            });
+            if all_numeric && let Some(new_elem) = numeric_type_for(ctx, elem_ty) {
+                return Some(ArrayType::get(ctx, new_elem).into());
+            }
+            return None;
+        }
+        let (rec_name, is_tuple, fields) = {
+            let deref = ty.deref(ctx);
+            let rec = deref.downcast_ref::<RecordType>()?;
+            (rec.name().clone(), rec.is_tuple(), rec.fields().ok()?.to_vec())
+        };
+        let mut changed = false;
+        let mut spec_fields = Vec::with_capacity(fields.len());
+        let mut spec_tag = String::new();
+        for (idx, (fname, fty)) in fields.into_iter().enumerate() {
+            let all_numeric = c.objects.iter().all(|&o| {
+                let Contents::Record(slots) = &self.heap.objects[o].contents else {
+                    return false;
+                };
+                slots
+                    .get(idx)
+                    .is_some_and(|&s| self.heap.cells[s].domain == Fact::Numeric)
+            });
+            if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
+                spec_fields.push((fname, new_fty));
+                spec_tag.push_str(&format!("_{idx}"));
+                changed = true;
+            } else {
+                spec_fields.push((fname, fty));
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let new_name: Identifier = format!("{rec_name}__num{spec_tag}")
+            .try_into()
+            .expect("record name");
+        let handle = if is_tuple {
+            RecordType::get_tuple(ctx, new_name, Some(spec_fields)).ok()?
+        } else {
+            RecordType::get(ctx, new_name, Some(spec_fields)).ok()?
+        };
+        Some(handle.into())
+    }
+
+    pub(super) fn specialized_value_type(
+        &self,
+        ctx: &mut Context,
+        id: usize,
+        value: Value,
+    ) -> Option<TypeHandle> {
+        let ty = value.get_type(ctx);
+        if ty.deref(ctx).is::<RecordType>() || ty.deref(ctx).is::<ArrayType>() {
+            let cell = *self.states[id].heap_values.get(&value)?;
+            return self.specialized_cell_type(ctx, ty, cell);
+        }
+        let state = &self.states[id];
+        if let Some(op) = value.defining_op() {
+            if let Some(fg) = Operation::get_op::<FieldGetOp>(op, ctx) {
+                let base = op.deref(ctx).get_operand(0);
+                let base_spec = self.specialized_value_type(ctx, id, base)?;
+                let field_name = fg.field(ctx);
+                let field_ty = base_spec
+                    .deref(ctx)
+                    .downcast_ref::<RecordType>()?
+                    .fields()
+                    .ok()?
+                    .iter()
+                    .find(|(n, _)| *n == field_name)?
+                    .1;
+                return (field_ty != ty).then_some(field_ty);
+            }
+            if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
+                let base = op.deref(ctx).get_operand(0);
+                let base_spec = self.specialized_value_type(ctx, id, base)?;
+                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
+                return (elem_ty != ty).then_some(elem_ty);
+            }
+            if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+                let base = op.deref(ctx).get_operand(0);
+                let base_spec = self.specialized_value_type(ctx, id, base)?;
+                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
+                let opt_ty: TypeHandle =
+                    crate::types::OptionalType::get(ctx, elem_ty).into();
+                return (opt_ty != ty).then_some(opt_ty);
+            }
+            if Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
+                || Operation::get_op::<AwaitOp>(op, ctx).is_some()
+            {
+                return None;
+            }
+            if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx) {
+                let ok = match intrinsic.intrinsic(ctx) {
+                    Some(
+                        crate::intrinsics::Intrinsic::BigIntNegate
+                        | crate::intrinsics::Intrinsic::BytesAt
+                        | crate::intrinsics::Intrinsic::ParseInt,
+                    ) => true,
+                    Some(
+                        crate::intrinsics::Intrinsic::MathFloor
+                        | crate::intrinsics::Intrinsic::MathCeil
+                        | crate::intrinsics::Intrinsic::MathTrunc
+                        | crate::intrinsics::Intrinsic::MathRound
+                        | crate::intrinsics::Intrinsic::MathAbs,
+                    ) => {
+                        let arg = op.deref(ctx).get_operand(0);
+                        state.representation(arg).is_some() || state.fact(arg) == Fact::Numeric
+                    }
+                    Some(
+                        crate::intrinsics::Intrinsic::MathMin
+                        | crate::intrinsics::Intrinsic::MathMax,
+                    ) => {
+                        let lhs = op.deref(ctx).get_operand(0);
+                        let rhs = op.deref(ctx).get_operand(1);
+                        (state.representation(lhs).is_some()
+                            && state.representation(rhs).is_some())
+                            || state.fact(lhs) == Fact::Numeric
+                            || state.fact(rhs) == Fact::Numeric
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return None;
+                }
+            }
+        }
+        if state.fact(value) == Fact::Numeric {
+            return numeric_type_for(ctx, ty);
+        }
+        None
+    }
+
+    pub(super) fn specialized_result_type(
+        &self,
+        ctx: &mut Context,
+        id: usize,
+        pos: usize,
+        ty: TypeHandle,
+    ) -> Option<TypeHandle> {
+        let res = &self.states[id].results[pos];
+        if ty.deref(ctx).is::<RecordType>() || ty.deref(ctx).is::<ArrayType>() {
+            let cell = res.heap?;
+            return self.specialized_cell_type(ctx, ty, cell);
+        }
+        if res.domain == Fact::Numeric {
+            return numeric_type_for(ctx, ty);
         }
         None
     }

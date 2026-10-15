@@ -27,12 +27,28 @@ struct FunctionEnv<'a> {
     integer_aliases: &'a HashMap<String, HirType>,
     imported_types: &'a HashMap<String, String>,
     foreign: &'a HashMap<String, crate::hir::Foreign>,
+    locations: &'a crate::locations::Locations<'a>,
+    fn_name: &'a str,
+    map_ctor_idx: usize,
+    set_ctor_idx: usize,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;
 const BIGINT_TYPE: HirType = HirType::BigInt;
 
 impl<'a> FunctionEnv<'a> {
+    pub(super) fn next_map_ctor(&mut self) -> Option<(HirType, HirType)> {
+        let idx = self.map_ctor_idx;
+        self.map_ctor_idx += 1;
+        self.locations.map_ctor(self.fn_name, idx)
+    }
+
+    pub(super) fn next_set_ctor(&mut self) -> Option<HirType> {
+        let idx = self.set_ctor_idx;
+        self.set_ctor_idx += 1;
+        self.locations.set_ctor(self.fn_name, idx)
+    }
+
     fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
         match ty {
             HirType::Named(name) => match self.integer_aliases.get(name) {
@@ -370,6 +386,11 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
                     env.locals.insert(*id, inferred);
                 }
             }
+            Stmt::Let {
+                init: Some(init), ..
+            } => {
+                let _ = expression(init, env);
+            }
             Stmt::Expr(Expr::LocalSet(id, value))
                 if env
                     .base
@@ -382,29 +403,46 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
                     env.locals.insert(*id, inferred);
                 }
             }
+            Stmt::Expr(expr) | Stmt::Throw(expr) => {
+                let _ = expression(expr, env);
+            }
             Stmt::Return(value) => {
+                let ret_ty = value
+                    .as_ref()
+                    .map_or(HirType::Void, |value| expression(value, env));
                 if let ScanMode::Returns(returned) = mode {
-                    returned.push(
-                        value
-                            .as_ref()
-                            .map_or(HirType::Void, |value| expression(value, env)),
-                    );
+                    returned.push(ret_ty);
                 }
             }
             Stmt::If {
+                condition,
                 then_branch,
                 else_branch,
-                ..
             } => {
+                let _ = expression(condition, env);
                 scan(then_branch, env, mode);
                 if let Some(body) = else_branch {
                     scan(body, env, mode);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => scan(body, env, mode),
-            Stmt::For { init, body, .. } => {
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                let _ = expression(condition, env);
+                scan(body, env, mode);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+            } => {
                 if let Some(init) = init {
                     scan(std::slice::from_mut(init), env, mode);
+                }
+                if let Some(condition) = condition {
+                    let _ = expression(condition, env);
+                }
+                if let Some(update) = update {
+                    let _ = expression(update, env);
                 }
                 scan(body, env, mode);
             }
@@ -421,8 +459,15 @@ fn scan(statements: &mut [Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<
                     scan(body, env, mode);
                 }
             }
-            Stmt::Switch { cases, .. } => {
+            Stmt::Switch {
+                discriminant,
+                cases,
+            } => {
+                let _ = expression(discriminant, env);
                 for case in cases {
+                    if let Some(test) = &case.test {
+                        let _ = expression(test, env);
+                    }
                     scan(&mut case.body, env, mode);
                 }
             }
@@ -516,6 +561,10 @@ pub(super) fn unresolved_types(
             integer_aliases: &integer_aliases,
             foreign,
             imported_types: &imported_types,
+            locations,
+            fn_name: crate::MAIN,
+            map_ctor_idx: 0,
+            set_ctor_idx: 0,
         };
         scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     }
@@ -539,6 +588,10 @@ pub(super) fn unresolved_types(
                 integer_aliases: &integer_aliases,
                 foreign,
                 imported_types: &imported_types,
+                locations,
+                fn_name: &function.name,
+                map_ctor_idx: 0,
+                set_ctor_idx: 0,
             };
             let mut returned = Vec::new();
             scan(
@@ -604,6 +657,10 @@ pub(super) fn unresolved_types(
         integer_aliases: &integer_aliases,
         foreign,
         imported_types: &imported_types,
+        locations,
+        fn_name: crate::MAIN,
+        map_ctor_idx: 0,
+        set_ctor_idx: 0,
     };
     scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
@@ -621,6 +678,10 @@ pub(super) fn unresolved_types(
             integer_aliases: &integer_aliases,
             foreign,
             imported_types: &imported_types,
+            locations,
+            fn_name: &function.name,
+            map_ctor_idx: 0,
+            set_ctor_idx: 0,
         };
         scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
     }

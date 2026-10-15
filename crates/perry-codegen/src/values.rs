@@ -49,10 +49,45 @@ impl<T: Copy> Carriers<T> {
             },
         })
     }
+
+    pub(crate) fn map<U>(self, mut f: impl FnMut(T) -> U) -> Carriers<U> {
+        match self {
+            Self::Scalar(value) => Carriers::Scalar(f(value)),
+            Self::Numeric { tag, payload } => Carriers::Numeric {
+                tag: f(tag),
+                payload: f(payload),
+            },
+        }
+    }
+
+    pub(crate) fn zip<U: Copy>(self, other: Carriers<U>) -> Result<Carriers<(T, U)>> {
+        match (self, other) {
+            (Self::Scalar(a), Carriers::Scalar(b)) => Ok(Carriers::Scalar((a, b))),
+            (
+                Self::Numeric {
+                    tag: at,
+                    payload: ap,
+                },
+                Carriers::Numeric {
+                    tag: bt,
+                    payload: bp,
+                },
+            ) => Ok(Carriers::Numeric {
+                tag: (at, bt),
+                payload: (ap, bp),
+            }),
+            _ => Err(anyhow!("carrier shape mismatch")),
+        }
+    }
+}
+
+pub(crate) fn is_numeric_type(ctx: &Context, ty: TypeHandle) -> bool {
+    let inner = crate::repr::optional_inner(ctx, ty).unwrap_or(ty);
+    inner.deref(ctx).is::<NumericType>()
 }
 
 pub(crate) fn carriers(ctx: &Context, ty: TypeHandle) -> Result<Carriers<TypeHandle>> {
-    if ty.deref(ctx).is::<NumericType>() {
+    if is_numeric_type(ctx, ty) {
         Ok(Carriers::Numeric {
             tag: IntegerType::get(ctx, 32, Signedness::Signless).into(),
             payload: IntegerType::get(ctx, 64, Signedness::Signless).into(),

@@ -106,15 +106,18 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
             .get_type(ctx)
             .deref(ctx)
             .is::<crate::types::NumericType>()
+            && crate::optional::optional_value(ctx, target).is_none()
         {
             let inner = operand.defining_op()?;
             Operation::get_op::<NumericCastOp>(inner, ctx)?;
             let input = inner.deref(ctx).get_operand(0);
-            return Some(if input.get_type(ctx) == target {
-                Replacement::Value(input)
-            } else {
-                Replacement::Cast(input, target)
-            });
+            if crate::optional::optional_value(ctx, input.get_type(ctx)).is_none() {
+                return Some(if input.get_type(ctx) == target {
+                    Replacement::Value(input)
+                } else {
+                    Replacement::Cast(input, target)
+                });
+            }
         }
         if let Some(inner) = converted_integer(ctx, operand) {
             if inner.get_type(ctx) == target {

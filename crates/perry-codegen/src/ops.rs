@@ -166,7 +166,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(compare) = Operation::get_op::<MirCompareOp>(op, ctx) {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
             let kind = compare.kind(ctx);
-            if mir_ty.deref(ctx).is::<perry_mir::types::NumericType>() {
+            if crate::values::is_numeric_type(ctx, mir_ty) {
                 let value = self.numeric_comparison(ctx, op, kind)?;
                 self.define(ctx, op, value);
                 return Ok(());

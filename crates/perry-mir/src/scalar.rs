@@ -182,6 +182,7 @@ impl Verify for NumericCastOp {
         }
         for value in op.operands().chain(op.results()) {
             let ty = value.get_type(ctx);
+            let ty = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
             let ty = ty.deref(ctx);
             if !ty.is::<crate::types::NumericType>()
                 && !ty.is::<pliron::builtin::types::FP64Type>()

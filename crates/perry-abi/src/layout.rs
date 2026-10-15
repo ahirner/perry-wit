@@ -131,4 +131,5 @@ pub mod numeric {
     pub const UNSIGNED: i32 = 2;
     pub const UNDEFINED: i32 = 3;
     pub const NULL: i32 = 4;
+    pub const OMITTED: i32 = 5;
 }

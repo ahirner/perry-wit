@@ -154,10 +154,11 @@ pub fn lower_sources(
     let mut locations = loaded.locations;
     locations.collect(&ast);
     source::validate(&ast, &locations)?;
+    collections::preserve_type_args(&mut ast);
+    let spans = source::inferred_bindings(&ast);
     streams::lower(&mut ast)?;
     decoder::preserve_options(&mut ast)?;
     array_methods::preserve_arguments(&mut ast);
-    collections::preserve_type_args(&mut ast);
     let mut hir = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()
@@ -172,7 +173,6 @@ pub fn lower_sources(
             None => error,
         }
     })?;
-    let spans = source::inferred_bindings(&ast);
     let inferred = hir
         .local_source_spans
         .iter()

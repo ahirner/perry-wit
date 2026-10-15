@@ -58,6 +58,9 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     if deref.is::<FP64Type>() {
         return Ok(Repr::F64);
     }
+    if deref.is::<perry_mir::types::NumericType>() {
+        return Ok(Repr::I32);
+    }
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
         return match int.width() {
             1 => Ok(Repr::Bool),

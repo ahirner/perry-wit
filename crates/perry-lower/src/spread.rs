@@ -20,13 +20,13 @@ impl<'s> FunctionBuilder<'s> {
             None
         };
         let val = self.expression_with(ctx, source, expected)?;
-        if let Some((elem_ty, _)) = crate::collections::set_entry_type(ctx, val.get_type(ctx)) {
+        let val_ty = optional_value(ctx, val.get_type(ctx)).unwrap_or_else(|| val.get_type(ctx));
+        if crate::collections::is_collection_or_view_record(ctx, val_ty)
+            || crate::collections::set_entry_type(ctx, val_ty).is_some()
+            || crate::collections::map_entry_types(ctx, val_ty).is_some()
+        {
             let val = self.defined(ctx, val)?;
-            return self.set_values(ctx, val, elem_ty);
-        }
-        if crate::collections::map_entry_types(ctx, val.get_type(ctx)).is_some() {
-            let val = self.defined(ctx, val)?;
-            return self.kv_entries(ctx, val);
+            return self.materialize_collection_to_array(ctx, val);
         }
         Ok(val)
     }
@@ -95,6 +95,31 @@ impl<'s> FunctionBuilder<'s> {
                             && type_args.len() == 1 =>
                         {
                             type_args.pop().unwrap()
+                        }
+                        HirType::Generic {
+                            base,
+                            mut type_args,
+                        } if base == "MapKeys" && type_args.len() == 2 => {
+                            type_args.swap_remove(0)
+                        }
+                        HirType::Generic {
+                            base,
+                            mut type_args,
+                        } if base == "MapValues" && type_args.len() == 2 => {
+                            type_args.pop().unwrap()
+                        }
+                        HirType::Generic {
+                            base,
+                            mut type_args,
+                        } if base == "SetEntries" && type_args.len() == 1 => {
+                            let t = type_args.pop().unwrap();
+                            HirType::Tuple(vec![t.clone(), t])
+                        }
+                        HirType::Generic { base, type_args }
+                            if matches!(base.as_str(), "Map" | "ReadonlyMap")
+                                && type_args.len() == 2 =>
+                        {
+                            HirType::Tuple(type_args)
                         }
                         _ => return None,
                     }

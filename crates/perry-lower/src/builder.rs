@@ -71,6 +71,9 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
+    pub(super) fn_name: String,
+    pub(super) map_ctor_idx: usize,
+    pub(super) set_ctor_idx: usize,
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -188,6 +191,9 @@ impl<'s> FunctionBuilder<'s> {
             result: signature.result,
             is_async: signature.is_async,
             labels: 0,
+            fn_name: signature.name.to_string(),
+            map_ctor_idx: 0,
+            set_ctor_idx: 0,
         }
     }
 }

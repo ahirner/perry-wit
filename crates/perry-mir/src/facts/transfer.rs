@@ -129,7 +129,7 @@ impl Solver {
         let (new, expanded, widened) = old.join_step(
             range,
             state.representation(value),
-            state.summarized || expansions >= 1,
+            expansions >= 1,
         );
         if expanded {
             self.analysis.states[id]
@@ -308,7 +308,7 @@ impl Solver {
                 let (range, expanded, widened) = old.range.join_step(
                     self.analysis.states[id].range(value),
                     domain.integer(),
-                    self.analysis.states[id].summarized || old.expansions >= 1,
+                    old.expansions >= 1,
                 );
                 if expanded {
                     self.analysis.states[id].results[position].expansions =
@@ -483,6 +483,30 @@ impl Solver {
             }
             return;
         }
+        if let Some(binary) = Operation::get_op::<BinaryOp>(op, ctx)
+            && binary.kind(ctx) == BinaryKind::Rem
+        {
+            let result = operation.get_result(0);
+            let lhs = operation.get_operand(0);
+            let rhs = operation.get_operand(1);
+            let fact = if self.analysis.keys[id].specialize
+                && (self.analysis.states[id].fact(lhs) == Fact::Numeric
+                    || self.analysis.states[id].fact(rhs) == Fact::Numeric)
+            {
+                Fact::Numeric
+            } else {
+                Fact::Original
+            };
+            let range = arithmetic_range(
+                BinaryKind::Rem,
+                self.analysis.states[id].range(lhs),
+                self.analysis.states[id].range(rhs),
+                None,
+            );
+            self.fact(id, result, fact);
+            self.range(id, result, range);
+            return;
+        }
         if Operation::get_op::<IntrinsicOp>(op, ctx)
             .is_some_and(|op| op.intrinsic(ctx) == Some(Intrinsic::BigIntNegate))
         {
@@ -525,6 +549,8 @@ impl Solver {
                         Fact::Integer(integer)
                     } else if let Some(req) = required {
                         Fact::Integer(req)
+                    } else if self.analysis.keys[id].specialize && input_fact == Fact::Numeric {
+                        Fact::Numeric
                     } else {
                         Fact::Original
                     };

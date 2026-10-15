@@ -201,8 +201,8 @@ impl Fact {
     pub(super) fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
-            (Self::Original, _) | (_, Self::Original) => Self::Original,
             (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
+            (Self::Original, _) | (_, Self::Original) => Self::Original,
             (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
                 Self::Literal { negative: a || b }
             }
@@ -498,11 +498,15 @@ impl Solver {
         if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
             return Fact::Integer(integer);
         }
-        if facts().any(|fact| fact == Fact::Original) {
-            return Fact::Original;
-        }
         if facts().any(|fact| fact == Fact::Bottom) {
             return Fact::Bottom;
+        }
+        let required = state.required.get(&result).copied();
+        if self.analysis.keys[id].specialize && facts().any(|fact| fact == Fact::Numeric) {
+            return required.map_or(Fact::Numeric, Fact::Integer);
+        }
+        if facts().any(|fact| fact == Fact::Original) {
+            return Fact::Original;
         }
         let negative = inputs.iter().any(|&v| {
             matches!(state.fact(v), Fact::Literal { negative: true })
@@ -514,10 +518,6 @@ impl Solver {
             } else {
                 Fact::Original
             };
-        }
-        let required = state.required.get(&result).copied();
-        if facts().any(|fact| fact == Fact::Numeric) {
-            return required.map_or(Fact::Numeric, Fact::Integer);
         }
         let input = facts().filter_map(Fact::integer).reduce(Integer::common);
         match (input, required) {

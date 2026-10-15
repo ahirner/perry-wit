@@ -201,7 +201,6 @@ struct State {
     facts: HashMap<Value, Fact>,
     ranges: HashMap<Value, Range>,
     range_expansions: HashMap<Value, u8>,
-    summarized: bool,
     required: HashMap<Value, Integer>,
     original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
@@ -272,6 +271,10 @@ impl ProgramFacts {
                 Range::Bounds(Interval { lower: 0.., .. })
             )
     }
+
+    pub fn context_count(&self, function: &Identifier) -> usize {
+        self.keys.iter().filter(|k| &k.function == function).count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -313,35 +316,75 @@ struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
+    summary_contexts: HashMap<Key, usize>,
     work: Worklist,
     width_defaults: Vec<(usize, usize, Value)>,
 }
 
 impl Solver {
+    fn summary_key(&self, key: &Key) -> Key {
+        let body = &self.analysis.bodies[&key.function];
+        let common = key
+            .args
+            .iter()
+            .copied()
+            .flatten()
+            .chain(key.results.iter().filter_map(|r| r.integer()))
+            .reduce(Integer::common);
+        let args = key
+            .args
+            .iter()
+            .enumerate()
+            .map(|(idx, arg)| {
+                if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
+                    Some(declared)
+                } else {
+                    arg.and(common)
+                }
+            })
+            .collect();
+        Key {
+            function: key.function.clone(),
+            args,
+            numeric_args: key.numeric_args.clone(),
+            results: key.results.clone(),
+            specialize: true,
+        }
+    }
+
     fn context(&mut self, ctx: &Context, key: Key) -> usize {
         if let Some(&id) = self.contexts.get(&key) {
             return id;
         }
-        let mut summarized = false;
         if key.specialize {
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
             if *count >= MAX_PRECISE_CONTEXTS {
                 self.analysis.summarized_contexts += 1;
-                summarized = true;
-            } else {
-                *count += 1;
+                let summary = self.summary_key(&key);
+                let id = if let Some(&id) = self.contexts.get(&summary) {
+                    id
+                } else if let Some(&id) = self.summary_contexts.get(&summary) {
+                    id
+                } else {
+                    let id = self.allocate_context(ctx, summary.clone());
+                    self.summary_contexts.insert(summary.clone(), id);
+                    self.contexts.insert(summary, id);
+                    id
+                };
+                self.contexts.insert(key, id);
+                return id;
             }
+            *count += 1;
         }
-        let id = self.allocate_context(ctx, key.clone(), summarized);
+        let id = self.allocate_context(ctx, key.clone());
         self.contexts.insert(key, id);
         id
     }
 
-    fn allocate_context(&mut self, ctx: &Context, key: Key, summarized: bool) -> usize {
+    fn allocate_context(&mut self, ctx: &Context, key: Key) -> usize {
         let id = self.analysis.keys.len();
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
-            summarized,
             results: vec![ResultFact::default(); key.results.len()],
             summary: crate::effects::Summary {
                 effects: body.effects.effects,
@@ -349,6 +392,18 @@ impl Solver {
             },
             ..State::default()
         };
+        for constraint in &body.constraints {
+            if let Constraint::Op { op, .. } = *constraint
+                && Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some()
+            {
+                for (position, value) in op.deref(ctx).operands().enumerate() {
+                    if let Some(required) = key.results.get(position).and_then(|r| r.integer()) {
+                        let entry = state.required.entry(value).or_insert(required);
+                        *entry = entry.common(required);
+                    }
+                }
+            }
+        }
         for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
             if body.external {
                 state
@@ -470,6 +525,7 @@ impl Analysis for ProgramFacts {
             },
             contexts: HashMap::new(),
             precise_counts: HashMap::new(),
+            summary_contexts: HashMap::new(),
             work: Worklist::default(),
             width_defaults: Vec::new(),
         };
@@ -592,11 +648,16 @@ impl Analysis for ProgramFacts {
             solver.analysis.roots.push((function, id));
         }
         loop {
-            while let Some(item) = solver.work.pop() {
-                solver.analysis.constraint_visits += 1;
-                match item {
-                    Work::Operation(id, index) => solver.process(ctx, id, index),
-                    Work::OpenObject(object) => solver.open_object(ctx, object),
+            loop {
+                while let Some(item) = solver.work.pop() {
+                    solver.analysis.constraint_visits += 1;
+                    match item {
+                        Work::Operation(id, index) => solver.process(ctx, id, index),
+                        Work::OpenObject(object) => solver.open_object(ctx, object),
+                    }
+                }
+                if !solver.unify_heap_objects(ctx) {
+                    break;
                 }
             }
             // Every default is applied after propagation settles, before the next queue drain.

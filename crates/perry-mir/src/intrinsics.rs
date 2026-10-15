@@ -740,7 +740,8 @@ impl Verify for IntrinsicOp {
             | Intrinsic::MathMax => {
                 operands.len() == ins.len()
                     && results.len() == 1
-                    && results[0].deref(ctx).is::<IntegerType>()
+                    && (results[0].deref(ctx).is::<IntegerType>()
+                        || results[0].deref(ctx).is::<crate::types::NumericType>())
                     && operands.iter().all(|&t| t == results[0])
             }
             Intrinsic::BytesAt => {

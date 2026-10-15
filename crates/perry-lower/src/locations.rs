@@ -16,6 +16,8 @@ pub(super) struct Locations<'s> {
     calls: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
+    map_ctors: HashMap<String, Vec<Option<(perry_hir::types::Type, perry_hir::types::Type)>>>,
+    set_ctors: HashMap<String, Vec<Option<perry_hir::types::Type>>>,
     async_init: bool,
 }
 
@@ -26,6 +28,26 @@ impl<'s> Locations<'s> {
 
     pub(super) fn async_init(&self) -> bool {
         self.async_init
+    }
+
+    pub(super) fn map_ctor(
+        &self,
+        fn_name: &str,
+        index: usize,
+    ) -> Option<(perry_hir::types::Type, perry_hir::types::Type)> {
+        self.map_ctors
+            .get(fn_name)
+            .and_then(|list| list.get(index))
+            .cloned()
+            .flatten()
+    }
+
+    pub(super) fn set_ctor(&self, fn_name: &str, index: usize) -> Option<perry_hir::types::Type> {
+        self.set_ctors
+            .get(fn_name)
+            .and_then(|list| list.get(index))
+            .cloned()
+            .flatten()
     }
 
     pub(super) fn has_explicit_return(&self, name: &str) -> bool {
@@ -103,19 +125,26 @@ impl<'s> Locations<'s> {
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         use perry_parser::swc_ecma_ast as ast;
         use swc_ecma_visit::{Visit, VisitWith};
-        struct Collector<'a, 's>(&'a mut Locations<'s>);
+        struct Collector<'a, 's> {
+            locations: &'a mut Locations<'s>,
+            current_fn: String,
+        }
         impl Visit for Collector<'_, '_> {
             fn visit_fn_decl(&mut self, function: &ast::FnDecl) {
-                self.0.functions.insert(
-                    function.ident.sym.to_string(),
+                let name = function.ident.sym.to_string();
+                self.locations.functions.insert(
+                    name.clone(),
                     FunctionInfo {
                         span: function.function.span,
                         explicit_return: function.function.return_type.is_some(),
                     },
                 );
+                let prev = std::mem::replace(&mut self.current_fn, name);
                 function.visit_children_with(self);
+                self.current_fn = prev;
             }
             fn visit_var_declarator(&mut self, decl: &ast::VarDeclarator) {
+                let mut fn_name = None;
                 if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
                     let info = match &**init {
                         ast::Expr::Arrow(arrow) => Some(FunctionInfo {
@@ -129,47 +158,93 @@ impl<'s> Locations<'s> {
                         _ => None,
                     };
                     if let Some(info) = info {
-                        self.0
-                            .functions
-                            .entry(ident.id.sym.to_string())
-                            .or_insert(info);
+                        let name = ident.id.sym.to_string();
+                        self.locations.functions.entry(name.clone()).or_insert(info);
+                        if self.current_fn == crate::MAIN {
+                            fn_name = Some(name);
+                        }
                     }
                 }
-                decl.visit_children_with(self);
+                if let Some(name) = fn_name {
+                    let prev = std::mem::replace(&mut self.current_fn, name);
+                    decl.visit_children_with(self);
+                    self.current_fn = prev;
+                } else {
+                    decl.visit_children_with(self);
+                }
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    self.0.calls.insert(call.span.lo.0, call.span);
+                    self.locations.calls.insert(call.span.lo.0, call.span);
                 }
                 call.visit_children_with(self);
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
                 if new_expr.span.lo.0 != 0 {
-                    self.0.calls.insert(new_expr.span.lo.0, new_expr.span);
+                    self.locations.calls.insert(new_expr.span.lo.0, new_expr.span);
+                }
+                if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+                    if ident.sym.as_ref() == "Map" {
+                        let entry = new_expr.type_args.as_ref().and_then(|ta| {
+                            if ta.params.len() == 2 {
+                                Some((
+                                    crate::collections::ts_type_to_hir(&ta.params[0])?,
+                                    crate::collections::ts_type_to_hir(&ta.params[1])?,
+                                ))
+                            } else {
+                                None
+                            }
+                        });
+                        self.locations
+                            .map_ctors
+                            .entry(self.current_fn.clone())
+                            .or_default()
+                            .push(entry);
+                    } else if ident.sym.as_ref() == "Set" {
+                        let entry = new_expr.type_args.as_ref().and_then(|ta| {
+                            if ta.params.len() == 1 {
+                                crate::collections::ts_type_to_hir(&ta.params[0])
+                            } else {
+                                None
+                            }
+                        });
+                        self.locations
+                            .set_ctors
+                            .entry(self.current_fn.clone())
+                            .or_default()
+                            .push(entry);
+                    }
                 }
                 new_expr.visit_children_with(self);
             }
             fn visit_ts_interface_decl(&mut self, decl: &ast::TsInterfaceDecl) {
-                self.0.types.insert(decl.id.sym.to_string(), decl.span);
+                self.locations
+                    .types
+                    .insert(decl.id.sym.to_string(), decl.span);
                 decl.visit_children_with(self);
             }
             fn visit_ts_type_alias_decl(&mut self, decl: &ast::TsTypeAliasDecl) {
-                self.0.types.insert(decl.id.sym.to_string(), decl.span);
+                self.locations
+                    .types
+                    .insert(decl.id.sym.to_string(), decl.span);
                 decl.visit_children_with(self);
             }
             fn visit_class_decl(&mut self, decl: &ast::ClassDecl) {
-                self.0
+                self.locations
                     .types
                     .insert(decl.ident.sym.to_string(), decl.class.span);
                 decl.visit_children_with(self);
             }
             fn visit_import_decl(&mut self, import: &ast::ImportDecl) {
-                self.0
+                self.locations
                     .imports
                     .insert(import.src.value.to_string_lossy().into_owned(), import.span);
             }
         }
-        module.visit_with(&mut Collector(self));
+        module.visit_with(&mut Collector {
+            locations: self,
+            current_fn: crate::MAIN.to_string(),
+        });
         struct TopLevelAwait(bool);
         impl Visit for TopLevelAwait {
             fn visit_await_expr(&mut self, _: &ast::AwaitExpr) {

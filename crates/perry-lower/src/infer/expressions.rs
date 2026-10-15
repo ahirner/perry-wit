@@ -206,14 +206,17 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         }
         Expr::New {
             class_name, args, ..
-        } if class_name == "Map" || collections::parse_typed_map_callee(class_name).is_some() => {
-            if let Some((k, v)) = collections::parse_typed_map_callee(class_name) {
+        } if class_name == "Map" => {
+            let explicit = env.next_map_ctor();
+            let first_ty = args
+                .first()
+                .map(|first| strip_nullish(expression(first, env)).0);
+            if let Some((k, v)) = explicit {
                 HirType::Generic {
                     base: String::from("Map"),
                     type_args: vec![k, v],
                 }
-            } else if let Some(first) = args.first()
-                && let HirType::Array(inner) = strip_nullish(expression(first, env)).0
+            } else if let Some(HirType::Array(inner)) = first_ty
                 && let HirType::Tuple(items) = *inner
                 && items.len() == 2
             {
@@ -227,15 +230,17 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         }
         Expr::New {
             class_name, args, ..
-        } if class_name == "Set" || collections::parse_typed_set_callee(class_name).is_some() => {
-            if let Some(t) = collections::parse_typed_set_callee(class_name) {
+        } if class_name == "Set" => {
+            let explicit = env.next_set_ctor();
+            let first_ty = args
+                .first()
+                .map(|first| strip_nullish(expression(first, env)).0);
+            if let Some(t) = explicit {
                 HirType::Generic {
                     base: String::from("Set"),
                     type_args: vec![t],
                 }
-            } else if let Some(first) = args.first()
-                && let HirType::Array(inner) = strip_nullish(expression(first, env)).0
-            {
+            } else if let Some(HirType::Array(inner)) = first_ty {
                 HirType::Generic {
                     base: String::from("Set"),
                     type_args: vec![*inner],
@@ -244,23 +249,65 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 perry_hir::infer_expr_type(expr, env)
             }
         }
-        Expr::MapNewFromArray(items) => match strip_nullish(expression(items, env)).0 {
-            HirType::Array(inner) => match *inner {
-                HirType::Tuple(tuple) if tuple.len() == 2 => HirType::Generic {
+        Expr::MapNew => {
+            if let Some((k, v)) = env.next_map_ctor() {
+                HirType::Generic {
                     base: String::from("Map"),
-                    type_args: tuple,
-                },
-                _ => HirType::Any,
-            },
-            _ => HirType::Any,
-        },
-        Expr::SetNewFromArray(items) => match strip_nullish(expression(items, env)).0 {
-            HirType::Array(inner) => HirType::Generic {
-                base: String::from("Set"),
-                type_args: vec![*inner],
-            },
-            _ => HirType::Any,
-        },
+                    type_args: vec![k, v],
+                }
+            } else {
+                HirType::Any
+            }
+        }
+        Expr::MapNewFromArray(items) => {
+            let explicit = env.next_map_ctor();
+            let items_ty = strip_nullish(expression(items, env)).0;
+            if let Some((k, v)) = explicit {
+                HirType::Generic {
+                    base: String::from("Map"),
+                    type_args: vec![k, v],
+                }
+            } else {
+                match items_ty {
+                    HirType::Array(inner) => match *inner {
+                        HirType::Tuple(tuple) if tuple.len() == 2 => HirType::Generic {
+                            base: String::from("Map"),
+                            type_args: tuple,
+                        },
+                        _ => HirType::Any,
+                    },
+                    _ => HirType::Any,
+                }
+            }
+        }
+        Expr::SetNew => {
+            if let Some(t) = env.next_set_ctor() {
+                HirType::Generic {
+                    base: String::from("Set"),
+                    type_args: vec![t],
+                }
+            } else {
+                HirType::Any
+            }
+        }
+        Expr::SetNewFromArray(items) => {
+            let explicit = env.next_set_ctor();
+            let items_ty = strip_nullish(expression(items, env)).0;
+            if let Some(t) = explicit {
+                HirType::Generic {
+                    base: String::from("Set"),
+                    type_args: vec![t],
+                }
+            } else {
+                match items_ty {
+                    HirType::Array(inner) => HirType::Generic {
+                        base: String::from("Set"),
+                        type_args: vec![*inner],
+                    },
+                    _ => HirType::Any,
+                }
+            }
+        }
         Expr::MapGet { map, .. } => match strip_nullish(expression(map, env)).0 {
             HirType::Generic { base, type_args }
                 if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
@@ -282,10 +329,20 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         Expr::MapSize(_) | Expr::SetSize(_) => HirType::Number,
         Expr::MapKeys(map) | Expr::ArrayKeys(map) => match strip_nullish(expression(map, env)).0 {
             HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap" | "Set" | "ReadonlySet")
-                    && !type_args.is_empty() =>
+                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
             {
-                HirType::Array(Box::new(type_args[0].clone()))
+                HirType::Generic {
+                    base: String::from("MapKeys"),
+                    type_args,
+                }
+            }
+            HirType::Generic { base, type_args }
+                if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
+            {
+                HirType::Generic {
+                    base: String::from("Set"),
+                    type_args: vec![type_args[0].clone()],
+                }
             }
             HirType::Array(_) => HirType::Array(Box::new(HirType::Number)),
             _ => HirType::Any,
@@ -295,12 +352,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Generic { base, type_args }
                     if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
                 {
-                    HirType::Array(Box::new(type_args[1].clone()))
+                    HirType::Generic {
+                        base: String::from("MapValues"),
+                        type_args,
+                    }
                 }
                 HirType::Generic { base, type_args }
                     if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
                 {
-                    HirType::Array(Box::new(type_args[0].clone()))
+                    HirType::Generic {
+                        base: String::from("Set"),
+                        type_args: vec![type_args[0].clone()],
+                    }
                 }
                 HirType::Array(elem) => HirType::Array(elem),
                 _ => HirType::Any,
@@ -311,13 +374,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Generic { base, type_args }
                     if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
                 {
-                    HirType::Array(Box::new(HirType::Tuple(type_args)))
+                    HirType::Generic {
+                        base: String::from("Map"),
+                        type_args,
+                    }
                 }
                 HirType::Generic { base, type_args }
                     if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
                 {
-                    let t = type_args[0].clone();
-                    HirType::Array(Box::new(HirType::Tuple(vec![t.clone(), t])))
+                    HirType::Generic {
+                        base: String::from("SetEntries"),
+                        type_args: vec![type_args[0].clone()],
+                    }
                 }
                 HirType::Array(elem) => {
                     HirType::Array(Box::new(HirType::Tuple(vec![HirType::Number, *elem])))
@@ -329,12 +397,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             HirType::Generic { base, type_args }
                 if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
             {
-                HirType::Array(Box::new(type_args[0].clone()))
+                HirType::Generic {
+                    base: String::from("Set"),
+                    type_args: vec![type_args[0].clone()],
+                }
             }
             HirType::Generic { base, type_args }
                 if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
             {
-                HirType::Array(Box::new(type_args[1].clone()))
+                HirType::Generic {
+                    base: String::from("MapValues"),
+                    type_args,
+                }
             }
             HirType::Array(elem) => HirType::Array(elem),
             _ => HirType::Any,
@@ -388,7 +462,12 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 object, property, ..
             } if matches!(
                 property.as_str(),
-                "concat" | array_methods::CONCAT | "filter" | "sort" | "toSorted"
+                "concat"
+                    | array_methods::CONCAT
+                    | "filter"
+                    | "sort"
+                    | "toSorted"
+                    | streams::ITERATION
             ) =>
             {
                 expression(object, env)
@@ -456,9 +535,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                             && type_args.len() == 2 =>
                     {
                         match property.as_str() {
-                            "keys" => HirType::Array(Box::new(type_args[0].clone())),
-                            "values" => HirType::Array(Box::new(type_args[1].clone())),
-                            _ => HirType::Array(Box::new(HirType::Tuple(type_args))),
+                            "keys" => HirType::Generic {
+                                base: String::from("MapKeys"),
+                                type_args,
+                            },
+                            "values" => HirType::Generic {
+                                base: String::from("MapValues"),
+                                type_args,
+                            },
+                            _ => HirType::Generic {
+                                base: String::from("Map"),
+                                type_args,
+                            },
                         }
                     }
                     HirType::Generic { base, type_args }
@@ -467,10 +555,14 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     {
                         let t = type_args[0].clone();
                         match property.as_str() {
-                            "entries" => {
-                                HirType::Array(Box::new(HirType::Tuple(vec![t.clone(), t])))
-                            }
-                            _ => HirType::Array(Box::new(t)),
+                            "entries" => HirType::Generic {
+                                base: String::from("SetEntries"),
+                                type_args: vec![t],
+                            },
+                            _ => HirType::Generic {
+                                base: String::from("Set"),
+                                type_args: vec![t],
+                            },
                         }
                     }
                     HirType::Array(elem) => match property.as_str() {
@@ -572,9 +664,21 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Tuple(type_args)
             }
             HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
+                if matches!(base.as_str(), "Set" | "ReadonlySet" | "MapKeys")
+                    && !type_args.is_empty() =>
             {
                 type_args[0].clone()
+            }
+            HirType::Generic { base, type_args }
+                if base == "MapValues" && !type_args.is_empty() =>
+            {
+                type_args.last().unwrap().clone()
+            }
+            HirType::Generic { base, type_args }
+                if base == "SetEntries" && !type_args.is_empty() =>
+            {
+                let t = type_args[0].clone();
+                HirType::Tuple(vec![t.clone(), t])
             }
             other => {
                 if let Some((_, val_ty)) = shapes::generics::dict_entry_types(

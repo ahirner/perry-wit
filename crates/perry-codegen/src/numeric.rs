@@ -5,7 +5,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, bail};
-use perry_abi::layout::numeric::{FLOAT, SIGNED, UNSIGNED};
+use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, UNDEFINED, UNSIGNED};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, NumericConstant},
     types::NumericType,
@@ -200,13 +200,38 @@ impl FunctionLowering<'_, '_> {
         if source == target {
             return Ok(value);
         }
-        if target.deref(ctx).is::<NumericType>() {
+        if crate::values::is_numeric_type(ctx, target) && crate::values::is_numeric_type(ctx, source)
+        {
+            return Ok(value);
+        }
+        if crate::values::is_numeric_type(ctx, target) {
             let value = value.scalar()?;
-            let (tag, payload) = if let Some((_, signed)) = integer(ctx, source) {
+            if crate::repr::optional_inner(ctx, source).is_some() {
+                let undef = self.absence_test(ctx, value, source, false)?;
+                let null = self.absence_test(ctx, value, source, true)?;
+                let omit = self.is_omitted(ctx, value, source)?;
+                let not_omit = self.num(ctx, NumOpcode::I32Eqz, vec![omit]);
+                let undef_not_omit = self.num(ctx, NumOpcode::I32And, vec![undef, not_omit]);
+                let tag_float = self.i32_const(ctx, FLOAT);
+                let tag_null = self.i32_const(ctx, NULL);
+                let tag_undef = self.i32_const(ctx, UNDEFINED);
+                let tag_omit = self.i32_const(ctx, OMITTED);
+                let tag = self.select(ctx, null, tag_null, tag_float);
+                let tag = self.select(ctx, undef_not_omit, tag_undef, tag);
+                let tag = self.select(ctx, omit, tag_omit, tag);
+                let present = self.is_absent(ctx, value, source)?;
+                let present = self.num(ctx, NumOpcode::I32Eqz, vec![present]);
+                let float_bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+                let zero = self.i64_const(ctx, 0);
+                let payload = self.select(ctx, present, float_bits, zero);
+                return Ok(Carriers::Numeric { tag, payload });
+            }
+            let (tag, payload) = if let Some((bits, signed)) = integer(ctx, source) {
+                let use_signed = signed || bits < 64;
                 let wide = IntegerType::get(
                     ctx,
                     64,
-                    if signed {
+                    if use_signed {
                         Signedness::Signed
                     } else {
                         Signedness::Unsigned
@@ -214,7 +239,7 @@ impl FunctionLowering<'_, '_> {
                 )
                 .into();
                 (
-                    if signed { SIGNED } else { UNSIGNED },
+                    if use_signed { SIGNED } else { UNSIGNED },
                     self.numeric_cast(ctx, value, source, wide)?,
                 )
             } else {
@@ -233,9 +258,34 @@ impl FunctionLowering<'_, '_> {
             Carriers::Numeric { tag, payload } => {
                 let result_type = wasm_type(ctx, target)?;
                 let done = self.new_block(ctx, vec![result_type]);
+                if crate::repr::optional_inner(ctx, target).is_some() {
+                    let is_absent_block = self.new_block(ctx, vec![]);
+                    let is_present_block = self.new_block(ctx, vec![]);
+                    let undef_tag = self.i32_const(ctx, UNDEFINED);
+                    let absent_cond = self.num(ctx, NumOpcode::I32GeU, vec![tag, undef_tag]);
+                    self.cond_br(
+                        ctx,
+                        absent_cond,
+                        (is_absent_block, vec![]),
+                        (is_present_block, vec![]),
+                    );
+                    self.block = is_absent_block;
+                    let null_tag = self.i32_const(ctx, NULL);
+                    let omit_tag = self.i32_const(ctx, OMITTED);
+                    let is_null = self.num(ctx, NumOpcode::I32Eq, vec![tag, null_tag]);
+                    let is_omit = self.num(ctx, NumOpcode::I32Eq, vec![tag, omit_tag]);
+                    let undef_val = self.undefined(ctx, target)?;
+                    let null_val = self.null(ctx, target)?;
+                    let omit_val = self.omitted(ctx, target)?;
+                    let absent_val = self.select(ctx, is_null, null_val, undef_val);
+                    let absent_val = self.select(ctx, is_omit, omit_val, absent_val);
+                    self.br(ctx, done, vec![absent_val]);
+                    self.block = is_present_block;
+                }
+                let inner_target = crate::repr::optional_inner(ctx, target).unwrap_or(target);
                 let floats = self.new_block(ctx, vec![]);
                 let signed = self.new_block(ctx, vec![]);
-                let unsigned = if target.deref(ctx).is::<FP64Type>() {
+                let unsigned = if inner_target.deref(ctx).is::<FP64Type>() {
                     self.new_block(ctx, vec![])
                 } else {
                     signed
@@ -248,7 +298,7 @@ impl FunctionLowering<'_, '_> {
                 self.block = floats;
                 let float = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
                 let float_type = FP64Type::get(ctx).into();
-                let float = self.numeric_cast(ctx, float, float_type, target)?;
+                let float = self.numeric_cast(ctx, float, float_type, inner_target)?;
                 self.br(ctx, done, vec![float]);
                 for (block, signedness) in [
                     (signed, Signedness::Signed),
@@ -259,7 +309,7 @@ impl FunctionLowering<'_, '_> {
                     }
                     self.block = block;
                     let source = IntegerType::get(ctx, 64, signedness).into();
-                    let value = self.numeric_cast(ctx, payload, source, target)?;
+                    let value = self.numeric_cast(ctx, payload, source, inner_target)?;
                     self.br(ctx, done, vec![value]);
                 }
                 self.block = done;
@@ -535,6 +585,36 @@ impl FunctionLowering<'_, '_> {
         };
         let i32 = i32_type(ctx);
         let done = self.new_block(ctx, vec![i32]);
+        if crate::repr::optional_inner(ctx, left.get_type(ctx)).is_some() {
+            let undef_tag = self.i32_const(ctx, UNDEFINED);
+            let a_absent = self.num(ctx, NumOpcode::I32GeU, vec![at, undef_tag]);
+            let b_absent = self.num(ctx, NumOpcode::I32GeU, vec![bt, undef_tag]);
+            let either_absent = self.num(ctx, NumOpcode::I32Or, vec![a_absent, b_absent]);
+            let absent_block = self.new_block(ctx, vec![]);
+            let present_block = self.new_block(ctx, vec![]);
+            self.cond_br(
+                ctx,
+                either_absent,
+                (absent_block, vec![]),
+                (present_block, vec![]),
+            );
+            self.block = absent_block;
+            let omit_tag = self.i32_const(ctx, OMITTED);
+            let a_omit = self.num(ctx, NumOpcode::I32Eq, vec![at, omit_tag]);
+            let b_omit = self.num(ctx, NumOpcode::I32Eq, vec![bt, omit_tag]);
+            let norm_a = self.select(ctx, a_omit, undef_tag, at);
+            let norm_b = self.select(ctx, b_omit, undef_tag, bt);
+            let both_absent = self.num(ctx, NumOpcode::I32And, vec![a_absent, b_absent]);
+            let same_absent = self.num(ctx, NumOpcode::I32Eq, vec![norm_a, norm_b]);
+            let eq = self.num(ctx, NumOpcode::I32And, vec![both_absent, same_absent]);
+            let res = match kind {
+                CompareKind::Eq => eq,
+                CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
+                _ => self.i32_const(ctx, 0),
+            };
+            self.br(ctx, done, vec![res]);
+            self.block = present_block;
+        }
         let floats = self.new_block(ctx, vec![]);
         let integers = self.new_block(ctx, vec![]);
         let float = self.i32_const(ctx, FLOAT);
@@ -637,5 +717,123 @@ impl FunctionLowering<'_, '_> {
         let different_sign = self.num(ctx, NumOpcode::I32Xor, vec![negative, float_negative]);
         let sign_order = self.select(ctx, negative, minus, plus);
         self.select(ctx, different_sign, sign_order, order)
+    }
+
+    pub(super) fn numeric_intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        intrinsic: perry_mir::intrinsics::Intrinsic,
+    ) -> Result<Option<Carriers<Value>>> {
+        use perry_mir::intrinsics::Intrinsic;
+        if op.deref(ctx).get_num_results() == 0 {
+            return Ok(None);
+        }
+        let ty = op.deref(ctx).get_result(0).get_type(ctx);
+        if !ty.deref(ctx).is::<NumericType>() {
+            return Ok(None);
+        }
+        match intrinsic {
+            Intrinsic::MathFloor
+            | Intrinsic::MathCeil
+            | Intrinsic::MathTrunc
+            | Intrinsic::MathRound => {
+                let arg = op.deref(ctx).get_operand(0);
+                let Carriers::Numeric { tag, payload } = self.mapped_value(ctx, arg)? else {
+                    bail!("numeric rounding requires tagged operand");
+                };
+                let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+                let rounded = match intrinsic {
+                    Intrinsic::MathFloor => self.num(ctx, NumOpcode::F64Floor, vec![f]),
+                    Intrinsic::MathCeil => self.num(ctx, NumOpcode::F64Ceil, vec![f]),
+                    Intrinsic::MathTrunc => self.num(ctx, NumOpcode::F64Trunc, vec![f]),
+                    Intrinsic::MathRound => {
+                        let floor = self.num(ctx, NumOpcode::F64Floor, vec![f]);
+                        let fraction = self.num(ctx, NumOpcode::F64Sub, vec![f, floor]);
+                        let half = self.f64_const(ctx, 0.5);
+                        let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
+                        let one = self.f64_const(ctx, 1.0);
+                        let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
+                        let rounded = self.select(ctx, up, next, floor);
+                        self.num(ctx, NumOpcode::F64Copysign, vec![rounded, f])
+                    }
+                    _ => unreachable!(),
+                };
+                let float_payload = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![rounded]);
+                let is_float = self.num(ctx, NumOpcode::I32Eqz, vec![tag]);
+                let payload = self.select(ctx, is_float, float_payload, payload);
+                Ok(Some(Carriers::Numeric { tag, payload }))
+            }
+            Intrinsic::MathAbs => {
+                let arg = op.deref(ctx).get_operand(0);
+                let Carriers::Numeric { tag, payload } = self.mapped_value(ctx, arg)? else {
+                    bail!("numeric abs requires tagged operand");
+                };
+                let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+                let abs_f = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                let float_payload = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![abs_f]);
+                let signed_tag = self.i32_const(ctx, SIGNED);
+                let unsigned_tag = self.i32_const(ctx, UNSIGNED);
+                let is_signed = self.num(ctx, NumOpcode::I32Eq, vec![tag, signed_tag]);
+                let zero = self.i64_const(ctx, 0);
+                let is_neg = self.num(ctx, NumOpcode::I64LtS, vec![payload, zero]);
+                let negate = self.num(ctx, NumOpcode::I32And, vec![is_signed, is_neg]);
+                let neg_payload = self.num(ctx, NumOpcode::I64Sub, vec![zero, payload]);
+                let int_payload = self.select(ctx, negate, neg_payload, payload);
+                let overflow_min = self.num(ctx, NumOpcode::I64LtS, vec![int_payload, zero]);
+                let signed_res_tag = self.select(ctx, overflow_min, unsigned_tag, signed_tag);
+                let int_tag = self.select(ctx, is_signed, signed_res_tag, tag);
+                let is_float = self.num(ctx, NumOpcode::I32Eqz, vec![tag]);
+                let res_tag = self.select(ctx, is_float, tag, int_tag);
+                let res_payload = self.select(ctx, is_float, float_payload, int_payload);
+                Ok(Some(Carriers::Numeric {
+                    tag: res_tag,
+                    payload: res_payload,
+                }))
+            }
+            Intrinsic::MathMin | Intrinsic::MathMax => {
+                let lhs = op.deref(ctx).get_operand(0);
+                let rhs = op.deref(ctx).get_operand(1);
+                let (
+                    Carriers::Numeric {
+                        tag: lt,
+                        payload: lp,
+                    },
+                    Carriers::Numeric {
+                        tag: rt,
+                        payload: rp,
+                    },
+                ) = (self.mapped_value(ctx, lhs)?, self.mapped_value(ctx, rhs)?)
+                else {
+                    bail!("numeric min/max requires tagged operands");
+                };
+                let float_tag = self.i32_const(ctx, FLOAT);
+                let lf = self.num(ctx, NumOpcode::I32Eq, vec![lt, float_tag]);
+                let rf = self.num(ctx, NumOpcode::I32Eq, vec![rt, float_tag]);
+                let lf_val = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![lp]);
+                let rf_val = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![rp]);
+                let l_nan_f = self.num(ctx, NumOpcode::F64Ne, vec![lf_val, lf_val]);
+                let r_nan_f = self.num(ctx, NumOpcode::F64Ne, vec![rf_val, rf_val]);
+                let l_nan = self.num(ctx, NumOpcode::I32And, vec![lf, l_nan_f]);
+                let r_nan = self.num(ctx, NumOpcode::I32And, vec![rf, r_nan_f]);
+                let any_nan = self.num(ctx, NumOpcode::I32Or, vec![l_nan, r_nan]);
+                let is_less = self.numeric_comparison(ctx, op, CompareKind::Lt)?;
+                let pick_left = if intrinsic == Intrinsic::MathMin {
+                    is_less
+                } else {
+                    self.num(ctx, NumOpcode::I32Eqz, vec![is_less])
+                };
+                let chosen_tag = self.select(ctx, pick_left, lt, rt);
+                let chosen_payload = self.select(ctx, pick_left, lp, rp);
+                let nan_bits = self.i64_const(ctx, f64::NAN.to_bits());
+                let res_tag = self.select(ctx, any_nan, float_tag, chosen_tag);
+                let res_payload = self.select(ctx, any_nan, nan_bits, chosen_payload);
+                Ok(Some(Carriers::Numeric {
+                    tag: res_tag,
+                    payload: res_payload,
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 }

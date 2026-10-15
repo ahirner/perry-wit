@@ -251,24 +251,13 @@ impl<'s> FunctionBuilder<'s> {
         let body_block = self.new_block(ctx, "body");
         let latch = self.new_block(ctx, "latch");
         let exit = self.new_block(ctx, "exit");
-        self.jump(ctx, if body_first { body_block } else { header });
-
-        self.switch_to(header);
-        match condition {
-            None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
-            Some(Expr::Bool(false)) => self.jump(ctx, exit),
-            Some(condition) => {
-                let condition = self.condition(ctx, condition)?;
-                self.branch(ctx, condition, body_block, exit);
-            }
-        }
-
-        self.switch_to(body_block);
-        if let Some(Expr::Compare {
-            op: CompareOp::Lt,
-            left,
-            right,
-        }) = condition
+        let mut collection_iter = None;
+        if !body_first
+            && let Some(Expr::Compare {
+                op: CompareOp::Lt,
+                left,
+                right,
+            }) = condition
             && let (
                 Expr::LocalGet(idx_id),
                 Expr::PropertyGet {
@@ -285,17 +274,47 @@ impl<'s> FunctionBuilder<'s> {
             let arr_val = self.load(ctx, arr_slot)?;
             if let Ok(arr_def) = self.defined(ctx, arr_val) {
                 let arr_ty = arr_def.get_type(ctx);
-                if crate::collections::map_entry_types(ctx, arr_ty).is_some()
+                if crate::collections::is_collection_or_view_record(ctx, arr_ty)
+                    || crate::collections::map_entry_types(ctx, arr_ty).is_some()
                     || crate::collections::set_entry_type(ctx, arr_ty).is_some()
                 {
-                    let idx_val = self.load(ctx, idx_slot)?;
-                    let entry = self.element_at(ctx, arr_def, idx_val)?;
-                    if let Some(live) = self.collection_entry_live(ctx, entry)? {
-                        let live_body = self.new_block(ctx, "loop_live_body");
-                        self.branch(ctx, live, live_body, latch);
-                        self.switch_to(live_body);
-                    }
+                    let cursor_pair =
+                        if let Some(c_arr) = self.collection_cursors_array(ctx, arr_def)? {
+                            let init_idx = self.load(ctx, idx_slot)?;
+                            let c = self.push_collection_cursor(ctx, c_arr, init_idx)?;
+                            Some((c_arr, c))
+                        } else {
+                            None
+                        };
+                    collection_iter = Some(( idx_slot, arr_def, cursor_pair));
                 }
+            }
+        }
+        self.jump(ctx, if body_first { body_block } else { header });
+
+        self.switch_to(header);
+        match condition {
+            None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
+            Some(Expr::Bool(false)) => self.jump(ctx, exit),
+            Some(condition) => {
+                let condition = self.condition(ctx, condition)?;
+                self.branch(ctx, condition, body_block, exit);
+            }
+        }
+
+        self.switch_to(body_block);
+        if let Some((idx_slot, arr_def, ref cursor_pair)) = collection_iter {
+            let idx_val = self.load(ctx, idx_slot)?;
+            if let Some((_, c)) = cursor_pair {
+                let c = *c;
+                self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), idx_val));
+            }
+            let entries = self.collection_entries_array(ctx, arr_def)?;
+            let entry = self.element_at(ctx, entries, idx_val)?;
+            if let Some(live) = self.collection_entry_live(ctx, entry)? {
+                let live_body = self.new_block(ctx, "loop_live_body");
+                self.branch(ctx, live, live_body, latch);
+                self.switch_to(live_body);
             }
         }
         self.controls.push(Control::Loop {
@@ -308,11 +327,19 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, latch);
 
         self.switch_to(latch);
+        if let Some((idx_slot, _, Some((_, c)))) = collection_iter {
+            let cur_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+            let cur_idx = self.append_value(ctx, &cur_op);
+            self.store(ctx, idx_slot, cur_idx);
+        }
         if let Some(update) = update {
             self.effect(ctx, update)?;
         }
         self.jump(ctx, header);
         self.switch_to(exit);
+        if let Some((_, _, Some((c_arr, _)))) = collection_iter {
+            self.pop_collection_cursor(ctx, c_arr)?;
+        }
         Ok(())
     }
 }

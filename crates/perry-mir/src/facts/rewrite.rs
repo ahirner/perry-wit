@@ -93,11 +93,11 @@ struct Implementation {
 struct CoalesceKey {
     function: Identifier,
     arg_kinds: Vec<Option<bool>>,
-    numeric_args: Vec<bool>,
+    arg_specs: Vec<Option<TypeHandle>>,
     results: Vec<Option<Integer>>,
-    numeric_results: Vec<bool>,
+    result_specs: Vec<Option<TypeHandle>>,
     values: Vec<Option<Integer>>,
-    numeric_values: Vec<bool>,
+    value_specs: Vec<Option<TypeHandle>>,
     compares: Vec<Option<Integer>>,
     numeric_compares: Vec<bool>,
     calls: Vec<usize>,
@@ -151,26 +151,26 @@ fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::valu
 }
 
 fn coalesce_key(
-    ctx: &Context,
+    ctx: &mut Context,
+    analysis: &ProgramFacts,
+    id: usize,
     key: &super::Key,
     body: &super::Body,
     state: &super::State,
 ) -> CoalesceKey {
     let mut values = Vec::new();
-    let mut numeric_values = Vec::new();
+    let mut value_specs = Vec::new();
     let mut compares = Vec::new();
     let mut numeric_compares = Vec::new();
     let mut calls = Vec::new();
     for &constraint in &body.constraints {
         match constraint {
             Constraint::Op { op, .. } => {
-                for res in op.deref(ctx).results() {
+                let res_list: Vec<_> = op.deref(ctx).results().collect();
+                for res in res_list {
                     let can = can_specialize_value(ctx, state, res);
                     values.push(can.then(|| state.representation(res)).flatten());
-                    numeric_values.push(
-                        can && !res.get_type(ctx).deref(ctx).is::<PromiseType>()
-                            && state.fact(res) == super::Fact::Numeric,
-                    );
+                    value_specs.push(analysis.specialized_value_type(ctx, id, res));
                 }
                 if Operation::get_op::<CompareOp>(op, ctx).is_some() {
                     let inputs = [op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1)];
@@ -187,13 +187,23 @@ fn coalesce_key(
             }
             Constraint::Edge { to, .. } => {
                 values.push(state.representation(to));
-                numeric_values.push(
-                    !to.get_type(ctx).deref(ctx).is::<PromiseType>()
-                        && state.fact(to) == super::Fact::Numeric,
-                );
+                value_specs.push(analysis.specialized_value_type(ctx, id, to));
             }
         }
     }
+    let sig = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
+        .expect("function type");
+    let res_types = sig.deref(ctx).res_types().clone();
+    let arg_specs = body
+        .parameters
+        .iter()
+        .map(|&p| analysis.specialized_value_type(ctx, id, p))
+        .collect();
+    let result_specs = res_types
+        .iter()
+        .enumerate()
+        .map(|(pos, &ty)| analysis.specialized_result_type(ctx, id, pos, ty))
+        .collect();
     CoalesceKey {
         function: key.function.clone(),
         arg_kinds: key
@@ -201,15 +211,11 @@ fn coalesce_key(
             .iter()
             .map(|a| a.map(|i| i.bits == 64 && !i.signed))
             .collect(),
-        numeric_args: key.numeric_args.clone(),
+        arg_specs,
         results: state.results.iter().map(|r| r.domain.integer()).collect(),
-        numeric_results: state
-            .results
-            .iter()
-            .map(|r| r.domain == super::Fact::Numeric)
-            .collect(),
+        result_specs,
         values,
-        numeric_values,
+        value_specs,
         compares,
         numeric_compares,
         calls,
@@ -238,34 +244,44 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let signature =
             TypedHandle::<FunctionType>::from_handle(signature, ctx).expect("function type");
         let arg_types = signature.deref(ctx).arg_types().clone();
+        let res_types = signature.deref(ctx).res_types().clone();
         let argument_changes = analysis.keys[id]
             .args
             .iter()
             .zip(&arg_types)
             .any(|(domain, &ty)| domain.is_some_and(|domain| domain.ty(ctx) != ty))
-            || analysis.keys[id].numeric_args.iter().copied().any(|b| b);
+            || body
+                .parameters
+                .iter()
+                .any(|&p| analysis.specialized_value_type(ctx, id, p).is_some());
         let result_changes = state
             .results
             .iter()
-            .zip(signature.deref(ctx).res_types())
-            .any(|(result, ty)| {
+            .enumerate()
+            .zip(&res_types)
+            .any(|((pos, result), &ty)| {
                 result
                     .domain
                     .integer()
                     .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
                     || (!root_ids.contains(&id)
                         && !ty.deref(ctx).is::<PromiseType>()
-                        && result.domain == super::Fact::Numeric)
+                        && analysis.specialized_result_type(ctx, id, pos, ty).is_some())
             });
-        let values_change = state.facts.keys().any(|&value| {
-            can_specialize_value(ctx, state, value)
-                && (state.representation(value).is_some_and(|domain| {
+        let fact_keys: Vec<_> = state.facts.keys().copied().collect();
+        let heap_keys: Vec<_> = state.heap_values.keys().copied().collect();
+        let values_change = fact_keys.into_iter().any(|value| {
+            (can_specialize_value(ctx, state, value)
+                && state.representation(value).is_some_and(|domain| {
                     let ty = value.get_type(ctx);
                     let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
                         .map_or(ty, |promise| promise.deref(ctx).value());
                     Integer::from_type(ctx, ty) != Some(domain)
-                }) || (!value.get_type(ctx).deref(ctx).is::<PromiseType>()
-                    && state.fact(value) == super::Fact::Numeric))
+                }))
+                || (!value.get_type(ctx).deref(ctx).is::<PromiseType>()
+                    && analysis.specialized_value_type(ctx, id, value).is_some())
+        }) || heap_keys.into_iter().any(|value| {
+            analysis.specialized_value_type(ctx, id, value).is_some()
         }) || body.constraints.iter().any(|&constraint| {
             matches!(
                 constraint,
@@ -315,7 +331,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let signature = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
             .expect("function type");
         if changed.contains(&id) && !root_ids.contains(&id) {
-            let ckey = coalesce_key(ctx, key, body, state);
+            let ckey = coalesce_key(ctx, analysis, id, key, body, state);
             if let Some(&impl_idx) = coalesced_map.get(&ckey) {
                 let imp = &mut unique_impls[impl_idx];
                 let mut widened = false;
@@ -370,30 +386,33 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             function.set_symbol_name(ctx, name);
             cloned.deref_mut(ctx).attributes.0.remove(&WIT_SIGNATURE);
             cloned.insert_after(ctx, body.function.get_operation());
-            for ((ty, domain), &numeric) in implementation
+            for (pos, (ty, domain)) in implementation
                 .arguments
                 .iter_mut()
                 .zip(&key.args)
-                .zip(&key.numeric_args)
+                .enumerate()
             {
                 if let Some(domain) = domain {
                     *ty = domain.ty(ctx);
-                } else if numeric {
-                    *ty = crate::types::NumericType::get(ctx).into();
+                } else if let Some(&param) = body.parameters.get(pos)
+                    && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, param)
+                {
+                    *ty = spec_ty;
                 }
             }
-            for (ty, facts) in implementation
+            for (pos, (ty, facts)) in implementation
                 .results
                 .iter_mut()
                 .zip(&analysis.states[id].results)
+                .enumerate()
             {
                 if let Some(domain) = facts.domain.integer() {
                     *ty = domain.ty(ctx);
                 } else if !root_ids.contains(&id)
                     && !ty.deref(ctx).is::<PromiseType>()
-                    && facts.domain == super::Fact::Numeric
+                    && let Some(spec_ty) = analysis.specialized_result_type(ctx, id, pos, *ty)
                 {
-                    *ty = crate::types::NumericType::get(ctx).into();
+                    *ty = spec_ty;
                 }
             }
             let signature = FunctionType::get(
@@ -411,7 +430,8 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         }
         let impl_idx = unique_impls.len();
         if changed.contains(&id) && !root_ids.contains(&id) {
-            coalesced_map.insert(coalesce_key(ctx, key, body, state), impl_idx);
+            let ckey = coalesce_key(ctx, analysis, id, key, body, state);
+            coalesced_map.insert(ckey, impl_idx);
         }
         unique_impls.push(implementation);
         impl_of.insert(id, impl_idx);
@@ -425,11 +445,21 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let mapping = &implementation.mapping;
         let state = &analysis.states[id];
         let body = &analysis.bodies[&analysis.keys[id].function];
-        for &value in state.facts.keys() {
-            if body.parameters.contains(&value) || !can_specialize_value(ctx, state, value) {
+        let all_values: Vec<_> = state
+            .facts
+            .keys()
+            .chain(state.heap_values.keys())
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        for value in all_values {
+            if body.parameters.contains(&value) {
                 continue;
             }
-            if let Some(domain) = state.representation(value) {
+            if can_specialize_value(ctx, state, value)
+                && let Some(domain) = state.representation(value)
+            {
                 let cloned = mapping.lookup_value(value).expect("cloned value");
                 let scalar = domain.ty(ctx);
                 let ty = if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
@@ -439,10 +469,10 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 };
                 cloned.set_type(ctx, ty);
             } else if !value.get_type(ctx).deref(ctx).is::<PromiseType>()
-                && state.fact(value) == super::Fact::Numeric
+                && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, value)
             {
                 let cloned = mapping.lookup_value(value).expect("cloned value");
-                cloned.set_type(ctx, crate::types::NumericType::get(ctx).into());
+                cloned.set_type(ctx, spec_ty);
             }
         }
         let mut expected = Vec::new();
@@ -606,12 +636,20 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 }
                 if matches!(
                     intrinsic,
-                    crate::intrinsics::Intrinsic::MathAbs
+                    crate::intrinsics::Intrinsic::MathFloor
+                        | crate::intrinsics::Intrinsic::MathCeil
+                        | crate::intrinsics::Intrinsic::MathTrunc
+                        | crate::intrinsics::Intrinsic::MathRound
+                        | crate::intrinsics::Intrinsic::MathAbs
                         | crate::intrinsics::Intrinsic::MathMin
                         | crate::intrinsics::Intrinsic::MathMax
-                ) && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx)).is_some()
-                {
-                    expected.fill(op.deref(ctx).get_result(0).get_type(ctx));
+                ) {
+                    let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                    if Integer::from_type(ctx, res_ty).is_some()
+                        || res_ty.deref(ctx).is::<crate::types::NumericType>()
+                    {
+                        expected.fill(res_ty);
+                    }
                 }
             }
             if let Some(&child) = state.calls.get(&original) {
@@ -654,6 +692,84 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 .expect("promise")
                 .deref(ctx)
                 .value();
+            } else if Operation::get_op::<crate::heap::AllocOp>(original, ctx).is_some() {
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some(fields) = res_ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::RecordType>()
+                    .and_then(|r| r.fields().ok())
+                {
+                    for (i, (_, fty)) in fields.iter().enumerate() {
+                        if i < expected.len() {
+                            expected[i] = *fty;
+                        }
+                    }
+                }
+            } else if Operation::get_op::<crate::heap::FieldGetOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::heap::FieldPresentOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::collections::ArrayGetOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::collections::ArrayAtOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::collections::ArrayLenOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::collections::ArrayTruncateOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::IsUndefinedOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::IsNullOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::UnwrapOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::ToNumberOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::OptionalCastOp>(original, ctx).is_some()
+            {
+                expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+            } else if let Some(fs) = Operation::get_op::<crate::heap::FieldSetOp>(original, ctx) {
+                let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                expected[0] = base_ty;
+                let field_name = fs.field(ctx);
+                if let Some((_, fty)) = base_ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::RecordType>()
+                    .and_then(|r| r.fields().ok())
+                    .and_then(|f| f.iter().find(|(n, _)| *n == field_name))
+                {
+                    expected[1] = *fty;
+                }
+            } else if Operation::get_op::<crate::collections::ArrayNewOp>(original, ctx).is_some() {
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some(elem_ty) = res_ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::ArrayType>()
+                    .map(|a| a.element())
+                {
+                    expected.fill(elem_ty);
+                }
+            } else if Operation::get_op::<crate::collections::ArrayPushOp>(original, ctx).is_some()
+            {
+                let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                expected[0] = base_ty;
+                if let Some(elem_ty) = base_ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::ArrayType>()
+                    .map(|a| a.element())
+                {
+                    expected[1] = elem_ty;
+                }
+            } else if Operation::get_op::<crate::collections::ArraySetOp>(original, ctx).is_some() {
+                let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                expected[0] = base_ty;
+                if let Some(elem_ty) = base_ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::ArrayType>()
+                    .map(|a| a.element())
+                {
+                    expected[2] = elem_ty;
+                }
+            } else if Operation::get_op::<crate::collections::ArrayExtendOp>(original, ctx)
+                .is_some()
+            {
+                expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+                expected[1] = op.deref(ctx).get_operand(1).get_type(ctx);
+            } else if Operation::get_op::<crate::optional::WrapOp>(original, ctx).is_some() {
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some(inner_ty) = crate::optional::optional_value(ctx, res_ty) {
+                    expected[0] = inner_ty;
+                }
             } else if Operation::get_op::<BinaryOp>(original, ctx).is_some() {
                 expected.fill(op.deref(ctx).get_result(0).get_type(ctx));
             } else if Operation::get_op::<CompareOp>(original, ctx).is_some() {
@@ -663,12 +779,28 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 ];
                 if let Some(domain) = comparison_domain(state, &inputs) {
                     expected.fill(domain.ty(ctx));
-                } else if op
-                    .deref(ctx)
-                    .operands()
-                    .any(|v| v.get_type(ctx).deref(ctx).is::<crate::types::NumericType>())
-                {
-                    expected.fill(crate::types::NumericType::get(ctx).into());
+                } else {
+                    let l_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                    let r_ty = op.deref(ctx).get_operand(1).get_type(ctx);
+                    let is_num = |t: TypeHandle| {
+                        let inner = crate::optional::optional_value(ctx, t).unwrap_or(t);
+                        inner.deref(ctx).is::<crate::types::NumericType>()
+                    };
+                    if is_num(l_ty) || is_num(r_ty) {
+                        if let Some(absence) = crate::optional::absence(ctx, l_ty)
+                            .or_else(|| crate::optional::absence(ctx, r_ty))
+                        {
+                            let target = crate::types::OptionalType::get_with(
+                                ctx,
+                                crate::types::NumericType::get(ctx).into(),
+                                absence,
+                            )
+                            .into();
+                            expected.fill(target);
+                        } else {
+                            expected.fill(crate::types::NumericType::get(ctx).into());
+                        }
+                    }
                 }
             } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {
                 expected.clone_from(&implementation.results);
@@ -694,6 +826,27 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             for (index, &ty) in expected.iter().enumerate() {
                 let value = op.deref(ctx).get_operand(index);
                 if value.get_type(ctx) != ty {
+                    if let Some(def_op) = value.defining_op() {
+                        if Operation::get_op::<crate::optional::UndefinedOp>(def_op, ctx).is_some()
+                        {
+                            let undef = crate::optional::UndefinedOp::with_type(ctx, ty);
+                            rewriter.insert_operation(ctx, undef.get_operation());
+                            Operation::replace_operand(op, ctx, index, undef.get_result(ctx));
+                            continue;
+                        }
+                        if Operation::get_op::<crate::optional::OmittedOp>(def_op, ctx).is_some() {
+                            let omit = crate::optional::OmittedOp::with_type(ctx, ty);
+                            rewriter.insert_operation(ctx, omit.get_operation());
+                            Operation::replace_operand(op, ctx, index, omit.get_result(ctx));
+                            continue;
+                        }
+                        if Operation::get_op::<crate::optional::NullOp>(def_op, ctx).is_some() {
+                            let nul = crate::optional::NullOp::new(ctx, ty);
+                            rewriter.insert_operation(ctx, nul.get_operation());
+                            Operation::replace_operand(op, ctx, index, nul.get_result(ctx));
+                            continue;
+                        }
+                    }
                     let cast = NumericCastOp::new(ctx, value, ty);
                     rewriter.insert_operation(ctx, cast.get_operation());
                     Operation::replace_operand(op, ctx, index, cast.get_result(ctx));

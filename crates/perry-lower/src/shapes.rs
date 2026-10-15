@@ -95,7 +95,7 @@ pub(super) struct Shapes<'h> {
     object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
     function_names: HashSet<&'h str>,
     local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
-    locations: &'h crate::locations::Locations<'h>,
+    pub(super) locations: &'h crate::locations::Locations<'h>,
     foreign: &'h HashMap<String, crate::hir::Foreign>,
     integer_imports: HashMap<&'h str, (u32, Signedness)>,
     imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
@@ -539,13 +539,10 @@ impl<'h> Shapes<'h> {
     ) -> Result<TypeHandle> {
         let k_ty = self.value_type(ctx, k)?;
         let v_ty = self.value_type(ctx, v)?;
-        let mut fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
         if prefix == "map_tuple" {
-            fields.push((
-                "_2".to_string(),
-                IntegerType::get(ctx, 1, Signedness::Signless).into(),
-            ));
+            return Ok(self.map_box_from_types(ctx, k_ty, v_ty)?.into());
         }
+        let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
         let entry = self.mir_record_prefix(ctx, fields, Some(prefix))?;
         Ok(ArrayType::get(ctx, entry.into()).into())
     }
@@ -559,37 +556,139 @@ impl<'h> Shapes<'h> {
     ) -> Result<TypeHandle> {
         let k_ty = self.source_type(ctx, k)?;
         let v_ty = self.source_type(ctx, v)?;
-        let mut fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
-        if prefix == "map_tuple" {
-            fields.push((
-                "_2".to_string(),
-                IntegerType::get(ctx, 1, Signedness::Signless).into(),
-            ));
-        }
+        let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
         let entry = self.mir_record_prefix(ctx, fields, Some(prefix))?;
         Ok(ArrayType::get(ctx, entry.into()).into())
     }
 
-    pub(super) fn set_array_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
-        let elem_ty = self.value_type(ctx, elem)?;
-        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let entry = self.mir_record_prefix(
+    pub(super) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
+        self.mir_record_prefix(
             ctx,
-            vec![("_0".to_string(), elem_ty), ("_1".to_string(), i1_ty)],
-            Some("set_tuple"),
-        )?;
-        Ok(ArrayType::get(ctx, entry.into()).into())
+            vec![("_0".to_string(), FP64Type::get(ctx).into())],
+            Some("cursor_tuple"),
+        )
     }
 
-    fn set_array_source_type(&self, ctx: &Context, elem: ArgumentId) -> Result<TypeHandle> {
-        let elem_ty = self.source_type(ctx, elem)?;
+    pub(super) fn map_box_from_types(
+        &self,
+        ctx: &Context,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let entry = self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), k_ty),
+                ("_1".to_string(), v_ty),
+                ("_2".to_string(), i1_ty),
+            ],
+            Some("map_tuple"),
+        )?;
+        let entries_arr = ArrayType::get(ctx, entry.into()).into();
+        let cursor_rec = self.cursor_tuple_type(ctx)?;
+        let cursors_arr = ArrayType::get(ctx, cursor_rec.into()).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), entries_arr),
+                ("_1".to_string(), FP64Type::get(ctx).into()),
+                ("_2".to_string(), cursors_arr),
+            ],
+            Some("map_box"),
+        )
+    }
+
+    pub(super) fn map_view_from_types(
+        &self,
+        ctx: &Context,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+        view_prefix: &str,
+    ) -> Result<TypedHandle<RecordType>> {
+        let map_box = self.map_box_from_types(ctx, k_ty, v_ty)?;
+        self.mir_record_prefix(
+            ctx,
+            vec![("_0".to_string(), map_box.into())],
+            Some(view_prefix),
+        )
+    }
+
+    fn map_source_type(&self, ctx: &Context, k: ArgumentId, v: ArgumentId) -> Result<TypeHandle> {
+        let k_ty = self.source_type(ctx, k)?;
+        let v_ty = self.source_type(ctx, v)?;
+        Ok(self.map_box_from_types(ctx, k_ty, v_ty)?.into())
+    }
+
+    fn map_view_source_type(
+        &self,
+        ctx: &Context,
+        k: ArgumentId,
+        v: ArgumentId,
+        view_prefix: &str,
+    ) -> Result<TypeHandle> {
+        let k_ty = self.source_type(ctx, k)?;
+        let v_ty = self.source_type(ctx, v)?;
+        Ok(self.map_view_from_types(ctx, k_ty, v_ty, view_prefix)?.into())
+    }
+
+    pub(super) fn set_box_from_type(
+        &self,
+        ctx: &Context,
+        elem_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let entry = self.mir_record_prefix(
             ctx,
             vec![("_0".to_string(), elem_ty), ("_1".to_string(), i1_ty)],
             Some("set_tuple"),
         )?;
-        Ok(ArrayType::get(ctx, entry.into()).into())
+        let entries_arr = ArrayType::get(ctx, entry.into()).into();
+        let cursor_rec = self.cursor_tuple_type(ctx)?;
+        let cursors_arr = ArrayType::get(ctx, cursor_rec.into()).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), entries_arr),
+                ("_1".to_string(), FP64Type::get(ctx).into()),
+                ("_2".to_string(), cursors_arr),
+            ],
+            Some("set_box"),
+        )
+    }
+
+    pub(super) fn set_view_from_type(
+        &self,
+        ctx: &Context,
+        elem_ty: TypeHandle,
+        view_prefix: &str,
+    ) -> Result<TypedHandle<RecordType>> {
+        let set_box = self.set_box_from_type(ctx, elem_ty)?;
+        self.mir_record_prefix(
+            ctx,
+            vec![("_0".to_string(), set_box.into())],
+            Some(view_prefix),
+        )
+    }
+
+    pub(super) fn set_array_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
+        let elem_ty = self.value_type(ctx, elem)?;
+        Ok(self.set_box_from_type(ctx, elem_ty)?.into())
+    }
+
+    fn set_source_type(&self, ctx: &Context, elem: ArgumentId) -> Result<TypeHandle> {
+        let elem_ty = self.source_type(ctx, elem)?;
+        Ok(self.set_box_from_type(ctx, elem_ty)?.into())
+    }
+
+    fn set_view_source_type(
+        &self,
+        ctx: &Context,
+        elem: ArgumentId,
+        view_prefix: &str,
+    ) -> Result<TypeHandle> {
+        let elem_ty = self.source_type(ctx, elem)?;
+        Ok(self.set_view_from_type(ctx, elem_ty, view_prefix)?.into())
     }
 
     pub(super) fn mir_record_kind(

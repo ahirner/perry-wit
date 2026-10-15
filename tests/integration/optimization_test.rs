@@ -725,10 +725,12 @@ export function run(rawId: u64, delta: s64): number {
         compile(
             r#"
 interface Box { raw: string }
+interface NumRec { x: number }
 function fwd(v: number): number { return v; }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
 function radix(flag: number): number { return flag > 0 ? 10 : 16; }
 export function run(flag: number): number {
+    const s = choose(flag);
     const a = parseInt("9007199254740993");
     const b = parseInt("9007199254740993");
     const eq = a === b && !(a !== b);
@@ -737,12 +739,25 @@ export function run(flag: number): number {
     const helper = fwd(a) === b && JSON.stringify(fwd(a)) === "9007199254740993";
     const overflow = Number.isNaN(parseInt("18446744073709551616"));
     const radixWrap = parseInt("10", 4294967298) === 2;
-    const runtimeText = JSON.stringify(parseInt(choose(flag))) === "9007199254740993";
+    const runtimeText = JSON.stringify(parseInt(s)) === "9007199254740993";
     const runtimeRadix = JSON.stringify(parseInt("9007199254740993", radix(flag))) === "9007199254740993";
     const box = JSON.parse<Box>(flag > 0 ? '{"raw":"9007199254740993"}' : '{"raw":"7"}');
     const runtimeJson = JSON.stringify(parseInt(box.raw)) === "9007199254740993";
     const nonJsWs = Number.isNaN(parseInt("\u008510"));
-    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs ? 1 : 0;
+    const rec: NumRec = { x: parseInt(s) };
+    const numRecord = JSON.stringify(rec.x + 1) === "9007199254740994";
+    const arr = [parseInt(s)];
+    const numArray = JSON.stringify(arr[0] + 1) === "9007199254740994";
+    const opt: number | undefined = flag > 0 ? parseInt(s) : undefined;
+    const numOptional = JSON.stringify(opt === undefined ? 0 : opt + 1) === "9007199254740994";
+    const br = flag > 0 ? parseInt(s) : 1;
+    const numBranch = JSON.stringify(br + 1) === "9007199254740994";
+    const numRem = (parseInt(s) % 10) === 3;
+    const numMath =
+        JSON.stringify(Math.trunc(parseInt(s)) + 1) === "9007199254740994" &&
+        JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
+        JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && numArray && numOptional && numBranch && numRem && numMath ? 1 : 0;
 }
 "#,
             "func(flag:s32)->s32",
@@ -874,7 +889,7 @@ export function run(): number {
         entries[0][0] === "x" &&
         entries[0][1] === undefined;
 
-    const s1 = new Set([1, 2, 3]);
+    const s1 = new Set<number>([1, 2, 3]);
     let s1Total = 0;
     s1.forEach((v) => {
         s1.delete(v);
@@ -888,7 +903,7 @@ export function run(): number {
         s2Total = s2Total + v;
     }
 
-    const m1 = new Map([[1, 10], [2, 20], [3, 30]]);
+    const m1 = new Map<number, number>([[1, 10], [2, 20], [3, 30]]);
     let m1Total = 0;
     m1.forEach((v, k) => {
         m1.delete(k);
@@ -902,6 +917,10 @@ export function run(): number {
         m2Total = m2Total + v;
     }
 
+    const emptyTypedMap = new Map<string, number>();
+    emptyTypedMap.set("k", 7);
+    const typedMapOk = emptyTypedMap.get("k") === 7 && emptyTypedMap.size === 1;
+
     const s3 = new Set([1, 2]);
     let s3Total = 0;
     s3.forEach((v) => {
@@ -911,6 +930,60 @@ export function run(): number {
             s3.add(9);
         }
     });
+
+    const liveSet = new Set<number>([1, 2]);
+    const setIter = liveSet.values();
+    liveSet.delete(2);
+    liveSet.add(4);
+    let liveSetTotal = 0;
+    for (const v of setIter) {
+        liveSetTotal = liveSetTotal + v;
+    }
+
+    const liveSetK = new Set<number>([1, 2]);
+    const setKeyIter = liveSetK.keys();
+    liveSetK.delete(2);
+    liveSetK.add(4);
+    let liveSetKeyTotal = 0;
+    for (const k of setKeyIter) {
+        liveSetKeyTotal = liveSetKeyTotal + k;
+    }
+
+    const liveSetE = new Set<number>([1, 2]);
+    const setEntIter = liveSetE.entries();
+    liveSetE.delete(2);
+    liveSetE.add(4);
+    let liveSetEntTotal = 0;
+    for (const [k, v] of setEntIter) {
+        liveSetEntTotal = liveSetEntTotal + k + v;
+    }
+
+    const liveMap = new Map<number, number>([[1, 10], [2, 20]]);
+    const mapValIter = liveMap.values();
+    liveMap.delete(2);
+    liveMap.set(4, 40);
+    let liveMapValTotal = 0;
+    for (const v of mapValIter) {
+        liveMapValTotal = liveMapValTotal + v;
+    }
+
+    const liveMapK = new Map<number, number>([[1, 10], [2, 20]]);
+    const mapKeyIter = liveMapK.keys();
+    liveMapK.delete(2);
+    liveMapK.set(4, 40);
+    let liveMapKeyTotal = 0;
+    for (const k of mapKeyIter) {
+        liveMapKeyTotal = liveMapKeyTotal + k;
+    }
+
+    const liveMapE = new Map<number, number>([[1, 10], [2, 20]]);
+    const mapEntIter = liveMapE.entries();
+    liveMapE.delete(2);
+    liveMapE.set(4, 40);
+    let liveMapEntTotal = 0;
+    for (const [k, v] of mapEntIter) {
+        liveMapEntTotal = liveMapEntTotal + k + v;
+    }
 
     const spreadSet = [...new Set([4, 5])];
     const spreadOk = spreadSet.length === 2 && spreadSet[0] + spreadSet[1] === 9;
@@ -924,7 +997,14 @@ export function run(): number {
         s2Total === 6 &&
         m1Total === 60 &&
         m2Total === 60 &&
+        typedMapOk &&
         s3Total === 10 &&
+        liveSetTotal === 5 &&
+        liveSetKeyTotal === 5 &&
+        liveSetEntTotal === 10 &&
+        liveMapValTotal === 50 &&
+        liveMapKeyTotal === 5 &&
+        liveMapEntTotal === 55 &&
         spreadOk &&
         nulHygiene
         ? 1
@@ -936,6 +1016,34 @@ export function run(): number {
         .core,
     );
     assert_eq!(program.call("run", &[]).0[0].unwrap_i32(), 1);
+
+    let mut churn = crate::core_program::Program::from_wasm(
+        compile(
+            r#"
+export function run(n: number): number {
+    const s = new Set<number>();
+    const m = new Map<number, number>();
+    for (let i = 0; i < n; i = i + 1) {
+        s.add(i);
+        s.delete(i);
+        m.set(i, i);
+        m.delete(i);
+    }
+    return s.size + m.size;
+}
+"#,
+            "func(n:s32)->s32",
+        )?
+        .core,
+    );
+    let (res_128, fuel_128) = churn.call("run", &[wasmtime::Val::I32(128)]);
+    let (res_512, fuel_512) = churn.call("run", &[wasmtime::Val::I32(512)]);
+    assert_eq!(res_128[0].unwrap_i32(), 0);
+    assert_eq!(res_512[0].unwrap_i32(), 0);
+    assert!(
+        fuel_512 < 6 * fuel_128,
+        "expected linear churn scaling, got fuel(128)={fuel_128}, fuel(512)={fuel_512}"
+    );
     Ok(())
 }
 

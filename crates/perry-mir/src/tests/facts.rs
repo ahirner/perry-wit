@@ -472,3 +472,76 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn context_summarization_bounds_context_count() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{
+        builtin::{
+            op_interfaces::SymbolOpInterface,
+            types::{IntegerType, Signedness},
+        },
+        pass::AnalysisManager,
+    };
+    use std::fmt::Write;
+    let ctx = &mut Context::new();
+    let mut text = String::from(
+        r#"builtin.module @context_bound { ^module():
+          builtin.func @helper: builtin.function <(builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
+            ^entry(a: builtin.fp64, b: builtin.fp64):
+              sum = perry.binary Add a, b : builtin.fp64;
+              perry.return sum
+          }
+    "#,
+    );
+    let widths = [
+        (8, Signedness::Unsigned),
+        (8, Signedness::Signed),
+        (16, Signedness::Unsigned),
+        (16, Signedness::Signed),
+        (32, Signedness::Unsigned),
+        (32, Signedness::Signed),
+        (64, Signedness::Unsigned),
+        (64, Signedness::Signed),
+    ];
+    let mut specs = Vec::new();
+    for &(ba, sa) in &widths {
+        for &(bb, sb) in &widths {
+            let idx = specs.len();
+            let name = format!("e{idx}");
+            writeln!(
+                text,
+                r#"; builtin.func @{name}: builtin.function <(builtin.fp64, builtin.fp64) -> (builtin.fp64)> {{
+                  ^entry(a: builtin.fp64, b: builtin.fp64):
+                    res = perry.call helper (a, b) : builtin.fp64;
+                    perry.return res
+                }}"#
+            )
+            .unwrap();
+            specs.push((name, (ba, sa), (bb, sb)));
+        }
+    }
+    text.push_str("}");
+    let module = parse(ctx, &text);
+    verify_operation(module, ctx)?;
+    for func in crate::aggregates::functions(module, ctx) {
+        let sym = func.get_symbol_name(ctx);
+        if let Some((_, (ba, sa), (bb, sb))) = specs.iter().find(|(n, _, _)| sym.as_ref() == n) {
+            crate::calls::set_exported(ctx, &func);
+            let ta = IntegerType::get(ctx, *ba, *sa).into();
+            let tb = IntegerType::get(ctx, *bb, *sb).into();
+            let tr = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+            crate::facts::constrain(ctx, &func, vec![ta, tb], vec![tr]);
+        }
+    }
+    let mut analyses = AnalysisManager::default();
+    let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+    assert_eq!(facts.summarized_contexts, 28);
+    let helper_contexts = facts.context_count(&pliron::ident!("helper"));
+    assert_eq!(
+        helper_contexts, 37,
+        "expected bounded helper contexts (1 generic + 32 precise + 4 summary), got {helper_contexts}"
+    );
+    Ok(())
+}
+

@@ -157,6 +157,10 @@ impl FunctionLowering<'_, '_> {
                 return Ok(());
             }
         }
+        if let Some(value) = self.numeric_intrinsic(ctx, op, intrinsic)? {
+            self.define_value(ctx, op, value);
+            return Ok(());
+        }
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
             Intrinsic::ExceptionEqual => Some(self.runtime(ctx, Runtime::StdExceptionEqual, args)),

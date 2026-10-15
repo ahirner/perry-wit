@@ -257,10 +257,11 @@ impl ToNumberOp {
 
 impl Verify for ToNumberOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let number = FP64Type::get(ctx).into();
-        if inner(ctx, operand(self, ctx), "perry.to_number")? != number
-            || self.get_result(ctx).get_type(ctx) != number
-        {
+        let number: TypeHandle = FP64Type::get(ctx).into();
+        let numeric: TypeHandle = crate::types::NumericType::get(ctx).into();
+        let inner_ty = inner(ctx, operand(self, ctx), "perry.to_number")?;
+        let res_ty = self.get_result(ctx).get_type(ctx);
+        if (inner_ty != number && inner_ty != numeric) || res_ty != inner_ty {
             verify_err!(self.loc(ctx), OptionalErr::Result("perry.to_number"))?
         }
         Ok(())

@@ -67,7 +67,19 @@ impl Shapes<'_> {
                     let [k, v] = arguments.as_slice() else {
                         bail!("{base} needs key and value type arguments");
                     };
-                    return self.kv_array_source_type(ctx, *k, *v, "map_tuple");
+                    return self.map_source_type(ctx, *k, *v);
+                }
+                if base == "MapKeys" && !self.is_user_type(base) {
+                    let [k, v] = arguments.as_slice() else {
+                        bail!("{base} needs key and value type arguments");
+                    };
+                    return self.map_view_source_type(ctx, *k, *v, "map_keys_box");
+                }
+                if base == "MapValues" && !self.is_user_type(base) {
+                    let [k, v] = arguments.as_slice() else {
+                        bail!("{base} needs key and value type arguments");
+                    };
+                    return self.map_view_source_type(ctx, *k, *v, "map_values_box");
                 }
                 if base == "Record" && !self.is_user_type(base) {
                     let [k, v] = arguments.as_slice() else {
@@ -79,7 +91,13 @@ impl Shapes<'_> {
                     let [element] = arguments.as_slice() else {
                         bail!("{base} needs one element type argument");
                     };
-                    return self.set_array_source_type(ctx, *element);
+                    return self.set_source_type(ctx, *element);
+                }
+                if base == "SetEntries" && !self.is_user_type(base) {
+                    let [element] = arguments.as_slice() else {
+                        bail!("{base} needs one element type argument");
+                    };
+                    return self.set_view_source_type(ctx, *element, "set_entries_box");
                 }
                 if matches!(base.as_str(), "ReadonlyArray" | "Array") && !self.is_user_type(base) {
                     let [element] = arguments.as_slice() else {

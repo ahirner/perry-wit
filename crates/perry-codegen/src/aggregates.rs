@@ -1,7 +1,7 @@
 //! Records, arrays and variants: allocation, field and element access.
 use crate::{
     function::FunctionLowering,
-    repr::{Repr, optional_inner, repr, slot_kind},
+    repr::{Carriers, Repr, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow};
@@ -122,7 +122,6 @@ impl FunctionLowering<'_, '_> {
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect();
-            let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self
@@ -134,9 +133,12 @@ impl FunctionLowering<'_, '_> {
                 self.record_storage(ctx, record_ty, size)?
             };
             self.record_header(ctx, object, record);
-            for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
+            for (index, ty) in fields.into_iter().enumerate() {
                 let kind = slot_kind(ctx, ty)?;
-                self.store(ctx, kind, object, record::field(index), value);
+                let operand = op.deref(ctx).get_operand(index);
+                let value = self.mapped_value(ctx, operand)?;
+                let slot = self.prepare_slot_value(ctx, value);
+                self.store(ctx, kind, object, record::field(index), slot);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -146,13 +148,14 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let object = self.mapped(ctx, record)?;
-            let mut value = self.load(ctx, kind, object, offset);
+            let raw = self.load(ctx, kind, object, offset);
+            let mut value = self.unpack_slot_value(ctx, raw, ty);
             if perry_mir::optional::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
-                let omitted = self.is_omitted(ctx, value, ty)?;
-                let undef = self.undefined(ctx, ty)?;
-                value = self.select(ctx, omitted, undef, value);
+                let omitted = self.is_omitted_value(ctx, value, ty)?;
+                let undef = self.undefined_value(ctx, ty)?;
+                value = self.select_carriers(ctx, omitted, undef, value)?;
             }
-            self.define(ctx, op, value);
+            self.define_value(ctx, op, value);
             return Ok(true);
         }
         if let Some(present) = Operation::get_op::<FieldPresentOp>(op, ctx) {
@@ -163,7 +166,8 @@ impl FunctionLowering<'_, '_> {
                     let kind = slot_kind(ctx, ty)?;
                     let object = self.mapped(ctx, record)?;
                     let raw = self.load(ctx, kind, object, offset);
-                    let omitted = self.is_omitted(ctx, raw, ty)?;
+                    let unpacked = self.unpack_slot_value(ctx, raw, ty);
+                    let omitted = self.is_omitted_value(ctx, unpacked, ty)?;
                     self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
                 } else {
                     self.i32_const(ctx, 1)
@@ -173,24 +177,33 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
+            let val_opd = op.deref(ctx).get_operand(1);
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
-            let operands = self.operands(ctx, op)?;
-            self.store(ctx, kind, operands[0], offset, operands[1]);
+            let object = self.mapped(ctx, record)?;
+            let value = self.mapped_value(ctx, val_opd)?;
+            let slot = self.prepare_slot_value(ctx, value);
+            self.store(ctx, kind, object, offset, slot);
             return Ok(true);
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
             let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
-            let capacity = self.i32_const(ctx, operands.len() as i32);
+            let count = op.deref(ctx).get_num_operands();
+            let capacity = self.i32_const(ctx, count as i32);
             let array = self.new_array(ctx, capacity, element)?;
-            if !operands.is_empty() {
-                let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-                for (index, value) in operands.iter().enumerate() {
-                    self.store(ctx, kind, data, layout::SLOT * index as u32, *value);
+            if count > 0 {
+                let mut slots = Vec::with_capacity(count);
+                for index in 0..count {
+                    let operand = op.deref(ctx).get_operand(index);
+                    let value = self.mapped_value(ctx, operand)?;
+                    slots.push(self.prepare_slot_value(ctx, value));
                 }
-                let len = self.i32_const(ctx, operands.len() as i32);
+                let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+                for (index, slot) in slots.into_iter().enumerate() {
+                    self.store(ctx, kind, data, layout::SLOT * index as u32, slot);
+                }
+                let len = self.i32_const(ctx, count as i32);
                 self.store(ctx, MemKind::I32, array, layout::LEN, len);
             }
             self.define(ctx, op, array);
@@ -237,13 +250,17 @@ impl FunctionLowering<'_, '_> {
             return Ok(true);
         }
         if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
-            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let arr_opd = op.deref(ctx).get_operand(0);
+            let val_opd = op.deref(ctx).get_operand(1);
+            let element = Self::element_type(ctx, arr_opd)?;
             let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
+            let array = self.mapped(ctx, arr_opd)?;
+            let value = self.mapped_value(ctx, val_opd)?;
+            let slot = self.prepare_slot_value(ctx, value);
             self.push(
                 ctx,
-                operands[0],
-                operands[1],
+                array,
+                slot,
                 kind,
                 repr(ctx, element)? == Repr::Ref,
             );
@@ -261,16 +278,17 @@ impl FunctionLowering<'_, '_> {
             let slot = self.select(ctx, ok, i, zero);
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, slot);
-            let loaded = self.load(ctx, kind, address, 0);
+            let loaded_raw = self.load(ctx, kind, address, 0);
+            let loaded = self.unpack_slot_value(ctx, loaded_raw, element);
             let target = op.deref(ctx).get_result(0).get_type(ctx);
             let loaded = if optional_inner(ctx, element).is_some() {
-                self.optional_cast(ctx, loaded, element, target)?
+                self.optional_cast_value(ctx, loaded, element, target)?
             } else {
                 loaded
             };
-            let undefined = self.undefined(ctx, target)?;
-            let value = self.select(ctx, ok, loaded, undefined);
-            self.define(ctx, op, value);
+            let undefined = self.undefined_value(ctx, target)?;
+            let value = self.select_carriers(ctx, ok, loaded, undefined)?;
+            self.define_value(ctx, op, value);
             return Ok(true);
         }
         if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
@@ -279,15 +297,21 @@ impl FunctionLowering<'_, '_> {
             let operands = self.operands(ctx, op)?;
             let data = self.load(ctx, MemKind::I32, operands[0], layout::DATA);
             let address = self.slot_address(ctx, data, operands[1]);
-            let value = self.load(ctx, kind, address, 0);
-            self.define(ctx, op, value);
+            let raw = self.load(ctx, kind, address, 0);
+            let value = self.unpack_slot_value(ctx, raw, element);
+            self.define_value(ctx, op, value);
             return Ok(true);
         }
         if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let arr_opd = op.deref(ctx).get_operand(0);
+            let idx_opd = op.deref(ctx).get_operand(1);
+            let val_opd = op.deref(ctx).get_operand(2);
+            let element = Self::element_type(ctx, arr_opd)?;
             let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
-            let (array, index, value) = (operands[0], operands[1], operands[2]);
+            let array = self.mapped(ctx, arr_opd)?;
+            let index = self.mapped(ctx, idx_opd)?;
+            let value = self.mapped_value(ctx, val_opd)?;
+            let slot = self.prepare_slot_value(ctx, value);
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             let (i, ok, integral) = self.element_index(ctx, index, len)?;
             let write = self.new_block(ctx, vec![]);
@@ -297,7 +321,7 @@ impl FunctionLowering<'_, '_> {
             self.block = write;
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, i);
-            self.store(ctx, kind, address, 0, value);
+            self.store(ctx, kind, address, 0, slot);
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -308,12 +332,50 @@ impl FunctionLowering<'_, '_> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, kind, repr(ctx, element)? == Repr::Ref);
+            self.push(ctx, array, slot, kind, repr(ctx, element)? == Repr::Ref);
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    pub(crate) fn prepare_slot_value(&mut self, ctx: &mut Context, value: Carriers<Value>) -> Value {
+        match value {
+            Carriers::Scalar(v) => v,
+            Carriers::Numeric { tag, payload } => {
+                let size = self.i32_const(ctx, 16);
+                let addr = self.alloc(ctx, size);
+                self.store(ctx, MemKind::I32, addr, 0, tag);
+                self.store(ctx, MemKind::I64, addr, 8, payload);
+                addr
+            }
+        }
+    }
+
+    pub(crate) fn unpack_slot_value(
+        &mut self,
+        ctx: &mut Context,
+        raw: Value,
+        ty: TypeHandle,
+    ) -> Carriers<Value> {
+        if crate::values::is_numeric_type(ctx, ty) {
+            let tag = self.load(ctx, MemKind::I32, raw, 0);
+            let payload = self.load(ctx, MemKind::I64, raw, 8);
+            Carriers::Numeric { tag, payload }
+        } else {
+            Carriers::Scalar(raw)
+        }
+    }
+
+    pub(crate) fn select_carriers(
+        &mut self,
+        ctx: &mut Context,
+        cond: Value,
+        a: Carriers<Value>,
+        b: Carriers<Value>,
+    ) -> Result<Carriers<Value>> {
+        Ok(a.zip(b)?.map(|(av, bv)| self.select(ctx, cond, av, bv)))
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
