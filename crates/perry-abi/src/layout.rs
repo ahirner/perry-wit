@@ -124,3 +124,11 @@ pub mod descriptor {
     pub const UNSIGNED_INT: u32 = 9;
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 }
+
+pub mod numeric {
+    pub const FLOAT: i32 = 0;
+    pub const SIGNED: i32 = 1;
+    pub const UNSIGNED: i32 = 2;
+    pub const UNDEFINED: i32 = 3;
+    pub const NULL: i32 = 4;
+}

@@ -23,8 +23,16 @@ pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
         return is_reference(ctx, inner);
     }
     let ty = ty.deref(ctx);
-    !ty.is::<pliron::builtin::types::FP64Type>() && !ty.is::<pliron::builtin::types::IntegerType>()
+    !ty.is::<pliron::builtin::types::FP64Type>()
+        && !ty.is::<pliron::builtin::types::IntegerType>()
+        && !ty.is::<NumericType>()
 }
+
+/// A numeric value retaining an exact signed/unsigned 64-bit integer or IEEE double.
+/// Converting a narrower integer into this type explicitly widens its domain.
+#[pliron_type(name = "perry.numeric", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct NumericType;
 
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///

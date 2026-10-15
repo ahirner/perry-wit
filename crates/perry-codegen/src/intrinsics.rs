@@ -30,6 +30,133 @@ impl FunctionLowering<'_, '_> {
         op: Ptr<Operation>,
         intrinsic: Intrinsic,
     ) -> Result<()> {
+        if intrinsic == Intrinsic::ParseInt {
+            let str_op = op.deref(ctx).get_operand(0);
+            let str_val = self.mapped(ctx, str_op)?;
+            let radix_op = op.deref(ctx).get_operand(1);
+            let radix_ty = radix_op.get_type(ctx);
+            let numeric_ty: pliron::r#type::TypeHandle =
+                perry_mir::types::NumericType::get(ctx).into();
+            let radix_val = self.mapped_value(ctx, radix_op)?;
+            let crate::repr::Carriers::Numeric {
+                tag: radix_tag,
+                payload: radix_payload,
+            } = self.cast_value(ctx, radix_val, radix_ty, numeric_ty)?
+            else {
+                bail!("expected numeric carrier for parseInt radix");
+            };
+            let out = *self
+                .state
+                .numeric_result
+                .get_or_insert_with(|| self.state.data.append(8, &[0; 8]));
+            let out_ptr = self.i32_const(ctx, out as i32);
+            let tag = self.runtime(
+                ctx,
+                Runtime::StdParseInt,
+                vec![str_val, radix_tag, radix_payload, out_ptr],
+            );
+            let payload = self.load(ctx, MemKind::I64, out_ptr, 0);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = self.cast_value(
+                ctx,
+                crate::repr::Carriers::Numeric { tag, payload },
+                numeric_ty,
+                res_ty,
+            )?;
+            self.define_value(ctx, op, value);
+            return Ok(());
+        }
+        if intrinsic == Intrinsic::NumberToString {
+            let arg_op = op.deref(ctx).get_operand(0);
+            let arg_ty = arg_op.get_type(ctx);
+            if arg_ty.deref(ctx).is::<perry_mir::types::NumericType>()
+                || crate::numeric::integer(ctx, arg_ty).is_some()
+            {
+                let numeric_ty: pliron::r#type::TypeHandle =
+                    perry_mir::types::NumericType::get(ctx).into();
+                let arg_val = self.mapped_value(ctx, arg_op)?;
+                let crate::repr::Carriers::Numeric { tag, payload } =
+                    self.cast_value(ctx, arg_val, arg_ty, numeric_ty)?
+                else {
+                    bail!("expected numeric carrier for NumberToString");
+                };
+                let value = self.runtime(ctx, Runtime::StdNumberToString, vec![tag, payload]);
+                self.define(ctx, op, value);
+                return Ok(());
+            }
+        }
+        if matches!(
+            intrinsic,
+            Intrinsic::NumberIsNaN
+                | Intrinsic::NumberIsFinite
+                | Intrinsic::NumberIsInteger
+                | Intrinsic::NumberIsSafeInteger
+        ) {
+            let arg_op = op.deref(ctx).get_operand(0);
+            let arg_ty = arg_op.get_type(ctx);
+            if arg_ty.deref(ctx).is::<perry_mir::types::NumericType>()
+                || crate::numeric::integer(ctx, arg_ty).is_some()
+            {
+                let numeric_ty: pliron::r#type::TypeHandle =
+                    perry_mir::types::NumericType::get(ctx).into();
+                let arg_val = self.mapped_value(ctx, arg_op)?;
+                let crate::repr::Carriers::Numeric { tag, payload } =
+                    self.cast_value(ctx, arg_val, arg_ty, numeric_ty)?
+                else {
+                    bail!("expected numeric carrier for number predicate");
+                };
+                let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT as i32);
+                let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+                let result = match intrinsic {
+                    Intrinsic::NumberIsNaN => {
+                        let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                        let is_nan = self.num(ctx, NumOpcode::F64Ne, vec![f, f]);
+                        self.num(ctx, NumOpcode::I32And, vec![is_float, is_nan])
+                    }
+                    Intrinsic::NumberIsFinite => {
+                        let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
+                        let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                        let inf = self.f64_const(ctx, f64::INFINITY);
+                        let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                        self.num(ctx, NumOpcode::I32Or, vec![not_float, finite])
+                    }
+                    Intrinsic::NumberIsInteger => {
+                        let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
+                        let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                        let inf = self.f64_const(ctx, f64::INFINITY);
+                        let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                        let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
+                        let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
+                        let float_int = self.num(ctx, NumOpcode::I32And, vec![finite, integral]);
+                        self.num(ctx, NumOpcode::I32Or, vec![not_float, float_int])
+                    }
+                    Intrinsic::NumberIsSafeInteger => {
+                        let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                        let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
+                        let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
+                        let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
+                        let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
+                        let float_safe = self.num(ctx, NumOpcode::I32And, vec![in_range, integral]);
+                        let min_i64 = self.i64_const(ctx, (-9_007_199_254_740_991i64) as u64);
+                        let max_i64 = self.i64_const(ctx, 9_007_199_254_740_991);
+                        let ge_min = self.num(ctx, NumOpcode::I64GeS, vec![payload, min_i64]);
+                        let le_max = self.num(ctx, NumOpcode::I64LeS, vec![payload, max_i64]);
+                        let signed_safe = self.num(ctx, NumOpcode::I32And, vec![ge_min, le_max]);
+                        let unsigned_safe =
+                            self.num(ctx, NumOpcode::I64LeU, vec![payload, max_i64]);
+                        let signed_tag =
+                            self.i32_const(ctx, perry_abi::layout::numeric::SIGNED as i32);
+                        let is_signed = self.num(ctx, NumOpcode::I32Eq, vec![tag, signed_tag]);
+                        let int_safe = self.select(ctx, is_signed, signed_safe, unsigned_safe);
+                        let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                        self.select(ctx, is_float, float_safe, int_safe)
+                    }
+                    _ => unreachable!(),
+                };
+                self.define(ctx, op, result);
+                return Ok(());
+            }
+        }
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
             Intrinsic::ExceptionEqual => Some(self.runtime(ctx, Runtime::StdExceptionEqual, args)),

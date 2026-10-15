@@ -1,0 +1,112 @@
+//! Multi-carrier lowering for MIR values whose runtime representation uses a register pair.
+use crate::{function::FunctionLowering, repr::wasm_type};
+use anyhow::{Result, anyhow, ensure};
+use perry_mir::types::NumericType;
+use pliron::{
+    builtin::types::{IntegerType, Signedness},
+    context::{Context, Ptr},
+    operation::Operation,
+    r#type::{TypeHandle, Typed},
+    value::Value,
+};
+
+#[derive(Clone, Copy)]
+pub(crate) enum Carriers<T> {
+    Scalar(T),
+    Numeric { tag: T, payload: T },
+}
+
+impl<T> From<T> for Carriers<T> {
+    fn from(value: T) -> Self {
+        Self::Scalar(value)
+    }
+}
+
+impl<T: Copy> Carriers<T> {
+    pub(crate) fn scalar(self) -> Result<T> {
+        match self {
+            Self::Scalar(value) => Ok(value),
+            Self::Numeric { .. } => Err(anyhow!(
+                "numeric alternatives require both register carriers"
+            )),
+        }
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = T> {
+        let (first, second) = match self {
+            Self::Scalar(value) => (value, None),
+            Self::Numeric { tag, payload } => (tag, Some(payload)),
+        };
+        std::iter::once(first).chain(second)
+    }
+
+    pub(crate) fn try_map<U>(self, mut f: impl FnMut(T) -> Result<U>) -> Result<Carriers<U>> {
+        Ok(match self {
+            Self::Scalar(value) => Carriers::Scalar(f(value)?),
+            Self::Numeric { tag, payload } => Carriers::Numeric {
+                tag: f(tag)?,
+                payload: f(payload)?,
+            },
+        })
+    }
+}
+
+pub(crate) fn carriers(ctx: &Context, ty: TypeHandle) -> Result<Carriers<TypeHandle>> {
+    if ty.deref(ctx).is::<NumericType>() {
+        Ok(Carriers::Numeric {
+            tag: IntegerType::get(ctx, 32, Signedness::Signless).into(),
+            payload: IntegerType::get(ctx, 64, Signedness::Signless).into(),
+        })
+    } else {
+        Ok(Carriers::Scalar(wasm_type(ctx, ty)?))
+    }
+}
+
+pub(crate) fn signature(
+    ctx: &Context,
+    types: impl IntoIterator<Item = TypeHandle>,
+) -> Result<Vec<TypeHandle>> {
+    let mut result = Vec::new();
+    for ty in types {
+        result.extend(carriers(ctx, ty)?.iter());
+    }
+    Ok(result)
+}
+
+impl FunctionLowering<'_, '_> {
+    pub(crate) fn bind_values(
+        &mut self,
+        ctx: &Context,
+        logical: impl IntoIterator<Item = Value>,
+        physical: impl IntoIterator<Item = Value>,
+    ) -> Result<()> {
+        let mut physical = physical.into_iter();
+        for value in logical {
+            let parts = carriers(ctx, value.get_type(ctx))?.try_map(|ty| {
+                let carrier = physical
+                    .next()
+                    .ok_or_else(|| anyhow!("missing value carrier"))?;
+                ensure!(carrier.get_type(ctx) == ty, "value carrier type mismatch");
+                Ok(carrier)
+            })?;
+            self.values.insert(value, parts);
+        }
+        ensure!(physical.next().is_none(), "unexpected value carrier");
+        Ok(())
+    }
+
+    pub(crate) fn flatten_operands(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        start: usize,
+    ) -> Result<Vec<Value>> {
+        let count = op.deref(ctx).get_num_operands();
+        let mut result = Vec::new();
+        for index in start..count {
+            let value = op.deref(ctx).get_operand(index);
+            result.extend(self.mapped_value(ctx, value)?.iter());
+        }
+        Ok(result)
+    }
+}

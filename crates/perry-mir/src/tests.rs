@@ -447,4 +447,3 @@ fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     );
     Ok(())
 }
-

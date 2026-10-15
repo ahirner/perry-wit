@@ -24,6 +24,10 @@ impl<'s> FunctionBuilder<'s> {
             let val = self.defined(ctx, val)?;
             return self.set_values(ctx, val, elem_ty);
         }
+        if crate::collections::map_entry_types(ctx, val.get_type(ctx)).is_some() {
+            let val = self.defined(ctx, val)?;
+            return self.kv_entries(ctx, val);
+        }
         Ok(val)
     }
 
@@ -84,9 +88,11 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = if spread {
                     match ty {
                         HirType::Array(inner) => *inner,
-                        HirType::Generic { base, mut type_args }
-                            if matches!(base.as_str(), "Set" | "ReadonlySet")
-                                && type_args.len() == 1 =>
+                        HirType::Generic {
+                            base,
+                            mut type_args,
+                        } if matches!(base.as_str(), "Set" | "ReadonlySet")
+                            && type_args.len() == 1 =>
                         {
                             type_args.pop().unwrap()
                         }

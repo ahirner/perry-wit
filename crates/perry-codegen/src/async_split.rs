@@ -17,8 +17,9 @@
 use crate::{
     function::FunctionLowering,
     module::ModuleState,
-    repr::{i32_type, slot_kind, wasm_type},
+    repr::{i32_type, slot_kind},
     runtime::Runtime,
+    values::{self, Carriers},
 };
 use anyhow::{Result, anyhow};
 use perry_abi::layout::promise as promises;
@@ -54,7 +55,7 @@ use perry_abi::layout::async_frame::{OBSERVER, PIN, SLOTS};
 pub(crate) struct Frame {
     pub(crate) frame: Value,
     /// Frame slot offset and access of each MIR value kept in the frame.
-    pub(crate) slots: HashMap<Value, (u32, MemKind)>,
+    pub(crate) slots: HashMap<Value, Carriers<(u32, MemKind)>>,
     /// Continuation block of each `await`, in state order (state = index + 1).
     pub(crate) resumes: Vec<Ptr<BasicBlock>>,
 }
@@ -117,25 +118,34 @@ pub(crate) fn lower(
     let params: Vec<Value> = entry.deref(ctx).arguments().collect();
 
     // Frame layout: parameters first, then every other value live across an await.
-    let mut slots: HashMap<Value, (u32, MemKind)> = HashMap::new();
+    let mut slots: HashMap<Value, Carriers<(u32, MemKind)>> = HashMap::new();
     let mut offset = SLOTS;
+    let mut alloc_slot = |ty: pliron::r#type::TypeHandle| -> Result<Carriers<(u32, MemKind)>> {
+        if ty.deref(ctx).is::<perry_mir::types::NumericType>() {
+            let slot = Carriers::Numeric {
+                tag: (offset, MemKind::I32),
+                payload: (offset + 8, MemKind::I64),
+            };
+            offset += 16;
+            Ok(slot)
+        } else {
+            let slot = Carriers::Scalar((offset, slot_kind(ctx, ty)?));
+            offset += 8;
+            Ok(slot)
+        }
+    };
     for (param, ty) in params.iter().zip(&mir_params) {
-        slots.insert(*param, (offset, slot_kind(ctx, *ty)?));
-        offset += 8;
+        slots.insert(*param, alloc_slot(*ty)?);
     }
     for value in live_across_awaits(ctx, mir, state.live) {
         if let std::collections::hash_map::Entry::Vacant(slot) = slots.entry(value) {
-            slot.insert((offset, slot_kind(ctx, value.get_type(ctx))?));
-            offset += 8;
+            slot.insert(alloc_slot(value.get_type(ctx))?);
         }
     }
     let frame_size = offset;
 
     // Ramp: allocate the frame, store the arguments, run the body to its first suspension.
-    let wasm_params = mir_params
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
+    let wasm_params = values::signature(ctx, mir_params.iter().copied())?;
     let i32 = i32_type(ctx);
     let ramp_ty = FunctionType::get(ctx, wasm_params, vec![i32]);
     let ramp = FuncOp::new(ctx, name.clone(), ramp_ty);
@@ -145,10 +155,11 @@ pub(crate) fn lower(
         let size = b.i32_const(ctx, frame_size as i32);
         let frame = if b.state.collectible {
             let mut offsets = vec![PROMISE, AWAITED];
-            offsets.extend(slots.iter().filter_map(|(value, (offset, _))| {
+            offsets.extend(slots.iter().filter_map(|(value, slot)| {
                 crate::repr::repr(ctx, value.get_type(ctx))
                     .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
-                    .then_some(*offset)
+                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
+                    .flatten()
             }));
             offsets.sort_unstable();
             let shape = b.pointer_shape(&offsets);
@@ -166,9 +177,12 @@ pub(crate) fn lower(
         b.store(ctx, MemKind::I32, frame, STATE, zero);
         let promise = b.new_promise(ctx, mir_results[0])?;
         b.store(ctx, MemKind::I32, frame, PROMISE, promise);
-        for (param, arg) in params.iter().zip(args) {
-            let (at, access) = slots[param];
-            b.store(ctx, access, frame, at, arg);
+        let mut args_iter = args.into_iter();
+        for param in &params {
+            for (at, access) in slots[param].iter() {
+                let arg = args_iter.next().expect("ramp argument");
+                b.store(ctx, access, frame, at, arg);
+            }
         }
         let call = CallOp::new(ctx, step_name(&name), vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
@@ -182,10 +196,7 @@ pub(crate) fn lower(
     let step = FuncOp::new(ctx, step_name(&name), step_ty);
     let dispatch = step.get_entry_block(ctx);
     let frame = dispatch.deref(ctx).get_argument(0);
-    let results = mir_results
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
+    let results = values::signature(ctx, mir_results.iter().copied())?;
     let mut b = FunctionLowering::glue(state, ctx, &step);
     b.throws = true;
     b.results = results;
@@ -217,8 +228,10 @@ pub(crate) fn lower(
     let saved = std::mem::replace(&mut b.block, begin);
     let mut loaded = Vec::new();
     for param in &params {
-        let (at, access) = b.step_frame().slots[param];
-        loaded.push(b.load(ctx, access, frame, at));
+        let slot = b.step_frame().slots[param];
+        for (at, access) in slot.iter() {
+            loaded.push(b.load(ctx, access, frame, at));
+        }
     }
     b.br(ctx, targets[0], loaded);
     b.block = saved;

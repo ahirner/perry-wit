@@ -165,9 +165,39 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         writer: Value,
-        value: Value,
+        value: impl Into<crate::repr::Carriers<Value>>,
         ty: TypeHandle,
     ) -> Result<()> {
+        let value = value.into();
+        if let crate::repr::Carriers::Numeric { tag, payload } = value {
+            let floats = self.new_block(ctx, vec![]);
+            let signed = self.new_block(ctx, vec![]);
+            let unsigned = self.new_block(ctx, vec![]);
+            let invalid = self.new_block(ctx, vec![]);
+            let done = self.new_block(ctx, vec![]);
+            self.br_table(ctx, tag, vec![floats, signed, unsigned], invalid);
+
+            self.block = invalid;
+            let op = pliron_wasm::control::UnreachableOp::new(ctx).get_operation();
+            self.insert(ctx, op);
+
+            self.block = floats;
+            let float = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+            self.runtime_void(ctx, Runtime::StdJsonNumber, vec![writer, float]);
+            self.br(ctx, done, vec![]);
+
+            self.block = signed;
+            self.runtime_void(ctx, Runtime::StdJsonWriteI64, vec![writer, payload]);
+            self.br(ctx, done, vec![]);
+
+            self.block = unsigned;
+            self.runtime_void(ctx, Runtime::StdJsonWriteU64, vec![writer, payload]);
+            self.br(ctx, done, vec![]);
+
+            self.block = done;
+            return Ok(());
+        }
+        let value = value.scalar()?;
         if let Some(inner) = optional_inner(ctx, ty) {
             // Inside arrays, `undefined` is written as `null`.
             let undefined = self.is_absent(ctx, value, ty)?;
@@ -483,16 +513,18 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(super) fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        let value = self.operand(ctx, op, 0)?;
-        let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+        let input = op.deref(ctx).get_operand(0);
+        let value = self.mapped_value(ctx, input)?;
+        let ty = input.get_type(ctx);
         let writer = self.runtime(ctx, Runtime::StdJsonWriter, vec![]);
         let json = ty.deref(ctx).is::<JsonType>();
         let text = if json || optional_inner(ctx, ty).is_some() {
             // A top-level `undefined` stringifies to `undefined`.
+            let scalar = value.scalar()?;
             let undefined = if json {
-                self.num(ctx, NumOpcode::I32Eqz, vec![value])
+                self.num(ctx, NumOpcode::I32Eqz, vec![scalar])
             } else {
-                self.absence_test(ctx, value, ty, false)?
+                self.absence_test(ctx, scalar, ty, false)?
             };
             let i32 = i32_type(ctx);
             let write = self.new_block(ctx, vec![]);

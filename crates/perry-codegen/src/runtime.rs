@@ -267,8 +267,9 @@ runtime_functions! {
     StdJsonWriteU64 = "std_json_write_u64" (I32, I64);
     StdJsonWriter = "std_json_writer" () -> I32;
     StdMathRandom = "std_math_random" () -> F64;
+    StdNumberToString = "std_number_to_string" (I32, I64) -> I32;
     StdParseFloat = "std_parse_float" (I32) -> F64;
-    StdParseInt = "std_parse_int" (I32, F64) -> F64;
+    StdParseInt = "std_parse_int" (I32, I32, I64, I32) -> I32;
     StdRaiseInvalidDate = "std_raise_invalid_date" () -> I32;
     StdRandomUuid = "std_random_uuid" () -> I32;
     StdRegexSearch = "std_regex_search" (I32, I32) -> F64;

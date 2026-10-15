@@ -264,6 +264,40 @@ impl<'s> FunctionBuilder<'s> {
         }
 
         self.switch_to(body_block);
+        if let Some(Expr::Compare {
+            op: CompareOp::Lt,
+            left,
+            right,
+        }) = condition
+            && let (
+                Expr::LocalGet(idx_id),
+                Expr::PropertyGet {
+                    object: obj,
+                    property,
+                    ..
+                },
+            ) = (left.as_ref(), right.as_ref())
+            && property == "length"
+            && let Expr::LocalGet(arr_id) = obj.as_ref()
+            && let Ok(arr_slot) = self.local(*arr_id)
+            && let Ok(idx_slot) = self.local(*idx_id)
+        {
+            let arr_val = self.load(ctx, arr_slot)?;
+            if let Ok(arr_def) = self.defined(ctx, arr_val) {
+                let arr_ty = arr_def.get_type(ctx);
+                if crate::collections::map_entry_types(ctx, arr_ty).is_some()
+                    || crate::collections::set_entry_type(ctx, arr_ty).is_some()
+                {
+                    let idx_val = self.load(ctx, idx_slot)?;
+                    let entry = self.element_at(ctx, arr_def, idx_val)?;
+                    if let Some(live) = self.collection_entry_live(ctx, entry)? {
+                        let live_body = self.new_block(ctx, "loop_live_body");
+                        self.branch(ctx, live, live_body, latch);
+                        self.switch_to(live_body);
+                    }
+                }
+            }
+        }
         self.controls.push(Control::Loop {
             continue_to: latch,
             break_to: exit,

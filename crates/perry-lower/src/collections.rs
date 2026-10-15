@@ -3,13 +3,9 @@
 use super::*;
 use perry_mir::types::OptionalType;
 use perry_parser::swc_ecma_ast as ast;
-use swc_common::DUMMY_SP;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 mod objects;
-
-pub(super) const MAP_TYPE_MARKER: &str = "\0perry_map_type_args";
-pub(super) const SET_TYPE_MARKER: &str = "\0perry_set_type_args";
 
 /// Rewrite `new Map<K, V>(...)` and `new Set<T>(...)` in the AST before HIR lowering
 /// so explicit constructor type arguments are preserved even when the variable binding
@@ -82,23 +78,12 @@ pub(super) fn preserve_type_args(module: &mut ast::Module) {
                 _ => None,
             }
         }
-
-        fn str_arg(s: &str) -> ast::ExprOrSpread {
-            ast::ExprOrSpread {
-                spread: None,
-                expr: Box::new(ast::Expr::Lit(ast::Lit::Str(ast::Str {
-                    span: DUMMY_SP,
-                    value: s.into(),
-                    raw: None,
-                }))),
-            }
-        }
     }
 
     impl VisitMut for TypeArgPreserver {
         fn visit_mut_new_expr(&mut self, node: &mut ast::NewExpr) {
             node.visit_mut_children_with(self);
-            let ast::Expr::Ident(ident) = node.callee.as_ref() else {
+            let ast::Expr::Ident(ident) = node.callee.as_mut() else {
                 return;
             };
             let Some(type_args) = node.type_args.as_ref() else {
@@ -111,49 +96,16 @@ pub(super) fn preserve_type_args(module: &mut ast::Module) {
                 ) && let (Some(k_enc), Some(v_enc)) =
                     (encode_hir_type(&k_hir), encode_hir_type(&v_hir))
                 {
-                    let mut elems = vec![
-                        Some(Self::str_arg(MAP_TYPE_MARKER)),
-                        Some(Self::str_arg(&k_enc)),
-                        Some(Self::str_arg(&v_enc)),
-                    ];
-                    if let Some(first) = node
-                        .args
-                        .take()
-                        .and_then(|mut args| (!args.is_empty()).then(|| args.swap_remove(0)))
-                    {
-                        elems.push(Some(first));
-                    }
-                    node.args = Some(vec![ast::ExprOrSpread {
-                        spread: None,
-                        expr: Box::new(ast::Expr::Array(ast::ArrayLit {
-                            span: DUMMY_SP,
-                            elems,
-                        })),
-                    }]);
+                    ident.sym = format!("\0perry_map:{}:{k_enc}:{v_enc}", k_enc.len()).into();
+                    node.type_args = None;
                 }
             } else if ident.sym.as_ref() == "Set"
                 && type_args.params.len() == 1
                 && let Some(elem_hir) = Self::ts_type_to_hir(&type_args.params[0])
                 && let Some(elem_enc) = encode_hir_type(&elem_hir)
             {
-                let mut elems = vec![
-                    Some(Self::str_arg(SET_TYPE_MARKER)),
-                    Some(Self::str_arg(&elem_enc)),
-                ];
-                if let Some(first) = node
-                    .args
-                    .take()
-                    .and_then(|mut args| (!args.is_empty()).then(|| args.swap_remove(0)))
-                {
-                    elems.push(Some(first));
-                }
-                node.args = Some(vec![ast::ExprOrSpread {
-                    spread: None,
-                    expr: Box::new(ast::Expr::Array(ast::ArrayLit {
-                        span: DUMMY_SP,
-                        elems,
-                    })),
-                }]);
+                ident.sym = format!("\0perry_set:{elem_enc}").into();
+                node.type_args = None;
             }
         }
 
@@ -308,52 +260,19 @@ pub(crate) fn decode_hir_type(s: &str) -> Option<HirType> {
     None
 }
 
-pub(super) fn parse_map_new_arg(expr: &Expr) -> Option<(HirType, HirType, Option<&Expr>)> {
-    let Expr::Array(elems) = expr else {
-        return None;
-    };
-    let Some(Expr::String(marker)) = elems.first() else {
-        return None;
-    };
-    if marker != MAP_TYPE_MARKER {
-        return None;
-    }
-    let Expr::String(k_enc) = elems.get(1)? else {
-        return None;
-    };
-    let Expr::String(v_enc) = elems.get(2)? else {
-        return None;
-    };
-    let init = elems.get(3).filter(|e| !matches!(e, Expr::Undefined));
-    Some((decode_hir_type(k_enc)?, decode_hir_type(v_enc)?, init))
+pub(super) fn parse_typed_map_callee(class_name: &str) -> Option<(HirType, HirType)> {
+    let rest = class_name.strip_prefix("\0perry_map:")?;
+    let (k_enc, rem) = take_len_prefixed(rest)?;
+    let v_enc = rem.strip_prefix(':')?;
+    Some((decode_hir_type(k_enc)?, decode_hir_type(v_enc)?))
 }
 
-pub(super) fn parse_set_new_arg(expr: &Expr) -> Option<(HirType, Option<&Expr>)> {
-    let Expr::Array(elems) = expr else {
-        return None;
-    };
-    let Some(Expr::String(marker)) = elems.first() else {
-        return None;
-    };
-    if marker != SET_TYPE_MARKER {
-        return None;
-    }
-    let Expr::String(t_enc) = elems.get(1)? else {
-        return None;
-    };
-    let init = elems.get(2).filter(|e| !matches!(e, Expr::Undefined));
-    Some((decode_hir_type(t_enc)?, init))
+pub(super) fn parse_typed_set_callee(class_name: &str) -> Option<HirType> {
+    let elem_enc = class_name.strip_prefix("\0perry_set:")?;
+    decode_hir_type(elem_enc)
 }
 
-pub(super) fn parse_map_type_args(args: &[Expr]) -> Option<(HirType, HirType, Option<&Expr>)> {
-    args.first().and_then(parse_map_new_arg)
-}
-
-pub(super) fn parse_set_type_args(args: &[Expr]) -> Option<(HirType, Option<&Expr>)> {
-    args.first().and_then(parse_set_new_arg)
-}
-
-/// Extract `(K, V, tuple_rec)` if `ty` is an `ArrayType` whose element is a 2-field tuple `RecordType`.
+/// Extract `(K, V, tuple_rec)` if `ty` is an `ArrayType` whose element is a key-value tuple `RecordType`.
 pub(super) fn tuple_kv_types(
     ctx: &Context,
     ty: TypeHandle,
@@ -367,7 +286,8 @@ pub(super) fn tuple_kv_types(
         return None;
     }
     let fields = rec_ref.fields().ok()?;
-    if fields.len() != 2 {
+    let is_map_tuple = rec_ref.name().as_ref().starts_with("map_tuple_");
+    if !(fields.len() == 2 || (is_map_tuple && fields.len() == 3)) {
         return None;
     }
     let (_, k_ty) = fields.iter().find(|(n, _)| n == "_0")?;
@@ -423,7 +343,7 @@ pub(super) fn set_entry_type(
         return None;
     }
     let fields = rec_ref.fields().ok()?;
-    if fields.len() != 1 {
+    if fields.len() != 2 {
         return None;
     }
     let (_, elem_ty) = fields.iter().find(|(n, _)| n == "_0")?;
@@ -474,41 +394,20 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         match expr {
             Expr::MapNew => Ok(Some(self.empty_map(ctx, expected)?)),
-            Expr::MapNewFromArray(init) => {
-                if let Some((k_hir, v_hir, real_init)) = parse_map_new_arg(init) {
-                    let map_ty = self
-                        .shapes
-                        .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?;
-                    if let Some(real_init) = real_init {
-                        return Ok(Some(self.map_from_entries(ctx, real_init, Some(map_ty))?));
-                    }
-                    return Ok(Some(self.empty_map(ctx, Some(map_ty))?));
-                }
-                Ok(Some(self.map_from_entries(ctx, init, expected)?))
-            }
+            Expr::MapNewFromArray(init) => Ok(Some(self.map_from_entries(ctx, init, expected)?)),
             Expr::SetNew => Ok(Some(self.empty_set(ctx, expected)?)),
-            Expr::SetNewFromArray(init) => {
-                if let Some((elem_hir, real_init)) = parse_set_new_arg(init) {
-                    let set_ty = self.shapes.set_array_type(ctx, &elem_hir)?;
-                    if let Some(real_init) = real_init {
-                        return Ok(Some(self.set_from_array(ctx, real_init, Some(set_ty))?));
-                    }
-                    return Ok(Some(self.empty_set(ctx, Some(set_ty))?));
-                }
-                Ok(Some(self.set_from_array(ctx, init, expected)?))
-            }
+            Expr::SetNewFromArray(init) => Ok(Some(self.set_from_array(ctx, init, expected)?)),
             Expr::New {
                 class_name, args, ..
-            } if class_name == "Map" => {
-                if let Some((k_hir, v_hir, real_init)) = parse_map_type_args(args) {
-                    let map_ty = self
-                        .shapes
-                        .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?;
-                    if let Some(real_init) = real_init {
-                        return Ok(Some(self.map_from_entries(ctx, real_init, Some(map_ty))?));
-                    }
-                    return Ok(Some(self.empty_map(ctx, Some(map_ty))?));
-                }
+            } if class_name == "Map" || parse_typed_map_callee(class_name).is_some() => {
+                let expected = if let Some((k_hir, v_hir)) = parse_typed_map_callee(class_name) {
+                    Some(
+                        self.shapes
+                            .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?,
+                    )
+                } else {
+                    expected
+                };
                 if let [init] = args.as_slice()
                     && !matches!(init, Expr::Undefined)
                 {
@@ -518,14 +417,12 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::New {
                 class_name, args, ..
-            } if class_name == "Set" => {
-                if let Some((elem_hir, real_init)) = parse_set_type_args(args) {
-                    let set_ty = self.shapes.set_array_type(ctx, &elem_hir)?;
-                    if let Some(real_init) = real_init {
-                        return Ok(Some(self.set_from_array(ctx, real_init, Some(set_ty))?));
-                    }
-                    return Ok(Some(self.empty_set(ctx, Some(set_ty))?));
-                }
+            } if class_name == "Set" || parse_typed_set_callee(class_name).is_some() => {
+                let expected = if let Some(elem_hir) = parse_typed_set_callee(class_name) {
+                    Some(self.shapes.set_array_type(ctx, &elem_hir)?)
+                } else {
+                    expected
+                };
                 if let [init] = args.as_slice()
                     && !matches!(init, Expr::Undefined)
                 {
@@ -536,7 +433,7 @@ impl<'s> FunctionBuilder<'s> {
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
-                Ok(Some(self.array_length(ctx, m)))
+                Ok(Some(self.collection_size(ctx, m)?))
             }
             Expr::MapGet { map, key } => {
                 let m = self.expression(ctx, map)?;
@@ -608,7 +505,7 @@ impl<'s> FunctionBuilder<'s> {
                     return Ok(Some(self.set_entries(ctx, m, elem_ty)?));
                 }
                 if kv_entry_types(ctx, ty).is_some() {
-                    return Ok(Some(m));
+                    return Ok(Some(self.kv_entries(ctx, m)?));
                 }
                 let elem_ty = self.array_element(ctx, m)?;
                 Ok(Some(self.array_entries(ctx, m, elem_ty)?))
@@ -705,7 +602,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 "entries" => {
                     ensure!(args.is_empty(), "Map.entries takes no arguments");
-                    Some(receiver)
+                    Some(self.kv_entries(ctx, receiver)?)
                 }
                 "forEach" => {
                     let [callback] = args else {
@@ -809,24 +706,37 @@ impl<'s> FunctionBuilder<'s> {
         init: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let entries_val = self.expression_with(ctx, init, expected)?;
+        let init_expected =
+            if let Some((k_ty, v_ty, _)) = expected.and_then(|exp| kv_entry_types(ctx, exp)) {
+                let pair_rec = self.shapes.mir_record_prefix(
+                    ctx,
+                    vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                    Some("tuple"),
+                )?;
+                Some(ArrayType::get(ctx, pair_rec.into()).into())
+            } else {
+                None
+            };
+        let entries_val = self.expression_with(ctx, init, init_expected)?;
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty, _) = kv_entry_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| kv_entry_types(ctx, e)))
             .context("Map constructor requires an iterable of [key, value] tuples")?;
+        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.mir_record_prefix(
                 ctx,
-                vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                vec![
+                    ("_0".to_string(), k_ty),
+                    ("_1".to_string(), v_ty),
+                    ("_2".to_string(), i1_ty),
+                ],
                 Some("map_tuple"),
             )?,
         };
         let map = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, map_tuple.into(), vec![]));
-        let limit = self.array_length(ctx, entries_val);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "map_init", zero, limit, |b, ctx, idx, _, _| {
-            let entry = b.element_at(ctx, entries_val, idx)?;
+        self.live_collection_loop(ctx, "map_init", entries_val, |b, ctx, _, entry| {
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let k = b.append_value(ctx, &k_op);
             let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
@@ -842,8 +752,7 @@ impl<'s> FunctionBuilder<'s> {
             bail!("an empty Set requires a type annotation (e.g. Set<T>)");
         };
         let expected = optional_value(ctx, expected).unwrap_or(expected);
-        let (_, tuple_rec) =
-            set_entry_type(ctx, expected).context("expected a Set<T> type")?;
+        let (_, tuple_rec) = set_entry_type(ctx, expected).context("expected a Set<T> type")?;
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![])))
     }
 
@@ -858,6 +767,7 @@ impl<'s> FunctionBuilder<'s> {
         });
         let arr = self.expression_with(ctx, init, init_expected)?;
         let arr = self.defined(ctx, arr)?;
+        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let (elem_ty, tuple_rec, source_is_set) = match set_entry_type(ctx, arr.get_type(ctx)) {
             Some((e, r)) => (e, r, true),
             None => {
@@ -866,7 +776,7 @@ impl<'s> FunctionBuilder<'s> {
                     Some(r) => r,
                     None => self.shapes.mir_record_prefix(
                         ctx,
-                        vec![("_0".to_string(), e)],
+                        vec![("_0".to_string(), e), ("_1".to_string(), i1_ty)],
                         Some("set_tuple"),
                     )?,
                 };
@@ -874,13 +784,12 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         let set = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_init", zero, limit, |b, ctx, idx, _, _| {
+        self.live_collection_loop(ctx, "set_init", arr, |b, ctx, _, entry| {
             let item = if source_is_set {
-                b.set_element_at(ctx, arr, idx)?
+                let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                b.append_value(ctx, &op)
             } else {
-                b.element_at(ctx, arr, idx)?
+                entry
             };
             b.set_add(ctx, set, item, elem_ty, tuple_rec)?;
             Ok(())
@@ -905,5 +814,32 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             Ok(eq)
         }
+    }
+
+    /// Convert a JSON object snapshot `{"k": v, ...}` into a `Record<string, V>` dictionary array.
+    pub(crate) fn decode_dict(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        _k_ty: TypeHandle,
+        v_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
+        let keys = self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value]);
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        let limit = self.array_length(ctx, keys);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "json_dict", zero, limit, |b, ctx, idx, _, _| {
+            let key_str = b.element_at(ctx, keys, idx)?;
+            let raw_val = b.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key_str]);
+            let decoded_val = b.fit(ctx, raw_val, v_ty)?;
+            let entry = b.emit_value(ctx, |ctx| {
+                AllocOp::new(ctx, tuple_rec, vec![key_str, decoded_val])
+            });
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, dict, entry));
+            Ok(())
+        })?;
+        Ok(dict)
     }
 }

@@ -2,7 +2,7 @@
 use crate::{
     attrs::CompareKind,
     exceptions::CaughtOp,
-    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
+    optional::{IsUndefinedOp, OmittedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{CompareOp, NumericCastOp},
 };
 use pliron::{
@@ -65,9 +65,10 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
         if wrapped(ctx, operand).is_some() {
             return Some(Replacement::Bool(false));
         }
-        let undefined = operand
-            .defining_op()
-            .is_some_and(|def| Operation::get_op::<UndefinedOp>(def, ctx).is_some());
+        let undefined = operand.defining_op().is_some_and(|def| {
+            Operation::get_op::<UndefinedOp>(def, ctx).is_some()
+                || Operation::get_op::<OmittedOp>(def, ctx).is_some()
+        });
         return undefined.then_some(Replacement::Bool(true));
     }
     if Operation::get_op::<ToNumberOp>(op, ctx).is_some()
@@ -100,6 +101,20 @@ fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
         let target = operation.get_result(0).get_type(ctx);
         if operand.get_type(ctx) == target {
             return Some(Replacement::Value(operand));
+        }
+        if operand
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::types::NumericType>()
+        {
+            let inner = operand.defining_op()?;
+            Operation::get_op::<NumericCastOp>(inner, ctx)?;
+            let input = inner.deref(ctx).get_operand(0);
+            return Some(if input.get_type(ctx) == target {
+                Replacement::Value(input)
+            } else {
+                Replacement::Cast(input, target)
+            });
         }
         if let Some(inner) = converted_integer(ctx, operand) {
             if inner.get_type(ctx) == target {

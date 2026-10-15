@@ -472,4 +472,3 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
     }
     Ok(())
 }
-

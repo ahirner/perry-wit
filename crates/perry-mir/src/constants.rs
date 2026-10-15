@@ -110,6 +110,14 @@ impl ConstFoldInterface for NumericCastOp {
             if target.deref(ctx).is::<crate::types::BigIntType>() {
                 return None;
             }
+            let scalar = input
+                .downcast_ref::<crate::attrs::NumericConstant>()
+                .map(|number| number.scalar(ctx));
+            let input = scalar.as_deref().unwrap_or(input.as_ref());
+            if target.deref(ctx).is::<crate::types::NumericType>() {
+                return crate::attrs::NumericConstant::from_scalar(ctx, input)
+                    .map(|number| Box::new(number) as AttrObj);
+            }
             let target_int = TypedHandle::<IntegerType>::from_handle(target, ctx).ok();
             if let Some(input) = input.downcast_ref::<IntegerAttr>() {
                 let source = input.get_type().deref(ctx);
@@ -222,6 +230,11 @@ impl ConstFoldInterface for CompareOp {
                 rhs.downcast_ref::<FPDoubleAttr>(),
             ) {
                 f64::from(lhs.clone()).partial_cmp(&f64::from(rhs.clone()))
+            } else if let (Some(lhs), Some(rhs)) = (
+                lhs.downcast_ref::<crate::attrs::NumericConstant>(),
+                rhs.downcast_ref::<crate::attrs::NumericConstant>(),
+            ) {
+                lhs.order(*rhs)
             } else {
                 let (lhs, rhs) = (
                     lhs.downcast_ref::<IntegerAttr>()?,

@@ -279,7 +279,10 @@ impl ProgramFacts {
                             .or_else(|| {
                                 Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx))
                             });
-                        if callee.is_none_or(|c| self.callee_may_mutate_open_state(ctx, &c)) {
+                        if callee.is_none_or(|c| {
+                            self.effects(&c)
+                                .is_none_or(|summary| summary.effects.may_mutate_state())
+                        }) {
                             return true;
                         }
                     }
@@ -300,43 +303,4 @@ impl ProgramFacts {
         }
         false
     }
-
-    fn callee_may_mutate_open_state(&self, ctx: &Context, root: &Identifier) -> bool {
-        let mut visited = HashSet::new();
-        let mut stack = vec![root.clone()];
-        while let Some(name) = stack.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            let Some(body) = self.bodies.get(&name) else {
-                return true;
-            };
-            if body.effects.effects.may_mutate_records() {
-                return true;
-            }
-            for &constraint in &body.constraints {
-                let Constraint::Op { op, .. } = constraint else {
-                    continue;
-                };
-                if Operation::get_op::<FieldSetOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-                {
-                    return true;
-                }
-                if let Some(callee) = Operation::get_op::<CallOp>(op, ctx)
-                    .map(|c| c.callee(ctx))
-                    .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)))
-                {
-                    stack.push(callee);
-                }
-            }
-        }
-        false
-    }
 }
-

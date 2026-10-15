@@ -746,6 +746,27 @@ impl Verify for IntrinsicOp {
             Intrinsic::BytesAt => {
                 operands_fit && results.len() == 1 && results[0].deref(ctx).is::<IntegerType>()
             }
+            Intrinsic::ParseInt => {
+                operands.len() == 2
+                    && results.len() == 1
+                    && operands[0].deref(ctx).is::<StringType>()
+                    && (operands[1].deref(ctx).is::<FP64Type>()
+                        || operands[1].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[1].deref(ctx).is::<IntegerType>())
+                    && (results[0].deref(ctx).is::<FP64Type>()
+                        || results[0].deref(ctx).is::<crate::types::NumericType>()
+                        || results[0].deref(ctx).is::<IntegerType>())
+            }
+            Intrinsic::NumberToString
+            | Intrinsic::NumberIsNaN
+            | Intrinsic::NumberIsFinite
+            | Intrinsic::NumberIsInteger
+            | Intrinsic::NumberIsSafeInteger => {
+                operands.len() == 1
+                    && (operands[0].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[0].deref(ctx).is::<IntegerType>())
+                    && results_fit
+            }
             _ => false,
         };
         if !(operands_fit && results_fit) && !specialized_int_fit {

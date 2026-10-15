@@ -70,6 +70,7 @@ pub struct Effects {
     /// An unhandled await or synchronous callee exposes the async boundary's error channel.
     pub unhandled_await: bool,
     pub writes_record: bool,
+    pub writes_state: bool,
     pub failure: Failure,
     /// Runtime-managed values or effectful services whose task independence is unproven.
     pub task_state: bool,
@@ -88,6 +89,10 @@ pub struct Summary {
 impl Effects {
     pub fn may_mutate_records(&self) -> bool {
         self.writes_record || self.may_suspend || self.may_reenter
+    }
+
+    pub fn may_mutate_state(&self) -> bool {
+        self.writes_state || self.may_mutate_records()
     }
 
     pub fn requires_task(&self) -> bool {
@@ -134,6 +139,7 @@ impl LocalEffects {
         current.unhandled_await |=
             synchronous && callee.unhandled_await && !self.handled.contains(&call);
         current.writes_record |= callee.writes_record;
+        current.writes_state |= callee.writes_state;
         current.task_state |= callee.task_state;
         if synchronous && callee.failure.throws() {
             current.failure = self.fail(current.failure, call, callee.failure.escapes());
@@ -324,14 +330,28 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                         );
                     }
                 }
-                effects.writes_record |= Operation::get_op::<FieldSetOp>(op, ctx).is_some();
-                effects.task_state |= op
-                    .deref(ctx)
-                    .operands()
-                    .chain(op.deref(ctx).results())
-                    .any(|value| crate::types::is_reference(ctx, value.get_type(ctx)))
-                    || Operation::get_op::<IntrinsicOp>(op, ctx)
-                        .is_some_and(|i| i.intrinsic(ctx).is_none_or(|i| !i.pure()));
+                let writes_record = Operation::get_op::<FieldSetOp>(op, ctx).is_some();
+                effects.writes_record |= writes_record;
+                effects.writes_state |= writes_record
+                    || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::collections::ArrayTruncateOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+                effects.task_state |=
+                    op.deref(ctx)
+                        .operands()
+                        .chain(op.deref(ctx).results())
+                        .any(|value| {
+                            crate::types::is_reference(ctx, value.get_type(ctx))
+                                && value.defining_op().is_none_or(|def| {
+                                    Operation::get_op::<crate::collections::StringConstOp>(def, ctx)
+                                        .is_none()
+                                })
+                        })
+                        || Operation::get_op::<IntrinsicOp>(op, ctx)
+                            .is_some_and(|i| i.intrinsic(ctx).is_none_or(|i| !i.pure()));
                 if Operation::get_op::<CallOp>(op, ctx).is_none()
                     && Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_none()
                     && crate::intrinsics::may_throw(ctx, op)
@@ -381,6 +401,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     effects.may_reenter = true;
                     effects.host_work = true;
                     effects.writes_record = true;
+                    effects.writes_state = true;
                     effects.task_state = true;
                     effects.unknown_helper_bound = true;
                     if Operation::get_op::<CallOp>(op, ctx).is_some() {

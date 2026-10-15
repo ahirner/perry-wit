@@ -126,8 +126,11 @@ impl Solver {
         let state = &self.analysis.states[id];
         let old = state.range(value);
         let expansions = state.range_expansions.get(&value).copied().unwrap_or(0);
-        let (new, expanded, widened) =
-            old.join_step(range, state.representation(value), expansions >= 1);
+        let (new, expanded, widened) = old.join_step(
+            range,
+            state.representation(value),
+            state.summarized || expansions >= 1,
+        );
         if expanded {
             self.analysis.states[id]
                 .range_expansions
@@ -305,7 +308,7 @@ impl Solver {
                 let (range, expanded, widened) = old.range.join_step(
                     self.analysis.states[id].range(value),
                     domain.integer(),
-                    old.expansions >= 1,
+                    self.analysis.states[id].summarized || old.expansions >= 1,
                 );
                 if expanded {
                     self.analysis.states[id].results[position].expansions =
@@ -386,11 +389,22 @@ impl Solver {
                         }
                     })
                     .collect();
+                let numeric_args = operation
+                    .operands()
+                    .enumerate()
+                    .map(|(position, value)| {
+                        asynchronous.is_none()
+                            && declared_args.get(position).copied().flatten().is_none()
+                            && !value.get_type(ctx).deref(ctx).is::<PromiseType>()
+                            && self.analysis.states[id].fact(value) == Fact::Numeric
+                    })
+                    .collect();
                 let child = self.context(
                     ctx,
                     Key {
                         function: callee.clone(),
                         args,
+                        numeric_args,
                         results: operation
                             .results()
                             .enumerate()
@@ -629,20 +643,46 @@ impl Solver {
                     return;
                 }
                 BuiltinContract::NumberOnly => {
-                    if intrinsic == Intrinsic::ParseInt
-                        && let Some((_, domain, interval, needs_i64)) =
-                            super::domains::const_parsed_int(ctx, op)
-                    {
-                        let fact = if needs_i64 {
-                            Fact::Integer(domain)
-                        } else {
-                            Fact::Literal {
-                                negative: interval.lower < 0,
+                    if intrinsic == Intrinsic::ParseInt {
+                        match super::domains::const_parsed_int(ctx, op) {
+                            Some(super::domains::ConstParsedInt::Integer {
+                                domain,
+                                interval,
+                                needs_i64,
+                                ..
+                            }) => {
+                                let fact = if needs_i64 {
+                                    Fact::Integer(domain)
+                                } else {
+                                    Fact::Literal {
+                                        negative: interval.lower < 0,
+                                    }
+                                };
+                                self.fact(id, result, fact);
+                                self.range(id, result, Range::Bounds(interval));
+                                return;
                             }
-                        };
-                        self.fact(id, result, fact);
-                        self.range(id, result, Range::Bounds(interval));
-                        return;
+                            Some(super::domains::ConstParsedInt::Float(_)) => {
+                                self.fact(id, result, Fact::Original);
+                                self.range(id, result, Range::Unknown);
+                                return;
+                            }
+                            None => {
+                                let fact = if self.analysis.keys[id].specialize
+                                    && !crate::calls::is_async(
+                                        ctx,
+                                        &self.analysis.bodies[&self.analysis.keys[id].function]
+                                            .function,
+                                    ) {
+                                    Fact::Numeric
+                                } else {
+                                    Fact::Original
+                                };
+                                self.fact(id, result, fact);
+                                self.range(id, result, Range::Unknown);
+                                return;
+                            }
+                        }
                     }
                     self.fact(id, result, Fact::Original);
                     self.range(id, result, Range::Unknown);

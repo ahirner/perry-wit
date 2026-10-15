@@ -155,7 +155,7 @@ impl NumericCastOp {
 }
 
 #[derive(Debug, Error)]
-#[error("perry.numeric_cast requires f64/integer conversion or integer/bigint boxing")]
+#[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
 struct NumericCastErr;
 
 impl Verify for NumericCastOp {
@@ -183,7 +183,8 @@ impl Verify for NumericCastOp {
         for value in op.operands().chain(op.results()) {
             let ty = value.get_type(ctx);
             let ty = ty.deref(ctx);
-            if !ty.is::<pliron::builtin::types::FP64Type>()
+            if !ty.is::<crate::types::NumericType>()
+                && !ty.is::<pliron::builtin::types::FP64Type>()
                 && !ty
                     .downcast_ref::<IntegerType>()
                     .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))

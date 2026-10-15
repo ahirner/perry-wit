@@ -44,14 +44,14 @@ fn position(text: &str, ascii: bool, offset: usize) -> u64 {
     }
 }
 
-struct View {
+pub(crate) struct View {
     string: *mut u8,
-    text: &'static str,
+    pub(crate) text: &'static str,
     scalars: u64,
     ascii: bool,
 }
 
-fn view(string: *mut u8) -> View {
+pub(crate) fn view(string: *mut u8) -> View {
     // SAFETY: compiled code passes strings of valid UTF-8.
     let bytes = unsafe { bytes(string) };
     let text = unsafe { core::str::from_utf8_unchecked(bytes) };
@@ -341,17 +341,7 @@ pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, 
 
 /// ECMAScript WhiteSpace and LineTerminator code points.
 fn space(scalar: char) -> bool {
-    matches!(
-        scalar,
-        '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
-    )
+    perry_abi::number::space(scalar)
 }
 
 /// `s.trim()`.
@@ -520,83 +510,6 @@ fn parse_decimal_prefix(rest: &[u8]) -> Option<(&[u8], perry_abi::number::Decima
         }
     }
     Some((&rest[..mantissa_end], decimal, exponent, at))
-}
-
-/// ECMAScript `ToInt32(value)`.
-fn to_int32(value: f64) -> i32 {
-    if !value.is_finite() || value == 0.0 {
-        return 0;
-    }
-    let bits = value.to_bits();
-    let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    if !(0..84).contains(&exp) {
-        return 0;
-    }
-    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let low = if exp <= 52 {
-        (mantissa >> (52 - exp)) as i32
-    } else {
-        (mantissa as u32).wrapping_shl((exp - 52) as u32) as i32
-    };
-    if (bits >> 63) != 0 {
-        low.wrapping_neg()
-    } else {
-        low
-    }
-}
-
-/// ECMAScript `parseInt(string, radix)` under the 64-bit exact integer contract.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
-    let trimmed = view(string).text.trim_start_matches(space).as_bytes();
-    let (negative, mut rest) = match trimmed.first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
-    let r = to_int32(radix);
-    let (radix, strip_prefix) = if r == 0 {
-        (10u32, true)
-    } else if !(2..=36).contains(&r) {
-        return f64::NAN;
-    } else {
-        (r as u32, r == 16)
-    };
-    let radix =
-        if strip_prefix && rest.len() >= 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
-            rest = &rest[2..];
-            16
-        } else {
-            radix
-        };
-    let limit = if negative { 1u64 << 63 } else { u64::MAX };
-    let mut count = 0usize;
-    let mut magnitude = 0u64;
-    let mut overflow = false;
-    for &byte in rest {
-        let Some(digit) = ascii_digit(byte, radix) else {
-            break;
-        };
-        count += 1;
-        if !overflow {
-            if let Some(next) = magnitude
-                .checked_mul(u64::from(radix))
-                .and_then(|v| v.checked_add(u64::from(digit)))
-                .filter(|&v| v <= limit)
-            {
-                magnitude = next;
-            } else {
-                overflow = true;
-            }
-        }
-    }
-    if count == 0 || overflow {
-        f64::NAN
-    } else if negative {
-        -(magnitude as f64)
-    } else {
-        magnitude as f64
-    }
 }
 
 /// ECMAScript `parseFloat(string)`.

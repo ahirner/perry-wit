@@ -61,6 +61,7 @@ mod repr;
 mod runtime;
 mod strings;
 mod temporal;
+mod values;
 mod variants;
 
 pub use memory::explain_tiers;

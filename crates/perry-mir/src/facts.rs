@@ -85,6 +85,7 @@ pub fn implementation(ctx: &Context, function: &FuncOp) -> Identifier {
 struct Key {
     function: Identifier,
     args: Vec<Option<Integer>>,
+    numeric_args: Vec<bool>,
     results: Vec<ResultDomain>,
     /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
     specialize: bool,
@@ -111,18 +112,13 @@ struct Body {
     declared_results: Vec<Option<Integer>>,
     effects: crate::effects::LocalEffects,
     external: bool,
-    has_comparison: bool,
 }
 
 impl Body {
     fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Self {
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
-        let mut has_comparison = false;
         for op in crate::aggregates::operations(ctx, &function) {
-            if Operation::get_op::<crate::scalar::CompareOp>(op, ctx).is_some() {
-                has_comparison = true;
-            }
             let index = constraints.len();
             constraints.push(Constraint::Op {
                 op,
@@ -194,7 +190,6 @@ impl Body {
                 .collect(),
             declared_args,
             declared_results,
-            has_comparison,
         }
     }
 }
@@ -206,6 +201,7 @@ struct State {
     facts: HashMap<Value, Fact>,
     ranges: HashMap<Value, Range>,
     range_expansions: HashMap<Value, u8>,
+    summarized: bool,
     required: HashMap<Value, Integer>,
     original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
@@ -316,112 +312,36 @@ impl Worklist {
 struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
-    summary_contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
     work: Worklist,
     width_defaults: Vec<(usize, usize, Value)>,
 }
 
 impl Solver {
-    fn summary_key(&self, key: &Key) -> Key {
-        let body = &self.analysis.bodies[&key.function];
-        if body.has_comparison {
-            let common = key
-                .args
-                .iter()
-                .copied()
-                .flatten()
-                .chain(key.results.iter().filter_map(|r| r.integer()))
-                .reduce(Integer::common);
-            let args = key
-                .args
-                .iter()
-                .enumerate()
-                .map(|(idx, arg)| {
-                    if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
-                        Some(declared)
-                    } else {
-                        arg.and(common)
-                    }
-                })
-                .collect();
-            Key {
-                function: key.function.clone(),
-                args,
-                results: key.results.clone(),
-                specialize: true,
-            }
-        } else {
-            let args = key
-                .args
-                .iter()
-                .enumerate()
-                .map(|(idx, arg)| {
-                    if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
-                        Some(declared)
-                    } else {
-                        arg.map(|int| Integer {
-                            bits: 64,
-                            signed: int.signed || int.bits < 64,
-                        })
-                    }
-                })
-                .collect();
-            let results = key
-                .results
-                .iter()
-                .enumerate()
-                .map(|(idx, res)| {
-                    if *res == ResultDomain::Original {
-                        ResultDomain::Original
-                    } else if let Some(declared) =
-                        body.declared_results.get(idx).copied().flatten()
-                    {
-                        ResultDomain::Integer(declared)
-                    } else {
-                        ResultDomain::Inferred
-                    }
-                })
-                .collect();
-            Key {
-                function: key.function.clone(),
-                args,
-                results,
-                specialize: true,
-            }
-        }
-    }
-
     fn context(&mut self, ctx: &Context, key: Key) -> usize {
         if let Some(&id) = self.contexts.get(&key) {
             return id;
         }
+        let mut summarized = false;
         if key.specialize {
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
             if *count >= MAX_PRECISE_CONTEXTS {
                 self.analysis.summarized_contexts += 1;
-                let summary = self.summary_key(&key);
-                let id = if let Some(&id) = self.summary_contexts.get(&summary) {
-                    id
-                } else {
-                    let id = self.allocate_context(ctx, summary.clone());
-                    self.summary_contexts.insert(summary, id);
-                    id
-                };
-                self.contexts.insert(key, id);
-                return id;
+                summarized = true;
+            } else {
+                *count += 1;
             }
-            *count += 1;
         }
-        let id = self.allocate_context(ctx, key.clone());
+        let id = self.allocate_context(ctx, key.clone(), summarized);
         self.contexts.insert(key, id);
         id
     }
 
-    fn allocate_context(&mut self, ctx: &Context, key: Key) -> usize {
+    fn allocate_context(&mut self, ctx: &Context, key: Key, summarized: bool) -> usize {
         let id = self.analysis.keys.len();
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
+            summarized,
             results: vec![ResultFact::default(); key.results.len()],
             summary: crate::effects::Summary {
                 effects: body.effects.effects,
@@ -438,9 +358,14 @@ impl Solver {
             if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
                 state.origins.insert(parameter, BTreeSet::from([position]));
             }
-            state
-                .facts
-                .insert(parameter, domain.map_or(Fact::Original, Fact::Integer));
+            let fact = if let Some(domain) = *domain {
+                Fact::Integer(domain)
+            } else if key.numeric_args.get(position).copied().unwrap_or(false) {
+                Fact::Numeric
+            } else {
+                Fact::Original
+            };
+            state.facts.insert(parameter, fact);
             state.ranges.insert(
                 parameter,
                 domain.map_or(
@@ -544,7 +469,6 @@ impl Analysis for ProgramFacts {
                 heap: heap::HeapFacts::default(),
             },
             contexts: HashMap::new(),
-            summary_contexts: HashMap::new(),
             precise_counts: HashMap::new(),
             work: Worklist::default(),
             width_defaults: Vec::new(),
@@ -563,23 +487,28 @@ impl Analysis for ProgramFacts {
                         (Operation::get_op::<NumericCastOp>(op, ctx).is_some()
                             && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
                                 .is_some())
-                            || domains::const_parsed_int(ctx, op)
-                                .is_some_and(|(_, _, _, needs_i64)| needs_i64)
+                            || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
+                                .is_some_and(|op| {
+                                    op.intrinsic(ctx)
+                                        == Some(crate::intrinsics::Intrinsic::ParseInt)
+                                })
                     })
         });
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
-            let args = ty
+            let args: Vec<_> = ty
                 .deref(ctx)
                 .arg_types()
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect();
+            let numeric_args = vec![false; args.len()];
             let generic = solver.context(
                 ctx,
                 Key {
                     function: function.get_symbol_name(ctx),
                     args,
+                    numeric_args,
                     results: ty
                         .deref(ctx)
                         .res_types()
@@ -616,7 +545,7 @@ impl Analysis for ProgramFacts {
             if !is_root {
                 continue;
             }
-            let (args, results) = if let Some(signature) = signature {
+            let (args, results): (Vec<_>, Vec<_>) = if let Some(signature) = signature {
                 let signature = TypedHandle::<FunctionType>::from_handle(signature, ctx)?;
                 (
                     signature
@@ -649,11 +578,13 @@ impl Analysis for ProgramFacts {
                         .collect(),
                 )
             };
+            let numeric_args = vec![false; args.len()];
             let id = solver.context(
                 ctx,
                 Key {
                     function: function.get_symbol_name(ctx),
                     args,
+                    numeric_args,
                     results,
                     specialize: true,
                 },

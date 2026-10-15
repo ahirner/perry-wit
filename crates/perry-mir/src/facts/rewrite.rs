@@ -93,9 +93,13 @@ struct Implementation {
 struct CoalesceKey {
     function: Identifier,
     arg_kinds: Vec<Option<bool>>,
+    numeric_args: Vec<bool>,
     results: Vec<Option<Integer>>,
+    numeric_results: Vec<bool>,
     values: Vec<Option<Integer>>,
+    numeric_values: Vec<bool>,
     compares: Vec<Option<Integer>>,
+    numeric_compares: Vec<bool>,
     calls: Vec<usize>,
 }
 
@@ -125,7 +129,9 @@ fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::valu
     if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx) {
         return match intrinsic.intrinsic(ctx) {
             Some(
-                crate::intrinsics::Intrinsic::BigIntNegate | crate::intrinsics::Intrinsic::BytesAt,
+                crate::intrinsics::Intrinsic::BigIntNegate
+                | crate::intrinsics::Intrinsic::BytesAt
+                | crate::intrinsics::Intrinsic::ParseInt,
             ) => true,
             Some(
                 crate::intrinsics::Intrinsic::MathFloor
@@ -137,9 +143,6 @@ fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::valu
             Some(crate::intrinsics::Intrinsic::MathMin | crate::intrinsics::Intrinsic::MathMax) => {
                 state.representation(op.deref(ctx).get_operand(0)).is_some()
                     && state.representation(op.deref(ctx).get_operand(1)).is_some()
-            }
-            Some(crate::intrinsics::Intrinsic::ParseInt) => {
-                super::domains::const_parsed_int(ctx, op).is_some()
             }
             _ => false,
         };
@@ -154,22 +157,29 @@ fn coalesce_key(
     state: &super::State,
 ) -> CoalesceKey {
     let mut values = Vec::new();
+    let mut numeric_values = Vec::new();
     let mut compares = Vec::new();
+    let mut numeric_compares = Vec::new();
     let mut calls = Vec::new();
     for &constraint in &body.constraints {
         match constraint {
             Constraint::Op { op, .. } => {
                 for res in op.deref(ctx).results() {
-                    let dom = if can_specialize_value(ctx, state, res) {
-                        state.representation(res)
-                    } else {
-                        None
-                    };
-                    values.push(dom);
+                    let can = can_specialize_value(ctx, state, res);
+                    values.push(can.then(|| state.representation(res)).flatten());
+                    numeric_values.push(
+                        can && !res.get_type(ctx).deref(ctx).is::<PromiseType>()
+                            && state.fact(res) == super::Fact::Numeric,
+                    );
                 }
                 if Operation::get_op::<CompareOp>(op, ctx).is_some() {
                     let inputs = [op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1)];
                     compares.push(comparison_domain(state, &inputs));
+                    numeric_compares.push(
+                        inputs
+                            .iter()
+                            .any(|&v| state.fact(v) == super::Fact::Numeric),
+                    );
                 }
                 if let Some(&child) = state.calls.get(&op) {
                     calls.push(child);
@@ -177,6 +187,10 @@ fn coalesce_key(
             }
             Constraint::Edge { to, .. } => {
                 values.push(state.representation(to));
+                numeric_values.push(
+                    !to.get_type(ctx).deref(ctx).is::<PromiseType>()
+                        && state.fact(to) == super::Fact::Numeric,
+                );
             }
         }
     }
@@ -187,9 +201,17 @@ fn coalesce_key(
             .iter()
             .map(|a| a.map(|i| i.bits == 64 && !i.signed))
             .collect(),
+        numeric_args: key.numeric_args.clone(),
         results: state.results.iter().map(|r| r.domain.integer()).collect(),
+        numeric_results: state
+            .results
+            .iter()
+            .map(|r| r.domain == super::Fact::Numeric)
+            .collect(),
         values,
+        numeric_values,
         compares,
+        numeric_compares,
         calls,
     }
 }
@@ -219,8 +241,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let argument_changes = analysis.keys[id]
             .args
             .iter()
-            .zip(arg_types)
-            .any(|(domain, ty)| domain.is_some_and(|domain| domain.ty(ctx) != ty));
+            .zip(&arg_types)
+            .any(|(domain, &ty)| domain.is_some_and(|domain| domain.ty(ctx) != ty))
+            || analysis.keys[id].numeric_args.iter().copied().any(|b| b);
         let result_changes = state
             .results
             .iter()
@@ -230,15 +253,24 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     .domain
                     .integer()
                     .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
+                    || (!root_ids.contains(&id)
+                        && !ty.deref(ctx).is::<PromiseType>()
+                        && result.domain == super::Fact::Numeric)
             });
         let values_change = state.facts.keys().any(|&value| {
             can_specialize_value(ctx, state, value)
-                && state.representation(value).is_some_and(|domain| {
+                && (state.representation(value).is_some_and(|domain| {
                     let ty = value.get_type(ctx);
                     let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
                         .map_or(ty, |promise| promise.deref(ctx).value());
                     Integer::from_type(ctx, ty) != Some(domain)
-                })
+                }) || (!value.get_type(ctx).deref(ctx).is::<PromiseType>()
+                    && state.fact(value) == super::Fact::Numeric))
+        }) || body.constraints.iter().any(|&constraint| {
+            matches!(
+                constraint,
+                Constraint::Op { op, .. } if super::domains::const_parsed_int(ctx, op).is_some()
+            )
         });
         let comparisons_change = body.constraints.iter().any(|&constraint| {
             let Constraint::Op { op, .. } = constraint else {
@@ -251,6 +283,8 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             let rhs = op.deref(ctx).get_operand(1);
             let lhs_ty = lhs.get_type(ctx);
             comparison_domain(state, &[lhs, rhs]).is_some_and(|domain| domain.ty(ctx) != lhs_ty)
+                || state.fact(lhs) == super::Fact::Numeric
+                || state.fact(rhs) == super::Fact::Numeric
         });
         if argument_changes || result_changes || values_change || comparisons_change {
             changed.insert(id);
@@ -336,9 +370,16 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             function.set_symbol_name(ctx, name);
             cloned.deref_mut(ctx).attributes.0.remove(&WIT_SIGNATURE);
             cloned.insert_after(ctx, body.function.get_operation());
-            for (ty, domain) in implementation.arguments.iter_mut().zip(&key.args) {
+            for ((ty, domain), &numeric) in implementation
+                .arguments
+                .iter_mut()
+                .zip(&key.args)
+                .zip(&key.numeric_args)
+            {
                 if let Some(domain) = domain {
                     *ty = domain.ty(ctx);
+                } else if numeric {
+                    *ty = crate::types::NumericType::get(ctx).into();
                 }
             }
             for (ty, facts) in implementation
@@ -348,6 +389,11 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             {
                 if let Some(domain) = facts.domain.integer() {
                     *ty = domain.ty(ctx);
+                } else if !root_ids.contains(&id)
+                    && !ty.deref(ctx).is::<PromiseType>()
+                    && facts.domain == super::Fact::Numeric
+                {
+                    *ty = crate::types::NumericType::get(ctx).into();
                 }
             }
             let signature = FunctionType::get(
@@ -392,6 +438,11 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     scalar
                 };
                 cloned.set_type(ctx, ty);
+            } else if !value.get_type(ctx).deref(ctx).is::<PromiseType>()
+                && state.fact(value) == super::Fact::Numeric
+            {
+                let cloned = mapping.lookup_value(value).expect("cloned value");
+                cloned.set_type(ctx, crate::types::NumericType::get(ctx).into());
             }
         }
         let mut expected = Vec::new();
@@ -481,6 +532,78 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     rewriter.replace_operation(ctx, op, negated);
                     continue;
                 }
+                if intrinsic == crate::intrinsics::Intrinsic::ParseInt {
+                    if let Some(parsed) = super::domains::const_parsed_int(ctx, original) {
+                        let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                        let attr: Box<dyn pliron::builtin::attr_interfaces::TypedAttrInterface> =
+                            if res_ty.deref(ctx).is::<crate::types::NumericType>() {
+                                match parsed {
+                                    super::domains::ConstParsedInt::Integer {
+                                        bits,
+                                        domain,
+                                        ..
+                                    } => {
+                                        if domain.signed {
+                                            Box::new(crate::attrs::NumericConstant::Signed(
+                                                bits as i64,
+                                            ))
+                                        } else {
+                                            Box::new(crate::attrs::NumericConstant::Unsigned(bits))
+                                        }
+                                    }
+                                    super::domains::ConstParsedInt::Float(bits) => {
+                                        Box::new(crate::attrs::NumericConstant::Float(bits))
+                                    }
+                                }
+                            } else {
+                                let f = match parsed {
+                                    super::domains::ConstParsedInt::Integer {
+                                        bits,
+                                        domain,
+                                        ..
+                                    } => {
+                                        if domain.signed {
+                                            (bits as i64) as f64
+                                        } else {
+                                            bits as f64
+                                        }
+                                    }
+                                    super::domains::ConstParsedInt::Float(bits) => {
+                                        f64::from_bits(bits)
+                                    }
+                                };
+                                Box::new(pliron::builtin::attributes::FPDoubleAttr::from(f))
+                            };
+                        let constant = ConstantOp::new(ctx, attr).get_operation();
+                        rewriter.insert_operation(ctx, constant);
+                        rewriter.replace_operation(ctx, op, constant);
+                        continue;
+                    }
+                    if op
+                        .deref(ctx)
+                        .get_result(0)
+                        .get_type(ctx)
+                        .deref(ctx)
+                        .is::<crate::types::NumericType>()
+                    {
+                        expected[1] = crate::types::NumericType::get(ctx).into();
+                    }
+                }
+                if matches!(
+                    intrinsic,
+                    crate::intrinsics::Intrinsic::NumberToString
+                        | crate::intrinsics::Intrinsic::NumberIsNaN
+                        | crate::intrinsics::Intrinsic::NumberIsFinite
+                        | crate::intrinsics::Intrinsic::NumberIsInteger
+                        | crate::intrinsics::Intrinsic::NumberIsSafeInteger
+                ) {
+                    let arg_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                    if arg_ty.deref(ctx).is::<crate::types::NumericType>()
+                        || Integer::from_type(ctx, arg_ty).is_some()
+                    {
+                        expected[0] = arg_ty;
+                    }
+                }
                 if matches!(
                     intrinsic,
                     crate::intrinsics::Intrinsic::MathAbs
@@ -540,6 +663,12 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 ];
                 if let Some(domain) = comparison_domain(state, &inputs) {
                     expected.fill(domain.ty(ctx));
+                } else if op
+                    .deref(ctx)
+                    .operands()
+                    .any(|v| v.get_type(ctx).deref(ctx).is::<crate::types::NumericType>())
+                {
+                    expected.fill(crate::types::NumericType::get(ctx).into());
                 }
             } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {
                 expected.clone_from(&implementation.results);

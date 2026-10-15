@@ -412,4 +412,3 @@ fn unsupported_temporal_forms_are_rejected() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
-

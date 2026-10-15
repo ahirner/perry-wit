@@ -1,5 +1,20 @@
 //! Attributes of the `perry` dialect.
-use pliron::derive::pliron_attr;
+use crate::types::NumericType;
+use pliron::{
+    attribute::{AttrObj, Attribute},
+    builtin::{
+        attr_interfaces::{MaterializableAttr, TypedAttrInterface},
+        attributes::{FPDoubleAttr, IntegerAttr},
+        ops::ConstantOp,
+        types::{IntegerType, Signedness},
+    },
+    context::{Context, Ptr},
+    derive::{attr_interface_impl, pliron_attr},
+    op::Op,
+    operation::Operation,
+    r#type::TypeHandle,
+    utils::apint::{APInt, bw},
+};
 
 /// Measurements of the numeric solver and convergent cleanup for one compilation.
 #[pliron_attr(name = "perry.optimization_statistics", format, verifier = "succ")]
@@ -97,6 +112,128 @@ pub enum ErrorKind {
 )]
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct ReuseOperands(pub Vec<u32>);
+
+/// An exact signed/unsigned integer or the bit pattern of an IEEE double.
+#[pliron_attr(name = "perry.numeric_constant", format, verifier = "succ")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NumericConstant {
+    Signed(i64),
+    Unsigned(u64),
+    Float(u64),
+}
+
+impl NumericConstant {
+    pub(crate) fn from_scalar(ctx: &Context, attr: &dyn Attribute) -> Option<Self> {
+        if let Some(integer) = attr.downcast_ref::<IntegerAttr>() {
+            return Some(
+                if integer.get_type().deref(ctx).signedness() == Signedness::Unsigned {
+                    Self::Unsigned(integer.value().to_u64())
+                } else {
+                    Self::Signed(integer.value().to_i64())
+                },
+            );
+        }
+        let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
+        if value.is_finite()
+            && value.fract() == 0.0
+            && !(value == 0.0 && value.is_sign_negative())
+            && (-9007199254740992.0..=9007199254740992.0).contains(&value)
+        {
+            return Some(Self::Signed(value as i64));
+        }
+        Some(Self::Float(value.to_bits()))
+    }
+
+    pub(crate) fn scalar(self, ctx: &Context) -> AttrObj {
+        let (bits, signedness) = match self {
+            Self::Signed(value) => (value as u64, Signedness::Signed),
+            Self::Unsigned(value) => (value, Signedness::Unsigned),
+            Self::Float(bits) => return Box::new(FPDoubleAttr::from(f64::from_bits(bits))),
+        };
+        Box::new(IntegerAttr::new(
+            IntegerType::get(ctx, 64, signedness),
+            APInt::from_u64(bits, bw(64)),
+        ))
+    }
+
+    pub(crate) fn order(self, other: Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering::{Greater, Less};
+        match (self, other) {
+            (Self::Signed(a), Self::Signed(b)) => Some(a.cmp(&b)),
+            (Self::Unsigned(a), Self::Unsigned(b)) => Some(a.cmp(&b)),
+            (Self::Signed(a), Self::Unsigned(b)) => {
+                Some(if a < 0 { Less } else { (a as u64).cmp(&b) })
+            }
+            (Self::Unsigned(a), Self::Signed(b)) => {
+                Some(if b < 0 { Greater } else { a.cmp(&(b as u64)) })
+            }
+            (Self::Float(a), Self::Float(b)) => f64::from_bits(a).partial_cmp(&f64::from_bits(b)),
+            (Self::Signed(integer), Self::Float(bits)) => {
+                Self::order_integer_float(integer < 0, integer.unsigned_abs(), f64::from_bits(bits))
+            }
+            (Self::Unsigned(integer), Self::Float(bits)) => {
+                Self::order_integer_float(false, integer, f64::from_bits(bits))
+            }
+            (Self::Float(bits), other) => other
+                .order(Self::Float(bits))
+                .map(std::cmp::Ordering::reverse),
+        }
+    }
+
+    fn order_integer_float(
+        negative: bool,
+        magnitude: u64,
+        float: f64,
+    ) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        if float.is_nan() {
+            return None;
+        }
+        if float == f64::INFINITY {
+            return Some(Less);
+        }
+        if float == f64::NEG_INFINITY {
+            return Some(Greater);
+        }
+        if magnitude == 0 {
+            return (0.0f64).partial_cmp(&float);
+        }
+        if negative != float.is_sign_negative() || float == 0.0 {
+            return Some(if negative { Less } else { Greater });
+        }
+        let abs = float.abs();
+        if abs < 1.0 {
+            return Some(if negative { Less } else { Greater });
+        }
+        if abs >= 18446744073709551616.0 {
+            return Some(if negative { Greater } else { Less });
+        }
+        let truncated = abs.trunc() as u64;
+        let magnitude_order = match magnitude.cmp(&truncated) {
+            Equal if abs.fract() != 0.0 => Less,
+            ordering => ordering,
+        };
+        Some(if negative {
+            magnitude_order.reverse()
+        } else {
+            magnitude_order
+        })
+    }
+}
+
+#[attr_interface_impl]
+impl TypedAttrInterface for NumericConstant {
+    fn get_type(&self, ctx: &Context) -> TypeHandle {
+        NumericType::get(ctx).into()
+    }
+}
+
+#[attr_interface_impl]
+impl MaterializableAttr for NumericConstant {
+    fn materialize(&self, ctx: &mut Context) -> Ptr<Operation> {
+        ConstantOp::new(ctx, Box::new(*self)).get_operation()
+    }
+}
 
 /// Per-function metadata flags for exports, async splitting, entry specialization, and atomic construction.
 #[pliron_attr(name = "perry.function_meta", format, verifier = "succ")]

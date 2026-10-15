@@ -687,10 +687,7 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
         -128
     );
     assert_eq!(
-        program
-            .call("big", &[I64(9007199254740992), I64(1)])
-            .0[0]
-            .unwrap_i64(),
+        program.call("big", &[I64(9007199254740992), I64(1)]).0[0].unwrap_i64(),
         9007199254740993
     );
     Ok(())
@@ -727,8 +724,11 @@ export function run(rawId: u64, delta: s64): number {
     let mut parse_int = crate::core_program::Program::from_wasm(
         compile(
             r#"
+interface Box { raw: string }
 function fwd(v: number): number { return v; }
-export function run(): number {
+function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
+function radix(flag: number): number { return flag > 0 ? 10 : 16; }
+export function run(flag: number): number {
     const a = parseInt("9007199254740993");
     const b = parseInt("9007199254740993");
     const eq = a === b && !(a !== b);
@@ -736,76 +736,206 @@ export function run(): number {
     const cmp = a < 10000000000000000 && !(a > 10000000000000000);
     const helper = fwd(a) === b && JSON.stringify(fwd(a)) === "9007199254740993";
     const overflow = Number.isNaN(parseInt("18446744073709551616"));
-    return eq && mul && cmp && helper && overflow ? 1 : 0;
+    const radixWrap = parseInt("10", 4294967298) === 2;
+    const runtimeText = JSON.stringify(parseInt(choose(flag))) === "9007199254740993";
+    const runtimeRadix = JSON.stringify(parseInt("9007199254740993", radix(flag))) === "9007199254740993";
+    const box = JSON.parse<Box>(flag > 0 ? '{"raw":"9007199254740993"}' : '{"raw":"7"}');
+    const runtimeJson = JSON.stringify(parseInt(box.raw)) === "9007199254740993";
+    const nonJsWs = Number.isNaN(parseInt("\u008510"));
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs ? 1 : 0;
+}
+"#,
+            "func(flag:s32)->s32",
+        )?
+        .core,
+    );
+    assert_eq!(
+        parse_int.call("run", &[wasmtime::Val::I32(1)]).0[0].unwrap_i32(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
+    for (case_name, helper) in [
+        (
+            "inline_compare",
+            "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }",
+        ),
+        (
+            "delegated_compare",
+            "function classify(v:number):number { return v > 200 ? v : -v; }\nfunction helper(a:number,b:number):number { const sum = a+b; return classify(sum); }",
+        ),
+        (
+            "divide_after_add",
+            "function helper(a:number,b:number):number { const sum = a+b; return sum / 2; }",
+        ),
+    ] {
+        let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
+        let mut others = String::new();
+        let mut extra_exports = String::new();
+        for a in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+            for b in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+                if a == "u8" && b == "u8" {
+                    continue;
+                }
+                let id = format!("e{}", extra_exports.len());
+                others += &format!(
+                    "export function {id}(a:number,b:number):number {{ return helper(a,b); }}\n"
+                );
+                extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
+            }
+        }
+        let mut baseline = None;
+        for (order, source, signature, expect_summary) in [
+            (
+                "single",
+                format!("{helper}\n{target}"),
+                "func(a:u8,b:u8)->u8".to_owned(),
+                false,
+            ),
+            (
+                "target_first",
+                format!("{helper}\n{target}\n{others}"),
+                format!("func(a:u8,b:u8)->u8{extra_exports}"),
+                true,
+            ),
+            (
+                "target_last",
+                format!("{helper}\n{others}\n{target}"),
+                format!("func(a:u8,b:u8)->u8{extra_exports}"),
+                true,
+            ),
+        ] {
+            let compiled = compile(&source, &signature)?;
+            assert!(
+                !compiled.allocation_report.contains("range_widenings=0"),
+                "{}",
+                compiled.allocation_report
+            );
+            if expect_summary {
+                assert!(
+                    !compiled.allocation_report.contains("summarized_contexts=0"),
+                    "{}",
+                    compiled.allocation_report
+                );
+            }
+            let mut prog = crate::core_program::Program::from_wasm(compiled.core);
+            let actual = prog
+                .call("run", &[wasmtime::Val::I32(250), wasmtime::Val::I32(10)])
+                .0[0]
+                .unwrap_i32()
+                & 0xff;
+            if let Some(expected) = baseline {
+                assert_eq!(
+                    actual, expected,
+                    "context order case `{case_name}` (`{order}`) mismatch"
+                );
+            } else {
+                baseline = Some(actual);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn collection_mutation_during_iteration_and_property_presence_preserve_semantics() -> Result<()> {
+    let mut program = crate::core_program::Program::from_wasm(
+        compile(
+            r#"
+interface Item { x?: number; y?: number }
+export function run(): number {
+    const src: Item = {};
+    const dst: Item = { x: src.x };
+    const heapSrc: Item = {};
+    const heapKeys = Object.keys(heapSrc).length;
+    const heapDst: Item = { x: heapSrc.x };
+    const assigned: Item = { x: 1 };
+    assigned.x = src.x;
+    const jsonMissing = JSON.parse<Item>("{}");
+    const copiedPresence =
+        ("x" in dst) &&
+        dst.x === undefined &&
+        Object.keys(dst).length === 1 &&
+        heapKeys === 0 &&
+        Object.keys(heapDst).length === 1 &&
+        Object.keys(assigned).length === 1 &&
+        !("x" in jsonMissing);
+
+    const explicit: Item = { x: undefined };
+    const values = Object.values(explicit);
+    const entries = Object.entries(explicit);
+    const enumPresence =
+        values.length === 1 &&
+        values[0] === undefined &&
+        entries.length === 1 &&
+        entries[0][0] === "x" &&
+        entries[0][1] === undefined;
+
+    const s1 = new Set([1, 2, 3]);
+    let s1Total = 0;
+    s1.forEach((v) => {
+        s1.delete(v);
+        s1Total = s1Total + v;
+    });
+
+    const s2 = new Set([1, 2, 3]);
+    let s2Total = 0;
+    for (const v of s2) {
+        s2.delete(v);
+        s2Total = s2Total + v;
+    }
+
+    const m1 = new Map([[1, 10], [2, 20], [3, 30]]);
+    let m1Total = 0;
+    m1.forEach((v, k) => {
+        m1.delete(k);
+        m1Total = m1Total + v;
+    });
+
+    const m2 = new Map([[1, 10], [2, 20], [3, 30]]);
+    let m2Total = 0;
+    for (const [k, v] of m2) {
+        m2.delete(k);
+        m2Total = m2Total + v;
+    }
+
+    const s3 = new Set([1, 2]);
+    let s3Total = 0;
+    s3.forEach((v) => {
+        s3Total = s3Total + v;
+        if (v === 1) {
+            s3.clear();
+            s3.add(9);
+        }
+    });
+
+    const spreadSet = [...new Set([4, 5])];
+    const spreadOk = spreadSet.length === 2 && spreadSet[0] + spreadSet[1] === 9;
+
+    const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
+    const nulHygiene = nulSet.size === 3 && nulSet.has("\u0000perry_set_type_args") && nulSet.has("__perry_set_type_args");
+
+    return copiedPresence &&
+        enumPresence &&
+        s1Total === 6 &&
+        s2Total === 6 &&
+        m1Total === 60 &&
+        m2Total === 60 &&
+        s3Total === 10 &&
+        spreadOk &&
+        nulHygiene
+        ? 1
+        : 0;
 }
 "#,
             "func()->s32",
         )?
         .core,
     );
-    assert_eq!(parse_int.call("run", &[]).0[0].unwrap_i32(), 1);
-    Ok(())
-}
-
-#[test]
-fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
-    let helper = "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }";
-    let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
-    let mut others = String::new();
-    let mut extra_exports = String::new();
-    for a in ["u8", "s8", "u16", "s16", "u32", "s32"] {
-        for b in ["u8", "s8", "u16", "s16", "u32", "s32"] {
-            if a == "u8" && b == "u8" {
-                continue;
-            }
-            let id = format!("e{}", extra_exports.len());
-            others += &format!(
-                "export function {id}(a:number,b:number):number {{ return helper(a,b); }}\n"
-            );
-            extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
-        }
-    }
-    for (name, source, signature, expect_summary) in [
-        (
-            "single",
-            format!("{helper}\n{target}"),
-            "func(a:u8,b:u8)->u8".to_owned(),
-            false,
-        ),
-        (
-            "target_first",
-            format!("{helper}\n{target}\n{others}"),
-            format!("func(a:u8,b:u8)->u8{extra_exports}"),
-            true,
-        ),
-        (
-            "target_last",
-            format!("{helper}\n{others}\n{target}"),
-            format!("func(a:u8,b:u8)->u8{extra_exports}"),
-            true,
-        ),
-    ] {
-        let compiled = compile(&source, &signature)?;
-        assert!(
-            !compiled.allocation_report.contains("range_widenings=0"),
-            "{}",
-            compiled.allocation_report
-        );
-        if expect_summary {
-            assert!(
-                !compiled.allocation_report.contains("summarized_contexts=0"),
-                "{}",
-                compiled.allocation_report
-            );
-        }
-        let mut prog = crate::core_program::Program::from_wasm(compiled.core);
-        let actual = prog
-            .call("run", &[wasmtime::Val::I32(250), wasmtime::Val::I32(10)])
-            .0[0]
-            .unwrap_i32()
-            & 0xff;
-        assert_eq!(actual, 252, "context order case `{name}` mismatch");
-    }
+    assert_eq!(program.call("run", &[]).0[0].unwrap_i32(), 1);
     Ok(())
 }
 
@@ -860,4 +990,3 @@ export function run(x: number): number {
     );
     Ok(())
 }
-

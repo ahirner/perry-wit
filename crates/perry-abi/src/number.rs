@@ -381,3 +381,153 @@ impl Big {
         })
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum Number {
+    Float(f64),
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl Number {
+    pub fn to_int32(self) -> i32 {
+        match self {
+            Number::Signed(value) => value as i32,
+            Number::Unsigned(value) => value as i32,
+            Number::Float(value) => {
+                if !value.is_finite() || value == 0.0 {
+                    return 0;
+                }
+                let bits = value.to_bits();
+                let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+                if !(0..84).contains(&exp) {
+                    return 0;
+                }
+                let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+                let low = if exp <= 52 {
+                    (mantissa >> (52 - exp)) as i32
+                } else {
+                    (mantissa as u32).wrapping_shl((exp - 52) as u32) as i32
+                };
+                if (bits >> 63) != 0 {
+                    low.wrapping_neg()
+                } else {
+                    low
+                }
+            }
+        }
+    }
+
+    pub fn from_numeric(tag: i32, bits: u64) -> Self {
+        match tag {
+            crate::layout::numeric::SIGNED => Self::Signed(bits as i64),
+            crate::layout::numeric::UNSIGNED => Self::Unsigned(bits),
+            crate::layout::numeric::NULL => Self::Float(0.0),
+            crate::layout::numeric::UNDEFINED => Self::Float(f64::NAN),
+            _ => Self::Float(f64::from_bits(bits)),
+        }
+    }
+
+    pub fn into_numeric(self) -> (i32, u64) {
+        match self {
+            Self::Float(value) => (crate::layout::numeric::FLOAT, value.to_bits()),
+            Self::Signed(value) => (crate::layout::numeric::SIGNED, value as u64),
+            Self::Unsigned(value) => (crate::layout::numeric::UNSIGNED, value),
+        }
+    }
+}
+
+impl PartialEq for Number {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::Float(left), Self::Float(right)) => left == right,
+            (Self::Signed(left), Self::Signed(right)) => left == right,
+            (Self::Unsigned(left), Self::Unsigned(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+/// ECMAScript WhiteSpace and LineTerminator code points.
+pub fn space(scalar: char) -> bool {
+    matches!(
+        scalar,
+        '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
+fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
+    let digit = match byte {
+        b'0'..=b'9' => u32::from(byte - b'0'),
+        b'a'..=b'z' => u32::from(byte - b'a') + 10,
+        b'A'..=b'Z' => u32::from(byte - b'A') + 10,
+        _ => return None,
+    };
+    (digit < radix).then_some(digit)
+}
+
+/// ECMAScript `parseInt(string, radix)` under the 64-bit exact integer contract.
+pub fn parse_integer(input: &str, radix: Number) -> Number {
+    let trimmed = input.trim_start_matches(space).as_bytes();
+    let (negative, mut rest) = match trimmed.first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let r = radix.to_int32();
+    let (radix, strip_prefix) = if r == 0 {
+        (10u32, true)
+    } else if !(2..=36).contains(&r) {
+        return Number::Float(f64::NAN);
+    } else {
+        (r as u32, r == 16)
+    };
+    let radix =
+        if strip_prefix && rest.len() >= 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
+            rest = &rest[2..];
+            16
+        } else {
+            radix
+        };
+    let limit = if negative { 1u64 << 63 } else { u64::MAX };
+    let mut count = 0usize;
+    let mut magnitude = 0u64;
+    let mut overflow = false;
+    for &byte in rest {
+        let Some(digit) = ascii_digit(byte, radix) else {
+            break;
+        };
+        count += 1;
+        if !overflow {
+            if let Some(next) = magnitude
+                .checked_mul(u64::from(radix))
+                .and_then(|v| v.checked_add(u64::from(digit)))
+                .filter(|&v| v <= limit)
+            {
+                magnitude = next;
+            } else {
+                overflow = true;
+            }
+        }
+    }
+    if count == 0 || overflow {
+        Number::Float(f64::NAN)
+    } else if negative {
+        if magnitude == 0 {
+            Number::Float(-0.0)
+        } else {
+            Number::Signed(magnitude.wrapping_neg() as i64)
+        }
+    } else if magnitude <= i64::MAX as u64 {
+        Number::Signed(magnitude as i64)
+    } else {
+        Number::Unsigned(magnitude)
+    }
+}

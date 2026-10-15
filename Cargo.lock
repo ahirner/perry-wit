@@ -1515,6 +1515,7 @@ name = "perry-mir"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "perry-abi",
  "perry-wit-diagnostics",
  "pliron",
  "regex",

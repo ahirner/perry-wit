@@ -800,12 +800,8 @@ impl<'s> FunctionBuilder<'s> {
                     NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
             }
-            (Kind::Array, "length" | "size") => {
-                let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, value));
-                self.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-                })
-            }
+            (Kind::Array, "length") => self.array_length(ctx, value),
+            (Kind::Array, "size") => self.collection_size(ctx, value)?,
             (Kind::Array, field)
                 if crate::collections::dict_entry_types(ctx, value.get_type(ctx)).is_some() =>
             {
@@ -885,6 +881,7 @@ impl<'s> FunctionBuilder<'s> {
                     anyhow!("property {field} does not exist on this shape (subset rule R1)")
                 })?;
                 let loaded = self.append_value(ctx, &op);
+                let loaded = self.normalize_optional_read(ctx, loaded)?;
                 if loaded
                     .get_type(ctx)
                     .deref(ctx)
@@ -949,6 +946,7 @@ impl<'s> FunctionBuilder<'s> {
                 let op = FieldGetOp::new(ctx, array, field.clone())
                     .map_err(|_| anyhow!("record has no field {field}"))?;
                 let loaded = self.append_value(ctx, &op);
+                let loaded = self.normalize_optional_read(ctx, loaded)?;
                 if loaded
                     .get_type(ctx)
                     .deref(ctx)
@@ -975,6 +973,21 @@ impl<'s> FunctionBuilder<'s> {
                     let entry = self.defined(ctx, val)?;
                     let get_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
                     return Ok(self.append_value(ctx, &get_op));
+                }
+                if let Some((k_ty, v_ty, _)) =
+                    crate::collections::map_entry_types(ctx, array.get_type(ctx))
+                {
+                    let entry = self.defined(ctx, val)?;
+                    let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                    let k = self.append_value(ctx, &k_op);
+                    let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+                    let v = self.append_value(ctx, &v_op);
+                    let tuple_rec = self.shapes.mir_record_prefix(
+                        ctx,
+                        vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                        Some("tuple"),
+                    )?;
+                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v])));
                 }
                 Ok(val)
             }

@@ -46,21 +46,31 @@ impl FunctionEmitter<'_> {
             let is_branch = is_cond_br || Operation::get_op::<BrOp>(user, ctx).is_some();
             let operands: Vec<Value> = user.deref(ctx).operands().collect();
             let mut barrier = user_index;
-            for (position, operand) in operands.into_iter().enumerate().rev() {
+            let mut cursor = operands.len();
+            while cursor > 0 {
+                let position = cursor - 1;
+                let operand = operands[position];
                 let edge_argument = is_branch && !(position == 0 && is_cond_br);
                 let Some(def) = operand.defining_op() else {
+                    cursor -= 1;
                     continue;
                 };
                 let Some(&def_index) = index.get(&def) else {
+                    cursor -= 1;
                     continue;
                 };
-                if def_index >= user_index
-                    || def.deref(ctx).get_num_results() != 1
-                    || operand.num_uses(ctx) != 1
+                let results: Vec<Value> = def.deref(ctx).results().collect();
+                let arity = results.len();
+                if arity == 0
+                    || arity > cursor
+                    || operands[cursor - arity..cursor] != results[..]
+                    || def_index >= user_index
+                    || results.iter().any(|res| res.num_uses(ctx) != 1)
                     || self.folded.contains(&def)
                     || is_constant(ctx, def)
                     || (edge_argument && anchored[def_index])
                 {
+                    cursor -= 1;
                     continue;
                 }
                 if anchored[def_index] {
@@ -68,6 +78,7 @@ impl FunctionEmitter<'_> {
                     let crosses_effect = (def_index + 1..barrier)
                         .any(|between| anchored[between] && !self.folded.contains(&ops[between]));
                     if crosses_effect {
+                        cursor -= 1;
                         continue;
                     }
                     barrier = start[def_index];
@@ -75,6 +86,7 @@ impl FunctionEmitter<'_> {
                 self.folded.insert(def);
                 anchored[user_index] |= anchored[def_index];
                 start[user_index] = start[user_index].min(start[def_index]);
+                cursor -= arity;
             }
         }
     }

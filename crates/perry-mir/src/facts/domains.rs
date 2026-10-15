@@ -193,6 +193,7 @@ pub(super) enum Fact {
         negative: bool,
     },
     Integer(Integer),
+    Numeric,
     Original,
 }
 
@@ -201,6 +202,7 @@ impl Fact {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Original, _) | (_, Self::Original) => Self::Original,
+            (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
             (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
                 Self::Literal { negative: a || b }
             }
@@ -257,32 +259,18 @@ impl From<Option<Integer>> for ResultDomain {
     }
 }
 
-fn to_int32(value: f64) -> i32 {
-    if !value.is_finite() || value == 0.0 {
-        return 0;
-    }
-    let bits = value.to_bits();
-    let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    if !(0..84).contains(&exp) {
-        return 0;
-    }
-    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let low = if exp <= 52 {
-        (mantissa >> (52 - exp)) as i32
-    } else {
-        (mantissa as u32).wrapping_shl((exp - 52) as u32) as i32
-    };
-    if (bits >> 63) != 0 {
-        low.wrapping_neg()
-    } else {
-        low
-    }
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ConstParsedInt {
+    Integer {
+        bits: u64,
+        domain: Integer,
+        interval: Interval,
+        needs_i64: bool,
+    },
+    Float(u64),
 }
 
-pub(super) fn const_parsed_int(
-    ctx: &Context,
-    op: Ptr<Operation>,
-) -> Option<(u64, Integer, Interval, bool)> {
+pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<ConstParsedInt> {
     let intrinsic = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)?;
     if intrinsic.intrinsic(ctx) != Some(crate::intrinsics::Intrinsic::ParseInt) {
         return None;
@@ -295,91 +283,64 @@ pub(super) fn const_parsed_int(
     let radix_op = operation.get_operand(1).defining_op()?;
     let radix_const = Operation::get_op::<ConstantOp>(radix_op, ctx)?;
     let radix_attr = radix_const.get_attr_builtin_constant_value(ctx)?;
-    let radix_val = f64::from(radix_attr.downcast_ref::<FPDoubleAttr>()?.clone());
-    let trimmed = text
-        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '\u{00a0}' | '\u{feff}'))
-        .as_bytes();
-    let (negative, mut rest) = match trimmed.first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
-    let r = to_int32(radix_val);
-    let (radix, strip_prefix) = if r == 0 {
-        (10u32, true)
-    } else if !(2..=36).contains(&r) {
-        return None;
-    } else {
-        (r as u32, r == 16)
-    };
-    let radix =
-        if strip_prefix && rest.len() >= 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
-            rest = &rest[2..];
-            16
+    let radix = if let Some(float) = radix_attr.downcast_ref::<FPDoubleAttr>() {
+        perry_abi::number::Number::Float(f64::from(float.clone()))
+    } else if let Some(integer) = radix_attr.downcast_ref::<IntegerAttr>() {
+        if integer.get_type().deref(ctx).signedness() == Signedness::Unsigned {
+            perry_abi::number::Number::Unsigned(integer.value().to_u64())
         } else {
-            radix
-        };
-    let limit = if negative { 1u64 << 63 } else { u64::MAX };
-    let mut count = 0usize;
-    let mut magnitude = 0u64;
-    let mut overflow = false;
-    for &byte in rest {
-        let digit = match byte {
-            b'0'..=b'9' => u32::from(byte - b'0'),
-            b'a'..=b'z' => u32::from(byte - b'a') + 10,
-            b'A'..=b'Z' => u32::from(byte - b'A') + 10,
-            _ => break,
-        };
-        if digit >= radix {
-            break;
+            perry_abi::number::Number::Signed(integer.value().to_i64())
         }
-        count += 1;
-        if !overflow {
-            if let Some(next) = magnitude
-                .checked_mul(u64::from(radix))
-                .and_then(|v| v.checked_add(u64::from(digit)))
-                .filter(|&v| v <= limit)
-            {
-                magnitude = next;
-            } else {
-                overflow = true;
+    } else if let Some(numeric) = radix_attr.downcast_ref::<crate::attrs::NumericConstant>() {
+        match *numeric {
+            crate::attrs::NumericConstant::Signed(v) => perry_abi::number::Number::Signed(v),
+            crate::attrs::NumericConstant::Unsigned(v) => perry_abi::number::Number::Unsigned(v),
+            crate::attrs::NumericConstant::Float(bits) => {
+                perry_abi::number::Number::Float(f64::from_bits(bits))
             }
         }
-    }
-    if count == 0 || overflow || (negative && magnitude == 0) {
-        return None;
-    }
-    let (bits, domain, interval) = if negative {
-        (
-            (magnitude as i64).wrapping_neg() as u64,
-            Integer {
-                bits: 64,
-                signed: true,
-            },
-            Interval {
-                lower: -(magnitude as i128),
-                upper: -(magnitude as i128),
-            },
-        )
     } else {
-        (
-            magnitude,
-            Integer {
-                bits: 64,
-                signed: magnitude <= i64::MAX as u64,
-            },
-            Interval {
-                lower: magnitude as i128,
-                upper: magnitude as i128,
-            },
-        )
+        return None;
     };
-    let needs_i64 = magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
-    Some((bits, domain, interval, needs_i64))
+    match perry_abi::number::parse_integer(text, radix) {
+        perry_abi::number::Number::Signed(value) => {
+            let magnitude = value.unsigned_abs();
+            let needs_i64 =
+                magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
+            Some(ConstParsedInt::Integer {
+                bits: value as u64,
+                domain: Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                interval: Interval {
+                    lower: value as i128,
+                    upper: value as i128,
+                },
+                needs_i64,
+            })
+        }
+        perry_abi::number::Number::Unsigned(value) => {
+            let needs_i64 = value > 0 && (64 - value.leading_zeros() - value.trailing_zeros() > 53);
+            Some(ConstParsedInt::Integer {
+                bits: value,
+                domain: Integer {
+                    bits: 64,
+                    signed: value <= i64::MAX as u64,
+                },
+                interval: Interval {
+                    lower: value as i128,
+                    upper: value as i128,
+                },
+                needs_i64,
+            })
+        }
+        perry_abi::number::Number::Float(f) => Some(ConstParsedInt::Float(f.to_bits())),
+    }
 }
 
 pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interval> {
-    if let Some((_, _, interval, _)) = const_parsed_int(ctx, op) {
+    if let Some(ConstParsedInt::Integer { interval, .. }) = const_parsed_int(ctx, op) {
         return Some(interval);
     }
     let value = if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
@@ -392,6 +353,18 @@ pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interv
                 integer.value().to_u64() as i128
             } else {
                 integer.value().to_i64() as i128
+            }
+        } else if let Some(numeric) = attr.downcast_ref::<crate::attrs::NumericConstant>() {
+            match *numeric {
+                crate::attrs::NumericConstant::Signed(v) => v as i128,
+                crate::attrs::NumericConstant::Unsigned(v) => v as i128,
+                crate::attrs::NumericConstant::Float(bits) => {
+                    let value = f64::from_bits(bits);
+                    if !value.is_finite() || value.fract() != 0.0 {
+                        return None;
+                    }
+                    value as i128
+                }
             }
         } else {
             let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
@@ -480,7 +453,7 @@ pub(super) fn comparison_domain(state: &State, inputs: &[Value]) -> Option<Integ
 }
 
 pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
-    if let Some((bits, _, _, _)) = const_parsed_int(ctx, op) {
+    if let Some(ConstParsedInt::Integer { bits, .. }) = const_parsed_int(ctx, op) {
         return Some(bits);
     }
     if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
@@ -488,6 +461,21 @@ pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
     }
     let constant = Operation::get_op::<ConstantOp>(op, ctx)?;
     let attr = constant.get_attr_builtin_constant_value(ctx)?;
+    if let Some(numeric) = attr.downcast_ref::<crate::attrs::NumericConstant>() {
+        return match *numeric {
+            crate::attrs::NumericConstant::Signed(v) => Some(v as u64),
+            crate::attrs::NumericConstant::Unsigned(v) => Some(v),
+            crate::attrs::NumericConstant::Float(bits) => {
+                let value = f64::from_bits(bits);
+                (value.is_finite()
+                    && value.fract() == 0.0
+                    && !(value == 0.0 && value.is_sign_negative())
+                    && value >= i64::MIN as f64
+                    && value < 18446744073709551616.0)
+                    .then_some(value as i128 as u64)
+            }
+        };
+    }
     let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
     (value.is_finite()
         && value.fract() == 0.0
@@ -527,8 +515,11 @@ impl Solver {
                 Fact::Original
             };
         }
-        let input = facts().filter_map(Fact::integer).reduce(Integer::common);
         let required = state.required.get(&result).copied();
+        if facts().any(|fact| fact == Fact::Numeric) {
+            return required.map_or(Fact::Numeric, Fact::Integer);
+        }
+        let input = facts().filter_map(Fact::integer).reduce(Integer::common);
         match (input, required) {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
             (Some(input), None) => Fact::Integer(input),

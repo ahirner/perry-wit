@@ -3,12 +3,12 @@
 use crate::{
     function::FunctionLowering,
     regex,
-    repr::{Repr, i32_type, nonzero_i32_constant, optional_inner, repr, slot_kind, wasm_type},
+    repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
-    attrs::{BinaryKind, CompareKind, ErrorKind},
+    attrs::{CompareKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp},
     collections::{ConcatOp, StringConstOp, StringLenOp},
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
@@ -25,14 +25,12 @@ use pliron::{
         attributes::{FPDoubleAttr, IntegerAttr},
         op_interfaces::BranchOpInterface,
         ops::ConstantOp,
-        types::FP64Type,
     },
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
     r#type::{Typed, TypedHandle},
     utils::apint::APInt,
-    value::Value,
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -122,6 +120,12 @@ impl FunctionLowering<'_, '_> {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
                 .ok_or_else(|| anyhow!("constant without value"))?;
+            if let Some(&number) = attr.downcast_ref::<perry_mir::attrs::NumericConstant>() {
+                drop(attr);
+                let value = self.numeric_constant(ctx, number);
+                self.define_value(ctx, op, value);
+                return Ok(());
+            }
             let value = if let Some(double) = attr.downcast_ref::<FPDoubleAttr>() {
                 let value = f64::from(double.clone());
                 drop(attr);
@@ -150,51 +154,24 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<UndefOp>(op, ctx).is_some() {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let value = match repr(ctx, ty)? {
-                Repr::F64 => self.f64_const(ctx, 0.0),
-                Repr::I64 => self.i64_const(ctx, 0),
-                _ => self.i32_const(ctx, 0),
-            };
-            self.define(ctx, op, value);
+            let value = crate::values::carriers(ctx, ty)?.try_map(|ty| Ok(self.zero(ctx, ty)))?;
+            self.define_value(ctx, op, value);
             return Ok(());
         }
         if let Some(binary) = Operation::get_op::<MirBinaryOp>(op, ctx) {
-            let operands = self.operands(ctx, op)?;
-            let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            if let Some((bits, _)) = crate::numeric::integer(ctx, ty) {
-                let opcode = match (binary.kind(ctx), bits == 64) {
-                    (BinaryKind::Add, false) => NumOpcode::I32Add,
-                    (BinaryKind::Sub, false) => NumOpcode::I32Sub,
-                    (BinaryKind::Mul, false) => NumOpcode::I32Mul,
-                    (BinaryKind::Add, true) => NumOpcode::I64Add,
-                    (BinaryKind::Sub, true) => NumOpcode::I64Sub,
-                    (BinaryKind::Mul, true) => NumOpcode::I64Mul,
-                    (kind, _) => bail!("integer {kind:?} requires explicit division semantics"),
-                };
-                let value = self.num(ctx, opcode, operands);
-                let value = self.normalize_integer(ctx, value, ty);
-                self.define(ctx, op, value);
-                return Ok(());
-            }
-            let is_f64 = operands[0].get_type(ctx).deref(ctx).is::<FP64Type>();
-            let value = match (binary.kind(ctx), is_f64) {
-                (BinaryKind::Rem, true) => {
-                    let divisor = op.deref(ctx).get_operand(1);
-                    self.remainder(ctx, operands, nonzero_i32_constant(ctx, divisor))
-                }
-                (BinaryKind::Add, true) => self.num(ctx, NumOpcode::F64Add, operands),
-                (BinaryKind::Sub, true) => self.num(ctx, NumOpcode::F64Sub, operands),
-                (BinaryKind::Mul, true) => self.num(ctx, NumOpcode::F64Mul, operands),
-                (BinaryKind::Div, true) => self.num(ctx, NumOpcode::F64Div, operands),
-                (kind, false) => bail!("{kind:?} requires a resolved numeric representation"),
-            };
-            self.define(ctx, op, value);
+            let value = self.binary(ctx, op, binary.kind(ctx))?;
+            self.define_value(ctx, op, value);
             return Ok(());
         }
         if let Some(compare) = Operation::get_op::<MirCompareOp>(op, ctx) {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
+            if mir_ty.deref(ctx).is::<perry_mir::types::NumericType>() {
+                let value = self.numeric_comparison(ctx, op, kind)?;
+                self.define(ctx, op, value);
+                return Ok(());
+            }
+            let operands = self.operands(ctx, op)?;
             if mir_ty.deref(ctx).is::<StringType>()
                 && let Some(value) = self.string_literal_comparison(ctx, op, &operands, kind)
             {
@@ -270,56 +247,24 @@ impl FunctionLowering<'_, '_> {
                     CompareKind::Ne => NumOpcode::I32Ne,
                 };
                 self.num(ctx, opcode, vec![order, zero])
-            } else if operands[0].get_type(ctx).deref(ctx).is::<FP64Type>() {
-                let opcode = match kind {
-                    CompareKind::Lt => NumOpcode::F64Lt,
-                    CompareKind::Le => NumOpcode::F64Le,
-                    CompareKind::Gt => NumOpcode::F64Gt,
-                    CompareKind::Ge => NumOpcode::F64Ge,
-                    CompareKind::Eq => NumOpcode::F64Eq,
-                    CompareKind::Ne => NumOpcode::F64Ne,
-                };
-                self.num(ctx, opcode, operands)
             } else {
-                let (bits, signed) = crate::numeric::integer(ctx, mir_ty).unwrap_or((32, true));
-                let opcode = match (kind, bits == 64, signed) {
-                    (CompareKind::Lt, false, true) => NumOpcode::I32LtS,
-                    (CompareKind::Le, false, true) => NumOpcode::I32LeS,
-                    (CompareKind::Gt, false, true) => NumOpcode::I32GtS,
-                    (CompareKind::Ge, false, true) => NumOpcode::I32GeS,
-                    (CompareKind::Lt, false, false) => NumOpcode::I32LtU,
-                    (CompareKind::Le, false, false) => NumOpcode::I32LeU,
-                    (CompareKind::Gt, false, false) => NumOpcode::I32GtU,
-                    (CompareKind::Ge, false, false) => NumOpcode::I32GeU,
-                    (CompareKind::Eq, false, _) => NumOpcode::I32Eq,
-                    (CompareKind::Ne, false, _) => NumOpcode::I32Ne,
-                    (CompareKind::Lt, true, true) => NumOpcode::I64LtS,
-                    (CompareKind::Le, true, true) => NumOpcode::I64LeS,
-                    (CompareKind::Gt, true, true) => NumOpcode::I64GtS,
-                    (CompareKind::Ge, true, true) => NumOpcode::I64GeS,
-                    (CompareKind::Lt, true, false) => NumOpcode::I64LtU,
-                    (CompareKind::Le, true, false) => NumOpcode::I64LeU,
-                    (CompareKind::Gt, true, false) => NumOpcode::I64GtU,
-                    (CompareKind::Ge, true, false) => NumOpcode::I64GeU,
-                    (CompareKind::Eq, true, _) => NumOpcode::I64Eq,
-                    (CompareKind::Ne, true, _) => NumOpcode::I64Ne,
-                };
-                self.num(ctx, opcode, operands)
+                self.scalar_comparison(ctx, kind, mir_ty, operands[0], operands[1])
             };
             self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
-            let source = op.deref(ctx).get_operand(0).get_type(ctx);
+            let operand = op.deref(ctx).get_operand(0);
+            let source = operand.get_type(ctx);
             let target = op.deref(ctx).get_result(0).get_type(ctx);
-            let value = self.operand(ctx, op, 0)?;
-            let value = self.numeric_cast(ctx, value, source, target)?;
-            self.define(ctx, op, value);
+            let value = self.mapped_value(ctx, operand)?;
+            let value = self.cast_value(ctx, value, source, target)?;
+            self.define_value(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<MirBrOp>(op, ctx).is_some() {
             let dest = self.blocks[&op.deref(ctx).get_successor(0)];
-            let args = self.operands(ctx, op)?;
+            let args = self.flatten_operands(ctx, op, 0)?;
             self.br(ctx, dest, args);
             return Ok(());
         }
@@ -327,11 +272,10 @@ impl FunctionLowering<'_, '_> {
             let condition = self.operand(ctx, op, 0)?;
             let mut arm = |succ: usize| -> Result<_> {
                 let dest = self.blocks[&op.deref(ctx).get_successor(succ)];
-                let args = cond_br
-                    .successor_operands(ctx, succ)
-                    .into_iter()
-                    .map(|v| self.mapped(ctx, v))
-                    .collect::<Result<Vec<_>>>()?;
+                let mut args = Vec::new();
+                for value in cond_br.successor_operands(ctx, succ) {
+                    args.extend(self.mapped_value(ctx, value)?.iter());
+                }
                 Ok((dest, args))
             };
             let then = arm(0)?;
@@ -340,7 +284,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
-            let mut values = self.operands(ctx, op)?;
+            let mut values = self.flatten_operands(ctx, op, 0)?;
             if self.frame.is_some() {
                 self.settle_return(ctx, values);
                 return Ok(());
@@ -366,12 +310,10 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
             let callee = call.callee(ctx);
-            let args = self.operands(ctx, op)?;
+            let args = self.flatten_operands(ctx, op, 0)?;
             let mir_results: Vec<_> = op.deref(ctx).results().collect();
-            let mut results = mir_results
-                .iter()
-                .map(|v| wasm_type(ctx, v.get_type(ctx)))
-                .collect::<Result<Vec<_>>>()?;
+            let mut results =
+                crate::values::signature(ctx, mir_results.iter().map(|v| v.get_type(ctx)))?;
             let callee_throws = self.state.may_throw(&callee);
             if callee_throws {
                 results.push(i32_type(ctx));
@@ -379,9 +321,8 @@ impl FunctionLowering<'_, '_> {
             let wasm_call = CallOp::new(ctx, callee, args, results).get_operation();
             self.insert(ctx, wasm_call);
             let values: Vec<_> = wasm_call.deref(ctx).results().collect();
-            for (mir, wasm) in mir_results.iter().zip(&values) {
-                self.values.insert(*mir, *wasm);
-            }
+            let result_count = values.len() - usize::from(callee_throws);
+            self.bind_values(ctx, mir_results, values[..result_count].iter().copied())?;
             if callee_throws {
                 let status = *values
                     .last()
@@ -576,7 +517,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
             // The callee's ramp runs it to its first suspension and returns its promise.
             let callee = call.callee(ctx);
-            let args = self.operands(ctx, op)?;
+            let args = self.flatten_operands(ctx, op, 0)?;
             let i32 = i32_type(ctx);
             let ramp = CallOp::new(ctx, callee, args, vec![i32]).get_operation();
             let promise = self.result(ctx, ramp);
@@ -585,46 +526,5 @@ impl FunctionLowering<'_, '_> {
         }
         let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
         bail!("{name} has no lowering to wasm (did canonicalize run?)")
-    }
-
-    fn remainder(
-        &mut self,
-        ctx: &mut Context,
-        operands: Vec<Value>,
-        constant: Option<i32>,
-    ) -> Value {
-        let (dividend, divisor) = (operands[0], operands[1]);
-        let a = self.num(ctx, NumOpcode::I32TruncSatF64S, vec![dividend]);
-        let back = self.num(ctx, NumOpcode::F64ConvertI32S, vec![a]);
-        let mut fast = self.num(ctx, NumOpcode::F64Eq, vec![back, dividend]);
-        let b = match constant {
-            Some(constant) => self.i32_const(ctx, constant),
-            None => {
-                let b = self.num(ctx, NumOpcode::I32TruncSatF64S, vec![divisor]);
-                let back = self.num(ctx, NumOpcode::F64ConvertI32S, vec![b]);
-                let exact = self.num(ctx, NumOpcode::F64Eq, vec![back, divisor]);
-                fast = self.num(ctx, NumOpcode::I32And, vec![fast, exact]);
-                // A zero divisor gives NaN (`fmod`); `i32.rem_s` would trap.
-                let zero = self.num(ctx, NumOpcode::I32Eqz, vec![b]);
-                let nonzero = self.num(ctx, NumOpcode::I32Eqz, vec![zero]);
-                fast = self.num(ctx, NumOpcode::I32And, vec![fast, nonzero]);
-                b
-            }
-        };
-        let f64 = FP64Type::get(ctx).into();
-        let integer = self.new_block(ctx, vec![]);
-        let general = self.new_block(ctx, vec![]);
-        let join = self.new_block(ctx, vec![f64]);
-        self.cond_br(ctx, fast, (integer, vec![]), (general, vec![]));
-        self.block = integer;
-        let rem = self.num(ctx, NumOpcode::I32RemS, vec![a, b]);
-        let rem = self.num(ctx, NumOpcode::F64ConvertI32S, vec![rem]);
-        let rem = self.num(ctx, NumOpcode::F64Copysign, vec![rem, dividend]);
-        self.br(ctx, join, vec![rem]);
-        self.block = general;
-        let rem = self.runtime(ctx, Runtime::F64Rem, vec![dividend, divisor]);
-        self.br(ctx, join, vec![rem]);
-        self.block = join;
-        join.deref(ctx).get_argument(0)
     }
 }

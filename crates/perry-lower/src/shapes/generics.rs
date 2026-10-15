@@ -593,10 +593,11 @@ fn dict_entry_types_depth(
     }
     let lookup = (interfaces, type_aliases);
     if let Some(props) = resolve_record_properties(ctx, &lookup, ty, depth) {
+        let any_opt = props.iter().any(|(_, _, opt)| *opt);
         let mut iter = props.into_iter();
-        let (_, first_ty, first_opt) = iter.next()?;
-        let first_ty = optional_property_arg(ctx, first_ty, first_opt);
-        if iter.all(|(_, ty, opt)| optional_property_arg(ctx, ty, opt) == first_ty) {
+        let (_, first_ty, _) = iter.next()?;
+        let first_ty = optional_property_arg(ctx, first_ty, any_opt);
+        if iter.all(|(_, ty, _)| optional_property_arg(ctx, ty, any_opt) == first_ty) {
             return Some((Argument::from_kind(ctx, Kind::String), first_ty));
         }
         return None;

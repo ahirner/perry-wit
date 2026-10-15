@@ -1,4 +1,5 @@
 //! How MIR types are represented in Wasm values and memory slots.
+pub(crate) use crate::values::Carriers;
 use anyhow::{Result, bail};
 use perry_mir::types::{
     AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
@@ -28,7 +29,7 @@ pub(crate) fn val_type_is_i64(ctx: &Context, ty: TypeHandle) -> bool {
         .is_some_and(|int| int.width() == 64)
 }
 
-pub(crate) fn i32_type(ctx: &mut Context) -> TypeHandle {
+pub(crate) fn i32_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }
 
@@ -113,7 +114,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     bail!("type {} has no Wasm representation", ty.disp(ctx))
 }
 
-pub(crate) fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+pub(crate) fn wasm_type(ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => FP64Type::get(ctx).into(),
         Repr::I64 => IntegerType::get(ctx, 64, Signedness::Signless).into(),

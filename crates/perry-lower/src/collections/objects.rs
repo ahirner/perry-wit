@@ -3,6 +3,60 @@
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {
+    pub(crate) fn collection_entry_live(
+        &mut self,
+        ctx: &mut Context,
+        entry: Value,
+    ) -> Result<Option<Value>> {
+        let Ok(rec) = TypedHandle::<RecordType>::from_handle(entry.get_type(ctx), ctx) else {
+            return Ok(None);
+        };
+        let field = {
+            let rec_ref = rec.deref(ctx);
+            let name = rec_ref.name();
+            if name.as_ref().starts_with("map_tuple_") {
+                "_2"
+            } else if name.as_ref().starts_with("set_tuple_") {
+                "_1"
+            } else {
+                return Ok(None);
+            }
+        };
+        let op = FieldGetOp::new(ctx, entry, field.to_string())?;
+        Ok(Some(self.append_value(ctx, &op)))
+    }
+
+    pub(crate) fn collection_size(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
+        let num_ty = FP64Type::get(ctx).into();
+        let count_slot = self.entry_slot(ctx, num_ty);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        self.store(ctx, count_slot, zero);
+        self.live_collection_loop(ctx, "coll_size", arr, |b, ctx, _, _| {
+            let cur = b.load(ctx, count_slot)?;
+            let next_c = b.binary(ctx, BinaryKind::Add, cur, one);
+            b.store(ctx, count_slot, next_c);
+            Ok(())
+        })?;
+        self.load(ctx, count_slot)
+    }
+
+    pub(crate) fn normalize_optional_read(
+        &mut self,
+        ctx: &mut Context,
+        val: Value,
+    ) -> Result<Value> {
+        let ty = val.get_type(ctx);
+        if optional_value(ctx, ty).is_some()
+            && absence(ctx, ty).is_some_and(|a| a.admits_undefined())
+        {
+            let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
+            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+            return self.choose(ctx, ty, is_undef, |_, _| Ok(undef), |_, _| Ok(val));
+        }
+        Ok(val)
+    }
+
     pub(crate) fn kv_get(
         &mut self,
         ctx: &mut Context,
@@ -26,6 +80,11 @@ impl<'s> FunctionBuilder<'s> {
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "kv_get", zero, limit, |b, ctx, idx, next, done| {
             let entry = b.element_at(ctx, arr, idx)?;
+            if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                let live_bb = b.new_block(ctx, "kv_get_live");
+                b.branch(ctx, live, live_bb, next);
+                b.switch_to(live_bb);
+            }
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let cand_k = b.append_value(ctx, &k_op);
             let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
@@ -56,7 +115,19 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let key = self.fit(ctx, key, k_ty)?;
         let val = self.fit(ctx, val, v_ty)?;
-        let new_entry = self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![key, val]));
+        let is_map_tuple = tuple_rec
+            .deref(ctx)
+            .name()
+            .as_ref()
+            .starts_with("map_tuple_");
+        let new_entry = if is_map_tuple {
+            let live_true = self.boolean(ctx, true);
+            self.emit_value(ctx, |ctx| {
+                AllocOp::new(ctx, tuple_rec, vec![key, val, live_true])
+            })
+        } else {
+            self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![key, val]))
+        };
         let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let found_slot = self.entry_slot(ctx, bool_ty);
         let false_val = self.boolean(ctx, false);
@@ -65,6 +136,11 @@ impl<'s> FunctionBuilder<'s> {
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "kv_set", zero, limit, |b, ctx, idx, next, done| {
             let entry = b.element_at(ctx, arr, idx)?;
+            if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                let live_bb = b.new_block(ctx, "kv_set_live");
+                b.branch(ctx, live, live_bb, next);
+                b.switch_to(live_bb);
+            }
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let cand_k = b.append_value(ctx, &k_op);
             let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
@@ -104,6 +180,11 @@ impl<'s> FunctionBuilder<'s> {
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "kv_has", zero, limit, |b, ctx, idx, next, done| {
             let entry = b.element_at(ctx, arr, idx)?;
+            if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                let live_bb = b.new_block(ctx, "kv_has_live");
+                b.branch(ctx, live, live_bb, next);
+                b.switch_to(live_bb);
+            }
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let cand_k = b.append_value(ctx, &k_op);
             let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
@@ -130,6 +211,33 @@ impl<'s> FunctionBuilder<'s> {
         let found_slot = self.entry_slot(ctx, bool_ty);
         let false_val = self.boolean(ctx, false);
         self.store(ctx, found_slot, false_val);
+        if map_entry_types(ctx, arr.get_type(ctx)).is_some() {
+            let limit = self.array_length(ctx, arr);
+            let zero = self.number(ctx, 0.0);
+            self.index_loop(ctx, "map_delete", zero, limit, |b, ctx, idx, next, done| {
+                let entry = b.element_at(ctx, arr, idx)?;
+                if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                    let live_bb = b.new_block(ctx, "map_delete_live");
+                    b.branch(ctx, live, live_bb, next);
+                    b.switch_to(live_bb);
+                }
+                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                let cand_k = b.append_value(ctx, &k_op);
+                let matched = b.same_value_zero(ctx, cand_k, key, k_ty)?;
+                let hit = b.new_block(ctx, "map_delete_hit");
+                b.branch(ctx, matched, hit, next);
+                b.switch_to(hit);
+                let dead = b.boolean(ctx, false);
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, entry, "_2".to_string(), dead)
+                });
+                let true_val = b.boolean(ctx, true);
+                b.store(ctx, found_slot, true_val);
+                b.jump(ctx, done);
+                Ok(())
+            })?;
+            return self.load(ctx, found_slot);
+        }
         let num_ty = FP64Type::get(ctx).into();
         let write_slot = self.entry_slot(ctx, num_ty);
         let zero = self.number(ctx, 0.0);
@@ -163,10 +271,18 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn collection_clear(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
-        let zero_f64 = self.number(ctx, 0.0);
-        let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero_f64, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, arr, zero_u32));
+        let is_map = map_entry_types(ctx, arr.get_type(ctx)).is_some();
+        let live_field = if is_map { "_2" } else { "_1" };
+        let limit = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        let false_val = self.boolean(ctx, false);
+        self.index_loop(ctx, "coll_clear", zero, limit, |b, ctx, idx, _, _| {
+            let entry = b.element_at(ctx, arr, idx)?;
+            b.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, entry, live_field.to_string(), false_val)
+            });
+            Ok(())
+        })?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
     }
@@ -176,12 +292,13 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         label: &str,
         arr: Value,
-        body: impl FnOnce(&mut Self, &mut Context, Value) -> Result<()>,
+        body: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
     ) -> Result<()> {
         let zero = self.number(ctx, 0.0);
         let index = self.entry_slot(ctx, zero.get_type(ctx));
         self.store(ctx, index, zero);
         let header = self.new_block(ctx, &format!("{label}_header"));
+        let check = self.new_block(ctx, &format!("{label}_check"));
         let entered = self.new_block(ctx, &format!("{label}_body"));
         let next = self.new_block(ctx, &format!("{label}_next"));
         let done = self.new_block(ctx, &format!("{label}_done"));
@@ -190,9 +307,17 @@ impl<'s> FunctionBuilder<'s> {
         let current = self.load(ctx, index)?;
         let limit = self.array_length(ctx, arr);
         let more = self.compare(ctx, CompareKind::Lt, current, limit);
-        self.branch(ctx, more, entered, done);
-        self.switch_to(entered);
-        body(self, ctx, current)?;
+        self.branch(ctx, more, check, done);
+        self.switch_to(check);
+        let entry = self.element_at(ctx, arr, current)?;
+        if let Some(live) = self.collection_entry_live(ctx, entry)? {
+            self.branch(ctx, live, entered, next);
+            self.switch_to(entered);
+        } else {
+            self.jump(ctx, entered);
+            self.switch_to(entered);
+        }
+        body(self, ctx, current, entry)?;
         self.jump(ctx, next);
         self.switch_to(next);
         let one = self.number(ctx, 1.0);
@@ -209,8 +334,7 @@ impl<'s> FunctionBuilder<'s> {
         arr: Value,
         callback: &'s Expr,
     ) -> Result<Value> {
-        self.live_collection_loop(ctx, "map_foreach", arr, |b, ctx, idx| {
-            let entry = b.element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "map_foreach", arr, |b, ctx, _, entry| {
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let k = b.append_value(ctx, &k_op);
             let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
@@ -220,17 +344,6 @@ impl<'s> FunctionBuilder<'s> {
         })?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
-    }
-
-    pub(super) fn set_element_at(
-        &mut self,
-        ctx: &mut Context,
-        arr: Value,
-        idx: Value,
-    ) -> Result<Value> {
-        let entry = self.element_at(ctx, arr, idx)?;
-        let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-        Ok(self.append_value(ctx, &op))
     }
 
     pub(super) fn set_add(
@@ -247,7 +360,10 @@ impl<'s> FunctionBuilder<'s> {
         let after_bb = self.new_block(ctx, "set_add_after");
         self.branch(ctx, present, after_bb, append_bb);
         self.switch_to(append_bb);
-        let entry = self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![val]));
+        let live_true = self.boolean(ctx, true);
+        let entry = self.emit_value(ctx, |ctx| {
+            AllocOp::new(ctx, tuple_rec, vec![val, live_true])
+        });
         self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, entry));
         self.jump(ctx, after_bb);
         self.switch_to(after_bb);
@@ -269,7 +385,14 @@ impl<'s> FunctionBuilder<'s> {
         let limit = self.array_length(ctx, arr);
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "set_has", zero, limit, |b, ctx, idx, next, done| {
-            let cand = b.set_element_at(ctx, arr, idx)?;
+            let entry = b.element_at(ctx, arr, idx)?;
+            if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                let live_bb = b.new_block(ctx, "set_has_live");
+                b.branch(ctx, live, live_bb, next);
+                b.switch_to(live_bb);
+            }
+            let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let cand = b.append_value(ctx, &op);
             let matched = b.same_value_zero(ctx, cand, val, elem_ty)?;
             let hit = b.new_block(ctx, "set_has_hit");
             b.branch(ctx, matched, hit, next);
@@ -294,35 +417,30 @@ impl<'s> FunctionBuilder<'s> {
         let found_slot = self.entry_slot(ctx, bool_ty);
         let false_val = self.boolean(ctx, false);
         self.store(ctx, found_slot, false_val);
-        let num_ty = FP64Type::get(ctx).into();
-        let write_slot = self.entry_slot(ctx, num_ty);
         let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
-        self.store(ctx, write_slot, zero);
         let limit = self.array_length(ctx, arr);
-        self.index_loop(ctx, "set_delete", zero, limit, |b, ctx, idx, next, _| {
+        self.index_loop(ctx, "set_delete", zero, limit, |b, ctx, idx, next, done| {
             let entry = b.element_at(ctx, arr, idx)?;
+            if let Some(live) = b.collection_entry_live(ctx, entry)? {
+                let live_bb = b.new_block(ctx, "set_delete_live");
+                b.branch(ctx, live, live_bb, next);
+                b.switch_to(live_bb);
+            }
             let v_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let cand = b.append_value(ctx, &v_op);
             let matched = b.same_value_zero(ctx, cand, val, elem_ty)?;
             let hit = b.new_block(ctx, "set_delete_hit");
-            let keep = b.new_block(ctx, "set_delete_keep");
-            b.branch(ctx, matched, hit, keep);
+            b.branch(ctx, matched, hit, next);
             b.switch_to(hit);
+            let dead = b.boolean(ctx, false);
+            b.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, entry, "_1".to_string(), dead)
+            });
             let true_val = b.boolean(ctx, true);
             b.store(ctx, found_slot, true_val);
-            b.jump(ctx, next);
-            b.switch_to(keep);
-            let w = b.load(ctx, write_slot)?;
-            b.emit(ctx, |ctx| ArraySetOp::new(ctx, arr, w, entry));
-            let next_w = b.binary(ctx, BinaryKind::Add, w, one);
-            b.store(ctx, write_slot, next_w);
+            b.jump(ctx, done);
             Ok(())
         })?;
-        let final_w = self.load(ctx, write_slot)?;
-        let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let new_len = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, final_w, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, arr, new_len));
         self.load(ctx, found_slot)
     }
 
@@ -333,10 +451,9 @@ impl<'s> FunctionBuilder<'s> {
         elem_ty: TypeHandle,
     ) -> Result<Value> {
         let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_values", zero, limit, |b, ctx, idx, _, _| {
-            let item = b.set_element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "set_values", arr, |b, ctx, _, entry| {
+            let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let item = b.append_value(ctx, &op);
             b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, item));
             Ok(())
         })?;
@@ -355,10 +472,9 @@ impl<'s> FunctionBuilder<'s> {
             Some("tuple"),
         )?;
         let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_entries", zero, limit, |b, ctx, idx, _, _| {
-            let item = b.set_element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "set_entries", arr, |b, ctx, _, entry| {
+            let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let item = b.append_value(ctx, &op);
             let pair = b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![item, item]));
             b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
             Ok(())
@@ -372,8 +488,9 @@ impl<'s> FunctionBuilder<'s> {
         arr: Value,
         callback: &'s Expr,
     ) -> Result<Value> {
-        self.live_collection_loop(ctx, "set_foreach", arr, |b, ctx, idx| {
-            let item = b.set_element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "set_foreach", arr, |b, ctx, _, entry| {
+            let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let item = b.append_value(ctx, &op);
             b.array_callback(ctx, callback, &[item, item, arr])?;
             Ok(())
         })?;
@@ -438,10 +555,7 @@ impl<'s> FunctionBuilder<'s> {
         let (k_ty, _, _) =
             kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
         let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, k_ty, vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "kv_keys", zero, limit, |b, ctx, idx, _, _| {
-            let entry = b.element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "kv_keys", arr, |b, ctx, _, entry| {
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let k = b.append_value(ctx, &k_op);
             b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, k));
@@ -454,13 +568,31 @@ impl<'s> FunctionBuilder<'s> {
         let (_, v_ty, _) =
             kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
         let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, v_ty, vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "kv_values", zero, limit, |b, ctx, idx, _, _| {
-            let entry = b.element_at(ctx, arr, idx)?;
+        self.live_collection_loop(ctx, "kv_values", arr, |b, ctx, _, entry| {
             let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
             let v = b.append_value(ctx, &v_op);
             b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, v));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    pub(crate) fn kv_entries(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
+        let (k_ty, v_ty, _) =
+            kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
+        let tuple_rec = self.shapes.mir_record_prefix(
+            ctx,
+            vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+            Some("tuple"),
+        )?;
+        let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        self.live_collection_loop(ctx, "kv_entries", arr, |b, ctx, _, entry| {
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let k = b.append_value(ctx, &k_op);
+            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+            let v = b.append_value(ctx, &v_op);
+            let pair = b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v]));
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
             Ok(())
         })?;
         Ok(out)
@@ -509,7 +641,8 @@ impl<'s> FunctionBuilder<'s> {
             let eq = self.compare(ctx, CompareKind::Eq, key, name_str);
             let op = FieldGetOp::new(ctx, rec, name)?;
             let field_val = self.append_value(ctx, &op);
-            let field_opt = self.fit(ctx, field_val, opt_ty)?;
+            let normalized = self.normalize_optional_read(ctx, field_val)?;
+            let field_opt = self.fit(ctx, normalized, opt_ty)?;
             acc = self.choose(ctx, opt_ty, eq, |_, _| Ok(field_opt), |_, _| Ok(acc))?;
         }
         Ok(acc)
@@ -569,7 +702,7 @@ impl<'s> FunctionBuilder<'s> {
             let (fields, uniform_ty) = record_uniform_field_type(ctx, rec).context(
                 "Object.values on a closed record requires all fields to share a uniform value type",
             )?;
-            let elem_ty = optional_value(ctx, uniform_ty).unwrap_or(uniform_ty);
+            let elem_ty = uniform_ty;
             let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
             for (name, field_ty) in fields {
                 let op = FieldGetOp::new(ctx, obj, name.clone())?;
@@ -583,8 +716,8 @@ impl<'s> FunctionBuilder<'s> {
                     let after_bb = self.new_block(ctx, "obj_val_after");
                     self.branch(ctx, present, keep_bb, after_bb);
                     self.switch_to(keep_bb);
-                    let unwrapped = self.defined(ctx, val)?;
-                    let fitted = self.fit(ctx, unwrapped, elem_ty)?;
+                    let normalized = self.normalize_optional_read(ctx, val)?;
+                    let fitted = self.fit(ctx, normalized, elem_ty)?;
                     self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, fitted));
                     self.jump(ctx, after_bb);
                     self.switch_to(after_bb);
@@ -607,33 +740,15 @@ impl<'s> FunctionBuilder<'s> {
         let obj = self.expression(ctx, obj_expr)?;
         let obj = self.defined(ctx, obj)?;
         let ty = obj.get_type(ctx);
-        if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) {
-            let tuple_rec = self.shapes.mir_record_prefix(
-                ctx,
-                vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
-                Some("tuple"),
-            )?;
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-            let limit = self.array_length(ctx, obj);
-            let zero = self.number(ctx, 0.0);
-            self.index_loop(ctx, "dict_entries", zero, limit, |b, ctx, idx, _, _| {
-                let entry = b.element_at(ctx, obj, idx)?;
-                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                let k = b.append_value(ctx, &k_op);
-                let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
-                let v = b.append_value(ctx, &v_op);
-                let pair = b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v]));
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
-                Ok(())
-            })?;
-            return Ok(out);
+        if dict_entry_types(ctx, ty).is_some() {
+            return self.kv_entries(ctx, obj);
         }
         if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
             let (fields, uniform_ty) = record_uniform_field_type(ctx, rec).context(
                 "Object.entries on a closed record requires all fields to share a uniform value type",
             )?;
             let str_ty: TypeHandle = StringType::get(ctx).into();
-            let elem_ty = optional_value(ctx, uniform_ty).unwrap_or(uniform_ty);
+            let elem_ty = uniform_ty;
             let tuple_rec = self.shapes.mir_record_prefix(
                 ctx,
                 vec![("_0".to_string(), str_ty), ("_1".to_string(), elem_ty)],
@@ -653,8 +768,8 @@ impl<'s> FunctionBuilder<'s> {
                     let after_bb = self.new_block(ctx, "obj_ent_after");
                     self.branch(ctx, present, keep_bb, after_bb);
                     self.switch_to(keep_bb);
-                    let unwrapped = self.defined(ctx, val)?;
-                    let fitted = self.fit(ctx, unwrapped, elem_ty)?;
+                    let normalized = self.normalize_optional_read(ctx, val)?;
+                    let fitted = self.fit(ctx, normalized, elem_ty)?;
                     let pair = self.emit_value(ctx, |ctx| {
                         AllocOp::new(ctx, tuple_rec, vec![name_val, fitted])
                     });
@@ -695,10 +810,7 @@ impl<'s> FunctionBuilder<'s> {
             )?,
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
-        let limit = self.array_length(ctx, entries_val);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "from_entries", zero, limit, |b, ctx, idx, _, _| {
-            let entry = b.element_at(ctx, entries_val, idx)?;
+        self.live_collection_loop(ctx, "from_entries", entries_val, |b, ctx, _, entry| {
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let k = b.append_value(ctx, &k_op);
             let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
@@ -859,36 +971,11 @@ impl<'s> FunctionBuilder<'s> {
                     });
                     return Ok(self.boolean(ctx, true));
                 }
-                bail!("delete operator is only supported on Record<K, V> dictionary types or optional record fields")
+                bail!(
+                    "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
+                )
             }
             _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
         }
-    }
-
-    /// Convert a JSON object snapshot `{"k": v, ...}` into a `Record<string, V>` dictionary array.
-    pub(crate) fn decode_dict(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        _k_ty: TypeHandle,
-        v_ty: TypeHandle,
-        tuple_rec: TypedHandle<RecordType>,
-    ) -> Result<Value> {
-        self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-        let keys = self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value]);
-        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        let limit = self.array_length(ctx, keys);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "json_dict", zero, limit, |b, ctx, idx, _, _| {
-            let key_str = b.element_at(ctx, keys, idx)?;
-            let raw_val = b.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key_str]);
-            let decoded_val = b.fit(ctx, raw_val, v_ty)?;
-            let entry = b.emit_value(ctx, |ctx| {
-                AllocOp::new(ctx, tuple_rec, vec![key_str, decoded_val])
-            });
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, dict, entry));
-            Ok(())
-        })?;
-        Ok(dict)
     }
 }

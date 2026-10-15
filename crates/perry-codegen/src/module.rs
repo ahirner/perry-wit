@@ -149,6 +149,8 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) globals: HashMap<Identifier, (u32, TypeHandle)>,
     /// The initializer and the address of its state cell, if the module has one.
     pub(crate) initializer: Option<Initializer>,
+    /// Static scratch cell for runtime calls returning a 64-bit numeric payload.
+    pub(crate) numeric_result: Option<u32>,
 }
 
 impl ModuleState<'_> {
@@ -276,6 +278,7 @@ pub(crate) fn lower(
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),
         initializer: None,
+        numeric_result: None,
     };
     if functions
         .iter()

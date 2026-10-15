@@ -303,7 +303,14 @@ impl Verify for ToStringOp {
     }
 }
 
-pure!(UndefinedOp, OmittedOp, WrapOp, IsUndefinedOp, ToNumberOp, ToStringOp);
+pure!(
+    UndefinedOp,
+    OmittedOp,
+    WrapOp,
+    IsUndefinedOp,
+    ToNumberOp,
+    ToStringOp
+);
 
 /// The explicit `null` value of a nullable type.
 #[pliron_op(

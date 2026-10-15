@@ -83,24 +83,24 @@ impl Pass for NormalizeJsonCopy {
                     source_ty,
                     target_ty,
                 ) {
-                    let helper_sym =
-                        if let Some(sym) = helper_cache.get(&(source_ty, target_ty)).cloned() {
-                            sym
-                        } else {
-                            let sym = loop {
-                                let candidate: Identifier =
-                                    format!("perry_json_copy_{next_helper_id}")
-                                        .try_into()
-                                        .unwrap_or_else(|_| pliron::ident!("perry_json_copy"));
-                                next_helper_id += 1;
-                                if used_names.insert(candidate.clone()) {
-                                    break candidate;
-                                }
-                            };
-                            build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
-                            helper_cache.insert((source_ty, target_ty), sym.clone());
-                            sym
+                    let helper_sym = if let Some(sym) =
+                        helper_cache.get(&(source_ty, target_ty)).cloned()
+                    {
+                        sym
+                    } else {
+                        let sym = loop {
+                            let candidate: Identifier = format!("perry_json_copy_{next_helper_id}")
+                                .try_into()
+                                .unwrap_or_else(|_| pliron::ident!("perry_json_copy"));
+                            next_helper_id += 1;
+                            if used_names.insert(candidate.clone()) {
+                                break candidate;
+                            }
                         };
+                        build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
+                        helper_cache.insert((source_ty, target_ty), sym.clone());
+                        sym
+                    };
 
                     rewrite_site(ctx, &site, helper_sym);
                     rewrites += 1;

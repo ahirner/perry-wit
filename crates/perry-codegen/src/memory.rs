@@ -495,9 +495,10 @@ impl FunctionLowering<'_, '_> {
         let mut dead: Vec<_> = frame
             .slots
             .iter()
-            .filter_map(|(value, (offset, _))| {
+            .filter_map(|(value, slot)| {
                 (!live(value) && repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
-                    .then_some(*offset)
+                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
+                    .flatten()
             })
             .collect();
         dead.sort_unstable();
