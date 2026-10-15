@@ -277,7 +277,7 @@ impl<'s> FunctionBuilder<'s> {
                         ctx,
                         target,
                         undefined,
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))),
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, target))),
                         null_or_value,
                     )
                 } else {

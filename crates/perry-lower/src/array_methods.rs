@@ -791,7 +791,7 @@ impl<'s> FunctionBuilder<'s> {
             NumericCastOp::new(
                 ctx,
                 index,
-                IntegerType::get(ctx, 32, Signedness::Unsigned).into(),
+                IntegerType::get(ctx, 32, Signedness::Signless).into(),
             )
         });
         let op = ArrayAtOp::new(ctx, array, at)?;

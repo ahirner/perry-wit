@@ -297,7 +297,7 @@ impl<'s> FunctionBuilder<'s> {
         for (_, field) in &fields {
             let slot = self.entry_slot(ctx, *field);
             let absent = if absence(ctx, *field).is_some_and(|a| a.admits_undefined()) {
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field))
+                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, *field))
             } else {
                 self.emit_value(ctx, |ctx| UndefOp::new(ctx, *field))
             };

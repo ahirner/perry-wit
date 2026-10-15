@@ -243,8 +243,16 @@ impl Program {
 }
 
 const TYPED_HELPERS: &str = r#"
+const sharedJsonCell: { value: number } = { value: 0 };
+function clobberSharedJsonCell(): void {
+    sharedJsonCell.value = -999;
+}
 function typedJson(value: number): number {
-    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: value, rows: [1, 2, 3] }));
+    sharedJsonCell.value = value;
+    const snapshot = JSON.stringify(sharedJsonCell);
+    clobberSharedJsonCell();
+    const preserved: { value: number | null } = JSON.parse(snapshot);
+    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));
     parsed.rows[0] = 4;
     return parsed.value === null ? 0 : parsed.value;
 }

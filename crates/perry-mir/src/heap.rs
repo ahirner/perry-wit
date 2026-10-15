@@ -205,6 +205,71 @@ impl SideEffects for FieldGetOp {
     }
 }
 
+/// Test whether one field of a record is present (not omitted).
+#[pliron_op(
+    name = "perry.field_present",
+    format = "$0 `.` attr($perry_present_field, $StringAttr) ` : ` type($0)",
+    interfaces = [OneOpdInterface, OneResultInterface],
+    attributes = (perry_present_field: StringAttr)
+)]
+pub struct FieldPresentOp;
+
+impl FieldPresentOp {
+    pub fn new(ctx: &mut Context, reference: Value, field: String) -> Result<Self> {
+        let _ = field_type(ctx, reference, &field, "perry.field_present")?;
+        let bool_ty = pliron::builtin::types::IntegerType::get(
+            ctx,
+            1,
+            pliron::builtin::types::Signedness::Signless,
+        )
+        .into();
+        let op = FieldPresentOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![bool_ty],
+                vec![reference],
+                vec![],
+                0,
+            ),
+        };
+        op.set_attr_perry_present_field(ctx, StringAttr::new(field));
+        Ok(op)
+    }
+
+    pub fn field(&self, ctx: &Context) -> String {
+        self.get_attr_perry_present_field(ctx)
+            .expect("field name")
+            .clone()
+            .into()
+    }
+}
+
+impl Verify for FieldPresentOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let reference = self.get_operation().deref(ctx).get_operand(0);
+        let _ = field_type(ctx, reference, &self.field(ctx), "perry.field_present")?;
+        if !crate::scalar::is_bool(ctx, self.get_result(ctx)) {
+            let record = record(ctx, reference.get_type(ctx), "perry.field_present")?;
+            verify_err!(
+                self.loc(ctx),
+                HeapErr::FieldType {
+                    record: record.name().to_string(),
+                    field: self.field(ctx).to_string(),
+                }
+            )?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl SideEffects for FieldPresentOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        false
+    }
+}
+
 /// Write one field of a record.
 #[pliron_op(
     name = "perry.field_set",

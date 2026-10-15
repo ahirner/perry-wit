@@ -292,8 +292,10 @@ impl Solver {
                     Fact::Original
                 } else if let Some(declared) = declared_results.get(position).copied().flatten() {
                     Fact::Integer(declared)
-                } else if fact == Fact::Literal {
-                    required.integer().map_or(Fact::Literal, Fact::Integer)
+                } else if matches!(fact, Fact::Literal { .. }) {
+                    required
+                        .integer()
+                        .map_or(fact, |req| fact.join(Fact::Integer(req)))
                 } else {
                     fact
                 };
@@ -368,7 +370,7 @@ impl Solver {
                         } else {
                             match self.analysis.states[id].fact(value) {
                                 Fact::Integer(integer) => Some(integer),
-                                Fact::Literal => {
+                                Fact::Literal { .. } => {
                                     let Range::Bounds(interval) =
                                         self.analysis.states[id].range(value)
                                     else {
@@ -440,26 +442,23 @@ impl Solver {
             for input in operation.operands() {
                 self.require(id, input, required);
             }
-            self.fact(
+            let mut fact = self.arithmetic(
+                ctx,
                 id,
+                &[operation.get_operand(0), operation.get_operand(1)],
                 result,
-                self.arithmetic(
-                    ctx,
-                    id,
-                    &[operation.get_operand(0), operation.get_operand(1)],
-                    result,
-                ),
             );
-            self.range(
-                id,
-                result,
-                arithmetic_range(
-                    binary.kind(ctx),
-                    self.analysis.states[id].range(operation.get_operand(0)),
-                    self.analysis.states[id].range(operation.get_operand(1)),
-                    self.analysis.states[id].fact(result).integer(),
-                ),
+            let range = arithmetic_range(
+                binary.kind(ctx),
+                self.analysis.states[id].range(operation.get_operand(0)),
+                self.analysis.states[id].range(operation.get_operand(1)),
+                fact.integer(),
             );
+            if let Fact::Literal { negative } = &mut fact {
+                *negative |= !matches!(range, Range::Bounds(i) if i.lower >= 0);
+            }
+            self.fact(id, result, fact);
+            self.range(id, result, range);
             if !was_integer
                 && self.analysis.keys[id].specialize
                 && required.is_none()
@@ -478,28 +477,23 @@ impl Solver {
                 .get(&operation.get_result(0))
                 .copied();
             self.require(id, operation.get_operand(0), required);
-            self.fact(
+            let mut fact = self.arithmetic(
+                ctx,
                 id,
+                &[operation.get_operand(0)],
                 operation.get_result(0),
-                self.arithmetic(
-                    ctx,
-                    id,
-                    &[operation.get_operand(0)],
-                    operation.get_result(0),
-                ),
             );
-            self.range(
-                id,
-                operation.get_result(0),
-                arithmetic_range(
-                    BinaryKind::Sub,
-                    Range::Bounds(Interval { lower: 0, upper: 0 }),
-                    self.analysis.states[id].range(operation.get_operand(0)),
-                    self.analysis.states[id]
-                        .fact(operation.get_result(0))
-                        .integer(),
-                ),
+            let range = arithmetic_range(
+                BinaryKind::Sub,
+                Range::Bounds(Interval { lower: 0, upper: 0 }),
+                self.analysis.states[id].range(operation.get_operand(0)),
+                fact.integer(),
             );
+            if let Fact::Literal { negative } = &mut fact {
+                *negative |= !matches!(range, Range::Bounds(i) if i.lower >= 0);
+            }
+            self.fact(id, operation.get_result(0), fact);
+            self.range(id, operation.get_result(0), range);
             return;
         }
         if let Some(intrinsic_op) = Operation::get_op::<IntrinsicOp>(op, ctx)
@@ -635,6 +629,21 @@ impl Solver {
                     return;
                 }
                 BuiltinContract::NumberOnly => {
+                    if intrinsic == Intrinsic::ParseInt
+                        && let Some((_, domain, interval, needs_i64)) =
+                            super::domains::const_parsed_int(ctx, op)
+                    {
+                        let fact = if needs_i64 {
+                            Fact::Integer(domain)
+                        } else {
+                            Fact::Literal {
+                                negative: interval.lower < 0,
+                            }
+                        };
+                        self.fact(id, result, fact);
+                        self.range(id, result, Range::Bounds(interval));
+                        return;
+                    }
                     self.fact(id, result, Fact::Original);
                     self.range(id, result, Range::Unknown);
                     return;
@@ -649,7 +658,7 @@ impl Solver {
             )
         {
             for input in operation.operands() {
-                if self.analysis.states[id].fact(input) == Fact::Literal {
+                if matches!(self.analysis.states[id].fact(input), Fact::Literal { .. }) {
                     self.require(id, input, Some(domain));
                 }
             }
@@ -664,7 +673,7 @@ impl Solver {
                     self.analysis.states[id].fact(operand),
                     self.analysis.states[id].range(operand),
                 ) {
-                    (Fact::Literal | Fact::Integer(_), Range::Bounds(interval))
+                    (Fact::Literal { .. } | Fact::Integer(_), Range::Bounds(interval))
                         if interval.fits(integer) =>
                     {
                         Range::Bounds(interval)
@@ -691,8 +700,11 @@ impl Solver {
             ) {
                 self.outcome(id, result, Outcomes::unknown(ctx, result.get_type(ctx)));
             }
+            let const_interval = constant_range(ctx, op);
             let fact = if literal(ctx, op).is_some() {
-                Fact::Literal
+                Fact::Literal {
+                    negative: const_interval.is_some_and(|i| i.lower < 0),
+                }
             } else if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
                 Fact::Integer(integer)
             } else if let Some((fact, _)) = heap_facts {
@@ -703,7 +715,7 @@ impl Solver {
             self.fact(id, result, fact);
             let range = if let Some((_, range)) = heap_facts {
                 range
-            } else if let Some(range) = constant_range(ctx, op) {
+            } else if let Some(range) = const_interval {
                 Range::Bounds(
                     self.analysis.states[id]
                         .representation(result)

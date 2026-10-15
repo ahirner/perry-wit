@@ -75,11 +75,13 @@ impl Shapes<'_> {
                     };
                     return self.kv_array_source_type(ctx, *k, *v, "dict_tuple");
                 }
-                if matches!(
-                    base.as_str(),
-                    "Set" | "ReadonlySet" | "ReadonlyArray" | "Array"
-                ) && !self.is_user_type(base)
-                {
+                if matches!(base.as_str(), "Set" | "ReadonlySet") && !self.is_user_type(base) {
+                    let [element] = arguments.as_slice() else {
+                        bail!("{base} needs one element type argument");
+                    };
+                    return self.set_array_source_type(ctx, *element);
+                }
+                if matches!(base.as_str(), "ReadonlyArray" | "Array") && !self.is_user_type(base) {
                     let [element] = arguments.as_slice() else {
                         bail!("{base} needs one element type argument");
                     };

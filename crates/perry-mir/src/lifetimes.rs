@@ -1,7 +1,7 @@
 //! Bounded frame storage for closed scalar records with no escaping aliases.
 use crate::{
     attrs::Tier,
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
 };
 use pliron::{
     builtin::{
@@ -54,6 +54,7 @@ fn frame_candidates(
                 let operand = usage.find_index(ctx);
                 if operand == 0
                     && (Operation::get_op::<FieldGetOp>(op, ctx).is_some()
+                        || Operation::get_op::<FieldPresentOp>(op, ctx).is_some()
                         || Operation::get_op::<FieldSetOp>(op, ctx).is_some())
                 {
                     return true;

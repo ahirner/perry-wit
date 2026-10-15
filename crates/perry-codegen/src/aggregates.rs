@@ -10,9 +10,9 @@ use perry_mir::{
     attrs::ErrorKind,
     collections::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ConcatSegmentsOp,
+        ArrayTruncateOp, ConcatSegmentsOp,
     },
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
     types::{ArrayType, RecordType},
     variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
 };
@@ -146,7 +146,28 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let object = self.mapped(ctx, record)?;
-            let value = self.load(ctx, kind, object, offset);
+            let mut value = self.load(ctx, kind, object, offset);
+            if perry_mir::optional::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                let omitted = self.is_omitted(ctx, value, ty)?;
+                let undef = self.undefined(ctx, ty)?;
+                value = self.select(ctx, omitted, undef, value);
+            }
+            self.define(ctx, op, value);
+            return Ok(true);
+        }
+        if let Some(present) = Operation::get_op::<FieldPresentOp>(op, ctx) {
+            let record = op.deref(ctx).get_operand(0);
+            let (offset, ty) = Self::field_slot(ctx, record, &present.field(ctx))?;
+            let value =
+                if perry_mir::optional::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                    let kind = slot_kind(ctx, ty)?;
+                    let object = self.mapped(ctx, record)?;
+                    let raw = self.load(ctx, kind, object, offset);
+                    let omitted = self.is_omitted(ctx, raw, ty)?;
+                    self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
+                } else {
+                    self.i32_const(ctx, 1)
+                };
             self.define(ctx, op, value);
             return Ok(true);
         }
@@ -179,6 +200,11 @@ impl FunctionLowering<'_, '_> {
             let array = self.operands(ctx, op)?[0];
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             self.define(ctx, op, len);
+            return Ok(true);
+        }
+        if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
+            let operands = self.operands(ctx, op)?;
+            self.store(ctx, MemKind::I32, operands[0], layout::LEN, operands[1]);
             return Ok(true);
         }
         if let Some(native) = Operation::get_op::<perry_mir::collections::NativeJsonOp>(op, ctx) {

@@ -49,6 +49,8 @@ pub const TAG_STRING: u32 = 3;
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
 /// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+/// Bits of an omitted optional field in a `number | undefined` slot.
+pub const OMITTED_BITS: u64 = 0x7FF0_0000_0000_0003;
 /// Offset of an array's data address ([layout::array::DATA]).
 pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].

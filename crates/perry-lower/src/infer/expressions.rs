@@ -296,36 +296,63 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         | Expr::In { .. }
         | Expr::Delete(_) => HirType::Boolean,
         Expr::MapSize(_) | Expr::SetSize(_) => HirType::Number,
-        Expr::MapKeys(map) => match strip_nullish(expression(map, env)).0 {
+        Expr::MapKeys(map) | Expr::ArrayKeys(map) => match strip_nullish(expression(map, env)).0 {
             HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap") && !type_args.is_empty() =>
+                if matches!(base.as_str(), "Map" | "ReadonlyMap" | "Set" | "ReadonlySet")
+                    && !type_args.is_empty() =>
             {
                 HirType::Array(Box::new(type_args[0].clone()))
             }
+            HirType::Array(_) => HirType::Array(Box::new(HirType::Number)),
             _ => HirType::Any,
         },
-        Expr::MapValues(map) => match strip_nullish(expression(map, env)).0 {
-            HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
-            {
-                HirType::Array(Box::new(type_args[1].clone()))
+        Expr::MapValues(map) | Expr::ArrayValues(map) => {
+            match strip_nullish(expression(map, env)).0 {
+                HirType::Generic { base, type_args }
+                    if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
+                {
+                    HirType::Array(Box::new(type_args[1].clone()))
+                }
+                HirType::Generic { base, type_args }
+                    if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
+                {
+                    HirType::Array(Box::new(type_args[0].clone()))
+                }
+                HirType::Array(elem) => HirType::Array(elem),
+                _ => HirType::Any,
             }
-            _ => HirType::Any,
-        },
-        Expr::MapEntries(map) => match strip_nullish(expression(map, env)).0 {
-            HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
-            {
-                HirType::Array(Box::new(HirType::Tuple(type_args)))
+        }
+        Expr::MapEntries(map) | Expr::ArrayEntries(map) => {
+            match strip_nullish(expression(map, env)).0 {
+                HirType::Generic { base, type_args }
+                    if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
+                {
+                    HirType::Array(Box::new(HirType::Tuple(type_args)))
+                }
+                HirType::Generic { base, type_args }
+                    if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
+                {
+                    let t = type_args[0].clone();
+                    HirType::Array(Box::new(HirType::Tuple(vec![t.clone(), t])))
+                }
+                HirType::Array(elem) => {
+                    HirType::Array(Box::new(HirType::Tuple(vec![HirType::Number, *elem])))
+                }
+                _ => HirType::Any,
             }
-            _ => HirType::Any,
-        },
+        }
         Expr::SetValues(set) => match strip_nullish(expression(set, env)).0 {
             HirType::Generic { base, type_args }
                 if matches!(base.as_str(), "Set" | "ReadonlySet") && !type_args.is_empty() =>
             {
                 HirType::Array(Box::new(type_args[0].clone()))
             }
+            HirType::Generic { base, type_args }
+                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
+            {
+                HirType::Array(Box::new(type_args[1].clone()))
+            }
+            HirType::Array(elem) => HirType::Array(elem),
             _ => HirType::Any,
         },
         Expr::ObjectKeys(_) | Expr::ForInKeys(_) => HirType::Array(Box::new(HirType::String)),
@@ -454,8 +481,20 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                         if matches!(base.as_str(), "Set" | "ReadonlySet")
                             && !type_args.is_empty() =>
                     {
-                        HirType::Array(Box::new(type_args[0].clone()))
+                        let t = type_args[0].clone();
+                        match property.as_str() {
+                            "entries" => HirType::Array(Box::new(HirType::Tuple(vec![t.clone(), t]))),
+                            _ => HirType::Array(Box::new(t)),
+                        }
                     }
+                    HirType::Array(elem) => match property.as_str() {
+                        "keys" => HirType::Array(Box::new(HirType::Number)),
+                        "values" => HirType::Array(elem),
+                        _ => HirType::Array(Box::new(HirType::Tuple(vec![
+                            HirType::Number,
+                            *elem,
+                        ]))),
+                    },
                     _ => perry_hir::infer_expr_type(expr, env),
                 }
             }

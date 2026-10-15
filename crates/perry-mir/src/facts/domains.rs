@@ -189,7 +189,9 @@ impl Range {
 pub(super) enum Fact {
     #[default]
     Bottom,
-    Literal,
+    Literal {
+        negative: bool,
+    },
     Integer(Integer),
     Original,
 }
@@ -199,7 +201,25 @@ impl Fact {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Original, _) | (_, Self::Original) => Self::Original,
-            (Self::Literal, fact) | (fact, Self::Literal) => fact,
+            (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
+                Self::Literal { negative: a || b }
+            }
+            (Self::Literal { negative }, Self::Integer(integer))
+            | (Self::Integer(integer), Self::Literal { negative }) => {
+                if negative && !integer.signed {
+                    let widened = integer.common(Integer {
+                        bits: 8,
+                        signed: true,
+                    });
+                    if widened.signed {
+                        Self::Integer(widened)
+                    } else {
+                        Self::Original
+                    }
+                } else {
+                    Self::Integer(integer)
+                }
+            }
             (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.common(b)),
         }
     }
@@ -237,7 +257,131 @@ impl From<Option<Integer>> for ResultDomain {
     }
 }
 
+fn to_int32(value: f64) -> i32 {
+    if !value.is_finite() || value == 0.0 {
+        return 0;
+    }
+    let bits = value.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    if !(0..84).contains(&exp) {
+        return 0;
+    }
+    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let low = if exp <= 52 {
+        (mantissa >> (52 - exp)) as i32
+    } else {
+        (mantissa as u32).wrapping_shl((exp - 52) as u32) as i32
+    };
+    if (bits >> 63) != 0 {
+        low.wrapping_neg()
+    } else {
+        low
+    }
+}
+
+pub(super) fn const_parsed_int(
+    ctx: &Context,
+    op: Ptr<Operation>,
+) -> Option<(u64, Integer, Interval, bool)> {
+    let intrinsic = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)?;
+    if intrinsic.intrinsic(ctx) != Some(crate::intrinsics::Intrinsic::ParseInt) {
+        return None;
+    }
+    let operation = op.deref(ctx);
+    let str_op = operation.get_operand(0).defining_op()?;
+    let str_const = Operation::get_op::<crate::collections::StringConstOp>(str_op, ctx)?;
+    let text_attr = str_const.get_attr_perry_string_value(ctx)?;
+    let text: &str = text_attr.as_ref();
+    let radix_op = operation.get_operand(1).defining_op()?;
+    let radix_const = Operation::get_op::<ConstantOp>(radix_op, ctx)?;
+    let radix_attr = radix_const.get_attr_builtin_constant_value(ctx)?;
+    let radix_val = f64::from(radix_attr.downcast_ref::<FPDoubleAttr>()?.clone());
+    let trimmed = text
+        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '\u{00a0}' | '\u{feff}'))
+        .as_bytes();
+    let (negative, mut rest) = match trimmed.first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let r = to_int32(radix_val);
+    let (radix, strip_prefix) = if r == 0 {
+        (10u32, true)
+    } else if !(2..=36).contains(&r) {
+        return None;
+    } else {
+        (r as u32, r == 16)
+    };
+    let radix =
+        if strip_prefix && rest.len() >= 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
+            rest = &rest[2..];
+            16
+        } else {
+            radix
+        };
+    let limit = if negative { 1u64 << 63 } else { u64::MAX };
+    let mut count = 0usize;
+    let mut magnitude = 0u64;
+    let mut overflow = false;
+    for &byte in rest {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'z' => u32::from(byte - b'a') + 10,
+            b'A'..=b'Z' => u32::from(byte - b'A') + 10,
+            _ => break,
+        };
+        if digit >= radix {
+            break;
+        }
+        count += 1;
+        if !overflow {
+            if let Some(next) = magnitude
+                .checked_mul(u64::from(radix))
+                .and_then(|v| v.checked_add(u64::from(digit)))
+                .filter(|&v| v <= limit)
+            {
+                magnitude = next;
+            } else {
+                overflow = true;
+            }
+        }
+    }
+    if count == 0 || overflow || (negative && magnitude == 0) {
+        return None;
+    }
+    let (bits, domain, interval) = if negative {
+        (
+            (magnitude as i64).wrapping_neg() as u64,
+            Integer {
+                bits: 64,
+                signed: true,
+            },
+            Interval {
+                lower: -(magnitude as i128),
+                upper: -(magnitude as i128),
+            },
+        )
+    } else {
+        (
+            magnitude,
+            Integer {
+                bits: 64,
+                signed: magnitude <= i64::MAX as u64,
+            },
+            Interval {
+                lower: magnitude as i128,
+                upper: magnitude as i128,
+            },
+        )
+    };
+    let needs_i64 = magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
+    Some((bits, domain, interval, needs_i64))
+}
+
 pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interval> {
+    if let Some((_, _, interval, _)) = const_parsed_int(ctx, op) {
+        return Some(interval);
+    }
     let value = if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         constant.magnitude(ctx)? as i128
     } else {
@@ -323,7 +467,7 @@ pub(super) fn comparison_domain(state: &State, inputs: &[Value]) -> Option<Integ
     for &input in inputs {
         match state.fact(input) {
             Fact::Integer(_) => {}
-            Fact::Literal => {
+            Fact::Literal { .. } => {
                 let Range::Bounds(interval) = state.range(input) else {
                     return None;
                 };
@@ -336,6 +480,9 @@ pub(super) fn comparison_domain(state: &State, inputs: &[Value]) -> Option<Integ
 }
 
 pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
+    if let Some((bits, _, _, _)) = const_parsed_int(ctx, op) {
+        return Some(bits);
+    }
     if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         return constant.magnitude(ctx);
     }
@@ -369,9 +516,13 @@ impl Solver {
         if facts().any(|fact| fact == Fact::Bottom) {
             return Fact::Bottom;
         }
+        let negative = inputs.iter().any(|&v| {
+            matches!(state.fact(v), Fact::Literal { negative: true })
+                || matches!(state.range(v), Range::Bounds(i) if i.lower < 0)
+        });
         if !self.analysis.keys[id].specialize {
-            return if facts().all(|fact| fact == Fact::Literal) {
-                Fact::Literal
+            return if facts().all(|fact| matches!(fact, Fact::Literal { .. })) {
+                Fact::Literal { negative }
             } else {
                 Fact::Original
             };
@@ -382,7 +533,7 @@ impl Solver {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
             (Some(input), None) => Fact::Integer(input),
             (None, Some(required)) => Fact::Integer(required),
-            _ => Fact::Literal,
+            _ => Fact::Literal { negative },
         }
     }
 }

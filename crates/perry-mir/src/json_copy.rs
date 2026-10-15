@@ -1,6 +1,6 @@
 mod emit;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pliron::builtin::op_interfaces::{
     OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface,
@@ -67,6 +67,7 @@ impl Pass for NormalizeJsonCopy {
             .collect();
         let funcs_by_name: HashMap<Identifier, FuncOp> =
             funcs.iter().map(|&f| (f.get_symbol_name(ctx), f)).collect();
+        let mut used_names: HashSet<Identifier> = funcs_by_name.keys().cloned().collect();
 
         for func in funcs {
             let sites = find_parse_stringify_sites(func, ctx, &funcs_by_name);
@@ -86,10 +87,16 @@ impl Pass for NormalizeJsonCopy {
                         if let Some(sym) = helper_cache.get(&(source_ty, target_ty)).cloned() {
                             sym
                         } else {
-                            let sym: Identifier = format!("perry_json_copy_{next_helper_id}")
-                                .try_into()
-                                .unwrap_or_else(|_| pliron::ident!("perry_json_copy"));
-                            next_helper_id += 1;
+                            let sym = loop {
+                                let candidate: Identifier =
+                                    format!("perry_json_copy_{next_helper_id}")
+                                        .try_into()
+                                        .unwrap_or_else(|_| pliron::ident!("perry_json_copy"));
+                                next_helper_id += 1;
+                                if used_names.insert(candidate.clone()) {
+                                    break candidate;
+                                }
+                            };
                             build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
                             helper_cache.insert((source_ty, target_ty), sym.clone());
                             sym

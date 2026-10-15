@@ -221,14 +221,16 @@ fn native_slot(bits: u64, desc: *mut u8) -> *mut u8 {
         descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),
         descriptor::OPTIONAL => {
             let inner = node(word(desc, 4));
-            let (undefined, null) = match word(inner, 0) {
-                descriptor::NUMBER => {
-                    (crate::runtime::UNDEFINED_BITS, descriptor::NULL_NUMBER_BITS)
-                }
-                descriptor::BOOLEAN => (2, 3),
-                _ => (0, 1),
+            let (undefined, omitted, null) = match word(inner, 0) {
+                descriptor::NUMBER => (
+                    crate::runtime::UNDEFINED_BITS,
+                    perry_abi::OMITTED_BITS,
+                    descriptor::NULL_NUMBER_BITS,
+                ),
+                descriptor::BOOLEAN => (2, 4, 3),
+                _ => (0, 2, 1),
             };
-            if bits == undefined {
+            if bits == undefined || bits == omitted {
                 core::ptr::null_mut()
             } else if bits == null {
                 std_json_from_scalar(NULL, 0)

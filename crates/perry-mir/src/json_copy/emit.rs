@@ -18,7 +18,7 @@ use crate::exceptions::{ErrorNewOp, RaiseOp, RethrowOp};
 use crate::heap::{AllocOp, FieldGetOp};
 use crate::intrinsics::{Intrinsic, IntrinsicOp};
 use crate::optional::{
-    IsNullOp, IsUndefinedOp, NullOp, UndefinedOp, UnwrapOp, WrapOp, absence, optional_value,
+    IsNullOp, IsUndefinedOp, NullOp, OmittedOp, UnwrapOp, WrapOp, absence, optional_value,
 };
 use crate::scalar::{BinaryOp, CompareOp};
 use crate::types::{ArrayType, RecordType, VariantType};
@@ -80,9 +80,9 @@ fn emit_normalize_value(
             append_op(ctx, block, &br);
 
             if pos == CopyPosition::RecordField {
-                let undef = UndefinedOp::with_type(ctx, target_ty);
-                append_op(ctx, absent_block, &undef);
-                let br_absent = BrOp::new(ctx, merge_block, vec![undef.get_result(ctx)]);
+                let omitted = OmittedOp::with_type(ctx, target_ty);
+                append_op(ctx, absent_block, &omitted);
+                let br_absent = BrOp::new(ctx, merge_block, vec![omitted.get_result(ctx)]);
                 append_op(ctx, absent_block, &br_absent);
             } else {
                 emit_throw_type_error(
@@ -270,9 +270,9 @@ fn emit_normalize_value(
                 cur_block = next_block;
                 field_vals.push(norm_val);
             } else {
-                let undef = UndefinedOp::with_type(ctx, *t_fty);
-                append_op(ctx, cur_block, &undef);
-                field_vals.push(undef.get_result(ctx));
+                let omitted = OmittedOp::with_type(ctx, *t_fty);
+                append_op(ctx, cur_block, &omitted);
+                field_vals.push(omitted.get_result(ctx));
             }
         }
 

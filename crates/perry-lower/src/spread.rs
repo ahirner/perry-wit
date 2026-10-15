@@ -19,7 +19,12 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             None
         };
-        self.expression_with(ctx, source, expected)
+        let val = self.expression_with(ctx, source, expected)?;
+        if let Some((elem_ty, _)) = crate::collections::set_entry_type(ctx, val.get_type(ctx)) {
+            let val = self.defined(ctx, val)?;
+            return self.set_values(ctx, val, elem_ty);
+        }
+        Ok(val)
     }
 
     pub(super) fn concat_values(
@@ -77,10 +82,15 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let ty = perry_hir::infer_expr_type(expression, env);
                 let ty = if spread {
-                    if let HirType::Array(inner) = ty {
-                        *inner
-                    } else {
-                        return None;
+                    match ty {
+                        HirType::Array(inner) => *inner,
+                        HirType::Generic { base, mut type_args }
+                            if matches!(base.as_str(), "Set" | "ReadonlySet")
+                                && type_args.len() == 1 =>
+                        {
+                            type_args.pop().unwrap()
+                        }
+                        _ => return None,
                     }
                 } else {
                     ty

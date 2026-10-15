@@ -139,6 +139,7 @@ pub(crate) fn compile_sources(
             identity,
             modules,
             resolve,
+            world,
             componentize,
             memory_checks,
         );

@@ -323,6 +323,13 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         }
         if result.status != Status::Failed {
             let attempts = Cell::new(0u32);
+            let passed = std::cell::RefCell::new(
+                contract
+                    .witnesses
+                    .iter()
+                    .map(|witness| witness.case.clone())
+                    .collect::<Vec<_>>(),
+            );
             // Shrinking explains regressions; a pending contract only needs its first failure.
             let shrink = if crate::passing(contract.id) {
                 settings.shrink_limit
@@ -337,6 +344,9 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                 ..Config::default()
             });
             let outcome = runner.run(&contract.strategy, |case| {
+                if passed.borrow().contains(&case) {
+                    return Ok(());
+                }
                 let index = attempts.get();
                 attempts.set(index + 1);
                 evaluate(
@@ -345,7 +355,9 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                     &executor,
                     &artifacts.join(format!("generated-{index}")),
                 )
-                .map_err(|error| TestCaseError::fail(format!("{error:#}")))
+                .map_err(|error| TestCaseError::fail(format!("{error:#}")))?;
+                passed.borrow_mut().push(case);
+                Ok(())
             });
             result.executions += attempts.get();
             match outcome {

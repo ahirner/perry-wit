@@ -8,8 +8,8 @@ use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 mod objects;
 
-pub(super) const MAP_TYPE_MARKER: &str = "__perry_map_type_args";
-pub(super) const SET_TYPE_MARKER: &str = "__perry_set_type_args";
+pub(super) const MAP_TYPE_MARKER: &str = "\0perry_map_type_args";
+pub(super) const SET_TYPE_MARKER: &str = "\0perry_set_type_args";
 
 /// Rewrite `new Map<K, V>(...)` and `new Set<T>(...)` in the AST before HIR lowering
 /// so explicit constructor type arguments are preserved even when the variable binding
@@ -409,6 +409,27 @@ pub(super) fn kv_entry_types(
     tuple_kv_types(ctx, ty)
 }
 
+/// Extract `(T, tuple_rec)` if `ty` is a `Set<T>` (`set_tuple_*` element).
+pub(super) fn set_entry_type(
+    ctx: &Context,
+    ty: TypeHandle,
+) -> Option<(TypeHandle, TypedHandle<RecordType>)> {
+    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let arr = TypedHandle::<ArrayType>::from_handle(ty, ctx).ok()?;
+    let elem = arr.deref(ctx).element();
+    let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
+    let rec_ref = rec.deref(ctx);
+    if !rec_ref.is_tuple() || !rec_ref.name().as_ref().starts_with("set_tuple_") {
+        return None;
+    }
+    let fields = rec_ref.fields().ok()?;
+    if fields.len() != 1 {
+        return None;
+    }
+    let (_, elem_ty) = fields.iter().find(|(n, _)| n == "_0")?;
+    Some((*elem_ty, rec))
+}
+
 /// Check if a closed `RecordType` has fields that can all be unified or read as values.
 fn record_uniform_field_type(
     ctx: &Context,
@@ -468,8 +489,7 @@ impl<'s> FunctionBuilder<'s> {
             Expr::SetNew => Ok(Some(self.empty_set(ctx, expected)?)),
             Expr::SetNewFromArray(init) => {
                 if let Some((elem_hir, real_init)) = parse_set_new_arg(init) {
-                    let elem_ty = self.shapes.value_type(ctx, &elem_hir)?;
-                    let set_ty: TypeHandle = ArrayType::get(ctx, elem_ty).into();
+                    let set_ty = self.shapes.set_array_type(ctx, &elem_hir)?;
                     if let Some(real_init) = real_init {
                         return Ok(Some(self.set_from_array(ctx, real_init, Some(set_ty))?));
                     }
@@ -500,8 +520,7 @@ impl<'s> FunctionBuilder<'s> {
                 class_name, args, ..
             } if class_name == "Set" => {
                 if let Some((elem_hir, real_init)) = parse_set_type_args(args) {
-                    let elem_ty = self.shapes.value_type(ctx, &elem_hir)?;
-                    let set_ty: TypeHandle = ArrayType::get(ctx, elem_ty).into();
+                    let set_ty = self.shapes.set_array_type(ctx, &elem_hir)?;
                     if let Some(real_init) = real_init {
                         return Ok(Some(self.set_from_array(ctx, real_init, Some(set_ty))?));
                     }
@@ -550,48 +569,74 @@ impl<'s> FunctionBuilder<'s> {
                 let (k_ty, _, _) = kv_entry_types(ctx, m.get_type(ctx))
                     .context("Map.delete receiver must be a Map")?;
                 let k = self.expression_with(ctx, key, Some(k_ty))?;
-                Ok(Some(self.kv_delete(ctx, map, m, k, k_ty)?))
+                Ok(Some(self.kv_delete(ctx, m, k, k_ty)?))
             }
             Expr::MapClear(map) | Expr::SetClear(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
-                Ok(Some(self.collection_clear(ctx, map, m)?))
+                Ok(Some(self.collection_clear(ctx, m)?))
             }
-            Expr::MapValues(map) => {
+            Expr::MapValues(map) | Expr::SetValues(map) | Expr::ArrayValues(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
-                Ok(Some(self.kv_values(ctx, m)?))
+                let ty = m.get_type(ctx);
+                if let Some((elem_ty, _)) = set_entry_type(ctx, ty) {
+                    return Ok(Some(self.set_values(ctx, m, elem_ty)?));
+                }
+                if kv_entry_types(ctx, ty).is_some() {
+                    return Ok(Some(self.kv_values(ctx, m)?));
+                }
+                Ok(Some(m))
             }
-            Expr::MapKeys(map) => {
+            Expr::MapKeys(map) | Expr::ArrayKeys(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
-                Ok(Some(self.kv_keys(ctx, m)?))
+                let ty = m.get_type(ctx);
+                if let Some((elem_ty, _)) = set_entry_type(ctx, ty) {
+                    return Ok(Some(self.set_values(ctx, m, elem_ty)?));
+                }
+                if kv_entry_types(ctx, ty).is_some() {
+                    return Ok(Some(self.kv_keys(ctx, m)?));
+                }
+                Ok(Some(self.array_keys(ctx, m)?))
             }
-            Expr::MapEntries(map) | Expr::SetValues(map) => {
+            Expr::MapEntries(map) | Expr::ArrayEntries(map) => {
                 let m = self.expression(ctx, map)?;
-                Ok(Some(self.defined(ctx, m)?))
+                let m = self.defined(ctx, m)?;
+                let ty = m.get_type(ctx);
+                if let Some((elem_ty, _)) = set_entry_type(ctx, ty) {
+                    return Ok(Some(self.set_entries(ctx, m, elem_ty)?));
+                }
+                if kv_entry_types(ctx, ty).is_some() {
+                    return Ok(Some(m));
+                }
+                let elem_ty = self.array_element(ctx, m)?;
+                Ok(Some(self.array_entries(ctx, m, elem_ty)?))
             }
             Expr::SetAdd { set_id, value } => {
                 let slot = self.local(*set_id)?;
                 let s = self.load(ctx, slot)?;
                 let s = self.defined(ctx, s)?;
-                let elem_ty = self.array_element(ctx, s)?;
+                let (elem_ty, tuple_rec) = set_entry_type(ctx, s.get_type(ctx))
+                    .context("Set.add receiver must be a Set")?;
                 let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                Ok(Some(self.set_add(ctx, s, v, elem_ty)?))
+                Ok(Some(self.set_add(ctx, s, v, elem_ty, tuple_rec)?))
             }
             Expr::SetHas { set, value } => {
                 let s = self.expression(ctx, set)?;
                 let s = self.defined(ctx, s)?;
-                let elem_ty = self.array_element(ctx, s)?;
+                let (elem_ty, _) = set_entry_type(ctx, s.get_type(ctx))
+                    .context("Set.has receiver must be a Set")?;
                 let v = self.expression_with(ctx, value, Some(elem_ty))?;
                 Ok(Some(self.set_has(ctx, s, v, elem_ty)?))
             }
             Expr::SetDelete { set, value } => {
                 let s = self.expression(ctx, set)?;
                 let s = self.defined(ctx, s)?;
-                let elem_ty = self.array_element(ctx, s)?;
+                let (elem_ty, _) = set_entry_type(ctx, s.get_type(ctx))
+                    .context("Set.delete receiver must be a Set")?;
                 let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                Ok(Some(self.set_delete(ctx, set, s, v, elem_ty)?))
+                Ok(Some(self.set_delete(ctx, s, v, elem_ty)?))
             }
             Expr::ObjectValues(obj) => Ok(Some(self.object_values(ctx, obj)?)),
             Expr::ObjectEntries(obj) => Ok(Some(self.object_entries(ctx, obj)?)),
@@ -609,7 +654,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn collection_method(
         &mut self,
         ctx: &mut Context,
-        object: &'s Expr,
+        _object: &'s Expr,
         receiver: Value,
         method: &str,
         args: &'s [Expr],
@@ -644,11 +689,11 @@ impl<'s> FunctionBuilder<'s> {
                         bail!("Map.delete requires one key argument");
                     };
                     let k = self.expression_with(ctx, key, Some(k_ty))?;
-                    Some(self.kv_delete(ctx, object, receiver, k, k_ty)?)
+                    Some(self.kv_delete(ctx, receiver, k, k_ty)?)
                 }
                 "clear" => {
                     ensure!(args.is_empty(), "Map.clear takes no arguments");
-                    Some(self.collection_clear(ctx, object, receiver)?)
+                    Some(self.collection_clear(ctx, receiver)?)
                 }
                 "keys" => {
                     ensure!(args.is_empty(), "Map.keys takes no arguments");
@@ -673,15 +718,14 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(Some(res));
         }
 
-        if kind(ctx, receiver)? == Kind::Array && dict_entry_types(ctx, recv_ty).is_none() {
-            let elem_ty = self.array_element(ctx, receiver)?;
+        if let Some((elem_ty, tuple_rec)) = set_entry_type(ctx, recv_ty) {
             let res = match method {
                 "add" => {
                     let [value] = args else {
                         bail!("Set.add requires one value argument");
                     };
                     let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                    Some(self.set_add(ctx, receiver, v, elem_ty)?)
+                    Some(self.set_add(ctx, receiver, v, elem_ty, tuple_rec)?)
                 }
                 "has" => {
                     let [value] = args else {
@@ -695,15 +739,15 @@ impl<'s> FunctionBuilder<'s> {
                         bail!("Set.delete requires one value argument");
                     };
                     let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                    Some(self.set_delete(ctx, object, receiver, v, elem_ty)?)
+                    Some(self.set_delete(ctx, receiver, v, elem_ty)?)
                 }
                 "clear" => {
                     ensure!(args.is_empty(), "Set.clear takes no arguments");
-                    Some(self.collection_clear(ctx, object, receiver)?)
+                    Some(self.collection_clear(ctx, receiver)?)
                 }
                 "keys" | "values" => {
                     ensure!(args.is_empty(), "Set.{method} takes no arguments");
-                    Some(receiver)
+                    Some(self.set_values(ctx, receiver, elem_ty)?)
                 }
                 "entries" => {
                     ensure!(args.is_empty(), "Set.entries takes no arguments");
@@ -711,9 +755,35 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 "forEach" => {
                     let [callback] = args else {
+                        bail!("Set.forEach requires one callback argument");
+                    };
+                    Some(self.set_for_each(ctx, receiver, callback)?)
+                }
+                _ => return Ok(None),
+            };
+            return Ok(Some(res));
+        }
+
+        if kind(ctx, receiver)? == Kind::Array && dict_entry_types(ctx, recv_ty).is_none() {
+            let elem_ty = self.array_element(ctx, receiver)?;
+            let res = match method {
+                "keys" => {
+                    ensure!(args.is_empty(), "Array.keys takes no arguments");
+                    Some(self.array_keys(ctx, receiver)?)
+                }
+                "values" => {
+                    ensure!(args.is_empty(), "Array.values takes no arguments");
+                    Some(receiver)
+                }
+                "entries" => {
+                    ensure!(args.is_empty(), "Array.entries takes no arguments");
+                    Some(self.array_entries(ctx, receiver, elem_ty)?)
+                }
+                "forEach" => {
+                    let [callback] = args else {
                         bail!("forEach requires one callback argument");
                     };
-                    Some(self.array_or_set_for_each(ctx, receiver, callback)?)
+                    Some(self.array_for_each(ctx, receiver, callback)?)
                 }
                 _ => return Ok(None),
             };
@@ -772,10 +842,9 @@ impl<'s> FunctionBuilder<'s> {
             bail!("an empty Set requires a type annotation (e.g. Set<T>)");
         };
         let expected = optional_value(ctx, expected).unwrap_or(expected);
-        let arr = TypedHandle::<ArrayType>::from_handle(expected, ctx)
-            .map_err(|_| anyhow!("expected a Set<T> type"))?;
-        let elem_ty = arr.deref(ctx).element();
-        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![])))
+        let (_, tuple_rec) =
+            set_entry_type(ctx, expected).context("expected a Set<T> type")?;
+        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![])))
     }
 
     fn set_from_array(
@@ -784,21 +853,42 @@ impl<'s> FunctionBuilder<'s> {
         init: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let arr = self.expression_with(ctx, init, expected)?;
+        let init_expected = expected.and_then(|exp| {
+            set_entry_type(ctx, exp).map(|(elem_ty, _)| ArrayType::get(ctx, elem_ty).into())
+        });
+        let arr = self.expression_with(ctx, init, init_expected)?;
         let arr = self.defined(ctx, arr)?;
-        let elem_ty = self.array_element(ctx, arr)?;
-        let set = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+        let (elem_ty, tuple_rec, source_is_set) = match set_entry_type(ctx, arr.get_type(ctx)) {
+            Some((e, r)) => (e, r, true),
+            None => {
+                let e = self.array_element(ctx, arr)?;
+                let r = match expected.and_then(|exp| set_entry_type(ctx, exp).map(|(_, r)| r)) {
+                    Some(r) => r,
+                    None => self.shapes.mir_record_prefix(
+                        ctx,
+                        vec![("_0".to_string(), e)],
+                        Some("set_tuple"),
+                    )?,
+                };
+                (e, r, false)
+            }
+        };
+        let set = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
         let limit = self.array_length(ctx, arr);
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "set_init", zero, limit, |b, ctx, idx, _, _| {
-            let item = b.element_at(ctx, arr, idx)?;
-            b.set_add(ctx, set, item, elem_ty)?;
+            let item = if source_is_set {
+                b.set_element_at(ctx, arr, idx)?
+            } else {
+                b.element_at(ctx, arr, idx)?
+            };
+            b.set_add(ctx, set, item, elem_ty, tuple_rec)?;
             Ok(())
         })?;
         Ok(set)
     }
 
-    fn same_value_zero(
+    pub(super) fn same_value_zero(
         &mut self,
         ctx: &mut Context,
         a: Value,
@@ -815,147 +905,5 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             Ok(eq)
         }
-    }
-
-    fn map_for_each(&mut self, ctx: &mut Context, arr: Value, callback: &'s Expr) -> Result<Value> {
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "map_for_each", zero, limit, |b, ctx, idx, next, _| {
-            let available = b.array_length(ctx, arr);
-            let present = b.compare(ctx, CompareKind::Lt, idx, available);
-            let read = b.new_block(ctx, "map_for_each_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let entry = b.element_at(ctx, arr, idx)?;
-            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-            let k = b.append_value(ctx, &k_op);
-            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
-            let v = b.append_value(ctx, &v_op);
-            b.array_callback(ctx, callback, &[v, k, arr])?;
-            Ok(())
-        })?;
-        let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
-    }
-
-    fn set_add(
-        &mut self,
-        ctx: &mut Context,
-        arr: Value,
-        val: Value,
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let val = self.fit(ctx, val, elem_ty)?;
-        let present = self.set_has(ctx, arr, val, elem_ty)?;
-        let append_bb = self.new_block(ctx, "set_add_append");
-        let after_bb = self.new_block(ctx, "set_add_after");
-        self.branch(ctx, present, after_bb, append_bb);
-        self.switch_to(append_bb);
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, val));
-        self.jump(ctx, after_bb);
-        self.switch_to(after_bb);
-        Ok(arr)
-    }
-
-    fn set_has(
-        &mut self,
-        ctx: &mut Context,
-        arr: Value,
-        val: Value,
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let val = self.fit(ctx, val, elem_ty)?;
-        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let found_slot = self.entry_slot(ctx, bool_ty);
-        let false_val = self.boolean(ctx, false);
-        self.store(ctx, found_slot, false_val);
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_has", zero, limit, |b, ctx, idx, next, done| {
-            let item = b.element_at(ctx, arr, idx)?;
-            let matched = b.same_value_zero(ctx, item, val, elem_ty)?;
-            let hit = b.new_block(ctx, "set_has_hit");
-            b.branch(ctx, matched, hit, next);
-            b.switch_to(hit);
-            let true_val = b.boolean(ctx, true);
-            b.store(ctx, found_slot, true_val);
-            b.jump(ctx, done);
-            Ok(())
-        })?;
-        self.load(ctx, found_slot)
-    }
-
-    fn set_delete(
-        &mut self,
-        ctx: &mut Context,
-        target: &'s Expr,
-        arr: Value,
-        val: Value,
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let val = self.fit(ctx, val, elem_ty)?;
-        let new_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let found_slot = self.entry_slot(ctx, bool_ty);
-        let false_val = self.boolean(ctx, false);
-        self.store(ctx, found_slot, false_val);
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_delete", zero, limit, |b, ctx, idx, next, _| {
-            let item = b.element_at(ctx, arr, idx)?;
-            let matched = b.same_value_zero(ctx, item, val, elem_ty)?;
-            let hit = b.new_block(ctx, "set_delete_hit");
-            let keep = b.new_block(ctx, "set_delete_keep");
-            b.branch(ctx, matched, hit, keep);
-            b.switch_to(hit);
-            let true_val = b.boolean(ctx, true);
-            b.store(ctx, found_slot, true_val);
-            b.jump(ctx, next);
-            b.switch_to(keep);
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, new_arr, item));
-            Ok(())
-        })?;
-        self.update_collection_target(ctx, target, new_arr)?;
-        self.load(ctx, found_slot)
-    }
-
-    fn set_entries(&mut self, ctx: &mut Context, arr: Value, elem_ty: TypeHandle) -> Result<Value> {
-        let tuple_rec = self.shapes.mir_record_prefix(
-            ctx,
-            vec![("_0".to_string(), elem_ty), ("_1".to_string(), elem_ty)],
-            Some("tuple"),
-        )?;
-        let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "set_entries", zero, limit, |b, ctx, idx, _, _| {
-            let item = b.element_at(ctx, arr, idx)?;
-            let pair = b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![item, item]));
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    fn array_or_set_for_each(
-        &mut self,
-        ctx: &mut Context,
-        arr: Value,
-        callback: &'s Expr,
-    ) -> Result<Value> {
-        let limit = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "for_each", zero, limit, |b, ctx, idx, next, _| {
-            let available = b.array_length(ctx, arr);
-            let present = b.compare(ctx, CompareKind::Lt, idx, available);
-            let read = b.new_block(ctx, "for_each_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let item = b.element_at(ctx, arr, idx)?;
-            b.array_callback(ctx, callback, &[item, idx, arr])?;
-            Ok(())
-        })?;
-        let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
     }
 }

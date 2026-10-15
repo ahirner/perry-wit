@@ -970,7 +970,13 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let index = self.index(ctx, index)?;
                 let op = ArrayGetOp::new(ctx, array, index)?;
-                Ok(self.append_value(ctx, &op))
+                let val = self.append_value(ctx, &op);
+                if crate::collections::set_entry_type(ctx, array.get_type(ctx)).is_some() {
+                    let entry = self.defined(ctx, val)?;
+                    let get_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                    return Ok(self.append_value(ctx, &get_op));
+                }
+                Ok(val)
             }
             _ => bail!("indexing is only supported on arrays so far"),
         }

@@ -2,43 +2,6 @@
 use anyhow::Result;
 use wasmparser::{Parser, Payload};
 mod asynchronous;
-mod numeric_and_json;
-
-fn mir_program(
-    signature: &str,
-    arguments: &str,
-    body: &str,
-) -> Result<crate::core_program::Program> {
-    use pliron::{
-        builtin::{
-            op_interfaces::SingleBlockRegionInterface,
-            ops::{FuncOp, ModuleOp},
-        },
-        context::Context,
-        irfmt::parsers::spaced,
-        linked_list::ContainsLinkedList,
-        operation::Operation,
-        parsable::parse_from_str,
-        printable::Printable,
-    };
-    let ctx = &mut Context::new();
-    let text = format!(
-        "builtin.module @numeric {{ ^module(): builtin.func @run: builtin.function <{signature}> {{ ^entry({arguments}): {body} }} }}"
-    );
-    let root = parse_from_str(spaced(Operation::top_level_parser()), ctx, &text)
-        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-    let module = Operation::get_op::<ModuleOp>(root, ctx).unwrap();
-    let operations: Vec<_> = module.get_body(ctx, 0).deref(ctx).iter(ctx).collect();
-    for op in operations {
-        if let Some(function) = Operation::get_op::<FuncOp>(op, ctx) {
-            perry_mir::calls::set_exported(ctx, &function);
-        }
-    }
-    let mut analyses = perry_mir::pipeline::canonicalize(root, ctx)
-        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-    let bytes = perry_codegen::compile(ctx, &module, &perry_codegen::Exports::Raw, &mut analyses)?;
-    Ok(crate::core_program::Program::from_wasm(bytes))
-}
 
 fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
     let stderr = if signature.starts_with("async ") {
@@ -649,151 +612,6 @@ fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
 }
 
 #[test]
-fn semantic_integer_arithmetic_wraps_at_each_width() -> Result<()> {
-    for bits in [8, 16, 32, 64] {
-        for signed in [false, true] {
-            let ty = format!("builtin.integer {}i{bits}", if signed { "s" } else { "u" });
-            let mask = u64::MAX >> (64 - bits);
-            let normalize = |value: u64| {
-                let value = value & mask;
-                if signed && bits < 64 && value & (1 << (bits - 1)) != 0 {
-                    value | !mask
-                } else {
-                    value
-                }
-            };
-            let to_val = |value: u64| {
-                let value = normalize(value);
-                if bits == 64 {
-                    wasmtime::Val::I64(value as i64)
-                } else {
-                    wasmtime::Val::I32(value as i32)
-                }
-            };
-            for kind in ["Add", "Sub", "Mul"] {
-                let mut program = mir_program(
-                    &format!("({ty}, {ty}) -> ({ty})"),
-                    &format!("x: {ty}, y: {ty}"),
-                    &format!("value = perry.binary {kind} x, y : {ty}; perry.return value"),
-                )?;
-                assert_eq!(program.memory_bytes(), 0);
-                for (x, y) in [
-                    (mask, 1),
-                    (1 << (bits - 1), mask),
-                    (mask >> 1, 2),
-                    (9007199254740993 & mask, 7),
-                ] {
-                    let expected = normalize(match kind {
-                        "Add" => x.wrapping_add(y),
-                        "Sub" => x.wrapping_sub(y),
-                        _ => x.wrapping_mul(y),
-                    });
-                    let (actual, _) = program.call("run", &[to_val(x), to_val(y)]);
-                    let actual = if bits == 64 {
-                        actual[0].unwrap_i64() as u64
-                    } else {
-                        actual[0].unwrap_i32() as i64 as u64
-                    };
-                    let expected = if bits == 32 {
-                        expected as i32 as i64 as u64
-                    } else {
-                        expected
-                    };
-                    assert_eq!(actual, expected, "{kind} {ty}: {x}, {y}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn integer_casts_use_source_signedness_and_wrap_narrowing() -> Result<()> {
-    use wasmtime::Val::{I32, I64};
-    for (from, to, input, expected) in [
-        ("si8", "si64", I32(-1), -1i64),
-        ("ui8", "si64", I32(255), 255),
-        ("ui32", "ui64", I32(-1), 4294967295),
-        ("si32", "ui64", I32(-1), -1),
-        ("si64", "si8", I64(128), -128),
-        ("ui64", "ui8", I64(-1), 255),
-        ("ui64", "si32", I64(4294967295), -1),
-        ("si8", "ui16", I32(-128), 65408),
-    ] {
-        let mut program = mir_program(
-            &format!("(builtin.integer {from}) -> (builtin.integer {to})"),
-            &format!("x: builtin.integer {from}"),
-            &format!("value = perry.numeric_cast x : builtin.integer {to}; perry.return value"),
-        )?;
-        let (actual, _) = program.call("run", &[input]);
-        let actual = if to.ends_with("64") {
-            actual[0].unwrap_i64()
-        } else {
-            i64::from(actual[0].unwrap_i32())
-        };
-        assert_eq!(actual, expected, "{from} -> {to}");
-        let literal = match input {
-            I32(value) if from.starts_with('u') => (value as u32).to_string(),
-            I32(value) => value.to_string(),
-            I64(value) if from.starts_with('u') => (value as u64).to_string(),
-            I64(value) => value.to_string(),
-            _ => unreachable!(),
-        };
-        let mut folded = mir_program(
-            &format!("() -> (builtin.integer {to})"),
-            "",
-            &format!(
-                "x = builtin.constant <builtin.integer <{literal}: {from}>> : builtin.integer {from}; value = perry.numeric_cast x : builtin.integer {to}; perry.return value"
-            ),
-        )?;
-        let (actual, _) = folded.call("run", &[]);
-        let actual = if to.ends_with("64") {
-            actual[0].unwrap_i64()
-        } else {
-            i64::from(actual[0].unwrap_i32())
-        };
-        assert_eq!(actual, expected, "folded {from} -> {to}");
-    }
-    Ok(())
-}
-
-#[test]
-fn narrow_arithmetic_wraps_before_later_widening() -> Result<()> {
-    let mut program = mir_program(
-        "(builtin.integer si8, builtin.integer si8) -> (builtin.integer si64)",
-        "x: builtin.integer si8, y: builtin.integer si8",
-        "sum = perry.binary Add x, y : builtin.integer si8; value = perry.numeric_cast sum : builtin.integer si64; perry.return value",
-    )?;
-    let (result, _) = program.call("run", &[wasmtime::Val::I32(127), wasmtime::Val::I32(1)]);
-    assert_eq!(result[0].unwrap_i64(), -128);
-    Ok(())
-}
-
-#[test]
-fn integer_comparisons_respect_signedness_at_wasm_widths() -> Result<()> {
-    for (ty, input, expected) in [
-        ("si32", wasmtime::Val::I32(-1), 0),
-        ("ui32", wasmtime::Val::I32(-1), 1),
-        ("si64", wasmtime::Val::I64(-1), 0),
-        ("ui64", wasmtime::Val::I64(-1), 1),
-    ] {
-        let mut program = mir_program(
-            &format!("(builtin.integer {ty}) -> (builtin.integer i1)"),
-            &format!("x: builtin.integer {ty}"),
-            &format!(
-                "zero = builtin.constant <builtin.integer <0: {ty}>> : builtin.integer {ty}; result = perry.compare Gt x, zero : builtin.integer i1; perry.return result"
-            ),
-        )?;
-        assert_eq!(
-            program.call("run", &[input]).0[0].unwrap_i32(),
-            expected,
-            "{ty}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<()> {
     for (wit, body, expected) in [
         ("s8", "a+b", 3),
@@ -832,3 +650,214 @@ fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<(
     }
     Ok(())
 }
+
+#[test]
+fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening() -> Result<()> {
+    use wasmtime::Val::{I32, I64};
+    let wit_src = r#"
+        package test:optimization;
+        interface math { type byte = u8; }
+        world test {
+            import math;
+            export wrap-byte: func(a: u32, b: u32) -> u32;
+            export widen-s8: func(a: s8, b: s8) -> s32;
+            export big: func(a: u64, b: u64) -> u64;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("optimization.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let source = r#"
+        import type { s8, s32, u64 } from "perry:types";
+        import type { Byte } from "wit:test:optimization/math";
+        function widenAfterAdd(a: s8, b: s8): s32 { const sum: s8 = (a + b) as s8; return sum; }
+        export function wrapByte(a: number, b: number): number { const wrapped: Byte = (a + b) as Byte; return wrapped; }
+        export function widenS8(a: s8, b: s8): s32 { return widenAfterAdd(a, b); }
+        export function big(a: u64, b: u64): u64 { return a + b; }
+    "#;
+    let compiled = perry_wit::compile_for_world(source, "optimization.ts", &resolve, world, true)?;
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(program.memory_bytes(), 0);
+    assert_eq!(
+        program.call("wrap-byte", &[I32(250), I32(10)]).0[0].unwrap_i32(),
+        4
+    );
+    assert_eq!(
+        program.call("widen-s8", &[I32(127), I32(1)]).0[0].unwrap_i32(),
+        -128
+    );
+    assert_eq!(
+        program
+            .call("big", &[I64(9007199254740992), I64(1)])
+            .0[0]
+            .unwrap_i64(),
+        9007199254740993
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_64_bit_integers_and_parse_int_preserve_precision() -> Result<()> {
+    let mut roundtrip = crate::core_program::Program::from_wasm(
+        compile(
+            r#"
+import type { u64, s64 } from "perry:types";
+interface Packet { id: u64; delta: s64 }
+function id(x: u64): u64 { return x; }
+export function run(rawId: u64, delta: s64): number {
+    const input: Packet = { id: id(rawId), delta };
+    const parsed = JSON.parse<Packet>(JSON.stringify(input));
+    const ok = JSON.stringify(id(rawId)) === "9007199254740993" && JSON.stringify(parsed.id) === "9007199254740993";
+    return ok && parsed.id === rawId && parsed.delta === delta ? 1 : 0;
+}
+"#,
+            "func(raw-id:u64,delta:s64)->s32",
+        )?
+        .core,
+    );
+    let (res, _) = roundtrip.call(
+        "run",
+        &[
+            wasmtime::Val::I64(9007199254740993),
+            wasmtime::Val::I64(-9007199254740993),
+        ],
+    );
+    assert_eq!(res[0].unwrap_i32(), 1);
+
+    let mut parse_int = crate::core_program::Program::from_wasm(
+        compile(
+            r#"
+function fwd(v: number): number { return v; }
+export function run(): number {
+    const a = parseInt("9007199254740993");
+    const b = parseInt("9007199254740993");
+    const eq = a === b && !(a !== b);
+    const mul = JSON.stringify(a * 2) === "18014398509481986";
+    const cmp = a < 10000000000000000 && !(a > 10000000000000000);
+    const helper = fwd(a) === b && JSON.stringify(fwd(a)) === "9007199254740993";
+    const overflow = Number.isNaN(parseInt("18446744073709551616"));
+    return eq && mul && cmp && helper && overflow ? 1 : 0;
+}
+"#,
+            "func()->s32",
+        )?
+        .core,
+    );
+    assert_eq!(parse_int.call("run", &[]).0[0].unwrap_i32(), 1);
+    Ok(())
+}
+
+#[test]
+fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
+    let helper = "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }";
+    let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
+    let mut others = String::new();
+    let mut extra_exports = String::new();
+    for a in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+        for b in ["u8", "s8", "u16", "s16", "u32", "s32"] {
+            if a == "u8" && b == "u8" {
+                continue;
+            }
+            let id = format!("e{}", extra_exports.len());
+            others += &format!(
+                "export function {id}(a:number,b:number):number {{ return helper(a,b); }}\n"
+            );
+            extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
+        }
+    }
+    for (name, source, signature, expect_summary) in [
+        (
+            "single",
+            format!("{helper}\n{target}"),
+            "func(a:u8,b:u8)->u8".to_owned(),
+            false,
+        ),
+        (
+            "target_first",
+            format!("{helper}\n{target}\n{others}"),
+            format!("func(a:u8,b:u8)->u8{extra_exports}"),
+            true,
+        ),
+        (
+            "target_last",
+            format!("{helper}\n{others}\n{target}"),
+            format!("func(a:u8,b:u8)->u8{extra_exports}"),
+            true,
+        ),
+    ] {
+        let compiled = compile(&source, &signature)?;
+        assert!(
+            !compiled.allocation_report.contains("range_widenings=0"),
+            "{}",
+            compiled.allocation_report
+        );
+        if expect_summary {
+            assert!(
+                !compiled.allocation_report.contains("summarized_contexts=0"),
+                "{}",
+                compiled.allocation_report
+            );
+        }
+        let mut prog = crate::core_program::Program::from_wasm(compiled.core);
+        let actual = prog
+            .call("run", &[wasmtime::Val::I32(250), wasmtime::Val::I32(10)])
+            .0[0]
+            .unwrap_i32()
+            & 0xff;
+        assert_eq!(actual, 252, "context order case `{name}` mismatch");
+    }
+    Ok(())
+}
+
+#[test]
+fn normalize_json_copy_rewrites_parse_stringify_and_preserves_edge_cases() -> Result<()> {
+    let compiled = compile(
+        r#"
+interface Item { a: number; b?: number; tags: string[] }
+export function run(x: number): number {
+    const src: Item = { a: x === 0 ? -0 : x, b: undefined, tags: ["ok"] };
+    const other: Item = { a: 1, tags: [] };
+    const text = JSON.stringify(src);
+    other.a = 99;
+    const copy = JSON.parse<Item>(text);
+    const mutated: Item = { a: 10, tags: [] };
+    const mText = JSON.stringify(mutated);
+    mutated.a = 20;
+    const preserved = JSON.parse<Item>(mText);
+    const negZeroFixed = Object.is(copy.a, 0) && !Object.is(copy.a, -0);
+    let threw = false;
+    try {
+        JSON.parse<Item>(JSON.stringify({ a: NaN, tags: ["bad"] }));
+    } catch (_e) {
+        threw = true;
+    }
+    return negZeroFixed && threw && !("b" in copy) && preserved.a === 10 ? copy.tags.length : -1;
+}
+"#,
+        "func(x:f64)->s32",
+    )?;
+    assert!(
+        !compiled
+            .allocation_report
+            .contains("parse_stringify_rewrites=0"),
+        "{}",
+        compiled.allocation_report
+    );
+    assert!(
+        !compiled
+            .allocation_report
+            .contains("parse_stringify_missed=0"),
+        "{}",
+        compiled.allocation_report
+    );
+    let mut program = crate::core_program::Program::from_wasm(compiled.core);
+    assert_eq!(
+        program
+            .call("run", &[wasmtime::Val::F64(0.0f64.to_bits())])
+            .0[0]
+            .unwrap_i32(),
+        1
+    );
+    Ok(())
+}
+

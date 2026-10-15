@@ -564,6 +564,24 @@ impl<'h> Shapes<'h> {
         Ok(ArrayType::get(ctx, entry.into()).into())
     }
 
+    pub(super) fn set_array_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
+        let elem_ty = self.value_type(ctx, elem)?;
+        let entry =
+            self.mir_record_prefix(ctx, vec![("_0".to_string(), elem_ty)], Some("set_tuple"))?;
+        Ok(ArrayType::get(ctx, entry.into()).into())
+    }
+
+    fn set_array_source_type(
+        &self,
+        ctx: &Context,
+        elem: ArgumentId,
+    ) -> Result<TypeHandle> {
+        let elem_ty = self.source_type(ctx, elem)?;
+        let entry =
+            self.mir_record_prefix(ctx, vec![("_0".to_string(), elem_ty)], Some("set_tuple"))?;
+        Ok(ArrayType::get(ctx, entry.into()).into())
+    }
+
     pub(super) fn mir_record_kind(
         &self,
         ctx: &Context,

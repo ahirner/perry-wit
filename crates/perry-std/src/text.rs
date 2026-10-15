@@ -527,10 +527,6 @@ fn to_int32(value: f64) -> i32 {
     if !value.is_finite() || value == 0.0 {
         return 0;
     }
-    if let Some((negative, magnitude)) = crate::integers::exact_parsed_int(value) {
-        let low = magnitude as i32;
-        return if negative { low.wrapping_neg() } else { low };
-    }
     let bits = value.to_bits();
     let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
     if !(0..84).contains(&exp) {
@@ -596,8 +592,10 @@ pub(crate) extern "C" fn std_parse_int(string: *mut u8, radix: f64) -> f64 {
     }
     if count == 0 || overflow {
         f64::NAN
+    } else if negative {
+        -(magnitude as f64)
     } else {
-        crate::integers::encode_parsed_int(negative, magnitude)
+        magnitude as f64
     }
 }
 

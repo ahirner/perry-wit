@@ -400,7 +400,7 @@ impl SideEffects for StringConstOp {
 }
 
 /// Extend a mutable array with a snapshot of another array's slots.
-#[pliron_op(name = "perry.array_extend", format = "$0 `, ` $1 ` : ` type($0)", interfaces = [NOpdsInterface<2>, NResultsInterface<0>, SameOperandsType])]
+#[pliron_op(name = "perry.array_extend", format = "$0 `, ` $1", interfaces = [NOpdsInterface<2>, NResultsInterface<0>, SameOperandsType])]
 pub struct ArrayExtendOp;
 impl ArrayExtendOp {
     pub fn new(ctx: &mut Context, target: Value, source: Value) -> Self {
@@ -428,6 +428,47 @@ impl Verify for ArrayExtendOp {
 }
 #[op_interface_impl]
 impl SideEffects for ArrayExtendOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        true
+    }
+}
+
+/// Shrink an array's length in-place without reallocating.
+#[pliron_op(
+    name = "perry.array_truncate",
+    format = "$0 `, ` $1",
+    interfaces = [NOpdsInterface<2>, NResultsInterface<0>]
+)]
+pub struct ArrayTruncateOp;
+
+impl ArrayTruncateOp {
+    pub fn new(ctx: &mut Context, array: Value, new_len: Value) -> Self {
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![],
+                vec![array, new_len],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for ArrayTruncateOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let op = self.get_operation().deref(ctx);
+        element(ctx, op.get_operand(0), "perry.array_truncate")?;
+        if !is_index(ctx, op.get_operand(1)) {
+            verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_truncate"))?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl SideEffects for ArrayTruncateOp {
     fn has_side_effects(&self, _: &Context) -> bool {
         true
     }

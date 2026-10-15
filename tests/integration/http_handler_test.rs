@@ -41,7 +41,7 @@ impl WasiHttpView for Host {
 
 const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
-import type { PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response }
+import type { Request, Response }
   from './handler-types/world';
 
 export async function handle(request: Request): Promise<Response> {

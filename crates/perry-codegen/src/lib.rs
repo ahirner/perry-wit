@@ -73,6 +73,10 @@ const DATA_BASE: u32 = 16;
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
+/// Omitted property in a `boolean | undefined` slot.
+const OMITTED_BOOL: i32 = 4;
+/// Omitted property in a reference `T | undefined` slot.
+const OMITTED_REF: i32 = 2;
 
 /// How functions are exported.
 pub enum Exports {

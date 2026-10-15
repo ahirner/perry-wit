@@ -38,8 +38,8 @@ world handler {
 }";
 
 const ADAPTER: &str = r#"
-import type { PerryHttpHandlerTypesMethod as __PerryMethod,
-  PerryHttpHandlerTypesScheme as __PerryScheme } from './handler-types/world';
+import type { Method as __PerryMethod,
+  Scheme as __PerryScheme } from './handler-types/world';
 import { request as __perryRequest, body as __perryBody, method as __perryMethod,
   methodOther as __perryMethodOther, hasScheme as __perryHasScheme, scheme as __perryScheme,
   schemeOther as __perrySchemeOther, authority as __perryAuthority, path as __perryPath,
@@ -102,6 +102,7 @@ pub(crate) fn compile(
     file_name: &str,
     modules: &std::collections::BTreeMap<String, String>,
     types: &Resolve,
+    types_world: WorldId,
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
@@ -114,7 +115,7 @@ pub(crate) fn compile(
         &program,
         file_name,
         modules,
-        &wit_types::foreign(types, None),
+        &wit_types::foreign(types, Some(types_world)),
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;

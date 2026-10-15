@@ -200,7 +200,7 @@ impl<'s> FunctionBuilder<'s> {
         for (index, ty) in missing {
             positioned.push((
                 index,
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
+                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)),
             ));
         }
         for (name, value) in values {

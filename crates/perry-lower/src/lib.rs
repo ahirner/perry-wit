@@ -52,23 +52,23 @@ use perry_mir::{
     attrs::{BinaryKind, CompareKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
     collections::{
-        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp, StringConstOp,
-        StringLenOp,
+        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp, ConcatOp,
+        StringConstOp, StringLenOp,
     },
     control::{BrOp, CondBrOp, ReturnOp},
     exceptions::{
         CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp,
         RethrowOp,
     },
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
     intrinsics::{
         Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp,
         PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
     },
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
-        IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
-        UnwrapOp, WrapOp, absence, optional_parts, optional_value,
+        IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
+        UndefinedOp, UnwrapOp, WrapOp, absence, optional_parts, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, NumericCastOp},
     types::{

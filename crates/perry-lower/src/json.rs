@@ -456,6 +456,7 @@ pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
         }
         if crate::collections::dict_entry_types(ctx, ty).is_some()
             || crate::collections::map_entry_types(ctx, ty).is_some()
+            || crate::collections::set_entry_type(ctx, ty).is_some()
         {
             return false;
         }

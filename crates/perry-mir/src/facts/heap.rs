@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     collections::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+        ArrayTruncateOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{Combinator, PromiseCombinatorOp},
@@ -63,6 +64,7 @@ pub(super) enum OperationKind {
     Length,
     Combine(Combinator),
     Extend,
+    Truncate,
     Alias { operand: usize },
     Return,
     Call,
@@ -73,7 +75,9 @@ pub(super) enum OperationKind {
 impl OperationKind {
     pub(super) fn classify(ctx: &Context, op: Ptr<Operation>) -> Self {
         if Operation::get_op::<crate::optional::UndefinedOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::optional::OmittedOp>(op, ctx).is_some()
             || Operation::get_op::<crate::optional::NullOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::heap::FieldPresentOp>(op, ctx).is_some()
         {
             return Self::None;
         }
@@ -144,6 +148,9 @@ impl OperationKind {
         }
         if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
             return Self::Extend;
+        }
+        if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
+            return Self::Truncate;
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             return Self::Return;
@@ -653,6 +660,21 @@ impl Solver {
                         self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
                         self.copy_aliases(ctx, input, output, reader);
                     }
+                }
+            }
+            OperationKind::Truncate => {
+                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
+                self.analysis.heap.cells[base].readers.insert(reader);
+                let mut previous = None;
+                while let Some(object) = self.next_object(base, previous) {
+                    previous = Some(object);
+                    self.widen_length(
+                        object,
+                        Range::Bounds(Interval {
+                            lower: 0,
+                            upper: u32::MAX.into(),
+                        }),
+                    );
                 }
             }
             OperationKind::Length => {

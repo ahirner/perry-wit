@@ -240,6 +240,7 @@ impl ProgramFacts {
                     || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
                     || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
                     || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some()
                 {
                     let target = op.deref(ctx).get_operand(0);
                     let (target_cells, target_untracked) = root_heap_cells(ctx, state, target);
@@ -250,6 +251,10 @@ impl ProgramFacts {
                     {
                         return true;
                     }
+                } else if open_or_summarized
+                    && Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
+                {
+                    return true;
                 } else if Operation::get_op::<CallOp>(op, ctx).is_some()
                     || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
                 {
@@ -268,6 +273,16 @@ impl ProgramFacts {
                     if arg_aliases {
                         return true;
                     }
+                    if open_or_summarized {
+                        let callee = Operation::get_op::<CallOp>(op, ctx)
+                            .map(|c| c.callee(ctx))
+                            .or_else(|| {
+                                Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx))
+                            });
+                        if callee.is_none_or(|c| self.callee_may_mutate_open_state(ctx, &c)) {
+                            return true;
+                        }
+                    }
                 }
             }
 
@@ -285,4 +300,43 @@ impl ProgramFacts {
         }
         false
     }
+
+    fn callee_may_mutate_open_state(&self, ctx: &Context, root: &Identifier) -> bool {
+        let mut visited = HashSet::new();
+        let mut stack = vec![root.clone()];
+        while let Some(name) = stack.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(body) = self.bodies.get(&name) else {
+                return true;
+            };
+            if body.effects.effects.may_mutate_records() {
+                return true;
+            }
+            for &constraint in &body.constraints {
+                let Constraint::Op { op, .. } = constraint else {
+                    continue;
+                };
+                if Operation::get_op::<FieldSetOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
+                    || Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
+                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
+                {
+                    return true;
+                }
+                if let Some(callee) = Operation::get_op::<CallOp>(op, ctx)
+                    .map(|c| c.callee(ctx))
+                    .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)))
+                {
+                    stack.push(callee);
+                }
+            }
+        }
+        false
+    }
 }
+

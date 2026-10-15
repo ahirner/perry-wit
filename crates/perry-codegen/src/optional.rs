@@ -1,17 +1,17 @@
 //! Optional values: the `undefined` and `null` sentinels of each representation, absence
 //! tests and the optional ops.
 use crate::{
-    UNDEFINED_BOOL,
+    OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL,
     function::FunctionLowering,
     repr::{Repr, repr},
 };
 use anyhow::{Result, anyhow, bail};
-use perry_abi::UNDEFINED_BITS;
+use perry_abi::{OMITTED_BITS, UNDEFINED_BITS};
 use perry_mir::{
     attrs::ErrorKind,
     optional::{
-        IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
-        UnwrapOp, WrapOp, absence,
+        IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
+        UndefinedOp, UnwrapOp, WrapOp, absence,
     },
     views::AggregateViewOp,
 };
@@ -34,6 +34,11 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(undefined) = Operation::get_op::<UndefinedOp>(op, ctx) {
             let value = self.undefined(ctx, undefined.get_result(ctx).get_type(ctx))?;
+            self.define(ctx, op, value);
+            return Ok(true);
+        }
+        if let Some(omitted) = Operation::get_op::<OmittedOp>(op, ctx) {
+            let value = self.omitted(ctx, omitted.get_result(ctx).get_type(ctx))?;
             self.define(ctx, op, value);
             return Ok(true);
         }
@@ -111,13 +116,52 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    pub(crate) fn omitted(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
+        Ok(match repr(ctx, inner)? {
+            Repr::F64 => {
+                let bits = self.i64_const(ctx, OMITTED_BITS);
+                self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
+            }
+            Repr::Bool => self.i32_const(ctx, OMITTED_BOOL),
+            Repr::Ref => self.i32_const(ctx, OMITTED_REF),
+            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+        })
+    }
+
+    pub(crate) fn is_omitted(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        inner: TypeHandle,
+    ) -> Result<Value> {
+        if !absence(ctx, inner).is_some_and(|a| a.admits_undefined()) {
+            return Ok(self.i32_const(ctx, 0));
+        }
+        Ok(match repr(ctx, inner)? {
+            Repr::F64 => {
+                let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+                let omitted = self.i64_const(ctx, OMITTED_BITS);
+                self.num(ctx, NumOpcode::I64Eq, vec![bits, omitted])
+            }
+            Repr::Bool => {
+                let omitted = self.i32_const(ctx, OMITTED_BOOL);
+                self.num(ctx, NumOpcode::I32Eq, vec![value, omitted])
+            }
+            Repr::Ref => {
+                let omitted = self.i32_const(ctx, OMITTED_REF);
+                self.num(ctx, NumOpcode::I32Eq, vec![value, omitted])
+            }
+            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+        })
+    }
+
     pub(crate) fn is_undefined(
         &mut self,
         ctx: &mut Context,
         value: Value,
         inner: TypeHandle,
     ) -> Result<Value> {
-        Ok(match repr(ctx, inner)? {
+        let explicit = match repr(ctx, inner)? {
             Repr::F64 => {
                 let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
                 let undefined = self.i64_const(ctx, UNDEFINED_BITS);
@@ -129,7 +173,9 @@ impl FunctionLowering<'_, '_> {
             }
             Repr::Ref => self.num(ctx, NumOpcode::I32Eqz, vec![value]),
             Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
-        })
+        };
+        let omitted = self.is_omitted(ctx, value, inner)?;
+        Ok(self.num(ctx, NumOpcode::I32Or, vec![explicit, omitted]))
     }
 
     pub(crate) fn null(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {

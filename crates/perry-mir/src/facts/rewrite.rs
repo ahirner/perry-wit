@@ -138,6 +138,9 @@ fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::valu
                 state.representation(op.deref(ctx).get_operand(0)).is_some()
                     && state.representation(op.deref(ctx).get_operand(1)).is_some()
             }
+            Some(crate::intrinsics::Intrinsic::ParseInt) => {
+                super::domains::const_parsed_int(ctx, op).is_some()
+            }
             _ => false,
         };
     }
