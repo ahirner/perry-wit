@@ -17,7 +17,7 @@ impl Shapes<'_> {
         )
     }
 
-    /// A `Map` entry `{ _0: key, _1: value, _2: live }`.
+    /// A `Map` entry `{ _0: key, _1: value, _2: live, _3: seq }`.
     pub(crate) fn map_tuple_type(
         &self,
         ctx: &Context,
@@ -25,32 +25,39 @@ impl Shapes<'_> {
         v_ty: TypeHandle,
     ) -> Result<TypedHandle<RecordType>> {
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let f64_ty = FP64Type::get(ctx).into();
         self.mir_record_prefix(
             ctx,
             vec![
                 ("_0".to_string(), k_ty),
                 ("_1".to_string(), v_ty),
                 ("_2".to_string(), i1_ty),
+                ("_3".to_string(), f64_ty),
             ],
             Some("map_tuple"),
         )
     }
 
-    /// A `Set` entry `{ _0: value, _1: live }`.
+    /// A `Set` entry `{ _0: value, _1: live, _2: seq }`.
     pub(crate) fn set_tuple_type(
         &self,
         ctx: &Context,
         elem_ty: TypeHandle,
     ) -> Result<TypedHandle<RecordType>> {
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let f64_ty = FP64Type::get(ctx).into();
         self.mir_record_prefix(
             ctx,
-            vec![("_0".to_string(), elem_ty), ("_1".to_string(), i1_ty)],
+            vec![
+                ("_0".to_string(), elem_ty),
+                ("_1".to_string(), i1_ty),
+                ("_2".to_string(), f64_ty),
+            ],
             Some("set_tuple"),
         )
     }
 
-    /// The `{ _0: index, _1: clear_epoch, _2: compaction_ver }` cursor of a live iterator.
+    /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
     pub(crate) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
         self.mir_record_prefix(
@@ -64,7 +71,7 @@ impl Shapes<'_> {
         )
     }
 
-    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: clear_epoch, _3: compactions }`.
+    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
     pub(crate) fn collection_box_type(
         &self,
         ctx: &Context,
@@ -73,15 +80,13 @@ impl Shapes<'_> {
     ) -> Result<TypedHandle<RecordType>> {
         let entries_arr = ArrayType::get(ctx, entry.into()).into();
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        let remap_arr: TypeHandle = ArrayType::get(ctx, f64_ty).into();
-        let compactions_arr = ArrayType::get(ctx, remap_arr).into();
         self.mir_record_prefix(
             ctx,
             vec![
                 ("_0".to_string(), entries_arr),
                 ("_1".to_string(), f64_ty),
                 ("_2".to_string(), f64_ty),
-                ("_3".to_string(), compactions_arr),
+                ("_3".to_string(), f64_ty),
             ],
             Some(kind.box_prefix()),
         )

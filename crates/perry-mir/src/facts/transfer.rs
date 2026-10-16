@@ -412,10 +412,23 @@ impl Solver {
                                     else {
                                         return None;
                                     };
-                                    interval.include(Integer {
-                                        bits: 64,
-                                        signed: true,
-                                    })
+                                    let base = self.analysis.states[id]
+                                        .required
+                                        .get(&value)
+                                        .copied()
+                                        .unwrap_or(Integer {
+                                            bits: if value
+                                                .get_type(ctx)
+                                                .deref(ctx)
+                                                .is::<crate::types::BigIntType>()
+                                            {
+                                                64
+                                            } else {
+                                                32
+                                            },
+                                            signed: true,
+                                        });
+                                    interval.include(base)
                                 }
                                 _ => None,
                             }
@@ -426,10 +439,16 @@ impl Solver {
                     .operands()
                     .enumerate()
                     .map(|(position, value)| {
+                        let fact = self.analysis.states[id].fact(value);
                         asynchronous.is_none()
                             && declared_args.get(position).copied().flatten().is_none()
                             && !value.get_type(ctx).deref(ctx).is::<PromiseType>()
-                            && self.analysis.states[id].fact(value) == Fact::Numeric
+                            && (fact == Fact::Numeric
+                                || (value
+                                    .get_type(ctx)
+                                    .deref(ctx)
+                                    .is::<crate::types::OptionalType>()
+                                    && fact.needs_lossless_64()))
                     })
                     .collect();
                 let child = self.context(
@@ -460,7 +479,11 @@ impl Solver {
                         specialize: true,
                     },
                 );
-                self.analysis.states[id].calls.insert(op, child);
+                if let Some(prev) = self.analysis.states[id].calls.insert(op, child)
+                    && prev != child
+                {
+                    self.analysis.states[prev].callers.remove(&(id, index));
+                }
                 self.analysis.states[child].callers.insert((id, index));
                 self.heap_call(ctx, id, index, child, op);
                 let mut call_constrained = false;
@@ -544,12 +567,9 @@ impl Solver {
             let result = operation.get_result(0);
             let lhs = operation.get_operand(0);
             let rhs = operation.get_operand(1);
-            let needs_numeric = |fact: Fact| {
-                fact == Fact::Numeric || fact.integer().is_some_and(|int| int.bits == 64)
-            };
             let fact = if self.analysis.keys[id].specialize
-                && (needs_numeric(self.analysis.states[id].fact(lhs))
-                    || needs_numeric(self.analysis.states[id].fact(rhs)))
+                && (self.analysis.states[id].fact(lhs).needs_lossless_64()
+                    || self.analysis.states[id].fact(rhs).needs_lossless_64())
             {
                 Fact::Numeric
             } else {

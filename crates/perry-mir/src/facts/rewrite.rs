@@ -123,7 +123,11 @@ struct CoalesceKey {
     calls: Vec<(usize, Option<bool>, Option<Integer>)>,
 }
 
-fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::value::Value) -> bool {
+pub(in crate::facts) fn can_specialize_value(
+    ctx: &Context,
+    state: &super::State,
+    value: pliron::value::Value,
+) -> bool {
     if value
         .get_type(ctx)
         .deref(ctx)
@@ -862,11 +866,16 @@ fn verify_lossless_context(
                 && state.fact(orig_val) == super::Fact::Numeric
                 && is_fp64_carrier(ctx, actual_ty)
             {
+                let fn_name = function.get_symbol_name(ctx);
+                let def_op = orig_val
+                    .defining_op()
+                    .map(|op| Operation::get_op_dyn(op, ctx).get_opid().to_string())
+                    .unwrap_or_else(|| "block_arg".to_string());
                 return verify_err!(
                     loc,
-                    LosslessRepresentationErr(
-                        "Fact::Numeric SSA value degraded to f64 carrier".into()
-                    )
+                    LosslessRepresentationErr(format!(
+                        "Fact::Numeric SSA value ({def_op} in {fn_name}) degraded to f64 carrier"
+                    ))
                 );
             }
             if let Some(&cell) = state.heap_values.get(&orig_val)

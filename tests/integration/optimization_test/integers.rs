@@ -286,21 +286,38 @@ fn exact_64_bit_integers_and_parse_int_preserve_precision() -> Result<()> {
             r#"
 import type { u64, s64 } from "perry:types";
 interface Packet { id: u64; delta: s64 }
+type ArithRec = { v: number; opt?: number };
 function id(x: u64): u64 { return x; }
-export function run(rawId: u64, delta: s64): number {
+function makeArith(x: number): ArithRec { return { v: x * 2, opt: x * 3 }; }
+export function run(rawId: u64, delta: s64, u: number): number {
     const input: Packet = { id: id(rawId), delta };
     const parsed = JSON.parse<Packet>(JSON.stringify(input));
-    const ok = JSON.stringify(id(rawId)) === "9007199254740993" && JSON.stringify(parsed.id) === "9007199254740993";
+    const rec: ArithRec = { v: u * 2, opt: u * 3 };
+    const arr: number[] = [u * 2];
+    const viaHelper = makeArith(u);
+    const arithOk =
+        JSON.stringify(rec.v) === "6000000000" &&
+        JSON.stringify(rec.opt ?? 0) === "9000000000" &&
+        JSON.stringify(arr[0]) === "6000000000" &&
+        JSON.stringify(viaHelper.v) === "6000000000";
+    const ok =
+        arithOk &&
+        JSON.stringify(id(rawId)) === "9007199254740993" &&
+        JSON.stringify(parsed.id) === "9007199254740993";
     return ok && parsed.id === rawId && parsed.delta === delta ? 1 : 0;
 }
 "#,
-            "func(raw-id:u64,delta:s64)->s32",
+            "func(raw-id:u64,delta:s64,u:u32)->s32",
         )?
         .core,
     );
     let (res, _) = roundtrip.call(
         "run",
-        &[Val::I64(9007199254740993), Val::I64(-9007199254740993)],
+        &[
+            Val::I64(9007199254740993),
+            Val::I64(-9007199254740993),
+            Val::I32(3_000_000_000u32 as i32),
+        ],
     );
     assert_eq!(res[0].unwrap_i32(), 1);
 

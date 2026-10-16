@@ -247,6 +247,14 @@ impl Solver {
             .copied()
     }
 
+    fn next_layout_object(&self, cell: usize, previous: Option<usize>) -> Option<usize> {
+        self.analysis.heap.cells[cell]
+            .layout_objects
+            .range((previous.map_or(Unbounded, Excluded), Unbounded))
+            .next()
+            .copied()
+    }
+
     /// Opens `object` once: its slots become unknown and every cell holding it is reconciled.
     fn mark_open(&mut self, object: usize) {
         if !self.analysis.heap.objects[object].open {
@@ -284,6 +292,7 @@ impl Solver {
             self.analysis.heap.objects[object].containers.insert(cell);
             self.work.enqueue(Work::ReconcileCell(cell));
             self.reconcile_owner(cell);
+            self.heap_changed(cell);
         }
     }
 
@@ -324,6 +333,11 @@ impl Solver {
         while let Some(object) = self.next_object(from, previous) {
             previous = Some(object);
             self.add_object(ctx, to, object);
+        }
+        let mut previous = None;
+        while let Some(object) = self.next_layout_object(from, previous) {
+            previous = Some(object);
+            self.add_layout_object(to, object);
         }
     }
 
@@ -439,8 +453,8 @@ impl Solver {
         if joined != cell.domain {
             cell.domain = joined;
             self.heap_changed(slot);
-            // Containers sharing a layout must agree once any of them holds a numeric slot.
-            if joined == Fact::Numeric {
+            // Containers sharing a layout must agree once any of them holds a lossless 64-bit slot.
+            if joined.needs_lossless_64() {
                 self.reconcile_owner(slot);
             }
         }
@@ -502,8 +516,14 @@ impl Solver {
         }
         let mut ancestors = BTreeSet::new();
         let mut worklist = Vec::new();
-        if let Some(owner) = self.analysis.heap.cells[cell].owner {
-            ancestors.insert(owner);
+        for &obj in &objects {
+            if ancestors.insert(obj) {
+                worklist.push(obj);
+            }
+        }
+        if let Some(owner) = self.analysis.heap.cells[cell].owner
+            && ancestors.insert(owner)
+        {
             worklist.push(owner);
         }
         while let Some(anc) = worklist.pop() {
@@ -571,7 +591,7 @@ impl Solver {
         let mut has_summarized = false;
         let mut child_objects = BTreeSet::new();
         for &slot in slots {
-            if self.analysis.heap.cells[slot].domain == Fact::Numeric {
+            if self.analysis.heap.cells[slot].domain.needs_lossless_64() {
                 has_numeric = true;
             }
             if self.analysis.heap.cells[slot].summarized {
@@ -586,7 +606,7 @@ impl Solver {
         }
         if has_numeric {
             for &slot in slots {
-                if self.analysis.heap.cells[slot].domain != Fact::Numeric {
+                if !self.analysis.heap.cells[slot].domain.needs_lossless_64() {
                     self.slot_domain(slot, Fact::Numeric);
                     self.slot_range(ctx, slot, Range::Unknown);
                 }

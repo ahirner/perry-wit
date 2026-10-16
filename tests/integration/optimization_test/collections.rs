@@ -87,10 +87,10 @@ export function run(n: number): number {
         for (const _e of m) {
             break;
         }
-        s.delete(0);
-        s.add(0);
-        m.delete(0);
-        m.set(0, 0);
+        s.add(i + 1);
+        s.delete(i + 1);
+        m.set(i + 1, i);
+        m.delete(i + 1);
     }
     return s.size + m.size;
 }
@@ -103,9 +103,17 @@ export function run(n: number): number {
     let mem_128 = churn.memory_bytes();
     let (res_512, fuel_512) = churn.call("run", &[Val::I32(512)]);
     let mem_512 = churn.memory_bytes();
+    let (res_64k, _) = churn.call("run", &[Val::I32(65536)]);
+    let mem_64k = churn.memory_bytes();
     assert_eq!(res_128[0].unwrap_i32(), 2);
     assert_eq!(res_512[0].unwrap_i32(), 2);
+    assert_eq!(res_64k[0].unwrap_i32(), 2);
     assert_eq!(mem_128, mem_512);
+    assert_eq!(mem_512, mem_64k);
+    assert!(
+        mem_64k <= 65536,
+        "expected bounded 64 KiB guest memory after 65,536 churn iterations, got {mem_64k}"
+    );
     assert!(
         fuel_512 < 6 * fuel_128,
         "expected linear churn scaling, got fuel(128)={fuel_128}, fuel(512)={fuel_512}"

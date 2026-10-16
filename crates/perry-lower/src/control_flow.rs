@@ -278,13 +278,13 @@ impl<'s> FunctionBuilder<'s> {
         }) = collection_loop
         {
             let idx_val = self.load(ctx, index)?;
+            let entries = self.collection_entries_array(ctx, collection)?;
+            let entry = self.element_at(ctx, entries, idx_val)?;
             if let Some(cursor) = cursor {
                 let one = self.number(ctx, 1.0);
                 let next_idx = self.binary(ctx, BinaryKind::Add, idx_val, one);
-                cursor.advance(self, ctx, next_idx);
+                cursor.advance(self, ctx, next_idx, entry)?;
             }
-            let entries = self.collection_entries_array(ctx, collection)?;
-            let entry = self.element_at(ctx, entries, idx_val)?;
             if let Some(live) = self.collection_entry_live(ctx, entry)? {
                 let live_body = self.new_block(ctx, "loop_live_body");
                 self.branch(ctx, live, live_body, latch);

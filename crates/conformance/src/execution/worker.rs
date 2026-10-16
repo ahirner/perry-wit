@@ -401,10 +401,10 @@ async fn observations(
             http: wasmtime_wasi_http::WasiHttpCtx::new(),
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
-                .memory_size(if matches!(case, Case::Stream(_)) {
-                    limits.memory_bytes.min(65536)
-                } else {
-                    limits.memory_bytes
+                .memory_size(match case {
+                    Case::Stream(_) => limits.memory_bytes.min(65536),
+                    Case::Collection(_) => limits.memory_bytes.min(256 * 1024),
+                    _ => limits.memory_bytes,
                 })
                 .build(),
         },

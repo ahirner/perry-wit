@@ -2,13 +2,21 @@
 
 use super::*;
 
-/// A cursor tracking `(index, clear_epoch, compaction_ver)` against a collection box.
+/// A cursor tracking `(index, min_seq, epoch)` against a collection box.
 #[derive(Clone, Copy)]
 pub(crate) enum LiveCursor {
     /// A view's own cursor: it survives `break`, and exhaustion parks it at infinity.
-    View { box_val: Value, cursor: Value },
+    View {
+        box_val: Value,
+        cursor: Value,
+        kind: EntryKind,
+    },
     /// A cursor created for one direct collection loop.
-    Loop { box_val: Value, cursor: Value },
+    Loop {
+        box_val: Value,
+        cursor: Value,
+        kind: EntryKind,
+    },
 }
 
 impl LiveCursor {
@@ -23,34 +31,85 @@ impl LiveCursor {
         let Some(box_val) = b.collection_underlying_box(ctx, coll)? else {
             return Ok(None);
         };
+        let kind = if map_box_record(ctx, box_val.get_type(ctx)).is_some() {
+            EntryKind::Map
+        } else {
+            EntryKind::Set
+        };
         Ok(Some(
             if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
                 let op = FieldGetOp::new(ctx, coll, "_1".to_string())?;
                 let cursor = b.append_value(ctx, &op);
-                let live = Self::View { box_val, cursor };
+                let live = Self::View {
+                    box_val,
+                    cursor,
+                    kind,
+                };
                 let start = live.position(b, ctx)?;
                 b.store(ctx, index, start);
                 live
             } else {
                 let start = b.load(ctx, index)?;
                 let cursor = b.new_collection_cursor(ctx, box_val, start)?;
-                Self::Loop { box_val, cursor }
+                Self::Loop {
+                    box_val,
+                    cursor,
+                    kind,
+                }
             },
         ))
     }
 
-    /// Record that the next visit starts at `next`, before the body can delete entries.
-    pub(crate) fn advance(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context, next: Value) {
-        let (Self::View { cursor, .. } | Self::Loop { cursor, .. }) = self;
+    /// Record that the next visit starts at `next` (after `entry`'s sequence number), before the
+    /// body can delete entries.
+    pub(crate) fn advance(
+        self,
+        b: &mut FunctionBuilder<'_>,
+        ctx: &mut Context,
+        next: Value,
+        entry: Value,
+    ) -> Result<()> {
+        let (Self::View {
+            box_val,
+            cursor,
+            kind,
+        }
+        | Self::Loop {
+            box_val,
+            cursor,
+            kind,
+        }) = self;
+        let seq_op = FieldGetOp::new(ctx, entry, kind.seq_field().to_string())?;
+        let seq = b.append_value(ctx, &seq_op);
+        let one = b.number(ctx, 1.0);
+        let next_seq = b.binary(ctx, BinaryKind::Add, seq, one);
+        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
+        let epoch = b.append_value(ctx, &epoch_op);
         b.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, cursor, "_0".to_string(), next)
         });
+        b.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_1".to_string(), next_seq)
+        });
+        b.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_2".to_string(), epoch)
+        });
+        Ok(())
     }
 
     /// The index the next visit starts at, synchronized with clears and compactions.
     pub(crate) fn position(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<Value> {
-        let (Self::View { box_val, cursor } | Self::Loop { box_val, cursor }) = self;
-        b.sync_collection_cursor(ctx, box_val, cursor)
+        let (Self::View {
+            box_val,
+            cursor,
+            kind,
+        }
+        | Self::Loop {
+            box_val,
+            cursor,
+            kind,
+        }) = self;
+        b.sync_collection_cursor(ctx, box_val, cursor, kind)
     }
 
     /// The loop ran out of entries: a view stays exhausted at infinity.
@@ -60,6 +119,9 @@ impl LiveCursor {
                 let inf = b.number(ctx, f64::INFINITY);
                 b.emit(ctx, |ctx| {
                     FieldSetOp::new(ctx, cursor, "_0".to_string(), inf)
+                });
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, cursor, "_1".to_string(), inf)
                 });
                 Ok(())
             }
@@ -79,11 +141,8 @@ impl<'s> FunctionBuilder<'s> {
         let box_rec = self.shapes.collection_box_type(ctx, entry, kind)?;
         let entries = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, entry.into(), vec![]));
         let zero = self.number(ctx, 0.0);
-        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        let remap_ty: TypeHandle = ArrayType::get(ctx, f64_ty).into();
-        let compactions = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, remap_ty, vec![]));
         Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, box_rec, vec![entries, zero, zero, compactions])
+            AllocOp::new(ctx, box_rec, vec![entries, zero, zero, zero])
         }))
     }
 
@@ -265,20 +324,36 @@ impl<'s> FunctionBuilder<'s> {
         Ok(out)
     }
 
+    pub(super) fn next_collection_seq(
+        &mut self,
+        ctx: &mut Context,
+        owner: Option<Value>,
+    ) -> Result<Value> {
+        let Some(box_val) = owner else {
+            return Ok(self.number(ctx, 0.0));
+        };
+        let seq_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let seq = self.append_value(ctx, &seq_op);
+        let one = self.number(ctx, 1.0);
+        let next_seq = self.binary(ctx, BinaryKind::Add, seq, one);
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, box_val, "_2".to_string(), next_seq)
+        });
+        Ok(seq)
+    }
+
     fn new_collection_cursor(
         &mut self,
         ctx: &mut Context,
         box_val: Value,
         idx: Value,
     ) -> Result<Value> {
-        let epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let zero = self.number(ctx, 0.0);
+        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
         let epoch = self.append_value(ctx, &epoch_op);
-        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let compactions = self.append_value(ctx, &comp_op);
-        let ver = self.array_length(ctx, compactions);
         let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
         Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, cursor_rec, vec![idx, epoch, ver])
+            AllocOp::new(ctx, cursor_rec, vec![idx, zero, epoch])
         }))
     }
 
@@ -287,62 +362,61 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         box_val: Value,
         cursor: Value,
+        kind: EntryKind,
     ) -> Result<Value> {
         let idx_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
         let idx = self.append_value(ctx, &idx_op);
         let inf = self.number(ctx, f64::INFINITY);
         let active = self.compare(ctx, CompareKind::Lt, idx, inf);
         let active_bb = self.new_block(ctx, "sync_cursor_active");
+        let resync_bb = self.new_block(ctx, "sync_cursor_resync");
         let done_bb = self.new_block(ctx, "sync_cursor_done");
         self.branch(ctx, active, active_bb, done_bb);
 
         self.switch_to(active_bb);
-        let cur_epoch_op = FieldGetOp::new(ctx, cursor, "_1".to_string())?;
+        let cur_epoch_op = FieldGetOp::new(ctx, cursor, "_2".to_string())?;
         let cur_epoch = self.append_value(ctx, &cur_epoch_op);
-        let box_epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let box_epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
         let box_epoch = self.append_value(ctx, &box_epoch_op);
-        let cleared = self.compare(ctx, CompareKind::Lt, cur_epoch, box_epoch);
-        let clear_bb = self.new_block(ctx, "sync_cursor_clear");
-        let check_compact_bb = self.new_block(ctx, "sync_cursor_compact_check");
-        self.branch(ctx, cleared, clear_bb, check_compact_bb);
+        let same_epoch = self.compare(ctx, CompareKind::Eq, cur_epoch, box_epoch);
+        self.branch(ctx, same_epoch, done_bb, resync_bb);
 
-        self.switch_to(clear_bb);
+        self.switch_to(resync_bb);
+        let min_seq_op = FieldGetOp::new(ctx, cursor, "_1".to_string())?;
+        let min_seq = self.append_value(ctx, &min_seq_op);
+        let entries_op = FieldGetOp::new(ctx, box_val, "_0".to_string())?;
+        let entries = self.append_value(ctx, &entries_op);
+        let len = self.array_length(ctx, entries);
         let zero = self.number(ctx, 0.0);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_0".to_string(), zero)
-        });
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_1".to_string(), box_epoch)
-        });
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_2".to_string(), zero)
-        });
-        self.jump(ctx, check_compact_bb);
-
-        self.switch_to(check_compact_bb);
-        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let compactions = self.append_value(ctx, &comp_op);
-        let comp_len = self.array_length(ctx, compactions);
-        let cur_ver_op = FieldGetOp::new(ctx, cursor, "_2".to_string())?;
-        let cur_ver = self.append_value(ctx, &cur_ver_op);
+        let one = self.number(ctx, 1.0);
+        let new_idx_slot = self.entry_slot(ctx, zero.get_type(ctx));
+        self.store(ctx, new_idx_slot, zero);
         self.index_loop(
             ctx,
-            "sync_cursor_compact",
-            cur_ver,
-            comp_len,
-            |b, ctx, v, _, _| {
-                let remap = b.element_at(ctx, compactions, v)?;
-                let cur_idx_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
-                let cur_idx = b.append_value(ctx, &cur_idx_op);
-                let new_idx = b.element_at(ctx, remap, cur_idx)?;
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, cursor, "_0".to_string(), new_idx)
-                });
+            "sync_cursor_scan",
+            zero,
+            len,
+            |b, ctx, i, next, scan_done| {
+                let e = b.element_at(ctx, entries, i)?;
+                let seq_op = FieldGetOp::new(ctx, e, kind.seq_field().to_string())?;
+                let e_seq = b.append_value(ctx, &seq_op);
+                let reached = b.compare(ctx, CompareKind::Ge, e_seq, min_seq);
+                let step_bb = b.new_block(ctx, "sync_cursor_step");
+                b.branch(ctx, reached, scan_done, step_bb);
+
+                b.switch_to(step_bb);
+                let next_i = b.binary(ctx, BinaryKind::Add, i, one);
+                b.store(ctx, new_idx_slot, next_i);
+                b.jump(ctx, next);
                 Ok(())
             },
         )?;
+        let new_idx = self.load(ctx, new_idx_slot)?;
         self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_2".to_string(), comp_len)
+            FieldSetOp::new(ctx, cursor, "_0".to_string(), new_idx)
+        });
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_2".to_string(), box_epoch)
         });
         self.jump(ctx, done_bb);
 
@@ -351,22 +425,14 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.append_value(ctx, &final_op))
     }
 
-    fn bump_clear_epoch(
-        &mut self,
-        ctx: &mut Context,
-        box_val: Value,
-        zero_u32: Value,
-    ) -> Result<()> {
-        let epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+    fn bump_box_epoch(&mut self, ctx: &mut Context, box_val: Value) -> Result<()> {
+        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
         let epoch = self.append_value(ctx, &epoch_op);
         let one = self.number(ctx, 1.0);
         let next_epoch = self.binary(ctx, BinaryKind::Add, epoch, one);
         self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, box_val, "_2".to_string(), next_epoch)
+            FieldSetOp::new(ctx, box_val, "_3".to_string(), next_epoch)
         });
-        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let compactions = self.append_value(ctx, &comp_op);
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, compactions, zero_u32));
         Ok(())
     }
 
@@ -444,7 +510,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// After a delete: empty the entries when nothing is live, else compact once at least 32
-    /// and at least half of the slots are tombstones, recording a remap table for cursors.
+    /// and at least half of the slots are tombstones, bumping the box epoch.
     fn reclaim_after_delete(
         &mut self,
         ctx: &mut Context,
@@ -471,7 +537,7 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(empty_bb);
         let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
-        self.bump_clear_epoch(ctx, box_val, zero_u32)?;
+        self.bump_box_epoch(ctx, box_val)?;
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
@@ -491,13 +557,9 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, should_compact, compact_bb, done_bb);
 
         self.switch_to(compact_bb);
-        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
         let write_slot = self.entry_slot(ctx, zero.get_type(ctx));
         self.store(ctx, write_slot, zero);
-        let remap = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, f64_ty, vec![]));
         self.index_loop(ctx, "reclaim_scan", zero, cap, |b, ctx, r, next, _| {
-            let w = b.load(ctx, write_slot)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, remap, w));
             let e = b.element_at(ctx, entries, r)?;
             let live_op = FieldGetOp::new(ctx, e, kind.live_field().to_string())?;
             let is_live = b.append_value(ctx, &live_op);
@@ -505,6 +567,7 @@ impl<'s> FunctionBuilder<'s> {
             b.branch(ctx, is_live, live_branch, next);
 
             b.switch_to(live_branch);
+            let w = b.load(ctx, write_slot)?;
             b.emit(ctx, |ctx| ArraySetOp::new(ctx, entries, w, e));
             let next_w = b.binary(ctx, BinaryKind::Add, w, one);
             b.store(ctx, write_slot, next_w);
@@ -512,12 +575,9 @@ impl<'s> FunctionBuilder<'s> {
             Ok(())
         })?;
         let final_w = self.load(ctx, write_slot)?;
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, remap, final_w));
         let new_len = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, final_w, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, new_len));
-        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let compactions = self.append_value(ctx, &comp_op);
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, compactions, remap));
+        self.bump_box_epoch(ctx, box_val)?;
         self.jump(ctx, done_bb);
 
         self.switch_to(done_bb);
@@ -560,7 +620,7 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, count_slot)
     }
 
-    /// `clear()`: empty a box and bump its clear epoch, or tombstone every entry of a bare array.
+    /// `clear()`: empty a box and bump its epoch, or tombstone every entry of a bare array.
     pub(super) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
         if let Some(box_val) = self.collection_underlying_box(ctx, coll)? {
             let entries = self.collection_entries_array(ctx, box_val)?;
@@ -571,7 +631,7 @@ impl<'s> FunctionBuilder<'s> {
             self.emit(ctx, |ctx| {
                 FieldSetOp::new(ctx, box_val, "_1".to_string(), zero)
             });
-            self.bump_clear_epoch(ctx, box_val, zero_u32)?;
+            self.bump_box_epoch(ctx, box_val)?;
         } else {
             let kind = TypedHandle::<ArrayType>::from_handle(coll.get_type(ctx), ctx)
                 .ok()
@@ -623,10 +683,10 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, more, check, done);
         self.switch_to(check);
         let next_idx = self.binary(ctx, BinaryKind::Add, current, one);
-        if let Some(cursor) = cursor {
-            cursor.advance(self, ctx, next_idx);
-        }
         let raw_entry = self.element_at(ctx, entries, current)?;
+        if let Some(cursor) = cursor {
+            cursor.advance(self, ctx, next_idx, raw_entry)?;
+        }
         match self.collection_entry_live(ctx, raw_entry)? {
             Some(live) => self.branch(ctx, live, entered, next),
             None => self.jump(ctx, entered),

@@ -440,8 +440,13 @@ impl CollectionCase {
                     CollectionKind::MapEntries => "for (const [_k, _v] of tmpIt)",
                     _ => "for (const _v of tmpIt)",
                 };
+                let temp_churn = if is_set {
+                    "for (let d = 0; d < 64; d += 1) { coll.add(10000 + d); coll.delete(10000 + d); }"
+                } else {
+                    "for (let d = 0; d < 64; d += 1) { coll.set(10000 + d, d); coll.delete(10000 + d); }"
+                };
                 out.push_str(&format!(
-                    "{indent}for (let c = 0; c < {count}; c += 1) {{\n{indent}  const tmpIt = {view_call};\n{indent}  {loop_head} {{\n{indent}    break;\n{indent}  }}\n{indent}}}\n"
+                    "{indent}for (let c = 0; c < {count}; c += 1) {{\n{indent}  {temp_churn}\n{indent}  const tmpIt = {view_call};\n{indent}  {loop_head} {{\n{indent}    break;\n{indent}  }}\n{indent}}}\n"
                 ));
             }
         }

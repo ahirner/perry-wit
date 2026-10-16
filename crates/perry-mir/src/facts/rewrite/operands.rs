@@ -530,6 +530,11 @@ fn coerce_operands(
                 value = mid_cast.get_result(ctx);
             }
         }
+        if super::super::heap::aggregate(ctx, value.get_type(ctx))
+            || super::super::heap::aggregate(ctx, ty)
+        {
+            continue;
+        }
         let cast = NumericCastOp::new(ctx, value, ty);
         rewriter.insert_operation(ctx, cast.get_operation());
         Operation::replace_operand(op, ctx, index, cast.get_result(ctx));

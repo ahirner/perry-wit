@@ -204,13 +204,17 @@ fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Re
 #[test]
 fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -> Result<()> {
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
-    for select in ["ecma.aggregate.specialization", "ecma.collection.iterators"] {
+    for (select, seed) in [
+        ("ecma.aggregate.specialization", 42),
+        ("ecma.aggregate.specialization", 43),
+        ("ecma.collection.iterators", 42),
+    ] {
         runner::campaign(
             Settings {
                 select: select.into(),
                 cases: 6,
                 depth: 3,
-                seed: 42,
+                seed,
                 shrink_limit: 32,
                 limits: Limits::default(),
             },
@@ -221,8 +225,9 @@ fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -
     // Forced precision-degradation check: Perry preserves exact 64-bit integer precision
     // for runtime `parseInt("9007199254740993", 10)` across recursive records and remainder,
     // whereas Node's IEEE-754 f64 degrades `9007199254740993` to `9007199254740992`.
-    // Executing this program through the equivalence adapter must therefore detect the
-    // f64 precision degradation between an f64-rounded evaluation and exact 64-bit specialization.
+    // Executing this program through the equivalence adapter must therefore succeed on both
+    // engines with Node producing `0` and Perry producing `2`, and `check_equivalence`
+    // rejecting the mismatch.
     let directory = tempfile::tempdir()?;
     let executor = Executor::new(executable, Limits::default());
     let precision_case = Case::Function {
@@ -240,6 +245,9 @@ export function run(x: number): { value: number; trace: number[] } {
     };
     let artifacts = tempfile::tempdir_in(directory.path())?;
     let evidences = executor.check(&precision_case, artifacts.path())?;
+    let (oracle_val, component_val) = evidences[0].first_values()?;
+    assert_eq!(oracle_val, number(0.0));
+    assert_eq!(component_val, number(2.0));
     assert!(
         perry_conformance::execution::check_equivalence(&precision_case, &evidences[0]).is_err(),
         "equivalence check must distinguish exact 64-bit specialization (2) from f64 degradation (0)"

@@ -201,8 +201,13 @@ impl Solver {
                 let mut domain = Fact::Bottom;
                 let mut range = Range::Bottom;
                 let mut outcome = Outcomes::Bottom;
+                let use_layout = self.analysis.heap.cells[base].objects.is_empty();
                 let mut previous = None;
-                while let Some(object) = self.next_object(base, previous) {
+                while let Some(object) = if use_layout {
+                    self.next_layout_object(base, previous)
+                } else {
+                    self.next_object(base, previous)
+                } {
                     previous = Some(object);
                     let slot = self.analysis.heap.objects[object].contents.slots()[position];
                     if let OperationKind::ArrayWrite { index, .. } = kind {

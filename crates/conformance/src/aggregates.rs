@@ -21,6 +21,8 @@ use crate::{
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 
+mod emit;
+
 /// Aggregate type topology generated for the test case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateShape {
@@ -104,10 +106,18 @@ pub enum ValueSource {
     NarrowInt(i8),
     /// Function boundary `f64` parameter `x`
     BoundaryInput,
+    /// Widened 64-bit `Fact::Integer` arithmetic expression `(rtStr("abc").length * k)`
+    IntArith(i8),
+    /// Widened 64-bit `Fact::Integer` arithmetic returned from a helper `helperIntArith(k)`
+    HelperIntArith(i8),
     /// Constant-foldable `parseInt("...", radix)`
     ConstParseInt(ExactIntSeed),
     /// Non-constant-foldable `parseInt(rtStr("..."), rtRadix(radix))`
     RuntimeParseInt(ExactIntSeed),
+}
+
+fn int_arith_factor(raw: i8) -> i64 {
+    i64::from(raw.rem_euclid(11)) + 2
 }
 
 impl ValueSource {
@@ -122,28 +132,8 @@ impl ValueSource {
             Self::NanValue => RefVal::Float(f64::NAN),
             Self::NarrowInt(n) => RefVal::Float(f64::from(n)),
             Self::BoundaryInput => RefVal::Float(x),
+            Self::IntArith(k) | Self::HelperIntArith(k) => RefVal::Int64(3 * int_arith_factor(k)),
             Self::ConstParseInt(seed) | Self::RuntimeParseInt(seed) => RefVal::Int64(seed.as_i64()),
-        }
-    }
-
-    fn to_ts_expr(self) -> String {
-        match self {
-            Self::FloatFraction(k) => {
-                let v = f64::from(k) * 2.0 + 0.5;
-                format!("({v:?})")
-            }
-            Self::NegativeZero => "(-0.0)".to_string(),
-            Self::NanValue => "parseInt(rtStr(\"invalid\"), 10)".to_string(),
-            Self::NarrowInt(n) => format!("({n})"),
-            Self::BoundaryInput => "x".to_string(),
-            Self::ConstParseInt(seed) => {
-                let (s, radix) = seed.text_and_radix();
-                format!("parseInt(\"{s}\", {radix})")
-            }
-            Self::RuntimeParseInt(seed) => {
-                let (s, radix) = seed.text_and_radix();
-                format!("parseInt(rtStr(\"{s}\"), rtRadix({radix}))")
-            }
         }
     }
 }
@@ -169,11 +159,19 @@ pub struct InstanceSpec {
 /// An operation applied to the generated instances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateOp {
-    /// Read a slot and record `((val % divisor) + 0)`.
+    /// Read a slot and record `((val % divisor) + 0)` and a `JSON.stringify` probe.
     ReadMod {
         inst: usize,
         slot: SlotSelector,
         divisor: i8,
+    },
+    /// Select between two instances across a control-flow branch (`x >= 0 ? inst_a : inst_b`),
+    /// read `slot` through the shared getter, and record `% 2`, `JSON.stringify`, and a
+    /// helper-returned arithmetic aggregate probe.
+    BranchRead {
+        inst_a: usize,
+        inst_b: usize,
+        slot: SlotSelector,
     },
     /// Overwrite a primary slot (`PrimaryA` or `PrimaryB`) on `inst` with `new_source`.
     MutateSlot {
@@ -307,6 +305,16 @@ impl RefVal {
             }
         }
     }
+
+    fn json_probe_code(self) -> f64 {
+        if self.eq_val(Self::Int64(9_007_199_254_740_993)) {
+            1.0
+        } else if self.eq_val(Self::Int64(6)) {
+            2.0
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -414,6 +422,23 @@ impl AggregateCase {
                     let v = insts[inst % n].get_slot(slot);
                     let d = non_zero_divisor(divisor);
                     trace.push(v.rem_plus_zero(d));
+                    trace.push(v.json_probe_code());
+                }
+                AggregateOp::BranchRead {
+                    inst_a,
+                    inst_b,
+                    slot,
+                } => {
+                    let chosen = if x >= 0.0 {
+                        insts[inst_a % n]
+                    } else {
+                        insts[inst_b % n]
+                    };
+                    let v = chosen.get_slot(slot);
+                    trace.push(v.rem_plus_zero(2));
+                    trace.push(v.json_probe_code());
+                    // `makeArithShape(2)` produces a `Shape` whose slots hold `3 * 2 = 6`.
+                    trace.push(2.0);
                 }
                 AggregateOp::MutateSlot {
                     inst,
@@ -522,341 +547,6 @@ impl AggregateCase {
             fuel_used: Vec::new(),
         }
     }
-
-    /// Emit the standalone TypeScript source for this case.
-    pub fn source(&self) -> String {
-        let mut out = String::new();
-        self.emit_type_defs(&mut out);
-        self.emit_helpers(&mut out);
-        self.emit_run_function(&mut out);
-        out
-    }
-
-    fn emit_type_defs(&self, out: &mut String) {
-        let mut defs = Vec::new();
-        match self.shape {
-            AggregateShape::FlatRecord => {
-                defs.push(
-                    "interface Shape {\n  a: number;\n  b: number;\n  opt?: number;\n}\n"
-                        .to_string(),
-                );
-            }
-            AggregateShape::NestedRecord => {
-                defs.push("interface Inner {\n  a: number;\n  b: number;\n}\n".to_string());
-                defs.push("interface Shape {\n  inner: Inner;\n  opt?: number;\n}\n".to_string());
-            }
-            AggregateShape::SelfRecursive => {
-                defs.push(
-                    "interface Shape {\n  a: number;\n  b: number;\n  next?: Shape;\n}\n"
-                        .to_string(),
-                );
-            }
-            AggregateShape::MutuallyRecursive => {
-                defs.push(
-                    "interface PeerShape {\n  ca: number;\n  cb: number;\n  back?: Shape;\n}\n"
-                        .to_string(),
-                );
-                defs.push(
-                    "interface Shape {\n  a: number;\n  b: number;\n  peer?: PeerShape;\n}\n"
-                        .to_string(),
-                );
-            }
-            AggregateShape::RecordWithArrays => {
-                defs.push(
-                    "interface Shape {\n  items: number[];\n  extra?: number[];\n}\n".to_string(),
-                );
-            }
-        }
-        if self.permuted {
-            for d in defs.iter().rev() {
-                out.push_str(d);
-                out.push('\n');
-            }
-        } else {
-            for d in &defs {
-                out.push_str(d);
-                out.push('\n');
-            }
-        }
-    }
-
-    fn emit_helpers(&self, out: &mut String) {
-        let get_a = match self.shape {
-            AggregateShape::NestedRecord => "s.inner.a",
-            AggregateShape::RecordWithArrays => "s.items[0]",
-            _ => "s.a",
-        };
-        let get_b = match self.shape {
-            AggregateShape::NestedRecord => "s.inner.b",
-            AggregateShape::RecordWithArrays => "s.items[1]",
-            _ => "s.b",
-        };
-        let get_c = match self.shape {
-            AggregateShape::FlatRecord | AggregateShape::NestedRecord => {
-                format!("(s.opt !== undefined ? s.opt : {get_a})")
-            }
-            AggregateShape::SelfRecursive => {
-                format!("(s.next !== undefined ? s.next.a : {get_a})")
-            }
-            AggregateShape::MutuallyRecursive => {
-                format!("(s.peer !== undefined ? s.peer.ca : {get_a})")
-            }
-            AggregateShape::RecordWithArrays => {
-                format!("(s.extra !== undefined ? s.extra[0] : {get_a})")
-            }
-        };
-        let set_a = match self.shape {
-            AggregateShape::NestedRecord => "s.inner.a = v;",
-            AggregateShape::RecordWithArrays => "s.items[0] = v;",
-            _ => "s.a = v;",
-        };
-        let set_b = match self.shape {
-            AggregateShape::NestedRecord => "s.inner.b = v;",
-            AggregateShape::RecordWithArrays => "s.items[1] = v;",
-            _ => "s.b = v;",
-        };
-
-        let helpers = [
-            "function rtStr(s: string): string {\n  return s.slice(0);\n}\n".to_string(),
-            "function rtRadix(r: number): number {\n  return r;\n}\n".to_string(),
-            format!("function readSlotA(s: Shape): number {{\n  return {get_a};\n}}\n"),
-            format!("function readSlotB(s: Shape): number {{\n  return {get_b};\n}}\n"),
-            format!("function readSlotC(s: Shape): number {{\n  return {get_c};\n}}\n"),
-            format!(
-                "function writeSlot(s: Shape, slotB: boolean, v: number): void {{\n  if (slotB) {{\n    {set_b}\n  }} else {{\n    {set_a}\n  }}\n}}\n"
-            ),
-            "function sharedHelper(s: Shape, slotB: boolean): number {\n  return slotB ? readSlotB(s) : readSlotA(s);\n}\n".to_string(),
-            "function inspectSpecial(v: number): number {\n  if (Number.isNaN(v)) return -99;\n  if (v === 0 && (1 / v) === -Infinity) return -88;\n  return (v % 2) + 0;\n}\n".to_string(),
-            "function finalizeAgg(trace: number[]): number {\n  let sum = 0;\n  for (let i = 0; i < trace.length; i += 1) {\n    const item = trace[i];\n    const term = Number.isNaN(item) ? -55 : (item + 0);\n    sum += term * ((i % 5) + 1);\n  }\n  return sum;\n}\n".to_string(),
-        ];
-
-        if self.permuted {
-            for h in helpers.iter().rev() {
-                out.push_str(h);
-                out.push('\n');
-            }
-        } else {
-            for h in &helpers {
-                out.push_str(h);
-                out.push('\n');
-            }
-        }
-    }
-
-    fn emit_instance_expr(&self, spec: &InstanceSpec) -> String {
-        let a = spec.a.to_ts_expr();
-        let b = spec.b.to_ts_expr();
-        let ca = spec.child_a.to_ts_expr();
-        let cb = spec.child_b.to_ts_expr();
-        match self.shape {
-            AggregateShape::FlatRecord => {
-                if spec.has_child {
-                    format!("{{ a: {a}, b: {b}, opt: {ca} }}")
-                } else {
-                    format!("{{ a: {a}, b: {b} }}")
-                }
-            }
-            AggregateShape::NestedRecord => {
-                if spec.has_child {
-                    format!("{{ inner: {{ a: {a}, b: {b} }}, opt: {ca} }}")
-                } else {
-                    format!("{{ inner: {{ a: {a}, b: {b} }} }}")
-                }
-            }
-            AggregateShape::SelfRecursive => {
-                if spec.has_child {
-                    format!("{{ a: {a}, b: {b}, next: {{ a: {ca}, b: {cb} }} }}")
-                } else {
-                    format!("{{ a: {a}, b: {b} }}")
-                }
-            }
-            AggregateShape::MutuallyRecursive => {
-                if spec.has_child {
-                    format!("{{ a: {a}, b: {b}, peer: {{ ca: {ca}, cb: {cb} }} }}")
-                } else {
-                    format!("{{ a: {a}, b: {b} }}")
-                }
-            }
-            AggregateShape::RecordWithArrays => {
-                if spec.has_child {
-                    format!("{{ items: [{a}, {b}], extra: [{ca}, {cb}] }}")
-                } else {
-                    format!("{{ items: [{a}, {b}] }}")
-                }
-            }
-        }
-    }
-
-    fn emit_core_statements(&self, out: &mut String, indent: &str) {
-        out.push_str(&format!("{indent}const trace: number[] = [];\n"));
-
-        let decls: Vec<String> = self
-            .instances
-            .iter()
-            .enumerate()
-            .map(|(idx, spec)| {
-                let expr = self.emit_instance_expr(spec);
-                format!("{indent}const inst{idx}: Shape = {expr};\n")
-            })
-            .collect();
-
-        if self.permuted {
-            for d in decls.iter().rev() {
-                out.push_str(d);
-            }
-        } else {
-            for d in &decls {
-                out.push_str(d);
-            }
-        }
-
-        let n = self.instances.len();
-        for (op_idx, &op) in self.ops.iter().enumerate() {
-            match op {
-                AggregateOp::ReadMod {
-                    inst,
-                    slot,
-                    divisor,
-                } => {
-                    let i = inst % n;
-                    let d = non_zero_divisor(divisor);
-                    let read = match slot {
-                        SlotSelector::PrimaryA => format!("readSlotA(inst{i})"),
-                        SlotSelector::PrimaryB => format!("readSlotB(inst{i})"),
-                        SlotSelector::ChildOrOpt => format!("readSlotC(inst{i})"),
-                    };
-                    out.push_str(&format!("{indent}trace.push((({read} % ({d})) + 0));\n"));
-                }
-                AggregateOp::MutateSlot {
-                    inst,
-                    slot_b,
-                    new_source,
-                } => {
-                    let i = inst % n;
-                    let expr = new_source.to_ts_expr();
-                    out.push_str(&format!("{indent}writeSlot(inst{i}, {slot_b}, {expr});\n"));
-                    let read = if slot_b {
-                        format!("readSlotB(inst{i})")
-                    } else {
-                        format!("readSlotA(inst{i})")
-                    };
-                    out.push_str(&format!("{indent}trace.push((({read} % 2) + 0));\n"));
-                }
-                AggregateOp::ArrayConcatSpread { inst_a, inst_b } => {
-                    let ia = inst_a % n;
-                    let ib = inst_b % n;
-                    let arr_var = format!("comb_{op_idx}");
-                    out.push_str(&format!(
-                        "{indent}const {arr_var}: number[] = [readSlotA(inst{ia}), readSlotB(inst{ia})].concat([readSlotA(inst{ib})], [...[readSlotB(inst{ib})]]);\n"
-                    ));
-                    out.push_str(&format!(
-                        "{indent}for (let k = 0; k < {arr_var}.length; k += 1) {{\n{indent}  trace.push((({arr_var}[k] % 2) + 0));\n{indent}}}\n"
-                    ));
-                }
-                AggregateOp::SharedHelperCall { inst, slot_b } => {
-                    let i = inst % n;
-                    out.push_str(&format!(
-                        "{indent}trace.push(((sharedHelper(inst{i}, {slot_b}) % 2) + 0));\n"
-                    ));
-                }
-                AggregateOp::CompareSlots {
-                    inst_a,
-                    slot_a_b,
-                    inst_b,
-                    slot_b_b,
-                } => {
-                    let ia = inst_a % n;
-                    let ib = inst_b % n;
-                    let ra = if slot_a_b {
-                        format!("readSlotB(inst{ia})")
-                    } else {
-                        format!("readSlotA(inst{ia})")
-                    };
-                    let rb = if slot_b_b {
-                        format!("readSlotB(inst{ib})")
-                    } else {
-                        format!("readSlotA(inst{ib})")
-                    };
-                    out.push_str(&format!("{indent}trace.push({ra} < {rb} ? 1 : 0);\n"));
-                    out.push_str(&format!("{indent}trace.push({ra} === {rb} ? 1 : 0);\n"));
-                }
-                AggregateOp::InspectSpecial { inst, slot_b } => {
-                    let i = inst % n;
-                    let r = if slot_b {
-                        format!("readSlotB(inst{i})")
-                    } else {
-                        format!("readSlotA(inst{i})")
-                    };
-                    out.push_str(&format!("{indent}trace.push(inspectSpecial({r}));\n"));
-                }
-            }
-        }
-
-        if self.overflow_origins {
-            let spec = InstanceSpec {
-                a: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow53Plus1),
-                b: ValueSource::FloatFraction(0),
-                child_a: ValueSource::NarrowInt(1),
-                child_b: ValueSource::NarrowInt(2),
-                has_child: false,
-            };
-            let overflow_expr = self.emit_instance_expr(&spec);
-            out.push_str(&format!("{indent}const many: Shape[] = [\n"));
-            for _ in 0..36 {
-                out.push_str(&format!("{indent}  {overflow_expr},\n"));
-            }
-            out.push_str(&format!("{indent}];\n"));
-            out.push_str(&format!(
-                "{indent}trace.push(((readSlotA(many[35]) % 2) + 0));\n"
-            ));
-        }
-    }
-
-    fn emit_run_function(&self, out: &mut String) {
-        let n = self.instances.len();
-        let last = n - 1;
-        match self.wit_signature {
-            WitSignature::ObservationRecord => {
-                out.push_str(
-                    "export interface Observation {\n  value: number;\n  trace: number[];\n}\n\n",
-                );
-                out.push_str("export function run(x: number): Observation {\n");
-                self.emit_core_statements(out, "  ");
-                out.push_str("  return { value: finalizeAgg(trace), trace };\n}\n");
-            }
-            WitSignature::MultiFieldRecord => {
-                out.push_str(
-                    "export interface Observation {\n  value: number;\n  head: number;\n  tail: number;\n  trace: number[];\n}\n\n",
-                );
-                out.push_str("export function run(x: number): Observation {\n");
-                self.emit_core_statements(out, "  ");
-                out.push_str(&format!(
-                    "  const head = readSlotA(inst0) + 0;\n  const tail = readSlotB(inst{last}) + 0;\n  return {{ value: finalizeAgg(trace), head, tail, trace }};\n}}\n"
-                ));
-            }
-            WitSignature::DirectList => {
-                out.push_str("export function run(x: number): number[] {\n");
-                self.emit_core_statements(out, "  ");
-                out.push_str(
-                    "  const value = finalizeAgg(trace);\n  return [value].concat(trace);\n}\n",
-                );
-            }
-            WitSignature::OptionRecord => {
-                out.push_str(
-                    "export interface Observation {\n  value: number;\n  maybe?: number;\n  trace: number[];\n}\n\n",
-                );
-                out.push_str("export function run(x: number): Observation {\n");
-                self.emit_core_statements(out, "  ");
-                if self.instances[0].has_child {
-                    out.push_str(
-                        "  const maybe = readSlotC(inst0) + 0;\n  return { value: finalizeAgg(trace), maybe, trace };\n}\n",
-                    );
-                } else {
-                    out.push_str("  return { value: finalizeAgg(trace), trace };\n}\n");
-                }
-            }
-        }
-    }
 }
 
 pub(crate) fn exact_int_seed_strategy() -> impl Strategy<Value = ExactIntSeed> {
@@ -879,6 +569,8 @@ pub(crate) fn value_source_strategy() -> impl Strategy<Value = ValueSource> {
         1 => Just(ValueSource::NanValue),
         2 => (-30..=30i8).prop_map(ValueSource::NarrowInt),
         1 => Just(ValueSource::BoundaryInput),
+        2 => (0..11i8).prop_map(ValueSource::IntArith),
+        2 => (0..11i8).prop_map(ValueSource::HelperIntArith),
         3 => exact_int_seed_strategy().prop_map(ValueSource::ConstParseInt),
         3 => exact_int_seed_strategy().prop_map(ValueSource::RuntimeParseInt),
     ]
@@ -913,6 +605,12 @@ fn aggregate_op_strategy() -> impl Strategy<Value = AggregateOp> {
     prop_oneof![
         4 => (0..5usize, slot_selector_strategy(), 0..6i8)
             .prop_map(|(inst, slot, divisor)| AggregateOp::ReadMod { inst, slot, divisor }),
+        3 => (0..5usize, 0..5usize, slot_selector_strategy())
+            .prop_map(|(inst_a, inst_b, slot)| AggregateOp::BranchRead {
+                inst_a,
+                inst_b,
+                slot,
+            }),
         2 => (0..5usize, any::<bool>(), value_source_strategy())
             .prop_map(|(inst, slot_b, new_source)| AggregateOp::MutateSlot {
                 inst,
@@ -997,6 +695,13 @@ pub(crate) fn contract() -> Contract {
                         child_b: ValueSource::ConstParseInt(ExactIntSeed::TwoPow53Plus1),
                         has_child: true,
                     },
+                    InstanceSpec {
+                        a: ValueSource::IntArith(0),
+                        b: ValueSource::HelperIntArith(1),
+                        child_a: ValueSource::NarrowInt(3),
+                        child_b: ValueSource::NarrowInt(5),
+                        has_child: false,
+                    },
                 ],
                 ops: vec![
                     AggregateOp::ReadMod {
@@ -1008,6 +713,11 @@ pub(crate) fn contract() -> Contract {
                         inst: 0,
                         slot: SlotSelector::ChildOrOpt,
                         divisor: 1,
+                    },
+                    AggregateOp::BranchRead {
+                        inst_a: 0,
+                        inst_b: 2,
+                        slot: SlotSelector::ChildOrOpt,
                     },
                     AggregateOp::SharedHelperCall {
                         inst: 0,
@@ -1053,6 +763,11 @@ pub(crate) fn contract() -> Contract {
                     AggregateOp::ArrayConcatSpread {
                         inst_a: 0,
                         inst_b: 1,
+                    },
+                    AggregateOp::BranchRead {
+                        inst_a: 0,
+                        inst_b: 1,
+                        slot: SlotSelector::ChildOrOpt,
                     },
                     AggregateOp::MutateSlot {
                         inst: 1,
@@ -1122,12 +837,12 @@ pub(crate) fn contract() -> Contract {
                     InstanceSpec {
                         a: ValueSource::ConstParseInt(ExactIntSeed::NegTwoPow53Plus1),
                         b: ValueSource::BoundaryInput,
-                        child_a: ValueSource::NarrowInt(11),
+                        child_a: ValueSource::IntArith(0),
                         child_b: ValueSource::FloatFraction(0),
                         has_child: true,
                     },
                     InstanceSpec {
-                        a: ValueSource::NarrowInt(12),
+                        a: ValueSource::HelperIntArith(0),
                         b: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow53Plus3),
                         child_a: ValueSource::NegativeZero,
                         child_b: ValueSource::NarrowInt(1),
@@ -1138,6 +853,11 @@ pub(crate) fn contract() -> Contract {
                     AggregateOp::ArrayConcatSpread {
                         inst_a: 0,
                         inst_b: 1,
+                    },
+                    AggregateOp::BranchRead {
+                        inst_a: 0,
+                        inst_b: 1,
+                        slot: SlotSelector::ChildOrOpt,
                     },
                     AggregateOp::CompareSlots {
                         inst_a: 0,
@@ -1155,7 +875,7 @@ pub(crate) fn contract() -> Contract {
         id: "ecma.aggregate.specialization",
         description: "Orthogonal aggregate layout specialization across recursive shapes, exact 64-bit parseInt, origin scaling, and WIT boundaries",
         specification: "https://tc39.es/ecma262/",
-        domain: "Product of flat/nested/self-recursive/mutually-recursive/array-bearing records, multi-field/list/option WIT exports, float/NaN/-0.0/wide-parseInt value sources, shared helpers, array concat/spread, and >32-origin summarization",
+        domain: "Product of flat/nested/self-recursive/mutually-recursive/array-bearing records, multi-field/list/option WIT exports, float/NaN/-0.0/int-arith/wide-parseInt value sources, branch joins, shared helpers, array concat/spread, and >32-origin summarization",
         witnesses,
         strategy: aggregate_case_strategy().prop_map(Case::Aggregate).boxed(),
         check: check_equivalence,

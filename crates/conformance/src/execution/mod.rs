@@ -125,6 +125,27 @@ pub struct Evidence {
     /// The unchanged program's component outcome, for fault cases only.
     pub(crate) control: Option<Outcome>,
 }
+impl Evidence {
+    pub fn first_values(&self) -> Result<(&str, &str)> {
+        let (
+            Outcome::Values {
+                observations: oracle,
+                ..
+            },
+            Outcome::Values {
+                observations: component,
+                ..
+            },
+        ) = (&self.oracle, &self.component)
+        else {
+            bail!("expected both oracle and component to succeed with values, got {self:?}");
+        };
+        let (Some(o), Some(c)) = (oracle.first(), component.first()) else {
+            bail!("expected non-empty observations, got {self:?}");
+        };
+        Ok((&o.value, &c.value))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fault {
     Value,

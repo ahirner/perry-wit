@@ -47,14 +47,18 @@ impl ProgramFacts {
                 let opt_ty: TypeHandle = crate::types::OptionalType::get(ctx, elem_ty).into();
                 return (opt_ty != ty).then_some(opt_ty);
             }
-            if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
+            if Operation::get_op::<UnwrapOp>(op, ctx).is_some()
+                || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
+            {
                 let base = op.deref(ctx).get_operand(0);
                 if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
                     let inner_ty = crate::optional::optional_value(ctx, base_spec)?;
                     return (inner_ty != ty).then_some(inner_ty);
                 }
             }
-            if Operation::get_op::<WrapOp>(op, ctx).is_some() {
+            if Operation::get_op::<WrapOp>(op, ctx).is_some()
+                || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
+            {
                 let base = op.deref(ctx).get_operand(0);
                 if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
                     let absence = ty
@@ -105,7 +109,10 @@ impl ProgramFacts {
                 }
             }
         }
-        if state.fact(value) == Fact::Numeric {
+        if state.fact(value) == Fact::Numeric
+            || (state.fact(value).needs_lossless_64()
+                && !super::super::rewrite::can_specialize_value(ctx, state, value))
+        {
             return numeric_type_for(ctx, ty);
         }
         None
@@ -124,7 +131,9 @@ impl ProgramFacts {
             let cell = res.heap?;
             return self.specialized_cell_type(ctx, ty, cell);
         }
-        if res.domain == Fact::Numeric {
+        if res.domain == Fact::Numeric
+            || (res.domain.needs_lossless_64() && ty.deref(ctx).is::<crate::types::OptionalType>())
+        {
             return numeric_type_for(ctx, ty);
         }
         None
@@ -185,7 +194,7 @@ impl ProgramFacts {
             }
             let all_numeric = element_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && let Some(new_elem) = numeric_type_for(ctx, elem_ty) {
                 return Some((ArrayType::get(ctx, new_elem).into(), true));
             }
@@ -254,7 +263,7 @@ impl ProgramFacts {
             }
             let all_numeric = field_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
                 spec_fields.push((fname, new_fty));
                 spec_tag.push_str(&format!("_{idx}"));
@@ -342,7 +351,7 @@ impl ProgramFacts {
             }
             let all_numeric = element_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
                 visiting.remove(&ty);
                 return true;
@@ -386,7 +395,7 @@ impl ProgramFacts {
             }
             let all_numeric = field_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, fty).is_some() {
                 visiting.remove(&ty);
                 return true;
@@ -444,7 +453,7 @@ impl ProgramFacts {
             }
             let all_numeric = element_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
                 return Some(("arr_perry_numeric".to_string(), true));
             }
@@ -484,7 +493,7 @@ impl ProgramFacts {
             }
             let all_numeric = field_slots
                 .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, fty).is_some() {
                 spec_tag.push_str(&format!("_{idx}"));
                 real_change = true;

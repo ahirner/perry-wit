@@ -100,19 +100,28 @@ impl<'s> FunctionBuilder<'s> {
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
         let val = self.fit(ctx, val, v_ty)?;
-        let new_entry = if EntryKind::of_entry(ctx, tuple_rec) == Some(EntryKind::Map) {
-            let live_true = self.boolean(ctx, true);
-            self.emit_value(ctx, |ctx| {
-                AllocOp::new(ctx, tuple_rec, vec![key, val, live_true])
-            })
-        } else {
-            self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![key, val]))
-        };
-        let was_found = self.find_live_match(ctx, "kv_set", arr, key, k_ty, |b, ctx, idx, _| {
-            b.emit(ctx, |ctx| ArraySetOp::new(ctx, arr, idx, new_entry));
-            Ok(())
+        let is_map = EntryKind::of_entry(ctx, tuple_rec) == Some(EntryKind::Map);
+        let was_found =
+            self.find_live_match(ctx, "kv_set", arr, key, k_ty, |b, ctx, _, entry| {
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, entry, "_0".to_string(), key)
+                });
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, entry, "_1".to_string(), val)
+                });
+                Ok(())
+            })?;
+        self.append_unless(ctx, "kv_set", was_found, arr, box_opt, |b, ctx| {
+            if is_map {
+                let live_true = b.boolean(ctx, true);
+                let seq = b.next_collection_seq(ctx, box_opt)?;
+                Ok(b.emit_value(ctx, |ctx| {
+                    AllocOp::new(ctx, tuple_rec, vec![key, val, live_true, seq])
+                }))
+            } else {
+                Ok(b.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![key, val])))
+            }
         })?;
-        self.append_unless(ctx, "kv_set", was_found, arr, box_opt, |_, _| Ok(new_entry))?;
         Ok(coll)
     }
 
@@ -238,8 +247,9 @@ impl<'s> FunctionBuilder<'s> {
         let present = self.set_has(ctx, coll, val, elem_ty)?;
         self.append_unless(ctx, "set_add", present, arr, box_opt, |b, ctx| {
             let live_true = b.boolean(ctx, true);
+            let seq = b.next_collection_seq(ctx, box_opt)?;
             Ok(b.emit_value(ctx, |ctx| {
-                AllocOp::new(ctx, tuple_rec, vec![val, live_true])
+                AllocOp::new(ctx, tuple_rec, vec![val, live_true, seq])
             }))
         })?;
         Ok(coll)

@@ -1,8 +1,9 @@
 //! Lowering for `Map<K, V>`, `Set<T>`, `Record<K, V>`, `Object.*`, `Array.isArray`, and `in`.
 //!
-//! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: clear_epoch, _3: compactions }`.
-//! Deletes tombstone entries, and live iterators track `(index, clear_epoch, compaction_ver)` so
-//! clears and compactions adjust cursor positions without the box retaining cursors.
+//! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
+//! Deletes tombstone entries, and live iterators track `(index, min_seq, epoch)` so clears and
+//! compactions resynchronize cursor positions against monotonic entry sequence numbers without
+//! retaining cursor lists or compaction histories.
 
 use super::*;
 use perry_mir::OptionalType;
@@ -25,6 +26,14 @@ impl EntryKind {
         match self {
             Self::Map => "_2",
             Self::Set => "_1",
+        }
+    }
+
+    /// The entry record's monotonic insertion sequence number.
+    fn seq_field(self) -> &'static str {
+        match self {
+            Self::Map => "_3",
+            Self::Set => "_2",
         }
     }
 
@@ -190,7 +199,7 @@ pub(super) fn tuple_kv_types(
     }
     let fields = rec_ref.fields().ok()?;
     let is_map_tuple = rec_ref.name().as_ref().starts_with("map_tuple_");
-    if !(fields.len() == 2 || (is_map_tuple && fields.len() == 3)) {
+    if !(fields.len() == 2 || (is_map_tuple && fields.len() == 4)) {
         return None;
     }
     let (_, k_ty) = fields.iter().find(|(n, _)| n == "_0")?;
@@ -280,7 +289,7 @@ pub(super) fn set_entry_type(
         return None;
     }
     let fields = rec_ref.fields().ok()?;
-    if fields.len() != 2 {
+    if fields.len() != 3 {
         return None;
     }
     let (_, elem_ty) = fields.iter().find(|(n, _)| n == "_0")?;

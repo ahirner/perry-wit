@@ -202,6 +202,11 @@ impl Fact {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
+            (Self::Original, Self::Integer(integer)) | (Self::Integer(integer), Self::Original)
+                if integer.bits == 64 =>
+            {
+                Self::Numeric
+            }
             (Self::Original, _) | (_, Self::Original) => Self::Original,
             (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
                 Self::Literal { negative: a || b }
@@ -232,6 +237,10 @@ impl Fact {
         } else {
             None
         }
+    }
+
+    pub(super) fn needs_lossless_64(self) -> bool {
+        self == Self::Numeric || self.integer().is_some_and(|integer| integer.bits == 64)
     }
 }
 
