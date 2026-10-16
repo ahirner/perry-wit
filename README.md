@@ -216,7 +216,10 @@ Automated test suites evaluate component efficiency across four dimensions:
 Perry-WIT compiles TypeScript ahead-of-time directly into native WebAssembly instructions without an embedded JavaScript engine:
 
 ```text
-TypeScript ──► Perry HIR ──► perry MIR (pliron)
+TypeScript ──► Perry HIR ──► Typed MIR (pliron)
+                                   │
+                                   ▼
+                           Optimization Loop
                                    │
                                    ▼
                          perry-codegen (pliron-wasm)
@@ -226,10 +229,10 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)
 ```
 
 1. **HIR Lowering**: Transforms TypeScript AST into Perry HIR, resolving imports, establishing lexical scopes.
-2. **MIR Generation**: Lowers Perry HIR to typed pliron MIR. Local variables initialize as slots, converted into SSA values, block arguments via `mem2reg`.
-3. **Code Generation**: Translates MIR to WebAssembly operations, selects value representations, synthesizes export glue.
-4. **Control Flow Structuring**: Structures reducible control flow with Ramsey's dominator-tree algorithm, keeping single-use values on the operand stack.
-5. **Linking**: Relocates runtime memory management helpers into the module, embeds WIT world metadata, encodes the final component.
+2. **MIR Lowering**: Lowers Perry HIR to typed pliron MIR with local variable slots, structured block joins, and root frames.
+3. **Optimization**: Promotes local slots to SSA via `mem2reg`, iterating fact propagation, constant folding, and dead code elimination to convergence.
+4. **Code Generation**: Translates optimized MIR to WebAssembly operations with operand stack scheduling and Ramsey dominator-tree control flow structuring.
+5. **Component Encoding**: Relocates runtime memory management helpers, embeds WIT world metadata, and synthesizes Canonical ABI adapters.
 
 ## Semantics
 

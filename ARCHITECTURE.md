@@ -48,20 +48,19 @@ The compiler layers cooperate to transform high-level TypeScript into validated 
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
-│                      pliron MIR Engine                      │
-│   Block Joins  •  Exception Paths  •  Root Frame Tracking   │
-│                                                             │
-│   ┌─────────────────────────┐     ┌───────────────────────┐ │
-│   │    Runtime Builders     │     │  Linked Guest Helpers │ │
-│   │     Task Schedulers     │     │ Pure Rust Wasm (JSON, │ │
-│   │     Stream Readers      │◄────┤ Time, Text, Search)   │ │
-│   │        Host I/O         │     │ (Relocated Bytecode)  │ │
-│   └─────────────────────────┘     └───────────────────────┘ │
+│                     Typed MIR Lowering                      │
+│   Local Slots  •  Block Joins  •  Root Frames  •  Builders  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                      Optimization Loop                      │
+│   mem2reg  •  SCCP  •  ProgramFacts  •  CFG Simplification  │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
 │                       Code Generation                       │
-│    Dominator Tree Structuring  •  Reducible Control Flow    │
+│   Dominator Tree Structuring  •  Operand Stack Scheduling   │
+│   Linked Guest Helpers (JSON, Time, Text, Search Bytecode)  │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
@@ -95,11 +94,11 @@ Before SSA lowering, the compiler reconciles Perry HIR against the resolved WIT 
 
 ### 4. Typed MIR Lowering
 
-Perry HIR lowers into typed SSA intermediate representation built on pliron:
-- Every local variable initializes as a slot, converted into SSA values and block arguments via `mem2reg`.
-- Branch joins and loop headers pass mutable local state through SSA block parameters.
-- Exception unwinding uses shared catch and finally dispatch paths to guarantee consistent cleanup order.
-- References to heap objects are tracked in root frames linked across asynchronous suspension points.
+Perry HIR lowers into typed intermediate representation built on pliron:
+- Local variables initialize as mutable memory slots.
+- Branch joins and loop headers construct basic blocks and forward edge control flow.
+- Exception unwinding establishes shared catch and finally dispatch paths to guarantee consistent cleanup order.
+- Heap object references register in root frames linked across asynchronous suspension points.
 
 Function invocations, native capability calls, and Promise observations follow explicit ownership conventions:
 
@@ -107,27 +106,29 @@ Function invocations, native capability calls, and Promise observations follow e
 - **Capability Calls**: Outbound linear memory buffers pin across the host boundary. Opaque resource handles transfer through transactional descriptor scopes.
 - **Promise Observations**: Settled asynchronous tasks retain a single outcome for repeated observation ([Liskov & Shrira 1988], §3). Observing continuations borrow the retained value without cloning its heap graph.
 
-Runtime builders assemble scheduling hooks, combinators, scalar capabilities, process context, and date codecs. Referenced pure Rust guest helpers link into the module's shared memory.
+Runtime builders assemble scheduling hooks, combinators, scalar capabilities, process context, and date codecs.
 
-#### Optimization
+### 5. Optimization
 
-Pliron pass pipelines optimize the typed SSA intermediate representation:
+Pliron pass pipelines optimize the typed intermediate representation through an iterative fixed-point loop:
 
-- **Pass Pipeline**: Local variable slots promote to SSA values via `mem2reg`. Canonicalization, sparse conditional constant propagation (SCCP), control-flow graph simplification, and dead code elimination iterate to convergence.
+- **Slot Promotion**: Local variable slots promote to SSA values and block arguments via `mem2reg`.
+- **Pass Pipeline**: Canonicalization, sparse conditional constant propagation (SCCP), control flow graph simplification, and dead code elimination iterate to convergence.
 - **Fact Propagation**: `ProgramFacts` propagates representations, bitwidth demand, and interval ranges across SSA values and function boundaries. Intermediate integer expressions widen to subsuming types or evaluate in 64-bit `i64` registers when unconstrained to prevent premature overflow without heap allocation. Range bounds analysis eliminates redundant array bounds checks. Staged threshold widening and dataflow presence tracking remain planned future refinements.
 - **JSON Lowering**: Statically typed JSON serialization and parsing lower directly to specialized MIR decoders and schema-normalizing deep copies for known object shapes.
 
-### 5. Code Generation
+### 6. Code Generation
 
-The code generator translates typed MIR into WebAssembly instructions:
+The code generator translates optimized MIR into WebAssembly instructions:
 
-- Reducible control flow structures into valid WebAssembly blocks, loops, and branches using Ramsey's dominator-tree algorithm ([Ramsey 2022]).
+- **Control Flow Structuring**: Reducible control flow structures into valid WebAssembly blocks, loops, and branches using Ramsey's dominator-tree algorithm ([Ramsey 2022]).
 - **Operand Stack Scheduling**: Single-use values defined in the same block as their user fold into expression trees evaluated on the operand stack when effect and trap ordering permits. Constants rematerialize at use sites. Other live values and used block parameters occupy WebAssembly locals, with locals reused across non-overlapping live ranges.
 - **Canonical ABI Marshalling**: Synthesizes boundary stubs directly around compiled entry points according to the [Canonical ABI]. Inbound values lift from flat registers into typed guest objects, while outbound values lower into caller return areas.
+- **Helper Relocation**: Referenced pure Rust guest helpers link directly into module linear memory with zero call overhead.
 
 The resulting core WebAssembly module can be emitted directly for low-level embedding or unit testing.
 
-### 6. Component Encoding
+### 7. Component Encoding
 
 The component wrapper binds native WASI 0.3 imports, generates canonical ABI adapters, embeds resolved WIT metadata, and invokes the component encoder to emit a validated WASI 0.3 component.
 
