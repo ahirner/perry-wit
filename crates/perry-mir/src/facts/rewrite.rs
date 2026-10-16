@@ -57,7 +57,7 @@ impl Pass for Specialize {
         } else {
             rewrite(ctx, &analysis)
         };
-        let previous = crate::pipeline::statistics(root, ctx);
+        let previous = crate::pipeline::optimization_statistics(root, ctx);
         root.deref_mut(ctx).attributes.set(
             crate::pipeline::STATISTICS.clone(),
             crate::attrs::OptimizationStatistics {

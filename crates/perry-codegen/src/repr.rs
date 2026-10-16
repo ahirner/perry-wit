@@ -1,7 +1,7 @@
 //! How MIR types are represented in Wasm values and memory slots.
 pub(crate) use crate::values::Carriers;
 use anyhow::{Result, bail};
-use perry_mir::types::{
+use perry_mir::{
     AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
     DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonType,
     NumberStringType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,
@@ -58,7 +58,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     if deref.is::<FP64Type>() {
         return Ok(Repr::F64);
     }
-    if deref.is::<perry_mir::types::NumericType>() {
+    if deref.is::<perry_mir::NumericType>() {
         return Ok(Repr::I32);
     }
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
@@ -103,7 +103,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<UrlType>()
         || deref.is::<SearchParamsType>()
         || deref.is::<JsonType>()
-        || deref.is::<perry_mir::types::JsonCursorType>()
+        || deref.is::<perry_mir::JsonCursorType>()
         || deref.is::<TransferType>()
         || deref.is::<SlotType>()
     {
@@ -134,5 +134,5 @@ pub(crate) fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
 }
 
 pub(crate) fn optional_inner(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    perry_mir::optional::optional_value(ctx, ty)
+    perry_mir::optional_value(ctx, ty)
 }

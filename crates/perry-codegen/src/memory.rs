@@ -7,10 +7,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use perry_abi::layout::{array, record, roots as root_stack};
-use perry_mir::{
-    calls::{AsyncCallOp, CallOp},
-    types::RecordType,
-};
+use perry_mir::{AsyncCallOp, CallOp, RecordType};
 use pliron::{
     context::{Context, Ptr},
     op::Op,
@@ -72,13 +69,13 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
 pub(crate) fn needs_collector(
     ctx: &Context,
     functions: &[pliron::builtin::ops::FuncOp],
-    summaries: &perry_mir::facts::ProgramFacts,
+    summaries: &perry_mir::ProgramFacts,
 ) -> bool {
     use pliron::builtin::op_interfaces::SymbolOpInterface;
     functions.iter().any(|function| {
         let name = function.get_symbol_name(ctx);
         let effects = &summaries.effects(&name).expect("function effects").effects;
-        name.as_ref() == perry_mir::globals::INITIALIZER
+        name.as_ref() == perry_mir::INITIALIZER
             || effects.repeated_allocations
             || effects.unknown_helper_bound
             || effects.may_suspend
@@ -97,17 +94,17 @@ pub fn explain_tiers(
     use std::fmt::Write;
     let functions = crate::analysis::reachable_functions(ctx, module, exports);
     analyses
-        .get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation(), ctx)
+        .get_analysis::<perry_mir::LiveValues>(module.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     analyses
-        .get_analysis::<perry_mir::facts::ProgramFacts>(module.get_operation(), ctx)
+        .get_analysis::<perry_mir::ProgramFacts>(module.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     let effects = analyses
-        .try_get_analysis::<perry_mir::facts::ProgramFacts>(module.get_operation())
+        .try_get_analysis::<perry_mir::ProgramFacts>(module.get_operation())
         .expect("runtime effects");
     let summaries = &*effects;
     let live = analyses
-        .try_get_analysis::<perry_mir::liveness::LiveValues>(module.get_operation())
+        .try_get_analysis::<perry_mir::LiveValues>(module.get_operation())
         .expect("liveness");
     let collectible = !crate::boundary::used_keys(ctx, &functions).is_empty()
         || needs_collector(ctx, &functions, summaries);
@@ -117,7 +114,7 @@ pub fn explain_tiers(
         "task (bounded calls)"
     };
     let mut report = format!("Allocation tiers after MIR optimization: {tier}\n");
-    let stats = perry_mir::pipeline::statistics(module.get_operation(), ctx);
+    let stats = perry_mir::optimization_statistics(module.get_operation(), ctx);
     writeln!(report, "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}, summarized_contexts={}, range_widenings={}, parse_stringify_rewrites={}, parse_stringify_missed={}", stats.numeric_contexts, stats.constraint_visits, stats.specializations, stats.cleanup_rounds, stats.summarized_heap_sets, stats.summarized_contexts, stats.range_widenings, stats.parse_stringify_rewrites, stats.parse_stringify_missed).expect("string write");
     for function in &functions {
         let name = function.get_symbol_name(ctx);
@@ -125,12 +122,12 @@ pub fn explain_tiers(
         let ops = crate::analysis::function_ops(ctx, function);
         let sites = ops
             .iter()
-            .filter(|&&op| perry_mir::effects::allocates(ctx, op))
+            .filter(|&&op| perry_mir::allocates(ctx, op))
             .count();
         let frames = ops
             .into_iter()
-            .filter_map(|op| Operation::get_op::<perry_mir::heap::AllocOp>(op, ctx))
-            .filter(|allocation| allocation.tier(ctx) == perry_mir::attrs::Tier::Frame)
+            .filter_map(|op| Operation::get_op::<perry_mir::AllocOp>(op, ctx))
+            .filter(|allocation| allocation.tier(ctx) == perry_mir::Tier::Frame)
             .count();
         let leases = crate::lease::leased(ctx, function, &live).len();
         writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
@@ -153,8 +150,8 @@ impl FunctionLowering<'_, '_> {
         let mut bytes = 0;
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
-                if let Some(allocation) = Operation::get_op::<perry_mir::heap::AllocOp>(op, ctx)
-                    && allocation.tier(ctx) == perry_mir::attrs::Tier::Frame
+                if let Some(allocation) = Operation::get_op::<perry_mir::AllocOp>(op, ctx)
+                    && allocation.tier(ctx) == perry_mir::Tier::Frame
                 {
                     let record = TypedHandle::<RecordType>::from_handle(
                         allocation.get_result(ctx).get_type(ctx),
@@ -411,7 +408,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
-        after: perry_mir::liveness::LiveAfter<'_>,
+        after: perry_mir::LiveAfter<'_>,
         order: &HashMap<Value, usize>,
     ) -> Result<Option<Value>> {
         if self.atomic_construction {
@@ -424,7 +421,7 @@ impl FunctionLowering<'_, '_> {
             && call_effect
                 .is_none_or(|effect| effect.effects.may_collect || effect.effects.allocates);
         if !self.state.collectible
-            || !(perry_mir::effects::allocates(ctx, op)
+            || !(perry_mir::allocates(ctx, op)
                 || collecting_call
                 || Operation::get_op::<AsyncCallOp>(op, ctx).is_some())
         {
@@ -447,8 +444,7 @@ impl FunctionLowering<'_, '_> {
             .map(|value| self.mapped(ctx, value))
             .collect::<Result<Vec<_>>>()?;
         let atomic = self.state.resources.is_empty()
-            && (perry_mir::effects::allocation(ctx, op) == perry_mir::effects::Allocation::Atomic
-                || atomic_call);
+            && (perry_mir::allocation(ctx, op) == perry_mir::Allocation::Atomic || atomic_call);
         let resume = atomic.then(|| {
             let due = self.runtime(ctx, Runtime::GcDue, vec![]);
             let collect = self.new_block(ctx, vec![]);
@@ -479,7 +475,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
-        after: perry_mir::liveness::LiveAfter<'_>,
+        after: perry_mir::LiveAfter<'_>,
     ) {
         if !self.state.collectible {
             return;

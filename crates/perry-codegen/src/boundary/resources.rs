@@ -15,7 +15,7 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
             return;
         }
         let ty = ty.deref(ctx);
-        if let Some(resource) = ty.downcast_ref::<perry_mir::types::ResourceType>() {
+        if let Some(resource) = ty.downcast_ref::<perry_mir::ResourceType>() {
             keys.insert(resource.key());
         } else if let Some(record) = ty.downcast_ref::<RecordType>() {
             if let Ok(fields) = record.fields() {
@@ -25,11 +25,11 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
             }
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             visit(ctx, array.element(), seen, keys);
-        } else if let Some(optional) = ty.downcast_ref::<perry_mir::types::OptionalType>() {
+        } else if let Some(optional) = ty.downcast_ref::<perry_mir::OptionalType>() {
             visit(ctx, optional.value(), seen, keys);
-        } else if let Some(promise) = ty.downcast_ref::<perry_mir::types::PromiseType>() {
+        } else if let Some(promise) = ty.downcast_ref::<perry_mir::PromiseType>() {
             visit(ctx, promise.value(), seen, keys);
-        } else if let Some(variant) = ty.downcast_ref::<perry_mir::types::VariantType>() {
+        } else if let Some(variant) = ty.downcast_ref::<perry_mir::VariantType>() {
             for (_, payload) in variant.cases() {
                 if let Some(payload) = payload {
                     visit(ctx, *payload, seen, keys);
@@ -220,7 +220,7 @@ impl FunctionLowering<'_, '_> {
     fn check_resource_type(&self, ctx: &Context, ty: TypeHandle, key: u32) -> Result<()> {
         ensure!(
             ty.deref(ctx)
-                .downcast_ref::<perry_mir::types::ResourceType>()
+                .downcast_ref::<perry_mir::ResourceType>()
                 .is_some_and(|r| r.key() == key),
             "WIT resource requires its declared opaque SDK type"
         );

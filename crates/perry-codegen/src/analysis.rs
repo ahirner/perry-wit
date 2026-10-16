@@ -1,7 +1,7 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use perry_mir::calls::{AsyncCallOp, CallOp, is_exported};
+use perry_mir::{AsyncCallOp, CallOp, is_exported};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
@@ -54,7 +54,7 @@ pub(crate) fn reachable_functions(
                 .iter()
                 .any(|export| export.function == name.as_ref()),
         };
-        if exported || name.as_ref() == perry_mir::globals::INITIALIZER {
+        if exported || name.as_ref() == perry_mir::INITIALIZER {
             reachable.insert(index);
             pending.push(index);
         }

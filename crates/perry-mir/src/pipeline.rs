@@ -14,7 +14,10 @@ use pliron::{
 pliron::dict_key!(STATISTICS, "perry_optimization_statistics");
 
 /// Compilation measurements attached by the optimizer, without process-global state.
-pub fn statistics(root: Ptr<Operation>, ctx: &Context) -> crate::attrs::OptimizationStatistics {
+pub fn optimization_statistics(
+    root: Ptr<Operation>,
+    ctx: &Context,
+) -> crate::attrs::OptimizationStatistics {
     root.deref(ctx)
         .attributes
         .get::<crate::attrs::OptimizationStatistics>(&STATISTICS)
@@ -88,7 +91,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     ));
     ownership.add_pass(AssignLifetimes);
     ownership.run(root, ctx, &mut analyses)?;
-    let mut measured = statistics(root, ctx);
+    let mut measured = optimization_statistics(root, ctx);
     measured.cleanup_rounds = rounds;
     root.deref_mut(ctx)
         .attributes

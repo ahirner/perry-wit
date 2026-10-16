@@ -2,7 +2,7 @@
 use crate::{function::FunctionLowering, repr::Carriers};
 use anyhow::Result;
 use perry_abi::layout::numeric::{FLOAT, SIGNED, UNSIGNED};
-use perry_mir::{attrs::CompareKind, intrinsics::Intrinsic, types::NumericType};
+use perry_mir::{CompareKind, Intrinsic, NumericType};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,

@@ -595,7 +595,7 @@ export function run(n: number): number {
                 &Default::default(),
                 &Default::default(),
             )?;
-            let mut analyses = perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
+            let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
                 .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
             let exports = perry_codegen::Exports::Raw;
             row.optimization = Some(optimization_statistics(&perry_codegen::explain_tiers(

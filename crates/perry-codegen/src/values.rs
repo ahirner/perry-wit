@@ -1,7 +1,7 @@
 //! Multi-carrier lowering for MIR values whose runtime representation uses a register pair.
 use crate::{function::FunctionLowering, repr::wasm_type};
 use anyhow::{Result, anyhow, ensure};
-use perry_mir::types::NumericType;
+use perry_mir::NumericType;
 use pliron::{
     builtin::types::{IntegerType, Signedness},
     context::{Context, Ptr},

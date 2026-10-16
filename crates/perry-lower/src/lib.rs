@@ -46,34 +46,19 @@ use perry_hir::{
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{
-    attrs::{BinaryKind, CompareKind, ErrorKind},
-    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
-    collections::{
-        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp, ConcatOp,
-        StringConstOp, StringLenOp,
-    },
-    control::{BrOp, CondBrOp, ReturnOp},
-    exceptions::{
-        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp,
-        RethrowOp,
-    },
-    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
-    intrinsics::{
-        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp,
-        PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
-    },
-    locals::{LoadOp, LocalOp, StoreOp, UndefOp},
-    optional::{
-        IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
-        UndefinedOp, UnwrapOp, WrapOp, absence, optional_parts, optional_value,
-    },
-    scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, NumericCastOp},
-    types::{
-        AbortType, ArrayType, BigIntType, BytesType, DateType, ExceptionType, HeadersType,
-        IncomingType, InstantType, JsonType, PlainDateTimeType, PlainDateType, PromiseType,
-        ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType,
-        SettledType, StatsType, StringType, WritableType, WriterType,
-    },
+    AbortType, AllocOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+    ArrayTruncateOp, ArrayType, AsyncCallOp, AwaitOp, BigIntType, BinaryKind,
+    BinaryOp as MirBinary, BrOp, BytesType, CallOp, CatchOp, CaughtOp, Combinator, CompareKind,
+    CompareOp as MirCompare, ConcatOp, CondBrOp, DateType, ErrorKind, ErrorNewOp, ExceptionIsOp,
+    ExceptionMessageOp, ExceptionType, ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, HeadersType,
+    IncomingType, InstantType, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, JsonStringifyOp,
+    JsonType, LoadOp, LocalOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp, PlainDateTimeType,
+    PlainDateType, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp,
+    ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType, RethrowOp,
+    ReturnOp, SettledField, SettledFieldOp, SettledType, StatsType, StoreOp, StringConstOp,
+    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
+    WrapOp, WritableType, WriterType, absence, may_throw, optional_parts, optional_value,
+    set_async,
 };
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;

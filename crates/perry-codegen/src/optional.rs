@@ -9,12 +9,8 @@ use crate::{
 use anyhow::{Result, anyhow, bail};
 use perry_abi::{OMITTED_BITS, UNDEFINED_BITS, layout::numeric};
 use perry_mir::{
-    attrs::ErrorKind,
-    optional::{
-        IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
-        UndefinedOp, UnwrapOp, WrapOp, absence,
-    },
-    views::AggregateViewOp,
+    AggregateViewOp, ErrorKind, IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp,
+    ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, absence,
 };
 use pliron::{
     builtin::op_interfaces::OneResultInterface,

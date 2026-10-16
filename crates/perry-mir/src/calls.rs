@@ -236,7 +236,7 @@ fn update_meta(
 }
 
 /// Read the function's [crate::attrs::FunctionMeta] flags.
-pub fn function_meta(ctx: &Context, function: &FuncOp) -> crate::attrs::FunctionMeta {
+pub(crate) fn function_meta(ctx: &Context, function: &FuncOp) -> crate::attrs::FunctionMeta {
     function
         .get_operation()
         .deref(ctx)
@@ -256,11 +256,13 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).exported
 }
 
-pub fn set_specialized_entry(ctx: &mut Context, function: &FuncOp) {
+/// Mark `function` as a specialized implementation entry created by ProgramFacts.
+pub(crate) fn set_specialized_entry(ctx: &mut Context, function: &FuncOp) {
     update_meta(ctx, function, |m| m.specialized_entry = true);
 }
 
-pub fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
+/// Whether `function` is a specialized implementation entry.
+pub(crate) fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).specialized_entry
 }
 
@@ -270,7 +272,8 @@ pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
     update_meta(ctx, function, |m| m.atomic_construction = true);
 }
 
-pub fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
+/// Whether `function` requested an uninterrupted construction scope.
+pub(crate) fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).atomic_construction
 }
 
@@ -295,7 +298,8 @@ pub fn set_json_decoder(ctx: &mut Context, function: &FuncOp, kind: crate::attrs
         .set(JSON_DECODER_KIND.clone(), kind);
 }
 
-pub fn json_decoder_kind(
+/// The semantic kind of a compiler-generated JSON decoder, if `function` is one.
+pub(crate) fn json_decoder_kind(
     ctx: &Context,
     function: &FuncOp,
 ) -> Option<crate::attrs::JsonDecoderKind> {

@@ -52,9 +52,9 @@ impl<'s> FunctionBuilder<'s> {
             return self.narrow_primitive(ctx, expr, value);
         }
         let value = match expr {
-            Expr::RegExp { pattern, flags } => self.emit_value(ctx, |ctx| {
-                perry_mir::regex::RegexConstOp::new(ctx, pattern, flags)
-            }),
+            Expr::RegExp { pattern, flags } => {
+                self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
+            }
             Expr::RegExpDynamic { .. } => {
                 bail!("RegExp construction is unsupported; use a bounded regex literal")
             }
@@ -547,9 +547,7 @@ impl<'s> FunctionBuilder<'s> {
             };
         let magnitude = u64::from_str_radix(digits, radix)
             .context("bigint literal exceeds the 64-bit transport domain")?;
-        Ok(self.emit_value(ctx, |ctx| {
-            perry_mir::integers::BigIntConstOp::new(ctx, magnitude)
-        }))
+        Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
     }
 
     /// `null` or `undefined` of the expected optional type (`number | null/undefined` when
@@ -565,11 +563,11 @@ impl<'s> FunctionBuilder<'s> {
             None => {
                 let number = FP64Type::get(ctx).into();
                 let kind = if null {
-                    perry_mir::attrs::Absence::Null
+                    perry_mir::Absence::Null
                 } else {
-                    perry_mir::attrs::Absence::Undefined
+                    perry_mir::Absence::Undefined
                 };
-                perry_mir::types::OptionalType::get_with(ctx, number, kind).into()
+                perry_mir::OptionalType::get_with(ctx, number, kind).into()
             }
         };
         let allowed = absence(ctx, ty).is_some_and(|a| {
@@ -655,9 +653,9 @@ impl<'s> FunctionBuilder<'s> {
             let else_value = self.expression_with(ctx, else_expr, None)?;
             let else_ty = else_value.get_type(ctx);
             let then_absence = if matches!(then_expr, Expr::Null) {
-                perry_mir::attrs::Absence::Null
+                perry_mir::Absence::Null
             } else {
-                perry_mir::attrs::Absence::Undefined
+                perry_mir::Absence::Undefined
             };
             let ty = crate::coerce::admitting(ctx, else_ty, then_absence);
             let result = self.entry_slot(ctx, ty);
@@ -692,9 +690,9 @@ impl<'s> FunctionBuilder<'s> {
             Some(expected) => expected,
             None if matches!(else_expr, Expr::Null | Expr::Undefined) => {
                 let else_absence = if matches!(else_expr, Expr::Null) {
-                    perry_mir::attrs::Absence::Null
+                    perry_mir::Absence::Null
                 } else {
-                    perry_mir::attrs::Absence::Undefined
+                    perry_mir::Absence::Undefined
                 };
                 crate::coerce::admitting(ctx, then_ty, else_absence)
             }
@@ -710,7 +708,7 @@ impl<'s> FunctionBuilder<'s> {
                     crate::coerce::merge_absence(absence(ctx, then_ty), absence(ctx, else_ty))
                 {
                     let inner = optional_value(ctx, then_ty).unwrap_or(then_ty);
-                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 } else {
                     then_ty
                 }

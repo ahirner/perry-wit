@@ -70,7 +70,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
-        let opt_v_ty = admitting(ctx, v_ty, perry_mir::attrs::Absence::Undefined);
+        let opt_v_ty = admitting(ctx, v_ty, perry_mir::Absence::Undefined);
         let miss = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_v_ty));
         let result = self.entry_slot(ctx, opt_v_ty);
         self.store(ctx, result, miss);

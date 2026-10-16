@@ -13,7 +13,7 @@ fn lowered(source: &str) -> String {
     let ctx = &mut Context::new();
     let module = lower_without_foreign(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
     let op = module.get_operation();
-    perry_mir::pipeline::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    perry_mir::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     let printed = Operation::get_op_dyn(op, ctx).disp(ctx).to_string();
     for slot_op in ["perry.local", "perry.load", "perry.store"] {
         assert!(
@@ -383,7 +383,7 @@ export function local(x: number): number { const cell: Cell = { value: x }; retu
 export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
 "#;
     let module = lower_without_foreign(ctx, source, "lifetimes.ts").unwrap();
-    perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
+    perry_mir::canonicalize(module.get_operation(), ctx).unwrap();
     let printed = module.disp(ctx).to_string();
     assert!(printed.contains("perry.call read"), "{printed}");
     assert!(printed.contains("perry.call save"), "{printed}");

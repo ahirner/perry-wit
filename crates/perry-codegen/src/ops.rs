@@ -8,17 +8,11 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
-    attrs::{CompareKind, ErrorKind},
-    calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp},
-    collections::{ConcatOp, StringConstOp, StringLenOp},
-    control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
-    intrinsics::{
-        Combinator, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, PromiseRejectedOp,
-        PromiseResolvedOp, SettledField, SettledFieldOp,
-    },
-    locals::UndefOp,
-    scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, NumericCastOp},
-    types::{ArrayType, PromiseType, SettledType, StringType},
+    ArrayType, AsyncCallOp, AwaitOp, BinaryOp as MirBinaryOp, BrOp as MirBrOp, CallOp as MirCallOp,
+    Combinator, CompareKind, CompareOp as MirCompareOp, ConcatOp, CondBrOp as MirCondBrOp,
+    ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PromiseCombinatorOp, PromiseRejectedOp,
+    PromiseResolvedOp, PromiseType, ReturnOp as MirReturnOp, SettledField, SettledFieldOp,
+    SettledType, StringConstOp, StringLenOp, StringType, TimerOp, UndefOp,
 };
 use pliron::{
     builtin::{
@@ -46,8 +40,8 @@ impl FunctionLowering<'_, '_> {
         {
             return Ok(());
         }
-        if let Some(global) = Operation::get_op::<perry_mir::globals::GlobalOp>(op, ctx) {
-            let ty = TypedHandle::<perry_mir::types::SlotType>::from_handle(
+        if let Some(global) = Operation::get_op::<perry_mir::GlobalOp>(op, ctx) {
+            let ty = TypedHandle::<perry_mir::SlotType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
             )?
@@ -72,7 +66,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, cell);
             return Ok(());
         }
-        if Operation::get_op::<perry_mir::globals::GlobalLoadOp>(op, ctx).is_some() {
+        if Operation::get_op::<perry_mir::GlobalLoadOp>(op, ctx).is_some() {
             let slot = self.operand(ctx, op, 0)?;
             let initialized = self.load(ctx, MemKind::I32, slot, 8);
             let missing = self.num(ctx, NumOpcode::I32Eqz, vec![initialized]);
@@ -82,7 +76,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<perry_mir::locals::StoreOp>(op, ctx).is_some() {
+        if Operation::get_op::<perry_mir::StoreOp>(op, ctx).is_some() {
             let slot = self.operand(ctx, op, 0)?;
             let value = self.operand(ctx, op, 1)?;
             let kind = slot_kind(ctx, op.deref(ctx).get_operand(1).get_type(ctx))?;
@@ -91,7 +85,7 @@ impl FunctionLowering<'_, '_> {
             self.store(ctx, MemKind::I32, slot, 8, one);
             return Ok(());
         }
-        if let Some(constant) = Operation::get_op::<perry_mir::regex::RegexConstOp>(op, ctx) {
+        if let Some(constant) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
             let key = (constant.pattern(ctx), constant.flags(ctx));
             let address = if let Some(&address) = self.state.data.regexes.get(&key) {
                 address
@@ -105,7 +99,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if let Some(constant) = Operation::get_op::<perry_mir::integers::BigIntConstOp>(op, ctx) {
+        if let Some(constant) = Operation::get_op::<perry_mir::BigIntConstOp>(op, ctx) {
             let magnitude = constant
                 .magnitude(ctx)
                 .context("BigInt constant without a u64 magnitude")?;
@@ -120,7 +114,7 @@ impl FunctionLowering<'_, '_> {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
                 .ok_or_else(|| anyhow!("constant without value"))?;
-            if let Some(&number) = attr.downcast_ref::<perry_mir::attrs::NumericConstant>() {
+            if let Some(&number) = attr.downcast_ref::<perry_mir::NumericConstant>() {
                 drop(attr);
                 let value = self.numeric_constant(ctx, number);
                 self.define_value(ctx, op, value);
@@ -179,7 +173,7 @@ impl FunctionLowering<'_, '_> {
                 return Ok(());
             }
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
-            let value = if inner.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+            let value = if inner.deref(ctx).is::<perry_mir::NumberStringType>() {
                 let equal = self.number_string_equal(ctx, mir_ty, operands[0], operands[1])?;
                 match kind {
                     CompareKind::Eq => equal,
@@ -205,9 +199,9 @@ impl FunctionLowering<'_, '_> {
                 }
             } else if mir_ty.deref(ctx).is::<StringType>()
                 || optional_inner(ctx, mir_ty).is_some_and(|t| t.deref(ctx).is::<StringType>())
-                || mir_ty.deref(ctx).is::<perry_mir::types::BigIntType>()
+                || mir_ty.deref(ctx).is::<perry_mir::BigIntType>()
                 || optional_inner(ctx, mir_ty)
-                    .is_some_and(|t| t.deref(ctx).is::<perry_mir::types::BigIntType>())
+                    .is_some_and(|t| t.deref(ctx).is::<perry_mir::BigIntType>())
             {
                 let join = if optional_inner(ctx, mir_ty).is_some() {
                     let a = self.is_absent(ctx, operands[0], mir_ty)?;
@@ -225,7 +219,7 @@ impl FunctionLowering<'_, '_> {
                     None
                 };
                 let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
-                let order = if inner.deref(ctx).is::<perry_mir::types::BigIntType>() {
+                let order = if inner.deref(ctx).is::<perry_mir::BigIntType>() {
                     self.runtime(ctx, Runtime::StdBigintCompare, operands)
                 } else {
                     self.runtime(ctx, Runtime::StringCompare, operands)
@@ -297,14 +291,12 @@ impl FunctionLowering<'_, '_> {
             self.insert(ctx, ret);
             return Ok(());
         }
-        if let Some(call) = Operation::get_op::<perry_mir::foreign::ForeignOp>(op, ctx) {
+        if let Some(call) = Operation::get_op::<perry_mir::ForeignOp>(op, ctx) {
             match call.phase(ctx) {
-                perry_mir::foreign::Phase::Call | perry_mir::foreign::Phase::Start => {
+                perry_mir::Phase::Call | perry_mir::Phase::Start => {
                     self.foreign_call(ctx, op, &call.binding(ctx))?
                 }
-                perry_mir::foreign::Phase::Finish => {
-                    self.foreign_finish(ctx, op, &call.binding(ctx))?
-                }
+                perry_mir::Phase::Finish => self.foreign_finish(ctx, op, &call.binding(ctx))?,
             }
             return Ok(());
         }
@@ -345,13 +337,13 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<perry_mir::collections::ConcatReuseOp>(op, ctx).is_some() {
+        if Operation::get_op::<perry_mir::ConcatReuseOp>(op, ctx).is_some() {
             if op
                 .deref(ctx)
                 .get_result(0)
                 .get_type(ctx)
                 .deref(ctx)
-                .is::<perry_mir::types::ArrayType>()
+                .is::<perry_mir::ArrayType>()
             {
                 return self.array_concat(ctx, op);
             }
@@ -366,7 +358,7 @@ impl FunctionLowering<'_, '_> {
                 .get_result(0)
                 .get_type(ctx)
                 .deref(ctx)
-                .is::<perry_mir::types::ArrayType>()
+                .is::<perry_mir::ArrayType>()
             {
                 return self.array_concat(ctx, op);
             }
@@ -483,7 +475,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if let Some(key) = Operation::get_op::<perry_mir::intrinsics::JsonCursorKeyOp>(op, ctx) {
+        if let Some(key) = Operation::get_op::<perry_mir::JsonCursorKeyOp>(op, ctx) {
             return self.json_cursor_key(ctx, op, key.record(ctx));
         }
         if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some() {

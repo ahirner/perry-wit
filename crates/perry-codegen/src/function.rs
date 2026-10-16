@@ -8,7 +8,7 @@ use crate::{
     values::{self, Carriers},
 };
 use anyhow::{Context as _, Result, anyhow};
-use perry_mir::exceptions::CaughtOp;
+use perry_mir::CaughtOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -193,7 +193,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             let mut index = 0;
             while index < ops.len() {
                 let op = ops[index];
-                if Operation::get_op::<perry_mir::calls::AwaitOp>(op, ctx).is_some() {
+                if Operation::get_op::<perry_mir::AwaitOp>(op, ctx).is_some() {
                     self.clear_dead_frame_slots(ctx, op, live.after(op));
                 }
                 let root_mark = self.safe_point(ctx, op, live.after(op), &order)?;

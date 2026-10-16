@@ -1,9 +1,6 @@
 //! Closed union construction and tag-based payload selection.
 use super::*;
-use perry_mir::{
-    types::VariantType,
-    variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
-};
+use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 /// A path through declared fields; reads are checked even if an alias changes the path.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -82,7 +79,7 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
     ) -> Result<Value> {
         let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
-        if !ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+        if !ty.deref(ctx).is::<perry_mir::NumberStringType>() {
             return Ok(value);
         }
         let Some(path) = path(expr) else {
@@ -159,7 +156,7 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         let result = match payload {
-            Some(ty) if absent => perry_mir::types::OptionalType::get(ctx, ty).into(),
+            Some(ty) if absent => perry_mir::OptionalType::get(ctx, ty).into(),
             Some(ty) => ty,
             None => self.shapes.value_type(ctx, &HirType::Void)?,
         };

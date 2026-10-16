@@ -130,7 +130,7 @@ impl FunctionLowering<'_, '_> {
             });
             self.canonical_borrows = false;
             self.resource_scope = None;
-            let ty = perry_mir::types::TransferType::get(ctx).into();
+            let ty = perry_mir::TransferType::get(ctx).into();
             let promise = self.new_promise(ctx, ty)?;
             let mask = self.i32_const(ctx, 15);
             let state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);

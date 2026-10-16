@@ -8,8 +8,7 @@ use crate::{
 use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array, record};
 use perry_mir::{
-    intrinsics::Intrinsic,
-    types::{ArrayType, DateType, ExceptionType, JsonType, OptionalType, RecordType, StringType},
+    ArrayType, DateType, ExceptionType, Intrinsic, JsonType, OptionalType, RecordType, StringType,
 };
 use pliron::{
     builtin::{
@@ -71,7 +70,7 @@ impl FunctionLowering<'_, '_> {
                 bytes.extend_from_slice(&(*index as u32).to_le_bytes());
             }
             (self.state.data.append(4, &bytes), names.len())
-        } else if ty.deref(ctx).is::<perry_mir::types::VariantType>() {
+        } else if ty.deref(ctx).is::<perry_mir::VariantType>() {
             let mut bytes = Vec::with_capacity(16);
             for (index, name) in [(0u32, "tag"), (1u32, "val")] {
                 bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
@@ -218,7 +217,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         let value = value.scalar()?;
-        if ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+        if ty.deref(ctx).is::<perry_mir::NumberStringType>() {
             return self.json_number_string(ctx, writer, value);
         }
         let deref = ty.deref(ctx);
@@ -236,8 +235,7 @@ impl FunctionLowering<'_, '_> {
             drop(deref);
             let text = self.date_intrinsic(ctx, Intrinsic::DateJson, vec![value])?;
             let string = StringType::get(ctx).into();
-            let nullable =
-                OptionalType::get_with(ctx, string, perry_mir::attrs::Absence::Null).into();
+            let nullable = OptionalType::get_with(ctx, string, perry_mir::Absence::Null).into();
             return self.json_value(ctx, writer, text, nullable);
         }
         if deref.is::<ExceptionType>() {
@@ -279,7 +277,7 @@ impl FunctionLowering<'_, '_> {
         }
         let container = deref.is::<RecordType>()
             || deref.is::<ArrayType>()
-            || deref.is::<perry_mir::types::VariantType>();
+            || deref.is::<perry_mir::VariantType>();
         drop(deref);
         ensure!(
             container,
@@ -309,7 +307,7 @@ impl FunctionLowering<'_, '_> {
         let mut b = FunctionLowering::glue(self.state, ctx, &function);
         let record_type = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
         let tuple = record_type.is_some_and(|record| record.deref(ctx).is_tuple());
-        let variant_type = TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx).ok();
+        let variant_type = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx).ok();
         let dict_entry = TypedHandle::<ArrayType>::from_handle(ty, ctx)
             .ok()
             .map(|a| a.deref(ctx).element())

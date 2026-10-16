@@ -7,7 +7,7 @@ use crate::{
     runtime::{Runtime, W},
 };
 use anyhow::{Result, bail, ensure};
-use perry_mir::{intrinsics::Intrinsic, optional::absence, types::NumericType};
+use perry_mir::{Intrinsic, NumericType, absence};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -345,7 +345,7 @@ impl FunctionLowering<'_, '_> {
             }
             Intrinsic::JsonResidue => {
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-                let offset = if ty.deref(ctx).is::<perry_mir::types::RecordType>() {
+                let offset = if ty.deref(ctx).is::<perry_mir::RecordType>() {
                     perry_abi::layout::record::JSON
                 } else {
                     perry_abi::layout::variant::JSON
@@ -354,7 +354,7 @@ impl FunctionLowering<'_, '_> {
                 None
             }
             Intrinsic::JsonRetain => {
-                use perry_mir::types::{JsonType, RecordType};
+                use perry_mir::{JsonType, RecordType};
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
                 let (offset, graph) =
                     if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
@@ -715,9 +715,7 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(mut value) = value {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            if absence(ctx, ty) == Some(perry_mir::attrs::Absence::Null)
-                && repr(ctx, ty)? == Repr::Ref
-            {
+            if absence(ctx, ty) == Some(perry_mir::Absence::Null) && repr(ctx, ty)? == Repr::Ref {
                 // Helpers use C null pointers; compiled null has a stable distinct sentinel.
                 let absent = self.num(ctx, NumOpcode::I32Eqz, vec![value]);
                 let null = self.null(ctx, ty)?;

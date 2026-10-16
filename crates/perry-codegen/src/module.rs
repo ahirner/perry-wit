@@ -11,7 +11,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use perry_mir::calls::is_exported;
+use perry_mir::is_exported;
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
@@ -37,7 +37,7 @@ use pliron_wasm::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The symbol of module initialization, checked to be an identifier at compile time.
-pub(crate) const INITIALIZER: Identifier = Identifier::new(perry_mir::globals::INITIALIZER);
+pub(crate) const INITIALIZER: Identifier = Identifier::new(perry_mir::INITIALIZER);
 
 /// Module initialization mode and the address of its state cell in static data.
 #[derive(Clone, Copy)]
@@ -138,8 +138,8 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
-    pub(crate) program_facts: &'e perry_mir::facts::ProgramFacts,
-    pub(crate) live: &'e perry_mir::liveness::LiveValues,
+    pub(crate) program_facts: &'e perry_mir::ProgramFacts,
+    pub(crate) live: &'e perry_mir::LiveValues,
     /// Whether to count compiled roots published at [DATA_BASE] for [Exports::RawChecked].
     pub(crate) count_roots: bool,
     pub(crate) memory_checks: bool,
@@ -168,7 +168,7 @@ impl ModuleState<'_> {
     }
 }
 
-/// Lower canonicalized MIR (after `perry_mir::pipeline::canonicalize`) to the `wasm` dialect.
+/// Lower canonicalized MIR (after `perry_mir::canonicalize`) to the `wasm` dialect.
 pub(crate) fn lower(
     ctx: &mut Context,
     mir: &ModuleOp,
@@ -179,20 +179,20 @@ pub(crate) fn lower(
     let functions = reachable_functions(ctx, mir, exports);
     let async_functions: Vec<Identifier> = functions
         .iter()
-        .filter(|f| perry_mir::calls::is_async(ctx, f))
+        .filter(|f| perry_mir::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
     analyses
-        .get_analysis::<perry_mir::facts::ProgramFacts>(mir.get_operation(), ctx)
+        .get_analysis::<perry_mir::ProgramFacts>(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     analyses
-        .get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation(), ctx)
+        .get_analysis::<perry_mir::LiveValues>(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
     let effects = analyses
-        .try_get_analysis::<perry_mir::facts::ProgramFacts>(mir.get_operation())
+        .try_get_analysis::<perry_mir::ProgramFacts>(mir.get_operation())
         .expect("runtime effects");
     let live = analyses
-        .try_get_analysis::<perry_mir::liveness::LiveValues>(mir.get_operation())
+        .try_get_analysis::<perry_mir::LiveValues>(mir.get_operation())
         .expect("liveness");
     let resource_keys = boundary::used_keys(ctx, &functions);
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
@@ -253,17 +253,15 @@ pub(crate) fn lower(
             crate::analysis::function_ops(ctx, function)
                 .into_iter()
                 .any(|op| {
-                    Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
-                        |op| {
-                            op.intrinsic(ctx).is_some_and(|i| {
-                                matches!(
-                                    i,
-                                    perry_mir::intrinsics::Intrinsic::JsonRetain
-                                        | perry_mir::intrinsics::Intrinsic::JsonResidue
-                                )
-                            })
-                        },
-                    )
+                    Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                        op.intrinsic(ctx).is_some_and(|i| {
+                            matches!(
+                                i,
+                                perry_mir::Intrinsic::JsonRetain
+                                    | perry_mir::Intrinsic::JsonResidue
+                            )
+                        })
+                    })
                 })
         }),
         leased: HashSet::new(),
@@ -386,7 +384,7 @@ fn bind_exports(
         .collect();
     let initialization = state
         .program_facts
-        .effects(&Identifier::new(perry_mir::globals::INITIALIZER));
+        .effects(&Identifier::new(perry_mir::INITIALIZER));
     let initialization_escapes =
         initialization.is_some_and(|summary| summary.effects.failure.escapes());
     let stderr = state.imports.as_ref().is_some_and(|imports| {
@@ -441,7 +439,7 @@ fn bind_exports(
                 diagnostic.span = functions
                     .iter()
                     .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
-                    .and_then(|function| perry_mir::diagnostics::source_span(ctx, function));
+                    .and_then(|function| perry_mir::source_span(ctx, function));
                 return Err(diagnostic.into());
             }
             if export.is_async() {

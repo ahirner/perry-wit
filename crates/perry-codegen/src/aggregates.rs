@@ -8,14 +8,9 @@ use crate::{
 use anyhow::{Result, anyhow};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
-    attrs::ErrorKind,
-    collections::{
-        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayTruncateOp, ConcatSegmentsOp,
-    },
-    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
-    types::{ArrayType, RecordType},
-    variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
+    AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+    ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp,
+    FieldSetOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -92,7 +87,7 @@ impl FunctionLowering<'_, '_> {
         let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
         let operands = self.operands(ctx, op)?;
         let references = self.i32_const(ctx, Self::array_element_kind(ctx, element)? as i32);
-        let reuse = Operation::get_op::<perry_mir::collections::ConcatReuseOp>(op, ctx)
+        let reuse = Operation::get_op::<perry_mir::ConcatReuseOp>(op, ctx)
             .map_or_else(Vec::new, |concat| concat.candidates(ctx).0);
         let value = if operands.len() == 2 {
             let mask = reuse.iter().fold(0, |mask, index| mask | (1 << index));
@@ -211,7 +206,7 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let mut value = self.load_slot_value(ctx, object, offset, ty)?;
-            if perry_mir::optional::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+            if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                 let omitted = self.is_omitted_value(ctx, value, ty)?;
                 let undef = self.undefined_value(ctx, ty)?;
                 value = self.select_carriers(ctx, omitted, undef, value)?;
@@ -222,15 +217,14 @@ impl FunctionLowering<'_, '_> {
         if let Some(present) = Operation::get_op::<FieldPresentOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
             let (offset, ty) = Self::field_slot(ctx, record, &present.field(ctx))?;
-            let value =
-                if perry_mir::optional::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
-                    let object = self.mapped(ctx, record)?;
-                    let unpacked = self.load_slot_value(ctx, object, offset, ty)?;
-                    let omitted = self.is_omitted_value(ctx, unpacked, ty)?;
-                    self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
-                } else {
-                    self.i32_const(ctx, 1)
-                };
+            let value = if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                let object = self.mapped(ctx, record)?;
+                let unpacked = self.load_slot_value(ctx, object, offset, ty)?;
+                let omitted = self.is_omitted_value(ctx, unpacked, ty)?;
+                self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
+            } else {
+                self.i32_const(ctx, 1)
+            };
             self.define(ctx, op, value);
             return Ok(true);
         }
@@ -276,7 +270,7 @@ impl FunctionLowering<'_, '_> {
             self.store(ctx, MemKind::I32, operands[0], layout::LEN, operands[1]);
             return Ok(true);
         }
-        if let Some(native) = Operation::get_op::<perry_mir::collections::NativeJsonOp>(op, ctx) {
+        if let Some(native) = Operation::get_op::<perry_mir::NativeJsonOp>(op, ctx) {
             use pliron::builtin::op_interfaces::OneOpdInterface;
             let source = native.get_operand(ctx);
             let descriptor = self.native_descriptor(ctx, source.get_type(ctx))?;

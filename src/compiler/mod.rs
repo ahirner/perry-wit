@@ -264,7 +264,7 @@ fn lower(
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
-    let analyses = perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
+    let analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
@@ -286,7 +286,7 @@ fn finish(
 }
 
 fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
-    use perry_mir::intrinsics::{Intrinsic, IntrinsicOp};
+    use perry_mir::{Intrinsic, IntrinsicOp};
     use pliron::{
         builtin::{
             op_interfaces::{OneRegionInterface, SingleBlockRegionInterface},

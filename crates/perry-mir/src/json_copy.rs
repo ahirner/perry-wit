@@ -111,7 +111,7 @@ impl Pass for NormalizeJsonCopy {
         }
 
         if rewrites > 0 || missed > 0 {
-            let mut stats = crate::pipeline::statistics(root, ctx);
+            let mut stats = crate::pipeline::optimization_statistics(root, ctx);
             stats.parse_stringify_rewrites += rewrites;
             stats.parse_stringify_missed += missed;
             root.deref_mut(ctx)

@@ -20,10 +20,8 @@
 //!
 //! Without the proof the operations allocate fresh objects, which is always correct.
 use perry_mir::{
-    calls::AwaitOp,
-    intrinsics::{Intrinsic, IntrinsicOp},
-    optional::{IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp, WrapOp},
-    scalar::CompareOp,
+    AwaitOp, CompareOp, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp,
+    WrapOp,
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -51,7 +49,7 @@ fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
 pub(crate) fn leased(
     ctx: &Context,
     function: &FuncOp,
-    live: &perry_mir::liveness::LiveValues,
+    live: &perry_mir::LiveValues,
 ) -> HashSet<Ptr<Operation>> {
     let ops: Vec<Ptr<Operation>> = function
         .get_region(ctx)

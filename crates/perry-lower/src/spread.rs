@@ -1,10 +1,6 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
-use perry_mir::{
-    attrs::Absence,
-    collections::{ArrayExtendOp, ConcatSegmentsOp},
-    types::{OptionalType, StringType},
-};
+use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
 
 impl<'s> FunctionBuilder<'s> {
     fn spread_value(

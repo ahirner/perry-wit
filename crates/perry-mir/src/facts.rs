@@ -46,7 +46,7 @@ pliron::dict_key!(WIT_SIGNATURE, "perry_wit_signature");
 pliron::dict_key!(SPECIALIZATION, "perry_specialization");
 
 /// Attach validated WIT numeric constraints before optimizing a source function.
-pub fn constrain(
+pub fn constrain_signature(
     ctx: &mut Context,
     function: &FuncOp,
     args: Vec<TypeHandle>,
@@ -71,7 +71,7 @@ pub fn wit_signature(ctx: &Context, function: &FuncOp) -> Option<TypeHandle> {
 }
 
 /// Implementation selected for a constrained boundary, or the original function.
-pub fn implementation(ctx: &Context, function: &FuncOp) -> Identifier {
+pub fn specialized_implementation(ctx: &Context, function: &FuncOp) -> Identifier {
     function
         .get_operation()
         .deref(ctx)

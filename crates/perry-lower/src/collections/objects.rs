@@ -50,8 +50,7 @@ impl<'s> FunctionBuilder<'s> {
         let (fields, uniform_ty) = record_uniform_field_type(ctx, rec_handle).context(
             "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>",
         )?;
-        let opt_ty =
-            crate::coerce::admitting(ctx, uniform_ty, perry_mir::attrs::Absence::Undefined);
+        let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
         for (name, _) in fields.into_iter().rev() {
             let name_str = self.string(ctx, &name);

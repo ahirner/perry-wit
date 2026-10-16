@@ -1,6 +1,6 @@
 //! Canonical discriminants and payloads for closed WIT sums.
 use super::*;
-use perry_mir::optional::{absence, optional_value};
+use perry_mir::{absence, optional_value};
 
 /// A WIT `result` that a source function fills completion-style: a compatible return is
 /// `ok`, a checked throw is `err`.
@@ -257,7 +257,7 @@ impl FunctionLowering<'_, '_> {
             let trap = UnreachableOp::new(ctx).get_operation();
             self.insert(ctx, trap);
             self.block = valid;
-            let string = perry_mir::types::StringType::get(ctx).into();
+            let string = perry_mir::StringType::get(ctx).into();
             let mir = RecordType::get(
                 ctx,
                 identifier("perry_completion_error"),
@@ -273,12 +273,12 @@ impl FunctionLowering<'_, '_> {
         let (expected, mir, kind) = match err {
             AbiType::String | AbiType::Enum(_) => (
                 exception_layout::TAG_STRING,
-                perry_mir::types::StringType::get(ctx).into(),
+                perry_mir::StringType::get(ctx).into(),
                 MemKind::I32,
             ),
             AbiType::S64 | AbiType::U64 => (
                 exception_layout::TAG_BIGINT,
-                perry_mir::types::BigIntType::get(ctx).into(),
+                perry_mir::BigIntType::get(ctx).into(),
                 MemKind::I32,
             ),
             AbiType::Bool => (
@@ -362,7 +362,7 @@ impl FunctionLowering<'_, '_> {
                 record_field(ctx, record, if case == 0 { "value" } else { "error" })?.1
             }
             AbiType::Variant(cases) => {
-                let variant = TypedHandle::<perry_mir::types::VariantType>::from_handle(mir, ctx)?;
+                let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)?;
                 return variant
                     .deref(ctx)
                     .cases()
@@ -399,7 +399,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Enum(names) => {
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT enum needs a string literal union"
                 );
                 let text = self.state.data.string(&names[case]);
@@ -572,7 +572,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Variant(cases) => {
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::VariantType>(),
+                    mir.deref(ctx).is::<perry_mir::VariantType>(),
                     "variant needs a closed tagged union"
                 );
                 let tag = self.load(ctx, MemKind::I32, value, 0);
@@ -580,7 +580,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Enum(names) => {
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT enum needs a string literal union"
                 );
                 self.string_tag(ctx, names.iter().map(String::as_str), value)

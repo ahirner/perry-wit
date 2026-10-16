@@ -110,10 +110,6 @@ impl ArrayNewOp {
         op.set_attr_perry_array_tier(ctx, Tier::Unassigned);
         op
     }
-
-    pub fn tier(&self, ctx: &Context) -> Tier {
-        *self.get_attr_perry_array_tier(ctx).expect("array tier")
-    }
 }
 
 impl Verify for ArrayNewOp {

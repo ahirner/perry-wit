@@ -13,7 +13,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use perry_abi::layout::{array as layout, record, string as strings};
-use perry_mir::types::{ArrayType, RecordType};
+use perry_mir::{ArrayType, RecordType};
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
@@ -494,7 +494,7 @@ impl FunctionLowering<'_, '_> {
         handle: Value,
     ) -> Result<Value> {
         ensure!(
-            mir_ty.deref(ctx).is::<perry_mir::types::ReadableType>(),
+            mir_ty.deref(ctx).is::<perry_mir::ReadableType>(),
             "WIT stream<u8> needs a TypeScript ReadableStream<Uint8Array>"
         );
         self.state.uses_streams = true;
@@ -509,7 +509,7 @@ impl FunctionLowering<'_, '_> {
         len: Value,
     ) -> Result<Value> {
         ensure!(
-            mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+            mir_ty.deref(ctx).is::<perry_mir::StringType>(),
             "WIT string needs a TypeScript string"
         );
         let string = self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len]);
@@ -527,7 +527,7 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
-        if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::types::BytesType>() {
+        if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::BytesType>() {
             let bytes = self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr]);
             if self.state.collectible {
                 self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
@@ -667,7 +667,7 @@ impl FunctionLowering<'_, '_> {
             AbiType::OkHandle { .. } => bail!("handle results are returned flat"),
             AbiType::String => {
                 ensure!(
-                    mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT string needs a TypeScript string"
                 );
                 let data = self.load(ctx, MemKind::I32, value, strings::DATA);
@@ -709,14 +709,14 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<(Value, Value)> {
         if *element == AbiType::U8 {
-            if mir_ty.deref(ctx).is::<perry_mir::types::StringType>() {
+            if mir_ty.deref(ctx).is::<perry_mir::StringType>() {
                 return Ok((
                     self.load(ctx, MemKind::I32, value, strings::DATA),
                     self.load(ctx, MemKind::I32, value, strings::LEN),
                 ));
             }
-            if mir_ty.deref(ctx).is::<perry_mir::types::BytesType>()
-                || mir_ty.deref(ctx).is::<perry_mir::types::ByteInputType>()
+            if mir_ty.deref(ctx).is::<perry_mir::BytesType>()
+                || mir_ty.deref(ctx).is::<perry_mir::ByteInputType>()
             {
                 let view = self.runtime(ctx, Runtime::StdBytesBoundary, vec![value]);
                 let data = self.load(ctx, MemKind::I32, view, 4);
@@ -796,7 +796,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::String => {
                 ensure!(
-                    mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT string needs a TypeScript string"
                 );
                 out.push(self.load(ctx, MemKind::I32, value, strings::DATA));

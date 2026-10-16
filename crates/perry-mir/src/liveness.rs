@@ -53,7 +53,7 @@ impl LiveValues {
     }
 
     /// Direct uses on this receiving edge, excluding values defined by the receiving block.
-    pub fn on_entry(&self, block: Ptr<BasicBlock>, value: Value) -> bool {
+    pub(crate) fn on_entry(&self, block: Ptr<BasicBlock>, value: Value) -> bool {
         self.entry[&block].contains(&value)
     }
 }

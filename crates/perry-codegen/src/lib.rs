@@ -27,7 +27,7 @@
 //! function, whose ops `ops` dispatches to the topical modules; `async_split` turns async
 //! functions into state machines and [boundary] binds them to the canonical ABI.
 use anyhow::{Context as _, Result, anyhow};
-use perry_mir::attrs::ErrorKind;
+use perry_mir::ErrorKind;
 use pliron::{
     builtin::ops::ModuleOp,
     context::Context,

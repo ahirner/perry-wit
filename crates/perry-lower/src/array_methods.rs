@@ -1,6 +1,6 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
-use perry_mir::{collections::ArrayAtOp, types::OptionalType};
+use perry_mir::{ArrayAtOp, OptionalType};
 /// The frame of an inline array callback being lowered: its `return`s store into `slot` and
 /// branch to `done` instead of leaving the enclosing function.
 pub(super) struct CallbackReturn {
@@ -466,8 +466,7 @@ impl<'s> FunctionBuilder<'s> {
         let miss = if index_only {
             self.number(ctx, -1.0)
         } else {
-            let opt_ty =
-                crate::coerce::admitting(ctx, element, perry_mir::attrs::Absence::Undefined);
+            let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
             self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
         };
         let result_ty = miss.get_type(ctx);

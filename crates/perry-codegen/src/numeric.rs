@@ -9,10 +9,7 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, UNDEFINED, UNSIGNED};
-use perry_mir::{
-    attrs::{BinaryKind, CompareKind, NumericConstant},
-    types::NumericType,
-};
+use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
 use pliron::{
     builtin::{
         attributes::IntegerAttr,
@@ -119,7 +116,7 @@ impl FunctionLowering<'_, '_> {
         if source == target {
             return Ok(value);
         }
-        if source.deref(ctx).is::<perry_mir::types::BigIntType>() {
+        if source.deref(ctx).is::<perry_mir::BigIntType>() {
             let magnitude = self.load(ctx, MemKind::I64, value, 0);
             let negative = self.load(ctx, MemKind::I32, value, 8);
             let zero = self.i64_const(ctx, 0);
@@ -128,7 +125,7 @@ impl FunctionLowering<'_, '_> {
             let source = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
             return self.numeric_cast(ctx, raw, source, target);
         }
-        if target.deref(ctx).is::<perry_mir::types::BigIntType>() {
+        if target.deref(ctx).is::<perry_mir::BigIntType>() {
             let (_, signed) = integer(ctx, source)
                 .ok_or_else(|| anyhow::anyhow!("bigint boxing needs an integer"))?;
             let wide = IntegerType::get(
@@ -506,7 +503,7 @@ impl FunctionLowering<'_, '_> {
 
                 let single_w = self.select(ctx, l_fixed, lw, rw);
                 let single_s = self.select(ctx, l_fixed, l_odd, r_odd);
-                let unconstrained = Operation::get_op::<perry_mir::scalar::BinaryOp>(op, ctx)
+                let unconstrained = Operation::get_op::<perry_mir::BinaryOp>(op, ctx)
                     .is_some_and(|b| b.is_unconstrained(ctx));
                 let w = if unconstrained {
                     three

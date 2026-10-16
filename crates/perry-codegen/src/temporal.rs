@@ -1,6 +1,6 @@
 //! Temporal codec calls with opaque collectible payloads.
 use crate::{function::FunctionLowering, runtime::Runtime};
-use perry_mir::intrinsics::Intrinsic;
+use perry_mir::Intrinsic;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 

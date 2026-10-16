@@ -159,7 +159,7 @@ pub(super) fn build_module(
         let persistent = hir.functions.iter().any(|f| f.is_exported);
         let signature = Signature {
             name: identifier(if persistent {
-                perry_mir::globals::INITIALIZER
+                perry_mir::INITIALIZER
             } else {
                 MAIN
             })?,
@@ -194,13 +194,13 @@ pub(super) fn build_module(
             .map_err(|error| locations.annotate_function(error, &function.name))
             .with_context(|| format!("lowering function {}", function.name))?;
         if let Some(span) = locations.function_span(&function.name) {
-            perry_mir::diagnostics::set_source_span(ctx, &func, &span);
+            perry_mir::set_source_span(ctx, &func, &span);
         }
         if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
-            perry_mir::facts::constrain(ctx, &func, wit_params, wit_results);
+            perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }
         if function.is_exported {
-            perry_mir::calls::set_exported(ctx, &func);
+            perry_mir::set_exported(ctx, &func);
         }
         if function.is_async {
             set_async(ctx, &func);

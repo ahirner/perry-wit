@@ -23,7 +23,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use perry_abi::layout::promise as promises;
-use perry_mir::calls::AwaitOp;
+use perry_mir::AwaitOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -70,7 +70,7 @@ pub(super) const RESUME: Identifier = pliron::ident!("resume");
 fn live_across_awaits(
     ctx: &Context,
     function: &FuncOp,
-    liveness: &perry_mir::liveness::LiveValues,
+    liveness: &perry_mir::LiveValues,
 ) -> Vec<Value> {
     let order = crate::analysis::value_order(ctx, function);
     let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();

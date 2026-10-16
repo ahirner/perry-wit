@@ -1,6 +1,6 @@
 //! Schema-specific JSON construction in MIR over the shared JSON lexer.
 use super::*;
-use perry_mir::{intrinsics::JsonCursorKeyOp, types::NumberStringType};
+use perry_mir::{JsonCursorKeyOp, NumberStringType};
 
 impl<'s> FunctionBuilder<'s> {
     fn cursor_index(&mut self, ctx: &mut Context, n: u32) -> Value {
@@ -145,7 +145,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if ty.deref(ctx).is::<RecordType>()
             || ty.deref(ctx).is::<ArrayType>()
-            || ty.deref(ctx).is::<perry_mir::types::VariantType>()
+            || ty.deref(ctx).is::<perry_mir::VariantType>()
         {
             let name = self.json_decoder(
                 ctx,
@@ -154,7 +154,7 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx, entry| {
                     let input = entry.deref(ctx).get_argument(0);
                     let byte = entry.deref(ctx).get_argument(1);
-                    let variant = ty.deref(ctx).is::<perry_mir::types::VariantType>();
+                    let variant = ty.deref(ctx).is::<perry_mir::VariantType>();
                     let array = ty.deref(ctx).is::<ArrayType>()
                         || TypedHandle::<RecordType>::from_handle(ty, ctx)
                             .is_ok_and(|r| r.deref(ctx).is_tuple());
@@ -497,7 +497,7 @@ impl<'s> FunctionBuilder<'s> {
         cursor: Value,
         ty: TypeHandle,
     ) -> Result<(Value, Value)> {
-        let cases = perry_mir::variants::cases(ctx, ty)?;
+        let cases = perry_mir::variant_cases(ctx, ty)?;
         let string_ty: TypeHandle = StringType::get(ctx).into();
         let boolean: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let index_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Signless).into();
@@ -644,9 +644,8 @@ impl<'s> FunctionBuilder<'s> {
             self.switch_to(case_block);
             match *payload {
                 None => {
-                    let decoded = self.emit_value(ctx, |ctx| {
-                        perry_mir::variants::VariantNewOp::new(ctx, ty, name, None)
-                    });
+                    let decoded = self
+                        .emit_value(ctx, |ctx| perry_mir::VariantNewOp::new(ctx, ty, name, None));
                     let graph = self.load(ctx, residue)?;
                     self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![decoded, graph]);
                     let ok = self.boolean(ctx, false);
@@ -719,7 +718,7 @@ impl<'s> FunctionBuilder<'s> {
                     self.branch(ctx, payload_err, finish, build_ok);
                     self.switch_to(build_ok);
                     let decoded = self.emit_value(ctx, |ctx| {
-                        perry_mir::variants::VariantNewOp::new(ctx, ty, name, Some(payload_val))
+                        perry_mir::VariantNewOp::new(ctx, ty, name, Some(payload_val))
                     });
                     let graph = self.load(ctx, residue)?;
                     self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![decoded, graph]);

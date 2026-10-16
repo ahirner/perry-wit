@@ -15,7 +15,7 @@
 //! Options distinguish admitted null and undefined states; tuples use `{ _0: A, _1: B }`.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use perry_mir::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
@@ -288,9 +288,9 @@ impl<'h> Shapes<'h> {
             return Ok(*mapped);
         }
         let deref = ty.deref(ctx);
-        let mapped = if deref.is::<perry_mir::types::BytesType>() {
+        let mapped = if deref.is::<perry_mir::BytesType>() {
             drop(deref);
-            perry_mir::types::ByteInputType::get(ctx).into()
+            perry_mir::ByteInputType::get(ctx).into()
         } else if let Some(array) = deref.downcast_ref::<ArrayType>() {
             let element = array.element();
             drop(deref);
@@ -301,7 +301,7 @@ impl<'h> Shapes<'h> {
             drop(deref);
             let value = self.input_type(ctx, value)?;
             OptionalType::get_with(ctx, value, absence).into()
-        } else if let Some(variant) = deref.downcast_ref::<perry_mir::types::VariantType>() {
+        } else if let Some(variant) = deref.downcast_ref::<perry_mir::VariantType>() {
             let cases = variant.cases().to_vec();
             drop(deref);
             let cases = cases
@@ -310,7 +310,7 @@ impl<'h> Shapes<'h> {
                     Ok((tag, payload.map(|ty| self.input_type(ctx, ty)).transpose()?))
                 })
                 .collect::<Result<_>>()?;
-            perry_mir::types::VariantType::get(ctx, cases).into()
+            perry_mir::VariantType::get(ctx, cases).into()
         } else if let Some(record) = deref.downcast_ref::<RecordType>() {
             let get = if record.is_tuple() {
                 RecordType::get_tuple
@@ -368,7 +368,7 @@ impl<'h> Shapes<'h> {
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
         if let Some((width, _)) = Self::perry_integer_spec(name) {
             return Ok(if width == 64 {
-                perry_mir::types::BigIntType::get(ctx).into()
+                perry_mir::BigIntType::get(ctx).into()
             } else {
                 FP64Type::get(ctx).into()
             });
@@ -378,7 +378,7 @@ impl<'h> Shapes<'h> {
         if !user {
             if let Some(&(width, _)) = self.integer_imports.get(name) {
                 return Ok(if width == 64 {
-                    perry_mir::types::BigIntType::get(ctx).into()
+                    perry_mir::BigIntType::get(ctx).into()
                 } else {
                     FP64Type::get(ctx).into()
                 });
@@ -388,35 +388,35 @@ impl<'h> Shapes<'h> {
             }
             match name {
                 "AbortController" | "AbortSignal" => {
-                    return Ok(perry_mir::types::AbortType::get(ctx).into());
+                    return Ok(perry_mir::AbortType::get(ctx).into());
                 }
-                "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
-                "URL" => return Ok(perry_mir::types::UrlType::get(ctx).into()),
-                "URLSearchParams" => return Ok(perry_mir::types::SearchParamsType::get(ctx).into()),
+                "Uint8Array" => return Ok(perry_mir::BytesType::get(ctx).into()),
+                "URL" => return Ok(perry_mir::UrlType::get(ctx).into()),
+                "URLSearchParams" => return Ok(perry_mir::SearchParamsType::get(ctx).into()),
                 "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" => {
-                    return Ok(perry_mir::types::ExceptionType::get(ctx).into());
+                    return Ok(perry_mir::ExceptionType::get(ctx).into());
                 }
-                "RegExp" => return Ok(perry_mir::types::RegexType::get(ctx).into()),
-                "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
-                "Temporal.Instant" => return Ok(perry_mir::types::InstantType::get(ctx).into()),
+                "RegExp" => return Ok(perry_mir::RegexType::get(ctx).into()),
+                "Date" => return Ok(perry_mir::DateType::get(ctx).into()),
+                "Temporal.Instant" => return Ok(perry_mir::InstantType::get(ctx).into()),
                 "Temporal.PlainDate" => {
-                    return Ok(perry_mir::types::PlainDateType::get(ctx).into());
+                    return Ok(perry_mir::PlainDateType::get(ctx).into());
                 }
                 "Temporal.PlainDateTime" => {
-                    return Ok(perry_mir::types::PlainDateTimeType::get(ctx).into());
+                    return Ok(perry_mir::PlainDateTimeType::get(ctx).into());
                 }
-                "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
-                "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),
-                "Request" => return Ok(perry_mir::types::RequestType::get(ctx).into()),
-                "ReadableStream" => return Ok(perry_mir::types::ReadableType::get(ctx).into()),
-                "ArrayBuffer" => return Ok(perry_mir::types::ByteBufferType::get(ctx).into()),
+                "Headers" => return Ok(perry_mir::HeadersType::get(ctx).into()),
+                "Response" => return Ok(perry_mir::ResponseType::get(ctx).into()),
+                "Request" => return Ok(perry_mir::RequestType::get(ctx).into()),
+                "ReadableStream" => return Ok(perry_mir::ReadableType::get(ctx).into()),
+                "ArrayBuffer" => return Ok(perry_mir::ByteBufferType::get(ctx).into()),
                 "ReadableStreamBYOBReader" => {
-                    return Ok(perry_mir::types::ByobReaderType::get(ctx).into());
+                    return Ok(perry_mir::ByobReaderType::get(ctx).into());
                 }
                 "ReadableStreamDefaultReader" => {
-                    return Ok(perry_mir::types::ReaderType::get(ctx).into());
+                    return Ok(perry_mir::ReaderType::get(ctx).into());
                 }
-                "TextDecoder" => return Ok(perry_mir::types::DecoderType::get(ctx).into()),
+                "TextDecoder" => return Ok(perry_mir::DecoderType::get(ctx).into()),
                 _ => {}
             }
             if let Some(entry) = self.foreign.get(name) {

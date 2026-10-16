@@ -129,11 +129,6 @@ impl Verify for UndefinedOp {
 pub struct OmittedOp;
 
 impl OmittedOp {
-    pub fn new(ctx: &mut Context, value: TypeHandle) -> Self {
-        let ty = OptionalType::get(ctx, value).into();
-        Self::with_type(ctx, ty)
-    }
-
     pub fn with_type(ctx: &mut Context, ty: TypeHandle) -> Self {
         OmittedOp {
             op: Operation::new(

@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Result, bail, ensure};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
-use perry_mir::calls::is_exported;
+use perry_mir::is_exported;
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
@@ -39,8 +39,8 @@ pub(crate) fn constrain_numbers(
         else {
             continue;
         };
-        let existing = perry_mir::facts::wit_signature(ctx, function)
-            .unwrap_or_else(|| function.get_type(ctx));
+        let existing =
+            perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
         let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if args.len() != export.params.len()
@@ -63,10 +63,10 @@ pub(crate) fn constrain_numbers(
                 .downcast_ref::<pliron::builtin::types::IntegerType>()
                 .is_some_and(|int| int.width() == 64);
             ensure!(
-                !wide || source.deref(ctx).is::<perry_mir::types::BigIntType>() || is_wide_int,
+                !wide || source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int,
                 "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
             );
-            if (wide && (source.deref(ctx).is::<perry_mir::types::BigIntType>() || is_wide_int))
+            if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
                 || (!wide
                     && (source.deref(ctx).is::<FP64Type>()
                         || source
@@ -78,7 +78,7 @@ pub(crate) fn constrain_numbers(
             }
         }
         if constrained {
-            perry_mir::facts::constrain(ctx, function, args, results);
+            perry_mir::constrain_signature(ctx, function, args, results);
         }
     }
     Ok(())
@@ -91,7 +91,7 @@ pub(crate) fn specialized_implementations(ctx: &Context, mir: &ModuleOp, exports
             .iter()
             .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
         {
-            export.function = perry_mir::facts::implementation(ctx, function).to_string();
+            export.function = perry_mir::specialized_implementation(ctx, function).to_string();
         }
     }
 }

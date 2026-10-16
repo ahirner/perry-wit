@@ -96,7 +96,7 @@ impl<'s> FunctionBuilder<'s> {
             DecoderInput::Cursor => (
                 "cursor",
                 vec![
-                    perry_mir::types::JsonCursorType::get(ctx).into(),
+                    perry_mir::JsonCursorType::get(ctx).into(),
                     IntegerType::get(ctx, 32, Signedness::Signless).into(),
                 ],
                 vec![
@@ -130,17 +130,17 @@ impl<'s> FunctionBuilder<'s> {
         };
         let ty = FunctionType::get(ctx, params, results);
         let function = FuncOp::new(ctx, name.clone(), ty);
-        perry_mir::calls::set_json_decoder(
+        perry_mir::set_json_decoder(
             ctx,
             &function,
             match input {
-                DecoderInput::Text => perry_mir::attrs::JsonDecoderKind::Parse,
-                DecoderInput::Snapshot => perry_mir::attrs::JsonDecoderKind::Value,
-                DecoderInput::Cursor => perry_mir::attrs::JsonDecoderKind::Cursor,
+                DecoderInput::Text => perry_mir::JsonDecoderKind::Parse,
+                DecoderInput::Snapshot => perry_mir::JsonDecoderKind::Value,
+                DecoderInput::Cursor => perry_mir::JsonDecoderKind::Cursor,
             },
         );
         if input != DecoderInput::Snapshot {
-            perry_mir::calls::set_atomic_construction(ctx, &function);
+            perry_mir::set_atomic_construction(ctx, &function);
         }
         self.shapes
             .module
@@ -166,7 +166,7 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         target: TypeHandle,
     ) -> Result<Value> {
-        if target.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+        if target.deref(ctx).is::<perry_mir::NumberStringType>() {
             let tag = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]);
             let number = self.string(ctx, "number");
             let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
@@ -186,8 +186,7 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if let Ok(variant) = TypedHandle::<perry_mir::types::VariantType>::from_handle(target, ctx)
-        {
+        if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(target, ctx) {
             let cases = variant.deref(ctx).cases().to_vec();
             self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
             let tag_key = self.string(ctx, "tag");
@@ -211,7 +210,7 @@ impl<'s> FunctionBuilder<'s> {
                     None
                 };
                 let decoded = self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantNewOp::new(ctx, target, &name, payload)
+                    perry_mir::VariantNewOp::new(ctx, target, &name, payload)
                 });
                 self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
                 self.store(ctx, result, decoded);
@@ -376,9 +375,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::Boolean => Intrinsic::JsonFromBool,
             Kind::Exception => Intrinsic::JsonFromException,
             Kind::Record | Kind::Array => {
-                return Ok(self.emit_value(ctx, |ctx| {
-                    perry_mir::collections::NativeJsonOp::new(ctx, value)
-                }));
+                return Ok(self.emit_value(ctx, |ctx| perry_mir::NativeJsonOp::new(ctx, value)));
             }
             _ => bail!("unsupported Error cause type"),
         };
@@ -431,14 +428,14 @@ pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
             pending.extend(fields.iter().map(|(_, ty)| *ty));
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             pending.push(array.element());
-        } else if let Some(variant) = ty.downcast_ref::<perry_mir::types::VariantType>() {
+        } else if let Some(variant) = ty.downcast_ref::<perry_mir::VariantType>() {
             pending.extend(variant.cases().iter().filter_map(|(_, ty)| *ty));
-        } else if let Some(optional) = ty.downcast_ref::<perry_mir::types::OptionalType>() {
+        } else if let Some(optional) = ty.downcast_ref::<perry_mir::OptionalType>() {
             pending.push(optional.value());
         } else if !(ty.is::<FP64Type>()
             || ty.is::<StringType>()
             || ty.is::<JsonType>()
-            || ty.is::<perry_mir::types::NumberStringType>()
+            || ty.is::<perry_mir::NumberStringType>()
             || ty
                 .downcast_ref::<IntegerType>()
                 .is_some_and(|int| matches!(int.width(), 1 | 64)))

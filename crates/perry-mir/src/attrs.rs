@@ -238,11 +238,11 @@ impl MaterializableAttr for NumericConstant {
 /// Per-function metadata flags for exports, async splitting, entry specialization, and atomic construction.
 #[pliron_attr(name = "perry.function_meta", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
-pub struct FunctionMeta {
-    pub exported: bool,
-    pub asynchronous: bool,
-    pub specialized_entry: bool,
-    pub atomic_construction: bool,
+pub(crate) struct FunctionMeta {
+    pub(crate) exported: bool,
+    pub(crate) asynchronous: bool,
+    pub(crate) specialized_entry: bool,
+    pub(crate) atomic_construction: bool,
 }
 
 /// Semantic kind of a compiler-generated JSON decoder function.

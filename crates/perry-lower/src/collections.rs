@@ -5,7 +5,7 @@
 //! move it; views (`map.keys()`) own such a cursor. Records are recognized by name prefix.
 
 use super::*;
-use perry_mir::types::OptionalType;
+use perry_mir::OptionalType;
 
 mod keyed;
 mod objects;

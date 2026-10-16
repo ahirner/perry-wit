@@ -356,7 +356,7 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(super) fn load(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
         if self.global_slots.contains(&slot) {
-            let op = perry_mir::globals::GlobalLoadOp::new(ctx, slot)?;
+            let op = perry_mir::GlobalLoadOp::new(ctx, slot)?;
             return Ok(self.append_value(ctx, &op));
         }
         let op = LoadOp::new(ctx, slot)?;
@@ -465,14 +465,14 @@ impl<'s> FunctionBuilder<'s> {
         ty: TypeHandle,
     ) -> Result<Value> {
         let name = identifier(&format!("global_{id}"))?;
-        let slot = self.emit_value(ctx, |ctx| perry_mir::globals::GlobalOp::new(ctx, name, ty));
+        let slot = self.emit_value(ctx, |ctx| perry_mir::GlobalOp::new(ctx, name, ty));
         self.global_slots.insert(slot);
         Ok(slot)
     }
 
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
         Ok(
-            TypedHandle::<perry_mir::types::SlotType>::from_handle(slot.get_type(ctx), ctx)
+            TypedHandle::<perry_mir::SlotType>::from_handle(slot.get_type(ctx), ctx)
                 .map_err(|_| anyhow!("not a slot"))?
                 .deref(ctx)
                 .value(),

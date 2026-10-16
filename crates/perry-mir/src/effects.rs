@@ -87,11 +87,11 @@ pub struct Summary {
 }
 
 impl Effects {
-    pub fn may_mutate_records(&self) -> bool {
+    pub(crate) fn may_mutate_records(&self) -> bool {
         self.writes_record || self.may_suspend || self.may_reenter
     }
 
-    pub fn may_mutate_state(&self) -> bool {
+    pub(crate) fn may_mutate_state(&self) -> bool {
         self.writes_state || self.may_mutate_records()
     }
 

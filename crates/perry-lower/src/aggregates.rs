@@ -115,7 +115,7 @@ impl<'s> FunctionBuilder<'s> {
         // A record or variant where `T | undefined` is expected is a `T`.
         let expected = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
         if let Some(ty) = expected
-            && ty.deref(ctx).is::<perry_mir::types::VariantType>()
+            && ty.deref(ctx).is::<perry_mir::VariantType>()
         {
             return self.variant_literal(ctx, ty, names, args);
         }
@@ -271,7 +271,7 @@ impl<'s> FunctionBuilder<'s> {
                     states = merge_absence(states, absence(ctx, ty));
                 }
                 states.map_or(inner, |states| {
-                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 })
             }
             (None, None) => bail!("an empty array literal needs a declared element type"),

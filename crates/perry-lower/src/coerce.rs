@@ -2,13 +2,13 @@
 use super::*;
 
 pub(super) fn merge_absence(
-    left: Option<perry_mir::attrs::Absence>,
-    right: Option<perry_mir::attrs::Absence>,
-) -> Option<perry_mir::attrs::Absence> {
+    left: Option<perry_mir::Absence>,
+    right: Option<perry_mir::Absence>,
+) -> Option<perry_mir::Absence> {
     match (left, right) {
         (None, other) | (other, None) => other,
         (Some(left), Some(right)) if left == right => Some(left),
-        (Some(_), Some(_)) => Some(perry_mir::attrs::Absence::Both),
+        (Some(_), Some(_)) => Some(perry_mir::Absence::Both),
     }
 }
 
@@ -17,14 +17,14 @@ pub(super) fn merge_absence(
 pub(super) fn admitting(
     ctx: &mut Context,
     ty: TypeHandle,
-    state: perry_mir::attrs::Absence,
+    state: perry_mir::Absence,
 ) -> TypeHandle {
     let states = match absence(ctx, ty) {
-        Some(existing) if existing != state => perry_mir::attrs::Absence::Both,
+        Some(existing) if existing != state => perry_mir::Absence::Both,
         _ => state,
     };
     let inner = optional_value(ctx, ty).unwrap_or(ty);
-    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+    perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,17 +109,17 @@ impl Kind {
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
-    if ty.is::<perry_mir::types::BigIntType>() {
+    if ty.is::<perry_mir::BigIntType>() {
         Ok(Kind::BigInt)
     } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
     } else if ty.is::<StringType>() {
         Ok(Kind::String)
-    } else if ty.is::<perry_mir::types::ResourceType>() {
+    } else if ty.is::<perry_mir::ResourceType>() {
         Ok(Kind::Resource)
-    } else if ty.is::<perry_mir::types::NumberStringType>() {
+    } else if ty.is::<perry_mir::NumberStringType>() {
         Ok(Kind::NumberString)
-    } else if ty.is::<perry_mir::types::VariantType>() {
+    } else if ty.is::<perry_mir::VariantType>() {
         Ok(Kind::Variant)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
@@ -129,15 +129,15 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Exception)
     } else if ty.is::<BytesType>() {
         Ok(Kind::Bytes)
-    } else if ty.is::<perry_mir::types::UrlType>() {
+    } else if ty.is::<perry_mir::UrlType>() {
         Ok(Kind::Url)
-    } else if ty.is::<perry_mir::types::SearchParamsType>() {
+    } else if ty.is::<perry_mir::SearchParamsType>() {
         Ok(Kind::SearchParams)
     } else if ty.is::<JsonType>() {
         Ok(Kind::Json)
-    } else if ty.is::<perry_mir::types::RegexType>() {
+    } else if ty.is::<perry_mir::RegexType>() {
         Ok(Kind::Regex)
-    } else if ty.is::<perry_mir::types::DecoderType>() {
+    } else if ty.is::<perry_mir::DecoderType>() {
         Ok(Kind::Decoder)
     } else if ty.is::<DateType>() {
         Ok(Kind::Date)
@@ -157,9 +157,9 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Writer)
     } else if ty.is::<ReadableType>() {
         Ok(Kind::Readable)
-    } else if ty.is::<perry_mir::types::ByteBufferType>() {
+    } else if ty.is::<perry_mir::ByteBufferType>() {
         Ok(Kind::ByteBuffer)
-    } else if ty.is::<perry_mir::types::ByobReaderType>() {
+    } else if ty.is::<perry_mir::ByobReaderType>() {
         Ok(Kind::ByobReader)
     } else if ty.is::<ReaderType>() {
         Ok(Kind::Reader)
@@ -241,7 +241,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let ty = value.get_type(ctx);
         let wanted = optional_value(ctx, target).unwrap_or(target);
-        if wanted.deref(ctx).is::<perry_mir::types::NumberStringType>()
+        if wanted.deref(ctx).is::<perry_mir::NumberStringType>()
             && (ty.deref(ctx).is::<FP64Type>() || ty.deref(ctx).is::<StringType>())
         {
             let tag = if ty.deref(ctx).is::<FP64Type>() {
@@ -250,11 +250,11 @@ impl<'s> FunctionBuilder<'s> {
                 "string"
             };
             let boxed = self.emit_value(ctx, |ctx| {
-                perry_mir::variants::VariantNewOp::new(ctx, wanted, tag, Some(value))
+                perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value))
             });
             return self.fit(ctx, boxed, target);
         }
-        if target.deref(ctx).is::<perry_mir::types::ByteInputType>() {
+        if target.deref(ctx).is::<perry_mir::ByteInputType>() {
             let convert = if ty.deref(ctx).is::<StringType>() {
                 Some(Intrinsic::StringByteInput)
             } else if ty.deref(ctx).is::<BytesType>() {
@@ -335,7 +335,7 @@ impl<'s> FunctionBuilder<'s> {
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
             return self.fit(ctx, converted, target);
         }
-        if thrown.deref(ctx).is::<perry_mir::types::BigIntType>()
+        if thrown.deref(ctx).is::<perry_mir::BigIntType>()
             && wanted
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()
@@ -349,7 +349,7 @@ impl<'s> FunctionBuilder<'s> {
             .deref(ctx)
             .downcast_ref::<IntegerType>()
             .is_some_and(|int| int.width() == 64)
-            && wanted.deref(ctx).is::<perry_mir::types::BigIntType>()
+            && wanted.deref(ctx).is::<perry_mir::BigIntType>()
         {
             let defined = self.defined(ctx, value)?;
             let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
@@ -365,9 +365,9 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.emit_value(ctx, |ctx| OptionalCastOp::new(ctx, value, target)))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
-        } else if perry_mir::views::can_widen(ctx, ty, target) {
+        } else if perry_mir::can_widen(ctx, ty, target) {
             Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::views::AggregateViewOp::new(ctx, value, target)
+                perry_mir::AggregateViewOp::new(ctx, value, target)
             }))
         } else {
             let source = optional_value(ctx, ty).unwrap_or(ty);
@@ -485,9 +485,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         Ok(match kind(ctx, value)? {
             Kind::NumberString => {
-                let tag = self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantTagOp::new(ctx, value)
-                });
+                let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value));
                 let number = self.string(ctx, "number");
                 let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
                 self.choose_string(
@@ -496,14 +494,14 @@ impl<'s> FunctionBuilder<'s> {
                     |b, ctx| {
                         let ty = FP64Type::get(ctx).into();
                         let payload = b.emit_value(ctx, |ctx| {
-                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
                         });
                         b.display(ctx, payload)
                     },
                     |b, ctx| {
                         let ty = StringType::get(ctx).into();
                         Ok(b.emit_value(ctx, |ctx| {
-                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
                         }))
                     },
                 )?
@@ -515,7 +513,7 @@ impl<'s> FunctionBuilder<'s> {
                     .downcast_ref::<IntegerType>()
                     .is_some_and(|int| int.width() == 64)
                 {
-                    let bigint = perry_mir::types::BigIntType::get(ctx).into();
+                    let bigint = perry_mir::BigIntType::get(ctx).into();
                     self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
                 } else {
                     value
@@ -559,9 +557,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let name = match kind(ctx, value)? {
             Kind::NumberString => {
-                return Ok(self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantTagOp::new(ctx, value)
-                }));
+                return Ok(self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value)));
             }
             Kind::BigInt => "bigint",
             Kind::Number => "number",
@@ -579,5 +575,5 @@ impl<'s> FunctionBuilder<'s> {
 /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
 pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
     let number = FP64Type::get(ctx).into();
-    perry_mir::types::OptionalType::get(ctx, number).into()
+    perry_mir::OptionalType::get(ctx, number).into()
 }

@@ -174,8 +174,7 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some((inner, states)) = optional_parts(ctx, ty)
                     && foreign::accepts_input(ctx, inner, actual)
                 {
-                    let wrapped =
-                        perry_mir::types::OptionalType::get_with(ctx, actual, states).into();
+                    let wrapped = perry_mir::OptionalType::get_with(ctx, actual, states).into();
                     self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
                 } else {
                     self.fit(ctx, value, ty)?
@@ -194,13 +193,8 @@ impl<'s> FunctionBuilder<'s> {
                 let op = AsyncCallOp::new(ctx, wrapper, values, payload);
                 return Ok(Some(self.append_value(ctx, &op)));
             }
-            let op = perry_mir::foreign::ForeignOp::new(
-                ctx,
-                perry_mir::foreign::Phase::Call,
-                &binding,
-                values,
-                results,
-            );
+            let op =
+                perry_mir::ForeignOp::new(ctx, perry_mir::Phase::Call, &binding, values, results);
             self.append(ctx, &op);
             return Ok(op.get_operation().deref(ctx).results().next());
         }

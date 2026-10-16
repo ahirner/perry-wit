@@ -544,7 +544,7 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
                 })
                 .collect();
             let results = vec![FP64Type::get(ctx).into()];
-            crate::facts::constrain(ctx, &func, args, results);
+            crate::facts::constrain_signature(ctx, &func, args, results);
         }
     }
     let mut analyses = AnalysisManager::default();

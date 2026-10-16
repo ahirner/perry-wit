@@ -1,8 +1,8 @@
 {
   "compiler_revision": "2f606a2a075b025f681dbf9eda5b8982353199a8",
   "compiler_source_changes": false,
-  "comparison_harness_sha256": "715004f4acd409898c6b7a47fa470ed04521d7f3f236f9b80e9946cb5c7bfcae",
-  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged. Report consumed instantiation and first-invocation fuel separately; retain the historical fuel measurement and captured baseline unchanged. Extract comparison into a private gate module, borrow workload names and check their set once. The comparison hash covers the listed harness files concatenated in order; capture hashes, measured workloads, baseline metrics and the 105% limits are unchanged.",
+  "comparison_harness_sha256": "01dd5bbe3e3995f620ce0112c598dcdace8a14ecd97aa07a03688ae0aca4fef5",
+  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged. Report consumed instantiation and first-invocation fuel separately; retain the historical fuel measurement and captured baseline unchanged. Extract comparison into a private gate module, borrow workload names and check their set once. Import perry-mir's canonicalize from its crate-root API. The comparison hash covers the listed harness files concatenated in order; capture hashes, measured workloads, baseline metrics and the 105% limits are unchanged.",
   "harness_changes": "Added core sizes and optimization fixtures; replaced TCP HTTP transport with a fixed in-process response before capture.",
   "host": "macOS-27.0-arm64-arm-64bit",
   "rust": "1.98.1",

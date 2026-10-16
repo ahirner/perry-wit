@@ -106,11 +106,7 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         (rhs, lhs)
                     };
-                    if value
-                        .get_type(ctx)
-                        .deref(ctx)
-                        .is::<perry_mir::types::BigIntType>()
-                    {
+                    if value.get_type(ctx).deref(ctx).is::<perry_mir::BigIntType>() {
                         self.intrinsic(ctx, Intrinsic::ExceptionBigIntEqual, vec![exception, value])
                     } else {
                         let value = self.error_cause(ctx, value)?;
@@ -138,16 +134,16 @@ impl<'s> FunctionBuilder<'s> {
                 optional_value(ctx, value.get_type(ctx))
                     .unwrap_or(value.get_type(ctx))
                     .deref(ctx)
-                    .is::<perry_mir::types::NumberStringType>()
+                    .is::<perry_mir::NumberStringType>()
             };
             let states = merge_absence(
                 absence(ctx, lhs.get_type(ctx)),
                 absence(ctx, rhs.get_type(ctx)),
             );
             if union(lhs) || union(rhs) {
-                let base = perry_mir::types::NumberStringType::get(ctx).into();
+                let base = perry_mir::NumberStringType::get(ctx).into();
                 let target = states.map_or(base, |a| {
-                    perry_mir::types::OptionalType::get_with(ctx, base, a).into()
+                    perry_mir::OptionalType::get_with(ctx, base, a).into()
                 });
                 let lhs = self.fit(ctx, lhs, target)?;
                 let rhs = self.fit(ctx, rhs, target)?;
@@ -163,8 +159,7 @@ impl<'s> FunctionBuilder<'s> {
                     left_inner == right_inner,
                     "comparison of different types is not supported"
                 );
-                let target =
-                    perry_mir::types::OptionalType::get_with(ctx, left_inner, states).into();
+                let target = perry_mir::OptionalType::get_with(ctx, left_inner, states).into();
                 let lhs = self.fit(ctx, lhs, target)?;
                 let rhs = self.fit(ctx, rhs, target)?;
                 ensure!(
@@ -381,7 +376,7 @@ impl<'s> FunctionBuilder<'s> {
                 let right_ty = rhs.get_type(ctx);
                 if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
                     let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
-                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 } else {
                     left_ty
                 }

@@ -23,20 +23,20 @@ impl Shapes<'_> {
     pub(super) fn source_type(&self, ctx: &Context, source: ArgumentId) -> Result<TypeHandle> {
         let source = source.deref(ctx);
         match source.kind() {
-            Kind::BigInt => Ok(perry_mir::types::BigIntType::get(ctx).into()),
+            Kind::BigInt => Ok(perry_mir::BigIntType::get(ctx).into()),
             Kind::Number | Kind::Int32 => Ok(FP64Type::get(ctx).into()),
             Kind::Boolean => Ok(IntegerType::get(ctx, 1, Signedness::Signless).into()),
             Kind::String | Kind::StringLiteral(_) => Ok(StringType::get(ctx).into()),
             Kind::Null => Ok(OptionalType::get_with(
                 ctx,
                 FP64Type::get(ctx).into(),
-                perry_mir::attrs::Absence::Null,
+                perry_mir::Absence::Null,
             )
             .into()),
             Kind::Void => Ok(OptionalType::get_with(
                 ctx,
                 FP64Type::get(ctx).into(),
-                perry_mir::attrs::Absence::Undefined,
+                perry_mir::Absence::Undefined,
             )
             .into()),
             Kind::Array(element) => {
@@ -101,7 +101,7 @@ impl Shapes<'_> {
                         [ty] if matches!(ty.deref(ctx).kind(), Kind::Named(n) if n == "Uint8Array")
                     )
                 {
-                    return Ok(perry_mir::types::ReadableType::get(ctx).into());
+                    return Ok(perry_mir::ReadableType::get(ctx).into());
                 }
                 self.generic(ctx, base, arguments)
             }
@@ -187,7 +187,7 @@ impl Shapes<'_> {
                         .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
             })
         {
-            return Ok(perry_mir::types::NumberStringType::get(ctx).into());
+            return Ok(perry_mir::NumberStringType::get(ctx).into());
         }
         let defined: Vec<_> = members
             .iter()
@@ -210,9 +210,9 @@ impl Shapes<'_> {
                 .iter()
                 .any(|ty| matches!(ty.deref(ctx).kind(), Kind::Void)),
         ) {
-            (true, true) => perry_mir::attrs::Absence::Both,
-            (true, false) => perry_mir::attrs::Absence::Null,
-            _ => perry_mir::attrs::Absence::Undefined,
+            (true, true) => perry_mir::Absence::Both,
+            (true, false) => perry_mir::Absence::Null,
+            _ => perry_mir::Absence::Undefined,
         };
         Ok(OptionalType::get_with(ctx, inner, absence).into())
     }
@@ -294,7 +294,7 @@ impl Shapes<'_> {
                 .transpose()?;
             cases.push((tag, payload));
         }
-        Ok(perry_mir::types::VariantType::get(ctx, cases).into())
+        Ok(perry_mir::VariantType::get(ctx, cases).into())
     }
 
     fn settled_source_type(&self, ctx: &Context, ty: ArgumentId) -> Result<TypeHandle> {
@@ -428,13 +428,11 @@ impl Shapes<'_> {
         match entry {
             crate::hir::Foreign::Type(ty) => self.value_type(ctx, ty),
             crate::hir::Foreign::Integer { width, .. } => Ok(if *width == 64 {
-                perry_mir::types::BigIntType::get(ctx).into()
+                perry_mir::BigIntType::get(ctx).into()
             } else {
                 FP64Type::get(ctx).into()
             }),
-            crate::hir::Foreign::Resource(id) => {
-                Ok(perry_mir::types::ResourceType::get(ctx, *id).into())
-            }
+            crate::hir::Foreign::Resource(id) => Ok(perry_mir::ResourceType::get(ctx, *id).into()),
             crate::hir::Foreign::Input(inner) => {
                 let inner = self.foreign_value_type(ctx, inner)?;
                 self.input_type(ctx, inner)

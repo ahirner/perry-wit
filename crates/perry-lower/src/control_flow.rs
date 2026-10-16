@@ -226,7 +226,7 @@ impl<'s> FunctionBuilder<'s> {
         if self.handlers.is_empty() {
             self.emit(ctx, |ctx| {
                 let rethrow = RethrowOp::new(ctx, status);
-                perry_mir::exceptions::set_exit_only(ctx, &rethrow);
+                perry_mir::set_exit_only(ctx, &rethrow);
                 rethrow
             });
         } else {

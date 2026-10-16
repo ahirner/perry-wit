@@ -609,7 +609,7 @@ impl Intrinsic {
     }
 
     /// Pure services can be removed when unused.
-    pub fn pure(self) -> bool {
+    pub(crate) fn pure(self) -> bool {
         self.flags().contains(&"pure")
     }
 
