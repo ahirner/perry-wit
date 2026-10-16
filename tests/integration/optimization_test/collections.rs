@@ -4,16 +4,13 @@ use crate::core_program::Program;
 use anyhow::Result;
 use wasmtime::Val;
 
-/// Live iterator mutation, resumption, and compaction are checked by the stateful
-/// `ecma.collection.iterators` generator; this covers property presence, key hygiene,
-/// iterator identity, and linear churn cost.
 #[test]
-fn collection_mutation_during_iteration_and_property_presence_preserve_semantics() -> Result<()> {
+fn object_property_presence_distinguishes_omitted_from_explicit_undefined() -> Result<()> {
     let mut program = Program::from_wasm(
         compile(
             r#"
 interface Item { x?: number; y?: number }
-export function run(): number {
+export function run(query: number): number {
     const src: Item = {};
     const dst: Item = { x: src.x };
     const heapSrc: Item = {};
@@ -22,53 +19,88 @@ export function run(): number {
     const assigned: Item = { x: 1 };
     assigned.x = src.x;
     const jsonMissing = JSON.parse<Item>("{}");
-    const copiedPresence =
-        ("x" in dst) &&
-        dst.x === undefined &&
-        Object.keys(dst).length === 1 &&
-        heapKeys === 0 &&
-        Object.keys(heapDst).length === 1 &&
-        Object.keys(assigned).length === 1 &&
-        !("x" in jsonMissing);
-
     const explicit: Item = { x: undefined };
     const values = Object.values(explicit);
     const entries = Object.entries(explicit);
-    const enumPresence =
-        values.length === 1 &&
+    if (query === 0) return ("x" in dst) && dst.x === undefined ? 1 : 0;
+    if (query === 1) return Object.keys(dst).length * 100 + heapKeys * 10 + Object.keys(heapDst).length;
+    if (query === 2) return Object.keys(assigned).length * 10 + ("x" in jsonMissing ? 1 : 0);
+    return values.length === 1 &&
         values[0] === undefined &&
         entries.length === 1 &&
         entries[0][0] === "x" &&
-        entries[0][1] === undefined;
-
-    const nested = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
-    const nestedOk = nested.get("key").has(4) && nested.get("key").size === 2;
-
-    const idSet = new Set<number>([1]);
-    const iterIdentity = (idSet.values() as unknown) !== (idSet.values() as unknown);
-
-    const spreadSet = [...new Set([4, 5])];
-    const spreadOk = spreadSet.length === 2 && spreadSet[0] + spreadSet[1] === 9;
-
-    const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
-    const nulHygiene = nulSet.size === 3 && nulSet.has("\u0000perry_set_type_args") && nulSet.has("__perry_set_type_args");
-
-    return copiedPresence &&
-        enumPresence &&
-        nestedOk &&
-        iterIdentity &&
-        spreadOk &&
-        nulHygiene
+        entries[0][1] === undefined
         ? 1
         : 0;
 }
 "#,
-            "func()->s32",
+            "func(query:s32)->s32",
         )?
         .core,
     );
-    assert_eq!(program.call("run", &[]).0[0].unwrap_i32(), 1);
+    for (query, expected, label) in [
+        (0, 1, "copied undefined property remains present with undefined value"),
+        (1, 101, "Object.keys counts on stack/heap records with omitted vs copied undefined"),
+        (2, 10, "assigned undefined stays present while JSON.parse('{}') omits missing field"),
+        (3, 1, "Object.values and Object.entries include explicit undefined property"),
+    ] {
+        assert_eq!(
+            program.call("run", &[Val::I32(query)]).0[0].unwrap_i32(),
+            expected,
+            "{label}"
+        );
+    }
+    Ok(())
+}
 
+/// Live iterator mutation, resumption, and compaction are checked by the stateful
+/// `ecma.collection.iterators` generator; this checks nested collections, iterator
+/// object identity, Set spread, and internal-prefix key hygiene.
+#[test]
+fn collection_key_hygiene_spread_and_iterator_identity_hold() -> Result<()> {
+    let mut program = Program::from_wasm(
+        compile(
+            r#"
+export function run(query: number): number {
+    if (query === 0) {
+        const nested = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
+        return (nested.get("key").has(4) ? 10 : 0) + nested.get("key").size;
+    }
+    if (query === 1) {
+        const idSet = new Set<number>([1]);
+        return (idSet.values() as unknown) !== (idSet.values() as unknown) ? 1 : 0;
+    }
+    if (query === 2) {
+        const spreadSet = [...new Set([4, 5])];
+        return spreadSet.length * 100 + spreadSet[0] * 10 + spreadSet[1];
+    }
+    const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
+    return nulSet.size * 100 +
+        (nulSet.has("\u0000perry_set_type_args") ? 10 : 0) +
+        (nulSet.has("__perry_set_type_args") ? 1 : 0);
+}
+"#,
+            "func(query:s32)->s32",
+        )?
+        .core,
+    );
+    for (query, expected, label) in [
+        (0, 12, "nested Map<string, Set<number>> preserves inner Set membership and size"),
+        (1, 1, "Set.values() allocates distinct iterator instances"),
+        (2, 245, "spreading Set into array preserves order and elements"),
+        (3, 311, "Set string keys with NUL or internal prefix do not collide with metadata"),
+    ] {
+        assert_eq!(
+            program.call("run", &[Val::I32(query)]).0[0].unwrap_i32(),
+            expected,
+            "{label}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn collection_churn_reuses_memory_and_scales_linearly() -> Result<()> {
     let mut churn = Program::from_wasm(
         compile(
             r#"

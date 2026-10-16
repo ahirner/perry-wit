@@ -374,12 +374,12 @@ impl AggregateCase {
             };
             let overflow_expr = self.emit_instance_expr(&spec);
             out.push_str(&format!("{indent}const many: Shape[] = [\n"));
-            for _ in 0..36 {
+            for _ in 0..4 {
                 out.push_str(&format!("{indent}  {overflow_expr},\n"));
             }
             out.push_str(&format!("{indent}];\n"));
             out.push_str(&format!(
-                "{indent}trace.push(((readSlotA(many[35]) % 2) + 0));\n"
+                "{indent}trace.push(((readSlotA(many[3]) % 2) + 0));\n"
             ));
         }
     }

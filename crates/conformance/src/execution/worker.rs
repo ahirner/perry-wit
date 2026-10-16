@@ -168,7 +168,11 @@ fn execute_function(
                 .map_err(anyhow::Error::from)
         }
     };
-    let compiled = match compile_one() {
+    let compiled = match if matches!(case, Case::Aggregate(agg) if agg.overflow_origins) {
+        perry_mir::with_fact_limits(2, 2, compile_one)
+    } else {
+        compile_one()
+    } {
         Ok(compiled) => compiled,
         Err(error) => return Ok(Outcome::Compile(format!("{error:#}"))),
     };

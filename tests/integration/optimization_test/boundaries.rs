@@ -1,7 +1,6 @@
 //! Scalar export boundaries: which runtime pieces (memory, realloc, roots) are retained.
-use super::{compile, export_names, function_names};
+use super::{compile, inspect_wasm};
 use anyhow::Result;
-use wasmparser::{Parser, Payload};
 
 #[test]
 fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
@@ -12,17 +11,11 @@ fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
         "export function run(a:number,b:number):number { return a+b; } export function unused():string { return String(Math.random()); }",
     ] {
         let compiled = compile(source, "func(a:f64,b:f64)->f64")?;
-        let mut functions = 0;
-        for payload in Parser::new(0).parse_all(&compiled.core) {
-            match payload? {
-                Payload::FunctionSection(section) => functions = section.count(),
-                Payload::MemorySection(section) => assert_eq!(section.count(), 0),
-                Payload::ImportSection(section) => assert_eq!(section.count(), 0),
-                _ => {}
-            }
-        }
-        assert_eq!(functions, 1, "export the implementation directly");
-        assert_eq!(export_names(&compiled.core)?, ["run"]);
+        let wasm = inspect_wasm(&compiled.core)?;
+        assert_eq!(wasm.functions, 1, "export the implementation directly");
+        assert_eq!(wasm.memories, 0);
+        assert_eq!(wasm.imports, 0);
+        assert_eq!(wasm.exports, ["run"]);
         assert!(compiled.core.len() < 2963);
         let engine = wasmtime::Engine::default();
         let (mut store, instance) =
@@ -41,17 +34,15 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
         "let count=0; export function run(a:number):number { try { count+=a; return count; } catch { return -1; } }",
     ] {
         let compiled = compile(source, "func(a:f64)->f64")?;
-        for payload in Parser::new(0).parse_all(&compiled.core) {
-            assert!(
-                !matches!(payload?, Payload::StartSection { .. }),
-                "constant helper initialization must be resolved before instantiation"
-            );
-        }
-        assert!(!function_names(&compiled.core)?.contains(&"__wasm_apply_data_relocs"));
-        let exports = export_names(&compiled.core)?;
-        assert!(exports.contains(&"memory"), "{source}");
-        assert!(exports.contains(&"cabi_post_run"), "{source}");
-        assert!(!exports.contains(&"cabi_realloc"), "{source}");
+        let wasm = inspect_wasm(&compiled.core)?;
+        assert!(
+            !wasm.has_start,
+            "constant helper initialization must be resolved before instantiation"
+        );
+        assert!(!wasm.function_names.contains(&"__wasm_apply_data_relocs"));
+        assert!(wasm.exports.contains(&"memory"), "{source}");
+        assert!(wasm.exports.contains(&"cabi_post_run"), "{source}");
+        assert!(!wasm.exports.contains(&"cabi_realloc"), "{source}");
         let engine = wasmtime::Engine::default();
         let (mut store, instance) =
             crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
@@ -73,7 +64,7 @@ fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
         world,
         true,
     )?;
-    assert!(!export_names(&compiled.core)?.contains(&"cabi_realloc"));
+    assert!(!inspect_wasm(&compiled.core)?.exports.contains(&"cabi_realloc"));
     // Component encoding validates the reachable import and export ABI without realloc.
     assert!(compiled.component.is_some());
     Ok(())

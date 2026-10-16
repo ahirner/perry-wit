@@ -1,5 +1,5 @@
 //! WIT integer domains: typed arithmetic, wrap points, widening and exact 64-bit values.
-use super::compile;
+use super::{compile, inspect_wasm};
 use crate::core_program::Program;
 use anyhow::Result;
 use wasmparser::{Operator, Parser, Payload};
@@ -25,83 +25,73 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
             &format!("func(a:{wit},b:{wit})->{wit}"),
         )?;
         let mut stripped = wasm_encoder::Module::new();
-        let mut names = false;
         for payload in Parser::new(0).parse_all(&compiled.core) {
             let payload = payload?;
-            if let Payload::CustomSection(section) = &payload {
-                names |= section.name() == "name";
-            } else if let Some((id, range)) = payload.as_section() {
+            if !matches!(payload, Payload::CustomSection(_))
+                && let Some((id, range)) = payload.as_section()
+            {
                 stripped.section(&wasm_encoder::RawSection {
                     id,
                     data: &compiled.core[range.start as usize..range.end as usize],
                 });
             }
         }
-        assert!(names);
         let stripped = stripped.finish();
         assert!(stripped.len() < compiled.core.len());
+        let core_summary = inspect_wasm(&compiled.core)?;
+        assert!(core_summary.has_name_section);
+        let stripped_summary = inspect_wasm(&stripped)?;
         let wide = wit.ends_with("64");
         let mut addition = false;
-        for bytes in [&compiled.core, &stripped] {
-            for payload in Parser::new(0).parse_all(bytes) {
-                match payload? {
-                    Payload::FunctionSection(section) => assert_eq!(
-                        section.count(),
-                        if wit.ends_with("8") || wit.ends_with("16") {
-                            2
-                        } else {
-                            1
-                        },
-                        "{wit}"
+        for summary in [&core_summary, &stripped_summary] {
+            assert_eq!(
+                summary.functions,
+                if wit.ends_with("8") || wit.ends_with("16") {
+                    2
+                } else {
+                    1
+                },
+                "{wit}"
+            );
+            assert_eq!(summary.memories, 0, "{wit}");
+            assert_eq!(summary.imports, 0, "{wit}");
+            assert_eq!(summary.exports, ["run"], "{wit}");
+            if wit == "s32" {
+                assert!(
+                    matches!(
+                        summary.bodies[0].as_slice(),
+                        [
+                            Operator::LocalGet { local_index: 0 },
+                            Operator::LocalGet { local_index: 1 },
+                            Operator::I32Add,
+                            Operator::End,
+                        ]
                     ),
-                    Payload::MemorySection(section) => assert_eq!(section.count(), 0, "{wit}"),
-                    Payload::ImportSection(section) => assert_eq!(section.count(), 0, "{wit}"),
-                    Payload::ExportSection(section) => {
-                        let exports = section
-                            .into_iter()
-                            .map(|export| export.map(|export| export.name))
-                            .collect::<std::result::Result<Vec<_>, _>>()?;
-                        assert_eq!(exports, ["run"], "{wit}");
+                    "{:?}",
+                    summary.bodies[0]
+                );
+            }
+            let mut sign_extensions = 0;
+            for op in summary.instructions() {
+                addition |= matches!(
+                    (op, wide),
+                    (Operator::I64Add, true) | (Operator::I32Add, false)
+                );
+                match op {
+                    Operator::I32Extend8S if wit == "s8" => sign_extensions += 1,
+                    Operator::I32Extend16S if wit == "s16" => sign_extensions += 1,
+                    Operator::I32Shl | Operator::I32ShrS => {
+                        panic!("{wit}: use sign-extension instructions")
                     }
-                    Payload::CodeSectionEntry(body) => {
-                        let ops = body
-                            .get_operators_reader()?
-                            .into_iter()
-                            .collect::<std::result::Result<Vec<_>, _>>()?;
-                        if wit == "s32" {
-                            assert!(
-                                matches!(
-                                    ops.as_slice(),
-                                    [
-                                        Operator::LocalGet { local_index: 0 },
-                                        Operator::LocalGet { local_index: 1 },
-                                        Operator::I32Add,
-                                        Operator::End,
-                                    ]
-                                ),
-                                "{ops:?}"
-                            );
-                        }
-                        for op in ops {
-                            addition |= matches!(
-                                (&op, wide),
-                                (Operator::I64Add, true) | (Operator::I32Add, false)
-                            );
-                            assert!(!format!("{op:?}").contains("F64"), "{wit}: {op:?}");
-                            assert!(
-                                !matches!(op, Operator::I32Shl | Operator::I32ShrS),
-                                "{wit}: use sign-extension instructions"
-                            );
-                            if matches!(wit, "s32" | "u32" | "s64" | "u64") {
-                                assert!(
-                                    !matches!(op, Operator::Call { .. }),
-                                    "{wit}: exported arithmetic must not forward"
-                                );
-                            }
-                        }
+                    Operator::Call { .. } if matches!(wit, "s32" | "u32" | "s64" | "u64") => {
+                        panic!("{wit}: exported arithmetic must not forward")
                     }
                     _ => {}
                 }
+                assert!(!format!("{op:?}").contains("F64"), "{wit}: {op:?}");
+            }
+            if matches!(wit, "s8" | "s16") {
+                assert_eq!(sign_extensions, 3, "{wit}: a+b sign extensions");
             }
         }
         assert!(addition, "{wit}");
@@ -202,35 +192,22 @@ fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
 
 #[test]
 fn signed_narrow_normalization_occurs_only_at_required_wrap_points() -> Result<()> {
-    for (wit, body, expected) in [
-        ("s8", "a+b", 3),
-        ("s16", "a+b", 3),
-        ("s8", "a", 1),
-        ("s16", "a", 1),
-    ] {
-        let (parameters, signature) = if body == "a" {
-            ("a:number", format!("func(a:{wit})->{wit}"))
-        } else {
-            ("a:number,b:number", format!("func(a:{wit},b:{wit})->{wit}"))
-        };
+    for wit in ["s8", "s16"] {
         let compiled = compile(
-            &format!("export function run({parameters}):number {{ return {body}; }}"),
-            &signature,
+            "export function run(a:number):number { return a; }",
+            &format!("func(a:{wit})->{wit}"),
         )?;
+        let summary = inspect_wasm(&compiled.core)?;
         let mut extensions = 0;
-        for payload in Parser::new(0).parse_all(&compiled.core) {
-            if let Payload::CodeSectionEntry(body) = payload? {
-                for op in body.get_operators_reader()? {
-                    match op? {
-                        Operator::I32Extend8S if wit == "s8" => extensions += 1,
-                        Operator::I32Extend16S if wit == "s16" => extensions += 1,
-                        Operator::I32Shl | Operator::I32ShrS => panic!("use sign extension"),
-                        _ => {}
-                    }
-                }
+        for op in summary.instructions() {
+            match op {
+                Operator::I32Extend8S if wit == "s8" => extensions += 1,
+                Operator::I32Extend16S if wit == "s16" => extensions += 1,
+                Operator::I32Shl | Operator::I32ShrS => panic!("use sign extension"),
+                _ => {}
             }
         }
-        assert_eq!(extensions, expected, "{wit}: {body}");
+        assert_eq!(extensions, 1, "{wit}: a");
     }
     Ok(())
 }
@@ -323,11 +300,15 @@ export function run(rawId: u64, delta: s64, u: number): number {
 
     // Aggregate specialization across nested/recursive records, arrays, optionals,
     // permutations, and origin summarization is tested by `ecma.aggregate.specialization`;
-    // this checks parseInt lexical edge cases, 64-bit remainder, and Math intrinsics.
+    // this checks parseInt lexical edge cases, 64-bit remainder, Math intrinsics,
+    // exact64 aggregate JSON serialization, and reference alias identity.
     let mut parse_int = Program::from_wasm(
         compile(
             r#"
 interface Box { raw: string }
+interface Cell { value: number }
+interface Nested { inner: Cell; list: number[] }
+interface Node { value: number; next?: Node }
 function fwd(v: number): number { return v; }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
 function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
@@ -359,7 +340,24 @@ export function run(flag: number): number {
         JSON.stringify(Math.trunc(parseInt(s)) + 1) === "9007199254740994" &&
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
-    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRem && numMath ? 1 : 0;
+    const exactVal = parseInt(s);
+    const recJson = JSON.stringify({ value: exactVal }) === '{"value":9007199254740993}';
+    const nestedObj: Nested = { inner: { value: exactVal }, list: [exactVal, 1.5] };
+    const nestedJson =
+        JSON.stringify(nestedObj) === '{"inner":{"value":9007199254740993},"list":[9007199254740993,1.5]}' &&
+        JSON.stringify([...nestedObj.list]) === "[9007199254740993,1.5]";
+    const optNode: Node = { value: exactVal };
+    const optJson = JSON.stringify(optNode) === '{"value":9007199254740993}';
+    const aliasSelf: Node = { value: exactVal };
+    aliasSelf.next = aliasSelf;
+    const sharedCell: Cell = { value: exactVal };
+    const sharedPair: Cell[] = [sharedCell].concat([sharedCell]);
+    sharedPair[0].value = 1.5;
+    const aliasIdentity =
+        aliasSelf.next === aliasSelf &&
+        (aliasSelf.next?.value ?? 0) === exactVal &&
+        sharedPair[1].value === 1.5;
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRem && numMath && recJson && nestedJson && optJson && aliasIdentity ? 1 : 0;
 }
 "#,
             "func(flag:s32)->s32",

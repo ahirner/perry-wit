@@ -25,12 +25,19 @@ const NUM_ITER_SLOTS: usize = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollectionKind {
     SetValues,
+    SetEntries,
     MapKeys,
     MapValues,
     MapEntries,
 }
 
-/// Mutation performed on the first step inside an active `for...of` loop body.
+impl CollectionKind {
+    fn is_set(self) -> bool {
+        matches!(self, Self::SetValues | Self::SetEntries)
+    }
+}
+
+/// Mutation performed on the first step inside an active `for...of` or `forEach` body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InLoopMutation {
     None,
@@ -52,6 +59,9 @@ pub enum CollectionAction {
         steps: usize,
         in_body: InLoopMutation,
     },
+    /// Traverse the collection via `.forEach((v, k) => ...)` with an optional first-element
+    /// mutation, while existing `for...of` iterators remain paused.
+    ForEach { in_body: InLoopMutation },
     /// Insert or update a single key (`val_bias` in `0..=9`).
     Insert { key: i32, val_bias: i32 },
     /// Insert a contiguous batch of keys (`count` up to 48) so subsequent batch deletes cross
@@ -89,6 +99,7 @@ struct ReferenceCollection {
     kind: CollectionKind,
     entries: Vec<(i32, i32)>,
     iters: [IterModel; NUM_ITER_SLOTS],
+    for_each_pos: Option<usize>,
 }
 
 impl ReferenceCollection {
@@ -106,6 +117,7 @@ impl ReferenceCollection {
                 pos: 0,
                 exhausted: false,
             }),
+            for_each_pos: None,
         }
     }
 
@@ -115,7 +127,7 @@ impl ReferenceCollection {
 
     fn insert(&mut self, key: i32, val: i32) {
         if let Some(existing) = self.entries.iter_mut().find(|(k, _)| *k == key) {
-            if !matches!(self.kind, CollectionKind::SetValues) {
+            if !self.kind.is_set() {
                 existing.1 = val;
             }
         } else {
@@ -131,6 +143,11 @@ impl ReferenceCollection {
                     iter.pos -= 1;
                 }
             }
+            if let Some(pos) = &mut self.for_each_pos
+                && *pos > idx
+            {
+                *pos -= 1;
+            }
         }
     }
 
@@ -141,6 +158,9 @@ impl ReferenceCollection {
                 iter.pos = 0;
             }
         }
+        if let Some(pos) = &mut self.for_each_pos {
+            *pos = 0;
+        }
     }
 
     fn new_iter(&mut self, slot: usize) {
@@ -149,6 +169,28 @@ impl ReferenceCollection {
             pos: 0,
             exhausted: false,
         };
+    }
+
+    fn apply_in_body(&mut self, k: i32, in_body: InLoopMutation, input_bias: i32) {
+        match in_body {
+            InLoopMutation::None => {}
+            InLoopMutation::DeleteCurrent => {
+                self.delete(k);
+            }
+            InLoopMutation::DeleteAndReinsert => {
+                self.delete(k);
+                self.insert(k, self.value_for(k, input_bias + 1));
+            }
+            InLoopMutation::InsertOffset(off) => {
+                let nk = k + off;
+                self.insert(nk, self.value_for(nk, input_bias));
+            }
+            InLoopMutation::ClearAndInsert(off) => {
+                let nk = k + off;
+                self.clear();
+                self.insert(nk, self.value_for(nk, input_bias));
+            }
+        }
     }
 
     fn step(
@@ -170,37 +212,41 @@ impl ReferenceCollection {
             self.iters[slot].pos += 1;
             let yielded = match self.kind {
                 CollectionKind::SetValues | CollectionKind::MapKeys => k,
+                CollectionKind::SetEntries => k + k,
                 CollectionKind::MapValues => v,
                 CollectionKind::MapEntries => k + v,
             };
             trace.push(f64::from(yielded));
             seen += 1;
             if seen == 1 {
-                match in_body {
-                    InLoopMutation::None => {}
-                    InLoopMutation::DeleteCurrent => {
-                        self.delete(k);
-                    }
-                    InLoopMutation::DeleteAndReinsert => {
-                        self.delete(k);
-                        self.insert(k, self.value_for(k, input_bias + 1));
-                    }
-                    InLoopMutation::InsertOffset(off) => {
-                        let nk = k + off;
-                        self.insert(nk, self.value_for(nk, input_bias));
-                    }
-                    InLoopMutation::ClearAndInsert(off) => {
-                        let nk = k + off;
-                        self.clear();
-                        self.insert(nk, self.value_for(nk, input_bias));
-                    }
-                }
+                self.apply_in_body(k, in_body, input_bias);
             }
             if steps > 0 && seen >= steps {
                 break;
             }
         }
         trace.push(f64::from(-(seen as i32) - 100));
+    }
+
+    fn for_each(&mut self, in_body: InLoopMutation, input_bias: i32, trace: &mut Vec<f64>) {
+        self.for_each_pos = Some(0);
+        let mut seen = 0usize;
+        loop {
+            let pos = self.for_each_pos.unwrap_or(0);
+            if pos >= self.entries.len() {
+                break;
+            }
+            let (k, v) = self.entries[pos];
+            self.for_each_pos = Some(pos + 1);
+            let yielded = if self.kind.is_set() { k + k } else { k + v };
+            trace.push(f64::from(yielded));
+            seen += 1;
+            if seen == 1 {
+                self.apply_in_body(k, in_body, input_bias);
+            }
+        }
+        self.for_each_pos = None;
+        trace.push(f64::from(-(seen as i32) - 200));
     }
 
     fn apply(&mut self, action: CollectionAction, input_bias: i32, trace: &mut Vec<f64>) {
@@ -211,6 +257,7 @@ impl ReferenceCollection {
                 steps,
                 in_body,
             } => self.step(slot, steps, in_body, input_bias, trace),
+            CollectionAction::ForEach { in_body } => self.for_each(in_body, input_bias, trace),
             CollectionAction::Insert { key, val_bias } => {
                 let v = self.value_for(key, input_bias + val_bias.rem_euclid(10));
                 self.insert(key, v);
@@ -307,11 +354,11 @@ impl CollectionCase {
 
     fn emit_body(&self, indent: &str) -> String {
         let mut out = String::new();
-        let is_set = matches!(self.kind, CollectionKind::SetValues);
+        let is_set = self.kind.is_set();
         let view_call = match self.kind {
             CollectionKind::SetValues | CollectionKind::MapValues => "coll.values()",
             CollectionKind::MapKeys => "coll.keys()",
-            CollectionKind::MapEntries => "coll.entries()",
+            CollectionKind::SetEntries | CollectionKind::MapEntries => "coll.entries()",
         };
 
         let decls = if is_set {
@@ -382,6 +429,43 @@ impl CollectionCase {
         out
     }
 
+    fn emit_in_body_mutation(&self, out: &mut String, indent: &str, in_body: InLoopMutation) {
+        let is_set = self.kind.is_set();
+        match in_body {
+            InLoopMutation::None => {}
+            InLoopMutation::DeleteCurrent => {
+                out.push_str(&format!("{indent}coll.delete(k);\n"));
+            }
+            InLoopMutation::DeleteAndReinsert => {
+                out.push_str(&format!("{indent}coll.delete(k);\n"));
+                if is_set {
+                    out.push_str(&format!("{indent}coll.add(k);\n"));
+                } else {
+                    out.push_str(&format!(
+                        "{indent}coll.set(k, valueFor(k, bias + 1));\n"
+                    ));
+                }
+            }
+            InLoopMutation::InsertOffset(off) => {
+                out.push_str(&format!("{indent}const nk = k + ({off});\n"));
+                if is_set {
+                    out.push_str(&format!("{indent}coll.add(nk);\n"));
+                } else {
+                    out.push_str(&format!("{indent}coll.set(nk, valueFor(nk, bias));\n"));
+                }
+            }
+            InLoopMutation::ClearAndInsert(off) => {
+                out.push_str(&format!("{indent}const nk = k + ({off});\n"));
+                out.push_str(&format!("{indent}coll.clear();\n"));
+                if is_set {
+                    out.push_str(&format!("{indent}coll.add(nk);\n"));
+                } else {
+                    out.push_str(&format!("{indent}coll.set(nk, valueFor(nk, bias));\n"));
+                }
+            }
+        }
+    }
+
     fn emit_action(
         &self,
         out: &mut String,
@@ -402,6 +486,20 @@ impl CollectionCase {
                 in_body,
             } => {
                 self.emit_step(out, indent, step_idx, slot % NUM_ITER_SLOTS, steps, in_body);
+            }
+            CollectionAction::ForEach { in_body } => {
+                let seen_var = format!("fe_seen_{step_idx}");
+                out.push_str(&format!("{indent}let {seen_var} = 0;\n"));
+                out.push_str(&format!(
+                    "{indent}coll.forEach((v, k) => {{\n{indent}  trace.push(k + v);\n{indent}  {seen_var} += 1;\n"
+                ));
+                if !matches!(in_body, InLoopMutation::None) {
+                    out.push_str(&format!("{indent}  if ({seen_var} === 1) {{\n"));
+                    self.emit_in_body_mutation(out, &format!("{indent}    "), in_body);
+                    out.push_str(&format!("{indent}  }}\n"));
+                }
+                out.push_str(&format!("{indent}}});\n"));
+                out.push_str(&format!("{indent}trace.push(-{seen_var} - 200);\n"));
             }
             CollectionAction::Insert { key, val_bias } => {
                 let vb = val_bias.rem_euclid(10);
@@ -437,7 +535,9 @@ impl CollectionCase {
             }
             CollectionAction::ChurnAbandoned { count } => {
                 let loop_head = match self.kind {
-                    CollectionKind::MapEntries => "for (const [_k, _v] of tmpIt)",
+                    CollectionKind::SetEntries | CollectionKind::MapEntries => {
+                        "for (const [_k, _v] of tmpIt)"
+                    }
                     _ => "for (const _v of tmpIt)",
                 };
                 let temp_churn = if is_set {
@@ -461,11 +561,10 @@ impl CollectionCase {
         steps: usize,
         in_body: InLoopMutation,
     ) {
-        let is_set = matches!(self.kind, CollectionKind::SetValues);
         let seen_var = format!("seen_{step_idx}");
         out.push_str(&format!("{indent}let {seen_var} = 0;\n"));
         match self.kind {
-            CollectionKind::MapEntries => {
+            CollectionKind::SetEntries | CollectionKind::MapEntries => {
                 out.push_str(&format!(
                     "{indent}for (const [k, v] of it{slot}) {{\n{indent}  trace.push(k + v);\n{indent}  {seen_var} += 1;\n"
                 ));
@@ -484,39 +583,7 @@ impl CollectionCase {
 
         if !matches!(in_body, InLoopMutation::None) {
             out.push_str(&format!("{indent}  if ({seen_var} === 1) {{\n"));
-            match in_body {
-                InLoopMutation::None => {}
-                InLoopMutation::DeleteCurrent => {
-                    out.push_str(&format!("{indent}    coll.delete(k);\n"));
-                }
-                InLoopMutation::DeleteAndReinsert => {
-                    out.push_str(&format!("{indent}    coll.delete(k);\n"));
-                    if is_set {
-                        out.push_str(&format!("{indent}    coll.add(k);\n"));
-                    } else {
-                        out.push_str(&format!(
-                            "{indent}    coll.set(k, valueFor(k, bias + 1));\n"
-                        ));
-                    }
-                }
-                InLoopMutation::InsertOffset(off) => {
-                    out.push_str(&format!("{indent}    const nk = k + ({off});\n"));
-                    if is_set {
-                        out.push_str(&format!("{indent}    coll.add(nk);\n"));
-                    } else {
-                        out.push_str(&format!("{indent}    coll.set(nk, valueFor(nk, bias));\n"));
-                    }
-                }
-                InLoopMutation::ClearAndInsert(off) => {
-                    out.push_str(&format!("{indent}    const nk = k + ({off});\n"));
-                    out.push_str(&format!("{indent}    coll.clear();\n"));
-                    if is_set {
-                        out.push_str(&format!("{indent}    coll.add(nk);\n"));
-                    } else {
-                        out.push_str(&format!("{indent}    coll.set(nk, valueFor(nk, bias));\n"));
-                    }
-                }
-            }
+            self.emit_in_body_mutation(out, &format!("{indent}    "), in_body);
             out.push_str(&format!("{indent}  }}\n"));
         }
 
@@ -533,6 +600,7 @@ impl CollectionCase {
 pub(crate) fn collection_kind_strategy() -> impl Strategy<Value = CollectionKind> {
     prop_oneof![
         Just(CollectionKind::SetValues),
+        Just(CollectionKind::SetEntries),
         Just(CollectionKind::MapKeys),
         Just(CollectionKind::MapValues),
         Just(CollectionKind::MapEntries),
@@ -554,6 +622,8 @@ fn action_strategy() -> impl Strategy<Value = CollectionAction> {
         2 => (0..NUM_ITER_SLOTS).prop_map(|slot| CollectionAction::NewIter { slot }),
         5 => (0..NUM_ITER_SLOTS, 0..=4usize, in_loop_mutation_strategy())
             .prop_map(|(slot, steps, in_body)| CollectionAction::Step { slot, steps, in_body }),
+        2 => in_loop_mutation_strategy()
+            .prop_map(|in_body| CollectionAction::ForEach { in_body }),
         3 => (0..64i32, 0..10i32)
             .prop_map(|(key, val_bias)| CollectionAction::Insert { key, val_bias }),
         2 => (0..24i32, 32..=48usize)
@@ -632,6 +702,32 @@ pub(crate) fn contract() -> Contract {
             }),
         },
         Witness {
+            partition: "set-entries-and-foreach-mutation",
+            case: Case::Collection(CollectionCase {
+                kind: CollectionKind::SetEntries,
+                initial_count: 6,
+                actions: vec![
+                    CollectionAction::Step {
+                        slot: 0,
+                        steps: 2,
+                        in_body: InLoopMutation::DeleteCurrent,
+                    },
+                    CollectionAction::ForEach {
+                        in_body: InLoopMutation::DeleteAndReinsert,
+                    },
+                    CollectionAction::Step {
+                        slot: 0,
+                        steps: 2,
+                        in_body: InLoopMutation::InsertOffset(10),
+                    },
+                    CollectionAction::ForEach {
+                        in_body: InLoopMutation::ClearAndInsert(30),
+                    },
+                ],
+                permuted: false,
+            }),
+        },
+        Witness {
             partition: "map-keys-compaction-under-paused-iterator",
             case: Case::Collection(CollectionCase {
                 kind: CollectionKind::MapKeys,
@@ -674,6 +770,9 @@ pub(crate) fn contract() -> Contract {
                         slot: 0,
                         steps: 2,
                         in_body: InLoopMutation::DeleteAndReinsert,
+                    },
+                    CollectionAction::ForEach {
+                        in_body: InLoopMutation::DeleteCurrent,
                     },
                     CollectionAction::DeleteBatch {
                         start_key: 2,
@@ -728,7 +827,7 @@ pub(crate) fn contract() -> Contract {
         id: "ecma.collection.iterators",
         description: "Live Set and Map iterators across active, paused, and abandoned lifetimes under delete compaction and clear",
         specification: "https://tc39.es/ecma262/#sec-keyed-collections",
-        domain: "Orthogonal state-machine sequences of NewIter, partial Step with in-body mutations, Insert/InsertBatch, Delete/DeleteBatch across the 32-tombstone compaction threshold, Clear, and abandoned cursor churn over Set.values, Map.keys, Map.values, and Map.entries; verified against both a Rust Vec reference model and Node",
+        domain: "Orthogonal state-machine sequences of NewIter, partial Step and ForEach with in-body mutations, Insert/InsertBatch, Delete/DeleteBatch across the 32-tombstone compaction threshold, Clear, and abandoned cursor churn over Set.values, Set.entries, Map.keys, Map.values, and Map.entries; verified against both a Rust Vec reference model and Node",
         witnesses,
         strategy: collection_case_strategy()
             .prop_map(Case::Collection)

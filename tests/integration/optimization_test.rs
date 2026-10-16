@@ -1,6 +1,6 @@
 //! Binary structure and behavior of optimized WIT-constrained programs.
 use anyhow::Result;
-use wasmparser::{KnownCustom, Name, Parser, Payload};
+use wasmparser::{KnownCustom, Name, Operator, Parser, Payload};
 
 mod asynchronous;
 mod boundaries;
@@ -29,34 +29,67 @@ fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
     )?)
 }
 
-/// Names exported by a core module, borrowed from its bytes.
-fn export_names(core: &[u8]) -> Result<Vec<&str>> {
-    let mut names = Vec::new();
-    for payload in Parser::new(0).parse_all(core) {
-        if let Payload::ExportSection(section) = payload? {
-            for export in section {
-                names.push(export?.name);
-            }
-        }
-    }
-    Ok(names)
+/// Decoded sections and instruction bodies of a core Wasm module for structural assertions.
+struct WasmSummary<'a> {
+    functions: u32,
+    memories: u32,
+    imports: u32,
+    has_start: bool,
+    has_name_section: bool,
+    exports: Vec<&'a str>,
+    function_names: Vec<&'a str>,
+    bodies: Vec<Vec<Operator<'a>>>,
 }
 
-/// Function names recorded in a core module's `name` section.
-fn function_names(core: &[u8]) -> Result<Vec<&str>> {
-    let mut names = Vec::new();
+impl<'a> WasmSummary<'a> {
+    fn instructions(&self) -> impl Iterator<Item = &Operator<'a>> {
+        self.bodies.iter().flat_map(|body| body.iter())
+    }
+}
+
+fn inspect_wasm(core: &[u8]) -> Result<WasmSummary<'_>> {
+    let mut summary = WasmSummary {
+        functions: 0,
+        memories: 0,
+        imports: 0,
+        has_start: false,
+        has_name_section: false,
+        exports: Vec::new(),
+        function_names: Vec::new(),
+        bodies: Vec::new(),
+    };
     for payload in Parser::new(0).parse_all(core) {
-        if let Payload::CustomSection(section) = payload?
-            && let KnownCustom::Name(subsections) = section.as_known()
-        {
-            for subsection in subsections {
-                if let Name::Function(entries) = subsection? {
-                    for entry in entries {
-                        names.push(entry?.name);
+        match payload? {
+            Payload::FunctionSection(section) => summary.functions = section.count(),
+            Payload::MemorySection(section) => summary.memories = section.count(),
+            Payload::ImportSection(section) => summary.imports = section.count(),
+            Payload::StartSection { .. } => summary.has_start = true,
+            Payload::ExportSection(section) => {
+                for export in section {
+                    summary.exports.push(export?.name);
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                let ops = body
+                    .get_operators_reader()?
+                    .into_iter()
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                summary.bodies.push(ops);
+            }
+            Payload::CustomSection(section) => {
+                summary.has_name_section |= section.name() == "name";
+                if let KnownCustom::Name(subsections) = section.as_known() {
+                    for subsection in subsections {
+                        if let Name::Function(entries) = subsection? {
+                            for entry in entries {
+                                summary.function_names.push(entry?.name);
+                            }
+                        }
                     }
                 }
             }
+            _ => {}
         }
     }
-    Ok(names)
+    Ok(summary)
 }

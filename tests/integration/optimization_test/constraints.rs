@@ -1,5 +1,5 @@
 //! Numeric constraints across calls, loops, ranges and bounded calling contexts.
-use super::{compile, function_names};
+use super::{compile, inspect_wasm};
 use crate::core_program::Program;
 use anyhow::Result;
 use wasmtime::Val;
@@ -187,7 +187,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
              }}"
         );
         let mut program = Program::new(&source);
-        let names = function_names(&program.wasm)?;
+        let names = inspect_wasm(&program.wasm)?.function_names;
         assert!(
             names.contains(&"read"),
             "inspect the retained helper and named runtime roots"
@@ -235,7 +235,8 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
 
 /// Context-count bounds per arity are asserted precisely in perry-mir's facts tests;
 /// this checks that forced context summarization via `with_fact_limits(1, 1, ...)`
-/// records `summarized_contexts` and `range_widenings` and preserves helper semantics.
+/// records `summarized_contexts` and `range_widenings` and preserves helper semantics
+/// regardless of function declaration order.
 #[test]
 fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
     let other = "export function other(a:number,b:number):number { return helper(a,b); }";
@@ -263,34 +264,38 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
             500,
         ),
     ] {
-        let source = format!("{helper}\n{other}\n{target}");
         let signature = format!("{run_sig}; export other: func(a:s16,b:s16)->u8");
         let mask = if run_sig.ends_with("->u16") {
             0xffff
         } else {
             0xff
         };
-        for summarize in [false, true] {
-            let compiled = if summarize {
-                perry_mir::with_fact_limits(1, 1, || compile(&source, &signature))?
-            } else {
-                compile(&source, &signature)?
-            };
-            let report = &compiled.allocation_report;
-            assert!(!report.contains("range_widenings=0"), "{report}");
-            if summarize {
-                assert!(!report.contains("summarized_contexts=0"), "{report}");
+        for (order_name, source) in [
+            ("other_first", format!("{helper}\n{other}\n{target}")),
+            ("target_first", format!("{target}\n{other}\n{helper}")),
+        ] {
+            for summarize in [false, true] {
+                let compiled = if summarize {
+                    perry_mir::with_fact_limits(1, 1, || compile(&source, &signature))?
+                } else {
+                    compile(&source, &signature)?
+                };
+                let report = &compiled.allocation_report;
+                assert!(!report.contains("range_widenings=0"), "{report}");
+                if summarize {
+                    assert!(!report.contains("summarized_contexts=0"), "{report}");
+                }
+                let mut prog = Program::from_wasm(compiled.core);
+                let actual = prog
+                    .call("run", &[Val::I32(call_args.0), Val::I32(call_args.1)])
+                    .0[0]
+                    .unwrap_i32()
+                    & mask;
+                assert_eq!(
+                    actual, expected_val,
+                    "context summarization case `{case_name}` ({order_name}, summarize={summarize}) mismatch"
+                );
             }
-            let mut prog = Program::from_wasm(compiled.core);
-            let actual = prog
-                .call("run", &[Val::I32(call_args.0), Val::I32(call_args.1)])
-                .0[0]
-                .unwrap_i32()
-                & mask;
-            assert_eq!(
-                actual, expected_val,
-                "context summarization case `{case_name}` (summarize={summarize}) mismatch"
-            );
         }
     }
     Ok(())

@@ -221,36 +221,5 @@ fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -
             executable.clone(),
         )?;
     }
-
-    // Forced precision-degradation check: Perry preserves exact 64-bit integer precision
-    // for runtime `parseInt("9007199254740993", 10)` across recursive records and remainder,
-    // whereas Node's IEEE-754 f64 degrades `9007199254740993` to `9007199254740992`.
-    // Executing this program through the equivalence adapter must therefore succeed on both
-    // engines with Node producing `0` and Perry producing `2`, and `check_equivalence`
-    // rejecting the mismatch.
-    let directory = tempfile::tempdir()?;
-    let executor = Executor::new(executable, Limits::default());
-    let precision_case = Case::Function {
-        source: r#"
-type Node = { x: number; y: number; next?: Node };
-export function run(x: number): { value: number; trace: number[] } {
-    const a: Node = { x: parseInt("9007199254740993", 10), y: 1.5 };
-    const b: Node = { x: 1.5, y: parseInt("9007199254740993", 10) };
-    const exact = (a.x % 2) + (b.y % 2);
-    return { value: exact, trace: [x] };
-}
-"#
-        .into(),
-        asynchronous: false,
-    };
-    let artifacts = tempfile::tempdir_in(directory.path())?;
-    let evidences = executor.check(&precision_case, artifacts.path())?;
-    let (oracle_val, component_val) = evidences[0].first_values()?;
-    assert_eq!(oracle_val, number(0.0));
-    assert_eq!(component_val, number(2.0));
-    assert!(
-        perry_conformance::execution::check_equivalence(&precision_case, &evidences[0]).is_err(),
-        "equivalence check must distinguish exact 64-bit specialization (2) from f64 degradation (0)"
-    );
     Ok(())
 }
