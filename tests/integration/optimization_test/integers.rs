@@ -311,8 +311,12 @@ export function run(rawId: u64, delta: s64): number {
 interface Box { raw: string }
 interface NumRec { x: number; opt?: number }
 interface OuterRec { inner: NumRec; items: number[] }
+interface Node { value: number; next?: Node }
 function fwd(v: number): number { return v; }
+function doubleNode(n: Node): number { return n.value * 2; }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
+function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
+function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
 function radix(flag: number): number { return flag > 0 ? 10 : 16; }
 export function run(flag: number): number {
     const s = choose(flag);
@@ -335,6 +339,11 @@ export function run(flag: number): number {
         JSON.stringify(rec.x + 1) === "9007199254740994" &&
         JSON.stringify(recOmitted) === '{"x":9007199254740993}' &&
         JSON.stringify(rec) === '{"opt":9007199254740993,"x":9007199254740993}';
+    const node: Node = { value: parseInt(s), next: { value: parseInt(s) } };
+    const recursiveRec =
+        JSON.stringify(doubleNode(node)) === "18014398509481986" &&
+        node.next !== undefined &&
+        JSON.stringify(doubleNode(node.next)) === "18014398509481986";
     const outer: OuterRec = { inner: { x: parseInt(s) }, items: [parseInt(s)] };
     const nestedRecord =
         JSON.stringify(outer.inner.x + 1) === "9007199254740994" &&
@@ -350,24 +359,51 @@ export function run(flag: number): number {
     const setArr = [0];
     setArr[0] = parseInt(s);
     const mixedArr = [1, parseInt(s)];
+    const concatMixed = arr.concat([1.5]);
+    const concatSame = arr.concat(arr);
+    const spreadMixed = [1.5, ...arr, 2.5];
+    const extended: number[] = [1.5];
+    extended.push(...arr);
     const numArray =
         JSON.stringify(arr[0] + 1) === "9007199254740994" &&
         JSON.stringify(arr) === "[9007199254740993]" &&
         JSON.stringify(pushed) === "[9007199254740993]" &&
         JSON.stringify(setArr) === "[9007199254740993]" &&
-        JSON.stringify(mixedArr) === "[1,9007199254740993]";
+        JSON.stringify(mixedArr) === "[1,9007199254740993]" &&
+        JSON.stringify(concatMixed) === "[9007199254740993,1.5]" &&
+        JSON.stringify(concatSame) === "[9007199254740993,9007199254740993]" &&
+        JSON.stringify(spreadMixed) === "[1.5,9007199254740993,2.5]" &&
+        JSON.stringify(extended) === "[1.5,9007199254740993]";
+    const many: NumRec[] = [
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) },
+        { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }, { x: parseInt(s) }
+    ];
+    const summarizedLayout = JSON.stringify(many[flag - 1].x * 2) === "18014398509481986";
     const opt: number | undefined = flag > 0 ? parseInt(s) : undefined;
     const numOptional =
         JSON.stringify(opt === undefined ? 0 : opt + 1) === "9007199254740994" &&
         JSON.stringify(opt) === "9007199254740993";
     const br = flag > 0 ? parseInt(s) : 1;
     const numBranch = JSON.stringify(br + 1) === "9007199254740994";
-    const numRem = (parseInt(s) % 10) === 3;
+    const u64OddRem = parseInt(chooseU64Odd(flag)) % 2;
+    const u64EvenRem = parseInt(chooseU64Even(flag)) % 2;
+    const numRem =
+        (parseInt(s) % 10) === 3 &&
+        JSON.stringify(u64OddRem) === "1" &&
+        u64EvenRem === 0 &&
+        !Object.is(u64EvenRem, -0);
     const numMath =
         JSON.stringify(Math.trunc(parseInt(s)) + 1) === "9007199254740994" &&
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
-    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && nestedRecord && arrayRecord && numArray && numOptional && numBranch && numRem && numMath ? 1 : 0;
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && recursiveRec && nestedRecord && arrayRecord && numArray && summarizedLayout && numOptional && numBranch && numRem && numMath ? 1 : 0;
 }
 "#,
             "func(flag:s32)->s32",

@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     collections::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayTruncateOp,
+        ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{Combinator, PromiseCombinatorOp},
@@ -128,7 +128,7 @@ fn payload(ctx: &Context, mut ty: TypeHandle) -> TypeHandle {
     }
 }
 
-fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
+pub(super) fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     let ty = payload(ctx, ty).deref(ctx);
     ty.is::<RecordType>() || ty.is::<ArrayType>()
 }
@@ -188,12 +188,18 @@ impl Solver {
                 readers: BTreeSet::new(),
             }
         };
+        let slots: Vec<usize> = contents.slots().to_vec();
         self.analysis.heap.objects.push(Object {
             contents,
             open,
             containers: BTreeSet::new(),
         });
         self.work.objects.push(false);
+        for slot in slots {
+            if payload(ctx, self.analysis.heap.cells[slot].ty) == ty {
+                self.add_layout_object(slot, id);
+            }
+        }
         if open {
             // Reserve the identity before the queued work follows recursive schema edges.
             self.analysis.heap.summaries.insert(ty, id);
@@ -491,7 +497,6 @@ impl Solver {
             for &obj in &objects {
                 self.mark_open(obj);
             }
-            return;
         }
         if objects.len() <= 1 {
             return;
@@ -502,9 +507,6 @@ impl Solver {
             .len();
         for slot_idx in 0..slot_count {
             let mut slots = Vec::with_capacity(objects.len());
-            let mut has_numeric = false;
-            let mut has_summarized = false;
-            let mut child_objects = BTreeSet::new();
             for &obj in &objects {
                 if let Some(&slot) = self.analysis.heap.objects[obj]
                     .contents
@@ -512,37 +514,50 @@ impl Solver {
                     .get(slot_idx)
                 {
                     slots.push(slot);
-                    if self.analysis.heap.cells[slot].domain == Fact::Numeric {
-                        has_numeric = true;
-                    }
-                    if self.analysis.heap.cells[slot].summarized {
-                        has_summarized = true;
-                    }
-                    child_objects.extend(
-                        self.analysis.heap.cells[slot]
-                            .layout_objects
-                            .iter()
-                            .copied(),
-                    );
                 }
             }
-            if has_numeric {
-                for &slot in &slots {
-                    if self.analysis.heap.cells[slot].domain != Fact::Numeric {
-                        self.slot_domain(slot, Fact::Numeric);
-                        self.slot_range(ctx, slot, Range::Unknown);
-                    }
+            self.reconcile_slot_group(ctx, &slots);
+        }
+    }
+
+    pub(super) fn reconcile_slot_group(&mut self, ctx: &Context, slots: &[usize]) {
+        if slots.is_empty() {
+            return;
+        }
+        let mut has_numeric = false;
+        let mut has_summarized = false;
+        let mut child_objects = BTreeSet::new();
+        for &slot in slots {
+            if self.analysis.heap.cells[slot].domain == Fact::Numeric {
+                has_numeric = true;
+            }
+            if self.analysis.heap.cells[slot].summarized {
+                has_summarized = true;
+            }
+            child_objects.extend(
+                self.analysis.heap.cells[slot]
+                    .layout_objects
+                    .iter()
+                    .copied(),
+            );
+        }
+        if has_numeric {
+            for &slot in slots {
+                if self.analysis.heap.cells[slot].domain != Fact::Numeric {
+                    self.slot_domain(slot, Fact::Numeric);
+                    self.slot_range(ctx, slot, Range::Unknown);
                 }
             }
-            if has_summarized {
+        }
+        if has_summarized {
+            for &child in &child_objects {
+                self.mark_open(child);
+            }
+        }
+        if !child_objects.is_empty() {
+            for &slot in slots {
                 for &child in &child_objects {
-                    self.mark_open(child);
-                }
-            } else if !child_objects.is_empty() {
-                for &slot in &slots {
-                    for &child in &child_objects {
-                        self.add_layout_object(slot, child);
-                    }
+                    self.add_layout_object(slot, child);
                 }
             }
         }

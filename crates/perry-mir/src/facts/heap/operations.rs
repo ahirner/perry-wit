@@ -11,6 +11,8 @@ pub(in crate::facts) enum OperationKind {
     Combine(Combinator),
     Extend,
     Truncate,
+    Concat,
+    ConcatSegments,
     Alias { operand: usize },
     Return,
     Call,
@@ -98,6 +100,14 @@ impl OperationKind {
         }
         if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
             return Self::Truncate;
+        }
+        if Operation::get_op::<ConcatOp>(op, ctx).is_some()
+            || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
+        {
+            return Self::Concat;
+        }
+        if Operation::get_op::<ConcatSegmentsOp>(op, ctx).is_some() {
+            return Self::ConcatSegments;
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             return Self::Return;
@@ -232,22 +242,93 @@ impl Solver {
                 let from = self.heap_value(ctx, id, operation.get_operand(1))?;
                 self.analysis.heap.cells[to].readers.insert(reader);
                 self.analysis.heap.cells[from].readers.insert(reader);
+                let mut slots = Vec::new();
                 let mut source = None;
                 while let Some(object) = self.next_object(from, source) {
                     source = Some(object);
                     let input = self.analysis.heap.objects[object].contents.slots()[0];
                     self.analysis.heap.cells[input].readers.insert(reader);
+                    slots.push(input);
                     let mut target = None;
                     while let Some(object) = self.next_object(to, target) {
                         target = Some(object);
                         self.grow_array(object, None, reader);
                         let output = self.analysis.heap.objects[object].contents.slots()[0];
+                        slots.push(output);
                         self.slot_domain(output, self.analysis.heap.cells[input].domain);
                         self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
                         self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
                         self.copy_aliases(ctx, input, output, reader);
                     }
                 }
+                self.reconcile_slot_group(ctx, &slots);
+            }
+            OperationKind::Concat => {
+                let result = operation.get_result(0);
+                let output = self.heap_allocation(ctx, id, result)?;
+                let out_slot = self.analysis.heap.objects[output].contents.slots()[0];
+                let mut slots = vec![out_slot];
+                for input_val in operation.operands() {
+                    let from = match self.heap_value(ctx, id, input_val) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    self.analysis.heap.cells[from].readers.insert(reader);
+                    let mut source = None;
+                    while let Some(object) = self.next_object(from, source) {
+                        source = Some(object);
+                        let input = self.analysis.heap.objects[object].contents.slots()[0];
+                        self.analysis.heap.cells[input].readers.insert(reader);
+                        slots.push(input);
+                        self.slot_domain(out_slot, self.analysis.heap.cells[input].domain);
+                        self.slot_range(ctx, out_slot, self.analysis.heap.cells[input].range);
+                        self.slot_outcome(out_slot, self.analysis.heap.cells[input].outcome);
+                        self.copy_aliases(ctx, input, out_slot, reader);
+                    }
+                }
+                self.reconcile_slot_group(ctx, &slots);
+                self.widen_length(
+                    output,
+                    Range::Bounds(Interval {
+                        lower: 0,
+                        upper: u32::MAX.into(),
+                    }),
+                );
+            }
+            OperationKind::ConcatSegments => {
+                let result = operation.get_result(0);
+                let output = self.heap_allocation(ctx, id, result)?;
+                let out_slot = self.analysis.heap.objects[output].contents.slots()[0];
+                let segments_val = operation.get_operand(0);
+                let mut slots = vec![out_slot];
+                if let Some(segments_cell) = self.heap_value(ctx, id, segments_val) {
+                    self.analysis.heap.cells[segments_cell].readers.insert(reader);
+                    let mut seg_obj = None;
+                    while let Some(object) = self.next_object(segments_cell, seg_obj) {
+                        seg_obj = Some(object);
+                        let seg_slot = self.analysis.heap.objects[object].contents.slots()[0];
+                        self.analysis.heap.cells[seg_slot].readers.insert(reader);
+                        let mut inner_obj = None;
+                        while let Some(inner) = self.next_object(seg_slot, inner_obj) {
+                            inner_obj = Some(inner);
+                            let elem_slot = self.analysis.heap.objects[inner].contents.slots()[0];
+                            self.analysis.heap.cells[elem_slot].readers.insert(reader);
+                            slots.push(elem_slot);
+                            self.slot_domain(out_slot, self.analysis.heap.cells[elem_slot].domain);
+                            self.slot_range(ctx, out_slot, self.analysis.heap.cells[elem_slot].range);
+                            self.slot_outcome(out_slot, self.analysis.heap.cells[elem_slot].outcome);
+                            self.copy_aliases(ctx, elem_slot, out_slot, reader);
+                        }
+                    }
+                }
+                self.reconcile_slot_group(ctx, &slots);
+                self.widen_length(
+                    output,
+                    Range::Bounds(Interval {
+                        lower: 0,
+                        upper: u32::MAX.into(),
+                    }),
+                );
             }
             OperationKind::Truncate => {
                 let base = self.heap_value(ctx, id, operation.get_operand(0))?;

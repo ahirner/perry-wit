@@ -372,9 +372,14 @@ fn operand_types(
         {
             *value = elem_ty;
         }
-    } else if Operation::get_op::<crate::collections::ArrayExtendOp>(original, ctx).is_some() {
-        expected[0] = operand_ty(ctx, 0);
-        expected[1] = operand_ty(ctx, 1);
+    } else if Operation::get_op::<crate::collections::ArrayExtendOp>(original, ctx).is_some()
+        || Operation::get_op::<crate::collections::ConcatOp>(original, ctx).is_some()
+        || Operation::get_op::<crate::collections::ConcatReuseOp>(original, ctx).is_some()
+        || Operation::get_op::<crate::collections::ConcatSegmentsOp>(original, ctx).is_some()
+    {
+        for (index, slot) in expected.iter_mut().enumerate() {
+            *slot = operand_ty(ctx, index);
+        }
     } else if Operation::get_op::<crate::optional::WrapOp>(original, ctx).is_some() {
         if let Some(inner_ty) = crate::optional::optional_value(ctx, result_ty(ctx)) {
             expected[0] = inner_ty;
@@ -416,6 +421,10 @@ fn operand_types(
                     None => numeric,
                 };
                 expected.fill(target);
+            } else if super::super::heap::aggregate(ctx, l_ty) {
+                expected.fill(l_ty);
+            } else if super::super::heap::aggregate(ctx, r_ty) {
+                expected.fill(r_ty);
             }
         }
     } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {

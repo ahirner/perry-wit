@@ -27,6 +27,7 @@ impl LiveCursor {
             if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
                 let op = FieldGetOp::new(ctx, coll, "_1".to_string())?;
                 let cursor = b.append_value(ctx, &op);
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, cursors, cursor));
                 let start = Self::View { cursors, cursor }.position(b, ctx)?;
                 b.store(ctx, index, start);
                 Self::View { cursors, cursor }
@@ -56,12 +57,12 @@ impl LiveCursor {
     /// The loop ran out of entries: a view stays exhausted and leaves the cursor array.
     pub(crate) fn exhausted(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
         match self {
-            Self::View { cursors, cursor } => {
+            Self::View { cursor, .. } => {
                 let inf = b.number(ctx, f64::INFINITY);
                 b.emit(ctx, |ctx| {
                     FieldSetOp::new(ctx, cursor, "_0".to_string(), inf)
                 });
-                b.remove_collection_cursor(ctx, cursors, cursor)
+                Ok(())
             }
             Self::Loop { .. } => Ok(()),
         }
@@ -69,10 +70,8 @@ impl LiveCursor {
 
     /// Control left the loop by any exit: a loop's own cursor is released.
     pub(crate) fn exited(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
-        match self {
-            Self::Loop { cursors, cursor } => b.remove_collection_cursor(ctx, cursors, cursor),
-            Self::View { .. } => Ok(()),
-        }
+        let (Self::Loop { cursors, cursor } | Self::View { cursors, cursor }) = self;
+        b.remove_collection_cursor(ctx, cursors, cursor)
     }
 }
 
@@ -101,10 +100,9 @@ impl<'s> FunctionBuilder<'s> {
         box_val: Value,
         view: CollectionViewKind,
     ) -> Result<Value> {
-        let cursors_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
-        let cursors = self.append_value(ctx, &cursors_op);
+        let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
         let zero = self.number(ctx, 0.0);
-        let cursor = self.push_collection_cursor(ctx, cursors, zero)?;
+        let cursor = self.emit_value(ctx, |ctx| AllocOp::new(ctx, cursor_rec, vec![zero]));
         let view_rec = self
             .shapes
             .collection_view_type(ctx, box_val.get_type(ctx), view)?;

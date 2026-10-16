@@ -166,13 +166,24 @@ export function run(): number {
         compile(
             r#"
 export function run(n: number): number {
-    const s = new Set<number>();
-    const m = new Map<number, number>();
+    const s = new Set<number>([0]);
+    const m = new Map<number, number>([[0, 0]]);
     for (let i = 0; i < n; i = i + 1) {
-        s.add(i);
-        s.delete(i);
-        m.set(i, i);
-        m.delete(i);
+        s.values();
+        m.values();
+        for (const _v of s.values()) {
+            break;
+        }
+        for (const _v of s) {
+            break;
+        }
+        for (const _e of m) {
+            break;
+        }
+        s.delete(0);
+        s.add(0);
+        m.delete(0);
+        m.set(0, 0);
     }
     return s.size + m.size;
 }
@@ -182,9 +193,12 @@ export function run(n: number): number {
         .core,
     );
     let (res_128, fuel_128) = churn.call("run", &[Val::I32(128)]);
+    let mem_128 = churn.memory_bytes();
     let (res_512, fuel_512) = churn.call("run", &[Val::I32(512)]);
-    assert_eq!(res_128[0].unwrap_i32(), 0);
-    assert_eq!(res_512[0].unwrap_i32(), 0);
+    let mem_512 = churn.memory_bytes();
+    assert_eq!(res_128[0].unwrap_i32(), 2);
+    assert_eq!(res_512[0].unwrap_i32(), 2);
+    assert_eq!(mem_128, mem_512);
     assert!(
         fuel_512 < 6 * fuel_128,
         "expected linear churn scaling, got fuel(128)={fuel_128}, fuel(512)={fuel_512}"

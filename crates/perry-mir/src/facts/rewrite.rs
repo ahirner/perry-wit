@@ -417,7 +417,7 @@ fn types_change(
                     .domain
                     .integer()
                     .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
-                    || (!root_ids.contains(&id)
+                    || ((!root_ids.contains(&id) || super::heap::aggregate(ctx, ty))
                         && !ty.deref(ctx).is::<PromiseType>()
                         && analysis.specialized_result_type(ctx, id, pos, ty).is_some())
             });
@@ -525,7 +525,7 @@ fn clone_implementation(
     {
         if let Some(domain) = facts.domain.integer() {
             *ty = domain.ty(ctx);
-        } else if !is_root
+        } else if (!is_root || super::heap::aggregate(ctx, *ty))
             && !ty.deref(ctx).is::<PromiseType>()
             && let Some(spec_ty) = analysis.specialized_result_type(ctx, id, pos, *ty)
         {

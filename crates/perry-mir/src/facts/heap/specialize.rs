@@ -12,8 +12,11 @@ impl ProgramFacts {
     ) -> Option<TypeHandle> {
         let ty = value.get_type(ctx);
         if aggregate(ctx, ty) && !ty.deref(ctx).is::<PromiseType>() {
-            let cell = *self.states[id].heap_values.get(&value)?;
-            return self.specialized_cell_type(ctx, ty, cell);
+            if let Some(&cell) = self.states[id].heap_values.get(&value)
+                && let Some(spec) = self.specialized_cell_type(ctx, ty, cell)
+            {
+                return Some(spec);
+            }
         }
         let state = &self.states[id];
         if let Some(op) = value.defining_op() {
@@ -42,6 +45,23 @@ impl ProgramFacts {
                 let base_spec = self.specialized_value_type(ctx, id, base)?;
                 let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
                 let opt_ty: TypeHandle = crate::types::OptionalType::get(ctx, elem_ty).into();
+                return (opt_ty != ty).then_some(opt_ty);
+            }
+            if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
+                let base = op.deref(ctx).get_operand(0);
+                let base_spec = self.specialized_value_type(ctx, id, base)?;
+                let inner_ty = crate::optional::optional_value(ctx, base_spec)?;
+                return (inner_ty != ty).then_some(inner_ty);
+            }
+            if Operation::get_op::<WrapOp>(op, ctx).is_some() {
+                let base = op.deref(ctx).get_operand(0);
+                let base_spec = self.specialized_value_type(ctx, id, base)?;
+                let absence = ty
+                    .deref(ctx)
+                    .downcast_ref::<crate::types::OptionalType>()?
+                    .absence();
+                let opt_ty: TypeHandle =
+                    crate::types::OptionalType::get_with(ctx, base_spec, absence).into();
                 return (opt_ty != ty).then_some(opt_ty);
             }
             if Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
@@ -115,19 +135,23 @@ impl ProgramFacts {
         cell: usize,
     ) -> Option<TypeHandle> {
         let c = &self.heap.cells[cell];
-        self.specialized_objects_type(ctx, ty, &c.layout_objects, c.summarized)
+        let mut visiting = HashMap::new();
+        let (t, real) = self.specialized_type_inner(ctx, ty, &c.layout_objects, &mut visiting)?;
+        real.then_some(t)
     }
 
-    /// Specializes `ty` when every closed object in `objects` agrees on numeric slots.
-    fn specialized_objects_type(
+    /// Specializes `ty` when every object in `objects` agrees on numeric slots.
+    /// Returns `Some((type, real_change))` where `real_change` is false if the result is
+    /// merely an unverified recursive reservation stub.
+    fn specialized_type_inner(
         &self,
         ctx: &Context,
         ty: TypeHandle,
         objects: &BTreeSet<usize>,
-        summarized: bool,
-    ) -> Option<TypeHandle> {
-        if is_recursive_type(ctx, ty, &mut HashSet::new()) {
-            return None;
+        visiting: &mut HashMap<TypeHandle, TypeHandle>,
+    ) -> Option<(TypeHandle, bool)> {
+        if let Some(&target) = visiting.get(&ty) {
+            return Some((target, false));
         }
         if let Some((inner_ty, absence)) = {
             let deref = ty.deref(ctx);
@@ -135,10 +159,14 @@ impl ProgramFacts {
                 .downcast_ref::<crate::types::OptionalType>()
                 .map(|opt| (opt.value(), opt.absence()))
         } {
-            let new_inner = self.specialized_objects_type(ctx, inner_ty, objects, summarized)?;
-            return Some(crate::types::OptionalType::get_with(ctx, new_inner, absence).into());
+            let (new_inner, real) =
+                self.specialized_type_inner(ctx, inner_ty, objects, visiting)?;
+            return Some((
+                crate::types::OptionalType::get_with(ctx, new_inner, absence).into(),
+                real,
+            ));
         }
-        if summarized || objects.is_empty() || objects.iter().any(|&o| self.heap.objects[o].open) {
+        if objects.is_empty() {
             return None;
         }
         let array_elem = ty
@@ -157,18 +185,17 @@ impl ProgramFacts {
                 .iter()
                 .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
             if all_numeric && let Some(new_elem) = numeric_type_for(ctx, elem_ty) {
-                return Some(ArrayType::get(ctx, new_elem).into());
+                return Some((ArrayType::get(ctx, new_elem).into(), true));
             }
             if aggregate(ctx, elem_ty) {
-                let elem_summarized = element_slots.iter().any(|&s| self.heap.cells[s].summarized);
                 let mut elem_objects = BTreeSet::new();
                 for &s in &element_slots {
                     elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
                 }
-                if let Some(new_elem) =
-                    self.specialized_objects_type(ctx, elem_ty, &elem_objects, elem_summarized)
+                if let Some((new_elem, real)) =
+                    self.specialized_type_inner(ctx, elem_ty, &elem_objects, visiting)
                 {
-                    return Some(ArrayType::get(ctx, new_elem).into());
+                    return Some((ArrayType::get(ctx, new_elem).into(), real));
                 }
             }
             return None;
@@ -184,16 +211,37 @@ impl ProgramFacts {
                 rec.fields().ok()?.to_vec(),
             )
         };
-        let mut changed = false;
+        let is_rec = is_recursive_type(ctx, ty, &mut HashSet::new());
+        let reserved_name = if is_rec {
+            let name = Legaliser::default().legalise(&format!("{rec_name}__num_rec"));
+            let reserved_handle: TypeHandle = if is_tuple {
+                RecordType::get_tuple(ctx, name.clone(), None).ok()?.into()
+            } else {
+                RecordType::get(ctx, name.clone(), None).ok()?.into()
+            };
+            visiting.insert(ty, reserved_handle);
+            Some(name)
+        } else {
+            None
+        };
+        let mut real_change = false;
         let mut spec_fields = Vec::with_capacity(fields.len());
         let mut spec_tag = String::new();
         for (idx, (fname, fty)) in fields.into_iter().enumerate() {
             let mut field_slots = Vec::with_capacity(objects.len());
             for &o in objects {
                 let Contents::Record(slots) = &self.heap.objects[o].contents else {
+                    if is_rec {
+                        visiting.remove(&ty);
+                    }
                     return None;
                 };
-                let &s = slots.get(idx)?;
+                let Some(&s) = slots.get(idx) else {
+                    if is_rec {
+                        visiting.remove(&ty);
+                    }
+                    return None;
+                };
                 field_slots.push(s);
             }
             let all_numeric = field_slots
@@ -202,20 +250,21 @@ impl ProgramFacts {
             if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
                 spec_fields.push((fname, new_fty));
                 spec_tag.push_str(&format!("_{idx}"));
-                changed = true;
+                real_change = true;
             } else if aggregate(ctx, fty) {
-                let field_summarized = field_slots.iter().any(|&s| self.heap.cells[s].summarized);
                 let mut field_objects = BTreeSet::new();
                 for &s in &field_slots {
                     field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
                 }
-                if let Some(new_fty) =
-                    self.specialized_objects_type(ctx, fty, &field_objects, field_summarized)
+                if let Some((new_fty, sub_real)) =
+                    self.specialized_type_inner(ctx, fty, &field_objects, visiting)
                 {
                     let tag = type_spec_tag(ctx, new_fty);
                     spec_fields.push((fname, new_fty));
                     spec_tag.push_str(&format!("_{idx}_{tag}"));
-                    changed = true;
+                    if sub_real {
+                        real_change = true;
+                    }
                 } else {
                     spec_fields.push((fname, fty));
                 }
@@ -223,17 +272,28 @@ impl ProgramFacts {
                 spec_fields.push((fname, fty));
             }
         }
-        if !changed {
+        if !real_change {
+            if is_rec {
+                visiting.remove(&ty);
+            }
             return None;
         }
-        // The suffix only appends identifier characters, so a fresh legaliser keeps the name.
-        let new_name = Legaliser::default().legalise(&format!("{rec_name}__num{spec_tag}"));
-        let handle = if is_tuple {
-            RecordType::get_tuple(ctx, new_name, Some(spec_fields)).ok()?
+        let handle = if let Some(reserved_name) = reserved_name {
+            if is_tuple {
+                RecordType::get_tuple(ctx, reserved_name, Some(spec_fields)).ok()?
+            } else {
+                RecordType::get(ctx, reserved_name, Some(spec_fields)).ok()?
+            }
         } else {
-            RecordType::get(ctx, new_name, Some(spec_fields)).ok()?
+            // The suffix only appends identifier characters, so a fresh legaliser keeps the name.
+            let new_name = Legaliser::default().legalise(&format!("{rec_name}__num{spec_tag}"));
+            if is_tuple {
+                RecordType::get_tuple(ctx, new_name, Some(spec_fields)).ok()?
+            } else {
+                RecordType::get(ctx, new_name, Some(spec_fields)).ok()?
+            }
         };
-        Some(handle.into())
+        Some((handle.into(), true))
     }
 }
 

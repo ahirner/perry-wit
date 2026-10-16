@@ -8,6 +8,7 @@ use crate::{
     values::is_numeric_type,
 };
 use anyhow::{Result, bail};
+use pliron::printable::Printable;
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
 use pliron::{
@@ -171,7 +172,11 @@ impl FunctionLowering<'_, '_> {
                     (true, false) => NumOpcode::I64TruncSatF64U,
                 })
             }
-            _ => bail!("unsupported numeric representation conversion"),
+            _ => bail!(
+                "unsupported numeric representation conversion: source={}, target={}",
+                source.disp(ctx),
+                target.disp(ctx)
+            ),
         };
         let value = opcode.map_or(value, |opcode| self.num(ctx, opcode, vec![value]));
         let preserves_range = match (integer(ctx, source), integer(ctx, target)) {
@@ -442,17 +447,24 @@ impl FunctionLowering<'_, '_> {
                 let nan = self.numeric_constant(ctx, NumericConstant::Float(f64::NAN.to_bits()));
                 self.br(ctx, done, nan.iter().collect());
                 self.block = nonzero;
-                let unsigned_block = self.new_block(ctx, vec![]);
-                let signed_block = self.new_block(ctx, vec![]);
-                let both_unsigned = self.num(ctx, NumOpcode::I32And, vec![lu, ru]);
-                self.cond_br(
-                    ctx,
-                    both_unsigned,
-                    (unsigned_block, vec![]),
-                    (signed_block, vec![]),
-                );
-                self.block = unsigned_block;
-                let value = self.num(ctx, NumOpcode::I64RemU, vec![lp, rp]);
+                let zero64 = self.i64_const(ctx, 0);
+                let lp_lt_zero = self.num(ctx, NumOpcode::I64LtS, vec![lp, zero64]);
+                let l_is_neg = self.num(ctx, NumOpcode::I32And, vec![l_odd, lp_lt_zero]);
+                let neg_lp = self.num(ctx, NumOpcode::I64Sub, vec![zero64, lp]);
+                let abs_lp = self.select(ctx, l_is_neg, neg_lp, lp);
+
+                let rp_lt_zero = self.num(ctx, NumOpcode::I64LtS, vec![rp, zero64]);
+                let r_is_neg = self.num(ctx, NumOpcode::I32And, vec![r_odd, rp_lt_zero]);
+                let neg_rp = self.num(ctx, NumOpcode::I64Sub, vec![zero64, rp]);
+                let abs_rp = self.select(ctx, r_is_neg, neg_rp, rp);
+
+                let rem_u = self.num(ctx, NumOpcode::I64RemU, vec![abs_lp, abs_rp]);
+                let rem_zero = self.num(ctx, NumOpcode::I64Eqz, vec![rem_u]);
+                let is_neg_zero = self.num(ctx, NumOpcode::I32And, vec![l_is_neg, rem_zero]);
+
+                let neg_rem = self.num(ctx, NumOpcode::I64Sub, vec![zero64, rem_u]);
+                let normal_val = self.select(ctx, l_is_neg, neg_rem, rem_u);
+
                 let l_fixed = self.is_fixed_tag(ctx, lt);
                 let r_fixed = self.is_fixed_tag(ctx, rt);
                 let any_fixed = self.num(ctx, NumOpcode::I32Or, vec![l_fixed, r_fixed]);
@@ -461,17 +473,13 @@ impl FunctionLowering<'_, '_> {
                     self.select(ctx, gt, lt, rt)
                 };
                 let rem_u_tag = self.select(ctx, any_fixed, max_t, unsigned);
-                self.br(ctx, done, vec![rem_u_tag, value]);
-                self.block = signed_block;
-                let value = self.num(ctx, NumOpcode::I64RemS, vec![lp, rp]);
-                let empty = self.num(ctx, NumOpcode::I64Eqz, vec![value]);
-                let zero = self.i64_const(ctx, 0);
-                let negative = self.num(ctx, NumOpcode::I64LtS, vec![lp, zero]);
-                let negative_zero = self.num(ctx, NumOpcode::I32And, vec![empty, negative]);
+                let pos_tag = self.select(ctx, lu, rem_u_tag, signed);
+                let normal_tag = self.select(ctx, l_is_neg, signed, pos_tag);
+
                 let float = self.i32_const(ctx, FLOAT);
                 let bits = self.i64_const(ctx, (-0.0f64).to_bits());
-                let tag = self.select(ctx, negative_zero, float, signed);
-                let value = self.select(ctx, negative_zero, bits, value);
+                let tag = self.select(ctx, is_neg_zero, float, normal_tag);
+                let value = self.select(ctx, is_neg_zero, bits, normal_val);
                 self.br(ctx, done, vec![tag, value]);
             } else {
                 let integer_type = IntegerType::get(ctx, 64, Signedness::Unsigned).into();

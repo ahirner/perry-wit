@@ -607,7 +607,8 @@ impl FunctionLowering<'_, '_> {
             return self.numeric_cast(ctx, value, mir_ty, target);
         }
         if matches!(ty, AbiType::F32 | AbiType::F64)
-            && crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, _)| bits > 1)
+            && (crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, _)| bits > 1)
+                || mir_ty.deref(ctx).is::<perry_mir::NumericType>())
         {
             let target = FP64Type::get(ctx).into();
             let value = self.numeric_cast(ctx, value, mir_ty, target)?;
