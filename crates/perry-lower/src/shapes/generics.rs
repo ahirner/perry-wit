@@ -236,13 +236,7 @@ pub(super) fn collect_interface_properties<L: DeclarationLookup>(
     let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
     let mut remaining = 4096;
     for ext in &interface.extends {
-        let ext_ty = match ext {
-            HirType::Named(name) | HirType::Generic { base: name, .. } => {
-                crate::collections::decode_hir_type(name).unwrap_or_else(|| ext.clone())
-            }
-            other => other.clone(),
-        };
-        let ext_sub = Argument::from_hir(ctx, &ext_ty, bindings, &mut remaining).ok()?;
+        let ext_sub = Argument::from_hir(ctx, ext, bindings, &mut remaining).ok()?;
         let parent_props = resolve_record_properties(ctx, lookup, ext_sub, depth + 1)?;
         for (name, ty, opt) in parent_props {
             if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == name) {

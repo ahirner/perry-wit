@@ -1021,6 +1021,8 @@ export function run(): number {
         m2Total = m2Total + v;
     }
 
+    const nested = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
+    const nestedOk = nested.get("key").has(4) && nested.get("key").size === 2;
     const emptyTypedMap = new Map<string, number>();
     emptyTypedMap.set("k", 7);
     const typedMapOk = emptyTypedMap.get("k") === 7 && emptyTypedMap.size === 1;
@@ -1132,7 +1134,7 @@ export function run(): number {
         s2Total === 6 &&
         m1Total === 60 &&
         m2Total === 60 &&
-        typedMapOk &&
+        typedMapOk && nestedOk &&
         s3Total === 10 &&
         liveSetTotal === 5 &&
         liveSetKeyTotal === 5 &&

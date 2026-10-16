@@ -3,12 +3,11 @@
 //! One structural lowering with no representation decisions:
 //! - every local (parameters included) is a `perry.local` slot, and pliron `mem2reg` builds SSA
 //!   joins, loop-carried block arguments and later await continuations;
-//! - expression types come from the MIR types of the lowered operands, so there is no separate,
-//!   recursive type inference;
+//! - contextual inference completes unresolved source types before MIR construction;
 //! - tiers stay `Unassigned` and layouts abstract; later passes decide them.
 //!
-//! [lower_sources] runs the source passes (module graph, validation, stream rewriting),
-//! Perry's HIR lowering, and then [program] over the HIR. Each function body is lowered by a
+//! [lower_sources] resolves modules, passes the AST through [hir_compat], completes types
+//! with [infer], and builds MIR with [program]. Each function body is lowered by a
 //! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
 //! Unsupported constructs are rejected with a diagnostic.
 mod aggregates;
@@ -23,20 +22,18 @@ mod dates;
 mod decoder;
 mod expressions;
 mod foreign;
+mod hir_compat;
 mod host;
 mod infer;
 mod json;
 mod json_cursor;
-mod locations;
 mod modules;
 mod operators;
 mod program;
 mod shapes;
-mod source;
 pub mod source_files;
 mod spread;
 mod statements;
-mod streams;
 mod temporal;
 mod url;
 mod variants;
@@ -150,36 +147,9 @@ pub fn lower_sources(
     foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<ModuleOp> {
     let loaded = modules::load(source, identity, modules, foreign)?;
-    let mut ast = loaded.module;
-    let mut locations = loaded.locations;
-    locations.collect(&ast);
-    source::validate(&ast, &locations)?;
-    collections::preserve_type_args(&mut ast);
-    let spans = source::inferred_bindings(&ast);
-    streams::lower(&mut ast)?;
-    decoder::preserve_options(&mut ast)?;
-    array_methods::preserve_arguments(&mut ast);
-    let mut hir = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
-        let span = error
-            .downcast_ref::<perry_hir::error::LowerError>()
-            .and_then(|error| error.span);
-        let diagnostic = PerryDiagnostic::error(
-            DiagnosticCode::UnsupportedExpression,
-            format!("failed to lower {identity}: {error:#}"),
-        );
-        let error = error.context(diagnostic);
-        match span {
-            Some(span) => locations.annotate(error, span),
-            None => error,
-        }
-    })?;
-    let inferred = hir
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
-        .collect();
-    infer::unresolved_types(ctx, &mut hir, &inferred, &locations, foreign);
-    program::build_module(ctx, &hir, foreign, inferred, &locations)
+    let mut lowered = hir_compat::lower(loaded, identity)?;
+    infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
+    program::build_module(ctx, &lowered.module, foreign, &lowered.metadata)
 }
 
 #[cfg(test)]

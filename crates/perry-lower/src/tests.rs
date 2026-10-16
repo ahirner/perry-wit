@@ -412,3 +412,42 @@ fn unsupported_temporal_forms_are_rejected() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
+
+#[test]
+fn dense_destructuring_preserves_defaults_and_missing_elements() {
+    let printed = lowered(
+        r#"
+export function run(n: number): number {
+    const values: number[] = [n, 4];
+    const [first, , missing = 7] = values;
+    const [text, count] = ['ok', 3] as [string, number];
+    return first + missing + count + text.length;
+}
+"#,
+    );
+    assert!(!printed.contains("arrayRecord"), "{printed}");
+}
+
+#[test]
+fn constructor_types_survive_nested_calls_and_inference_revisits() {
+    let printed = lowered(
+        r#"
+interface Parent<T> { value: T }
+interface Child extends Parent<number> { extra: number }
+function make() {
+    if (false) { const skipped = new Map<number, boolean>(); }
+    return new Map<string, Set<number>>([['key', new Set<number>([3])]]);
+}
+export function run(n: number): number {
+    const shapes = new Map<string, {value:number}>();
+    shapes.set("a", {value:n});
+    const inferred = new Set([3, 4]);
+    const inferredMap = new Map([[1, 2], [3, 4]]);
+    const values = make();
+    const pair: Child = {value: n, extra: values.size};
+    return pair.value + pair.extra + inferred.size + inferredMap.size;
+}
+"#,
+    );
+    assert!(!printed.contains("perry_constructor"), "{printed}");
+}

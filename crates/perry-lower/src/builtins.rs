@@ -14,14 +14,16 @@ impl<'s> FunctionBuilder<'s> {
         method: &str,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        if method == streams::ITERATION && matches!(object, Expr::UrlSearchParamsNew(_)) {
+        let method = hir_compat::method(method);
+        if method == hir_compat::Method::Iteration && matches!(object, Expr::UrlSearchParamsNew(_))
+        {
             bail!(
                 "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
             );
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        if method == streams::ITERATION {
+        if method == hir_compat::Method::Iteration {
             ensure!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
                     || crate::collections::is_collection_or_view_record(
@@ -32,22 +34,14 @@ impl<'s> FunctionBuilder<'s> {
             );
             return Ok(Some(receiver));
         }
-        if method == array_methods::PUSH {
+        if method == hir_compat::Method::Push {
             ensure!(
                 kind(ctx, receiver)? == Kind::Array,
                 "push requires a dense array receiver"
             );
         }
         let arg = |index: usize| args.get(index);
-        let method = if method == decoder::DECODE {
-            "decode"
-        } else if method == array_methods::PUSH {
-            "push"
-        } else if method == array_methods::CONCAT {
-            "concat"
-        } else {
-            method
-        };
+        let method = method.name();
         if let Some(value) = self.collection_method(ctx, object, receiver, method, args)? {
             return Ok(value);
         }

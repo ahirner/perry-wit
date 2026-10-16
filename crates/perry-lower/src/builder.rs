@@ -57,7 +57,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
-    pub(super) false_guards: HashSet<LocalId>,
+    pub(super) iteration: hir_compat::Iteration,
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
     pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
     pub(super) controls: Vec<Control>,
@@ -71,9 +71,6 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
-    pub(super) fn_name: String,
-    pub(super) map_ctor_idx: usize,
-    pub(super) set_ctor_idx: usize,
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -179,7 +176,7 @@ impl<'s> FunctionBuilder<'s> {
             block: entry,
             locals: HashMap::new(),
             global_slots: HashSet::new(),
-            false_guards: HashSet::new(),
+            iteration: hir_compat::Iteration::default(),
             variant_guards: Vec::new(),
             controls: Vec::new(),
             callback_returns: Vec::new(),
@@ -191,9 +188,6 @@ impl<'s> FunctionBuilder<'s> {
             result: signature.result,
             is_async: signature.is_async,
             labels: 0,
-            fn_name: signature.name.to_string(),
-            map_ctor_idx: 0,
-            set_ctor_idx: 0,
         }
     }
 }

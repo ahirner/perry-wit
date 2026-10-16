@@ -291,7 +291,8 @@ pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<Cons
         } else {
             perry_abi::number::Number::Signed(integer.value().to_i64())
         }
-    } else if let Some(numeric) = radix_attr.downcast_ref::<crate::attrs::NumericConstant>() {
+    } else {
+        let numeric = radix_attr.downcast_ref::<crate::attrs::NumericConstant>()?;
         match *numeric {
             crate::attrs::NumericConstant::Signed(v) => perry_abi::number::Number::Signed(v),
             crate::attrs::NumericConstant::Unsigned(v) => perry_abi::number::Number::Unsigned(v),
@@ -299,8 +300,6 @@ pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<Cons
                 perry_abi::number::Number::Float(f64::from_bits(bits))
             }
         }
-    } else {
-        return None;
     };
     match perry_abi::number::parse_integer(text, radix) {
         perry_abi::number::Number::Signed(value) => {

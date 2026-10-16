@@ -225,7 +225,7 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)
                        WASI 0.3 P3 Component
 ```
 
-1. **HIR Lowering**: Transforms TypeScript AST into Perry HIR, resolving imports, establishing lexical scopes.
+1. **HIR Lowering**: Resolves the static module graph and lowers TypeScript AST through Perry HIR, preserving lexical scopes. The private [`hir_compat`](crates/perry-lower/src/hir_compat/mod.rs) boundary owns source metadata, constructor type IDs, argument-preservation rewrites, and recognition of compiler-generated iterator records. Contextual inference and MIR emission consume its typed views.
 2. **MIR Generation**: Lowers Perry HIR to typed pliron MIR. Local variables initialize as slots, converted into SSA values, block arguments via `mem2reg`.
 3. **Code Generation**: Translates MIR to WebAssembly operations, selects value representations, synthesizes export glue.
 4. **Control Flow Structuring**: Structures reducible control flow with Ramsey's dominator-tree algorithm, keeping single-use values on the operand stack.

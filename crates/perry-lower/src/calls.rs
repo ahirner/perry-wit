@@ -9,51 +9,49 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [Expr],
         byte_offset: u32,
     ) -> Result<Option<Value>> {
-        if let Expr::ExternFuncRef { name, .. } = callee {
-            if matches!(
-                name.as_str(),
-                "js_global_get_or_throw_unresolved"
-                    | "js_global_assign_existing_or_throw"
-                    | "js_global_update"
-            ) && let Some(Expr::String(ident)) = args.first()
-            {
-                return Err(self.shapes.annotate_byte_offset(
+        if let Some(call) = hir_compat::runtime_call(callee, args) {
+            use hir_compat::RuntimeCall;
+            return match call {
+                RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
                     anyhow!("cannot find name '{ident}'"),
                     byte_offset,
                     ident.len() as u32,
-                ));
-            }
-            use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
-            match (name.as_str(), args) {
-                (TDZ_CHECK, [Expr::LocalGet(id), Expr::String(_)]) => {
-                    self.load(ctx, self.local(*id)?)?;
-                    return Ok(None);
+                )),
+                RuntimeCall::CheckInitialized { local, value } => {
+                    let value = value.map(|value| self.expression(ctx, value)).transpose()?;
+                    self.load(ctx, self.local(local)?)?;
+                    Ok(value)
                 }
-                (TDZ_CHECK_THEN, [Expr::LocalGet(id), Expr::String(_), value]) => {
-                    let value = self.expression(ctx, value)?;
-                    self.load(ctx, self.local(*id)?)?;
-                    return Ok(Some(value));
-                }
-                ("js_map_compaction_epoch" | "js_set_compaction_epoch", _) => {
-                    return Ok(Some(self.number(ctx, 0.0)));
-                }
-                ("js_map_cursor_next" | "js_set_cursor_next", [coll, idx, _]) => {
-                    let coll_val = self.expression(ctx, coll)?;
-                    let idx_val = self.expression(ctx, idx)?;
-                    let len = self.array_length(ctx, coll_val);
-                    let in_bounds = self.compare(ctx, CompareKind::Lt, idx_val, len);
-                    let neg_one = self.number(ctx, -1.0);
-                    let res = self.choose(
+                RuntimeCall::CollectionEpoch => Ok(Some(self.number(ctx, 0.0))),
+                RuntimeCall::CollectionCursor { collection, index } => {
+                    let collection = self.expression(ctx, collection)?;
+                    let index = self.expression(ctx, index)?;
+                    let len = self.array_length(ctx, collection);
+                    let in_bounds = self.compare(ctx, CompareKind::Lt, index, len);
+                    let absent = self.number(ctx, -1.0);
+                    self.choose(
                         ctx,
                         FP64Type::get(ctx).into(),
                         in_bounds,
-                        |_, _| Ok(idx_val),
-                        |_, _| Ok(neg_one),
-                    )?;
-                    return Ok(Some(res));
+                        |_, _| Ok(index),
+                        |_, _| Ok(absent),
+                    )
+                    .map(Some)
                 }
-                _ => {}
-            }
+                RuntimeCall::ExitCode(args) => {
+                    let [code] = args else {
+                        bail!("process.exitCode takes one value");
+                    };
+                    let code = self.expression(ctx, code)?;
+                    let code = self.arithmetic(ctx, code);
+                    ensure!(
+                        kind(ctx, code)? == Kind::Number,
+                        "process.exitCode must be a number"
+                    );
+                    self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
+                    Ok(None)
+                }
+            };
         }
         if let Expr::PropertyGet {
             object, property, ..
@@ -74,16 +72,6 @@ impl<'s> FunctionBuilder<'s> {
             return self.temporal_factory(ctx, class, property, args).map(Some);
         }
 
-        if let Expr::Closure { params, body, .. } = callee
-            && let [param] = params.as_slice()
-            && param.name == "__perry_obj_iife"
-        {
-            ensure!(
-                matches!(args, [Expr::Object(fields)] if fields.is_empty()),
-                "object literals with methods are not supported yet"
-            );
-            return self.object_spread(ctx, param.id, body).map(Some);
-        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
@@ -135,24 +123,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             return self.method(ctx, object, property, args);
         }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && name == "js_process_exit_code_set"
-        {
-            let [code] = args else {
-                bail!("process.exitCode takes one value");
-            };
-            let code = self.expression(ctx, code)?;
-            let code = self.arithmetic(ctx, code);
-            ensure!(
-                kind(ctx, code)? == Kind::Number,
-                "process.exitCode must be a number"
-            );
-            self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
-            return Ok(None);
-        }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && name == program::ESM_EXPORT_INIT
-        {
+        if hir_compat::is_import_initializer(callee) {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
             return Ok(None);
         }

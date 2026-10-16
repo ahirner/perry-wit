@@ -15,6 +15,24 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Some(record) = self.iteration.expression(expr) {
+            return match record {
+                hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
+                hir_compat::RecordExpr::Length(source) => {
+                    let source = self.expression(ctx, source)?;
+                    if let Ok(record) =
+                        TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+                        && record.deref(ctx).is_tuple()
+                    {
+                        let length = record.deref(ctx).fields()?.len();
+                        Ok(self.number(ctx, length as f64))
+                    } else {
+                        Ok(self.array_length(ctx, source))
+                    }
+                }
+                hir_compat::RecordExpr::Close => self.absent_literal(ctx, false, expected),
+            };
+        }
         if let Expr::Sequence(parts) = expr {
             let (last, effects) = parts.split_last().context("empty sequence expression")?;
             for effect in effects {
@@ -38,11 +56,7 @@ impl<'s> FunctionBuilder<'s> {
             Expr::RegExpDynamic { .. } => {
                 bail!("RegExp construction is unsupported; use a bounded regex literal")
             }
-            Expr::RegExpTest { regex, string } => {
-                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-                let string = self.string_operand(ctx, string)?;
-                self.regex_test(ctx, regex, string)
-            }
+            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts)?,
             Expr::BigInt(text) => self.bigint_literal(ctx, text)?,
             Expr::BigIntCoerce(expr) => self.bigint_coerce(ctx, expr)?,
             Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
@@ -63,9 +77,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::LocalSet(id, value) => self
                 .local_set(ctx, *id, value)
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
-            Expr::Update { id, op, prefix } => self
-                .update(ctx, *id, op, *prefix)
-                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Expr::Update { id, op, prefix } => {
+                self.iteration.advance(*id);
+                self.update(ctx, *id, op, *prefix)
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?
+            }
             Expr::PropertyUpdate {
                 object,
                 property,
@@ -88,13 +104,6 @@ impl<'s> FunctionBuilder<'s> {
                     self.locals.remove(id);
                 }
                 out?
-            }
-            Expr::Conditional {
-                condition,
-                else_expr,
-                ..
-            } if matches!(&**condition, Expr::LocalGet(guard) if self.false_guards.contains(guard)) => {
-                self.expression(ctx, else_expr)?
             }
             Expr::Conditional {
                 condition,
@@ -655,7 +664,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `condition ? then : otherwise`, joined through a result slot.
-    fn conditional(
+    pub(super) fn conditional(
         &mut self,
         ctx: &mut Context,
         condition: &'s Expr,
@@ -948,6 +957,9 @@ impl<'s> FunctionBuilder<'s> {
                         format!("_{}", *n as u64)
                     }
                     Expr::Integer(n) if *n >= 0 => format!("_{n}"),
+                    _ if self.iteration.index(index).is_some() => {
+                        format!("_{}", self.iteration.index(index).unwrap())
+                    }
                     _ => {
                         let Ok(rec) =
                             TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)

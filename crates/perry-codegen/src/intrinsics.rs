@@ -112,7 +112,7 @@ impl FunctionLowering<'_, '_> {
                 else {
                     bail!("expected numeric carrier for number predicate");
                 };
-                let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT as i32);
+                let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
                 let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
                 let result = match intrinsic {
                     Intrinsic::NumberIsNaN => {

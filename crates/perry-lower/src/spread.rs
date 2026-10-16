@@ -1,6 +1,5 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
-use crate::array_methods::{CONCAT, PUSH};
 use perry_mir::{
     attrs::Absence,
     collections::{ArrayExtendOp, ConcatSegmentsOp},
@@ -212,10 +211,10 @@ impl<'s> FunctionBuilder<'s> {
             bail!("spread calls require a dense array push receiver")
         };
         ensure!(
-            matches!(property.as_str(), PUSH | "push" | CONCAT | "concat"),
+            matches!(hir_compat::method(property).name(), "push" | "concat"),
             "spread calls are supported for dense array push"
         );
-        if matches!(property.as_str(), CONCAT | "concat") {
+        if hir_compat::method(property).name() == "concat" {
             return self.concat_call_spread(ctx, object, args);
         }
         let receiver = self.expression(ctx, object)?;

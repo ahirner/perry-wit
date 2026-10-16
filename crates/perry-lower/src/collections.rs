@@ -2,269 +2,8 @@
 
 use super::*;
 use perry_mir::types::OptionalType;
-use perry_parser::swc_ecma_ast as ast;
-use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 mod objects;
-
-/// Rewrite `new Map<K, V>(...)` and `new Set<T>(...)` in the AST before HIR lowering
-/// so explicit constructor type arguments are preserved even when the variable binding
-/// has no type annotation.
-pub(super) fn ts_type_to_hir(ty: &ast::TsType) -> Option<HirType> {
-    match ty {
-        ast::TsType::TsKeywordType(kw) => match kw.kind {
-            ast::TsKeywordTypeKind::TsStringKeyword => Some(HirType::String),
-            ast::TsKeywordTypeKind::TsNumberKeyword => Some(HirType::Number),
-            ast::TsKeywordTypeKind::TsBooleanKeyword => Some(HirType::Boolean),
-            ast::TsKeywordTypeKind::TsBigIntKeyword => Some(HirType::BigInt),
-            ast::TsKeywordTypeKind::TsVoidKeyword | ast::TsKeywordTypeKind::TsUndefinedKeyword => {
-                Some(HirType::Void)
-            }
-            ast::TsKeywordTypeKind::TsNullKeyword => Some(HirType::Null),
-            ast::TsKeywordTypeKind::TsAnyKeyword => Some(HirType::Any),
-            ast::TsKeywordTypeKind::TsUnknownKeyword => Some(HirType::Unknown),
-            _ => None,
-        },
-        ast::TsType::TsArrayType(arr) => {
-            Some(HirType::Array(Box::new(ts_type_to_hir(&arr.elem_type)?)))
-        }
-        ast::TsType::TsTupleType(tuple) => {
-            let mut elems = Vec::with_capacity(tuple.elem_types.len());
-            for elem in &tuple.elem_types {
-                elems.push(ts_type_to_hir(&elem.ty)?);
-            }
-            Some(HirType::Tuple(elems))
-        }
-        ast::TsType::TsUnionOrIntersectionType(ast::TsUnionOrIntersectionType::TsUnionType(u)) => {
-            let mut items = Vec::with_capacity(u.types.len());
-            for member in &u.types {
-                items.push(ts_type_to_hir(member)?);
-            }
-            Some(HirType::Union(items))
-        }
-        ast::TsType::TsParenthesizedType(p) => ts_type_to_hir(&p.type_ann),
-        ast::TsType::TsTypeRef(type_ref) => {
-            let ast::TsEntityName::Ident(ident) = &type_ref.type_name else {
-                return None;
-            };
-            let name = ident.sym.as_ref();
-            if let Some(params) = &type_ref.type_params {
-                let mut args = Vec::with_capacity(params.params.len());
-                for param in &params.params {
-                    args.push(ts_type_to_hir(param)?);
-                }
-                if matches!(name, "Array" | "ReadonlyArray") && args.len() == 1 {
-                    return Some(HirType::Array(Box::new(args.swap_remove(0))));
-                }
-                Some(HirType::Generic {
-                    base: name.to_string(),
-                    type_args: args,
-                })
-            } else {
-                Some(HirType::Named(name.to_string()))
-            }
-        }
-        ast::TsType::TsLitType(lit) => match &lit.lit {
-            ast::TsLit::Str(s) => Some(HirType::StringLiteral(
-                s.value.to_string_lossy().into_owned(),
-            )),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Propagate `new Map<K, V>(...)` and `new Set<T>(...)` type arguments onto unannotated
-/// variable bindings while preserving the builtin constructor identifier for `perry_hir`.
-pub(super) fn preserve_type_args(module: &mut ast::Module) {
-    struct TypeArgPreserver;
-
-    impl VisitMut for TypeArgPreserver {
-        fn visit_mut_var_declarator(&mut self, node: &mut ast::VarDeclarator) {
-            node.visit_mut_children_with(self);
-            let ast::Pat::Ident(binding) = &mut node.name else {
-                return;
-            };
-            if binding.type_ann.is_some() {
-                return;
-            }
-            let Some(init) = node.init.as_ref() else {
-                return;
-            };
-            let ast::Expr::New(new_expr) = init.as_ref() else {
-                return;
-            };
-            let ast::Expr::Ident(ident) = new_expr.callee.as_ref() else {
-                return;
-            };
-            let Some(type_args) = new_expr.type_args.as_ref() else {
-                return;
-            };
-            let sym = ident.sym.as_ref();
-            if (sym == "Map" && type_args.params.len() == 2)
-                || (sym == "Set" && type_args.params.len() == 1)
-            {
-                binding.type_ann = Some(Box::new(ast::TsTypeAnn {
-                    span: swc_common::DUMMY_SP,
-                    type_ann: Box::new(ast::TsType::TsTypeRef(ast::TsTypeRef {
-                        span: swc_common::DUMMY_SP,
-                        type_name: ast::TsEntityName::Ident(ident.clone()),
-                        type_params: Some(type_args.clone()),
-                    })),
-                }));
-            }
-        }
-
-        fn visit_mut_ts_interface_decl(&mut self, node: &mut ast::TsInterfaceDecl) {
-            node.visit_mut_children_with(self);
-            for ext in &mut node.extends {
-                let Some(type_args) = ext.type_args.as_ref() else {
-                    continue;
-                };
-                let ast::Expr::Ident(ident) = ext.expr.as_mut() else {
-                    continue;
-                };
-                let mut args = Vec::with_capacity(type_args.params.len());
-                let mut ok = true;
-                for param in &type_args.params {
-                    if let Some(ty) = ts_type_to_hir(param) {
-                        args.push(ty);
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok
-                    && let Some(encoded) = encode_hir_type(&HirType::Generic {
-                        base: ident.sym.to_string(),
-                        type_args: args,
-                    })
-                {
-                    ident.sym = encoded.into();
-                    ext.type_args = None;
-                }
-            }
-        }
-    }
-
-    module.visit_mut_with(&mut TypeArgPreserver);
-}
-
-fn encode_hir_type(ty: &HirType) -> Option<String> {
-    Some(match ty {
-        HirType::String => "s".to_string(),
-        HirType::Number => "n".to_string(),
-        HirType::Boolean => "b".to_string(),
-        HirType::BigInt => "i".to_string(),
-        HirType::Void => "v".to_string(),
-        HirType::Null => "z".to_string(),
-        HirType::Any => "a".to_string(),
-        HirType::Unknown => "u".to_string(),
-        HirType::Array(inner) => format!("A:{}", encode_hir_type(inner)?),
-        HirType::Named(name) => format!("N:{}:{name}", name.len()),
-        HirType::StringLiteral(s) => format!("L:{}:{s}", s.len()),
-        HirType::Tuple(items) => {
-            let mut out = format!("T:{}:", items.len());
-            for item in items {
-                let enc = encode_hir_type(item)?;
-                out.push_str(&format!("{}:{enc}", enc.len()));
-            }
-            out
-        }
-        HirType::Union(items) => {
-            let mut out = format!("U:{}:", items.len());
-            for item in items {
-                let enc = encode_hir_type(item)?;
-                out.push_str(&format!("{}:{enc}", enc.len()));
-            }
-            out
-        }
-        HirType::Generic { base, type_args } => {
-            let mut out = format!("G:{}:{base}:{}:", base.len(), type_args.len());
-            for arg in type_args {
-                let enc = encode_hir_type(arg)?;
-                out.push_str(&format!("{}:{enc}", enc.len()));
-            }
-            out
-        }
-        _ => return None,
-    })
-}
-
-fn take_len_prefixed(rest: &str) -> Option<(&str, &str)> {
-    let (len_str, after_colon) = rest.split_once(':')?;
-    let len: usize = len_str.parse().ok()?;
-    if after_colon.len() < len {
-        return None;
-    }
-    Some((&after_colon[..len], &after_colon[len..]))
-}
-
-pub(crate) fn decode_hir_type(s: &str) -> Option<HirType> {
-    match s {
-        "s" => return Some(HirType::String),
-        "n" => return Some(HirType::Number),
-        "b" => return Some(HirType::Boolean),
-        "i" => return Some(HirType::BigInt),
-        "v" => return Some(HirType::Void),
-        "z" => return Some(HirType::Null),
-        "a" => return Some(HirType::Any),
-        "u" => return Some(HirType::Unknown),
-        _ => {}
-    }
-    if let Some(rest) = s.strip_prefix("A:") {
-        return Some(HirType::Array(Box::new(decode_hir_type(rest)?)));
-    }
-    if let Some(rest) = s.strip_prefix("N:") {
-        let (name, rem) = take_len_prefixed(rest)?;
-        return rem.is_empty().then_some(HirType::Named(name.to_string()));
-    }
-    if let Some(rest) = s.strip_prefix("L:") {
-        let (lit, rem) = take_len_prefixed(rest)?;
-        return rem
-            .is_empty()
-            .then_some(HirType::StringLiteral(lit.to_string()));
-    }
-    if let Some(rest) = s.strip_prefix("T:") {
-        let (count_str, mut rem) = rest.split_once(':')?;
-        let count: usize = count_str.parse().ok()?;
-        let mut items = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (chunk, next) = take_len_prefixed(rem)?;
-            items.push(decode_hir_type(chunk)?);
-            rem = next;
-        }
-        return rem.is_empty().then_some(HirType::Tuple(items));
-    }
-    if let Some(rest) = s.strip_prefix("U:") {
-        let (count_str, mut rem) = rest.split_once(':')?;
-        let count: usize = count_str.parse().ok()?;
-        let mut items = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (chunk, next) = take_len_prefixed(rem)?;
-            items.push(decode_hir_type(chunk)?);
-            rem = next;
-        }
-        return rem.is_empty().then_some(HirType::Union(items));
-    }
-    if let Some(rest) = s.strip_prefix("G:") {
-        let (base, rem) = take_len_prefixed(rest)?;
-        let rem = rem.strip_prefix(':')?;
-        let (count_str, mut rem) = rem.split_once(':')?;
-        let count: usize = count_str.parse().ok()?;
-        let mut args = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (chunk, next) = take_len_prefixed(rem)?;
-            args.push(decode_hir_type(chunk)?);
-            rem = next;
-        }
-        return rem.is_empty().then_some(HirType::Generic {
-            base: base.to_string(),
-            type_args: args,
-        });
-    }
-    None
-}
 
 pub(super) fn map_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
     let ty = optional_value(ctx, ty).unwrap_or(ty);
@@ -478,99 +217,36 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
+        if let Some(constructor) = self.shapes.metadata.constructors.get(expr) {
+            use hir_compat::Constructor;
+            return match constructor {
+                Constructor::Map { types, init } => {
+                    let expected = match types {
+                        Some((key, value)) => {
+                            Some(self.shapes.kv_array_type(ctx, key, value, "map_tuple")?)
+                        }
+                        None => expected,
+                    };
+                    match init {
+                        Some(init) => self.map_from_entries(ctx, init, expected),
+                        None => self.empty_map(ctx, expected),
+                    }
+                    .map(Some)
+                }
+                Constructor::Set { element, init } => {
+                    let expected = match element {
+                        Some(element) => Some(self.shapes.set_array_type(ctx, element)?),
+                        None => expected,
+                    };
+                    match init {
+                        Some(init) => self.set_from_array(ctx, init, expected),
+                        None => self.empty_set(ctx, expected),
+                    }
+                    .map(Some)
+                }
+            };
+        }
         match expr {
-            Expr::MapNew => {
-                let idx = self.map_ctor_idx;
-                self.map_ctor_idx += 1;
-                let expected = if let Some((k_hir, v_hir)) =
-                    self.shapes.locations.map_ctor(&self.fn_name, idx)
-                {
-                    Some(
-                        self.shapes
-                            .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?,
-                    )
-                } else {
-                    expected
-                };
-                Ok(Some(self.empty_map(ctx, expected)?))
-            }
-            Expr::MapNewFromArray(init) => {
-                let idx = self.map_ctor_idx;
-                self.map_ctor_idx += 1;
-                let expected = if let Some((k_hir, v_hir)) =
-                    self.shapes.locations.map_ctor(&self.fn_name, idx)
-                {
-                    Some(
-                        self.shapes
-                            .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?,
-                    )
-                } else {
-                    expected
-                };
-                Ok(Some(self.map_from_entries(ctx, init, expected)?))
-            }
-            Expr::SetNew => {
-                let idx = self.set_ctor_idx;
-                self.set_ctor_idx += 1;
-                let expected =
-                    if let Some(elem_hir) = self.shapes.locations.set_ctor(&self.fn_name, idx) {
-                        Some(self.shapes.set_array_type(ctx, &elem_hir)?)
-                    } else {
-                        expected
-                    };
-                Ok(Some(self.empty_set(ctx, expected)?))
-            }
-            Expr::SetNewFromArray(init) => {
-                let idx = self.set_ctor_idx;
-                self.set_ctor_idx += 1;
-                let expected =
-                    if let Some(elem_hir) = self.shapes.locations.set_ctor(&self.fn_name, idx) {
-                        Some(self.shapes.set_array_type(ctx, &elem_hir)?)
-                    } else {
-                        expected
-                    };
-                Ok(Some(self.set_from_array(ctx, init, expected)?))
-            }
-            Expr::New {
-                class_name, args, ..
-            } if class_name == "Map" => {
-                let idx = self.map_ctor_idx;
-                self.map_ctor_idx += 1;
-                let expected = if let Some((k_hir, v_hir)) =
-                    self.shapes.locations.map_ctor(&self.fn_name, idx)
-                {
-                    Some(
-                        self.shapes
-                            .kv_array_type(ctx, &k_hir, &v_hir, "map_tuple")?,
-                    )
-                } else {
-                    expected
-                };
-                if let [init] = args.as_slice()
-                    && !matches!(init, Expr::Undefined)
-                {
-                    return Ok(Some(self.map_from_entries(ctx, init, expected)?));
-                }
-                Ok(Some(self.empty_map(ctx, expected)?))
-            }
-            Expr::New {
-                class_name, args, ..
-            } if class_name == "Set" => {
-                let idx = self.set_ctor_idx;
-                self.set_ctor_idx += 1;
-                let expected =
-                    if let Some(elem_hir) = self.shapes.locations.set_ctor(&self.fn_name, idx) {
-                        Some(self.shapes.set_array_type(ctx, &elem_hir)?)
-                    } else {
-                        expected
-                    };
-                if let [init] = args.as_slice()
-                    && !matches!(init, Expr::Undefined)
-                {
-                    return Ok(Some(self.set_from_array(ctx, init, expected)?));
-                }
-                Ok(Some(self.empty_set(ctx, expected)?))
-            }
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;

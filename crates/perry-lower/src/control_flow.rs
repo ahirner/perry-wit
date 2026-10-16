@@ -254,23 +254,9 @@ impl<'s> FunctionBuilder<'s> {
         let exit = self.new_block(ctx, "exit");
         let mut collection_iter = None;
         if !body_first
-            && let Some(Expr::Compare {
-                op: CompareOp::Lt,
-                left,
-                right,
-            }) = condition
-            && let (
-                Expr::LocalGet(idx_id),
-                Expr::PropertyGet {
-                    object: obj,
-                    property,
-                    ..
-                },
-            ) = (left.as_ref(), right.as_ref())
-            && property == "length"
-            && let Expr::LocalGet(arr_id) = obj.as_ref()
-            && let Ok(arr_slot) = self.local(*arr_id)
-            && let Ok(idx_slot) = self.local(*idx_id)
+            && let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition)
+            && let Ok(arr_slot) = self.local(arr_id)
+            && let Ok(idx_slot) = self.local(idx_id)
         {
             let arr_val = self.load(ctx, arr_slot)?;
             if let Ok(arr_def) = self.defined(ctx, arr_val) {

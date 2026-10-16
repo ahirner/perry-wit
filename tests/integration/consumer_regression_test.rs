@@ -12,6 +12,8 @@ fn array_callbacks_and_iteration_match_javascript() {
     let source = r#"
 function twice(n:number):number {return n*2;}
 function nothing(n:number):void {}
+function missingDefault():number {throw new Error('missing');}
+function refill(values:number[]):number {values.push(1,2);return 8;}
 export function callbacks():number {
  let calls=0;
  const numbers:number[]=[1,2,3];
@@ -24,6 +26,8 @@ export function callbacks():number {
  catch(e){if(e.message!=='stop')return 3;}
  const finished=values.map(n=>{try {return n*2;}finally {trace++;}});
  if(trace!==16 || finished[1]!==8)return 4;
+ const wrapped=values.map(n=>n+(trace as number));
+ if(wrapped[0]!==17 || wrapped[1]!==20)return 7;
  const small:number[]=[1,2,3];
  const cases:number[]=small.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
  const loops:number[]=small.map(n=>{while(true){return n*2;}});
@@ -42,6 +46,17 @@ export function iteration():number {
  for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
  let text='';
  for(const word of 'c,d'.split(',')){text+=word;}
+ const [first, , missing = visits + 4] = values;
+ const [label, count] = ['ok', 3] as [string, number];
+ if(first!==1 || missing!==3 || label!=='ok' || count!==3)return 2;
+ const [, absent = 7] = [5];
+ if(absent!==7)return 3;
+ let thrown=0;
+ try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
+ if(thrown!==1)return 4;
+ const exhausted:number[]=[];
+ const [filled=refill(exhausted), stillMissing=9]=exhausted;
+ if(filled!==8 || stillMissing!==9)return 5;
  for(const scalar of 'é🙂a'){text+=scalar+':';}
  return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
 }
@@ -198,7 +213,16 @@ function size(value:Choice):number {
     } finally { const ignored = 0; }
 }
 function present(value:{n:number} | null | undefined):number { return value ? value.n : 10; }
-export function run():number {return size({tag:'text',val:'abc'}) + size({tag:'number',val:4}) + present({n:7}) + present(null) + present(undefined);}
+interface Options { query?: { search?: string } }
+function label(options:Options):string {return options.query?.search?.trim().toLowerCase() ?? '';}
+function checked(options:Options, visits:number[]):Options {visits.push(1);return options;}
+function nested():boolean {
+ const visits:number[]=[];
+ const options:Options={query:{search:' OK '}};
+ const value=checked(options,visits).query?.search?.trim().toLowerCase() ?? '';
+ return label({})==='' && label({query:{}})==='' && value==='ok' && visits.length===1;
+}
+export function run():number {if(!nested())return -1;return size({tag:'text',val:'abc'}) + size({tag:'number',val:4}) + present({n:7}) + present(null) + present(undefined);}
 "#;
     assert_eq!(Program::new(source).outcome("run", &[]), (35.0, 0));
 }
@@ -324,7 +348,8 @@ fn generic_interfaces_aliases_and_defaults_resolve_to_concrete_shapes() {
 interface Item { n:number }
 interface Pair<Item,Other=Item> { a:Item; b:Other }
 interface Page<T> {items:T[];next:string|null}
-interface Entry<T=string> {value:T}
+interface Base<T> {value:T}
+interface Entry<T=string> extends Base<T> {}
 type Box<T> = {item:T};
 interface Link<T> {value:T;next:Link<T>|null}
 function size(page:Page<Entry>) {const items = page.items; const first = items[0]; return first.value.length;}

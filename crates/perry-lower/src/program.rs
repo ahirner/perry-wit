@@ -1,9 +1,6 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
 
-/// The HIR runtime call that initializes a named built-in import (`Writable`).
-pub(super) const ESM_EXPORT_INIT: &str = "js_native_module_named_esm_export_value";
-
 pub(super) struct Signature {
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
@@ -38,11 +35,11 @@ pub(super) fn build_module(
     ctx: &mut Context,
     hir: &HirModule,
     foreign: &HashMap<String, crate::hir::Foreign>,
-    inferred: HashSet<LocalId>,
-    locations: &crate::locations::Locations<'_>,
+    metadata: &hir_compat::Metadata<'_>,
 ) -> Result<ModuleOp> {
+    let locations = &metadata.locations;
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(module, hir, foreign, inferred, locations);
+    let shapes = Shapes::new(module, hir, foreign, metadata);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<String, Builtin> = HashMap::new();
@@ -154,7 +151,7 @@ pub(super) fn build_module(
     // function.
     let has_init = hir.init.iter().any(|statement| {
         !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
-            if matches!(&**callee, Expr::ExternFuncRef { name, .. } if name == ESM_EXPORT_INIT))
+            if hir_compat::is_import_initializer(callee))
     });
     if has_init {
         // Top-level statements (with top-level `await`) form the async main function of a

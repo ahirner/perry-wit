@@ -27,28 +27,13 @@ struct FunctionEnv<'a> {
     integer_aliases: &'a HashMap<String, HirType>,
     imported_types: &'a HashMap<String, String>,
     foreign: &'a HashMap<String, crate::hir::Foreign>,
-    locations: &'a crate::locations::Locations<'a>,
-    fn_name: &'a str,
-    map_ctor_idx: usize,
-    set_ctor_idx: usize,
+    metadata: &'a hir_compat::Metadata<'a>,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;
 const BIGINT_TYPE: HirType = HirType::BigInt;
 
 impl<'a> FunctionEnv<'a> {
-    pub(super) fn next_map_ctor(&mut self) -> Option<(HirType, HirType)> {
-        let idx = self.map_ctor_idx;
-        self.map_ctor_idx += 1;
-        self.locations.map_ctor(self.fn_name, idx)
-    }
-
-    pub(super) fn next_set_ctor(&mut self) -> Option<HirType> {
-        let idx = self.set_ctor_idx;
-        self.set_ctor_idx += 1;
-        self.locations.set_ctor(self.fn_name, idx)
-    }
-
     fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
         match ty {
             HirType::Named(name) => match self.integer_aliases.get(name) {
@@ -530,10 +515,11 @@ fn push_return_type(
 pub(super) fn unresolved_types(
     ctx: &Context,
     hir: &mut HirModule,
-    inferred: &HashSet<LocalId>,
-    locations: &crate::locations::Locations<'_>,
+    metadata: &hir_compat::Metadata<'_>,
     foreign: &HashMap<String, crate::hir::Foreign>,
 ) {
+    let inferred = &metadata.inferred_bindings;
+    let locations = &metadata.locations;
     let (integer_aliases, imported_types) = collect_foreign_imports(hir, foreign);
     clear_inferred_type_vars(
         &mut hir.init,
@@ -561,10 +547,7 @@ pub(super) fn unresolved_types(
             integer_aliases: &integer_aliases,
             foreign,
             imported_types: &imported_types,
-            locations,
-            fn_name: crate::MAIN,
-            map_ctor_idx: 0,
-            set_ctor_idx: 0,
+            metadata,
         };
         scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     }
@@ -588,10 +571,7 @@ pub(super) fn unresolved_types(
                 integer_aliases: &integer_aliases,
                 foreign,
                 imported_types: &imported_types,
-                locations,
-                fn_name: &function.name,
-                map_ctor_idx: 0,
-                set_ctor_idx: 0,
+                metadata,
             };
             let mut returned = Vec::new();
             scan(
@@ -657,10 +637,7 @@ pub(super) fn unresolved_types(
         integer_aliases: &integer_aliases,
         foreign,
         imported_types: &imported_types,
-        locations,
-        fn_name: crate::MAIN,
-        map_ctor_idx: 0,
-        set_ctor_idx: 0,
+        metadata,
     };
     scan(&mut hir.init, &mut env, &mut ScanMode::ResolveLocals);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
@@ -678,10 +655,7 @@ pub(super) fn unresolved_types(
             integer_aliases: &integer_aliases,
             foreign,
             imported_types: &imported_types,
-            locations,
-            fn_name: &function.name,
-            map_ctor_idx: 0,
-            set_ctor_idx: 0,
+            metadata,
         };
         scan(&mut function.body, &mut env, &mut ScanMode::ResolveLocals);
     }

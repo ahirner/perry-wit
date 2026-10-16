@@ -87,7 +87,6 @@ pub(super) struct Shapes<'h> {
     pub(super) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
-    pub(super) inferred_bindings: HashSet<perry_hir::types::LocalId>,
     pub(super) type_env: perry_hir::HirTypeEnv,
     pub(super) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(super) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
@@ -95,7 +94,7 @@ pub(super) struct Shapes<'h> {
     object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
     function_names: HashSet<&'h str>,
     local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
-    pub(super) locations: &'h crate::locations::Locations<'h>,
+    pub(super) metadata: &'h crate::hir_compat::Metadata<'h>,
     foreign: &'h HashMap<String, crate::hir::Foreign>,
     integer_imports: HashMap<&'h str, (u32, Signedness)>,
     imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
@@ -138,8 +137,7 @@ impl<'h> Shapes<'h> {
         module: pliron::builtin::ops::ModuleOp,
         hir: &'h HirModule,
         foreign: &'h HashMap<String, crate::hir::Foreign>,
-        inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
-        locations: &'h crate::locations::Locations<'h>,
+        metadata: &'h crate::hir_compat::Metadata<'h>,
     ) -> Self {
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
@@ -183,7 +181,7 @@ impl<'h> Shapes<'h> {
         let mut user_classes = HashSet::new();
         let mut object_literal_shapes = HashMap::new();
         for class in &hir.classes {
-            if class.name.starts_with("__AnonShape_") {
+            if crate::hir_compat::is_object_literal(&class.name) {
                 object_literal_shapes.insert(
                     class.name.as_str(),
                     class.fields.iter().map(|f| f.name.as_str()).collect(),
@@ -213,7 +211,6 @@ impl<'h> Shapes<'h> {
             } else {
                 Default::default()
             },
-            inferred_bindings,
             type_env: perry_hir::HirTypeEnv::from_module(hir),
             interfaces,
             type_aliases,
@@ -221,7 +218,7 @@ impl<'h> Shapes<'h> {
             object_literal_shapes,
             function_names,
             local_source_spans: &hir.local_source_spans,
-            locations,
+            metadata,
             foreign,
             integer_imports,
             imported_types,
@@ -239,7 +236,7 @@ impl<'h> Shapes<'h> {
         id: perry_hir::types::LocalId,
     ) -> anyhow::Error {
         match self.local_source_spans.get(&id) {
-            Some(span) => self.locations.annotate(
+            Some(span) => self.metadata.locations.annotate(
                 error,
                 swc_common::Span::new(
                     swc_common::BytePos(span.start),
@@ -259,7 +256,7 @@ impl<'h> Shapes<'h> {
         if byte_offset == 0 {
             return error;
         }
-        self.locations.annotate(
+        self.metadata.locations.annotate(
             error,
             swc_common::Span::new(
                 swc_common::BytePos(byte_offset),
@@ -269,7 +266,7 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        self.locations.annotate_call(error, byte_offset)
+        self.metadata.locations.annotate_call(error, byte_offset)
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -342,7 +339,7 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn is_explicit_binding(&self, id: perry_hir::types::LocalId) -> bool {
-        self.local_source_spans.contains_key(&id) && !self.inferred_bindings.contains(&id)
+        self.local_source_spans.contains_key(&id) && !self.metadata.inferred_bindings.contains(&id)
     }
 
     /// Whether the program declares a type of this name (shadowing a built-in class).
@@ -359,7 +356,7 @@ impl<'h> Shapes<'h> {
         }
         let ty = self
             .resolve_named(ctx, name)
-            .map_err(|error| self.locations.annotate_type(error, name))?;
+            .map_err(|error| self.metadata.locations.annotate_type(error, name))?;
         // A re-entrant reference returns the opaque record; only the outermost call caches.
         if !self.pending.borrow().contains_key(&key) {
             self.named.borrow_mut().insert(key, ty);

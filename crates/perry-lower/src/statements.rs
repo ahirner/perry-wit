@@ -5,10 +5,47 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
         let mut rest = statements;
         while let Some((first, tail)) = rest.split_first() {
-            rest = match self.destructured_element(rest) {
-                Some((id, value, after)) => {
-                    self.binding(ctx, id, &HirType::Any, Some(value))?;
-                    after
+            rest = match self.iteration.element(rest) {
+                Some(element) => {
+                    let value = self.conditional(
+                        ctx,
+                        element.condition,
+                        element.missing,
+                        element.value,
+                        None,
+                    )?;
+                    let slot = self.entry_slot(ctx, value.get_type(ctx));
+                    self.store(ctx, slot, value);
+                    self.locals.insert(element.id, LocalBinding::plain(slot));
+                    let done = self.condition(ctx, element.condition)?;
+                    let done = self.choose(
+                        ctx,
+                        done.get_type(ctx),
+                        done,
+                        |b, ctx| Ok(b.boolean(ctx, true)),
+                        |b, ctx| {
+                            let available = match element.available {
+                                hir_compat::Availability::Test(test) => b.condition(ctx, test)?,
+                                hir_compat::Availability::Known(available) => {
+                                    b.boolean(ctx, available)
+                                }
+                            };
+                            b.choose(
+                                ctx,
+                                available.get_type(ctx),
+                                available,
+                                |b, ctx| {
+                                    if let Some(advance) = element.advance {
+                                        b.effect(ctx, advance)?;
+                                    }
+                                    Ok(b.boolean(ctx, false))
+                                },
+                                |b, ctx| Ok(b.boolean(ctx, true)),
+                            )
+                        },
+                    )?;
+                    self.store(ctx, self.local(element.done)?, done);
+                    element.rest
                 }
                 None => {
                     self.statement(ctx, first).map_err(|error| match first {
@@ -22,66 +59,24 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// Array destructuring declares each element as `let e = undefined` and assigns it in
-    /// `if (guard) { <iterator pull> } else { e = i < a.length ? a[i] : undefined }`. With a
-    /// statically false guard this is `let e = a[i]` (a read that is `undefined` out of
-    /// bounds, R8): the element, its initializer and the statements after the pair.
-    fn destructured_element(
-        &self,
-        statements: &'s [Stmt],
-    ) -> Option<(LocalId, &'s Expr, &'s [Stmt])> {
-        let [
-            Stmt::Let {
-                id,
-                ty: HirType::Any,
-                init: Some(Expr::Undefined),
-                ..
-            },
-            Stmt::If {
-                condition: Expr::LocalGet(guard),
-                else_branch: Some(else_branch),
-                ..
-            },
-            after @ ..,
-        ] = statements
-        else {
-            return None;
-        };
-        let [Stmt::Expr(Expr::LocalSet(target, value))] = else_branch.as_slice() else {
-            return None;
-        };
-        if target != id || !self.false_guards.contains(guard) {
-            return None;
-        }
-        let value = match &**value {
-            Expr::Conditional {
-                then_expr,
-                else_expr,
-                ..
-            } if matches!(**else_expr, Expr::Undefined)
-                && matches!(**then_expr, Expr::IndexGet { .. }) =>
-            {
-                &**then_expr
-            }
-            other => other,
-        };
-        Some((*id, value, after))
-    }
-
     pub(super) fn statement(&mut self, ctx: &mut Context, statement: &'s Stmt) -> Result<()> {
         match statement {
             Stmt::If {
-                condition: Expr::LocalGet(guard),
+                condition,
                 else_branch,
                 ..
-            } if self.false_guards.contains(guard) => {
+            } if self.iteration.is_guard(condition) => {
                 if let Some(else_branch) = else_branch {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::Let { id, ty, init, .. } => self
-                .binding(ctx, *id, ty, init.as_ref())
-                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Stmt::Let {
+                id, name, ty, init, ..
+            } => {
+                self.iteration.register_binding(*id, name, init.as_ref());
+                self.binding(ctx, *id, ty, init.as_ref())
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?;
+            }
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
@@ -242,9 +237,6 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// `let id: ty = init`. Array destructuring's iterator guard and the iterator of its
-    /// protocol arm (`guard ? GetIterator(a) : undefined`) bind nothing when the guard is
-    /// statically false.
     fn binding(
         &mut self,
         ctx: &mut Context,
@@ -252,15 +244,19 @@ impl<'s> FunctionBuilder<'s> {
         ty: &HirType,
         init: Option<&'s Expr>,
     ) -> Result<()> {
-        if let Some(guard) = init
-            && self.iterator_guard(ctx, guard)?
+        if let Some(init) = init
+            && let Some(source) = self.iteration.guard(id, init)
         {
-            self.false_guards.insert(id);
-            return Ok(());
-        }
-        if let Some(Expr::Conditional { condition, .. }) = init
-            && matches!(condition.as_ref(), Expr::LocalGet(guard) if self.false_guards.contains(guard))
-        {
+            if let Some(source) = source {
+                let source = self.expression(ctx, source)?;
+                let source = self.defined(ctx, source)?;
+                let tuple = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+                    .is_ok_and(|record| record.deref(ctx).is_tuple());
+                ensure!(
+                    kind(ctx, source)? == Kind::Array || tuple,
+                    "array destructuring is supported for arrays so far"
+                );
+            }
             return Ok(());
         }
         // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
@@ -321,7 +317,7 @@ impl<'s> FunctionBuilder<'s> {
         // HIR's getReader signature assumes the default overload.
         let carrier = match (declared, init) {
             (Some(ty), Some(value))
-                if self.shapes.inferred_bindings.contains(&id)
+                if self.shapes.metadata.inferred_bindings.contains(&id)
                     && (optional_value(ctx, value.get_type(ctx))
                         .unwrap_or(value.get_type(ctx))
                         == optional_value(ctx, ty).unwrap_or(ty)
@@ -351,6 +347,9 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Lower an expression evaluated for its effects; void calls are allowed here.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
+        if self.iteration.is_release(expr) {
+            return Ok(());
+        }
         if let Expr::Call {
             callee,
             args,
@@ -380,36 +379,5 @@ impl<'s> FunctionBuilder<'s> {
             self.expression(ctx, expr)?;
         }
         Ok(())
-    }
-
-    /// Whether `expr` is array destructuring's guard for the iterator protocol, which is
-    /// false for MIR arrays: they are plain arrays, and `Array.prototype[Symbol.iterator]`
-    /// cannot be patched. Other sources are an error.
-    fn iterator_guard(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<bool> {
-        let source = match expr {
-            Expr::ArrayIterationPatched => return Ok(true),
-            Expr::NativeMethodCall {
-                module,
-                object: None,
-                method,
-                args,
-                ..
-            } if module == "__perry_runtime" && method == "arrayDestructureNeedsIterator" => {
-                let [source] = args.as_slice() else {
-                    bail!("arrayDestructureNeedsIterator takes one value");
-                };
-                source
-            }
-            _ => return Ok(false),
-        };
-        let source = self.expression(ctx, source)?;
-        let source = self.defined(ctx, source)?;
-        let is_tuple_rec = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-            .is_ok_and(|r| r.deref(ctx).is_tuple());
-        ensure!(
-            kind(ctx, source)? == Kind::Array || is_tuple_rec,
-            "array destructuring is supported for arrays so far"
-        );
-        Ok(true)
     }
 }

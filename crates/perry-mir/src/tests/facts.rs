@@ -521,7 +521,7 @@ fn context_summarization_bounds_context_count() -> Result<()> {
             specs.push((name, (ba, sa), (bb, sb)));
         }
     }
-    text.push_str("}");
+    text.push('}');
     let module = parse(ctx, &text);
     verify_operation(module, ctx)?;
     for func in crate::aggregates::functions(module, ctx) {
@@ -601,7 +601,7 @@ fn context_summarization_bounds_mixed_integer_and_float_arities() -> Result<()> 
             )
             .unwrap();
         }
-        text.push_str("}");
+        text.push('}');
         let module = parse(ctx, &text);
         verify_operation(module, ctx)?;
         for func in crate::aggregates::functions(module, ctx) {

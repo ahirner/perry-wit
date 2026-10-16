@@ -1,5 +1,5 @@
 //! Source diagnostics before HIR can erase unsupported string representations.
-use crate::locations::Locations;
+use crate::hir_compat::locations::Locations;
 use anyhow::{Result, anyhow};
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::Span;

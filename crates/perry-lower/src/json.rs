@@ -291,63 +291,26 @@ impl<'s> FunctionBuilder<'s> {
 }
 
 impl<'s> FunctionBuilder<'s> {
-    /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
-    /// `{}`: `js_object_literal_spread` copies each spread and `js_object_literal_define`
-    /// defines each static member. Over JSON values it builds a JSON object; typed records
-    /// do not spread yet.
     pub(super) fn object_spread(
         &mut self,
         ctx: &mut Context,
-        target: LocalId,
-        body: &'s [Stmt],
+        parts: &'s [(Option<String>, Expr)],
     ) -> Result<Value> {
-        const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
-            response.json()) with static keys; computed keys, methods and accessors are not";
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
-        let is_target = |expr: &'s Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
-        for statement in body {
-            match statement {
-                Stmt::Let {
-                    id,
-                    init: Some(value),
-                    ..
-                } => {
-                    let value = self.json_value(ctx, value)?;
-                    let slot = self.entry_slot(ctx, value.get_type(ctx));
-                    self.store(ctx, slot, value);
-                    self.locals.insert(*id, LocalBinding::plain(slot));
+        for (key, value) in parts {
+            if let Some(key) = key {
+                let key = self.string(ctx, key);
+                let value = self.json_value(ctx, value)?;
+                self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+            } else {
+                let source = self.expression(ctx, value)?;
+                if matches!(kind(ctx, source), Ok(Kind::Exception)) {
+                    continue;
                 }
-                Stmt::Expr(Expr::Call { callee, args, .. })
-                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                        if name == "js_object_literal_spread")
-                        && args.len() == 2
-                        && is_target(&args[0]) =>
-                {
-                    let source = self.expression(ctx, &args[1])?;
-                    // An `Error` has no own enumerable properties: it adds nothing.
-                    if matches!(kind(ctx, source), Ok(Kind::Exception)) {
-                        continue;
-                    }
-                    let Some(source) = self.json_operand(ctx, source)? else {
-                        bail!("{UNSUPPORTED}");
-                    };
-                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
-                }
-                Stmt::Expr(Expr::Call { callee, args, .. })
-                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                        if name == "js_object_literal_define")
-                        && args.len() == 3
-                        && is_target(&args[0]) =>
-                {
-                    let Expr::String(key) = &args[1] else {
-                        bail!("{UNSUPPORTED}");
-                    };
-                    let key = self.string(ctx, key);
-                    let value = self.json_value(ctx, &args[2])?;
-                    self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
-                }
-                Stmt::Return(Some(result)) if is_target(result) => {}
-                _ => bail!("{UNSUPPORTED}"),
+                let source = self.json_operand(ctx, source)?.context(
+                    "object spread is supported over JSON values (JSON.parse, response.json()) with static keys"
+                )?;
+                self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }
         }
         Ok(object)

@@ -1,7 +1,8 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
+pub(crate) use crate::hir_compat::parse;
 use anyhow::{Context, Result, bail, ensure};
-use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
+use perry_parser::swc_ecma_ast as ast;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -14,7 +15,7 @@ type Exports = BTreeMap<String, String>;
 
 pub(super) struct Loaded<'s> {
     pub(super) module: ast::Module,
-    pub(super) locations: crate::locations::Locations<'s>,
+    pub(super) locations: crate::hir_compat::locations::Locations<'s>,
 }
 
 pub(super) fn load<'s>(
@@ -40,7 +41,7 @@ pub(super) fn load<'s>(
         _ => false,
     });
     if !needs_graph {
-        let mut locations = crate::locations::Locations::default();
+        let mut locations = crate::hir_compat::locations::Locations::default();
         locations.add(PathBuf::from(file), source, 0);
         return Ok(Loaded {
             module: initial,
@@ -58,7 +59,7 @@ pub(super) fn load<'s>(
             types: BTreeSet::new(),
             next: 0,
             next_span: 0,
-            locations: crate::locations::Locations::default(),
+            locations: crate::hir_compat::locations::Locations::default(),
             entry_path: normalize(Path::new(file)),
             entry_source: source,
         };
@@ -202,55 +203,6 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         })
 }
 
-pub(super) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
-    let mut cache = Default::default();
-    use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
-    let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
-        .map_err(|error| {
-            // The pinned wrapper discards fatal spans; recover SWC metadata directly.
-            use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
-            let lexer = Lexer::new(
-                Syntax::Typescript(TsSyntax::default()),
-                Default::default(),
-                swc_common::input::StringInput::new(
-                    source,
-                    swc_common::BytePos(1),
-                    swc_common::BytePos(source.len() as u32 + 1),
-                ),
-                None,
-            );
-            let mut parser = Parser::new_from(lexer);
-            let mut diagnostic = PerryDiagnostic::error(
-                DiagnosticCode::ParseError,
-                format!("Parsing {identity}: {error}"),
-            );
-            if let Err(failure) = parser.parse_module() {
-                let span = failure.span();
-                diagnostic.span = Some(SourceSpan::new(
-                    identity,
-                    source,
-                    span.lo.0.saturating_sub(1) as usize,
-                    span.hi.0.saturating_sub(1) as usize,
-                ));
-            }
-            error.context(diagnostic)
-        })?;
-    if let Some(diagnostic) = parsed.diagnostics.iter().next() {
-        return Err(PerryDiagnostic::error(
-            DiagnosticCode::ParseError,
-            format!("Parsing {identity}: {}", diagnostic.message),
-        )
-        .with_span(SourceSpan::new(
-            identity,
-            source,
-            diagnostic.span.start.saturating_sub(1) as usize,
-            diagnostic.span.end.saturating_sub(1) as usize,
-        ))
-        .into());
-    }
-    Ok(parsed.module)
-}
-
 pub(super) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
     module
         .body
@@ -277,7 +229,7 @@ struct Graph<'a> {
     types: BTreeSet<String>,
     next: usize,
     next_span: u32,
-    locations: crate::locations::Locations<'a>,
+    locations: crate::hir_compat::locations::Locations<'a>,
     entry_path: PathBuf,
     entry_source: &'a str,
 }
@@ -335,7 +287,7 @@ impl Graph<'_> {
         self.locations.add(path.to_owned(), text, self.next_span);
         module.visit_mut_with(&mut rebase);
         self.next_span = rebase.end + 1;
-        super::source::validate(&module, &self.locations)?;
+        super::hir_compat::source::validate(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {

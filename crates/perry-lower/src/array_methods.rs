@@ -1,33 +1,6 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
 use perry_mir::{collections::ArrayAtOp, types::OptionalType};
-use perry_parser::swc_ecma_ast as ast;
-use swc_ecma_visit::{VisitMut, VisitMutWith};
-
-pub(super) const PUSH: &str = "$$perryArrayPush";
-pub(super) const CONCAT: &str = "$$perryArrayConcat";
-
-/// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(super) fn preserve_arguments(module: &mut ast::Module) {
-    struct Arguments;
-    impl VisitMut for Arguments {
-        fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
-            call.visit_mut_children_with(self);
-            if let ast::Callee::Expr(callee) = &mut call.callee
-                && let ast::Expr::Member(member) = &mut **callee
-                && let ast::MemberProp::Ident(method) = &mut member.prop
-                && (method.sym == "concat"
-                    || (method.sym == "push"
-                        && (call.args.len() != 1
-                            || call.args.iter().any(|argument| argument.spread.is_some()))))
-            {
-                method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
-            }
-        }
-    }
-    module.visit_mut_with(&mut Arguments);
-}
-
 /// The frame of an inline array callback being lowered: its `return`s store into `slot` and
 /// branch to `done` instead of leaving the enclosing function.
 pub(super) struct CallbackReturn {
