@@ -172,7 +172,9 @@ pub(crate) fn export(
     )?;
     let returned = if let Some(completion) = completion {
         let ty = completion.result;
-        let payload = mir_results.first().map(|ty| (*ty, values[0]));
+        let payload = mir_results
+            .first()
+            .map(|ty| (*ty, Carriers::Scalar(values[0])));
         if flat_result_len == 1 {
             b.completion_flat(ctx, completion, 0, payload)?
         } else {
@@ -184,12 +186,14 @@ pub(crate) fn export(
     } else {
         match (&export.result, mir_results.first()) {
             (Some(ty), Some(mir_ty)) if flat_result_len == 1 => {
-                vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
+                let mut flat = Vec::new();
+                b.lower_flat_values(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), &mut flat)?;
+                flat
             }
             (Some(ty), Some(mir_ty)) => {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);
-                b.lower_store(ctx, ty, *mir_ty, values[0], area, 0)?;
+                b.lower_store(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), area, 0)?;
                 vec![area]
             }
             _ => vec![],
@@ -479,8 +483,8 @@ fn async_export(
         if let Some(outcome) = outcome {
             flat.push(outcome);
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
-            let kind = slot_kind(ctx, *mir_ty)?;
-            let value = b.load(ctx, kind, promise, perry_abi::layout::promise::VALUE);
+            let value =
+                b.load_slot_value(ctx, promise, perry_abi::layout::promise::VALUE, *mir_ty)?;
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);

@@ -55,7 +55,7 @@ impl Pass for Specialize {
         let specializations = if analysis.roots.is_empty() {
             0
         } else {
-            rewrite(ctx, &analysis)
+            rewrite(ctx, &analysis)?
         };
         let previous = crate::pipeline::optimization_statistics(root, ctx);
         root.deref_mut(ctx).attributes.set(
@@ -255,7 +255,7 @@ fn coalesce_key(ctx: &Context, analysis: &ProgramFacts, id: usize) -> CoalesceKe
     }
 }
 
-fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
+fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     let root_ids: HashSet<usize> = analysis.roots.iter().map(|&(_, id)| id).collect();
     let reachable = reachable_contexts(analysis, &root_ids);
@@ -311,6 +311,19 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             );
         }
     }
+    for &id in &reachable {
+        if analysis.keys[id].specialize {
+            let implementation = implementations.of(id);
+            verify_lossless_context(
+                ctx,
+                analysis,
+                id,
+                implementation.function,
+                Some(&implementation.mapping),
+                root_ids.contains(&id),
+            )?;
+        }
+    }
     for &(original, id) in &analysis.roots {
         if !changed.contains(&id) {
             continue;
@@ -341,7 +354,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
             .attributes
             .set(SPECIALIZATION.clone(), IdentifierAttr::new(name));
     }
-    changed.len()
+    Ok(changed.len())
 }
 
 /// Contexts called, transitively, from the specialized roots.
@@ -451,9 +464,12 @@ fn types_change(
         let lhs = op.deref(ctx).get_operand(0);
         let rhs = op.deref(ctx).get_operand(1);
         let lhs_ty = lhs.get_type(ctx);
+        let needs_numeric = |fact: super::Fact| {
+            fact == super::Fact::Numeric || fact.integer().is_some_and(|int| int.bits == 64)
+        };
         comparison_domain(state, &[lhs, rhs]).is_some_and(|domain| domain.ty(ctx) != lhs_ty)
-            || state.fact(lhs) == super::Fact::Numeric
-            || state.fact(rhs) == super::Fact::Numeric
+            || needs_numeric(state.fact(lhs))
+            || needs_numeric(state.fact(rhs))
     });
     argument_changes || result_changes || values_change || comparisons_change
 }
@@ -546,4 +562,206 @@ fn set_signature(ctx: &mut Context, imp: &Implementation) {
         let argument = entry.deref(ctx).get_argument(index);
         argument.set_type(ctx, ty);
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("lossless representation violated: {0}")]
+pub(crate) struct LosslessRepresentationErr(pub String);
+
+fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
+    let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+    inner.deref(ctx).is::<pliron::builtin::types::FP64Type>()
+}
+
+/// Verifies that no specialized function in `root` backs a `Fact::Numeric` or 64-bit integer
+/// value or aggregate slot with a lossy `builtin.fp64` carrier.
+#[cfg(test)]
+pub(crate) fn verify_lossless_module(
+    root: Ptr<Operation>,
+    ctx: &Context,
+    analysis: &ProgramFacts,
+) -> Result<()> {
+    let funcs: HashMap<Identifier, FuncOp> = crate::aggregates::functions(root, ctx)
+        .into_iter()
+        .map(|f| (f.get_symbol_name(ctx), f))
+        .collect();
+    let root_ids: HashSet<usize> = analysis.roots.iter().map(|&(_, id)| id).collect();
+    for &(_, id) in &analysis.roots {
+        let orig_name = &analysis.keys[id].function;
+        let target_name = funcs
+            .get(orig_name)
+            .map(|f| super::specialized_implementation(ctx, f))
+            .unwrap_or_else(|| orig_name.clone());
+        if let Some(&func) = funcs.get(&target_name) {
+            verify_lossless_context(ctx, analysis, id, func, None, root_ids.contains(&id))?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_lossless_context(
+    ctx: &Context,
+    analysis: &ProgramFacts,
+    id: usize,
+    function: FuncOp,
+    mapping: Option<&IrMapping>,
+    is_root: bool,
+) -> Result<()> {
+    use pliron::{
+        builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList, verify_err,
+    };
+    let loc = function.loc(ctx);
+    let key = &analysis.keys[id];
+    let state = &analysis.states[id];
+    let body = &analysis.bodies[&key.function];
+    let mut live_values = HashSet::new();
+    let region = function.get_region(ctx);
+    for block in region.deref(ctx).iter(ctx) {
+        live_values.extend(block.deref(ctx).arguments());
+    }
+    let ops = crate::aggregates::operations(ctx, &function);
+    for &op in &ops {
+        live_values.extend(op.deref(ctx).results());
+    }
+    let entry = function.get_entry_block(ctx);
+    let orig_arg_types = body.signature.deref(ctx).arg_types();
+    for (pos, &param) in body.parameters.iter().enumerate() {
+        let orig_arg_ty = orig_arg_types[pos];
+        let arg_ty = entry.deref(ctx).get_argument(pos).get_type(ctx);
+        if key
+            .args
+            .get(pos)
+            .copied()
+            .flatten()
+            .is_some_and(|d| d.bits == 64)
+            && is_fp64_carrier(ctx, arg_ty)
+        {
+            return verify_err!(
+                loc,
+                LosslessRepresentationErr(format!("64-bit parameter {pos} has f64 carrier"))
+            );
+        }
+        if state.fact(param) == super::Fact::Numeric
+            && !orig_arg_ty.deref(ctx).is::<PromiseType>()
+            && is_fp64_carrier(ctx, arg_ty)
+        {
+            return verify_err!(
+                loc,
+                LosslessRepresentationErr(format!("Fact::Numeric parameter {pos} has f64 carrier"))
+            );
+        }
+        if let Some(&cell) = state.heap_values.get(&param)
+            && !orig_arg_ty.deref(ctx).is::<PromiseType>()
+        {
+            analysis.verify_cell_layout_lossless(ctx, loc.clone(), arg_ty, cell)?;
+        }
+    }
+    let orig_res_types = body.signature.deref(ctx).res_types();
+    let actual_res_types = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?
+        .deref(ctx)
+        .res_types();
+    for (pos, res_fact) in state.results.iter().enumerate() {
+        let orig_ty = orig_res_types[pos];
+        let actual_ty = actual_res_types[pos];
+        if (!is_root || super::heap::aggregate(ctx, orig_ty))
+            && !orig_ty.deref(ctx).is::<PromiseType>()
+        {
+            if (res_fact.domain.integer().is_some_and(|d| d.bits == 64)
+                || res_fact.domain == super::Fact::Numeric)
+                && is_fp64_carrier(ctx, actual_ty)
+            {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(format!(
+                        "result {pos} with {:?} has f64 carrier",
+                        res_fact.domain
+                    ))
+                );
+            }
+            if let Some(cell) = res_fact.heap {
+                analysis.verify_cell_layout_lossless(ctx, loc.clone(), actual_ty, cell)?;
+            }
+        }
+    }
+    if let Some(mapping) = mapping {
+        let values = state.facts.keys().chain(
+            state
+                .heap_values
+                .keys()
+                .filter(|value| !state.facts.contains_key(value)),
+        );
+        for &orig_val in values {
+            if body.parameters.contains(&orig_val) {
+                continue;
+            }
+            let mapped = mapping.lookup_value(orig_val).unwrap_or(orig_val);
+            if !live_values.contains(&mapped) {
+                continue;
+            }
+            let actual_ty = mapped.get_type(ctx);
+            if can_specialize_value(ctx, state, orig_val)
+                && state.representation(orig_val).is_some_and(|d| d.bits == 64)
+                && !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
+                && is_fp64_carrier(ctx, actual_ty)
+            {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(
+                        "64-bit integer SSA value degraded to f64 carrier".into()
+                    )
+                );
+            }
+            if !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
+                && analysis.specialized_value_type(ctx, id, orig_val).is_some()
+                && state.fact(orig_val) == super::Fact::Numeric
+                && is_fp64_carrier(ctx, actual_ty)
+            {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(
+                        "Fact::Numeric SSA value degraded to f64 carrier".into()
+                    )
+                );
+            }
+            if let Some(&cell) = state.heap_values.get(&orig_val)
+                && !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
+            {
+                analysis.verify_cell_layout_lossless(ctx, loc.clone(), actual_ty, cell)?;
+            }
+        }
+    }
+    for op in ops {
+        if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
+            && intrinsic.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt)
+            && is_fp64_carrier(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+        {
+            return verify_err!(
+                loc,
+                LosslessRepresentationErr("ParseInt result has f64 carrier".into())
+            );
+        }
+        if let Some(fg) = Operation::get_op::<crate::heap::FieldGetOp>(op, ctx) {
+            let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let field_name = fg.field(ctx);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if let Some(field_ty) = base_ty
+                .deref(ctx)
+                .downcast_ref::<crate::types::RecordType>()
+                .and_then(|r| r.fields().ok().map(|f| f.to_vec()))
+                .and_then(|fields| fields.into_iter().find(|(n, _)| *n == field_name))
+                .map(|(_, t)| t)
+                && (field_ty.deref(ctx).is::<crate::types::NumericType>()
+                    || Integer::from_type(ctx, field_ty).is_some_and(|d| d.bits == 64))
+                && is_fp64_carrier(ctx, res_ty)
+            {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(format!(
+                        "field_get of lossless field `{field_name}` degraded to f64 carrier"
+                    ))
+                );
+            }
+        }
+    }
+    Ok(())
 }

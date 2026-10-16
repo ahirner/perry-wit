@@ -1,8 +1,8 @@
 //! Lowering for `Map<K, V>`, `Set<T>`, `Record<K, V>`, `Object.*`, `Array.isArray`, and `in`.
 //!
-//! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: cursors }`. Deletes
-//! tombstone entries, and every live iterator registers a cursor in `_2` so compaction can
-//! move it; views (`map.keys()`) own such a cursor. Records are recognized by name prefix.
+//! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: clear_epoch, _3: compactions }`.
+//! Deletes tombstone entries, and live iterators track `(index, clear_epoch, compaction_ver)` so
+//! clears and compactions adjust cursor positions without the box retaining cursors.
 
 use super::*;
 use perry_mir::OptionalType;

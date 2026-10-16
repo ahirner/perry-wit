@@ -312,8 +312,14 @@ interface Box { raw: string }
 interface NumRec { x: number; opt?: number }
 interface OuterRec { inner: NumRec; items: number[] }
 interface Node { value: number; next?: Node }
+interface PairNode { x: number; y: number; next?: PairNode }
+type PairAlias = { x: number; y: number; next?: PairAlias };
+interface Tree { val: number; children: Tree[] }
 function fwd(v: number): number { return v; }
 function doubleNode(n: Node): number { return n.value * 2; }
+function doubleTreeChild(n: Tree): number { return n.children[0].val * 2; }
+function setNodeVal(n: Node, v: number): void { n.value = v; }
+function getNodeVal(n: Node): number { return n.value; }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
 function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
 function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
@@ -399,11 +405,43 @@ export function run(flag: number): number {
         JSON.stringify(u64OddRem) === "1" &&
         u64EvenRem === 0 &&
         !Object.is(u64EvenRem, -0);
+    const recXYa: PairNode = { x: parseInt(s), y: 1.5 };
+    const recXYb: PairNode = { x: 1.5, y: parseInt(s) };
+    const aliasXYa: PairAlias = { x: 1.5, y: parseInt(s) };
+    const aliasXYb: PairAlias = { x: parseInt(s), y: 1.5 };
+    const mutNode: Node = { value: 1.5 };
+    setNodeVal(mutNode, parseInt(s));
+    const aliasSelf: Node = { value: parseInt(s) };
+    aliasSelf.next = aliasSelf;
+    const twoRecursiveLayouts =
+        JSON.stringify(recXYa.x) === "9007199254740993" &&
+        recXYa.y === 1.5 &&
+        recXYb.x === 1.5 &&
+        JSON.stringify(recXYb.y) === "9007199254740993" &&
+        aliasXYa.x === 1.5 &&
+        JSON.stringify(aliasXYa.y) === "9007199254740993" &&
+        JSON.stringify(aliasXYb.x) === "9007199254740993" &&
+        aliasXYb.y === 1.5 &&
+        JSON.stringify(getNodeVal(mutNode)) === "9007199254740993" &&
+        aliasSelf.next === aliasSelf &&
+        (aliasSelf.next !== undefined && JSON.stringify(aliasSelf.next.value) === "9007199254740993");
+    const treeRoot: Tree = { val: 1.5, children: [{ val: parseInt(s), children: [] }] };
+    const recursiveArrays =
+        JSON.stringify(doubleTreeChild(treeRoot)) === "18014398509481986";
+    const aliasCell: NumRec = { x: parseInt(s) };
+    const aliasArr: NumRec[] = [aliasCell];
+    const aliasConcat = aliasArr.concat(aliasArr);
+    aliasConcat[1].x = aliasConcat[1].x * 2;
+    const chunks: number[][] = [arr, [1.5], arr];
+    const baseChunks: number[] = [];
+    const nestedAndSegments =
+        JSON.stringify(aliasCell.x) === "18014398509481986" &&
+        JSON.stringify(baseChunks.concat(...chunks)) === "[9007199254740993,1.5,9007199254740993]";
     const numMath =
         JSON.stringify(Math.trunc(parseInt(s)) + 1) === "9007199254740994" &&
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
-    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && recursiveRec && nestedRecord && arrayRecord && numArray && summarizedLayout && numOptional && numBranch && numRem && numMath ? 1 : 0;
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && recursiveRec && twoRecursiveLayouts && recursiveArrays && nestedRecord && arrayRecord && numArray && nestedAndSegments && summarizedLayout && numOptional && numBranch && numRem && numMath ? 1 : 0;
 }
 "#,
             "func(flag:s32)->s32",
@@ -411,5 +449,89 @@ export function run(flag: number): number {
         .core,
     );
     assert_eq!(parse_int.call("run", &[Val::I32(1)]).0[0].unwrap_i32(), 1);
+
+    // Specialized aggregate results (records and lists with perry.numeric fields/elements) lower cleanly across WIT boundaries.
+    let wit_src = r#"
+        package test:numeric-boundary;
+        world test {
+            record pair { value: f64, name: string }
+            record single-f64 { value: f64 }
+            record single-s32 { value: s32 }
+            record single-s64 { value: s64 }
+            export run-pair: func(flag: s32) -> pair;
+            export run-f64: func(flag: s32) -> single-f64;
+            export run-s32: func(flag: s32) -> single-s32;
+            export run-s64: func(flag: s32) -> single-s64;
+            export run-list: func(flag: s32) -> list<f64>;
+        }
+    "#;
+    let (resolve, package) =
+        perry_wit::component::wit::resolve_source("numeric-boundary.wit", wit_src)?;
+    let world = resolve.select_world(&[package], Some("test"))?;
+    let boundary_source = r#"
+        import type { s64 } from "perry:types";
+        interface Pair { value: number; name: string }
+        interface SingleNum { value: number }
+        interface SingleS64 { value: s64 }
+        function choose(flag: number): string { return flag > 0 ? "42" : "7"; }
+        export function runPair(flag: number): Pair { return { value: parseInt(choose(flag)), name: "a" }; }
+        export function runF64(flag: number): SingleNum { return { value: parseInt(choose(flag)) }; }
+        export function runS32(flag: number): SingleNum { return { value: parseInt(choose(flag)) }; }
+        export function runS64(flag: number): SingleS64 { return { value: 9007199254740993n as s64 }; }
+        export function runList(flag: number): number[] { return [parseInt(choose(flag)), 2.5]; }
+    "#;
+    let boundary_compiled = perry_wit::compile_for_world(
+        boundary_source,
+        "numeric-boundary.ts",
+        &resolve,
+        world,
+        true,
+    )?;
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) =
+        crate::world::instantiate(&engine, &boundary_compiled.component.unwrap().stripped)?;
+    use wasmtime::component::Val as CVal;
+    let mut out = [CVal::Bool(false)];
+    instance.get_func(&mut store, "run-pair").unwrap().call(
+        &mut store,
+        &[CVal::S32(1)],
+        &mut out,
+    )?;
+    assert_eq!(
+        out[0],
+        CVal::Record(vec![
+            ("value".into(), CVal::Float64(42.0)),
+            ("name".into(), CVal::String("a".into())),
+        ])
+    );
+    let mut out = [CVal::Bool(false)];
+    instance.get_func(&mut store, "run-f64").unwrap().call(
+        &mut store,
+        &[CVal::S32(1)],
+        &mut out,
+    )?;
+    assert_eq!(
+        out[0],
+        CVal::Record(vec![("value".into(), CVal::Float64(42.0))])
+    );
+    let mut out = [CVal::Bool(false)];
+    instance.get_func(&mut store, "run-s32").unwrap().call(
+        &mut store,
+        &[CVal::S32(1)],
+        &mut out,
+    )?;
+    assert_eq!(out[0], CVal::Record(vec![("value".into(), CVal::S32(42))]));
+    let mut out = [CVal::Bool(false)];
+    instance.get_func(&mut store, "run-s64").unwrap().call(
+        &mut store,
+        &[CVal::S32(1)],
+        &mut out,
+    )?;
+    assert_eq!(
+        out[0],
+        CVal::Record(vec![("value".into(), CVal::S64(9007199254740993))])
+    );
+    let run_list = instance.get_typed_func::<(i32,), (Vec<f64>,)>(&mut store, "run-list")?;
+    assert_eq!(run_list.call(&mut store, (1,))?, (vec![42.0, 2.5],));
     Ok(())
 }

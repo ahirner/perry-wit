@@ -318,9 +318,6 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, exit);
 
         self.switch_to(exit);
-        if let Some((_, cursor)) = cursor {
-            cursor.exited(self, ctx)?;
-        }
         Ok(())
     }
 

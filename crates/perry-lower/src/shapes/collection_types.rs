@@ -50,16 +50,21 @@ impl Shapes<'_> {
         )
     }
 
-    /// The `{ _0: index }` cursor a live iterator registers with its collection.
+    /// The `{ _0: index, _1: clear_epoch, _2: compaction_ver }` cursor of a live iterator.
     pub(crate) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
         self.mir_record_prefix(
             ctx,
-            vec![("_0".to_string(), FP64Type::get(ctx).into())],
+            vec![
+                ("_0".to_string(), f64_ty),
+                ("_1".to_string(), f64_ty),
+                ("_2".to_string(), f64_ty),
+            ],
             Some("cursor_tuple"),
         )
     }
 
-    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: cursors }`.
+    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: clear_epoch, _3: compactions }`.
     pub(crate) fn collection_box_type(
         &self,
         ctx: &Context,
@@ -67,14 +72,16 @@ impl Shapes<'_> {
         kind: EntryKind,
     ) -> Result<TypedHandle<RecordType>> {
         let entries_arr = ArrayType::get(ctx, entry.into()).into();
-        let cursor_rec = self.cursor_tuple_type(ctx)?;
-        let cursors_arr = ArrayType::get(ctx, cursor_rec.into()).into();
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
+        let remap_arr: TypeHandle = ArrayType::get(ctx, f64_ty).into();
+        let compactions_arr = ArrayType::get(ctx, remap_arr).into();
         self.mir_record_prefix(
             ctx,
             vec![
                 ("_0".to_string(), entries_arr),
-                ("_1".to_string(), FP64Type::get(ctx).into()),
-                ("_2".to_string(), cursors_arr),
+                ("_1".to_string(), f64_ty),
+                ("_2".to_string(), f64_ty),
+                ("_3".to_string(), compactions_arr),
             ],
             Some(kind.box_prefix()),
         )

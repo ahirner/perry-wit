@@ -213,11 +213,17 @@ impl ProgramFacts {
         };
         let is_rec = is_recursive_type(ctx, ty, &mut HashSet::new());
         let reserved_name = if is_rec {
-            let name = Legaliser::default().legalise(&format!("{rec_name}__num_rec"));
+            let (reserved_id, _) =
+                self.specialization_tag(ctx, ty, objects, &mut HashSet::new())?;
+            let name = Legaliser::default().legalise(&reserved_id);
             let reserved_handle: TypeHandle = if is_tuple {
-                RecordType::get_tuple(ctx, name.clone(), None).ok()?.into()
+                RecordType::get_tuple(ctx, name.clone(), None)
+                    .expect("recursive tuple layout reservation must succeed")
+                    .into()
             } else {
-                RecordType::get(ctx, name.clone(), None).ok()?.into()
+                RecordType::get(ctx, name.clone(), None)
+                    .expect("recursive record layout reservation must succeed")
+                    .into()
             };
             visiting.insert(ty, reserved_handle);
             Some(name)
@@ -280,20 +286,252 @@ impl ProgramFacts {
         }
         let handle = if let Some(reserved_name) = reserved_name {
             if is_tuple {
-                RecordType::get_tuple(ctx, reserved_name, Some(spec_fields)).ok()?
+                RecordType::get_tuple(ctx, reserved_name, Some(spec_fields))
+                    .expect("specialized recursive tuple layout must be consistent")
             } else {
-                RecordType::get(ctx, reserved_name, Some(spec_fields)).ok()?
+                RecordType::get(ctx, reserved_name, Some(spec_fields))
+                    .expect("specialized recursive record layout must be consistent")
             }
         } else {
             // The suffix only appends identifier characters, so a fresh legaliser keeps the name.
             let new_name = Legaliser::default().legalise(&format!("{rec_name}__num{spec_tag}"));
             if is_tuple {
-                RecordType::get_tuple(ctx, new_name, Some(spec_fields)).ok()?
+                RecordType::get_tuple(ctx, new_name, Some(spec_fields))
+                    .expect("specialized tuple layout must be consistent")
             } else {
-                RecordType::get(ctx, new_name, Some(spec_fields)).ok()?
+                RecordType::get(ctx, new_name, Some(spec_fields))
+                    .expect("specialized record layout must be consistent")
             }
         };
         Some((handle.into(), true))
+    }
+
+    fn specialization_tag(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+        objects: &BTreeSet<usize>,
+        visiting: &mut HashSet<TypeHandle>,
+    ) -> Option<(String, bool)> {
+        if objects.is_empty() {
+            return None;
+        }
+        if visiting.contains(&ty) {
+            return Some(("self".to_string(), false));
+        }
+        if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
+            let (inner, absence) = (opt.value(), opt.absence());
+            let (tag, real) = self.specialization_tag(ctx, inner, objects, visiting)?;
+            return Some((format!("opt{}_{tag}", absence as u8), real));
+        }
+        if let Some(promise) = ty.deref(ctx).downcast_ref::<crate::types::PromiseType>() {
+            let inner = promise.value();
+            let (tag, real) = self.specialization_tag(ctx, inner, objects, visiting)?;
+            return Some((format!("prom_{tag}"), real));
+        }
+        let array_elem = ty
+            .deref(ctx)
+            .downcast_ref::<ArrayType>()
+            .map(|a| a.element());
+        if let Some(elem_ty) = array_elem {
+            let mut element_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
+                    return None;
+                };
+                element_slots.push(*element);
+            }
+            let all_numeric = element_slots
+                .iter()
+                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+            if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
+                return Some(("arr_perry_numeric".to_string(), true));
+            }
+            if aggregate(ctx, elem_ty) {
+                let mut elem_objects = BTreeSet::new();
+                for &s in &element_slots {
+                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                if let Some((sub_tag, real)) =
+                    self.specialization_tag(ctx, elem_ty, &elem_objects, visiting)
+                {
+                    return Some((format!("arr_{sub_tag}"), real));
+                }
+            }
+            return None;
+        }
+        let (rec_name, fields) = {
+            let deref = ty.deref(ctx);
+            let rec = deref.downcast_ref::<RecordType>()?;
+            (rec.name().clone(), rec.fields().ok()?.to_vec())
+        };
+        visiting.insert(ty);
+        let mut real_change = false;
+        let mut spec_tag = String::new();
+        for (idx, (_fname, fty)) in fields.into_iter().enumerate() {
+            let mut field_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Record(slots) = &self.heap.objects[o].contents else {
+                    visiting.remove(&ty);
+                    return None;
+                };
+                let Some(&s) = slots.get(idx) else {
+                    visiting.remove(&ty);
+                    return None;
+                };
+                field_slots.push(s);
+            }
+            let all_numeric = field_slots
+                .iter()
+                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+            if all_numeric && numeric_type_for(ctx, fty).is_some() {
+                spec_tag.push_str(&format!("_{idx}"));
+                real_change = true;
+            } else if aggregate(ctx, fty) {
+                let mut field_objects = BTreeSet::new();
+                for &s in &field_slots {
+                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                if let Some((sub_tag, sub_real)) =
+                    self.specialization_tag(ctx, fty, &field_objects, visiting)
+                {
+                    spec_tag.push_str(&format!("_{idx}_{sub_tag}"));
+                    if sub_real {
+                        real_change = true;
+                    }
+                }
+            }
+        }
+        visiting.remove(&ty);
+        real_change.then_some((format!("{rec_name}__num_rec{spec_tag}"), true))
+    }
+
+    pub(in crate::facts) fn verify_cell_layout_lossless(
+        &self,
+        ctx: &Context,
+        loc: pliron::location::Location,
+        ty: TypeHandle,
+        cell: usize,
+    ) -> pliron::result::Result<()> {
+        self.verify_objects_layout_lossless(
+            ctx,
+            loc,
+            ty,
+            &self.heap.cells[cell].layout_objects,
+            &mut HashSet::new(),
+        )
+    }
+
+    fn verify_objects_layout_lossless(
+        &self,
+        ctx: &Context,
+        loc: pliron::location::Location,
+        ty: TypeHandle,
+        objects: &BTreeSet<usize>,
+        visiting: &mut HashSet<TypeHandle>,
+    ) -> pliron::result::Result<()> {
+        use crate::facts::rewrite::LosslessRepresentationErr;
+        use pliron::verify_err;
+        let ty = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+        if objects.is_empty() || !visiting.insert(ty) {
+            return Ok(());
+        }
+        let array_elem = ty
+            .deref(ctx)
+            .downcast_ref::<ArrayType>()
+            .map(|a| a.element());
+        if let Some(elem_ty) = array_elem {
+            let mut element_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
+                    visiting.remove(&ty);
+                    return Ok(());
+                };
+                element_slots.push(*element);
+            }
+            let requires_lossless = element_slots.iter().any(|&s| {
+                self.heap.cells[s].domain == Fact::Numeric
+                    || self.heap.cells[s]
+                        .domain
+                        .integer()
+                        .is_some_and(|d| d.bits == 64)
+            });
+            if requires_lossless && numeric_type_for(ctx, elem_ty).is_some() {
+                visiting.remove(&ty);
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(
+                        "array element with Fact::Numeric has f64 carrier".into()
+                    )
+                );
+            }
+            if aggregate(ctx, elem_ty) {
+                let mut elem_objects = BTreeSet::new();
+                for &s in &element_slots {
+                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                self.verify_objects_layout_lossless(ctx, loc, elem_ty, &elem_objects, visiting)?;
+            }
+            visiting.remove(&ty);
+            return Ok(());
+        }
+        let fields = {
+            let deref = ty.deref(ctx);
+            let Some(rec) = deref.downcast_ref::<RecordType>() else {
+                visiting.remove(&ty);
+                return Ok(());
+            };
+            let Ok(fields) = rec.fields() else {
+                visiting.remove(&ty);
+                return Ok(());
+            };
+            fields.to_vec()
+        };
+        for (idx, (fname, fty)) in fields.into_iter().enumerate() {
+            let mut field_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Record(slots) = &self.heap.objects[o].contents else {
+                    visiting.remove(&ty);
+                    return Ok(());
+                };
+                let Some(&s) = slots.get(idx) else {
+                    visiting.remove(&ty);
+                    return Ok(());
+                };
+                field_slots.push(s);
+            }
+            let requires_lossless = field_slots.iter().any(|&s| {
+                self.heap.cells[s].domain == Fact::Numeric
+                    || self.heap.cells[s]
+                        .domain
+                        .integer()
+                        .is_some_and(|d| d.bits == 64)
+            });
+            if requires_lossless && numeric_type_for(ctx, fty).is_some() {
+                visiting.remove(&ty);
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(format!(
+                        "record field `{fname}` with Fact::Numeric has f64 carrier"
+                    ))
+                );
+            }
+            if aggregate(ctx, fty) {
+                let mut field_objects = BTreeSet::new();
+                for &s in &field_slots {
+                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                self.verify_objects_layout_lossless(
+                    ctx,
+                    loc.clone(),
+                    fty,
+                    &field_objects,
+                    visiting,
+                )?;
+            }
+        }
+        visiting.remove(&ty);
+        Ok(())
     }
 }
 

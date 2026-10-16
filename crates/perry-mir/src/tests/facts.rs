@@ -554,3 +554,87 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
     assert_eq!(facts.summarized_contexts, combos - 32);
     Ok(())
 }
+
+#[test]
+fn lossless_representation_verifier_rejects_precision_degradation() -> Result<()> {
+    use crate::facts::{ProgramFacts, Specialize, verify_lossless_module};
+    use pliron::{
+        builtin::{
+            attributes::TypeAttr,
+            op_interfaces::SymbolOpInterface,
+            type_interfaces::FunctionTypeInterface,
+            types::{FP64Type, FunctionType},
+        },
+        pass::{AnalysisManager, Pass},
+        r#type::{TypeHandle, Typed, TypedHandle},
+    };
+    let ctx = &mut Context::new();
+    let text = r#"
+builtin.module @lossless_check { ^module():
+  builtin.func @run: builtin.function <(perry.string) -> (perry.record <Node { x: builtin.fp64, next: perry.optional <perry.record <Node>,Undefined> }>)> {
+    ^entry(input: perry.string):
+      ten = builtin.constant <builtin.double 10.0> : builtin.fp64;
+      parsed = perry.intrinsic ParseInt (input, ten) : builtin.fp64;
+      none = perry.undefined : perry.optional <perry.record <Node>,Undefined>;
+      node = perry.alloc Unassigned (parsed, none) : perry.record <Node>;
+      loaded = perry.field_get node."x" : builtin.fp64;
+      copy = perry.alloc Unassigned (loaded, none) : perry.record <Node>;
+      perry.return copy
+  }
+}
+"#;
+    let module = parse(ctx, text);
+    let run = crate::aggregates::functions(module, ctx)[0];
+    crate::calls::set_exported(ctx, &run);
+    let orig_ret_ty = TypedHandle::<FunctionType>::from_handle(run.get_type(ctx), ctx)?
+        .deref(ctx)
+        .res_types()[0];
+    verify_operation(module, ctx)?;
+
+    let mut analyses = AnalysisManager::default();
+    Specialize.run(module, ctx, &mut analyses)?;
+    verify_operation(module, ctx)?;
+    let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+    verify_lossless_module(module, ctx, &facts)?;
+
+    let spec_fn = crate::aggregates::functions(module, ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
+        .unwrap();
+    let fp64: TypeHandle = FP64Type::get(ctx).into();
+
+    // 1. Degrading a ParseInt SSA result back to f64 must fail lossless verification.
+    let parse_res = crate::aggregates::operations(ctx, &spec_fn)
+        .into_iter()
+        .find(|&op| Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some())
+        .unwrap()
+        .deref(ctx)
+        .get_result(0);
+    let saved_parse_ty = parse_res.get_type(ctx);
+    parse_res.set_type(ctx, fp64);
+    assert!(verify_lossless_module(module, ctx, &facts).is_err());
+    parse_res.set_type(ctx, saved_parse_ty);
+    verify_lossless_module(module, ctx, &facts)?;
+
+    // 2. Degrading a FieldGetOp of a Fact::Numeric field back to f64 must fail verification.
+    let fg_res = crate::aggregates::operations(ctx, &spec_fn)
+        .into_iter()
+        .find(|&op| Operation::get_op::<crate::heap::FieldGetOp>(op, ctx).is_some())
+        .unwrap()
+        .deref(ctx)
+        .get_result(0);
+    let saved_fg_ty = fg_res.get_type(ctx);
+    fg_res.set_type(ctx, fp64);
+    assert!(verify_lossless_module(module, ctx, &facts).is_err());
+    fg_res.set_type(ctx, saved_fg_ty);
+    verify_lossless_module(module, ctx, &facts)?;
+
+    // 3. Degrading the aggregate return layout back to the unspecialized f64-field record must fail.
+    let arg_types = TypedHandle::<FunctionType>::from_handle(spec_fn.get_type(ctx), ctx)?
+        .deref(ctx)
+        .arg_types();
+    let degraded_sig = FunctionType::get(ctx, arg_types, vec![orig_ret_ty]);
+    spec_fn.set_attr_builtin_func_type(ctx, TypeAttr::new(degraded_sig.into()));
+    assert!(verify_lossless_module(module, ctx, &facts).is_err());
+    Ok(())
+}

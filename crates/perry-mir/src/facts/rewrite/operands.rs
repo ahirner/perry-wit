@@ -172,14 +172,21 @@ fn replace_with_scalar(
     false
 }
 
-/// The attribute of a constant-folded `parseInt` in its (numeric or `f64`) result type.
+/// The attribute of a constant-folded `parseInt` in its (integer, numeric or `f64`) result type.
 fn parsed_constant(
     ctx: &Context,
     res_ty: TypeHandle,
     parsed: super::super::domains::ConstParsedInt,
 ) -> Box<dyn pliron::builtin::attr_interfaces::TypedAttrInterface> {
     use super::super::domains::ConstParsedInt;
-    if res_ty.deref(ctx).is::<crate::types::NumericType>() {
+    if let Ok(int_ty) = TypedHandle::<IntegerType>::from_handle(res_ty, ctx) {
+        let bits = match parsed {
+            ConstParsedInt::Integer { bits, .. } => bits,
+            ConstParsedInt::Float(bits) => f64::from_bits(bits) as i64 as u64,
+        };
+        let width = int_ty.deref(ctx).width() as usize;
+        Box::new(IntegerAttr::new(int_ty, APInt::from_u64(bits, bw(width))))
+    } else if res_ty.deref(ctx).is::<crate::types::NumericType>() {
         match parsed {
             ConstParsedInt::Integer { bits, domain, .. } => {
                 if domain.signed {
@@ -409,6 +416,7 @@ fn operand_types(
             let is_num = |t: TypeHandle| {
                 let inner = crate::optional::optional_value(ctx, t).unwrap_or(t);
                 inner.deref(ctx).is::<crate::types::NumericType>()
+                    || Integer::from_type(ctx, inner).is_some_and(|int| int.bits == 64)
             };
             if is_num(l_ty) || is_num(r_ty) {
                 let numeric = crate::types::NumericType::get(ctx).into();

@@ -43,7 +43,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Store `value` into a `ty` slot at `addr + offset`.
-    fn store_slot_value(
+    pub(crate) fn store_slot_value(
         &mut self,
         ctx: &mut Context,
         addr: Value,
@@ -459,9 +459,11 @@ impl FunctionLowering<'_, '_> {
         Ok(ty.deref(ctx).element())
     }
 
-    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
-        let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected a record"))?;
+    pub(crate) fn record_type_field_slot(
+        ctx: &Context,
+        record: TypedHandle<RecordType>,
+        field: &str,
+    ) -> Result<(u32, TypeHandle)> {
         let record = record.deref(ctx);
         let fields = record
             .fields()
@@ -470,8 +472,14 @@ impl FunctionLowering<'_, '_> {
             .iter()
             .enumerate()
             .find(|(_, (name, _))| name == field)
-            .ok_or_else(|| anyhow!("record has no field {field}"))?;
+            .ok_or_else(|| anyhow!("TypeScript type {} has no field {field}", record.name()))?;
         Ok((record_offset(ctx, &fields[..index]), *field_ty))
+    }
+
+    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
+        let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
+            .map_err(|_| anyhow!("expected a record"))?;
+        Self::record_type_field_slot(ctx, record, field)
     }
 
     /// Initialize the header of fresh record storage: the id of shape `record` and, when the

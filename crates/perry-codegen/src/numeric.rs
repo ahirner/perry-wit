@@ -8,7 +8,6 @@ use crate::{
     values::is_numeric_type,
 };
 use anyhow::{Result, bail};
-use pliron::printable::Printable;
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
 use pliron::{
@@ -20,6 +19,7 @@ use pliron::{
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
+    printable::Printable,
     r#type::{TypeHandle, Typed},
     value::Value,
 };
@@ -208,7 +208,7 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    pub(super) fn cast_value(
+    pub(crate) fn cast_value(
         &mut self,
         ctx: &mut Context,
         value: Carriers<Value>,

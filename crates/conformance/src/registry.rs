@@ -219,6 +219,8 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ),
                 ("checked-json", Number::TypedJson(input())),
                 ("handled-throw", Number::Handled(input())),
+                ("parsed-aggregate", Number::ParsedAggregate(input())),
+                ("paused-iterator", Number::PausedIterator(input())),
             ],
         ),
         expression_contract(

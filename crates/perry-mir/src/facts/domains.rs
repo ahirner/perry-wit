@@ -202,6 +202,11 @@ impl Fact {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
+            (Self::Original, Self::Integer(int)) | (Self::Integer(int), Self::Original)
+                if int.bits == 64 =>
+            {
+                Self::Numeric
+            }
             (Self::Original, _) | (_, Self::Original) => Self::Original,
             (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
                 Self::Literal { negative: a || b }
@@ -216,7 +221,7 @@ impl Fact {
                     if widened.signed {
                         Self::Integer(widened)
                     } else {
-                        Self::Original
+                        Self::Numeric
                     }
                 } else {
                     Self::Integer(integer)
@@ -501,7 +506,11 @@ impl Solver {
             return Fact::Bottom;
         }
         let required = state.required.get(&result).copied();
-        if self.analysis.keys[id].specialize && facts().any(|fact| fact == Fact::Numeric) {
+        if self.analysis.keys[id].specialize
+            && (facts().any(|fact| fact == Fact::Numeric)
+                || (facts().any(|fact| fact == Fact::Original)
+                    && facts().any(|fact| fact.integer().is_some_and(|int| int.bits == 64))))
+        {
             return Fact::Numeric;
         }
         if facts().any(|fact| fact == Fact::Original) {

@@ -34,6 +34,7 @@ struct Cell {
 }
 
 struct Object {
+    ty: TypeHandle,
     contents: Contents,
     open: bool,
     containers: BTreeSet<usize>,
@@ -190,6 +191,7 @@ impl Solver {
         };
         let slots: Vec<usize> = contents.slots().to_vec();
         self.analysis.heap.objects.push(Object {
+            ty,
             contents,
             open,
             containers: BTreeSet::new(),
@@ -468,8 +470,17 @@ impl Solver {
     }
 
     fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
-        self.slot_domain(slot, self.analysis.states[id].fact(value));
-        self.slot_range(ctx, slot, self.analysis.states[id].range(value));
+        let mut domain = self.analysis.states[id].fact(value);
+        let mut range = self.analysis.states[id].range(value);
+        if self.analysis.keys[id].specialize
+            && domain.integer().is_some_and(|int| int.bits == 64)
+            && Integer::from_type(ctx, payload(ctx, self.analysis.heap.cells[slot].ty)).is_none()
+        {
+            domain = Fact::Numeric;
+            range = Range::Unknown;
+        }
+        self.slot_domain(slot, domain);
+        self.slot_range(ctx, slot, range);
         self.slot_outcome(slot, self.analysis.states[id].outcome(value));
         if let Some(from) = self.heap_value(ctx, id, value) {
             self.copy_aliases(ctx, from, slot, reader);
@@ -496,6 +507,35 @@ impl Solver {
         {
             for &obj in &objects {
                 self.mark_open(obj);
+            }
+        }
+        let mut ancestors = BTreeSet::new();
+        let mut worklist = Vec::new();
+        if let Some(owner) = self.analysis.heap.cells[cell].owner {
+            ancestors.insert(owner);
+            worklist.push(owner);
+        }
+        while let Some(anc) = worklist.pop() {
+            for &container_cell in &self.analysis.heap.objects[anc].containers {
+                if let Some(owner) = self.analysis.heap.cells[container_cell].owner
+                    && ancestors.insert(owner)
+                {
+                    worklist.push(owner);
+                }
+            }
+        }
+        if !ancestors.is_empty() {
+            for &obj in &objects {
+                let child_slots: Vec<usize> =
+                    self.analysis.heap.objects[obj].contents.slots().to_vec();
+                for child_slot in child_slots {
+                    let slot_ty = payload(ctx, self.analysis.heap.cells[child_slot].ty);
+                    for &anc in &ancestors {
+                        if self.analysis.heap.objects[anc].ty == slot_ty {
+                            self.add_layout_object(child_slot, anc);
+                        }
+                    }
+                }
             }
         }
         if objects.len() <= 1 {

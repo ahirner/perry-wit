@@ -60,6 +60,8 @@ pub enum Number {
     ByteAlias(Box<Self>, Box<Self>),
     ClosedLoop(Box<Self>, u8),
     Handled(Box<Self>),
+    ParsedAggregate(Box<Self>),
+    PausedIterator(Box<Self>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +277,32 @@ function handled(value: number): number {
     try { if (value < 0) throw value; return value; }
     catch (error) { return error as number; }
 }
+type RecNode = { a: number; b: number; next?: RecNode };
+function parsedAggregate(value: number): number {
+    const p = parseInt("42", 4294967306);
+    const n1: RecNode = { a: p, b: 1.5, next: { a: p + 1, b: 2.5 } };
+    const n2: RecNode = { a: 1.5, b: p, next: { a: 2.5, b: p + 1 } };
+    const list: number[] = [n1.a, n2.b, p % 5];
+    return (list[0] as number) + (list[1] as number) + (list[2] as number) === 86 ? value : -1;
+}
+function pausedIterator(value: number): number {
+    const s = new Set<number>();
+    s.add(1);
+    s.add(2);
+    const it = s.values();
+    let acc = 0;
+    for (const v of it) { acc += v; break; }
+    s.clear();
+    s.add(10);
+    for (const v of it) { acc += v; }
+    const m = new Map<number, number>();
+    for (let i = 0; i < 16; i++) m.set(i, i + 1);
+    const mit = m.values();
+    for (const v of mit) { acc += v; break; }
+    for (let i = 0; i < 14; i++) m.delete(i);
+    for (const v of mit) { acc += v; }
+    return acc === 43 ? value : -1;
+}
 "#;
 
 impl Display for Number {
@@ -294,6 +322,8 @@ impl Display for Number {
             Self::ByteAlias(a, b) => write!(f, "byteAlias({a}, {b})"),
             Self::ClosedLoop(value, count) => write!(f, "closedLoop({value}, {count})"),
             Self::Handled(value) => write!(f, "handled({value})"),
+            Self::ParsedAggregate(value) => write!(f, "parsedAggregate({value})"),
+            Self::PausedIterator(value) => write!(f, "pausedIterator({value})"),
             Self::Math(op, value) => write!(f, "Math.{op}({value})"),
             Self::DateTime(value) => write!(f, "new Date({value}).getTime()"),
             Self::ByteGet(a, b, c, index) => {

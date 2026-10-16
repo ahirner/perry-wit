@@ -359,7 +359,7 @@ impl<'h> Shapes<'h> {
             .resolve_named(ctx, name)
             .map_err(|error| self.metadata.locations.annotate_type(error, name))?;
         // A re-entrant reference returns the opaque record; only the outermost call caches.
-        if !self.pending.borrow().contains_key(&key) {
+        if self.pending.borrow().is_empty() {
             self.named.borrow_mut().insert(key, ty);
         }
         Ok(ty)
@@ -423,33 +423,8 @@ impl<'h> Shapes<'h> {
                 return self.foreign_value_type(ctx, entry);
             }
         }
-        if let Some((_, interface)) = self.interfaces.get(name) {
-            if !interface.type_params.is_empty() {
-                return self.generic(ctx, name, &[]);
-            }
-            ensure!(
-                interface.methods.is_empty(),
-                "interface {name}: methods are not supported yet"
-            );
-            let lookup = (&self.interfaces, &self.type_aliases);
-            let properties =
-                generics::collect_interface_properties(ctx, &lookup, interface, &HashMap::new(), 0)
-                    .with_context(|| {
-                        format!("failed to resolve inherited properties of interface {name}")
-                    })?;
-            let fields = properties
-                .iter()
-                .map(|(n, ty, opt)| (n.as_str(), *ty, *opt))
-                .collect();
-            return Ok(self
-                .source_record(ctx, Some(&ShapeKey::Named(name.to_owned())), fields)?
-                .into());
-        }
-        if let Some((_, alias)) = self.type_aliases.get(name) {
-            if !alias.type_params.is_empty() {
-                return self.generic(ctx, name, &[]);
-            }
-            return self.value_type(ctx, &alias.ty);
+        if user {
+            return self.generic(ctx, name, &[]);
         }
         bail!("type {name} is not supported by the MIR backend yet")
     }

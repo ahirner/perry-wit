@@ -24,11 +24,14 @@ impl FunctionLowering<'_, '_> {
             operands.len() == import.params.len(),
             "WIT import argument count mismatch"
         );
-        let values = self.operands(ctx, op)?;
+        let values = operands
+            .iter()
+            .map(|mir| self.mapped_value(ctx, *mir))
+            .collect::<Result<Vec<_>>>()?;
         let mark = self.root_mark(ctx);
         for (mir, value) in operands.iter().zip(&values) {
             if repr(ctx, mir.get_type(ctx))? == Repr::Ref {
-                self.publish_roots(ctx, &[*value]);
+                self.publish_roots(ctx, &[value.scalar()?]);
             }
         }
         self.begin_resources(

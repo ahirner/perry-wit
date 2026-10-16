@@ -302,7 +302,9 @@ impl Solver {
                 let segments_val = operation.get_operand(0);
                 let mut slots = vec![out_slot];
                 if let Some(segments_cell) = self.heap_value(ctx, id, segments_val) {
-                    self.analysis.heap.cells[segments_cell].readers.insert(reader);
+                    self.analysis.heap.cells[segments_cell]
+                        .readers
+                        .insert(reader);
                     let mut seg_obj = None;
                     while let Some(object) = self.next_object(segments_cell, seg_obj) {
                         seg_obj = Some(object);
@@ -315,8 +317,15 @@ impl Solver {
                             self.analysis.heap.cells[elem_slot].readers.insert(reader);
                             slots.push(elem_slot);
                             self.slot_domain(out_slot, self.analysis.heap.cells[elem_slot].domain);
-                            self.slot_range(ctx, out_slot, self.analysis.heap.cells[elem_slot].range);
-                            self.slot_outcome(out_slot, self.analysis.heap.cells[elem_slot].outcome);
+                            self.slot_range(
+                                ctx,
+                                out_slot,
+                                self.analysis.heap.cells[elem_slot].range,
+                            );
+                            self.slot_outcome(
+                                out_slot,
+                                self.analysis.heap.cells[elem_slot].outcome,
+                            );
                             self.copy_aliases(ctx, elem_slot, out_slot, reader);
                         }
                     }

@@ -2,39 +2,39 @@
 
 use super::*;
 
-/// A cursor registered in a collection's cursor array, so deletes and compaction move it.
+/// A cursor tracking `(index, clear_epoch, compaction_ver)` against a collection box.
 #[derive(Clone, Copy)]
 pub(crate) enum LiveCursor {
     /// A view's own cursor: it survives `break`, and exhaustion parks it at infinity.
-    View { cursors: Value, cursor: Value },
-    /// A cursor registered for one loop and released on every exit.
-    Loop { cursors: Value, cursor: Value },
+    View { box_val: Value, cursor: Value },
+    /// A cursor created for one direct collection loop.
+    Loop { box_val: Value, cursor: Value },
 }
 
 impl LiveCursor {
     /// Start iterating `coll` at the index stored in `index`, or at a view's own position,
-    /// which is stored into `index`. `None` when `coll` has no cursor array (plain arrays).
+    /// which is stored into `index`. `None` when `coll` is not a collection box or view.
     pub(crate) fn open(
         b: &mut FunctionBuilder<'_>,
         ctx: &mut Context,
         coll: Value,
         index: Value,
     ) -> Result<Option<Self>> {
-        let Some(cursors) = b.collection_cursors_array(ctx, coll)? else {
+        let Some(box_val) = b.collection_underlying_box(ctx, coll)? else {
             return Ok(None);
         };
         Ok(Some(
             if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
                 let op = FieldGetOp::new(ctx, coll, "_1".to_string())?;
                 let cursor = b.append_value(ctx, &op);
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, cursors, cursor));
-                let start = Self::View { cursors, cursor }.position(b, ctx)?;
+                let live = Self::View { box_val, cursor };
+                let start = live.position(b, ctx)?;
                 b.store(ctx, index, start);
-                Self::View { cursors, cursor }
+                live
             } else {
                 let start = b.load(ctx, index)?;
-                let cursor = b.push_collection_cursor(ctx, cursors, start)?;
-                Self::Loop { cursors, cursor }
+                let cursor = b.new_collection_cursor(ctx, box_val, start)?;
+                Self::Loop { box_val, cursor }
             },
         ))
     }
@@ -47,14 +47,13 @@ impl LiveCursor {
         });
     }
 
-    /// The index the next visit starts at, as moved by deletes and compaction.
+    /// The index the next visit starts at, synchronized with clears and compactions.
     pub(crate) fn position(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<Value> {
-        let (Self::View { cursor, .. } | Self::Loop { cursor, .. }) = self;
-        let op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
-        Ok(b.append_value(ctx, &op))
+        let (Self::View { box_val, cursor } | Self::Loop { box_val, cursor }) = self;
+        b.sync_collection_cursor(ctx, box_val, cursor)
     }
 
-    /// The loop ran out of entries: a view stays exhausted and leaves the cursor array.
+    /// The loop ran out of entries: a view stays exhausted at infinity.
     pub(crate) fn exhausted(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
         match self {
             Self::View { cursor, .. } => {
@@ -67,12 +66,6 @@ impl LiveCursor {
             Self::Loop { .. } => Ok(()),
         }
     }
-
-    /// Control left the loop by any exit: a loop's own cursor is released.
-    pub(crate) fn exited(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
-        let (Self::Loop { cursors, cursor } | Self::View { cursors, cursor }) = self;
-        b.remove_collection_cursor(ctx, cursors, cursor)
-    }
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -84,12 +77,13 @@ impl<'s> FunctionBuilder<'s> {
         kind: EntryKind,
     ) -> Result<Value> {
         let box_rec = self.shapes.collection_box_type(ctx, entry, kind)?;
-        let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
         let entries = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, entry.into(), vec![]));
         let zero = self.number(ctx, 0.0);
-        let cursors = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, cursor_rec.into(), vec![]));
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
+        let remap_ty: TypeHandle = ArrayType::get(ctx, f64_ty).into();
+        let compactions = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, remap_ty, vec![]));
         Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, box_rec, vec![entries, zero, cursors])
+            AllocOp::new(ctx, box_rec, vec![entries, zero, zero, compactions])
         }))
     }
 
@@ -100,9 +94,8 @@ impl<'s> FunctionBuilder<'s> {
         box_val: Value,
         view: CollectionViewKind,
     ) -> Result<Value> {
-        let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
         let zero = self.number(ctx, 0.0);
-        let cursor = self.emit_value(ctx, |ctx| AllocOp::new(ctx, cursor_rec, vec![zero]));
+        let cursor = self.new_collection_cursor(ctx, box_val, zero)?;
         let view_rec = self
             .shapes
             .collection_view_type(ctx, box_val.get_type(ctx), view)?;
@@ -140,16 +133,6 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(self.append_value(ctx, &op))
             }
             None => Ok(val),
-        }
-    }
-
-    fn collection_cursors_array(&mut self, ctx: &mut Context, val: Value) -> Result<Option<Value>> {
-        match self.collection_underlying_box(ctx, val)? {
-            Some(box_val) => {
-                let op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
-                Ok(Some(self.append_value(ctx, &op)))
-            }
-            None => Ok(None),
         }
     }
 
@@ -282,43 +265,109 @@ impl<'s> FunctionBuilder<'s> {
         Ok(out)
     }
 
-    fn push_collection_cursor(
+    fn new_collection_cursor(
         &mut self,
         ctx: &mut Context,
-        cursors: Value,
+        box_val: Value,
         idx: Value,
     ) -> Result<Value> {
+        let epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let epoch = self.append_value(ctx, &epoch_op);
+        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
+        let compactions = self.append_value(ctx, &comp_op);
+        let ver = self.array_length(ctx, compactions);
         let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
-        let cursor = self.emit_value(ctx, |ctx| AllocOp::new(ctx, cursor_rec, vec![idx]));
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, cursors, cursor));
-        Ok(cursor)
+        Ok(self.emit_value(ctx, |ctx| {
+            AllocOp::new(ctx, cursor_rec, vec![idx, epoch, ver])
+        }))
     }
 
-    /// Swap-remove `target` from `cursors`; cursor order carries no meaning.
-    fn remove_collection_cursor(
+    fn sync_collection_cursor(
         &mut self,
         ctx: &mut Context,
-        cursors: Value,
-        target: Value,
-    ) -> Result<()> {
-        let len = self.array_length(ctx, cursors);
+        box_val: Value,
+        cursor: Value,
+    ) -> Result<Value> {
+        let idx_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
+        let idx = self.append_value(ctx, &idx_op);
+        let inf = self.number(ctx, f64::INFINITY);
+        let active = self.compare(ctx, CompareKind::Lt, idx, inf);
+        let active_bb = self.new_block(ctx, "sync_cursor_active");
+        let done_bb = self.new_block(ctx, "sync_cursor_done");
+        self.branch(ctx, active, active_bb, done_bb);
+
+        self.switch_to(active_bb);
+        let cur_epoch_op = FieldGetOp::new(ctx, cursor, "_1".to_string())?;
+        let cur_epoch = self.append_value(ctx, &cur_epoch_op);
+        let box_epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let box_epoch = self.append_value(ctx, &box_epoch_op);
+        let cleared = self.compare(ctx, CompareKind::Lt, cur_epoch, box_epoch);
+        let clear_bb = self.new_block(ctx, "sync_cursor_clear");
+        let check_compact_bb = self.new_block(ctx, "sync_cursor_compact_check");
+        self.branch(ctx, cleared, clear_bb, check_compact_bb);
+
+        self.switch_to(clear_bb);
         let zero = self.number(ctx, 0.0);
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_0".to_string(), zero)
+        });
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_1".to_string(), box_epoch)
+        });
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_2".to_string(), zero)
+        });
+        self.jump(ctx, check_compact_bb);
+
+        self.switch_to(check_compact_bb);
+        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
+        let compactions = self.append_value(ctx, &comp_op);
+        let comp_len = self.array_length(ctx, compactions);
+        let cur_ver_op = FieldGetOp::new(ctx, cursor, "_2".to_string())?;
+        let cur_ver = self.append_value(ctx, &cur_ver_op);
+        self.index_loop(
+            ctx,
+            "sync_cursor_compact",
+            cur_ver,
+            comp_len,
+            |b, ctx, v, _, _| {
+                let remap = b.element_at(ctx, compactions, v)?;
+                let cur_idx_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
+                let cur_idx = b.append_value(ctx, &cur_idx_op);
+                let new_idx = b.element_at(ctx, remap, cur_idx)?;
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, cursor, "_0".to_string(), new_idx)
+                });
+                Ok(())
+            },
+        )?;
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, cursor, "_2".to_string(), comp_len)
+        });
+        self.jump(ctx, done_bb);
+
+        self.switch_to(done_bb);
+        let final_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
+        Ok(self.append_value(ctx, &final_op))
+    }
+
+    fn bump_clear_epoch(
+        &mut self,
+        ctx: &mut Context,
+        box_val: Value,
+        zero_u32: Value,
+    ) -> Result<()> {
+        let epoch_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let epoch = self.append_value(ctx, &epoch_op);
         let one = self.number(ctx, 1.0);
-        let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        self.index_loop(ctx, "remove_cursor", zero, len, |b, ctx, ci, next, done| {
-            let c = b.element_at(ctx, cursors, ci)?;
-            let matched = b.compare(ctx, CompareKind::Eq, c, target);
-            let hit = b.new_block(ctx, "remove_cursor_hit");
-            b.branch(ctx, matched, hit, next);
-            b.switch_to(hit);
-            let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
-            let last_elem = b.element_at(ctx, cursors, last_idx)?;
-            b.emit(ctx, |ctx| ArraySetOp::new(ctx, cursors, ci, last_elem));
-            let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
-            b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, cursors, new_len));
-            b.jump(ctx, done);
-            Ok(())
-        })
+        let next_epoch = self.binary(ctx, BinaryKind::Add, epoch, one);
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, box_val, "_2".to_string(), next_epoch)
+        });
+        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
+        let compactions = self.append_value(ctx, &comp_op);
+        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, compactions, zero_u32));
+        Ok(())
     }
 
     /// Mark `entry` deleted, overwrite its `cleared` fields so they hold no references, and
@@ -395,7 +444,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// After a delete: empty the entries when nothing is live, else compact once at least 32
-    /// and at least half of the slots are tombstones, moving active cursors with their entries.
+    /// and at least half of the slots are tombstones, recording a remap table for cursors.
     fn reclaim_after_delete(
         &mut self,
         ctx: &mut Context,
@@ -406,12 +455,9 @@ impl<'s> FunctionBuilder<'s> {
         let entries = self.append_value(ctx, &entries_op);
         let live_op = FieldGetOp::new(ctx, box_val, "_1".to_string())?;
         let live = self.append_value(ctx, &live_op);
-        let cursors_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
-        let cursors = self.append_value(ctx, &cursors_op);
 
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
-        let inf = self.number(ctx, f64::INFINITY);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
 
         let is_empty = self.compare(ctx, CompareKind::Eq, live, zero);
@@ -425,7 +471,7 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(empty_bb);
         let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
-        self.reset_active_cursors(ctx, "reclaim_reset_cursors", cursors)?;
+        self.bump_clear_epoch(ctx, box_val, zero_u32)?;
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
@@ -445,84 +491,37 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, should_compact, compact_bb, done_bb);
 
         self.switch_to(compact_bb);
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
         let write_slot = self.entry_slot(ctx, zero.get_type(ctx));
         self.store(ctx, write_slot, zero);
+        let remap = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, f64_ty, vec![]));
         self.index_loop(ctx, "reclaim_scan", zero, cap, |b, ctx, r, next, _| {
+            let w = b.load(ctx, write_slot)?;
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, remap, w));
             let e = b.element_at(ctx, entries, r)?;
             let live_op = FieldGetOp::new(ctx, e, kind.live_field().to_string())?;
             let is_live = b.append_value(ctx, &live_op);
             let live_branch = b.new_block(ctx, "reclaim_keep");
-            let dead_branch = b.new_block(ctx, "reclaim_drop");
-            b.branch(ctx, is_live, live_branch, dead_branch);
+            b.branch(ctx, is_live, live_branch, next);
 
             b.switch_to(live_branch);
-            let w = b.load(ctx, write_slot)?;
             b.emit(ctx, |ctx| ArraySetOp::new(ctx, entries, w, e));
             let next_w = b.binary(ctx, BinaryKind::Add, w, one);
             b.store(ctx, write_slot, next_w);
             b.jump(ctx, next);
-
-            b.switch_to(dead_branch);
-            let cur_w = b.load(ctx, write_slot)?;
-            let cur_len = b.array_length(ctx, cursors);
-            b.index_loop(
-                ctx,
-                "reclaim_adj_cursors",
-                zero,
-                cur_len,
-                |b, ctx, ci, c_next, _| {
-                    let c = b.element_at(ctx, cursors, ci)?;
-                    let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
-                    let c_idx = b.append_value(ctx, &c_op);
-                    let gt = b.compare(ctx, CompareKind::Gt, c_idx, cur_w);
-                    let active = b.compare(ctx, CompareKind::Lt, c_idx, inf);
-                    let bool_ty = gt.get_type(ctx);
-                    let should_adj =
-                        b.choose(ctx, bool_ty, gt, |_, _| Ok(active), |_, _| Ok(gt))?;
-                    let adj_bb = b.new_block(ctx, "reclaim_adj_hit");
-                    b.branch(ctx, should_adj, adj_bb, c_next);
-                    b.switch_to(adj_bb);
-                    let dec = b.binary(ctx, BinaryKind::Sub, c_idx, one);
-                    b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), dec));
-                    b.jump(ctx, c_next);
-                    Ok(())
-                },
-            )?;
-            b.jump(ctx, next);
             Ok(())
         })?;
         let final_w = self.load(ctx, write_slot)?;
+        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, remap, final_w));
         let new_len = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, final_w, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, new_len));
+        let comp_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
+        let compactions = self.append_value(ctx, &comp_op);
+        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, compactions, remap));
         self.jump(ctx, done_bb);
 
         self.switch_to(done_bb);
         Ok(())
-    }
-
-    /// Rewind every unexhausted cursor to the first slot of emptied entries.
-    fn reset_active_cursors(
-        &mut self,
-        ctx: &mut Context,
-        label: &str,
-        cursors: Value,
-    ) -> Result<()> {
-        let zero = self.number(ctx, 0.0);
-        let inf = self.number(ctx, f64::INFINITY);
-        let c_len = self.array_length(ctx, cursors);
-        let hit_label = format!("{label}_hit");
-        self.index_loop(ctx, label, zero, c_len, |b, ctx, ci, c_next, _| {
-            let c = b.element_at(ctx, cursors, ci)?;
-            let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
-            let c_idx = b.append_value(ctx, &c_op);
-            let active = b.compare(ctx, CompareKind::Lt, c_idx, inf);
-            let rst_bb = b.new_block(ctx, &hit_label);
-            b.branch(ctx, active, rst_bb, c_next);
-            b.switch_to(rst_bb);
-            b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), zero));
-            b.jump(ctx, c_next);
-            Ok(())
-        })
     }
 
     /// The liveness flag of a `Map`/`Set` entry; `None` for entries without one.
@@ -561,7 +560,7 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, count_slot)
     }
 
-    /// `clear()`: empty a box and rewind its cursors, or tombstone every entry of a bare array.
+    /// `clear()`: empty a box and bump its clear epoch, or tombstone every entry of a bare array.
     pub(super) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
         if let Some(box_val) = self.collection_underlying_box(ctx, coll)? {
             let entries = self.collection_entries_array(ctx, box_val)?;
@@ -572,9 +571,7 @@ impl<'s> FunctionBuilder<'s> {
             self.emit(ctx, |ctx| {
                 FieldSetOp::new(ctx, box_val, "_1".to_string(), zero)
             });
-            let cursors_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
-            let cursors = self.append_value(ctx, &cursors_op);
-            self.reset_active_cursors(ctx, "clear_cursors", cursors)?;
+            self.bump_clear_epoch(ctx, box_val, zero_u32)?;
         } else {
             let kind = TypedHandle::<ArrayType>::from_handle(coll.get_type(ctx), ctx)
                 .ok()
@@ -651,7 +648,6 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(done);
         if let Some(cursor) = cursor {
             cursor.exhausted(self, ctx)?;
-            cursor.exited(self, ctx)?;
         }
         Ok(())
     }

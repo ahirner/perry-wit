@@ -136,6 +136,55 @@ export function run(): number {
     const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
     const nulHygiene = nulSet.size === 3 && nulSet.has("\u0000perry_set_type_args") && nulSet.has("__perry_set_type_args");
 
+    // Paused iterators survive loop exit and observe clear() and compaction between loops.
+    const resumeClear = new Set<number>([1, 2, 3]);
+    const rcIter = resumeClear.values();
+    let rcTotal = 0;
+    for (const v of rcIter) {
+        rcTotal = rcTotal + v;
+        break;
+    }
+    resumeClear.clear();
+    resumeClear.add(4);
+    resumeClear.add(5);
+    for (const v of rcIter) {
+        rcTotal = rcTotal + v;
+    }
+
+    const compSet = new Set<number>();
+    for (let i = 0; i < 96; i = i + 1) {
+        compSet.add(i);
+    }
+    const itA = compSet.values();
+    const itB = compSet.values();
+    let compTotal = 0;
+    for (const v of itA) {
+        compTotal = compTotal + v;
+        if (v === 20) break;
+    }
+    for (let i = 0; i < 65; i = i + 1) {
+        compSet.delete(i);
+    }
+    for (const v of itA) {
+        compTotal = compTotal + v;
+    }
+    for (const v of itB) {
+        compTotal = compTotal + v;
+    }
+
+    const mvMap = new Map<number, number>([[1, 10], [2, 20], [3, 30]]);
+    const mvIter = mvMap.values();
+    let mvTotal = 0;
+    for (const v of mvIter) {
+        mvTotal = mvTotal + v;
+        break;
+    }
+    mvMap.delete(2);
+    mvMap.set(4, 40);
+    for (const v of mvIter) {
+        mvTotal = mvTotal + v;
+    }
+
     return copiedPresence &&
         enumPresence &&
         s1Total === 6 &&
@@ -151,7 +200,10 @@ export function run(): number {
         liveMapEntTotal === 55 &&
         iterIdentity &&
         spreadOk &&
-        nulHygiene
+        nulHygiene &&
+        rcTotal === 10 &&
+        compTotal === 5170 &&
+        mvTotal === 80
         ? 1
         : 0;
 }

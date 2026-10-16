@@ -217,7 +217,7 @@ pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
+pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
     equivalence(case, &evidence.oracle, &evidence.component, evidence)
 }
 

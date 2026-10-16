@@ -39,6 +39,8 @@ use domains::{
     constant_range, literal,
 };
 pub(crate) use rewrite::Specialize;
+#[cfg(test)]
+pub(crate) use rewrite::verify_lossless_module;
 mod outcomes;
 use outcomes::{Outcomes, promise_payload};
 

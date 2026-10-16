@@ -115,7 +115,13 @@ impl Solver {
 
     pub(super) fn fact(&mut self, id: usize, value: Value, fact: Fact) {
         let old = self.analysis.states[id].fact(value);
-        let new = old.join(fact);
+        let mut new = old.join(fact);
+        if (!self.analysis.keys[id].specialize
+            || self.analysis.states[id].original_payloads.contains(&value))
+            && new == Fact::Numeric
+        {
+            new = Fact::Original;
+        }
         if new != old {
             self.analysis.states[id].facts.insert(value, new);
             self.changed(id, value);
@@ -321,7 +327,12 @@ impl Solver {
                 };
                 let old = self.analysis.states[id].results[position];
                 let outcome = old.outcome.join(self.analysis.states[id].outcome(value));
-                let domain = old.domain.join(fact);
+                let mut domain = old.domain.join(fact);
+                if (!self.analysis.keys[id].specialize || required == ResultDomain::Original)
+                    && domain == Fact::Numeric
+                {
+                    domain = Fact::Original;
+                }
                 let (range, expanded, widened) = old.range.join_step(
                     self.analysis.states[id].range(value),
                     domain.integer(),
@@ -528,9 +539,12 @@ impl Solver {
             let result = operation.get_result(0);
             let lhs = operation.get_operand(0);
             let rhs = operation.get_operand(1);
+            let needs_numeric = |fact: Fact| {
+                fact == Fact::Numeric || fact.integer().is_some_and(|int| int.bits == 64)
+            };
             let fact = if self.analysis.keys[id].specialize
-                && (self.analysis.states[id].fact(lhs) == Fact::Numeric
-                    || self.analysis.states[id].fact(rhs) == Fact::Numeric)
+                && (needs_numeric(self.analysis.states[id].fact(lhs))
+                    || needs_numeric(self.analysis.states[id].fact(rhs)))
             {
                 Fact::Numeric
             } else {
@@ -723,8 +737,18 @@ impl Solver {
                                 needs_i64,
                                 ..
                             }) => {
+                                let can_specialize = self.analysis.keys[id].specialize
+                                    && !crate::calls::is_async(
+                                        ctx,
+                                        &self.analysis.bodies[&self.analysis.keys[id].function]
+                                            .function,
+                                    );
                                 let fact = if needs_i64 {
-                                    Fact::Integer(domain)
+                                    if can_specialize {
+                                        Fact::Integer(domain)
+                                    } else {
+                                        Fact::Original
+                                    }
                                 } else {
                                     Fact::Literal {
                                         negative: interval.lower < 0,
