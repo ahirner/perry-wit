@@ -396,7 +396,12 @@ impl Solver {
                     .map(|(position, value)| {
                         if let Some(declared) = declared_args.get(position).copied().flatten() {
                             Some(declared)
-                        } else if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                        } else if value.get_type(ctx).deref(ctx).is::<PromiseType>()
+                            || value
+                                .get_type(ctx)
+                                .deref(ctx)
+                                .is::<crate::types::OptionalType>()
+                        {
                             None
                         } else {
                             match self.analysis.states[id].fact(value) {
@@ -732,7 +737,6 @@ impl Solver {
                     if intrinsic == Intrinsic::ParseInt {
                         match super::domains::const_parsed_int(ctx, op) {
                             Some(super::domains::ConstParsedInt::Integer {
-                                domain,
                                 interval,
                                 needs_i64,
                                 ..
@@ -745,7 +749,7 @@ impl Solver {
                                     );
                                 let fact = if needs_i64 {
                                     if can_specialize {
-                                        Fact::Integer(domain)
+                                        Fact::Numeric
                                     } else {
                                         Fact::Original
                                     }

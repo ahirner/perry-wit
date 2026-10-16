@@ -89,6 +89,7 @@ fn replace_with_scalar(
 ) -> bool {
     let result = original.deref(ctx).results().next();
     if let Some(value) = result
+        && can_specialize_value(ctx, state, value)
         && let Some(domain) = state.representation(value)
         && let Some(bits) = literal(ctx, original)
     {

@@ -11,12 +11,12 @@ impl ProgramFacts {
         value: Value,
     ) -> Option<TypeHandle> {
         let ty = value.get_type(ctx);
-        if aggregate(ctx, ty) && !ty.deref(ctx).is::<PromiseType>() {
-            if let Some(&cell) = self.states[id].heap_values.get(&value)
-                && let Some(spec) = self.specialized_cell_type(ctx, ty, cell)
-            {
-                return Some(spec);
-            }
+        if aggregate(ctx, ty)
+            && !ty.deref(ctx).is::<PromiseType>()
+            && let Some(&cell) = self.states[id].heap_values.get(&value)
+            && let Some(spec) = self.specialized_cell_type(ctx, ty, cell)
+        {
+            return Some(spec);
         }
         let state = &self.states[id];
         if let Some(op) = value.defining_op() {
@@ -49,20 +49,22 @@ impl ProgramFacts {
             }
             if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
                 let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let inner_ty = crate::optional::optional_value(ctx, base_spec)?;
-                return (inner_ty != ty).then_some(inner_ty);
+                if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
+                    let inner_ty = crate::optional::optional_value(ctx, base_spec)?;
+                    return (inner_ty != ty).then_some(inner_ty);
+                }
             }
             if Operation::get_op::<WrapOp>(op, ctx).is_some() {
                 let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let absence = ty
-                    .deref(ctx)
-                    .downcast_ref::<crate::types::OptionalType>()?
-                    .absence();
-                let opt_ty: TypeHandle =
-                    crate::types::OptionalType::get_with(ctx, base_spec, absence).into();
-                return (opt_ty != ty).then_some(opt_ty);
+                if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
+                    let absence = ty
+                        .deref(ctx)
+                        .downcast_ref::<crate::types::OptionalType>()?
+                        .absence();
+                    let opt_ty: TypeHandle =
+                        crate::types::OptionalType::get_with(ctx, base_spec, absence).into();
+                    return (opt_ty != ty).then_some(opt_ty);
+                }
             }
             if Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
                 || Operation::get_op::<AwaitOp>(op, ctx).is_some()
@@ -151,7 +153,7 @@ impl ProgramFacts {
         visiting: &mut HashMap<TypeHandle, TypeHandle>,
     ) -> Option<(TypeHandle, bool)> {
         if let Some(&target) = visiting.get(&ty) {
-            return Some((target, false));
+            return Some((target, true));
         }
         if let Some((inner_ty, absence)) = {
             let deref = ty.deref(ctx);
@@ -306,6 +308,104 @@ impl ProgramFacts {
         Some((handle.into(), true))
     }
 
+    fn has_numeric_specialization(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+        objects: &BTreeSet<usize>,
+        visiting: &mut HashSet<TypeHandle>,
+    ) -> bool {
+        if objects.is_empty() {
+            return false;
+        }
+        if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
+            return self.has_numeric_specialization(ctx, opt.value(), objects, visiting);
+        }
+        if let Some(promise) = ty.deref(ctx).downcast_ref::<crate::types::PromiseType>() {
+            return self.has_numeric_specialization(ctx, promise.value(), objects, visiting);
+        }
+        if !visiting.insert(ty) {
+            return false;
+        }
+        let array_elem = ty
+            .deref(ctx)
+            .downcast_ref::<ArrayType>()
+            .map(|a| a.element());
+        if let Some(elem_ty) = array_elem {
+            let mut element_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
+                    visiting.remove(&ty);
+                    return false;
+                };
+                element_slots.push(*element);
+            }
+            let all_numeric = element_slots
+                .iter()
+                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+            if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
+                visiting.remove(&ty);
+                return true;
+            }
+            if aggregate(ctx, elem_ty) {
+                let mut elem_objects = BTreeSet::new();
+                for &s in &element_slots {
+                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                let res = self.has_numeric_specialization(ctx, elem_ty, &elem_objects, visiting);
+                visiting.remove(&ty);
+                return res;
+            }
+            visiting.remove(&ty);
+            return false;
+        }
+        let fields = {
+            let deref = ty.deref(ctx);
+            let Some(rec) = deref.downcast_ref::<RecordType>() else {
+                visiting.remove(&ty);
+                return false;
+            };
+            let Ok(fields) = rec.fields() else {
+                visiting.remove(&ty);
+                return false;
+            };
+            fields.to_vec()
+        };
+        for (idx, (_fname, fty)) in fields.into_iter().enumerate() {
+            let mut field_slots = Vec::with_capacity(objects.len());
+            for &o in objects {
+                let Contents::Record(slots) = &self.heap.objects[o].contents else {
+                    visiting.remove(&ty);
+                    return false;
+                };
+                let Some(&s) = slots.get(idx) else {
+                    visiting.remove(&ty);
+                    return false;
+                };
+                field_slots.push(s);
+            }
+            let all_numeric = field_slots
+                .iter()
+                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
+            if all_numeric && numeric_type_for(ctx, fty).is_some() {
+                visiting.remove(&ty);
+                return true;
+            }
+            if aggregate(ctx, fty) {
+                let mut field_objects = BTreeSet::new();
+                for &s in &field_slots {
+                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                }
+                if self.has_numeric_specialization(ctx, fty, &field_objects, visiting) {
+                    visiting.remove(&ty);
+                    return true;
+                }
+            }
+        }
+        visiting.remove(&ty);
+        false
+    }
+
     fn specialization_tag(
         &self,
         ctx: &Context,
@@ -317,7 +417,8 @@ impl ProgramFacts {
             return None;
         }
         if visiting.contains(&ty) {
-            return Some(("self".to_string(), false));
+            let real = self.has_numeric_specialization(ctx, ty, objects, &mut HashSet::new());
+            return Some(("self".to_string(), real));
         }
         if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
             let (inner, absence) = (opt.value(), opt.absence());

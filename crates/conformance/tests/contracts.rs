@@ -202,25 +202,20 @@ fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Re
 }
 
 #[test]
-fn generated_parsed_aggregate_and_paused_iterator_witnesses_and_precision_check() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -> Result<()> {
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
-    let executor = Executor::new(executable, Limits::default());
-
-    for expression in [
-        Number::ParsedAggregate(Box::new(Number::PausedIterator(Box::new(Number::Input)))),
-        Number::PausedIterator(Box::new(Number::ParsedAggregate(Box::new(
-            Number::Integer(17),
-        )))),
-    ] {
-        let case = Case::Program(Program {
-            expression,
-            form: Form::Direct,
-        });
-        let artifacts = tempfile::tempdir_in(directory.path())?;
-        for evidence in executor.check(&case, artifacts.path())? {
-            perry_conformance::execution::check_equivalence(&case, &evidence)?;
-        }
+    for select in ["ecma.aggregate.specialization", "ecma.collection.iterators"] {
+        runner::campaign(
+            Settings {
+                select: select.into(),
+                cases: 6,
+                depth: 3,
+                seed: 42,
+                shrink_limit: 32,
+                limits: Limits::default(),
+            },
+            executable.clone(),
+        )?;
     }
 
     // Forced precision-degradation check: Perry preserves exact 64-bit integer precision
@@ -228,6 +223,8 @@ fn generated_parsed_aggregate_and_paused_iterator_witnesses_and_precision_check(
     // whereas Node's IEEE-754 f64 degrades `9007199254740993` to `9007199254740992`.
     // Executing this program through the equivalence adapter must therefore detect the
     // f64 precision degradation between an f64-rounded evaluation and exact 64-bit specialization.
+    let directory = tempfile::tempdir()?;
+    let executor = Executor::new(executable, Limits::default());
     let precision_case = Case::Function {
         source: r#"
 type Node = { x: number; y: number; next?: Node };

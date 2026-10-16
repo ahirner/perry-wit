@@ -19,8 +19,6 @@ mod specialize;
 
 pub(super) use operations::OperationKind;
 
-const MAX_ORIGINS: usize = 32;
-
 struct Cell {
     ty: TypeHandle,
     objects: BTreeSet<usize>,
@@ -299,7 +297,7 @@ impl Solver {
             return;
         }
         self.analysis.heap.cells[cell].objects.insert(object);
-        if self.analysis.heap.cells[cell].objects.len() > MAX_ORIGINS {
+        if self.analysis.heap.cells[cell].objects.len() > super::max_origins() {
             // Existing aliases must also lose precision, including newly arriving objects.
             let ty = self.analysis.heap.cells[cell].ty;
             let summary = self.heap_summary(ctx, ty);
@@ -470,15 +468,8 @@ impl Solver {
     }
 
     fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
-        let mut domain = self.analysis.states[id].fact(value);
-        let mut range = self.analysis.states[id].range(value);
-        if self.analysis.keys[id].specialize
-            && domain.integer().is_some_and(|int| int.bits == 64)
-            && Integer::from_type(ctx, payload(ctx, self.analysis.heap.cells[slot].ty)).is_none()
-        {
-            domain = Fact::Numeric;
-            range = Range::Unknown;
-        }
+        let domain = self.analysis.states[id].fact(value);
+        let range = self.analysis.states[id].range(value);
         self.slot_domain(slot, domain);
         self.slot_range(ctx, slot, range);
         self.slot_outcome(slot, self.analysis.states[id].outcome(value));
@@ -525,7 +516,9 @@ impl Solver {
             }
         }
         if !ancestors.is_empty() {
-            for &obj in &objects {
+            let mut visited_objs: BTreeSet<usize> = objects.iter().copied().collect();
+            let mut obj_queue: Vec<usize> = objects.clone();
+            while let Some(obj) = obj_queue.pop() {
                 let child_slots: Vec<usize> =
                     self.analysis.heap.objects[obj].contents.slots().to_vec();
                 for child_slot in child_slots {
@@ -533,6 +526,16 @@ impl Solver {
                     for &anc in &ancestors {
                         if self.analysis.heap.objects[anc].ty == slot_ty {
                             self.add_layout_object(child_slot, anc);
+                        }
+                    }
+                    let nested: Vec<usize> = self.analysis.heap.cells[child_slot]
+                        .layout_objects
+                        .iter()
+                        .copied()
+                        .collect();
+                    for nested_obj in nested {
+                        if visited_objs.insert(nested_obj) {
+                            obj_queue.push(nested_obj);
                         }
                     }
                 }

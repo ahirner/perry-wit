@@ -61,7 +61,10 @@ pub use exceptions::{
     CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp, RethrowOp,
     set_exit_only,
 };
-pub use facts::{ProgramFacts, constrain_signature, specialized_implementation, wit_signature};
+pub use facts::{
+    ProgramFacts, constrain_signature, specialized_implementation, verify_lossless_module,
+    verify_lossless_operations, wit_signature, with_fact_limits,
+};
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
 pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp};

@@ -202,11 +202,6 @@ impl Fact {
         match (self, other) {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
-            (Self::Original, Self::Integer(int)) | (Self::Integer(int), Self::Original)
-                if int.bits == 64 =>
-            {
-                Self::Numeric
-            }
             (Self::Original, _) | (_, Self::Original) => Self::Original,
             (Self::Literal { negative: a }, Self::Literal { negative: b }) => {
                 Self::Literal { negative: a || b }

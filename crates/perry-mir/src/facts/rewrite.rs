@@ -55,7 +55,9 @@ impl Pass for Specialize {
         let specializations = if analysis.roots.is_empty() {
             0
         } else {
-            rewrite(ctx, &analysis)?
+            let count = rewrite(ctx, &analysis)?;
+            verify_lossless_module(root, ctx, &analysis)?;
+            count
         };
         let previous = crate::pipeline::optimization_statistics(root, ctx);
         root.deref_mut(ctx).attributes.set(
@@ -231,6 +233,17 @@ fn coalesce_key(ctx: &Context, analysis: &ProgramFacts, id: usize) -> CoalesceKe
         .collect();
     // Owned first: specializing may instantiate types while a signature borrow is live.
     let res_types = body.signature.deref(ctx).res_types();
+    let results = state
+        .results
+        .iter()
+        .zip(&res_types)
+        .map(|(r, &ty)| {
+            (!ty.deref(ctx).is::<crate::types::OptionalType>()
+                && !ty.deref(ctx).is::<PromiseType>())
+            .then(|| r.domain.integer())
+            .flatten()
+        })
+        .collect();
     let result_specs = res_types
         .into_iter()
         .enumerate()
@@ -244,7 +257,7 @@ fn coalesce_key(ctx: &Context, analysis: &ProgramFacts, id: usize) -> CoalesceKe
             .map(|a| a.map(|i| i.bits == 64 && !i.signed))
             .collect(),
         arg_specs,
-        results: state.results.iter().map(|r| r.domain.integer()).collect(),
+        results,
         result_specs,
         values,
         value_specs,
@@ -426,10 +439,12 @@ fn types_change(
             .enumerate()
             .zip(res_types)
             .any(|((pos, result), ty)| {
-                result
-                    .domain
-                    .integer()
-                    .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
+                (!ty.deref(ctx).is::<crate::types::OptionalType>()
+                    && !ty.deref(ctx).is::<PromiseType>()
+                    && result
+                        .domain
+                        .integer()
+                        .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain)))
                     || ((!root_ids.contains(&id) || super::heap::aggregate(ctx, ty))
                         && !ty.deref(ctx).is::<PromiseType>()
                         && analysis.specialized_result_type(ctx, id, pos, ty).is_some())
@@ -539,7 +554,10 @@ fn clone_implementation(
         .zip(&analysis.states[id].results)
         .enumerate()
     {
-        if let Some(domain) = facts.domain.integer() {
+        if !ty.deref(ctx).is::<crate::types::OptionalType>()
+            && !ty.deref(ctx).is::<PromiseType>()
+            && let Some(domain) = facts.domain.integer()
+        {
             *ty = domain.ty(ctx);
         } else if (!is_root || super::heap::aggregate(ctx, *ty))
             && !ty.deref(ctx).is::<PromiseType>()
@@ -575,8 +593,7 @@ fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
 
 /// Verifies that no specialized function in `root` backs a `Fact::Numeric` or 64-bit integer
 /// value or aggregate slot with a lossy `builtin.fp64` carrier.
-#[cfg(test)]
-pub(crate) fn verify_lossless_module(
+pub fn verify_lossless_module(
     root: Ptr<Operation>,
     ctx: &Context,
     analysis: &ProgramFacts,
@@ -594,6 +611,136 @@ pub(crate) fn verify_lossless_module(
             .unwrap_or_else(|| orig_name.clone());
         if let Some(&func) = funcs.get(&target_name) {
             verify_lossless_context(ctx, analysis, id, func, None, root_ids.contains(&id))?;
+        }
+    }
+    Ok(())
+}
+
+/// Verifies that no active function in `root` contains an operation whose lossless
+/// (`perry.numeric` or 64-bit integer) result or field/element projection was degraded
+/// to a `builtin.fp64` carrier after all MIR passes complete.
+pub fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result<()> {
+    let functions = crate::aggregates::functions(root, ctx);
+    let by_name: HashMap<Identifier, FuncOp> = functions
+        .iter()
+        .map(|&f| (f.get_symbol_name(ctx), f))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut pending = Vec::new();
+    for &func in &functions {
+        let name = func.get_symbol_name(ctx);
+        let is_entry = super::wit_signature(ctx, &func).is_some()
+            || crate::calls::is_exported(ctx, &func)
+            || name.as_ref() == crate::globals::INITIALIZER
+            || name.as_ref() == "perry_main";
+        if is_entry {
+            let target = super::specialized_implementation(ctx, &func);
+            if visited.insert(target.clone()) {
+                pending.push(target);
+            }
+        }
+    }
+    while let Some(name) = pending.pop() {
+        let Some(&func) = by_name.get(&name) else {
+            continue;
+        };
+        verify_lossless_function_ops(ctx, func)?;
+        for op in crate::aggregates::operations(ctx, &func) {
+            let callee = Operation::get_op::<CallOp>(op, ctx)
+                .map(|c| c.callee(ctx))
+                .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)));
+            if let Some(callee) = callee
+                && visited.insert(callee.clone())
+            {
+                pending.push(callee);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_lossless_type(ctx: &Context, ty: TypeHandle) -> bool {
+    let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+    inner.deref(ctx).is::<crate::types::NumericType>()
+        || Integer::from_type(ctx, inner).is_some_and(|d| d.bits == 64)
+}
+
+fn verify_lossless_function_ops(ctx: &Context, function: FuncOp) -> Result<()> {
+    use pliron::verify_err;
+    let loc = function.loc(ctx);
+    for op in crate::aggregates::operations(ctx, &function) {
+        if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
+            && intrinsic.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt)
+            && is_fp64_carrier(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+        {
+            return verify_err!(
+                loc,
+                LosslessRepresentationErr("ParseInt result has f64 carrier".into())
+            );
+        }
+        if let Some(fg) = Operation::get_op::<crate::heap::FieldGetOp>(op, ctx) {
+            let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let field_name = fg.field(ctx);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if let Some(field_ty) = base_ty
+                .deref(ctx)
+                .downcast_ref::<crate::types::RecordType>()
+                .and_then(|r| r.fields().ok().map(|f| f.to_vec()))
+                .and_then(|fields| fields.into_iter().find(|(n, _)| *n == field_name))
+                .map(|(_, t)| t)
+                && is_lossless_type(ctx, field_ty)
+                && is_fp64_carrier(ctx, res_ty)
+            {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(format!(
+                        "field_get of lossless field `{field_name}` degraded to f64 carrier"
+                    ))
+                );
+            }
+        }
+        if (Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some()
+            || Operation::get_op::<crate::collections::ArrayAtOp>(op, ctx).is_some())
+            && let Some(elem_ty) = op
+                .deref(ctx)
+                .get_operand(0)
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<crate::types::ArrayType>()
+                .map(|a| a.element())
+            && is_lossless_type(ctx, elem_ty)
+            && is_fp64_carrier(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+        {
+            return verify_err!(
+                loc,
+                LosslessRepresentationErr(
+                    "array element load of lossless element degraded to f64 carrier".into()
+                )
+            );
+        }
+        if Operation::get_op::<crate::optional::UnwrapOp>(op, ctx).is_some() {
+            let opt_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if is_lossless_type(ctx, opt_ty) && is_fp64_carrier(ctx, res_ty) {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(
+                        "optional unwrap of lossless value degraded to f64 carrier".into()
+                    )
+                );
+            }
+        }
+        if Operation::get_op::<crate::optional::WrapOp>(op, ctx).is_some() {
+            let in_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if is_lossless_type(ctx, in_ty) && is_fp64_carrier(ctx, res_ty) {
+                return verify_err!(
+                    loc,
+                    LosslessRepresentationErr(
+                        "optional wrap of lossless value degraded to f64 carrier".into()
+                    )
+                );
+            }
         }
     }
     Ok(())
@@ -712,7 +859,6 @@ fn verify_lossless_context(
                 );
             }
             if !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
-                && analysis.specialized_value_type(ctx, id, orig_val).is_some()
                 && state.fact(orig_val) == super::Fact::Numeric
                 && is_fp64_carrier(ctx, actual_ty)
             {
@@ -730,38 +876,6 @@ fn verify_lossless_context(
             }
         }
     }
-    for op in ops {
-        if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
-            && intrinsic.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt)
-            && is_fp64_carrier(ctx, op.deref(ctx).get_result(0).get_type(ctx))
-        {
-            return verify_err!(
-                loc,
-                LosslessRepresentationErr("ParseInt result has f64 carrier".into())
-            );
-        }
-        if let Some(fg) = Operation::get_op::<crate::heap::FieldGetOp>(op, ctx) {
-            let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let field_name = fg.field(ctx);
-            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            if let Some(field_ty) = base_ty
-                .deref(ctx)
-                .downcast_ref::<crate::types::RecordType>()
-                .and_then(|r| r.fields().ok().map(|f| f.to_vec()))
-                .and_then(|fields| fields.into_iter().find(|(n, _)| *n == field_name))
-                .map(|(_, t)| t)
-                && (field_ty.deref(ctx).is::<crate::types::NumericType>()
-                    || Integer::from_type(ctx, field_ty).is_some_and(|d| d.bits == 64))
-                && is_fp64_carrier(ctx, res_ty)
-            {
-                return verify_err!(
-                    loc,
-                    LosslessRepresentationErr(format!(
-                        "field_get of lossless field `{field_name}` degraded to f64 carrier"
-                    ))
-                );
-            }
-        }
-    }
+    verify_lossless_function_ops(ctx, function)?;
     Ok(())
 }

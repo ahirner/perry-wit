@@ -97,6 +97,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         .attributes
         .set(STATISTICS.clone(), measured);
     verify_operation(root, ctx)?;
+    crate::facts::verify_lossless_operations(root, ctx)?;
     Ok(analyses)
 }
 

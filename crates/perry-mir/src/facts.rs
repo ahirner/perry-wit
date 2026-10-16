@@ -39,8 +39,7 @@ use domains::{
     constant_range, literal,
 };
 pub(crate) use rewrite::Specialize;
-#[cfg(test)]
-pub(crate) use rewrite::verify_lossless_module;
+pub use rewrite::{verify_lossless_module, verify_lossless_operations};
 mod outcomes;
 use outcomes::{Outcomes, promise_payload};
 
@@ -227,6 +226,43 @@ impl Body {
 /// Specialized contexts per function before further keys share one summary context, so a
 /// function has one generic context and at most `MAX_PRECISE_CONTEXTS + 1` specialized ones.
 const MAX_PRECISE_CONTEXTS: usize = 32;
+pub(super) const DEFAULT_MAX_ORIGINS: usize = 32;
+
+std::thread_local! {
+    static FACT_LIMITS: std::cell::Cell<(usize, usize)> = const {
+        std::cell::Cell::new((DEFAULT_MAX_ORIGINS, MAX_PRECISE_CONTEXTS))
+    };
+}
+
+pub(super) fn max_origins() -> usize {
+    FACT_LIMITS.with(|c| c.get().0)
+}
+
+pub(super) fn max_precise_contexts() -> usize {
+    FACT_LIMITS.with(|c| c.get().1)
+}
+
+/// Temporarily overrides `(MAX_ORIGINS, MAX_PRECISE_CONTEXTS)` on the current thread
+/// for metamorphic testing of precision summarization vs. exact specialization.
+pub fn with_fact_limits<R>(
+    max_origins: usize,
+    max_precise_contexts: usize,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Guard(usize, usize);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FACT_LIMITS.with(|c| c.set((self.0, self.1)));
+        }
+    }
+    let prev = FACT_LIMITS.with(|c| {
+        let prev = c.get();
+        c.set((max_origins, max_precise_contexts));
+        prev
+    });
+    let _guard = Guard(prev.0, prev.1);
+    f()
+}
 
 #[derive(Default)]
 struct State {
@@ -389,7 +425,7 @@ impl Solver {
             } else {
                 let p_ty = param.get_type(ctx);
                 let inner_ty = crate::optional::optional_value(ctx, p_ty).unwrap_or(p_ty);
-                if let Some(int_dom) = Integer::from_type(ctx, inner_ty) {
+                if let Some(int_dom) = Integer::from_type(ctx, p_ty) {
                     args[idx] = Some(int_dom);
                 } else if !is_async && inner_ty.deref(ctx).is::<pliron::builtin::types::FP64Type>()
                 {
@@ -433,7 +469,7 @@ impl Solver {
                 return id;
             }
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
-            if *count >= MAX_PRECISE_CONTEXTS {
+            if *count >= max_precise_contexts() {
                 self.analysis.summarized_contexts += 1;
                 let summary = self.summary_key(ctx, &key);
                 let id = if let Some(&id) = self.contexts.get(&summary) {

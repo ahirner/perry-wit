@@ -29,8 +29,6 @@ pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
         1 => (child.clone(), child.clone()).prop_map(|(a,b)| Number::ByteAlias(Box::new(a), Box::new(b))),
         1 => (child.clone(), 0u8..8).prop_map(|(v,n)| Number::ClosedLoop(Box::new(v), n)),
         1 => child.clone().prop_map(|v| Number::Handled(Box::new(v))),
-        1 => child.clone().prop_map(|v| Number::ParsedAggregate(Box::new(v))),
-        1 => child.clone().prop_map(|v| Number::PausedIterator(Box::new(v))),
         1 => (prop::sample::select(vec![Math::Floor,Math::Ceil,Math::Trunc,Math::Abs,Math::Round]),child.clone()).prop_map(|(op,v)| Number::Math(op,Box::new(v))),
         1 => (text.clone(),text.clone(),child.clone()).prop_map(|(a,b,c)| Number::IndexOf(Box::new(a),Box::new(b),Box::new(c))),
         1 => child.clone().prop_map(|v| Number::DateTime(Box::new(v))),

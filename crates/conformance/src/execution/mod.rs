@@ -214,6 +214,29 @@ pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
             }
         }
     }
+    if let Some((first, rest)) = evidence.split_first()
+        && let Outcome::Values {
+            observations: baseline,
+            stdout,
+            stderr,
+            ..
+        } = &first.component
+    {
+        for result in rest {
+            if let Outcome::Values {
+                observations,
+                stdout: output,
+                stderr: errors,
+                ..
+            } = &result.component
+            {
+                ensure!(
+                    observations == baseline && output == stdout && errors == stderr,
+                    "metamorphic form changed component observations"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -377,6 +400,10 @@ impl Executor {
         }
         let oracle = if matches!(case, Case::Reject { .. }) {
             Outcome::Compile("expected source-domain rejection".into())
+        } else if let Case::Aggregate(agg) = case
+            && agg.uses_wide_exact_int()
+        {
+            agg.expected_outcome()
         } else if matches!(case, Case::Command { .. }) {
             Outcome::Command(command(
                 Command::new("node")
