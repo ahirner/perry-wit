@@ -3,9 +3,9 @@ use super::*;
 use perry_parser::swc_ecma_ast as ast;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-pub(crate) const DECODE: &str = "$$perryDecodeOptions";
+pub(super) const DECODE: &str = "$$perryDecodeOptions";
 
-pub(crate) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxContext) -> Result<()> {
+pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxContext) -> Result<()> {
     struct Options {
         error: Option<anyhow::Error>,
         unresolved: SyntaxContext,

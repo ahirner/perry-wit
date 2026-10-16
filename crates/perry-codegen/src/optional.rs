@@ -3,10 +3,11 @@
 use crate::{
     OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL,
     function::FunctionLowering,
-    repr::{Repr, repr},
+    repr::{Carriers, Repr, repr},
+    values::is_numeric_type,
 };
 use anyhow::{Result, anyhow, bail};
-use perry_abi::{OMITTED_BITS, UNDEFINED_BITS};
+use perry_abi::{OMITTED_BITS, UNDEFINED_BITS, layout::numeric};
 use perry_mir::{
     attrs::ErrorKind,
     optional::{
@@ -55,7 +56,7 @@ impl FunctionLowering<'_, '_> {
             let source = mir.get_type(ctx);
             let target = op.deref(ctx).get_result(0).get_type(ctx);
             let value = self.mapped_value(ctx, mir)?;
-            let value = self.optional_cast_value(ctx, value, source, target)?;
+            self.check_optional_cast(ctx, value, source, target)?;
             self.define_value(ctx, op, value);
             return Ok(true);
         }
@@ -75,21 +76,21 @@ impl FunctionLowering<'_, '_> {
             let undefined = self.absence_test_value(ctx, value, mir.get_type(ctx), false)?;
             let null = self.absence_test_value(ctx, value, mir.get_type(ctx), true)?;
             let result = match value {
-                crate::values::Carriers::Scalar(v) => {
+                Carriers::Scalar(v) => {
                     let nan = self.f64_const(ctx, f64::NAN);
                     let zero = self.f64_const(ctx, 0.0);
                     let number = self.select(ctx, null, zero, v);
-                    crate::values::Carriers::Scalar(self.select(ctx, undefined, nan, number))
+                    Carriers::Scalar(self.select(ctx, undefined, nan, number))
                 }
-                crate::values::Carriers::Numeric { tag, payload } => {
-                    let f_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
+                Carriers::Numeric { tag, payload } => {
+                    let f_tag = self.i32_const(ctx, numeric::FLOAT);
                     let nan_bits = self.i64_const(ctx, f64::NAN.to_bits());
                     let zero_bits = self.i64_const(ctx, 0);
                     let t1 = self.select(ctx, null, f_tag, tag);
                     let p1 = self.select(ctx, null, zero_bits, payload);
                     let t2 = self.select(ctx, undefined, f_tag, t1);
                     let p2 = self.select(ctx, undefined, nan_bits, p1);
-                    crate::values::Carriers::Numeric {
+                    Carriers::Numeric {
                         tag: t2,
                         payload: p2,
                     }
@@ -123,87 +124,67 @@ impl FunctionLowering<'_, '_> {
         Ok(false)
     }
 
+    /// `undefined` in the carriers of `ty`.
     pub(crate) fn undefined_value(
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
-    ) -> Result<crate::values::Carriers<Value>> {
-        if crate::values::is_numeric_type(ctx, ty) {
-            return Ok(crate::values::Carriers::Numeric {
-                tag: self.i32_const(ctx, perry_abi::layout::numeric::UNDEFINED),
-                payload: self.i64_const(ctx, 0),
-            });
-        }
-        self.undefined(ctx, ty).map(crate::values::Carriers::Scalar)
+    ) -> Result<Carriers<Value>> {
+        self.absent_value(ctx, ty, numeric::UNDEFINED, Self::undefined)
     }
 
-    pub(crate) fn omitted_value(
+    fn omitted_value(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Carriers<Value>> {
+        self.absent_value(ctx, ty, numeric::OMITTED, Self::omitted)
+    }
+
+    fn null_value(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Carriers<Value>> {
+        self.absent_value(ctx, ty, numeric::NULL, Self::null)
+    }
+
+    /// An absent value of `ty`: the tag `numeric_tag` for numeric alternatives, otherwise the
+    /// `scalar` sentinel.
+    fn absent_value(
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
-    ) -> Result<crate::values::Carriers<Value>> {
-        if crate::values::is_numeric_type(ctx, ty) {
-            return Ok(crate::values::Carriers::Numeric {
-                tag: self.i32_const(ctx, perry_abi::layout::numeric::OMITTED),
+        numeric_tag: i32,
+        scalar: fn(&mut Self, &mut Context, TypeHandle) -> Result<Value>,
+    ) -> Result<Carriers<Value>> {
+        if is_numeric_type(ctx, ty) {
+            Ok(Carriers::Numeric {
+                tag: self.i32_const(ctx, numeric_tag),
                 payload: self.i64_const(ctx, 0),
-            });
+            })
+        } else {
+            scalar(self, ctx, ty).map(Carriers::Scalar)
         }
-        self.omitted(ctx, ty).map(crate::values::Carriers::Scalar)
     }
 
-    pub(crate) fn null_value(
-        &mut self,
-        ctx: &mut Context,
-        ty: TypeHandle,
-    ) -> Result<crate::values::Carriers<Value>> {
-        if crate::values::is_numeric_type(ctx, ty) {
-            return Ok(crate::values::Carriers::Numeric {
-                tag: self.i32_const(ctx, perry_abi::layout::numeric::NULL),
-                payload: self.i64_const(ctx, 0),
-            });
-        }
-        self.null(ctx, ty).map(crate::values::Carriers::Scalar)
-    }
-
+    /// Whether `value` is the omitted marker; constant false when `ty` admits no `undefined`.
     pub(crate) fn is_omitted_value(
         &mut self,
         ctx: &mut Context,
-        value: crate::values::Carriers<Value>,
+        value: Carriers<Value>,
         ty: TypeHandle,
     ) -> Result<Value> {
         if !absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
             return Ok(self.i32_const(ctx, 0));
         }
         match value {
-            crate::values::Carriers::Numeric { tag, .. } => {
-                let omitted = self.i32_const(ctx, perry_abi::layout::numeric::OMITTED);
+            Carriers::Numeric { tag, .. } => {
+                let omitted = self.i32_const(ctx, numeric::OMITTED);
                 Ok(self.num(ctx, NumOpcode::I32Eq, vec![tag, omitted]))
             }
-            crate::values::Carriers::Scalar(v) => self.is_omitted(ctx, v, ty),
+            Carriers::Scalar(value) => self.is_omitted(ctx, value, ty),
         }
     }
 
-    pub(crate) fn is_undefined_value(
-        &mut self,
-        ctx: &mut Context,
-        value: crate::values::Carriers<Value>,
-        ty: TypeHandle,
-    ) -> Result<Value> {
-        match value {
-            crate::values::Carriers::Numeric { tag, .. } => {
-                let undef = self.i32_const(ctx, perry_abi::layout::numeric::UNDEFINED);
-                let explicit = self.num(ctx, NumOpcode::I32Eq, vec![tag, undef]);
-                let omitted = self.is_omitted_value(ctx, value, ty)?;
-                Ok(self.num(ctx, NumOpcode::I32Or, vec![explicit, omitted]))
-            }
-            crate::values::Carriers::Scalar(v) => self.is_undefined(ctx, v, ty),
-        }
-    }
-
+    /// Whether `value` is `undefined` (`null == false`) or `null`; constant false when `ty`
+    /// does not admit that absence. Omission counts as `undefined`.
     pub(crate) fn absence_test_value(
         &mut self,
         ctx: &mut Context,
-        value: crate::values::Carriers<Value>,
+        value: Carriers<Value>,
         ty: TypeHandle,
         null: bool,
     ) -> Result<Value> {
@@ -217,22 +198,36 @@ impl FunctionLowering<'_, '_> {
         if !admitted {
             return Ok(self.i32_const(ctx, 0));
         }
-        if !null {
-            return self.is_undefined_value(ctx, value, ty);
-        }
-        match value {
-            crate::values::Carriers::Numeric { tag, .. } => {
-                let n = self.i32_const(ctx, perry_abi::layout::numeric::NULL);
-                Ok(self.num(ctx, NumOpcode::I32Eq, vec![tag, n]))
+        match (value, null) {
+            (Carriers::Numeric { tag, .. }, false) => {
+                let undef = self.i32_const(ctx, numeric::UNDEFINED);
+                let explicit = self.num(ctx, NumOpcode::I32Eq, vec![tag, undef]);
+                let omitted = self.is_omitted_value(ctx, value, ty)?;
+                Ok(self.num(ctx, NumOpcode::I32Or, vec![explicit, omitted]))
             }
-            crate::values::Carriers::Scalar(v) => self.absence_test(ctx, v, ty, true),
+            (Carriers::Numeric { tag, .. }, true) => {
+                let null_tag = self.i32_const(ctx, numeric::NULL);
+                Ok(self.num(ctx, NumOpcode::I32Eq, vec![tag, null_tag]))
+            }
+            (Carriers::Scalar(value), false) => self.is_undefined(ctx, value, ty),
+            (Carriers::Scalar(value), true) => {
+                let sentinel = self.null(ctx, ty)?;
+                Ok(if repr(ctx, ty)? == Repr::F64 {
+                    let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+                    let sentinel = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![sentinel]);
+                    self.num(ctx, NumOpcode::I64Eq, vec![bits, sentinel])
+                } else {
+                    self.num(ctx, NumOpcode::I32Eq, vec![value, sentinel])
+                })
+            }
         }
     }
 
+    /// Whether `value` is `undefined`, omitted or `null`.
     pub(crate) fn is_absent_value(
         &mut self,
         ctx: &mut Context,
-        value: crate::values::Carriers<Value>,
+        value: Carriers<Value>,
         ty: TypeHandle,
     ) -> Result<Value> {
         let undefined = self.absence_test_value(ctx, value, ty, false)?;
@@ -240,19 +235,21 @@ impl FunctionLowering<'_, '_> {
         Ok(self.num(ctx, NumOpcode::I32Or, vec![undefined, null]))
     }
 
-    pub(crate) fn optional_cast_value(
+    /// Throw a `TypeError` when `value` holds an absence `source` admits but `target` does
+    /// not. Both types share a representation, so the value itself is reused unchanged.
+    pub(crate) fn check_optional_cast(
         &mut self,
         ctx: &mut Context,
-        value: crate::values::Carriers<Value>,
+        value: Carriers<Value>,
         source: TypeHandle,
         target: TypeHandle,
-    ) -> Result<crate::values::Carriers<Value>> {
+    ) -> Result<()> {
         let from = absence(ctx, source)
             .ok_or_else(|| anyhow!("optional cast from a non-optional type"))?;
         let to =
             absence(ctx, target).ok_or_else(|| anyhow!("optional cast to a non-optional type"))?;
         if from == to {
-            return Ok(value);
+            return Ok(());
         }
         if from.admits_undefined() && !to.admits_undefined() {
             let rejected = self.absence_test_value(ctx, value, source, false)?;
@@ -264,7 +261,7 @@ impl FunctionLowering<'_, '_> {
                 self.throw_if(ctx, null, ErrorKind::TypeError);
             }
         }
-        Ok(value)
+        Ok(())
     }
 
     pub(crate) fn undefined(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
@@ -353,6 +350,7 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    /// [`Self::absence_test_value`] for a scalar representation.
     pub(crate) fn absence_test(
         &mut self,
         ctx: &mut Context,
@@ -360,64 +358,16 @@ impl FunctionLowering<'_, '_> {
         ty: TypeHandle,
         null: bool,
     ) -> Result<Value> {
-        let admitted = absence(ctx, ty).is_some_and(|a| {
-            if null {
-                a.admits_null()
-            } else {
-                a.admits_undefined()
-            }
-        });
-        if !admitted {
-            return Ok(self.i32_const(ctx, 0));
-        }
-        if !null {
-            return self.is_undefined(ctx, value, ty);
-        }
-        let sentinel = self.null(ctx, ty)?;
-        Ok(if repr(ctx, ty)? == Repr::F64 {
-            let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
-            let sentinel = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![sentinel]);
-            self.num(ctx, NumOpcode::I64Eq, vec![bits, sentinel])
-        } else {
-            self.num(ctx, NumOpcode::I32Eq, vec![value, sentinel])
-        })
+        self.absence_test_value(ctx, Carriers::Scalar(value), ty, null)
     }
 
+    /// [`Self::is_absent_value`] for a scalar representation.
     pub(crate) fn is_absent(
         &mut self,
         ctx: &mut Context,
         value: Value,
         ty: TypeHandle,
     ) -> Result<Value> {
-        let undefined = self.absence_test(ctx, value, ty, false)?;
-        let null = self.absence_test(ctx, value, ty, true)?;
-        Ok(self.num(ctx, NumOpcode::I32Or, vec![undefined, null]))
-    }
-
-    pub(crate) fn optional_cast(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        source: TypeHandle,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        let from = absence(ctx, source)
-            .ok_or_else(|| anyhow!("optional cast from a non-optional type"))?;
-        let to =
-            absence(ctx, target).ok_or_else(|| anyhow!("optional cast to a non-optional type"))?;
-        if from == to {
-            return Ok(value);
-        }
-        if from.admits_undefined() && !to.admits_undefined() {
-            let rejected = self.absence_test(ctx, value, source, false)?;
-            self.throw_if(ctx, rejected, ErrorKind::TypeError);
-        }
-        if from.admits_null() {
-            let null = self.absence_test(ctx, value, source, true)?;
-            if !to.admits_null() {
-                self.throw_if(ctx, null, ErrorKind::TypeError);
-            }
-        }
-        Ok(value)
+        self.is_absent_value(ctx, Carriers::Scalar(value), ty)
     }
 }

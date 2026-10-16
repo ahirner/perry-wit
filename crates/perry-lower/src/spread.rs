@@ -85,41 +85,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let ty = perry_hir::infer_expr_type(expression, env);
                 let ty = if spread {
-                    match ty {
-                        HirType::Array(inner) => *inner,
-                        HirType::Generic {
-                            base,
-                            mut type_args,
-                        } if matches!(base.as_str(), "Set" | "ReadonlySet" | "SetValues")
-                            && type_args.len() == 1 =>
-                        {
-                            type_args.pop().unwrap()
-                        }
-                        HirType::Generic {
-                            base,
-                            mut type_args,
-                        } if base == "MapKeys" && type_args.len() == 2 => type_args.swap_remove(0),
-                        HirType::Generic {
-                            base,
-                            mut type_args,
-                        } if base == "MapValues" && type_args.len() == 2 => {
-                            type_args.pop().unwrap()
-                        }
-                        HirType::Generic {
-                            base,
-                            mut type_args,
-                        } if base == "SetEntries" && type_args.len() == 1 => {
-                            let t = type_args.pop().unwrap();
-                            HirType::Tuple(vec![t.clone(), t])
-                        }
-                        HirType::Generic { base, type_args }
-                            if matches!(base.as_str(), "Map" | "ReadonlyMap" | "MapEntries")
-                                && type_args.len() == 2 =>
-                        {
-                            HirType::Tuple(type_args)
-                        }
-                        _ => return None,
-                    }
+                    crate::shapes::generics::iterated_element(ty).ok()?
                 } else {
                     ty
                 };

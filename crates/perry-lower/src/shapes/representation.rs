@@ -1,5 +1,6 @@
 //! Source schemas to the existing MIR representation contracts.
 use super::*;
+use crate::collections::CollectionViewKind;
 
 impl Shapes<'_> {
     /// Compatibility entry for HIR consumers; representation uses interned source identities.
@@ -69,47 +70,22 @@ impl Shapes<'_> {
                     };
                     return self.map_source_type(ctx, *k, *v);
                 }
-                if base == "MapKeys" && !self.is_user_type(base) {
-                    let [k, v] = arguments.as_slice() else {
-                        bail!("{base} needs key and value type arguments");
-                    };
-                    return self.map_view_source_type(ctx, *k, *v, "map_keys_box");
-                }
-                if base == "MapValues" && !self.is_user_type(base) {
-                    let [k, v] = arguments.as_slice() else {
-                        bail!("{base} needs key and value type arguments");
-                    };
-                    return self.map_view_source_type(ctx, *k, *v, "map_values_box");
-                }
-                if base == "MapEntries" && !self.is_user_type(base) {
-                    let [k, v] = arguments.as_slice() else {
-                        bail!("{base} needs key and value type arguments");
-                    };
-                    return self.map_view_source_type(ctx, *k, *v, "map_entries_box");
+                if let Some(view) = CollectionViewKind::from_type_name(base)
+                    && !self.is_user_type(base)
+                {
+                    return self.collection_view_source_type(ctx, view, arguments);
                 }
                 if base == "Record" && !self.is_user_type(base) {
                     let [k, v] = arguments.as_slice() else {
                         bail!("Record needs key and value type arguments");
                     };
-                    return self.kv_array_source_type(ctx, *k, *v, "dict_tuple");
+                    return self.dict_source_type(ctx, *k, *v);
                 }
                 if matches!(base.as_str(), "Set" | "ReadonlySet") && !self.is_user_type(base) {
                     let [element] = arguments.as_slice() else {
                         bail!("{base} needs one element type argument");
                     };
                     return self.set_source_type(ctx, *element);
-                }
-                if base == "SetValues" && !self.is_user_type(base) {
-                    let [element] = arguments.as_slice() else {
-                        bail!("{base} needs one element type argument");
-                    };
-                    return self.set_view_source_type(ctx, *element, "set_values_box");
-                }
-                if base == "SetEntries" && !self.is_user_type(base) {
-                    let [element] = arguments.as_slice() else {
-                        bail!("{base} needs one element type argument");
-                    };
-                    return self.set_view_source_type(ctx, *element, "set_entries_box");
                 }
                 if matches!(base.as_str(), "ReadonlyArray" | "Array") && !self.is_user_type(base) {
                     let [element] = arguments.as_slice() else {
@@ -158,7 +134,7 @@ impl Shapes<'_> {
                         "index signatures are outside the closed-record profile when combined with fixed properties"
                     );
                     let str_arg = Argument::from_kind(ctx, Kind::String);
-                    return self.kv_array_source_type(ctx, str_arg, *val_ty, "dict_tuple");
+                    return self.dict_source_type(ctx, str_arg, *val_ty);
                 }
                 Ok(self
                     .source_record(

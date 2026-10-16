@@ -1,11 +1,12 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
 use crate::{
+    aggregates::record_slot,
     function::FunctionLowering,
     repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow};
-use perry_abi::layout::{record, roots as root_stack};
+use perry_abi::layout::{array, record, roots as root_stack};
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
     types::RecordType,
@@ -552,11 +553,7 @@ impl FunctionLowering<'_, '_> {
                 if repr(ctx, *field_ty).is_ok_and(|kind| kind == Repr::Ref) {
                     offsets.push(field_offset);
                 }
-                field_offset += if crate::values::is_numeric_type(ctx, *field_ty) {
-                    record::NUMERIC_SLOT
-                } else {
-                    record::SLOT
-                };
+                field_offset += record_slot(ctx, *field_ty);
             }
             if self.state.retains_json {
                 offsets.push(record::JSON);
@@ -587,7 +584,7 @@ impl FunctionLowering<'_, '_> {
                 Runtime::ArrayNewCollectible,
                 vec![capacity, references],
             ))
-        } else if elem_kind == perry_abi::layout::array::NUMERIC_ELEMENTS {
+        } else if elem_kind == array::NUMERIC_ELEMENTS {
             let references = self.i32_const(ctx, elem_kind as i32);
             Ok(self.runtime(ctx, Runtime::ArrayNewTyped, vec![capacity, references]))
         } else {

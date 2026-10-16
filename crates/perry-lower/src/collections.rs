@@ -1,30 +1,92 @@
 //! Lowering for `Map<K, V>`, `Set<T>`, `Record<K, V>`, `Object.*`, `Array.isArray`, and `in`.
+//!
+//! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: cursors }`. Deletes
+//! tombstone entries, and every live iterator registers a cursor in `_2` so compaction can
+//! move it; views (`map.keys()`) own such a cursor. Records are recognized by name prefix.
 
 use super::*;
 use perry_mir::types::OptionalType;
 
+mod keyed;
 mod objects;
+mod storage;
+pub(super) use storage::LiveCursor;
 
-pub(super) fn map_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
-    let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
-    rec.deref(ctx)
-        .name()
-        .as_ref()
-        .starts_with("map_box_")
-        .then_some(rec)
+/// The entry records of a live `Map` or `Set`, which carry a liveness flag for tombstones.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EntryKind {
+    Map,
+    Set,
 }
 
-pub(super) fn set_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
-    let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
-    rec.deref(ctx)
-        .name()
-        .as_ref()
-        .starts_with("set_box_")
-        .then_some(rec)
+impl EntryKind {
+    /// The entry record's liveness flag.
+    fn live_field(self) -> &'static str {
+        match self {
+            Self::Map => "_2",
+            Self::Set => "_1",
+        }
+    }
+
+    /// The name prefix of the collection's box record.
+    pub(super) fn box_prefix(self) -> &'static str {
+        match self {
+            Self::Map => "map_box",
+            Self::Set => "set_box",
+        }
+    }
+
+    /// Classify an entry record; dictionary and plain tuples have no liveness flag.
+    fn of_entry(ctx: &Context, rec: TypedHandle<RecordType>) -> Option<Self> {
+        let rec_ref = rec.deref(ctx);
+        let name = rec_ref.name();
+        if name.as_ref().starts_with("map_tuple_") {
+            Some(Self::Map)
+        } else if name.as_ref().starts_with("set_tuple_") {
+            Some(Self::Set)
+        } else {
+            None
+        }
+    }
 }
 
+/// `keys()`, `values()` or `entries()`, the iterator methods of `Map`, `Set` and arrays.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum IteratorMethod {
+    Keys,
+    Values,
+    Entries,
+}
+
+impl IteratorMethod {
+    pub(super) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "keys" => Some(Self::Keys),
+            "values" => Some(Self::Values),
+            "entries" => Some(Self::Entries),
+            _ => None,
+        }
+    }
+
+    /// The live view this method returns on a `Map`.
+    pub(super) fn map_view(self) -> CollectionViewKind {
+        match self {
+            Self::Keys => CollectionViewKind::MapKeys,
+            Self::Values => CollectionViewKind::MapValues,
+            Self::Entries => CollectionViewKind::MapEntries,
+        }
+    }
+
+    /// The live view this method returns on a `Set`, whose keys are its values.
+    pub(super) fn set_view(self) -> CollectionViewKind {
+        match self {
+            Self::Keys | Self::Values => CollectionViewKind::SetValues,
+            Self::Entries => CollectionViewKind::SetEntries,
+        }
+    }
+}
+
+/// A live iterator view over a `Map` or `Set` box.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollectionViewKind {
     MapKeys,
@@ -34,27 +96,77 @@ pub(super) enum CollectionViewKind {
     SetEntries,
 }
 
+impl CollectionViewKind {
+    const ALL: [Self; 5] = [
+        Self::MapKeys,
+        Self::MapValues,
+        Self::MapEntries,
+        Self::SetValues,
+        Self::SetEntries,
+    ];
+
+    /// The generic name inference gives the view (`MapKeys<K, V>`, `SetValues<T>`).
+    pub(super) fn type_name(self) -> &'static str {
+        match self {
+            Self::MapKeys => "MapKeys",
+            Self::MapValues => "MapValues",
+            Self::MapEntries => "MapEntries",
+            Self::SetValues => "SetValues",
+            Self::SetEntries => "SetEntries",
+        }
+    }
+
+    pub(super) fn from_type_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|view| view.type_name() == name)
+    }
+
+    /// The name prefix of the view's record.
+    pub(super) fn record_prefix(self) -> &'static str {
+        match self {
+            Self::MapKeys => "map_keys_box",
+            Self::MapValues => "map_values_box",
+            Self::MapEntries => "map_entries_box",
+            Self::SetValues => "set_values_box",
+            Self::SetEntries => "set_entries_box",
+        }
+    }
+
+    /// The collection the view reads.
+    pub(super) fn source(self) -> EntryKind {
+        match self {
+            Self::MapKeys | Self::MapValues | Self::MapEntries => EntryKind::Map,
+            Self::SetValues | Self::SetEntries => EntryKind::Set,
+        }
+    }
+}
+
+/// The record behind `ty` (optional or not) if its name is `{prefix}_…`.
+fn prefixed_record(ctx: &Context, ty: TypeHandle, prefix: &str) -> Option<TypedHandle<RecordType>> {
+    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
+    rec.deref(ctx)
+        .name()
+        .as_ref()
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('_'))
+        .then_some(rec)
+}
+
+pub(super) fn map_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
+    prefixed_record(ctx, ty, EntryKind::Map.box_prefix())
+}
+
+pub(super) fn set_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
+    prefixed_record(ctx, ty, EntryKind::Set.box_prefix())
+}
+
 pub(super) fn collection_view_record(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(CollectionViewKind, TypedHandle<RecordType>)> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
-    let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
-    let rec_ref = rec.deref(ctx);
-    let name_ref = rec_ref.name().as_ref();
-    if name_ref.starts_with("map_keys_box_") {
-        Some((CollectionViewKind::MapKeys, rec))
-    } else if name_ref.starts_with("map_values_box_") {
-        Some((CollectionViewKind::MapValues, rec))
-    } else if name_ref.starts_with("map_entries_box_") {
-        Some((CollectionViewKind::MapEntries, rec))
-    } else if name_ref.starts_with("set_values_box_") {
-        Some((CollectionViewKind::SetValues, rec))
-    } else if name_ref.starts_with("set_entries_box_") {
-        Some((CollectionViewKind::SetEntries, rec))
-    } else {
-        None
-    }
+    CollectionViewKind::ALL
+        .into_iter()
+        .find_map(|view| Some((view, prefixed_record(ctx, ty, view.record_prefix())?)))
 }
 
 pub(super) fn is_collection_or_view_record(ctx: &Context, ty: TypeHandle) -> bool {
@@ -222,9 +334,7 @@ impl<'s> FunctionBuilder<'s> {
             return match constructor {
                 Constructor::Map { types, init } => {
                     let expected = match types {
-                        Some((key, value)) => {
-                            Some(self.shapes.kv_array_type(ctx, key, value, "map_tuple")?)
-                        }
+                        Some((key, value)) => Some(self.shapes.map_type(ctx, key, value)?),
                         None => expected,
                     };
                     match init {
@@ -235,7 +345,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 Constructor::Set { element, init } => {
                     let expected = match element {
-                        Some(element) => Some(self.shapes.set_array_type(ctx, element)?),
+                        Some(element) => Some(self.shapes.set_type(ctx, element)?),
                         None => expected,
                     };
                     match init {
@@ -514,7 +624,7 @@ impl<'s> FunctionBuilder<'s> {
         let expected = optional_value(ctx, expected).unwrap_or(expected);
         let (_, _, tuple_rec) =
             kv_entry_types(ctx, expected).context("expected a Map<K, V> type")?;
-        self.alloc_map_box(ctx, tuple_rec)
+        self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
     }
 
     fn map_from_entries(
@@ -525,11 +635,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let init_expected =
             if let Some((k_ty, v_ty, _)) = expected.and_then(|exp| kv_entry_types(ctx, exp)) {
-                let pair_rec = self.shapes.mir_record_prefix(
-                    ctx,
-                    vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
-                    Some("tuple"),
-                )?;
+                let pair_rec = self.shapes.pair_type(ctx, k_ty, v_ty)?;
                 Some(ArrayType::get(ctx, pair_rec.into()).into())
             } else {
                 None
@@ -539,25 +645,13 @@ impl<'s> FunctionBuilder<'s> {
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
             .context("Map constructor requires an iterable of [key, value] tuples")?;
-        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
-            None => self.shapes.mir_record_prefix(
-                ctx,
-                vec![
-                    ("_0".to_string(), k_ty),
-                    ("_1".to_string(), v_ty),
-                    ("_2".to_string(), i1_ty),
-                ],
-                Some("map_tuple"),
-            )?,
+            None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
         };
-        let map = self.alloc_map_box(ctx, map_tuple)?;
+        let map = self.alloc_collection_box(ctx, map_tuple, EntryKind::Map)?;
         self.live_collection_loop(ctx, "map_init", entries_val, |b, ctx, _, entry| {
-            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-            let k = b.append_value(ctx, &k_op);
-            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
-            let v = b.append_value(ctx, &v_op);
+            let (k, v) = b.entry_fields(ctx, entry)?;
             b.kv_set(ctx, map, k, v, k_ty, v_ty, map_tuple)?;
             Ok(())
         })?;
@@ -570,7 +664,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let expected = optional_value(ctx, expected).unwrap_or(expected);
         let (_, tuple_rec) = set_entry_type(ctx, expected).context("expected a Set<T> type")?;
-        self.alloc_set_box(ctx, tuple_rec)
+        self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }
 
     fn set_from_array(
@@ -584,23 +678,18 @@ impl<'s> FunctionBuilder<'s> {
         });
         let arr = self.expression_with(ctx, init, init_expected)?;
         let arr = self.defined(ctx, arr)?;
-        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let (elem_ty, tuple_rec) = match set_entry_type(ctx, arr.get_type(ctx)) {
             Some((e, r)) => (e, r),
             None => {
                 let e = self.iterable_element_type(ctx, arr.get_type(ctx))?;
                 let r = match expected.and_then(|exp| set_entry_type(ctx, exp).map(|(_, r)| r)) {
                     Some(r) => r,
-                    None => self.shapes.mir_record_prefix(
-                        ctx,
-                        vec![("_0".to_string(), e), ("_1".to_string(), i1_ty)],
-                        Some("set_tuple"),
-                    )?,
+                    None => self.shapes.set_tuple_type(ctx, e)?,
                 };
                 (e, r)
             }
         };
-        let set = self.alloc_set_box(ctx, tuple_rec)?;
+        let set = self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)?;
         self.live_collection_loop(ctx, "set_init", arr, |b, ctx, _, item| {
             b.set_add(ctx, set, item, elem_ty, tuple_rec)?;
             Ok(())

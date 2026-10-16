@@ -7,13 +7,13 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 /// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
 /// the receiver is an array or string and yields it unchanged.
-pub(crate) const ITERATION: &str = "$$perryIteration";
+pub(super) const ITERATION: &str = "$$perryIteration";
 
 /// Prefix of the names a rewritten loop declares; numbered past any source name using it.
 const LOOP_PREFIX: &str = "__perry_loop_";
 
 /// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
-pub(crate) fn lower(module: &mut ast::Module) -> Result<()> {
+pub(super) fn lower(module: &mut ast::Module) -> Result<()> {
     #[derive(Default)]
     struct Names(HashSet<String>);
     impl Visit for Names {

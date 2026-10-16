@@ -25,31 +25,41 @@ pub(crate) enum Constructor<'a> {
 }
 
 impl Constructors {
-    pub(super) fn collect_types(&mut self, module: &mut HirModule) {
-        module.type_aliases.retain_mut(|alias| {
+    /// Move the type arguments of the aliases [preserve] declared into their constructors,
+    /// removing those aliases from `module`.
+    pub(super) fn collect_types(&mut self, module: &mut HirModule) -> Result<()> {
+        for alias in std::mem::take(&mut module.type_aliases) {
             let Some(index) = alias
                 .name
                 .strip_prefix(CONSTRUCTOR)
                 .and_then(|id| id.parse::<usize>().ok())
             else {
-                return true;
+                module.type_aliases.push(alias);
+                continue;
             };
-            let HirType::Generic { type_args, .. } = &mut alias.ty else {
-                return false;
+            let entry = self
+                .0
+                .get_mut(index)
+                .with_context(|| format!("no constructor was preserved as {:?}", alias.name))?;
+            let HirType::Generic { type_args, .. } = alias.ty else {
+                continue;
             };
-            match &mut self.0[index] {
-                ConstructorTypes::Map(types) if type_args.len() == 2 => {
-                    let value = type_args.pop().unwrap();
-                    let key = type_args.pop().unwrap();
+            match entry {
+                ConstructorTypes::Map(types) => {
+                    let Ok([key, value]) = <[HirType; 2]>::try_from(type_args) else {
+                        bail!("new Map takes key and value type arguments");
+                    };
                     *types = Some((key, value));
                 }
-                ConstructorTypes::Set(element) if type_args.len() == 1 => {
-                    *element = type_args.pop()
+                ConstructorTypes::Set(element) => {
+                    let Ok([item]) = <[HirType; 1]>::try_from(type_args) else {
+                        bail!("new Set takes one element type argument");
+                    };
+                    *element = Some(item);
                 }
-                _ => {}
             }
-            false
-        });
+        }
+        Ok(())
     }
 
     pub(crate) fn get<'a>(&'a self, expr: &'a Expr) -> Option<Constructor<'a>> {

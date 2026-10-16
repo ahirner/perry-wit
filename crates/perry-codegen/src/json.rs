@@ -1,7 +1,8 @@
 //! Typed JSON serialization.
 use crate::{
+    aggregates::record_slot,
     function::FunctionLowering,
-    repr::{i32_type, optional_inner, slot_kind, wasm_type},
+    repr::{Carriers, i32_type, optional_inner, slot_kind, wasm_type},
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow, ensure};
@@ -112,11 +113,7 @@ impl FunctionLowering<'_, '_> {
                 let name = self.state.data.string(name);
                 let field = self.native_descriptor(ctx, *field_ty)?;
                 words.extend([name, field, field_offset]);
-                field_offset += if crate::values::is_numeric_type(ctx, *field_ty) {
-                    record::NUMERIC_SLOT
-                } else {
-                    record::SLOT
-                };
+                field_offset += record_slot(ctx, *field_ty);
             }
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
@@ -171,7 +168,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         writer: Value,
-        value: impl Into<crate::repr::Carriers<Value>>,
+        value: impl Into<Carriers<Value>>,
         ty: TypeHandle,
     ) -> Result<()> {
         let value = value.into();
@@ -191,14 +188,8 @@ impl FunctionLowering<'_, '_> {
             self.block = join;
             return Ok(());
         }
-        if let crate::repr::Carriers::Numeric { tag, payload } = value {
-            let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
-            let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
-            let one = self.i32_const(ctx, 1);
-            let two = self.i32_const(ctx, 2);
-            let parity = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
-            let int_tag = self.num(ctx, NumOpcode::I32Sub, vec![two, parity]);
-            let norm_tag = self.select(ctx, is_float, float_tag, int_tag);
+        if let Carriers::Numeric { tag, payload } = value {
+            let norm_tag = self.canonical_numeric_tag(ctx, tag);
             let floats = self.new_block(ctx, vec![]);
             let signed = self.new_block(ctx, vec![]);
             let unsigned = self.new_block(ctx, vec![]);
@@ -380,20 +371,16 @@ impl FunctionLowering<'_, '_> {
                 &["tag", "val"],
                 count,
             );
-        } else if let Some((tuple_ty, _k_ty, v_ty)) = dict_entry {
+        } else if let Some((tuple_ty, k_ty, v_ty)) = dict_entry {
             let kind = slot_kind(ctx, tuple_ty)?;
-            let k_kind = slot_kind(ctx, _k_ty)?;
+            let k_kind = slot_kind(ctx, k_ty)?;
             let len = b.load(ctx, MemKind::I32, value, array::LEN);
             let data = b.load(ctx, MemKind::I32, value, array::DATA);
-            let val_offset = if crate::values::is_numeric_type(ctx, _k_ty) {
-                record::HEADER + record::NUMERIC_SLOT
-            } else {
-                record::field(1)
-            };
+            let val_offset = record::HEADER + record_slot(ctx, k_ty);
             b.counted_loop(ctx, len, |b, ctx, i| {
                 let slot = b.slot_address(ctx, data, i, tuple_ty);
                 let item = b.load(ctx, kind, slot, 0);
-                let key = b.load(ctx, k_kind, item, record::field(0));
+                let key = b.load(ctx, k_kind, item, record::HEADER);
                 let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
                 let present = match optional_inner(ctx, v_ty) {
                     Some(_) => {
@@ -488,11 +475,7 @@ impl FunctionLowering<'_, '_> {
             let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
             self.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
             self.json_value(ctx, writer, slot, field_ty)?;
-            offset += if crate::values::is_numeric_type(ctx, field_ty) {
-                record::NUMERIC_SLOT
-            } else {
-                record::SLOT
-            };
+            offset += record_slot(ctx, field_ty);
         }
         Ok(())
     }
@@ -509,11 +492,7 @@ impl FunctionLowering<'_, '_> {
         let mut offset = record::HEADER;
         for (key, &field_ty) in keys.iter().zip(types) {
             let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
-            offset += if crate::values::is_numeric_type(ctx, field_ty) {
-                record::NUMERIC_SLOT
-            } else {
-                record::SLOT
-            };
+            offset += record_slot(ctx, field_ty);
             let key = self.state.data.string(&json_key(key));
             let present = match optional_inner(ctx, field_ty) {
                 Some(_) => {

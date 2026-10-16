@@ -296,7 +296,7 @@ impl Solver {
             let declared_results = self.analysis.bodies[&self.analysis.keys[id].function]
                 .declared_results
                 .clone();
-            let is_summary = self.summary_contexts.values().any(|&s| s == id);
+            let is_summary = self.is_summary(id);
             for (position, value) in operation.operands().enumerate() {
                 let required = self.analysis.keys[id].results[position];
                 self.require(id, value, required.integer());
@@ -454,8 +454,9 @@ impl Solver {
                             || self.analysis.states[id].is_constrained(value));
                     if is_cons {
                         call_constrained = true;
-                        let returns = self.analysis.bodies[&callee].returns.clone();
-                        for ret_op in returns {
+                        // Indexed: `constrain` needs `&mut self` while the callee body is read.
+                        for ret in 0..self.analysis.bodies[&callee].returns.len() {
+                            let ret_op = self.analysis.bodies[&callee].returns[ret];
                             if let Some(ret_val) = ret_op.deref(ctx).operands().nth(position) {
                                 self.constrain(child, ret_val, true);
                             }

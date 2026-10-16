@@ -466,13 +466,8 @@ impl<'s> FunctionBuilder<'s> {
         let miss = if index_only {
             self.number(ctx, -1.0)
         } else {
-            let states = crate::coerce::merge_absence(
-                absence(ctx, element),
-                Some(perry_mir::attrs::Absence::Undefined),
-            )
-            .unwrap();
-            let inner = optional_value(ctx, element).unwrap_or(element);
-            let opt_ty = OptionalType::get_with(ctx, inner, states).into();
+            let opt_ty =
+                crate::coerce::admitting(ctx, element, perry_mir::attrs::Absence::Undefined);
             self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
         };
         let result_ty = miss.get_type(ctx);

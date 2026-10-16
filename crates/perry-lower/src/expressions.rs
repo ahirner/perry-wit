@@ -2,6 +2,8 @@
 use super::*;
 use crate::builtins::{BytesCreation, JSON_CALLBACKS};
 
+mod members;
+
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn expression(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         self.expression_with(ctx, expr, None)
@@ -629,40 +631,6 @@ impl<'s> FunctionBuilder<'s> {
         Ok(if prefix { stored } else { old })
     }
 
-    /// `++object.field` and its relatives, on a numeric record field.
-    fn property_update(
-        &mut self,
-        ctx: &mut Context,
-        object: &'s Expr,
-        property: &str,
-        op: &BinaryOp,
-        prefix: bool,
-    ) -> Result<Value> {
-        let object = self.expression(ctx, object)?;
-        let object = self.defined(ctx, object)?;
-        let get = FieldGetOp::new(ctx, object, property.to_string())
-            .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
-        let previous = self.append_value(ctx, &get);
-        let field_type = previous.get_type(ctx);
-        let old = self.arithmetic(ctx, previous);
-        ensure!(
-            kind(ctx, old)? == Kind::Number,
-            "property update needs a numeric field"
-        );
-        let one = self.number(ctx, 1.0);
-        let kind = match op {
-            BinaryOp::Add => BinaryKind::Add,
-            BinaryOp::Sub => BinaryKind::Sub,
-            _ => bail!("invalid property update"),
-        };
-        let next = self.binary(ctx, kind, old, one);
-        let stored = self.fit(ctx, next, field_type)?;
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, object, property.to_string(), stored)
-        });
-        Ok(if prefix { next } else { old })
-    }
-
     /// `condition ? then : otherwise`, joined through a result slot.
     pub(super) fn conditional(
         &mut self,
@@ -691,10 +659,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 perry_mir::attrs::Absence::Undefined
             };
-            let states = crate::coerce::merge_absence(absence(ctx, else_ty), Some(then_absence))
-                .unwrap_or(then_absence);
-            let inner = optional_value(ctx, else_ty).unwrap_or(else_ty);
-            let ty = perry_mir::types::OptionalType::get_with(ctx, inner, states).into();
+            let ty = crate::coerce::admitting(ctx, else_ty, then_absence);
             let result = self.entry_slot(ctx, ty);
             let else_value = self.fit(ctx, else_value, ty)?;
             self.store(ctx, result, else_value);
@@ -731,11 +696,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     perry_mir::attrs::Absence::Undefined
                 };
-                let states =
-                    crate::coerce::merge_absence(absence(ctx, then_ty), Some(else_absence))
-                        .unwrap_or(else_absence);
-                let inner = optional_value(ctx, then_ty).unwrap_or(then_ty);
-                perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                crate::coerce::admitting(ctx, then_ty, else_absence)
             }
             None => then_ty,
         };
@@ -780,245 +741,5 @@ impl<'s> FunctionBuilder<'s> {
         );
         let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
         Ok(self.append_value(ctx, &op))
-    }
-
-    /// `object.property`, by the kind of `object`.
-    fn property_get(
-        &mut self,
-        ctx: &mut Context,
-        object: &'s Expr,
-        property: &str,
-    ) -> Result<Value> {
-        let value = self.expression(ctx, object)?;
-        // Property access on `undefined` throws TypeError, in ECMAScript and here.
-        let value = self.defined(ctx, value)?;
-        Ok(match (kind(ctx, value)?, property) {
-            (Kind::Url, field) => self.url_field(ctx, value, field)?,
-            (Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),
-            (Kind::Decoder, "fatal" | "ignoreBOM") => {
-                let intrinsic = if property == "fatal" {
-                    Intrinsic::DecoderFatal
-                } else {
-                    Intrinsic::DecoderIgnoreBom
-                };
-                self.intrinsic(ctx, intrinsic, vec![value])
-            }
-            (Kind::String, "length") => {
-                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
-                self.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-                })
-            }
-            (Kind::Array, "length") => self.array_length(ctx, value),
-            (Kind::Array, "size") => self.collection_size(ctx, value)?,
-            (Kind::Array, field)
-                if crate::collections::dict_entry_types(ctx, value.get_type(ctx)).is_some() =>
-            {
-                let (k_ty, v_ty, _) =
-                    crate::collections::dict_entry_types(ctx, value.get_type(ctx))
-                        .context("MIR backend expected dictionary entry types")?;
-                let key = self.string(ctx, field);
-                self.kv_get(ctx, value, key, k_ty, v_ty)?
-            }
-            (Kind::Bytes, "buffer") => self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value]),
-            (Kind::Bytes, "byteOffset") => self.intrinsic(ctx, Intrinsic::BytesOffset, vec![value]),
-            (Kind::ByteBuffer, "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BufferLength, vec![value])
-            }
-            (Kind::Bytes, "length" | "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BytesLength, vec![value])
-            }
-            (Kind::Json, "length") => self.intrinsic(ctx, Intrinsic::JsonLength, vec![value]),
-            (Kind::Json, name) => {
-                let name = self.string(ctx, name);
-                self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
-            }
-            (Kind::Settled, field) => {
-                let field = match field {
-                    "status" => SettledField::Status,
-                    "value" => SettledField::Value,
-                    "reason" => SettledField::Reason,
-                    other => bail!("settled results have no property {other}"),
-                };
-                let op =
-                    SettledFieldOp::new(ctx, field, value).context("expected a settled result")?;
-                self.append_value(ctx, &op)
-            }
-            (
-                Kind::Headers
-                | Kind::Response
-                | Kind::Request
-                | Kind::Writable
-                | Kind::Writer
-                | Kind::Readable
-                | Kind::Reader
-                | Kind::ByobReader
-                | Kind::ReadResult,
-                name,
-            ) => self.web_member(ctx, value, name, None)?,
-            (Kind::Instant, "epochMilliseconds") => {
-                self.intrinsic(ctx, Intrinsic::InstantMs, vec![value])
-            }
-            (Kind::PlainDate | Kind::PlainDateTime, field) => {
-                self.temporal_field(ctx, value, field)?
-            }
-            (Kind::Abort, "signal") => value,
-            (Kind::Abort, "aborted") => self.intrinsic(ctx, Intrinsic::AbortAborted, vec![value]),
-            (Kind::Stats, "size") => self.intrinsic(ctx, Intrinsic::StatsSize, vec![value]),
-            (Kind::Exception, "cause") => {
-                self.intrinsic(ctx, Intrinsic::ExceptionCause, vec![value])
-            }
-            (Kind::Exception, "name") => self.intrinsic(ctx, Intrinsic::ExceptionName, vec![value]),
-            (Kind::Exception, "message") => {
-                self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
-            }
-            (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
-            (Kind::Record, field) => {
-                if field == "size"
-                    && (crate::collections::map_box_record(ctx, value.get_type(ctx)).is_some()
-                        || crate::collections::set_box_record(ctx, value.get_type(ctx)).is_some())
-                {
-                    return self.collection_size(ctx, value);
-                }
-                if field == "length"
-                    && crate::collections::is_collection_or_view_record(ctx, value.get_type(ctx))
-                {
-                    return self.collection_backing_length(ctx, value);
-                }
-                if field == "length"
-                    && let Ok(record) =
-                        TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
-                    && record.deref(ctx).is_tuple()
-                {
-                    let len = record
-                        .deref(ctx)
-                        .fields()
-                        .map_err(|_| anyhow!("tuple without fields"))?
-                        .len();
-                    return Ok(self.number(ctx, len as f64));
-                }
-                let op = FieldGetOp::new(ctx, value, field.to_string()).map_err(|_| {
-                    anyhow!("property {field} does not exist on this shape (subset rule R1)")
-                })?;
-                let loaded = self.append_value(ctx, &op);
-                let loaded = self.normalize_optional_read(ctx, loaded)?;
-                if loaded
-                    .get_type(ctx)
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                {
-                    let bigint = BigIntType::get(ctx).into();
-                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, loaded, bigint))
-                } else {
-                    loaded
-                }
-            }
-            (receiver_kind, property) => {
-                bail!(
-                    "property {property} is not supported on {} yet",
-                    receiver_kind.label()
-                )
-            }
-        })
-    }
-
-    /// `object[index]` on arrays, strings, bytes, JSON values and records (literal keys).
-    fn index_get(&mut self, ctx: &mut Context, object: &'s Expr, index: &'s Expr) -> Result<Value> {
-        let array = self.expression(ctx, object)?;
-        let array = self.defined(ctx, array)?;
-        match kind(ctx, array)? {
-            Kind::String => {
-                let index = self.number_operand(ctx, index)?;
-                Ok(self.intrinsic(ctx, Intrinsic::StringIndex, vec![array, index]))
-            }
-            Kind::Bytes => {
-                let index = self.number_operand(ctx, index)?;
-                Ok(self.intrinsic(ctx, Intrinsic::BytesGet, vec![array, index]))
-            }
-            Kind::Json => {
-                let index = self.expression(ctx, index)?;
-                let index = self.defined(ctx, index)?;
-                let intrinsic = match kind(ctx, index)? {
-                    Kind::String => Intrinsic::JsonMember,
-                    Kind::Number => Intrinsic::JsonIndex,
-                    _ => bail!("JSON lookup requires a string or number key"),
-                };
-                Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
-            }
-            Kind::Record => {
-                if crate::collections::is_collection_or_view_record(ctx, array.get_type(ctx)) {
-                    let idx = self.number_operand(ctx, index)?;
-                    return self.collection_view_element_at(ctx, array, idx);
-                }
-                let field = match index {
-                    Expr::String(name) => name.clone(),
-                    Expr::Number(n) if n.fract() == 0.0 && *n >= 0.0 => {
-                        format!("_{}", *n as u64)
-                    }
-                    Expr::Integer(n) if *n >= 0 => format!("_{n}"),
-                    _ if self.iteration.index(index).is_some() => {
-                        format!("_{}", self.iteration.index(index).unwrap())
-                    }
-                    _ => {
-                        let Ok(rec) =
-                            TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
-                        else {
-                            bail!("expected a record for dynamic index");
-                        };
-                        let key = self.string_operand(ctx, index)?;
-                        return self.record_dynamic_get(ctx, array, key, rec);
-                    }
-                };
-                let op = FieldGetOp::new(ctx, array, field.clone())
-                    .map_err(|_| anyhow!("record has no field {field}"))?;
-                let loaded = self.append_value(ctx, &op);
-                let loaded = self.normalize_optional_read(ctx, loaded)?;
-                if loaded
-                    .get_type(ctx)
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                {
-                    let bigint = BigIntType::get(ctx).into();
-                    Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, loaded, bigint)))
-                } else {
-                    Ok(loaded)
-                }
-            }
-            Kind::Array => {
-                if let Some((k_ty, v_ty, _)) =
-                    crate::collections::dict_entry_types(ctx, array.get_type(ctx))
-                {
-                    let key = self.expression_with(ctx, index, Some(k_ty))?;
-                    return self.kv_get(ctx, array, key, k_ty, v_ty);
-                }
-                let index = self.index(ctx, index)?;
-                let op = ArrayGetOp::new(ctx, array, index)?;
-                let val = self.append_value(ctx, &op);
-                if crate::collections::set_entry_type(ctx, array.get_type(ctx)).is_some() {
-                    let entry = self.defined(ctx, val)?;
-                    let get_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                    return Ok(self.append_value(ctx, &get_op));
-                }
-                if let Some((k_ty, v_ty, _)) =
-                    crate::collections::map_entry_types(ctx, array.get_type(ctx))
-                {
-                    let entry = self.defined(ctx, val)?;
-                    let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                    let k = self.append_value(ctx, &k_op);
-                    let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
-                    let v = self.append_value(ctx, &v_op);
-                    let tuple_rec = self.shapes.mir_record_prefix(
-                        ctx,
-                        vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
-                        Some("tuple"),
-                    )?;
-                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v])));
-                }
-                Ok(val)
-            }
-            _ => bail!("indexing is only supported on arrays so far"),
-        }
     }
 }

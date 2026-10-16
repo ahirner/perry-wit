@@ -13,6 +13,12 @@ use crate::{
 };
 use std::ops::Bound::{Excluded, Unbounded};
 
+mod operations;
+mod queries;
+mod specialize;
+
+pub(super) use operations::OperationKind;
+
 const MAX_ORIGINS: usize = 32;
 
 struct Cell {
@@ -56,123 +62,6 @@ pub(super) struct HeapFacts {
     cells: Vec<Cell>,
     objects: Vec<Object>,
     summaries: HashMap<TypeHandle, usize>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum OperationKind {
-    Allocate { array: bool },
-    Read { slot: usize },
-    Write { slot: usize, value: usize },
-    ArrayWrite { index: Option<usize>, value: usize },
-    Length,
-    Combine(Combinator),
-    Extend,
-    Truncate,
-    Alias { operand: usize },
-    Return,
-    Call,
-    Unknown,
-    None,
-}
-
-impl OperationKind {
-    pub(super) fn classify(ctx: &Context, op: Ptr<Operation>) -> Self {
-        if Operation::get_op::<crate::optional::UndefinedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::OmittedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::NullOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::heap::FieldPresentOp>(op, ctx).is_some()
-        {
-            return Self::None;
-        }
-        if Operation::get_op::<WrapOp>(op, ctx).is_some()
-            || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-            || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
-            || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-        {
-            return Self::Alias { operand: 0 };
-        }
-        if let Some(operand) = promise_payload(ctx, op) {
-            return Self::Alias { operand };
-        }
-        let operation = op.deref(ctx);
-        if !operation
-            .operands()
-            .chain(operation.results())
-            .any(|value| aggregate(ctx, value.get_type(ctx)))
-        {
-            return Self::None;
-        }
-        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
-            return Self::Allocate { array: false };
-        }
-        if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
-            return Self::Allocate { array: true };
-        }
-        if let Some(combine) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
-            return Self::Combine(combine.combinator(ctx));
-        }
-        let field = Operation::get_op::<FieldGetOp>(op, ctx)
-            .map(|op| (op.field(ctx), true))
-            .or_else(|| Operation::get_op::<FieldSetOp>(op, ctx).map(|op| (op.field(ctx), false)));
-        if let Some((field, read)) = field {
-            let ty = operation.get_operand(0).get_type(ctx).deref(ctx);
-            let Some(slot) = ty
-                .downcast_ref::<RecordType>()
-                .and_then(|rec| rec.fields().ok())
-                .and_then(|fields| fields.iter().position(|(name, _)| *name == field))
-            else {
-                return Self::Unknown;
-            };
-            return if read {
-                Self::Read { slot }
-            } else {
-                Self::Write { slot, value: 1 }
-            };
-        }
-        if Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
-            || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
-        {
-            return Self::Read { slot: 0 };
-        }
-        if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-            return Self::ArrayWrite {
-                index: Some(1),
-                value: 2,
-            };
-        }
-        if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
-            return Self::ArrayWrite {
-                index: None,
-                value: 1,
-            };
-        }
-        if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
-            return Self::Length;
-        }
-        if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
-            return Self::Extend;
-        }
-        if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
-            return Self::Truncate;
-        }
-        if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
-            return Self::Return;
-        }
-        if Operation::get_op::<CallOp>(op, ctx).is_some()
-            || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-        {
-            return Self::Call;
-        }
-        if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
-            || Operation::get_op::<crate::optional::IsUndefinedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::IsNullOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::intrinsics::JsonStringifyOp>(op, ctx).is_some()
-        {
-            return Self::None;
-        }
-        Self::Unknown
-    }
 }
 
 impl HeapFacts {
@@ -352,18 +241,35 @@ impl Solver {
             .copied()
     }
 
+    /// Opens `object` once: its slots become unknown and every cell holding it is reconciled.
+    fn mark_open(&mut self, object: usize) {
+        if !self.analysis.heap.objects[object].open {
+            self.analysis.heap.objects[object].open = true;
+            self.work.enqueue(Work::OpenObject(object));
+            self.reconcile_containers(object);
+        }
+    }
+
+    /// Queues reconciliation of every cell whose layout may include `object`.
+    fn reconcile_containers(&mut self, object: usize) {
+        for &container in &self.analysis.heap.objects[object].containers {
+            self.work.enqueue(Work::ReconcileCell(container));
+        }
+    }
+
+    /// Queues reconciliation of the cells holding the object that owns slot `cell`.
+    fn reconcile_owner(&mut self, cell: usize) {
+        if let Some(owner) = self.analysis.heap.cells[cell].owner {
+            self.reconcile_containers(owner);
+        }
+    }
+
     fn open_aliases(&mut self, cell: usize, reader: Work) {
         self.analysis.heap.cells[cell].readers.insert(reader);
         let mut previous = None;
         while let Some(object) = self.next_object(cell, previous) {
             previous = Some(object);
-            if !self.analysis.heap.objects[object].open {
-                self.analysis.heap.objects[object].open = true;
-                self.work.enqueue(Work::OpenObject(object));
-                for &container in &self.analysis.heap.objects[object].containers {
-                    self.work.enqueue(Work::ReconcileCell(container));
-                }
-            }
+            self.mark_open(object);
         }
     }
 
@@ -371,11 +277,7 @@ impl Solver {
         if self.analysis.heap.cells[cell].layout_objects.insert(object) {
             self.analysis.heap.objects[object].containers.insert(cell);
             self.work.enqueue(Work::ReconcileCell(cell));
-            if let Some(owner) = self.analysis.heap.cells[cell].owner {
-                for &container in &self.analysis.heap.objects[owner].containers {
-                    self.work.enqueue(Work::ReconcileCell(container));
-                }
-            }
+            self.reconcile_owner(cell);
         }
     }
 
@@ -385,13 +287,7 @@ impl Solver {
             return;
         }
         if self.analysis.heap.cells[cell].summarized {
-            if !self.analysis.heap.objects[object].open {
-                self.analysis.heap.objects[object].open = true;
-                self.work.enqueue(Work::OpenObject(object));
-                for &container in &self.analysis.heap.objects[object].containers {
-                    self.work.enqueue(Work::ReconcileCell(container));
-                }
-            }
+            self.mark_open(object);
             return;
         }
         self.analysis.heap.cells[cell].objects.insert(object);
@@ -408,11 +304,7 @@ impl Solver {
             self.analysis.heap.objects[summary].containers.insert(cell);
             self.analysis.summarized_heap_sets += 1;
             self.work.enqueue(Work::ReconcileCell(cell));
-            if let Some(owner) = self.analysis.heap.cells[cell].owner {
-                for &container in &self.analysis.heap.objects[owner].containers {
-                    self.work.enqueue(Work::ReconcileCell(container));
-                }
-            }
+            self.reconcile_owner(cell);
         }
         self.heap_changed(cell);
     }
@@ -540,14 +432,10 @@ impl Solver {
         let joined = cell.domain.join(domain);
         if joined != cell.domain {
             cell.domain = joined;
-            let owner = cell.owner;
             self.heap_changed(slot);
-            if joined == Fact::Numeric
-                && let Some(owner) = owner
-            {
-                for &container in &self.analysis.heap.objects[owner].containers {
-                    self.work.enqueue(Work::ReconcileCell(container));
-                }
+            // Containers sharing a layout must agree once any of them holds a numeric slot.
+            if joined == Fact::Numeric {
+                self.reconcile_owner(slot);
             }
         }
     }
@@ -582,289 +470,11 @@ impl Solver {
         }
     }
 
-    pub(super) fn heap_call(
-        &mut self,
-        ctx: &Context,
-        id: usize,
-        index: usize,
-        child: usize,
-        op: Ptr<Operation>,
-    ) {
-        let reader = Work::Operation(id, index);
-        for (position, input) in op.deref(ctx).operands().enumerate() {
-            let parameter =
-                self.analysis.bodies[&self.analysis.keys[child].function].parameters[position];
-            self.range(child, parameter, self.analysis.states[id].range(input));
-            self.outcome(child, parameter, self.analysis.states[id].outcome(input));
-            self.heap_alias(ctx, id, input, child, parameter, reader);
-        }
-        for (position, result) in op.deref(ctx).results().enumerate() {
-            if let Some(to) = self.heap_value(ctx, id, result)
-                && let Some(from) = self.analysis.states[child].results[position].heap
-            {
-                self.copy_aliases(ctx, from, to, reader);
-            }
-        }
-    }
-
-    pub(super) fn heap_operation(
-        &mut self,
-        ctx: &Context,
-        id: usize,
-        index: usize,
-        op: Ptr<Operation>,
-        kind: OperationKind,
-    ) -> Option<(Fact, Range)> {
-        let reader = Work::Operation(id, index);
-        let operation = op.deref(ctx);
-        match kind {
-            OperationKind::Allocate { array } => {
-                let value = operation.get_result(0);
-                let object = self.heap_allocation(ctx, id, value)?;
-                if array {
-                    let length = operation.get_num_operands() as i128;
-                    self.widen_length(
-                        object,
-                        Range::Bounds(Interval {
-                            lower: length,
-                            upper: length,
-                        }),
-                    );
-                }
-                for (position, value) in operation.operands().enumerate() {
-                    let slot = self.analysis.heap.objects[object].contents.slots()
-                        [if array { 0 } else { position }];
-                    self.write_slot(ctx, id, slot, value, reader);
-                }
-            }
-            OperationKind::Read { .. }
-            | OperationKind::Write { .. }
-            | OperationKind::ArrayWrite { .. } => {
-                let position = match kind {
-                    OperationKind::Read { slot } | OperationKind::Write { slot, .. } => slot,
-                    _ => 0,
-                };
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
-                self.analysis.heap.cells[base].readers.insert(reader);
-                let result = if matches!(kind, OperationKind::Read { .. }) {
-                    self.heap_value(ctx, id, operation.get_result(0))
-                } else {
-                    None
-                };
-                let mut domain = Fact::Bottom;
-                let mut range = Range::Bottom;
-                let mut outcome = Outcomes::Bottom;
-                let mut previous = None;
-                while let Some(object) = self.next_object(base, previous) {
-                    previous = Some(object);
-                    let slot = self.analysis.heap.objects[object].contents.slots()[position];
-                    if let OperationKind::ArrayWrite { index, .. } = kind {
-                        let range = index.map(|index| {
-                            self.analysis.states[id].range(operation.get_operand(index))
-                        });
-                        self.grow_array(object, range, reader);
-                    }
-                    if let OperationKind::Write { value, .. }
-                    | OperationKind::ArrayWrite { value, .. } = kind
-                    {
-                        self.write_slot(ctx, id, slot, operation.get_operand(value), reader);
-                    } else {
-                        self.analysis.heap.cells[slot].readers.insert(reader);
-                        domain = domain.join(self.analysis.heap.cells[slot].domain);
-                        range = range.join(
-                            self.analysis.heap.cells[slot].range,
-                            Integer::from_type(
-                                ctx,
-                                payload(ctx, self.analysis.heap.cells[slot].ty),
-                            )
-                            .or(domain.integer()),
-                        );
-                        outcome = outcome.join(self.analysis.heap.cells[slot].outcome);
-                        if let Some(result) = result {
-                            self.copy_aliases(ctx, slot, result, reader);
-                        }
-                    }
-                }
-                if matches!(kind, OperationKind::Read { .. }) {
-                    self.outcome(id, operation.get_result(0), outcome);
-                }
-                return matches!(kind, OperationKind::Read { .. }).then_some((domain, range));
-            }
-            OperationKind::Extend => {
-                let to = self.heap_value(ctx, id, operation.get_operand(0))?;
-                let from = self.heap_value(ctx, id, operation.get_operand(1))?;
-                self.analysis.heap.cells[to].readers.insert(reader);
-                self.analysis.heap.cells[from].readers.insert(reader);
-                let mut source = None;
-                while let Some(object) = self.next_object(from, source) {
-                    source = Some(object);
-                    let input = self.analysis.heap.objects[object].contents.slots()[0];
-                    self.analysis.heap.cells[input].readers.insert(reader);
-                    let mut target = None;
-                    while let Some(object) = self.next_object(to, target) {
-                        target = Some(object);
-                        self.grow_array(object, None, reader);
-                        let output = self.analysis.heap.objects[object].contents.slots()[0];
-                        self.slot_domain(output, self.analysis.heap.cells[input].domain);
-                        self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
-                        self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
-                        self.copy_aliases(ctx, input, output, reader);
-                    }
-                }
-            }
-            OperationKind::Truncate => {
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
-                self.analysis.heap.cells[base].readers.insert(reader);
-                let mut previous = None;
-                while let Some(object) = self.next_object(base, previous) {
-                    previous = Some(object);
-                    self.widen_length(
-                        object,
-                        Range::Bounds(Interval {
-                            lower: 0,
-                            upper: u32::MAX.into(),
-                        }),
-                    );
-                }
-            }
-            OperationKind::Length => {
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
-                self.analysis.heap.cells[base].readers.insert(reader);
-                let mut previous = None;
-                while let Some(object) = self.next_object(base, previous) {
-                    previous = Some(object);
-                    if let Contents::Array { readers, .. } =
-                        &mut self.analysis.heap.objects[object].contents
-                    {
-                        readers.insert(reader);
-                    }
-                }
-                return Some((Fact::Original, self.analysis.heap.length(base)));
-            }
-            OperationKind::Combine(kind) => {
-                let input = self.heap_value(ctx, id, operation.get_operand(0))?;
-                self.analysis.heap.cells[input].readers.insert(reader);
-                let result = operation.get_result(0);
-                let output = if kind == Combinator::Race {
-                    None
-                } else {
-                    self.heap_allocation(ctx, id, result)
-                };
-                let mut outcome = if kind == Combinator::Race {
-                    Outcomes::Bottom
-                } else {
-                    Outcomes::Fulfilled
-                };
-                let mut domain = Fact::Bottom;
-                let mut range = Range::Bottom;
-                let mut previous = None;
-                while let Some(object) = self.next_object(input, previous) {
-                    previous = Some(object);
-                    let Contents::Array {
-                        element,
-                        length,
-                        readers,
-                    } = &mut self.analysis.heap.objects[object].contents
-                    else {
-                        continue;
-                    };
-                    readers.insert(reader);
-                    let (element, length) = (*element, *length);
-                    self.analysis.heap.cells[element].readers.insert(reader);
-                    if kind != Combinator::AllSettled {
-                        outcome = outcome.join(self.analysis.heap.cells[element].outcome);
-                        if let Some(object) = output {
-                            let slot = self.analysis.heap.objects[object].contents.slots()[0];
-                            self.slot_domain(slot, self.analysis.heap.cells[element].domain);
-                            self.slot_range(ctx, slot, self.analysis.heap.cells[element].range);
-                            self.slot_outcome(
-                                slot,
-                                Outcomes::unknown(ctx, self.analysis.heap.cells[slot].ty),
-                            );
-                            self.copy_aliases(ctx, element, slot, reader);
-                        } else {
-                            domain = domain.join(self.analysis.heap.cells[element].domain);
-                            range = range
-                                .join(self.analysis.heap.cells[element].range, domain.integer());
-                            if let Some(result) = self.heap_value(ctx, id, result) {
-                                self.copy_aliases(ctx, element, result, reader);
-                            }
-                        }
-                    }
-                    if let Some(object) = output {
-                        self.widen_length(object, length);
-                    }
-                }
-                self.outcome(id, result, outcome);
-                return (kind == Combinator::Race).then_some((domain, range));
-            }
-            OperationKind::Alias { operand } => {
-                let input = operation.get_operand(operand);
-                self.heap_alias(ctx, id, input, id, operation.get_result(0), reader);
-                if promise_payload(ctx, op).is_none()
-                    && Operation::get_op::<AwaitOp>(op, ctx).is_none()
-                {
-                    self.outcome(
-                        id,
-                        operation.get_result(0),
-                        self.analysis.states[id].outcome(input),
-                    );
-                }
-                return Some((
-                    self.analysis.states[id].fact(input),
-                    self.analysis.states[id].range(input),
-                ));
-            }
-            OperationKind::Return => {
-                let is_external = self.analysis.bodies[&self.analysis.keys[id].function].external;
-                for (position, value) in operation.operands().enumerate() {
-                    if let Some(from) = self.heap_value(ctx, id, value) {
-                        if is_external {
-                            self.open_aliases(from, reader);
-                        }
-                        let to = if let Some(to) = self.analysis.states[id].results[position].heap {
-                            to
-                        } else {
-                            let to = self.heap_cell(value.get_type(ctx));
-                            self.analysis.states[id].results[position].heap = Some(to);
-                            self.notify_callers(id);
-                            to
-                        };
-                        self.copy_aliases(ctx, from, to, reader);
-                    }
-                }
-            }
-            OperationKind::Unknown | OperationKind::Call => {
-                if matches!(kind, OperationKind::Call) {
-                    let callee = Operation::get_op::<CallOp>(op, ctx)
-                        .map(|call| call.callee(ctx))
-                        .or_else(|| {
-                            Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx))
-                        })?;
-                    if self.analysis.bodies.contains_key(&callee) {
-                        return None;
-                    }
-                }
-                // Unmodelled storage may retain aliases or mutate reachable objects.
-                for value in operation.operands() {
-                    if let Some(cell) = self.heap_value(ctx, id, value) {
-                        self.open_aliases(cell, reader);
-                    }
-                }
-                for value in operation.results() {
-                    if let Some(cell) = self.heap_value(ctx, id, value) {
-                        let object = self.heap_summary(ctx, value.get_type(ctx));
-                        self.add_object(ctx, cell, object);
-                    }
-                }
-            }
-            OperationKind::None => {}
-        }
-        None
-    }
-
+    /// Unifies the layouts of the objects a cell may hold: once one is open every one opens,
+    /// numeric slots widen to agree, and nested layouts merge slot by slot.
     pub(super) fn reconcile_cell(&mut self, ctx: &Context, cell: usize) {
         let summarized = self.analysis.heap.cells[cell].summarized;
+        // Copied: reconciling slots may insert into this cell's own layout through recursion.
         let objects: Vec<usize> = self.analysis.heap.cells[cell]
             .layout_objects
             .iter()
@@ -879,13 +489,7 @@ impl Solver {
                 .any(|&obj| self.analysis.heap.objects[obj].open)
         {
             for &obj in &objects {
-                if !self.analysis.heap.objects[obj].open {
-                    self.analysis.heap.objects[obj].open = true;
-                    self.work.enqueue(Work::OpenObject(obj));
-                    for &container in &self.analysis.heap.objects[obj].containers {
-                        self.work.enqueue(Work::ReconcileCell(container));
-                    }
-                }
+                self.mark_open(obj);
             }
             return;
         }
@@ -932,13 +536,7 @@ impl Solver {
             }
             if has_summarized {
                 for &child in &child_objects {
-                    if !self.analysis.heap.objects[child].open {
-                        self.analysis.heap.objects[child].open = true;
-                        self.work.enqueue(Work::OpenObject(child));
-                        for &container in &self.analysis.heap.objects[child].containers {
-                            self.work.enqueue(Work::ReconcileCell(container));
-                        }
-                    }
+                    self.mark_open(child);
                 }
             } else if !child_objects.is_empty() {
                 for &slot in &slots {
@@ -950,311 +548,3 @@ impl Solver {
         }
     }
 }
-
-fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    if ty.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
-        return Some(crate::types::NumericType::get(ctx).into());
-    }
-    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>()
-        && opt
-            .value()
-            .deref(ctx)
-            .is::<pliron::builtin::types::FP64Type>()
-    {
-        return Some(
-            crate::types::OptionalType::get_with(
-                ctx,
-                crate::types::NumericType::get(ctx).into(),
-                opt.absence(),
-            )
-            .into(),
-        );
-    }
-    None
-}
-
-fn type_spec_tag(ctx: &Context, ty: TypeHandle) -> String {
-    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
-        return format!("opt_{}", type_spec_tag(ctx, opt.value()));
-    }
-    if let Some(arr) = ty.deref(ctx).downcast_ref::<ArrayType>() {
-        return format!("arr_{}", type_spec_tag(ctx, arr.element()));
-    }
-    if let Some(rec) = ty.deref(ctx).downcast_ref::<RecordType>() {
-        let s: String = rec
-            .name()
-            .as_ref()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        return format!("rec_{s}");
-    }
-    if ty.deref(ctx).is::<crate::types::NumericType>() {
-        return "num".to_string();
-    }
-    "scalar".to_string()
-}
-
-fn is_recursive_type(ctx: &Context, ty: TypeHandle, visiting: &mut HashSet<TypeHandle>) -> bool {
-    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
-        return is_recursive_type(ctx, opt.value(), visiting);
-    }
-    if let Some(arr) = ty.deref(ctx).downcast_ref::<ArrayType>() {
-        return is_recursive_type(ctx, arr.element(), visiting);
-    }
-    if ty.deref(ctx).is::<RecordType>() {
-        if !visiting.insert(ty) {
-            return true;
-        }
-        let fields = ty
-            .deref(ctx)
-            .downcast_ref::<RecordType>()
-            .and_then(|rec| rec.fields().ok().map(|f| f.to_vec()))
-            .unwrap_or_default();
-        let recursive = fields
-            .into_iter()
-            .any(|(_, fty)| is_recursive_type(ctx, fty, visiting));
-        visiting.remove(&ty);
-        return recursive;
-    }
-    false
-}
-
-impl ProgramFacts {
-    pub(super) fn specialized_cell_type(
-        &self,
-        ctx: &mut Context,
-        ty: TypeHandle,
-        cell: usize,
-    ) -> Option<TypeHandle> {
-        let c = &self.heap.cells[cell];
-        self.specialized_objects_type(ctx, ty, &c.layout_objects, c.summarized)
-    }
-
-    fn specialized_objects_type(
-        &self,
-        ctx: &mut Context,
-        ty: TypeHandle,
-        objects: &BTreeSet<usize>,
-        summarized: bool,
-    ) -> Option<TypeHandle> {
-        if is_recursive_type(ctx, ty, &mut HashSet::new()) {
-            return None;
-        }
-        if let Some((inner_ty, absence)) = {
-            let deref = ty.deref(ctx);
-            deref
-                .downcast_ref::<crate::types::OptionalType>()
-                .map(|opt| (opt.value(), opt.absence()))
-        } {
-            let new_inner = self.specialized_objects_type(ctx, inner_ty, objects, summarized)?;
-            return Some(crate::types::OptionalType::get_with(ctx, new_inner, absence).into());
-        }
-        if summarized || objects.is_empty() || objects.iter().any(|&o| self.heap.objects[o].open) {
-            return None;
-        }
-        let array_elem = ty
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .map(|a| a.element());
-        if let Some(elem_ty) = array_elem {
-            let mut element_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
-                    return None;
-                };
-                element_slots.push(*element);
-            }
-            let all_numeric = element_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
-            if all_numeric && let Some(new_elem) = numeric_type_for(ctx, elem_ty) {
-                return Some(ArrayType::get(ctx, new_elem).into());
-            }
-            if aggregate(ctx, elem_ty) {
-                let elem_summarized = element_slots.iter().any(|&s| self.heap.cells[s].summarized);
-                let mut elem_objects = BTreeSet::new();
-                for &s in &element_slots {
-                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                if let Some(new_elem) =
-                    self.specialized_objects_type(ctx, elem_ty, &elem_objects, elem_summarized)
-                {
-                    return Some(ArrayType::get(ctx, new_elem).into());
-                }
-            }
-            return None;
-        }
-        let (rec_name, is_tuple, fields) = {
-            let deref = ty.deref(ctx);
-            let rec = deref.downcast_ref::<RecordType>()?;
-            (
-                rec.name().clone(),
-                rec.is_tuple(),
-                rec.fields().ok()?.to_vec(),
-            )
-        };
-        let mut changed = false;
-        let mut spec_fields = Vec::with_capacity(fields.len());
-        let mut spec_tag = String::new();
-        for (idx, (fname, fty)) in fields.into_iter().enumerate() {
-            let mut field_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    return None;
-                };
-                let &s = slots.get(idx)?;
-                field_slots.push(s);
-            }
-            let all_numeric = field_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain == Fact::Numeric);
-            if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
-                spec_fields.push((fname, new_fty));
-                spec_tag.push_str(&format!("_{idx}"));
-                changed = true;
-            } else if aggregate(ctx, fty) {
-                let field_summarized = field_slots.iter().any(|&s| self.heap.cells[s].summarized);
-                let mut field_objects = BTreeSet::new();
-                for &s in &field_slots {
-                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                if let Some(new_fty) =
-                    self.specialized_objects_type(ctx, fty, &field_objects, field_summarized)
-                {
-                    let tag = type_spec_tag(ctx, new_fty);
-                    spec_fields.push((fname, new_fty));
-                    spec_tag.push_str(&format!("_{idx}_{tag}"));
-                    changed = true;
-                } else {
-                    spec_fields.push((fname, fty));
-                }
-            } else {
-                spec_fields.push((fname, fty));
-            }
-        }
-        if !changed {
-            return None;
-        }
-        let new_name: Identifier = format!("{rec_name}__num{spec_tag}")
-            .try_into()
-            .expect("record name");
-        let handle = if is_tuple {
-            RecordType::get_tuple(ctx, new_name, Some(spec_fields)).ok()?
-        } else {
-            RecordType::get(ctx, new_name, Some(spec_fields)).ok()?
-        };
-        Some(handle.into())
-    }
-
-    pub(super) fn specialized_value_type(
-        &self,
-        ctx: &mut Context,
-        id: usize,
-        value: Value,
-    ) -> Option<TypeHandle> {
-        let ty = value.get_type(ctx);
-        if aggregate(ctx, ty) && !ty.deref(ctx).is::<PromiseType>() {
-            let cell = *self.states[id].heap_values.get(&value)?;
-            return self.specialized_cell_type(ctx, ty, cell);
-        }
-        let state = &self.states[id];
-        if let Some(op) = value.defining_op() {
-            if let Some(fg) = Operation::get_op::<FieldGetOp>(op, ctx) {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let field_name = fg.field(ctx);
-                let field_ty = base_spec
-                    .deref(ctx)
-                    .downcast_ref::<RecordType>()?
-                    .fields()
-                    .ok()?
-                    .iter()
-                    .find(|(n, _)| *n == field_name)?
-                    .1;
-                return (field_ty != ty).then_some(field_ty);
-            }
-            if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
-                return (elem_ty != ty).then_some(elem_ty);
-            }
-            if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
-                let opt_ty: TypeHandle = crate::types::OptionalType::get(ctx, elem_ty).into();
-                return (opt_ty != ty).then_some(opt_ty);
-            }
-            if Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
-                || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-            {
-                return None;
-            }
-            if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx) {
-                let ok = match intrinsic.intrinsic(ctx) {
-                    Some(
-                        crate::intrinsics::Intrinsic::BigIntNegate
-                        | crate::intrinsics::Intrinsic::BytesAt
-                        | crate::intrinsics::Intrinsic::ParseInt,
-                    ) => true,
-                    Some(
-                        crate::intrinsics::Intrinsic::MathFloor
-                        | crate::intrinsics::Intrinsic::MathCeil
-                        | crate::intrinsics::Intrinsic::MathTrunc
-                        | crate::intrinsics::Intrinsic::MathRound
-                        | crate::intrinsics::Intrinsic::MathAbs,
-                    ) => {
-                        let arg = op.deref(ctx).get_operand(0);
-                        state.representation(arg).is_some() || state.fact(arg) == Fact::Numeric
-                    }
-                    Some(
-                        crate::intrinsics::Intrinsic::MathMin
-                        | crate::intrinsics::Intrinsic::MathMax,
-                    ) => {
-                        let lhs = op.deref(ctx).get_operand(0);
-                        let rhs = op.deref(ctx).get_operand(1);
-                        (state.representation(lhs).is_some() && state.representation(rhs).is_some())
-                            || state.fact(lhs) == Fact::Numeric
-                            || state.fact(rhs) == Fact::Numeric
-                    }
-                    _ => false,
-                };
-                if !ok {
-                    return None;
-                }
-            }
-        }
-        if state.fact(value) == Fact::Numeric {
-            return numeric_type_for(ctx, ty);
-        }
-        None
-    }
-
-    pub(super) fn specialized_result_type(
-        &self,
-        ctx: &mut Context,
-        id: usize,
-        pos: usize,
-        ty: TypeHandle,
-    ) -> Option<TypeHandle> {
-        let res = &self.states[id].results[pos];
-        if aggregate(ctx, ty) && !ty.deref(ctx).is::<PromiseType>() {
-            let cell = res.heap?;
-            return self.specialized_cell_type(ctx, ty, cell);
-        }
-        if res.domain == Fact::Numeric {
-            return numeric_type_for(ctx, ty);
-        }
-        None
-    }
-}
-
-mod queries;

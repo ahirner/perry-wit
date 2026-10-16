@@ -3,11 +3,11 @@ use super::*;
 use perry_parser::swc_ecma_ast as ast;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-pub(crate) const PUSH: &str = "$$perryArrayPush";
-pub(crate) const CONCAT: &str = "$$perryArrayConcat";
+const PUSH: &str = "$$perryArrayPush";
+const CONCAT: &str = "$$perryArrayConcat";
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(crate) fn preserve_arguments(module: &mut ast::Module) {
+pub(super) fn preserve_arguments(module: &mut ast::Module) {
     struct Arguments;
     impl VisitMut for Arguments {
         fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {

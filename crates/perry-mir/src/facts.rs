@@ -105,6 +105,8 @@ enum Constraint {
 
 struct Body {
     function: FuncOp,
+    /// The function's own type, resolved once so later phases need not re-check it.
+    signature: TypedHandle<FunctionType>,
     constraints: Vec<Constraint>,
     dependents: HashMap<Value, Vec<usize>>,
     parameters: Vec<Value>,
@@ -117,7 +119,8 @@ struct Body {
 }
 
 impl Body {
-    fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Self {
+    fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Result<Self> {
+        let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
         let mut returns = Vec::new();
@@ -175,7 +178,6 @@ impl Body {
             .and_then(|attr| {
                 TypedHandle::<FunctionType>::from_handle(attr.get_type(ctx), ctx).ok()
             });
-        let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx).ok();
         let declared_args = match signature {
             Some(sig) => sig
                 .deref(ctx)
@@ -183,7 +185,7 @@ impl Body {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect(),
-            None => vec![None; fn_ty.map_or(0, |ty| ty.deref(ctx).arg_types().len())],
+            None => vec![None; fn_ty.deref(ctx).arg_types().len()],
         };
         let declared_results = match signature {
             Some(sig) => sig
@@ -192,9 +194,9 @@ impl Body {
                 .iter()
                 .map(|&ty| Integer::from_type(ctx, ty))
                 .collect(),
-            None => vec![None; fn_ty.map_or(0, |ty| ty.deref(ctx).res_types().len())],
+            None => vec![None; fn_ty.deref(ctx).res_types().len()],
         };
-        Self {
+        Ok(Self {
             external: crate::calls::is_exported(ctx, &function)
                 || function
                     .get_operation()
@@ -203,6 +205,7 @@ impl Body {
                     .0
                     .contains_key(&WIT_SIGNATURE),
             function,
+            signature: fn_ty,
             effects,
             constraints,
             dependents,
@@ -215,10 +218,12 @@ impl Body {
             declared_args,
             declared_results,
             has_integer_constraints,
-        }
+        })
     }
 }
 
+/// Specialized contexts per function before further keys share one summary context, so a
+/// function has one generic context and at most `MAX_PRECISE_CONTEXTS + 1` specialized ones.
 const MAX_PRECISE_CONTEXTS: usize = 32;
 
 #[derive(Default)]
@@ -301,22 +306,19 @@ impl ProgramFacts {
             )
     }
 
-    pub fn context_count(&self, function: &Identifier) -> usize {
-        self.keys.iter().filter(|k| &k.function == function).count()
-    }
-
-    pub fn generic_context_count(&self, function: &Identifier) -> usize {
-        self.keys
-            .iter()
-            .filter(|k| &k.function == function && !k.specialize)
-            .count()
-    }
-
-    pub fn specialized_context_count(&self, function: &Identifier) -> usize {
-        self.keys
-            .iter()
-            .filter(|k| &k.function == function && k.specialize)
-            .count()
+    /// Generic and specialized context counts of `function`, for testing the context budget.
+    #[cfg(test)]
+    pub(crate) fn context_counts(&self, function: &Identifier) -> (usize, usize) {
+        self.keys.iter().filter(|k| &k.function == function).fold(
+            (0, 0),
+            |(generic, specialized), key| {
+                if key.specialize {
+                    (generic, specialized + 1)
+                } else {
+                    (generic + 1, specialized)
+                }
+            },
+        )
     }
 }
 
@@ -369,6 +371,11 @@ struct Solver {
 }
 
 impl Solver {
+    /// Whether context `id` is the shared summary of its function's surplus specializations.
+    fn is_summary(&self, id: usize) -> bool {
+        self.summary_contexts.get(&self.analysis.keys[id].function) == Some(&id)
+    }
+
     fn summary_key(&self, ctx: &Context, key: &Key) -> Key {
         let body = &self.analysis.bodies[&key.function];
         let is_async = crate::calls::is_async(ctx, &body.function);
@@ -388,9 +395,7 @@ impl Solver {
                 }
             }
         }
-        let fn_ty = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
-            .expect("function type");
-        let res_types = fn_ty.deref(ctx).res_types().clone();
+        let res_types = body.signature.deref(ctx).res_types();
         let results = (0..key.results.len())
             .map(|idx| {
                 if let Some(declared) = body.declared_results.get(idx).copied().flatten() {
@@ -591,12 +596,12 @@ impl Analysis for ProgramFacts {
                     .iter()
                     .zip(effects)
                     .map(|(&function, effects)| {
-                        (
+                        Ok((
                             function.get_symbol_name(ctx),
-                            Body::new(ctx, function, effects),
-                        )
+                            Body::new(ctx, function, effects)?,
+                        ))
                     })
-                    .collect(),
+                    .collect::<Result<_>>()?,
                 keys: Vec::new(),
                 states: Vec::new(),
                 roots: Vec::new(),
@@ -619,7 +624,7 @@ impl Analysis for ProgramFacts {
             .values()
             .any(|body| body.has_integer_constraints);
         for function in functions {
-            let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
+            let ty = solver.analysis.bodies[&function.get_symbol_name(ctx)].signature;
             let args: Vec<_> = ty
                 .deref(ctx)
                 .arg_types()
@@ -741,23 +746,6 @@ impl Analysis for ProgramFacts {
             if !defaulted {
                 break;
             }
-        }
-        for name in solver.analysis.bodies.keys() {
-            let generic_count = solver.analysis.generic_context_count(name);
-            let specialized_count = solver.analysis.specialized_context_count(name);
-            assert_eq!(
-                generic_count, 1,
-                "function {name} must have 1 generic context"
-            );
-            assert!(
-                specialized_count <= MAX_PRECISE_CONTEXTS + 1,
-                "function {name} exceeded specialized context budget: {specialized_count} > {}",
-                MAX_PRECISE_CONTEXTS + 1
-            );
-            assert!(
-                solver.analysis.context_count(name) <= MAX_PRECISE_CONTEXTS + 2,
-                "function {name} exceeded total context budget"
-            );
         }
         Ok(solver.analysis)
     }

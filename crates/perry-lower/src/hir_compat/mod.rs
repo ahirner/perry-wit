@@ -60,7 +60,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => error,
         }
     })?;
-    constructors.collect_types(&mut module);
+    constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
         .iter()

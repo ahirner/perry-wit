@@ -12,6 +12,21 @@ pub(super) fn merge_absence(
     }
 }
 
+/// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
+/// from `T | null`.
+pub(super) fn admitting(
+    ctx: &mut Context,
+    ty: TypeHandle,
+    state: perry_mir::attrs::Absence,
+) -> TypeHandle {
+    let states = match absence(ctx, ty) {
+        Some(existing) if existing != state => perry_mir::attrs::Absence::Both,
+        _ => state,
+    };
+    let inner = optional_value(ctx, ty).unwrap_or(ty);
+    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
     BigInt,

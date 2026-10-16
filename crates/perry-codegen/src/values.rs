@@ -32,6 +32,14 @@ impl<T: Copy> Carriers<T> {
         }
     }
 
+    /// The `(tag, payload)` pair of a numeric alternative.
+    pub(crate) fn numeric(self) -> Result<(T, T)> {
+        match self {
+            Self::Numeric { tag, payload } => Ok((tag, payload)),
+            Self::Scalar(_) => Err(anyhow!("numeric alternatives require a tagged carrier")),
+        }
+    }
+
     pub(crate) fn iter(self) -> impl Iterator<Item = T> {
         let (first, second) = match self {
             Self::Scalar(value) => (value, None),

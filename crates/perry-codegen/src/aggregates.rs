@@ -3,6 +3,7 @@ use crate::{
     function::FunctionLowering,
     repr::{Carriers, Repr, optional_inner, repr, slot_kind},
     runtime::Runtime,
+    values::is_numeric_type,
 };
 use anyhow::{Result, anyhow};
 use perry_abi::layout::{array as layout, record, variant};
@@ -26,8 +27,9 @@ use pliron::{
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
+    /// The runtime's element-kind flag for arrays of `element` (`layout::*_ELEMENTS`).
     pub(crate) fn array_element_kind(ctx: &Context, element: TypeHandle) -> Result<u32> {
-        if crate::values::is_numeric_type(ctx, element) {
+        if is_numeric_type(ctx, element) {
             Ok(layout::NUMERIC_ELEMENTS)
         } else if repr(ctx, element)? == Repr::Ref {
             Ok(layout::REFERENCE_ELEMENTS)
@@ -36,42 +38,17 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    pub(crate) fn record_field_offset(
-        ctx: &Context,
-        record: TypedHandle<RecordType>,
-        target_index: usize,
-    ) -> Result<u32> {
-        let rec = record.deref(ctx);
-        let fields = rec.fields().map_err(|_| anyhow!("record without fields"))?;
-        let mut offset = record::HEADER;
-        for (i, (_, ty)) in fields.iter().enumerate() {
-            if i == target_index {
-                return Ok(offset);
-            }
-            offset += if crate::values::is_numeric_type(ctx, *ty) {
-                record::NUMERIC_SLOT
-            } else {
-                record::SLOT
-            };
-        }
-        Err(anyhow!("field index out of bounds"))
-    }
-
+    /// Byte size of `record`: its header and every field slot.
     pub(crate) fn record_size(ctx: &Context, record: TypedHandle<RecordType>) -> Result<u32> {
-        let rec = record.deref(ctx);
-        let fields = rec.fields().map_err(|_| anyhow!("record without fields"))?;
-        let mut offset = record::HEADER;
-        for (_, ty) in fields.iter() {
-            offset += if crate::values::is_numeric_type(ctx, *ty) {
-                record::NUMERIC_SLOT
-            } else {
-                record::SLOT
-            };
-        }
-        Ok(offset)
+        let record = record.deref(ctx);
+        let fields = record
+            .fields()
+            .map_err(|_| anyhow!("record without fields"))?;
+        Ok(record_offset(ctx, fields))
     }
 
-    pub(crate) fn store_slot_value(
+    /// Store `value` into a `ty` slot at `addr + offset`.
+    fn store_slot_value(
         &mut self,
         ctx: &mut Context,
         addr: Value,
@@ -92,6 +69,7 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
+    /// Load the carriers of a `ty` slot at `addr + offset`.
     pub(crate) fn load_slot_value(
         &mut self,
         ctx: &mut Context,
@@ -99,7 +77,7 @@ impl FunctionLowering<'_, '_> {
         offset: u32,
         ty: TypeHandle,
     ) -> Result<Carriers<Value>> {
-        if crate::values::is_numeric_type(ctx, ty) {
+        if is_numeric_type(ctx, ty) {
             let tag = self.load(ctx, MemKind::I32, addr, offset);
             let payload = self.load(ctx, MemKind::I64, addr, offset + 8);
             Ok(Carriers::Numeric { tag, payload })
@@ -223,11 +201,7 @@ impl FunctionLowering<'_, '_> {
                 let operand = op.deref(ctx).get_operand(index);
                 let value = self.mapped_value(ctx, operand)?;
                 self.store_slot_value(ctx, object, offset, ty, value)?;
-                offset += if crate::values::is_numeric_type(ctx, ty) {
-                    record::NUMERIC_SLOT
-                } else {
-                    record::SLOT
-                };
+                offset += record_slot(ctx, ty);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -281,11 +255,7 @@ impl FunctionLowering<'_, '_> {
                     slots.push(self.mapped_value(ctx, operand)?);
                 }
                 let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-                let stride = if crate::values::is_numeric_type(ctx, element) {
-                    layout::NUMERIC_SLOT
-                } else {
-                    layout::SLOT
-                };
+                let stride = array_slot(ctx, element);
                 for (index, slot) in slots.into_iter().enumerate() {
                     self.store_slot_value(ctx, data, stride * index as u32, element, slot)?;
                 }
@@ -357,11 +327,9 @@ impl FunctionLowering<'_, '_> {
             let address = self.slot_address(ctx, data, slot, element);
             let loaded = self.load_slot_value(ctx, address, 0, element)?;
             let target = op.deref(ctx).get_result(0).get_type(ctx);
-            let loaded = if optional_inner(ctx, element).is_some() {
-                self.optional_cast_value(ctx, loaded, element, target)?
-            } else {
-                loaded
-            };
+            if optional_inner(ctx, element).is_some() {
+                self.check_optional_cast(ctx, loaded, element, target)?;
+            }
             let undefined = self.undefined_value(ctx, target)?;
             let value = self.select_carriers(ctx, ok, loaded, undefined)?;
             self.define_value(ctx, op, value);
@@ -412,7 +380,7 @@ impl FunctionLowering<'_, '_> {
         Ok(false)
     }
 
-    pub(crate) fn select_carriers(
+    fn select_carriers(
         &mut self,
         ctx: &mut Context,
         cond: Value,
@@ -442,6 +410,7 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
+    /// Address of element `index` in array storage `data` holding `element` slots.
     pub(crate) fn slot_address(
         &mut self,
         ctx: &mut Context,
@@ -449,12 +418,7 @@ impl FunctionLowering<'_, '_> {
         index: Value,
         element: TypeHandle,
     ) -> Value {
-        let shift = if crate::values::is_numeric_type(ctx, element) {
-            4
-        } else {
-            3
-        };
-        let shift = self.i32_const(ctx, shift);
+        let shift = self.i32_const(ctx, array_slot(ctx, element).trailing_zeros() as i32);
         let offset = self.num(ctx, NumOpcode::I32Shl, vec![index, shift]);
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
@@ -502,14 +466,18 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
-        let record_ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
+        let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?;
-        let (index, field_ty) = record_ty
-            .deref(ctx)
-            .field(field)
+        let record = record.deref(ctx);
+        let fields = record
+            .fields()
+            .map_err(|_| anyhow!("record has no field {field}"))?;
+        let (index, (_, field_ty)) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| name == field)
             .ok_or_else(|| anyhow!("record has no field {field}"))?;
-        let offset = Self::record_field_offset(ctx, record_ty, index)?;
-        Ok((offset, field_ty))
+        Ok((record_offset(ctx, &fields[..index]), *field_ty))
     }
 
     /// Initialize the header of fresh record storage: the id of shape `record` and, when the
@@ -537,5 +505,32 @@ impl FunctionLowering<'_, '_> {
         }
         let shape = self.i32_const(ctx, shape);
         self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
+    }
+}
+
+/// Bytes a record field of type `ty` occupies: numeric alternatives keep a tag and a payload.
+pub(crate) fn record_slot(ctx: &Context, ty: TypeHandle) -> u32 {
+    if is_numeric_type(ctx, ty) {
+        record::NUMERIC_SLOT
+    } else {
+        record::SLOT
+    }
+}
+
+/// Offset of the field following `preceding`: the header plus their slots.
+fn record_offset(ctx: &Context, preceding: &[(String, TypeHandle)]) -> u32 {
+    record::HEADER
+        + preceding
+            .iter()
+            .map(|(_, ty)| record_slot(ctx, *ty))
+            .sum::<u32>()
+}
+
+/// Bytes an array element of type `ty` occupies; always a power of two.
+fn array_slot(ctx: &Context, ty: TypeHandle) -> u32 {
+    if is_numeric_type(ctx, ty) {
+        layout::NUMERIC_SLOT
+    } else {
+        layout::SLOT
     }
 }

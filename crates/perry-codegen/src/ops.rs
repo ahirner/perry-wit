@@ -471,11 +471,9 @@ impl FunctionLowering<'_, '_> {
                         )?
                         .deref(ctx)
                         .value();
-                        let loaded = if optional_inner(ctx, source).is_some() {
-                            self.optional_cast(ctx, loaded, source, ty)?
-                        } else {
-                            loaded
-                        };
+                        if optional_inner(ctx, source).is_some() {
+                            self.check_optional_cast(ctx, loaded.into(), source, ty)?;
+                        }
                         self.select(ctx, fulfilled, loaded, undefined)
                     } else {
                         self.select(ctx, fulfilled, undefined, loaded)

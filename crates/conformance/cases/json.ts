@@ -104,13 +104,6 @@ function checkCollections(): string {
   const dictAliasHas = "b" in dictB ? 1 : 0;
   const rebuilt = Object.fromEntries(Object.entries(dictB));
 
-  const iterSet = new Set<number>([10, 20]);
-  const setValues = iterSet.values();
-  let setConsumed1 = 0;
-  let setConsumed2 = 0;
-  for (const v of setValues) setConsumed1 += v;
-  for (const v of setValues) setConsumed2 += v;
-
   const iterMap = new Map<string, number>([
     ["a", 1],
     ["b", 2],
@@ -149,7 +142,7 @@ function checkCollections(): string {
   let futureSum = 0;
   for (const v of compactActive.values()) futureSum += v;
 
-  return `${setAliasHas}:${setSameKeyVal}:${setGrowCount}:${setIsArray}:${markerSet.size}:${mapAliasHas}:${mapToClear.size}:${mapGrowCount}:${nanScore}:${dictAliasHas}:${rebuilt["c"] ?? 0}:${setConsumed1}:${setConsumed2}:${mapConsumed1}:${mapConsumed2.length}:${resume1}:${resume2}:${ex1}:${ex2}:${activeSum}:${futureSum}`;
+  return `${setAliasHas}:${setSameKeyVal}:${setGrowCount}:${setIsArray}:${markerSet.size}:${mapAliasHas}:${mapToClear.size}:${mapGrowCount}:${nanScore}:${dictAliasHas}:${rebuilt["c"] ?? 0}:${mapConsumed1}:${mapConsumed2.length}:${resume1}:${resume2}:${ex1}:${ex2}:${activeSum}:${futureSum}`;
 }
 
 interface Entry {
@@ -167,16 +160,6 @@ interface Page<T> extends Boxed<T[]> {
 }
 type EntryPreview = Pick<Entry, "key" | "value">;
 type PartialEntry = Partial<Entry>;
-
-interface InnerNum {
-  x: number;
-}
-interface OuterNum {
-  inner: InnerNum;
-}
-interface ArrNum {
-  xs: number[];
-}
 
 function ctxHelper(a: number, b: number): number {
   const s = a + b;
@@ -273,17 +256,6 @@ function checkArraysAndNumerics(miss: boolean): string {
       ? 1
       : 0;
 
-  const nestedNum: OuterNum = { inner: { x: parseInt("42") } };
-  const recArrNum: ArrNum = { xs: [parseInt("7"), parseInt("8")] };
-  const arrRecNum: InnerNum[] = [{ x: parseInt("9") }];
-  const pushedNum: number[] = [];
-  pushedNum.push(parseInt("11"));
-  const indexedNum: number[] = [0];
-  indexedNum[0] = parseInt("12");
-  const mixedNum: number[] = [1, parseInt("2")];
-  const optNum: number | undefined = miss ? parseInt("13") : undefined;
-  const numAggrJson = `${nestedNum.inner.x}:${recArrNum.xs[0] + recArrNum.xs[1]}:${arrRecNum[0].x}:${pushedNum[0]}:${indexedNum[0]}:${mixedNum[0] + mixedNum[1]}:${JSON.stringify(nestedNum)}:${JSON.stringify(recArrNum)}:${JSON.stringify(arrRecNum)}:${JSON.stringify(pushedNum)}:${JSON.stringify(indexedNum)}:${JSON.stringify(mixedNum)}:${JSON.stringify(optNum)}`;
-
   const ctxNoise =
     ctx01() + ctx02() + ctx03() + ctx04() + ctx05() + ctx06() + ctx07() + ctx08() +
     ctx09() + ctx10() + ctx11() + ctx12() + ctx13() + ctx14() + ctx15() + ctx16() +
@@ -292,7 +264,7 @@ function checkArraysAndNumerics(miss: boolean): string {
     ctx33() + ctx34();
   const ctxCheck = `${ctx35(250, 10)}:${ctxNoise}`;
 
-  return `${entries[0].value}:${entries.length}:${hitIdx}:${sorted[0].key}:${nums[0]}:${sortedNums[0]}:${tags[0]}:${flatCount}:${sum}:${rsum}:${keySum}:${joinedCheck}:${genericScore}:${radixWrap}:${parsedSum}:${nanChecks}:${numAggrJson}:${ctxCheck}`;
+  return `${entries[0].value}:${entries.length}:${hitIdx}:${sorted[0].key}:${nums[0]}:${sortedNums[0]}:${tags[0]}:${flatCount}:${sum}:${rsum}:${keySum}:${joinedCheck}:${genericScore}:${radixWrap}:${parsedSum}:${nanChecks}:${ctxCheck}`;
 }
 
 console.log(

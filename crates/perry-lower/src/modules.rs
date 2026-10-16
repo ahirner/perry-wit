@@ -1,6 +1,6 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
-pub(crate) use crate::hir_compat::parse;
+use crate::hir_compat::parse;
 use anyhow::{Context, Result, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use std::{

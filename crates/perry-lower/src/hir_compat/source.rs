@@ -55,7 +55,7 @@ pub(crate) fn validate(module: &ast::Module, locations: &Locations<'_>) -> Resul
 }
 
 /// Bindings with no declared type may keep the initializer's absence states.
-pub(crate) fn inferred_bindings(module: &ast::Module) -> std::collections::HashSet<(u32, u32)> {
+pub(super) fn inferred_bindings(module: &ast::Module) -> std::collections::HashSet<(u32, u32)> {
     #[derive(Default)]
     struct Bindings(std::collections::HashSet<(u32, u32)>);
     impl Visit for Bindings {

@@ -43,7 +43,7 @@ impl Integer {
             })
     }
 
-    pub(super) fn ty(self, ctx: &mut Context) -> TypeHandle {
+    pub(super) fn ty(self, ctx: &Context) -> TypeHandle {
         IntegerType::get(
             ctx,
             self.bits,

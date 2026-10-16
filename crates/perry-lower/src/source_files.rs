@@ -27,7 +27,7 @@ pub fn load(source: &str, entry: &str) -> Result<BTreeMap<String, String>> {
             continue;
         }
         ancestors.push(canonical);
-        let module = super::modules::parse(&source, &identity.to_string_lossy())?;
+        let module = crate::hir_compat::parse(&source, &identity.to_string_lossy())?;
         for import in super::modules::imports(&module) {
             let Some(path) = super::modules::candidates(&identity, &import)?
                 .into_iter()

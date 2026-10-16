@@ -60,7 +60,8 @@ impl BinaryOp {
         *self.get_attr_perry_binary_kind(ctx).expect("binary kind")
     }
 
-    pub fn set_unconstrained(&self, ctx: &mut Context, unconstrained: bool) {
+    /// Marks numeric add/sub/mul whose exact result no integer consumer constrains.
+    pub(crate) fn set_unconstrained(&self, ctx: &mut Context, unconstrained: bool) {
         if unconstrained {
             self.get_operation().deref_mut(ctx).attributes.set(
                 UNCONSTRAINED_ARITH.clone(),

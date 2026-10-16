@@ -1,5 +1,6 @@
 //! Structured source control flow expressed as ordinary typed MIR blocks.
 use super::*;
+use crate::collections::LiveCursor;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
@@ -252,41 +253,11 @@ impl<'s> FunctionBuilder<'s> {
         let latch = self.new_block(ctx, "latch");
         let exhausted_exit = self.new_block(ctx, "exhausted");
         let exit = self.new_block(ctx, "exit");
-        let mut collection_iter = None;
-        if !body_first
-            && let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition)
-            && let Ok(arr_slot) = self.local(arr_id)
-            && let Ok(idx_slot) = self.local(idx_id)
-        {
-            let arr_val = self.load(ctx, arr_slot)?;
-            if let Ok(arr_def) = self.defined(ctx, arr_val) {
-                let arr_ty = arr_def.get_type(ctx);
-                if crate::collections::is_collection_or_view_record(ctx, arr_ty)
-                    || crate::collections::map_entry_types(ctx, arr_ty).is_some()
-                    || crate::collections::set_entry_type(ctx, arr_ty).is_some()
-                {
-                    let is_view = crate::collections::collection_view_record(ctx, arr_ty).is_some();
-                    let cursor_info =
-                        if let Some(c_arr) = self.collection_cursors_array(ctx, arr_def)? {
-                            if is_view {
-                                let c_op = FieldGetOp::new(ctx, arr_def, "_1".to_string())?;
-                                let c = self.append_value(ctx, &c_op);
-                                let init_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
-                                let init_idx = self.append_value(ctx, &init_op);
-                                self.store(ctx, idx_slot, init_idx);
-                                Some((c_arr, c, true))
-                            } else {
-                                let init_idx = self.load(ctx, idx_slot)?;
-                                let c = self.push_collection_cursor(ctx, c_arr, init_idx)?;
-                                Some((c_arr, c, false))
-                            }
-                        } else {
-                            None
-                        };
-                    collection_iter = Some((idx_slot, arr_def, cursor_info));
-                }
-            }
-        }
+        let collection_loop = if body_first {
+            None
+        } else {
+            self.collection_loop(ctx, condition)?
+        };
         self.jump(ctx, if body_first { body_block } else { header });
 
         self.switch_to(header);
@@ -300,17 +271,19 @@ impl<'s> FunctionBuilder<'s> {
         }
 
         self.switch_to(body_block);
-        if let Some((idx_slot, arr_def, ref cursor_info)) = collection_iter {
-            let idx_val = self.load(ctx, idx_slot)?;
-            if let Some((_, c, _)) = cursor_info {
-                let c = *c;
+        if let Some(CollectionLoop {
+            index,
+            collection,
+            cursor,
+        }) = collection_loop
+        {
+            let idx_val = self.load(ctx, index)?;
+            if let Some(cursor) = cursor {
                 let one = self.number(ctx, 1.0);
                 let next_idx = self.binary(ctx, BinaryKind::Add, idx_val, one);
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, c, "_0".to_string(), next_idx)
-                });
+                cursor.advance(self, ctx, next_idx);
             }
-            let entries = self.collection_entries_array(ctx, arr_def)?;
+            let entries = self.collection_entries_array(ctx, collection)?;
             let entry = self.element_at(ctx, entries, idx_val)?;
             if let Some(live) = self.collection_entry_live(ctx, entry)? {
                 let live_body = self.new_block(ctx, "loop_live_body");
@@ -331,25 +304,64 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(update) = update {
             self.effect(ctx, update)?;
         }
-        if let Some((idx_slot, _, Some((_, c, _)))) = collection_iter {
-            let cur_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
-            let cur_idx = self.append_value(ctx, &cur_op);
-            self.store(ctx, idx_slot, cur_idx);
+        let cursor = collection_loop.and_then(|lp| lp.cursor.map(|cursor| (lp.index, cursor)));
+        if let Some((index, cursor)) = cursor {
+            let position = cursor.position(self, ctx)?;
+            self.store(ctx, index, position);
         }
         self.jump(ctx, header);
 
         self.switch_to(exhausted_exit);
-        if let Some((_, _, Some((c_arr, c, true)))) = collection_iter {
-            let inf = self.number(ctx, f64::INFINITY);
-            self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), inf));
-            self.remove_collection_cursor(ctx, c_arr, c)?;
+        if let Some((_, cursor)) = cursor {
+            cursor.exhausted(self, ctx)?;
         }
         self.jump(ctx, exit);
 
         self.switch_to(exit);
-        if let Some((_, _, Some((c_arr, c, false)))) = collection_iter {
-            self.remove_collection_cursor(ctx, c_arr, c)?;
+        if let Some((_, cursor)) = cursor {
+            cursor.exited(self, ctx)?;
         }
         Ok(())
     }
+
+    /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
+    /// a cursor so deletes in the body neither skip nor repeat entries.
+    fn collection_loop(
+        &mut self,
+        ctx: &mut Context,
+        condition: Option<&'s Expr>,
+    ) -> Result<Option<CollectionLoop>> {
+        let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition) else {
+            return Ok(None);
+        };
+        let (Ok(arr_slot), Ok(index)) = (self.local(arr_id), self.local(idx_id)) else {
+            return Ok(None);
+        };
+        let arr_val = self.load(ctx, arr_slot)?;
+        let Ok(collection) = self.defined(ctx, arr_val) else {
+            return Ok(None);
+        };
+        let ty = collection.get_type(ctx);
+        if !(crate::collections::is_collection_or_view_record(ctx, ty)
+            || crate::collections::map_entry_types(ctx, ty).is_some()
+            || crate::collections::set_entry_type(ctx, ty).is_some())
+        {
+            return Ok(None);
+        }
+        let cursor = LiveCursor::open(self, ctx, collection, index)?;
+        Ok(Some(CollectionLoop {
+            index,
+            collection,
+            cursor,
+        }))
+    }
+}
+
+/// A loop over a live collection: the loop's index slot, the collection and its cursor
+/// (`None` for bare entry arrays, which have no cursor array).
+#[derive(Clone, Copy)]
+struct CollectionLoop {
+    index: Value,
+    collection: Value,
+    cursor: Option<LiveCursor>,
 }
