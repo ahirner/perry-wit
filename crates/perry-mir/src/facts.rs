@@ -108,22 +108,45 @@ struct Body {
     constraints: Vec<Constraint>,
     dependents: HashMap<Value, Vec<usize>>,
     parameters: Vec<Value>,
+    returns: Vec<Ptr<Operation>>,
     declared_args: Vec<Option<Integer>>,
     declared_results: Vec<Option<Integer>>,
     effects: crate::effects::LocalEffects,
     external: bool,
+    has_integer_constraints: bool,
 }
 
 impl Body {
     fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Self {
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
+        let mut returns = Vec::new();
+        let mut has_integer_constraints = !crate::calls::is_exported(ctx, &function)
+            && function
+                .get_operation()
+                .deref(ctx)
+                .attributes
+                .0
+                .contains_key(&WIT_SIGNATURE);
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
             constraints.push(Constraint::Op {
                 op,
                 heap: heap::OperationKind::classify(ctx, op),
             });
+            if Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some() {
+                returns.push(op);
+            }
+            if !has_integer_constraints
+                && ((Operation::get_op::<NumericCastOp>(op, ctx).is_some()
+                    && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+                        .is_some())
+                    || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
+                        |op| op.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt),
+                    ))
+            {
+                has_integer_constraints = true;
+            }
             for value in op.deref(ctx).operands().chain(op.deref(ctx).results()) {
                 dependents.entry(value).or_default().push(index);
             }
@@ -188,8 +211,10 @@ impl Body {
                 .deref(ctx)
                 .arguments()
                 .collect(),
+            returns,
             declared_args,
             declared_results,
+            has_integer_constraints,
         }
     }
 }
@@ -202,6 +227,7 @@ struct State {
     ranges: HashMap<Value, Range>,
     range_expansions: HashMap<Value, u8>,
     required: HashMap<Value, Integer>,
+    constrained: HashSet<Value>,
     original_payloads: HashSet<Value>,
     calls: HashMap<Ptr<Operation>, usize>,
     results: Vec<ResultFact>,
@@ -227,6 +253,9 @@ impl State {
     }
     fn range(&self, value: Value) -> Range {
         self.ranges.get(&value).copied().unwrap_or_default()
+    }
+    fn is_constrained(&self, value: Value) -> bool {
+        self.constrained.contains(&value)
     }
     fn representation(&self, value: Value) -> Option<Integer> {
         match self.fact(value) {
@@ -275,12 +304,27 @@ impl ProgramFacts {
     pub fn context_count(&self, function: &Identifier) -> usize {
         self.keys.iter().filter(|k| &k.function == function).count()
     }
+
+    pub fn generic_context_count(&self, function: &Identifier) -> usize {
+        self.keys
+            .iter()
+            .filter(|k| &k.function == function && !k.specialize)
+            .count()
+    }
+
+    pub fn specialized_context_count(&self, function: &Identifier) -> usize {
+        self.keys
+            .iter()
+            .filter(|k| &k.function == function && k.specialize)
+            .count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Work {
     Operation(usize, usize),
     OpenObject(usize),
+    ReconcileCell(usize),
 }
 
 #[derive(Default)]
@@ -288,6 +332,7 @@ struct Worklist {
     pending: VecDeque<Work>,
     operations: Vec<Vec<bool>>,
     objects: Vec<bool>,
+    cells: Vec<bool>,
 }
 
 impl Worklist {
@@ -295,6 +340,7 @@ impl Worklist {
         let queued = match item {
             Work::Operation(context, index) => &mut self.operations[context][index],
             Work::OpenObject(object) => &mut self.objects[object],
+            Work::ReconcileCell(cell) => &mut self.cells[cell],
         };
         if !*queued {
             *queued = true;
@@ -307,6 +353,7 @@ impl Worklist {
         match item {
             Work::Operation(context, index) => self.operations[context][index] = false,
             Work::OpenObject(object) => self.objects[object] = false,
+            Work::ReconcileCell(cell) => self.cells[cell] = false,
         }
         Some(item)
     }
@@ -316,38 +363,54 @@ struct Solver {
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
-    summary_contexts: HashMap<Key, usize>,
+    summary_contexts: HashMap<Identifier, usize>,
     work: Worklist,
     width_defaults: Vec<(usize, usize, Value)>,
 }
 
 impl Solver {
-    fn summary_key(&self, key: &Key) -> Key {
+    fn summary_key(&self, ctx: &Context, key: &Key) -> Key {
         let body = &self.analysis.bodies[&key.function];
-        let common = key
-            .args
-            .iter()
-            .copied()
-            .flatten()
-            .chain(key.results.iter().filter_map(|r| r.integer()))
-            .reduce(Integer::common);
-        let args = key
-            .args
-            .iter()
-            .enumerate()
-            .map(|(idx, arg)| {
-                if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
-                    Some(declared)
+        let is_async = crate::calls::is_async(ctx, &body.function);
+        let mut args = vec![None; key.args.len()];
+        let mut numeric_args = vec![false; key.args.len()];
+        for (idx, param) in body.parameters.iter().enumerate() {
+            if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
+                args[idx] = Some(declared);
+            } else {
+                let p_ty = param.get_type(ctx);
+                let inner_ty = crate::optional::optional_value(ctx, p_ty).unwrap_or(p_ty);
+                if let Some(int_dom) = Integer::from_type(ctx, inner_ty) {
+                    args[idx] = Some(int_dom);
+                } else if !is_async && inner_ty.deref(ctx).is::<pliron::builtin::types::FP64Type>()
+                {
+                    numeric_args[idx] = true;
+                }
+            }
+        }
+        let fn_ty = TypedHandle::<FunctionType>::from_handle(body.function.get_type(ctx), ctx)
+            .expect("function type");
+        let res_types = fn_ty.deref(ctx).res_types().clone();
+        let results = (0..key.results.len())
+            .map(|idx| {
+                if let Some(declared) = body.declared_results.get(idx).copied().flatten() {
+                    ResultDomain::Integer(declared)
+                } else if let Some(&r_ty) = res_types.get(idx)
+                    && let Some(int_dom) = Integer::from_type(ctx, r_ty)
+                {
+                    ResultDomain::Integer(int_dom)
+                } else if is_async {
+                    ResultDomain::Original
                 } else {
-                    arg.and(common)
+                    ResultDomain::Inferred
                 }
             })
             .collect();
         Key {
             function: key.function.clone(),
             args,
-            numeric_args: key.numeric_args.clone(),
-            results: key.results.clone(),
+            numeric_args,
+            results,
             specialize: true,
         }
     }
@@ -357,20 +420,23 @@ impl Solver {
             return id;
         }
         if key.specialize {
+            if let Some(&id) = self.summary_contexts.get(&key.function) {
+                self.analysis.summarized_contexts += 1;
+                self.contexts.insert(key, id);
+                return id;
+            }
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
             if *count >= MAX_PRECISE_CONTEXTS {
                 self.analysis.summarized_contexts += 1;
-                let summary = self.summary_key(&key);
+                let summary = self.summary_key(ctx, &key);
                 let id = if let Some(&id) = self.contexts.get(&summary) {
-                    id
-                } else if let Some(&id) = self.summary_contexts.get(&summary) {
                     id
                 } else {
                     let id = self.allocate_context(ctx, summary.clone());
-                    self.summary_contexts.insert(summary.clone(), id);
                     self.contexts.insert(summary, id);
                     id
                 };
+                self.summary_contexts.insert(key.function.clone(), id);
                 self.contexts.insert(key, id);
                 return id;
             }
@@ -392,16 +458,34 @@ impl Solver {
             },
             ..State::default()
         };
-        for constraint in &body.constraints {
-            if let Constraint::Op { op, .. } = *constraint
-                && Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some()
-            {
-                for (position, value) in op.deref(ctx).operands().enumerate() {
-                    if let Some(required) = key.results.get(position).and_then(|r| r.integer()) {
-                        let entry = state.required.entry(value).or_insert(required);
-                        *entry = entry.common(required);
+        for &op in &body.returns {
+            for (position, value) in op.deref(ctx).operands().enumerate() {
+                if let Some(required) = key.results.get(position).and_then(|r| r.integer()) {
+                    let entry = state.required.entry(value).or_insert(required);
+                    *entry = entry.common(required);
+                    state.constrained.insert(value);
+                }
+            }
+        }
+        loop {
+            let mut progressed = false;
+            for constraint in &body.constraints {
+                if let Constraint::Edge { from, to } = *constraint {
+                    if let Some(&req) = state.required.get(&to) {
+                        let old = state.required.get(&from).copied();
+                        let new = old.map_or(req, |old| old.common(req));
+                        if old != Some(new) {
+                            state.required.insert(from, new);
+                            progressed = true;
+                        }
+                    }
+                    if state.constrained.contains(&to) && state.constrained.insert(from) {
+                        progressed = true;
                     }
                 }
+            }
+            if !progressed {
+                break;
             }
         }
         for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
@@ -529,27 +613,11 @@ impl Analysis for ProgramFacts {
             work: Worklist::default(),
             width_defaults: Vec::new(),
         };
-        let has_integer_constraints = functions.iter().any(|function| {
-            (!crate::calls::is_exported(ctx, function)
-                && function
-                    .get_operation()
-                    .deref(ctx)
-                    .attributes
-                    .0
-                    .contains_key(&WIT_SIGNATURE))
-                || crate::aggregates::operations(ctx, function)
-                    .into_iter()
-                    .any(|op| {
-                        (Operation::get_op::<NumericCastOp>(op, ctx).is_some()
-                            && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
-                                .is_some())
-                            || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
-                                .is_some_and(|op| {
-                                    op.intrinsic(ctx)
-                                        == Some(crate::intrinsics::Intrinsic::ParseInt)
-                                })
-                    })
-        });
+        let has_integer_constraints = solver
+            .analysis
+            .bodies
+            .values()
+            .any(|body| body.has_integer_constraints);
         for function in functions {
             let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
             let args: Vec<_> = ty
@@ -648,16 +716,12 @@ impl Analysis for ProgramFacts {
             solver.analysis.roots.push((function, id));
         }
         loop {
-            loop {
-                while let Some(item) = solver.work.pop() {
-                    solver.analysis.constraint_visits += 1;
-                    match item {
-                        Work::Operation(id, index) => solver.process(ctx, id, index),
-                        Work::OpenObject(object) => solver.open_object(ctx, object),
-                    }
-                }
-                if !solver.unify_heap_objects(ctx) {
-                    break;
+            while let Some(item) = solver.work.pop() {
+                solver.analysis.constraint_visits += 1;
+                match item {
+                    Work::Operation(id, index) => solver.process(ctx, id, index),
+                    Work::OpenObject(object) => solver.open_object(ctx, object),
+                    Work::ReconcileCell(cell) => solver.reconcile_cell(ctx, cell),
                 }
             }
             // Every default is applied after propagation settles, before the next queue drain.
@@ -677,6 +741,23 @@ impl Analysis for ProgramFacts {
             if !defaulted {
                 break;
             }
+        }
+        for name in solver.analysis.bodies.keys() {
+            let generic_count = solver.analysis.generic_context_count(name);
+            let specialized_count = solver.analysis.specialized_context_count(name);
+            assert_eq!(
+                generic_count, 1,
+                "function {name} must have 1 generic context"
+            );
+            assert!(
+                specialized_count <= MAX_PRECISE_CONTEXTS + 1,
+                "function {name} exceeded specialized context budget: {specialized_count} > {}",
+                MAX_PRECISE_CONTEXTS + 1
+            );
+            assert!(
+                solver.analysis.context_count(name) <= MAX_PRECISE_CONTEXTS + 2,
+                "function {name} exceeded total context budget"
+            );
         }
         Ok(solver.analysis)
     }

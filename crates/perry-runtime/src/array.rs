@@ -63,13 +63,33 @@ pub(crate) unsafe extern "C" fn perry_array_grow(array: *mut u8) {
 
 /// Twice `cap`, with the byte size of that many slots; traps when either overflows.
 fn doubled(cap: u32) -> (u32, u32) {
+    doubled_for(cap, SCALAR_ELEMENTS)
+}
+
+fn element_stride(references: u32) -> u32 {
+    if references == NUMERIC_ELEMENTS {
+        NUMERIC_SLOT
+    } else {
+        SLOT
+    }
+}
+
+fn element_words(references: u32) -> usize {
+    if references == NUMERIC_ELEMENTS { 2 } else { 1 }
+}
+
+fn doubled_for(cap: u32, references: u32) -> (u32, u32) {
     let cap = cap.checked_mul(2).expect("array capacity overflow");
-    (cap, slot_bytes(cap))
+    (cap, slot_bytes_for(cap, references))
+}
+
+fn slot_bytes_for(cap: u32, references: u32) -> u32 {
+    crate::sequence::byte_size(cap, element_stride(references), 0)
 }
 
 /// Byte size of `cap` slots; traps when it exceeds the 32-bit address space.
 fn slot_bytes(cap: u32) -> u32 {
-    crate::sequence::byte_size(cap, SLOT, 0)
+    slot_bytes_for(cap, SCALAR_ELEMENTS)
 }
 
 const ARRAY_SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Array, data) as u32];
@@ -77,7 +97,7 @@ const REFERENCE_SLOTS: [u32; 3] = [SLOT, 1, 0];
 
 /// The element shape of a collectible array: precise reference slots or opaque numbers.
 fn element_shape(references: u32) -> *const u32 {
-    if references != 0 {
+    if references == REFERENCE_ELEMENTS {
         REFERENCE_SLOTS.as_ptr()
     } else {
         core::ptr::null()
@@ -95,8 +115,10 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
             core::mem::size_of::<Array>() as u32,
             ARRAY_SHAPE.as_ptr(),
         ) as *mut Array;
-        let data =
-            crate::roots::perry_gc_alloc(slot_bytes(cap), element_shape(references)) as *mut u64;
+        let data = crate::roots::perry_gc_alloc(
+            slot_bytes_for(cap, references),
+            element_shape(references),
+        ) as *mut u64;
         array.write(Array::empty(cap, data));
         array as *mut u8
     }
@@ -111,13 +133,14 @@ pub(crate) unsafe extern "C" fn perry_array_grow_collectible(array: *mut u8, ref
     let array = array as *mut Array;
     // SAFETY: the caller owns a live array, and the copied slots retain their original shape.
     unsafe {
-        let (cap, bytes) = doubled((*array).cap);
+        let stride = element_stride(references);
+        let (cap, bytes) = doubled_for((*array).cap, references);
         // The old capacity and length are at most half the new one, so their sizes fit.
         let data = crate::roots::resize_buffer(
             (*array).data.cast(),
-            (*array).cap * SLOT,
+            (*array).cap * stride,
             bytes,
-            (*array).len * SLOT,
+            (*array).len * stride,
             element_shape(references),
         ) as *mut u64;
         (*array).data = data;
@@ -134,8 +157,13 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
     }
     #[cfg(not(feature = "collectible"))]
     {
-        let _ = references;
-        perry_array_new(capacity)
+        let cap = capacity.max(MIN_CAPACITY);
+        unsafe {
+            let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
+            let data = perry_alloc(slot_bytes_for(cap, references)) as *mut u64;
+            array.write(Array::empty(cap, data));
+            array as *mut u8
+        }
     }
 }
 
@@ -151,9 +179,17 @@ pub unsafe extern "C" fn perry_array_grow_typed(array: *mut u8, references: u32)
     }
     #[cfg(not(feature = "collectible"))]
     {
-        let _ = references;
+        let array = array as *mut Array;
         unsafe {
-            perry_array_grow(array);
+            let (cap, bytes) = doubled_for((*array).cap, references);
+            let data = perry_alloc(bytes) as *mut u64;
+            core::ptr::copy_nonoverlapping(
+                (*array).data,
+                data,
+                (*array).len as usize * element_words(references),
+            );
+            (*array).data = data;
+            (*array).cap = cap;
         }
     }
 }
@@ -197,6 +233,7 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
     candidate_count: u32,
 ) -> *mut u8 {
     unsafe {
+        let words = element_words(references);
         let reuse = if candidate_count == 0 {
             &[]
         } else {
@@ -209,7 +246,7 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
                 len.checked_add((*array.cast::<Array>()).len)
             })
             .expect("array length overflow");
-        slot_bytes(len.max(MIN_CAPACITY));
+        slot_bytes_for(len.max(MIN_CAPACITY), references);
         let eligible = |index: usize, array: *mut u8| {
             reuse.contains(&(index as u32))
                 && sources.iter().filter(|&&other| other == array).count() == 1
@@ -238,8 +275,8 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
                 .sum::<usize>();
             core::ptr::copy(
                 (*target).data,
-                (*target).data.add(prefix),
-                (*target).len as usize,
+                (*target).data.add(prefix * words),
+                (*target).len as usize * words,
             );
         }
         let mut offset = 0;
@@ -248,8 +285,8 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
             if source != target {
                 core::ptr::copy_nonoverlapping(
                     (*source).data,
-                    (*target).data.add(offset),
-                    (*source).len as usize,
+                    (*target).data.add(offset * words),
+                    (*source).len as usize * words,
                 );
             }
             offset += (*source).len as usize;
@@ -265,12 +302,13 @@ unsafe fn reserve(array: *mut Array, len: u32, references: u32) {
         if (*array).cap >= len {
             return;
         }
-        let cap = len.max((*array).cap.saturating_mul(2).min(u32::MAX / SLOT));
+        let stride = element_stride(references);
+        let cap = len.max((*array).cap.saturating_mul(2).min(u32::MAX / stride));
         let data = crate::region::perry_buffer_resize(
             (*array).data.cast(),
-            slot_bytes((*array).cap),
-            slot_bytes(cap),
-            slot_bytes((*array).len),
+            slot_bytes_for((*array).cap, references),
+            slot_bytes_for(cap, references),
+            slot_bytes_for((*array).len, references),
             element_shape(references),
         )
         .cast::<u64>();
@@ -290,15 +328,16 @@ pub(crate) unsafe extern "C" fn perry_array_extend(
     references: u32,
 ) {
     unsafe {
+        let words = element_words(references);
         let (target, source) = (target.cast::<Array>(), source.cast::<Array>());
         let (before, added) = ((*target).len, (*source).len);
         let len = crate::sequence::length(before, added);
-        slot_bytes(len);
+        slot_bytes_for(len, references);
         reserve(target, len, references);
         core::ptr::copy(
             (*source).data,
-            (*target).data.add(before as usize),
-            added as usize,
+            (*target).data.add(before as usize * words),
+            added as usize * words,
         );
         (*target).len = len;
     }
@@ -314,6 +353,7 @@ pub(crate) unsafe extern "C" fn perry_array_concat_segments(
     references: u32,
 ) -> *mut u8 {
     unsafe {
+        let words = element_words(references);
         let segments = &*segments.cast::<Array>();
         let sources = core::slice::from_raw_parts(segments.data, segments.len as usize);
         let len = sources
@@ -322,15 +362,15 @@ pub(crate) unsafe extern "C" fn perry_array_concat_segments(
                 len.checked_add((*(source as usize as *const Array)).len)
             })
             .expect("array length overflow");
-        slot_bytes(len);
+        slot_bytes_for(len, references);
         let result = perry_array_new_typed(len, references).cast::<Array>();
         let mut offset = 0;
         for &source in sources {
             let source = &*(source as usize as *const Array);
             core::ptr::copy_nonoverlapping(
                 source.data,
-                (*result).data.add(offset),
-                source.len as usize,
+                (*result).data.add(offset * words),
+                source.len as usize * words,
             );
             offset += source.len as usize;
         }

@@ -547,7 +547,7 @@ impl FunctionLowering<'_, '_> {
             let offset = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let source = b.num(ctx, NumOpcode::I32Add, vec![ptr, offset]);
             let value = b.lift_load(ctx, element, element_mir, source, 0)?;
-            let slot = b.slot_address(ctx, data, i);
+            let slot = b.slot_address(ctx, data, i, element_mir);
             b.store(ctx, kind, slot, 0, value);
             Ok(())
         })?;
@@ -741,7 +741,7 @@ impl FunctionLowering<'_, '_> {
         let buffer = self.alloc(ctx, bytes);
         let size = element.size() as i32;
         self.counted_loop(ctx, len, |b, ctx, i| {
-            let slot = b.slot_address(ctx, data, i);
+            let slot = b.slot_address(ctx, data, i, element_mir);
             let item = b.load(ctx, kind, slot, 0);
             let stride = b.i32_const(ctx, size);
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);

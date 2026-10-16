@@ -281,8 +281,13 @@ impl<'s> FunctionBuilder<'s> {
                     base.as_str(),
                     "Map"
                         | "ReadonlyMap"
+                        | "MapKeys"
+                        | "MapValues"
+                        | "MapEntries"
                         | "Set"
                         | "ReadonlySet"
+                        | "SetValues"
+                        | "SetEntries"
                         | "Array"
                         | "ReadonlyArray"
                         | "Record"

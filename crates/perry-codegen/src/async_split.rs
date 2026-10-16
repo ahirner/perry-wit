@@ -121,7 +121,7 @@ pub(crate) fn lower(
     let mut slots: HashMap<Value, Carriers<(u32, MemKind)>> = HashMap::new();
     let mut offset = SLOTS;
     let mut alloc_slot = |ty: pliron::r#type::TypeHandle| -> Result<Carriers<(u32, MemKind)>> {
-        if ty.deref(ctx).is::<perry_mir::types::NumericType>() {
+        if crate::values::is_numeric_type(ctx, ty) {
             let slot = Carriers::Numeric {
                 tag: (offset, MemKind::I32),
                 payload: (offset + 8, MemKind::I64),

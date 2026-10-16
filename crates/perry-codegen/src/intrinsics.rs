@@ -80,7 +80,14 @@ impl FunctionLowering<'_, '_> {
                 else {
                     bail!("expected numeric carrier for NumberToString");
                 };
-                let value = self.runtime(ctx, Runtime::StdNumberToString, vec![tag, payload]);
+                let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
+                let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                let one = self.i32_const(ctx, 1);
+                let two = self.i32_const(ctx, 2);
+                let parity = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
+                let int_tag = self.num(ctx, NumOpcode::I32Sub, vec![two, parity]);
+                let norm_tag = self.select(ctx, is_float, float_tag, int_tag);
+                let value = self.runtime(ctx, Runtime::StdNumberToString, vec![norm_tag, payload]);
                 self.define(ctx, op, value);
                 return Ok(());
             }
@@ -144,9 +151,8 @@ impl FunctionLowering<'_, '_> {
                         let signed_safe = self.num(ctx, NumOpcode::I32And, vec![ge_min, le_max]);
                         let unsigned_safe =
                             self.num(ctx, NumOpcode::I64LeU, vec![payload, max_i64]);
-                        let signed_tag =
-                            self.i32_const(ctx, perry_abi::layout::numeric::SIGNED as i32);
-                        let is_signed = self.num(ctx, NumOpcode::I32Eq, vec![tag, signed_tag]);
+                        let one = self.i32_const(ctx, 1);
+                        let is_signed = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
                         let int_safe = self.select(ctx, is_signed, signed_safe, unsigned_safe);
                         let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
                         self.select(ctx, is_float, float_safe, int_safe)

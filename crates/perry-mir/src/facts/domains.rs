@@ -503,7 +503,7 @@ impl Solver {
         }
         let required = state.required.get(&result).copied();
         if self.analysis.keys[id].specialize && facts().any(|fact| fact == Fact::Numeric) {
-            return required.map_or(Fact::Numeric, Fact::Integer);
+            return Fact::Numeric;
         }
         if facts().any(|fact| fact == Fact::Original) {
             return Fact::Original;

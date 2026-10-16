@@ -181,7 +181,9 @@ impl<'s> Locations<'s> {
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
                 if new_expr.span.lo.0 != 0 {
-                    self.locations.calls.insert(new_expr.span.lo.0, new_expr.span);
+                    self.locations
+                        .calls
+                        .insert(new_expr.span.lo.0, new_expr.span);
                 }
                 if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
                     if ident.sym.as_ref() == "Map" {

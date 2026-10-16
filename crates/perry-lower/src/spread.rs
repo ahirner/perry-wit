@@ -91,7 +91,7 @@ impl<'s> FunctionBuilder<'s> {
                         HirType::Generic {
                             base,
                             mut type_args,
-                        } if matches!(base.as_str(), "Set" | "ReadonlySet")
+                        } if matches!(base.as_str(), "Set" | "ReadonlySet" | "SetValues")
                             && type_args.len() == 1 =>
                         {
                             type_args.pop().unwrap()
@@ -99,9 +99,7 @@ impl<'s> FunctionBuilder<'s> {
                         HirType::Generic {
                             base,
                             mut type_args,
-                        } if base == "MapKeys" && type_args.len() == 2 => {
-                            type_args.swap_remove(0)
-                        }
+                        } if base == "MapKeys" && type_args.len() == 2 => type_args.swap_remove(0),
                         HirType::Generic {
                             base,
                             mut type_args,
@@ -116,7 +114,7 @@ impl<'s> FunctionBuilder<'s> {
                             HirType::Tuple(vec![t.clone(), t])
                         }
                         HirType::Generic { base, type_args }
-                            if matches!(base.as_str(), "Map" | "ReadonlyMap")
+                            if matches!(base.as_str(), "Map" | "ReadonlyMap" | "MapEntries")
                                 && type_args.len() == 2 =>
                         {
                             HirType::Tuple(type_args)

@@ -17,16 +17,17 @@ pub(super) fn ts_type_to_hir(ty: &ast::TsType) -> Option<HirType> {
             ast::TsKeywordTypeKind::TsNumberKeyword => Some(HirType::Number),
             ast::TsKeywordTypeKind::TsBooleanKeyword => Some(HirType::Boolean),
             ast::TsKeywordTypeKind::TsBigIntKeyword => Some(HirType::BigInt),
-            ast::TsKeywordTypeKind::TsVoidKeyword
-            | ast::TsKeywordTypeKind::TsUndefinedKeyword => Some(HirType::Void),
+            ast::TsKeywordTypeKind::TsVoidKeyword | ast::TsKeywordTypeKind::TsUndefinedKeyword => {
+                Some(HirType::Void)
+            }
             ast::TsKeywordTypeKind::TsNullKeyword => Some(HirType::Null),
             ast::TsKeywordTypeKind::TsAnyKeyword => Some(HirType::Any),
             ast::TsKeywordTypeKind::TsUnknownKeyword => Some(HirType::Unknown),
             _ => None,
         },
-        ast::TsType::TsArrayType(arr) => Some(HirType::Array(Box::new(
-            ts_type_to_hir(&arr.elem_type)?,
-        ))),
+        ast::TsType::TsArrayType(arr) => {
+            Some(HirType::Array(Box::new(ts_type_to_hir(&arr.elem_type)?)))
+        }
         ast::TsType::TsTupleType(tuple) => {
             let mut elems = Vec::with_capacity(tuple.elem_types.len());
             for elem in &tuple.elem_types {
@@ -34,9 +35,7 @@ pub(super) fn ts_type_to_hir(ty: &ast::TsType) -> Option<HirType> {
             }
             Some(HirType::Tuple(elems))
         }
-        ast::TsType::TsUnionOrIntersectionType(
-            ast::TsUnionOrIntersectionType::TsUnionType(u),
-        ) => {
+        ast::TsType::TsUnionOrIntersectionType(ast::TsUnionOrIntersectionType::TsUnionType(u)) => {
             let mut items = Vec::with_capacity(u.types.len());
             for member in &u.types {
                 items.push(ts_type_to_hir(member)?);
@@ -291,6 +290,8 @@ pub(super) fn set_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandl
 pub(super) enum CollectionViewKind {
     MapKeys,
     MapValues,
+    MapEntries,
+    SetValues,
     SetEntries,
 }
 
@@ -306,6 +307,10 @@ pub(super) fn collection_view_record(
         Some((CollectionViewKind::MapKeys, rec))
     } else if name_ref.starts_with("map_values_box_") {
         Some((CollectionViewKind::MapValues, rec))
+    } else if name_ref.starts_with("map_entries_box_") {
+        Some((CollectionViewKind::MapEntries, rec))
+    } else if name_ref.starts_with("set_values_box_") {
+        Some((CollectionViewKind::SetValues, rec))
     } else if name_ref.starts_with("set_entries_box_") {
         Some((CollectionViewKind::SetEntries, rec))
     } else {
@@ -381,6 +386,28 @@ pub(super) fn kv_entry_types(
         return Some(res);
     }
     tuple_kv_types(ctx, ty)
+}
+
+/// Extract `(K, V)` from any iterable of `[K, V]` pairs (`Map`, `Record`, `[K, V][]`, `MapEntries`, `SetEntries`).
+pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, TypeHandle)> {
+    if let Some((k, v, _)) = kv_entry_types(ctx, ty) {
+        return Some((k, v));
+    }
+    if let Some((view_kind, view_rec)) = collection_view_record(ctx, ty) {
+        let (_, inner_box) = view_rec.deref(ctx).field("_0")?;
+        return match view_kind {
+            CollectionViewKind::MapEntries => {
+                let (k, v, _) = map_entry_types(ctx, inner_box)?;
+                Some((k, v))
+            }
+            CollectionViewKind::SetEntries => {
+                let (elem, _) = set_entry_type(ctx, inner_box)?;
+                Some((elem, elem))
+            }
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Extract `(T, tuple_rec)` if `ty` is a `Set<T>` (`set_box_*` or `set_tuple_*` element).
@@ -833,8 +860,8 @@ impl<'s> FunctionBuilder<'s> {
             };
         let entries_val = self.expression_with(ctx, init, init_expected)?;
         let entries_val = self.defined(ctx, entries_val)?;
-        let (k_ty, v_ty, _) = kv_entry_types(ctx, entries_val.get_type(ctx))
-            .or_else(|| expected.and_then(|e| kv_entry_types(ctx, e)))
+        let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
+            .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
             .context("Map constructor requires an iterable of [key, value] tuples")?;
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {

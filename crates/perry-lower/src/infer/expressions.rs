@@ -543,6 +543,10 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                                 base: String::from("MapValues"),
                                 type_args,
                             },
+                            "entries" => HirType::Generic {
+                                base: String::from("MapEntries"),
+                                type_args,
+                            },
                             _ => HirType::Generic {
                                 base: String::from("Map"),
                                 type_args,
@@ -555,6 +559,10 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     {
                         let t = type_args[0].clone();
                         match property.as_str() {
+                            "keys" | "values" => HirType::Generic {
+                                base: String::from("SetValues"),
+                                type_args: vec![t],
+                            },
                             "entries" => HirType::Generic {
                                 base: String::from("SetEntries"),
                                 type_args: vec![t],
@@ -659,13 +667,16 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 _ => perry_hir::infer_expr_type(expr, env),
             },
             HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
+                if matches!(base.as_str(), "Map" | "ReadonlyMap" | "MapEntries")
+                    && type_args.len() == 2 =>
             {
                 HirType::Tuple(type_args)
             }
             HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Set" | "ReadonlySet" | "MapKeys")
-                    && !type_args.is_empty() =>
+                if matches!(
+                    base.as_str(),
+                    "Set" | "ReadonlySet" | "SetValues" | "MapKeys"
+                ) && !type_args.is_empty() =>
             {
                 type_args[0].clone()
             }

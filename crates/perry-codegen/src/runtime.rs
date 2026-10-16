@@ -149,6 +149,8 @@ runtime_functions! {
     JsonParseString = "json_parse_string" (I32) -> I32;
     ArrayGrowCollectible = "perry_array_grow_collectible" (I32, I32);
     ArrayNewCollectible = "perry_array_new_collectible" (I32, I32) -> I32;
+    ArrayGrowTyped = "perry_array_grow_typed" (I32, I32);
+    ArrayNewTyped = "perry_array_new_typed" (I32, I32) -> I32;
     CabiRelease = "perry_cabi_release" (I32);
     ForeignCancelled = "perry_foreign_cancelled" () -> I32;
     ForeignRegister = "perry_foreign_register" (I32, I32, I64);

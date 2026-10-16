@@ -42,12 +42,8 @@ function checkJsonAndPresence(): string {
   const absentKeys = Object.keys(absentOpt).length;
   const explicitKeys = Object.keys(explicitUndef).length;
 
-  const buf = new ArrayBuffer(8);
-  const view = new DataView(buf);
-  view.setUint32(0, (1076 << 20) | 0x95049, false);
-  view.setUint32(4, 0x7ffffff8, false);
-  const trickyFloat = view.getFloat64(0, false);
-  const floatFormatted = JSON.stringify(trickyFloat).length > 0 ? 1 : 0;
+  const trickyFloat = 14257184145526768;
+  const floatFormatted = JSON.stringify(trickyFloat) === "14257184145526768" ? 1 : 0;
 
   return `${localParsed.n}:${globalParsed.n}:${disjointParsed.n + disjointOther.n}:${absentIn}:${explicitIn}:${absentKeys}:${explicitKeys}:${JSON.stringify(explicitUndef)}:${perry_json_parse_user(localText)}:${perry_json_copy_0(3)}:${floatFormatted}:${presentOpt.opt ?? 0}`;
 }
@@ -108,7 +104,52 @@ function checkCollections(): string {
   const dictAliasHas = "b" in dictB ? 1 : 0;
   const rebuilt = Object.fromEntries(Object.entries(dictB));
 
-  return `${setAliasHas}:${setSameKeyVal}:${setGrowCount}:${setIsArray}:${markerSet.size}:${mapAliasHas}:${mapToClear.size}:${mapGrowCount}:${nanScore}:${dictAliasHas}:${rebuilt["c"] ?? 0}`;
+  const iterSet = new Set<number>([10, 20]);
+  const setValues = iterSet.values();
+  let setConsumed1 = 0;
+  let setConsumed2 = 0;
+  for (const v of setValues) setConsumed1 += v;
+  for (const v of setValues) setConsumed2 += v;
+
+  const iterMap = new Map<string, number>([
+    ["a", 1],
+    ["b", 2],
+  ]);
+  const mapKeys = iterMap.keys();
+  let mapConsumed1 = "";
+  let mapConsumed2 = "";
+  for (const k of mapKeys) mapConsumed1 += k;
+  for (const k of mapKeys) mapConsumed2 += k;
+
+  const resumeSet = new Set<number>([1, 2, 3]);
+  const resumeIt = resumeSet.values();
+  let resume1 = 0;
+  let resume2 = 0;
+  for (const v of resumeIt) {
+    resume1 += v;
+    break;
+  }
+  for (const v of resumeIt) resume2 += v;
+
+  const exhaustedSet = new Set<number>([1]);
+  const exhaustedIt = exhaustedSet.values();
+  let ex1 = 0;
+  let ex2 = 0;
+  for (const v of exhaustedIt) ex1 += v;
+  exhaustedSet.add(2);
+  for (const v of exhaustedIt) ex2 += v;
+
+  const compactActive = new Set<number>();
+  for (let i = 1; i <= 10; i++) compactActive.add(i);
+  let activeSum = 0;
+  for (const v of compactActive.values()) {
+    activeSum += v;
+    if (v <= 8) compactActive.delete(v);
+  }
+  let futureSum = 0;
+  for (const v of compactActive.values()) futureSum += v;
+
+  return `${setAliasHas}:${setSameKeyVal}:${setGrowCount}:${setIsArray}:${markerSet.size}:${mapAliasHas}:${mapToClear.size}:${mapGrowCount}:${nanScore}:${dictAliasHas}:${rebuilt["c"] ?? 0}:${setConsumed1}:${setConsumed2}:${mapConsumed1}:${mapConsumed2.length}:${resume1}:${resume2}:${ex1}:${ex2}:${activeSum}:${futureSum}`;
 }
 
 interface Entry {
@@ -126,6 +167,56 @@ interface Page<T> extends Boxed<T[]> {
 }
 type EntryPreview = Pick<Entry, "key" | "value">;
 type PartialEntry = Partial<Entry>;
+
+interface InnerNum {
+  x: number;
+}
+interface OuterNum {
+  inner: InnerNum;
+}
+interface ArrNum {
+  xs: number[];
+}
+
+function ctxHelper(a: number, b: number): number {
+  const s = a + b;
+  return s > 200 ? s : -s;
+}
+function ctx01(): number { return ctxHelper(1, 1); }
+function ctx02(): number { return ctxHelper(2, 1); }
+function ctx03(): number { return ctxHelper(3, 1); }
+function ctx04(): number { return ctxHelper(4, 1); }
+function ctx05(): number { return ctxHelper(5, 1); }
+function ctx06(): number { return ctxHelper(6, 1); }
+function ctx07(): number { return ctxHelper(7, 1); }
+function ctx08(): number { return ctxHelper(8, 1); }
+function ctx09(): number { return ctxHelper(9, 1); }
+function ctx10(): number { return ctxHelper(10, 1); }
+function ctx11(): number { return ctxHelper(11, 1); }
+function ctx12(): number { return ctxHelper(12, 1); }
+function ctx13(): number { return ctxHelper(13, 1); }
+function ctx14(): number { return ctxHelper(14, 1); }
+function ctx15(): number { return ctxHelper(15, 1); }
+function ctx16(): number { return ctxHelper(16, 1); }
+function ctx17(): number { return ctxHelper(17, 1); }
+function ctx18(): number { return ctxHelper(18, 1); }
+function ctx19(): number { return ctxHelper(19, 1); }
+function ctx20(): number { return ctxHelper(20, 1); }
+function ctx21(): number { return ctxHelper(21, 1); }
+function ctx22(): number { return ctxHelper(22, 1); }
+function ctx23(): number { return ctxHelper(23, 1); }
+function ctx24(): number { return ctxHelper(24, 1); }
+function ctx25(): number { return ctxHelper(25, 1); }
+function ctx26(): number { return ctxHelper(26, 1); }
+function ctx27(): number { return ctxHelper(27, 1); }
+function ctx28(): number { return ctxHelper(28, 1); }
+function ctx29(): number { return ctxHelper(29, 1); }
+function ctx30(): number { return ctxHelper(30, 1); }
+function ctx31(): number { return ctxHelper(31, 1); }
+function ctx32(): number { return ctxHelper(32, 1); }
+function ctx33(): number { return ctxHelper(33, 1); }
+function ctx34(): number { return ctxHelper(34, 1); }
+function ctx35(a: number, b: number): number { return ctxHelper(a, b) % 256; }
 
 function checkArraysAndNumerics(miss: boolean): string {
   const entries: Entry[] = [
@@ -182,9 +273,29 @@ function checkArraysAndNumerics(miss: boolean): string {
       ? 1
       : 0;
 
-  return `${entries[0].value}:${entries.length}:${hitIdx}:${sorted[0].key}:${ nums[0]}:${sortedNums[0]}:${tags[0]}:${flatCount}:${sum}:${rsum}:${keySum}:${joinedCheck}:${genericScore}:${radixWrap}:${parsedSum}:${nanChecks}`;
+  const nestedNum: OuterNum = { inner: { x: parseInt("42") } };
+  const recArrNum: ArrNum = { xs: [parseInt("7"), parseInt("8")] };
+  const arrRecNum: InnerNum[] = [{ x: parseInt("9") }];
+  const pushedNum: number[] = [];
+  pushedNum.push(parseInt("11"));
+  const indexedNum: number[] = [0];
+  indexedNum[0] = parseInt("12");
+  const mixedNum: number[] = [1, parseInt("2")];
+  const optNum: number | undefined = miss ? parseInt("13") : undefined;
+  const numAggrJson = `${nestedNum.inner.x}:${recArrNum.xs[0] + recArrNum.xs[1]}:${arrRecNum[0].x}:${pushedNum[0]}:${indexedNum[0]}:${mixedNum[0] + mixedNum[1]}:${JSON.stringify(nestedNum)}:${JSON.stringify(recArrNum)}:${JSON.stringify(arrRecNum)}:${JSON.stringify(pushedNum)}:${JSON.stringify(indexedNum)}:${JSON.stringify(mixedNum)}:${JSON.stringify(optNum)}`;
+
+  const ctxNoise =
+    ctx01() + ctx02() + ctx03() + ctx04() + ctx05() + ctx06() + ctx07() + ctx08() +
+    ctx09() + ctx10() + ctx11() + ctx12() + ctx13() + ctx14() + ctx15() + ctx16() +
+    ctx17() + ctx18() + ctx19() + ctx20() + ctx21() + ctx22() + ctx23() + ctx24() +
+    ctx25() + ctx26() + ctx27() + ctx28() + ctx29() + ctx30() + ctx31() + ctx32() +
+    ctx33() + ctx34();
+  const ctxCheck = `${ctx35(250, 10)}:${ctxNoise}`;
+
+  return `${entries[0].value}:${entries.length}:${hitIdx}:${sorted[0].key}:${nums[0]}:${sortedNums[0]}:${tags[0]}:${flatCount}:${sum}:${rsum}:${keySum}:${joinedCheck}:${genericScore}:${radixWrap}:${parsedSum}:${nanChecks}:${numAggrJson}:${ctxCheck}`;
 }
 
 console.log(
   `${output}|${checkJsonAndPresence()}|${checkCollections()}|${checkArraysAndNumerics(true)}`,
 );
+

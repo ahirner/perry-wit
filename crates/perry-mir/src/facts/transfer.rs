@@ -126,11 +126,8 @@ impl Solver {
         let state = &self.analysis.states[id];
         let old = state.range(value);
         let expansions = state.range_expansions.get(&value).copied().unwrap_or(0);
-        let (new, expanded, widened) = old.join_step(
-            range,
-            state.representation(value),
-            expansions >= 1,
-        );
+        let (new, expanded, widened) =
+            old.join_step(range, state.representation(value), expansions >= 1);
         if expanded {
             self.analysis.states[id]
                 .range_expansions
@@ -187,6 +184,12 @@ impl Solver {
         }
     }
 
+    pub(super) fn constrain(&mut self, id: usize, value: Value, constrained: bool) {
+        if constrained && self.analysis.states[id].constrained.insert(value) {
+            self.changed(id, value);
+        }
+    }
+
     fn preserve_promise_payload(&mut self, id: usize, value: Value) {
         if self.analysis.states[id].original_payloads.insert(value) {
             self.fact(id, value, Fact::Original);
@@ -212,6 +215,8 @@ impl Solver {
                 }
                 let required = self.analysis.states[id].required.get(&to).copied();
                 self.require(id, from, required);
+                let constrained = self.analysis.states[id].is_constrained(to);
+                self.constrain(id, from, constrained);
                 let fact = self.analysis.states[id].fact(from);
                 self.fact(id, to, fact);
                 self.range(id, to, self.analysis.states[id].range(from));
@@ -255,6 +260,8 @@ impl Solver {
                     value,
                     self.analysis.states[id].required.get(&promise).copied(),
                 );
+                let constrained = self.analysis.states[id].is_constrained(promise);
+                self.constrain(id, value, constrained);
                 self.fact(id, promise, self.analysis.states[id].fact(value));
             }
             self.range(id, promise, self.analysis.states[id].range(value));
@@ -277,6 +284,8 @@ impl Solver {
                     promise,
                     self.analysis.states[id].required.get(&result).copied(),
                 );
+                let constrained = self.analysis.states[id].is_constrained(result);
+                self.constrain(id, promise, constrained);
             }
             self.fact(id, result, fact);
             self.range(id, result, self.analysis.states[id].range(promise));
@@ -287,9 +296,17 @@ impl Solver {
             let declared_results = self.analysis.bodies[&self.analysis.keys[id].function]
                 .declared_results
                 .clone();
+            let is_summary = self.summary_contexts.values().any(|&s| s == id);
             for (position, value) in operation.operands().enumerate() {
                 let required = self.analysis.keys[id].results[position];
                 self.require(id, value, required.integer());
+                self.constrain(
+                    id,
+                    value,
+                    is_summary
+                        || required.integer().is_some()
+                        || declared_results.get(position).copied().flatten().is_some(),
+                );
                 let fact = self.analysis.states[id].fact(value);
                 let fact = if required == ResultDomain::Original {
                     Fact::Original
@@ -430,6 +447,21 @@ impl Solver {
                 self.analysis.states[id].calls.insert(op, child);
                 self.analysis.states[child].callers.insert((id, index));
                 self.heap_call(ctx, id, index, child, op);
+                let mut call_constrained = false;
+                for (position, value) in operation.results().enumerate() {
+                    let is_cons = !preserve_result
+                        && (declared_results.get(position).copied().flatten().is_some()
+                            || self.analysis.states[id].is_constrained(value));
+                    if is_cons {
+                        call_constrained = true;
+                        let returns = self.analysis.bodies[&callee].returns.clone();
+                        for ret_op in returns {
+                            if let Some(ret_val) = ret_op.deref(ctx).operands().nth(position) {
+                                self.constrain(child, ret_val, true);
+                            }
+                        }
+                    }
+                }
                 for (position, input) in operation.operands().enumerate() {
                     let parameter = parameters[position];
                     let required = declared_args.get(position).copied().flatten().or_else(|| {
@@ -439,6 +471,10 @@ impl Solver {
                             .copied()
                     });
                     self.require(id, input, required);
+                    let is_cons = declared_args.get(position).copied().flatten().is_some()
+                        || (call_constrained
+                            && self.analysis.states[child].is_constrained(parameter));
+                    self.constrain(id, input, is_cons);
                 }
                 self.call_results(ctx, id, child, op, asynchronous.is_some());
                 return;
@@ -453,8 +489,10 @@ impl Solver {
             let result = operation.get_result(0);
             let was_integer = self.analysis.states[id].fact(result).integer().is_some();
             let required = self.analysis.states[id].required.get(&result).copied();
+            let constrained = self.analysis.states[id].is_constrained(result);
             for input in operation.operands() {
                 self.require(id, input, required);
+                self.constrain(id, input, constrained);
             }
             let mut fact = self.arithmetic(
                 ctx,
@@ -514,7 +552,9 @@ impl Solver {
                 .required
                 .get(&operation.get_result(0))
                 .copied();
+            let constrained = self.analysis.states[id].is_constrained(operation.get_result(0));
             self.require(id, operation.get_operand(0), required);
+            self.constrain(id, operation.get_operand(0), constrained);
             let mut fact = self.arithmetic(
                 ctx,
                 id,
@@ -568,7 +608,9 @@ impl Solver {
                 BuiltinContract::Abs => {
                     let input = operation.get_operand(0);
                     let required = self.analysis.states[id].required.get(&result).copied();
+                    let constrained = self.analysis.states[id].is_constrained(result);
                     self.require(id, input, required);
+                    self.constrain(id, input, constrained);
                     let fact = self.arithmetic(ctx, id, &[input], result);
                     let range = match self.analysis.states[id].range(input) {
                         Range::Bottom => Range::Bottom,
@@ -600,8 +642,11 @@ impl Solver {
                     let lhs = operation.get_operand(0);
                     let rhs = operation.get_operand(1);
                     let required = self.analysis.states[id].required.get(&result).copied();
+                    let constrained = self.analysis.states[id].is_constrained(result);
                     self.require(id, lhs, required);
                     self.require(id, rhs, required);
+                    self.constrain(id, lhs, constrained);
+                    self.constrain(id, rhs, constrained);
                     let fact = self.arithmetic(ctx, id, &[lhs, rhs], result);
                     let range = match (
                         self.analysis.states[id].range(lhs),
@@ -734,6 +779,7 @@ impl Solver {
             let result = operation.get_result(0);
             if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
                 self.require(id, operand, Some(integer));
+                self.constrain(id, operand, true);
                 self.fact(id, result, Fact::Integer(integer));
                 let range = match (
                     self.analysis.states[id].fact(operand),

@@ -41,7 +41,21 @@ fn frame_candidates(
                     .expect("verified record");
             let record = record.deref(ctx);
             let fields = record.fields().expect("verified fields");
-            let size = 8 + 8 * fields.len();
+            let payload_bytes: usize = fields
+                .iter()
+                .map(|(_, ty)| {
+                    if crate::optional::optional_value(ctx, *ty)
+                        .unwrap_or(*ty)
+                        .deref(ctx)
+                        .is::<crate::types::NumericType>()
+                    {
+                        16
+                    } else {
+                        8
+                    }
+                })
+                .sum();
+            let size = 8 + payload_bytes;
             if bytes + size > 448
                 || fields
                     .iter()

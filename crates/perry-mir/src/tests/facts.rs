@@ -536,12 +536,102 @@ fn context_summarization_bounds_context_count() -> Result<()> {
     }
     let mut analyses = AnalysisManager::default();
     let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
-    assert_eq!(facts.summarized_contexts, 28);
+    assert_eq!(facts.summarized_contexts, 32);
+    assert_eq!(facts.generic_context_count(&pliron::ident!("helper")), 1);
+    assert_eq!(
+        facts.specialized_context_count(&pliron::ident!("helper")),
+        33
+    );
     let helper_contexts = facts.context_count(&pliron::ident!("helper"));
     assert_eq!(
-        helper_contexts, 37,
-        "expected bounded helper contexts (1 generic + 32 precise + 4 summary), got {helper_contexts}"
+        helper_contexts, 34,
+        "expected bounded helper contexts (1 generic + 32 precise + 1 summary), got {helper_contexts}"
     );
     Ok(())
 }
 
+#[test]
+fn context_summarization_bounds_mixed_integer_and_float_arities() -> Result<()> {
+    use crate::facts::ProgramFacts;
+    use pliron::{
+        builtin::{
+            op_interfaces::SymbolOpInterface,
+            types::{FP64Type, IntegerType, Signedness},
+        },
+        pass::AnalysisManager,
+    };
+    use std::fmt::Write;
+    for arity in [6usize, 8usize] {
+        let ctx = &mut Context::new();
+        let params_decl = (0..arity)
+            .map(|i| format!("p{i}: builtin.fp64"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params_types = vec!["builtin.fp64"; arity].join(", ");
+        let mut body_ops = String::new();
+        body_ops.push_str("        acc0 = perry.binary Add p0, p1 : builtin.fp64;\n");
+        for i in 2..arity {
+            let prev = i - 2;
+            let next = i - 1;
+            body_ops.push_str(&format!(
+                "        acc{next} = perry.binary Add acc{prev}, p{i} : builtin.fp64;\n"
+            ));
+        }
+        let last_acc = format!("acc{}", arity - 2);
+        let mut text = format!(
+            r#"builtin.module @test {{ ^module():
+              builtin.func @helper: builtin.function <({params_types}) -> (builtin.fp64)> {{
+              ^entry({params_decl}):
+{body_ops}        perry.return {last_acc}
+              }}"#
+        );
+        let call_args = (0..arity)
+            .map(|i| format!("p{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let combos = 1usize << arity;
+        for mask in 0..combos {
+            writeln!(
+                text,
+                r#"; builtin.func @e{mask}: builtin.function <({params_types}) -> (builtin.fp64)> {{
+                  ^entry({params_decl}):
+                    res = perry.call helper ({call_args}) : builtin.fp64;
+                    perry.return res
+                }}"#
+            )
+            .unwrap();
+        }
+        text.push_str("}");
+        let module = parse(ctx, &text);
+        verify_operation(module, ctx)?;
+        for func in crate::aggregates::functions(module, ctx) {
+            let sym = func.get_symbol_name(ctx);
+            if let Some(rest) = sym.as_ref().strip_prefix('e')
+                && let Ok(mask) = rest.parse::<usize>()
+            {
+                crate::calls::set_exported(ctx, &func);
+                let args = (0..arity)
+                    .map(|bit| {
+                        if (mask & (1 << bit)) != 0 {
+                            IntegerType::get(ctx, 8, Signedness::Unsigned).into()
+                        } else {
+                            FP64Type::get(ctx).into()
+                        }
+                    })
+                    .collect();
+                let results = vec![FP64Type::get(ctx).into()];
+                crate::facts::constrain(ctx, &func, args, results);
+            }
+        }
+        let mut analyses = AnalysisManager::default();
+        let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
+        assert_eq!(facts.generic_context_count(&pliron::ident!("helper")), 1);
+        assert_eq!(
+            facts.specialized_context_count(&pliron::ident!("helper")),
+            33
+        );
+        assert_eq!(facts.context_count(&pliron::ident!("helper")), 34);
+        assert_eq!(facts.summarized_contexts, combos - 32);
+    }
+    Ok(())
+}

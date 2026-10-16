@@ -160,7 +160,7 @@ impl FunctionLowering<'_, '_> {
                         ctx,
                     )?;
                     self.frame_slots.insert(op, bytes);
-                    bytes += record::field(record.deref(ctx).fields()?.len());
+                    bytes += Self::record_size(ctx, record)?;
                 }
             }
         }
@@ -546,17 +546,18 @@ impl FunctionLowering<'_, '_> {
             shape
         } else {
             let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
-            let mut offsets: Vec<_> = record
-                .deref(ctx)
-                .fields()?
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (_, ty))| {
-                    repr(ctx, *ty)
-                        .is_ok_and(|kind| kind == Repr::Ref)
-                        .then_some(record::field(index))
-                })
-                .collect();
+            let mut offsets = Vec::new();
+            let mut field_offset = record::HEADER;
+            for (_, field_ty) in record.deref(ctx).fields()?.iter() {
+                if repr(ctx, *field_ty).is_ok_and(|kind| kind == Repr::Ref) {
+                    offsets.push(field_offset);
+                }
+                field_offset += if crate::values::is_numeric_type(ctx, *field_ty) {
+                    record::NUMERIC_SLOT
+                } else {
+                    record::SLOT
+                };
+            }
             if self.state.retains_json {
                 offsets.push(record::JSON);
             }
@@ -578,13 +579,17 @@ impl FunctionLowering<'_, '_> {
         capacity: Value,
         element: TypeHandle,
     ) -> Result<Value> {
+        let elem_kind = Self::array_element_kind(ctx, element)?;
         if self.state.collectible {
-            let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+            let references = self.i32_const(ctx, elem_kind as i32);
             Ok(self.runtime(
                 ctx,
                 Runtime::ArrayNewCollectible,
                 vec![capacity, references],
             ))
+        } else if elem_kind == perry_abi::layout::array::NUMERIC_ELEMENTS {
+            let references = self.i32_const(ctx, elem_kind as i32);
+            Ok(self.runtime(ctx, Runtime::ArrayNewTyped, vec![capacity, references]))
         } else {
             Ok(self.runtime(ctx, Runtime::ArrayNew, vec![capacity]))
         }

@@ -100,7 +100,8 @@ struct CoalesceKey {
     value_specs: Vec<Option<TypeHandle>>,
     compares: Vec<Option<Integer>>,
     numeric_compares: Vec<bool>,
-    calls: Vec<usize>,
+    constrained_bins: Vec<bool>,
+    calls: Vec<(usize, Option<bool>, Option<Integer>)>,
 }
 
 fn can_specialize_value(ctx: &Context, state: &super::State, value: pliron::value::Value) -> bool {
@@ -162,15 +163,27 @@ fn coalesce_key(
     let mut value_specs = Vec::new();
     let mut compares = Vec::new();
     let mut numeric_compares = Vec::new();
+    let mut constrained_bins = Vec::new();
     let mut calls = Vec::new();
     for &constraint in &body.constraints {
         match constraint {
             Constraint::Op { op, .. } => {
-                let res_list: Vec<_> = op.deref(ctx).results().collect();
-                for res in res_list {
+                let num_results = op.deref(ctx).get_num_results();
+                for idx in 0..num_results {
+                    let res = op.deref(ctx).get_result(idx);
                     let can = can_specialize_value(ctx, state, res);
                     values.push(can.then(|| state.representation(res)).flatten());
                     value_specs.push(analysis.specialized_value_type(ctx, id, res));
+                }
+                if let Some(bin) = Operation::get_op::<BinaryOp>(op, ctx)
+                    && matches!(
+                        bin.kind(ctx),
+                        crate::attrs::BinaryKind::Add
+                            | crate::attrs::BinaryKind::Sub
+                            | crate::attrs::BinaryKind::Mul
+                    )
+                {
+                    constrained_bins.push(state.is_constrained(op.deref(ctx).get_result(0)));
                 }
                 if Operation::get_op::<CompareOp>(op, ctx).is_some() {
                     let inputs = [op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1)];
@@ -182,7 +195,18 @@ fn coalesce_key(
                     );
                 }
                 if let Some(&child) = state.calls.get(&op) {
-                    calls.push(child);
+                    let call_res = op.deref(ctx).results().next();
+                    calls.push((
+                        child,
+                        call_res.map(|r| state.is_constrained(r)),
+                        call_res.and_then(|r| {
+                            state
+                                .required
+                                .get(&r)
+                                .copied()
+                                .or_else(|| state.representation(r))
+                        }),
+                    ));
                 }
             }
             Constraint::Edge { to, .. } => {
@@ -218,6 +242,7 @@ fn coalesce_key(
         value_specs,
         compares,
         numeric_compares,
+        constrained_bins,
         calls,
     }
 }
@@ -254,20 +279,21 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 .parameters
                 .iter()
                 .any(|&p| analysis.specialized_value_type(ctx, id, p).is_some());
-        let result_changes = state
-            .results
-            .iter()
-            .enumerate()
-            .zip(&res_types)
-            .any(|((pos, result), &ty)| {
-                result
-                    .domain
-                    .integer()
-                    .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
-                    || (!root_ids.contains(&id)
-                        && !ty.deref(ctx).is::<PromiseType>()
-                        && analysis.specialized_result_type(ctx, id, pos, ty).is_some())
-            });
+        let result_changes =
+            state
+                .results
+                .iter()
+                .enumerate()
+                .zip(&res_types)
+                .any(|((pos, result), &ty)| {
+                    result
+                        .domain
+                        .integer()
+                        .is_some_and(|domain| Integer::from_type(ctx, ty) != Some(domain))
+                        || (!root_ids.contains(&id)
+                            && !ty.deref(ctx).is::<PromiseType>()
+                            && analysis.specialized_result_type(ctx, id, pos, ty).is_some())
+                });
         let fact_keys: Vec<_> = state.facts.keys().copied().collect();
         let heap_keys: Vec<_> = state.heap_values.keys().copied().collect();
         let values_change = fact_keys.into_iter().any(|value| {
@@ -280,14 +306,15 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 }))
                 || (!value.get_type(ctx).deref(ctx).is::<PromiseType>()
                     && analysis.specialized_value_type(ctx, id, value).is_some())
-        }) || heap_keys.into_iter().any(|value| {
-            analysis.specialized_value_type(ctx, id, value).is_some()
-        }) || body.constraints.iter().any(|&constraint| {
-            matches!(
-                constraint,
-                Constraint::Op { op, .. } if super::domains::const_parsed_int(ctx, op).is_some()
-            )
-        });
+        }) || heap_keys
+            .into_iter()
+            .any(|value| analysis.specialized_value_type(ctx, id, value).is_some())
+            || body.constraints.iter().any(|&constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Op { op, .. } if super::domains::const_parsed_int(ctx, op).is_some()
+                )
+            });
         let comparisons_change = body.constraints.iter().any(|&constraint| {
             let Constraint::Op { op, .. } = constraint else {
                 return false;
@@ -448,10 +475,14 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
         let all_values: Vec<_> = state
             .facts
             .keys()
-            .chain(state.heap_values.keys())
             .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
+            .chain(
+                state
+                    .heap_values
+                    .keys()
+                    .copied()
+                    .filter(|v| !state.facts.contains_key(v)),
+            )
             .collect();
         for value in all_values {
             if body.parameters.contains(&value) {
@@ -713,11 +744,30 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                 || Operation::get_op::<crate::collections::ArrayTruncateOp>(original, ctx).is_some()
                 || Operation::get_op::<crate::optional::IsUndefinedOp>(original, ctx).is_some()
                 || Operation::get_op::<crate::optional::IsNullOp>(original, ctx).is_some()
-                || Operation::get_op::<crate::optional::UnwrapOp>(original, ctx).is_some()
-                || Operation::get_op::<crate::optional::ToNumberOp>(original, ctx).is_some()
-                || Operation::get_op::<crate::optional::OptionalCastOp>(original, ctx).is_some()
             {
                 expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+            } else if Operation::get_op::<crate::optional::UnwrapOp>(original, ctx).is_some()
+                || Operation::get_op::<crate::optional::ToNumberOp>(original, ctx).is_some()
+            {
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                let orig_arg_ty = original.deref(ctx).get_operand(0).get_type(ctx);
+                if let Some(absence) = crate::optional::absence(ctx, orig_arg_ty) {
+                    expected[0] = crate::types::OptionalType::get_with(ctx, res_ty, absence).into();
+                } else {
+                    expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+                }
+            } else if Operation::get_op::<crate::optional::OptionalCastOp>(original, ctx).is_some()
+            {
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                let orig_arg_ty = original.deref(ctx).get_operand(0).get_type(ctx);
+                if let (Some(inner), Some(absence)) = (
+                    crate::optional::optional_value(ctx, res_ty),
+                    crate::optional::absence(ctx, orig_arg_ty),
+                ) {
+                    expected[0] = crate::types::OptionalType::get_with(ctx, inner, absence).into();
+                } else {
+                    expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+                }
             } else if let Some(fs) = Operation::get_op::<crate::heap::FieldSetOp>(original, ctx) {
                 let base_ty = op.deref(ctx).get_operand(0).get_type(ctx);
                 expected[0] = base_ty;
@@ -771,7 +821,20 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                     expected[0] = inner_ty;
                 }
             } else if Operation::get_op::<BinaryOp>(original, ctx).is_some() {
-                expected.fill(op.deref(ctx).get_result(0).get_type(ctx));
+                let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+                expected.fill(res_ty);
+                if res_ty.deref(ctx).is::<crate::types::NumericType>()
+                    && let Some(cloned_bin) = Operation::get_op::<BinaryOp>(op, ctx)
+                    && matches!(
+                        cloned_bin.kind(ctx),
+                        crate::attrs::BinaryKind::Add
+                            | crate::attrs::BinaryKind::Sub
+                            | crate::attrs::BinaryKind::Mul
+                    )
+                {
+                    let orig_res = original.deref(ctx).get_result(0);
+                    cloned_bin.set_unconstrained(ctx, !state.is_constrained(orig_res));
+                }
             } else if Operation::get_op::<CompareOp>(original, ctx).is_some() {
                 let inputs = [
                     original.deref(ctx).get_operand(0),
@@ -845,6 +908,40 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> usize {
                             rewriter.insert_operation(ctx, nul.get_operation());
                             Operation::replace_operand(op, ctx, index, nul.get_result(ctx));
                             continue;
+                        }
+                    }
+                    let mut value = value;
+                    if ty.deref(ctx).is::<crate::types::NumericType>()
+                        && let Some(&child) = state.calls.get(&original)
+                        && let Some(val_int) = Integer::from_type(ctx, value.get_type(ctx))
+                        && analysis.bodies[&analysis.keys[child].function]
+                            .parameters
+                            .get(index)
+                            .is_some_and(|&p| analysis.states[child].is_constrained(p))
+                        && let Some(orig_res) = result
+                    {
+                        let widened_int = if !state.is_constrained(orig_res) {
+                            val_int.unconstrained()
+                        } else if let Some(req_int) = state
+                            .required
+                            .get(&orig_res)
+                            .copied()
+                            .or_else(|| state.representation(orig_res))
+                        {
+                            let common = val_int.common(req_int);
+                            if val_int.signed && !common.signed {
+                                val_int.unconstrained()
+                            } else {
+                                common
+                            }
+                        } else {
+                            val_int
+                        };
+                        if widened_int != val_int {
+                            let mid_ty = widened_int.ty(ctx);
+                            let mid_cast = NumericCastOp::new(ctx, value, mid_ty);
+                            rewriter.insert_operation(ctx, mid_cast.get_operation());
+                            value = mid_cast.get_result(ctx);
                         }
                     }
                     let cast = NumericCastOp::new(ctx, value, ty);

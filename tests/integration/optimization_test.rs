@@ -725,7 +725,8 @@ export function run(rawId: u64, delta: s64): number {
         compile(
             r#"
 interface Box { raw: string }
-interface NumRec { x: number }
+interface NumRec { x: number; opt?: number }
+interface OuterRec { inner: NumRec; items: number[] }
 function fwd(v: number): number { return v; }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
 function radix(flag: number): number { return flag > 0 ? 10 : 16; }
@@ -744,12 +745,37 @@ export function run(flag: number): number {
     const box = JSON.parse<Box>(flag > 0 ? '{"raw":"9007199254740993"}' : '{"raw":"7"}');
     const runtimeJson = JSON.stringify(parseInt(box.raw)) === "9007199254740993";
     const nonJsWs = Number.isNaN(parseInt("\u008510"));
-    const rec: NumRec = { x: parseInt(s) };
-    const numRecord = JSON.stringify(rec.x + 1) === "9007199254740994";
+    const recOmitted: NumRec = { x: parseInt(s) };
+    const rec: NumRec = { x: parseInt(s), opt: flag > 0 ? parseInt(s) : undefined };
+    const numRecord =
+        JSON.stringify(rec.x + 1) === "9007199254740994" &&
+        JSON.stringify(recOmitted) === '{"x":9007199254740993}' &&
+        JSON.stringify(rec) === '{"opt":9007199254740993,"x":9007199254740993}';
+    const outer: OuterRec = { inner: { x: parseInt(s) }, items: [parseInt(s)] };
+    const nestedRecord =
+        JSON.stringify(outer.inner.x + 1) === "9007199254740994" &&
+        JSON.stringify(outer.items[0] + 1) === "9007199254740994" &&
+        JSON.stringify(outer) === '{"inner":{"x":9007199254740993},"items":[9007199254740993]}';
+    const recArr: NumRec[] = [{ x: parseInt(s) }];
+    const arrayRecord =
+        JSON.stringify(recArr[0].x + 1) === "9007199254740994" &&
+        JSON.stringify(recArr) === '[{"x":9007199254740993}]';
     const arr = [parseInt(s)];
-    const numArray = JSON.stringify(arr[0] + 1) === "9007199254740994";
+    const pushed: number[] = [];
+    pushed.push(parseInt(s));
+    const setArr = [0];
+    setArr[0] = parseInt(s);
+    const mixedArr = [1, parseInt(s)];
+    const numArray =
+        JSON.stringify(arr[0] + 1) === "9007199254740994" &&
+        JSON.stringify(arr) === "[9007199254740993]" &&
+        JSON.stringify(pushed) === "[9007199254740993]" &&
+        JSON.stringify(setArr) === "[9007199254740993]" &&
+        JSON.stringify(mixedArr) === "[1,9007199254740993]";
     const opt: number | undefined = flag > 0 ? parseInt(s) : undefined;
-    const numOptional = JSON.stringify(opt === undefined ? 0 : opt + 1) === "9007199254740994";
+    const numOptional =
+        JSON.stringify(opt === undefined ? 0 : opt + 1) === "9007199254740994" &&
+        JSON.stringify(opt) === "9007199254740993";
     const br = flag > 0 ? parseInt(s) : 1;
     const numBranch = JSON.stringify(br + 1) === "9007199254740994";
     const numRem = (parseInt(s) % 10) === 3;
@@ -757,7 +783,7 @@ export function run(flag: number): number {
         JSON.stringify(Math.trunc(parseInt(s)) + 1) === "9007199254740994" &&
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
-    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && numArray && numOptional && numBranch && numRem && numMath ? 1 : 0;
+    return eq && mul && cmp && helper && overflow && radixWrap && runtimeText && runtimeRadix && runtimeJson && nonJsWs && numRecord && nestedRecord && arrayRecord && numArray && numOptional && numBranch && numRem && numMath ? 1 : 0;
 }
 "#,
             "func(flag:s32)->s32",
@@ -773,18 +799,41 @@ export function run(flag: number): number {
 
 #[test]
 fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
-    for (case_name, helper) in [
+    for (case_name, helper, run_sig, call_args, expected_val) in [
         (
             "inline_compare",
             "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }",
+            "func(a:u8,b:u8)->u8",
+            (250, 10),
+            Some(252),
+        ),
+        (
+            "mixed_width_wrap",
+            "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
+            "func(a:u8,b:u16)->u8",
+            (250, 0),
+            Some(12),
+        ),
+        (
+            "mixed_width_widen_return",
+            "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
+            "func(a:u8,b:u8)->u16",
+            (250, 0),
+            Some(500),
         ),
         (
             "delegated_compare",
             "function classify(v:number):number { return v > 200 ? v : -v; }\nfunction helper(a:number,b:number):number { const sum = a+b; return classify(sum); }",
+            "func(a:u8,b:u8)->u8",
+            (250, 10),
+            None,
         ),
         (
             "divide_after_add",
             "function helper(a:number,b:number):number { const sum = a+b; return sum / 2; }",
+            "func(a:u8,b:u8)->u8",
+            (250, 10),
+            None,
         ),
     ] {
         let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
@@ -802,24 +851,29 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
                 extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
             }
         }
-        let mut baseline = None;
+        let mut baseline = expected_val;
+        let mask = if run_sig.ends_with("->u16") {
+            0xffff
+        } else {
+            0xff
+        };
         for (order, source, signature, expect_summary) in [
             (
                 "single",
                 format!("{helper}\n{target}"),
-                "func(a:u8,b:u8)->u8".to_owned(),
+                run_sig.to_owned(),
                 false,
             ),
             (
                 "target_first",
                 format!("{helper}\n{target}\n{others}"),
-                format!("func(a:u8,b:u8)->u8{extra_exports}"),
+                format!("{run_sig}{extra_exports}"),
                 true,
             ),
             (
                 "target_last",
                 format!("{helper}\n{others}\n{target}"),
-                format!("func(a:u8,b:u8)->u8{extra_exports}"),
+                format!("{run_sig}{extra_exports}"),
                 true,
             ),
         ] {
@@ -838,10 +892,16 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
             }
             let mut prog = crate::core_program::Program::from_wasm(compiled.core);
             let actual = prog
-                .call("run", &[wasmtime::Val::I32(250), wasmtime::Val::I32(10)])
+                .call(
+                    "run",
+                    &[
+                        wasmtime::Val::I32(call_args.0),
+                        wasmtime::Val::I32(call_args.1),
+                    ],
+                )
                 .0[0]
                 .unwrap_i32()
-                & 0xff;
+                & mask;
             if let Some(expected) = baseline {
                 assert_eq!(
                     actual, expected,
@@ -850,6 +910,50 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
             } else {
                 baseline = Some(actual);
             }
+        }
+    }
+
+    for arity in [4usize, 6, 8] {
+        let params: Vec<String> = (0..arity).map(|i| format!("p{i}:number")).collect();
+        let sum: Vec<String> = (0..arity).map(|i| format!("p{i}")).collect();
+        let mut source = format!(
+            "function helper({}):number {{ return {}; }}\n",
+            params.join(","),
+            sum.join("+")
+        );
+        let mut wits = Vec::new();
+        for mask in 0..(1usize << arity) {
+            let call_args: Vec<String> = (0..arity).map(|i| format!("p{i}")).collect();
+            let wit_args: Vec<String> = (0..arity)
+                .map(|i| {
+                    let ty = if (mask >> i) & 1 == 1 { "u8" } else { "f64" };
+                    format!("p{i}:{ty}")
+                })
+                .collect();
+            let name = if mask == 0 {
+                "run".to_owned()
+            } else {
+                format!("m{mask}")
+            };
+            source += &format!(
+                "export function {name}({}):number {{ return helper({}); }}\n",
+                params.join(","),
+                call_args.join(",")
+            );
+            let sig = format!("func({})->f64", wit_args.join(","));
+            if mask == 0 {
+                wits.push(sig);
+            } else {
+                wits.push(format!("export {name}: {sig}"));
+            }
+        }
+        let compiled = compile(&source, &wits.join("; "))?;
+        if arity >= 6 {
+            assert!(
+                !compiled.allocation_report.contains("summarized_contexts=0"),
+                "expected summary context for arity={arity}: {}",
+                compiled.allocation_report
+            );
         }
     }
     Ok(())
@@ -939,6 +1043,9 @@ export function run(): number {
     for (const v of setIter) {
         liveSetTotal = liveSetTotal + v;
     }
+    for (const v of setIter) {
+        liveSetTotal = liveSetTotal + v;
+    }
 
     const liveSetK = new Set<number>([1, 2]);
     const setKeyIter = liveSetK.keys();
@@ -966,6 +1073,9 @@ export function run(): number {
     for (const v of mapValIter) {
         liveMapValTotal = liveMapValTotal + v;
     }
+    for (const v of mapValIter) {
+        liveMapValTotal = liveMapValTotal + v;
+    }
 
     const liveMapK = new Map<number, number>([[1, 10], [2, 20]]);
     const mapKeyIter = liveMapK.keys();
@@ -984,6 +1094,31 @@ export function run(): number {
     for (const [k, v] of mapEntIter) {
         liveMapEntTotal = liveMapEntTotal + k + v;
     }
+
+    const resumeSet = new Set<number>([1, 2, 3]);
+    const resumeIter = resumeSet.values();
+    let resumeTotal = 0;
+    for (const v of resumeIter) {
+        resumeTotal = resumeTotal + v;
+        break;
+    }
+    for (const v of resumeIter) {
+        resumeTotal = resumeTotal + v;
+    }
+
+    const exhaustedSet = new Set<number>([1, 2]);
+    const exhaustedIter = exhaustedSet.values();
+    let exhaustedTotal = 0;
+    for (const v of exhaustedIter) {
+        exhaustedTotal = exhaustedTotal + v;
+    }
+    exhaustedSet.add(6);
+    for (const v of exhaustedIter) {
+        exhaustedTotal = exhaustedTotal + v;
+    }
+
+    const idSet = new Set<number>([1]);
+    const iterIdentity = (idSet.values() as unknown) !== (idSet.values() as unknown);
 
     const spreadSet = [...new Set([4, 5])];
     const spreadOk = spreadSet.length === 2 && spreadSet[0] + spreadSet[1] === 9;
@@ -1005,6 +1140,9 @@ export function run(): number {
         liveMapValTotal === 50 &&
         liveMapKeyTotal === 5 &&
         liveMapEntTotal === 55 &&
+        resumeTotal === 6 &&
+        exhaustedTotal === 3 &&
+        iterIdentity &&
         spreadOk &&
         nulHygiene
         ? 1

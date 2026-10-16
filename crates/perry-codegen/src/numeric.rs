@@ -5,7 +5,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, bail};
-use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, UNDEFINED, UNSIGNED};
+use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, UNDEFINED, UNSIGNED};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, NumericConstant},
     types::NumericType,
@@ -200,7 +200,8 @@ impl FunctionLowering<'_, '_> {
         if source == target {
             return Ok(value);
         }
-        if crate::values::is_numeric_type(ctx, target) && crate::values::is_numeric_type(ctx, source)
+        if crate::values::is_numeric_type(ctx, target)
+            && crate::values::is_numeric_type(ctx, source)
         {
             return Ok(value);
         }
@@ -227,21 +228,24 @@ impl FunctionLowering<'_, '_> {
                 return Ok(Carriers::Numeric { tag, payload });
             }
             let (tag, payload) = if let Some((bits, signed)) = integer(ctx, source) {
-                let use_signed = signed || bits < 64;
+                let width_idx = match bits {
+                    8 => 0,
+                    16 => 1,
+                    32 => 2,
+                    _ => 3,
+                };
+                let fixed_tag = U8 + width_idx * 2 + i32::from(signed);
                 let wide = IntegerType::get(
                     ctx,
                     64,
-                    if use_signed {
+                    if signed {
                         Signedness::Signed
                     } else {
                         Signedness::Unsigned
                     },
                 )
                 .into();
-                (
-                    if use_signed { SIGNED } else { UNSIGNED },
-                    self.numeric_cast(ctx, value, source, wide)?,
-                )
+                (fixed_tag, self.numeric_cast(ctx, value, source, wide)?)
             } else {
                 (
                     FLOAT,
@@ -262,7 +266,10 @@ impl FunctionLowering<'_, '_> {
                     let is_absent_block = self.new_block(ctx, vec![]);
                     let is_present_block = self.new_block(ctx, vec![]);
                     let undef_tag = self.i32_const(ctx, UNDEFINED);
-                    let absent_cond = self.num(ctx, NumOpcode::I32GeU, vec![tag, undef_tag]);
+                    let omit_tag = self.i32_const(ctx, OMITTED);
+                    let ge_undef = self.num(ctx, NumOpcode::I32GeU, vec![tag, undef_tag]);
+                    let le_omit = self.num(ctx, NumOpcode::I32LeU, vec![tag, omit_tag]);
+                    let absent_cond = self.num(ctx, NumOpcode::I32And, vec![ge_undef, le_omit]);
                     self.cond_br(
                         ctx,
                         absent_cond,
@@ -271,7 +278,6 @@ impl FunctionLowering<'_, '_> {
                     );
                     self.block = is_absent_block;
                     let null_tag = self.i32_const(ctx, NULL);
-                    let omit_tag = self.i32_const(ctx, OMITTED);
                     let is_null = self.num(ctx, NumOpcode::I32Eq, vec![tag, null_tag]);
                     let is_omit = self.num(ctx, NumOpcode::I32Eq, vec![tag, omit_tag]);
                     let undef_val = self.undefined(ctx, target)?;
@@ -283,6 +289,13 @@ impl FunctionLowering<'_, '_> {
                     self.block = is_present_block;
                 }
                 let inner_target = crate::repr::optional_inner(ctx, target).unwrap_or(target);
+                let float_tag = self.i32_const(ctx, FLOAT);
+                let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                let one = self.i32_const(ctx, 1);
+                let two = self.i32_const(ctx, 2);
+                let parity = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
+                let int_tag = self.num(ctx, NumOpcode::I32Sub, vec![two, parity]);
+                let norm_tag = self.select(ctx, is_float, float_tag, int_tag);
                 let floats = self.new_block(ctx, vec![]);
                 let signed = self.new_block(ctx, vec![]);
                 let unsigned = if inner_target.deref(ctx).is::<FP64Type>() {
@@ -291,7 +304,7 @@ impl FunctionLowering<'_, '_> {
                     signed
                 };
                 let invalid = self.new_block(ctx, vec![]);
-                self.br_table(ctx, tag, vec![floats, signed, unsigned], invalid);
+                self.br_table(ctx, norm_tag, vec![floats, signed, unsigned], invalid);
                 self.block = invalid;
                 let trap = UnreachableOp::new(ctx).get_operation();
                 self.insert(ctx, trap);
@@ -361,10 +374,13 @@ impl FunctionLowering<'_, '_> {
             let floating = self.num(ctx, NumOpcode::I32Or, vec![lf, rf]);
             self.cond_br(ctx, floating, (floats, vec![]), (integers, vec![]));
             self.block = integers;
-            let unsigned = self.i32_const(ctx, UNSIGNED);
-            let lu = self.num(ctx, NumOpcode::I32Eq, vec![lt, unsigned]);
-            let ru = self.num(ctx, NumOpcode::I32Eq, vec![rt, unsigned]);
+            let one = self.i32_const(ctx, 1);
+            let l_odd = self.num(ctx, NumOpcode::I32And, vec![lt, one]);
+            let r_odd = self.num(ctx, NumOpcode::I32And, vec![rt, one]);
+            let lu = self.num(ctx, NumOpcode::I32Eqz, vec![l_odd]);
+            let ru = self.num(ctx, NumOpcode::I32Eqz, vec![r_odd]);
             let is_unsigned = self.num(ctx, NumOpcode::I32Or, vec![lu, ru]);
+            let unsigned = self.i32_const(ctx, UNSIGNED);
             let signed = self.i32_const(ctx, SIGNED);
             let tag = self.select(ctx, is_unsigned, unsigned, signed);
             if kind == BinaryKind::Rem {
@@ -378,15 +394,25 @@ impl FunctionLowering<'_, '_> {
                 self.block = nonzero;
                 let unsigned_block = self.new_block(ctx, vec![]);
                 let signed_block = self.new_block(ctx, vec![]);
+                let both_unsigned = self.num(ctx, NumOpcode::I32And, vec![lu, ru]);
                 self.cond_br(
                     ctx,
-                    is_unsigned,
+                    both_unsigned,
                     (unsigned_block, vec![]),
                     (signed_block, vec![]),
                 );
                 self.block = unsigned_block;
                 let value = self.num(ctx, NumOpcode::I64RemU, vec![lp, rp]);
-                self.br(ctx, done, vec![unsigned, value]);
+                let u8_tag = self.i32_const(ctx, U8);
+                let l_fixed = self.num(ctx, NumOpcode::I32GeU, vec![lt, u8_tag]);
+                let r_fixed = self.num(ctx, NumOpcode::I32GeU, vec![rt, u8_tag]);
+                let any_fixed = self.num(ctx, NumOpcode::I32Or, vec![l_fixed, r_fixed]);
+                let max_t = {
+                    let gt = self.num(ctx, NumOpcode::I32GtU, vec![lt, rt]);
+                    self.select(ctx, gt, lt, rt)
+                };
+                let rem_u_tag = self.select(ctx, any_fixed, max_t, unsigned);
+                self.br(ctx, done, vec![rem_u_tag, value]);
                 self.block = signed_block;
                 let value = self.num(ctx, NumOpcode::I64RemS, vec![lp, rp]);
                 let empty = self.num(ctx, NumOpcode::I64Eqz, vec![value]);
@@ -400,8 +426,57 @@ impl FunctionLowering<'_, '_> {
                 self.br(ctx, done, vec![tag, value]);
             } else {
                 let integer_type = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-                let value = self.scalar_binary(ctx, kind, integer_type, vec![lp, rp], None)?;
-                let (tag, value) = if kind == BinaryKind::Mul {
+                let raw_value = self.scalar_binary(ctx, kind, integer_type, vec![lp, rp], None)?;
+                let u8_tag = self.i32_const(ctx, U8);
+                let l_fixed = self.num(ctx, NumOpcode::I32GeU, vec![lt, u8_tag]);
+                let r_fixed = self.num(ctx, NumOpcode::I32GeU, vec![rt, u8_tag]);
+                let any_fixed = self.num(ctx, NumOpcode::I32Or, vec![l_fixed, r_fixed]);
+                let both_fixed = self.num(ctx, NumOpcode::I32And, vec![l_fixed, r_fixed]);
+
+                let lw_raw = self.num(ctx, NumOpcode::I32Sub, vec![lt, u8_tag]);
+                let lw = self.num(ctx, NumOpcode::I32ShrU, vec![lw_raw, one]);
+                let rw_raw = self.num(ctx, NumOpcode::I32Sub, vec![rt, u8_tag]);
+                let rw = self.num(ctx, NumOpcode::I32ShrU, vec![rw_raw, one]);
+
+                let l_gt_r = self.num(ctx, NumOpcode::I32GtU, vec![lw, rw]);
+                let max_w = self.select(ctx, l_gt_r, lw, rw);
+                let same_s = self.num(ctx, NumOpcode::I32Eq, vec![l_odd, r_odd]);
+                let uw = self.select(ctx, l_odd, rw, lw);
+                let sw = self.select(ctx, l_odd, lw, rw);
+                let s_gt_u = self.num(ctx, NumOpcode::I32GtU, vec![sw, uw]);
+                let three = self.i32_const(ctx, 3);
+                let uw_lt_3 = self.num(ctx, NumOpcode::I32LtU, vec![uw, three]);
+                let uw_plus_1 = self.num(ctx, NumOpcode::I32Add, vec![uw, one]);
+                let widened_uw = self.select(ctx, uw_lt_3, uw_plus_1, three);
+                let mixed_w = self.select(ctx, s_gt_u, sw, widened_uw);
+                let both_w = self.select(ctx, same_s, max_w, mixed_w);
+                let both_s = self.select(ctx, same_s, l_odd, uw_lt_3);
+
+                let single_w = self.select(ctx, l_fixed, lw, rw);
+                let single_s = self.select(ctx, l_fixed, l_odd, r_odd);
+                let unconstrained = Operation::get_op::<perry_mir::scalar::BinaryOp>(op, ctx)
+                    .is_some_and(|b| b.is_unconstrained(ctx));
+                let w = if unconstrained {
+                    three
+                } else {
+                    self.select(ctx, both_fixed, both_w, single_w)
+                };
+                let s = self.select(ctx, both_fixed, both_s, single_s);
+
+                let eight = self.i32_const(ctx, 8);
+                let bits = self.num(ctx, NumOpcode::I32Shl, vec![eight, w]);
+                let sixty_four = self.i32_const(ctx, 64);
+                let shift32 = self.num(ctx, NumOpcode::I32Sub, vec![sixty_four, bits]);
+                let shift64 = self.num(ctx, NumOpcode::I64ExtendI32U, vec![shift32]);
+                let shifted = self.num(ctx, NumOpcode::I64Shl, vec![raw_value, shift64]);
+                let wrapped_s = self.num(ctx, NumOpcode::I64ShrS, vec![shifted, shift64]);
+                let wrapped_u = self.num(ctx, NumOpcode::I64ShrU, vec![shifted, shift64]);
+                let wrapped_value = self.select(ctx, s, wrapped_s, wrapped_u);
+                let w2 = self.num(ctx, NumOpcode::I32Shl, vec![w, one]);
+                let fixed_tag_base = self.num(ctx, NumOpcode::I32Add, vec![u8_tag, w2]);
+                let fixed_tag = self.num(ctx, NumOpcode::I32Add, vec![fixed_tag_base, s]);
+
+                let (unfixed_tag, unfixed_value) = if kind == BinaryKind::Mul {
                     let left_zero = self.num(ctx, NumOpcode::I64Eqz, vec![lp]);
                     let right_zero = self.num(ctx, NumOpcode::I64Eqz, vec![rp]);
                     let zero = self.num(ctx, NumOpcode::I32Or, vec![left_zero, right_zero]);
@@ -416,12 +491,14 @@ impl FunctionLowering<'_, '_> {
                     let bits = self.i64_const(ctx, (-0.0f64).to_bits());
                     (
                         self.select(ctx, negative_zero, float, tag),
-                        self.select(ctx, negative_zero, bits, value),
+                        self.select(ctx, negative_zero, bits, raw_value),
                     )
                 } else {
-                    (tag, value)
+                    (tag, raw_value)
                 };
-                self.br(ctx, done, vec![tag, value]);
+                let final_tag = self.select(ctx, any_fixed, fixed_tag, unfixed_tag);
+                let final_value = self.select(ctx, any_fixed, wrapped_value, unfixed_value);
+                self.br(ctx, done, vec![final_tag, final_value]);
             }
         }
         self.block = floats;
@@ -587,8 +664,13 @@ impl FunctionLowering<'_, '_> {
         let done = self.new_block(ctx, vec![i32]);
         if crate::repr::optional_inner(ctx, left.get_type(ctx)).is_some() {
             let undef_tag = self.i32_const(ctx, UNDEFINED);
-            let a_absent = self.num(ctx, NumOpcode::I32GeU, vec![at, undef_tag]);
-            let b_absent = self.num(ctx, NumOpcode::I32GeU, vec![bt, undef_tag]);
+            let omit_tag = self.i32_const(ctx, OMITTED);
+            let a_ge = self.num(ctx, NumOpcode::I32GeU, vec![at, undef_tag]);
+            let a_le = self.num(ctx, NumOpcode::I32LeU, vec![at, omit_tag]);
+            let a_absent = self.num(ctx, NumOpcode::I32And, vec![a_ge, a_le]);
+            let b_ge = self.num(ctx, NumOpcode::I32GeU, vec![bt, undef_tag]);
+            let b_le = self.num(ctx, NumOpcode::I32LeU, vec![bt, omit_tag]);
+            let b_absent = self.num(ctx, NumOpcode::I32And, vec![b_ge, b_le]);
             let either_absent = self.num(ctx, NumOpcode::I32Or, vec![a_absent, b_absent]);
             let absent_block = self.new_block(ctx, vec![]);
             let present_block = self.new_block(ctx, vec![]);
@@ -599,7 +681,6 @@ impl FunctionLowering<'_, '_> {
                 (present_block, vec![]),
             );
             self.block = absent_block;
-            let omit_tag = self.i32_const(ctx, OMITTED);
             let a_omit = self.num(ctx, NumOpcode::I32Eq, vec![at, omit_tag]);
             let b_omit = self.num(ctx, NumOpcode::I32Eq, vec![bt, omit_tag]);
             let norm_a = self.select(ctx, a_omit, undef_tag, at);
@@ -676,8 +757,8 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn numeric_negative(&mut self, ctx: &mut Context, tag: Value, payload: Value) -> Value {
-        let signed = self.i32_const(ctx, SIGNED);
-        let signed = self.num(ctx, NumOpcode::I32Eq, vec![tag, signed]);
+        let one = self.i32_const(ctx, 1);
+        let signed = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
         let zero = self.i64_const(ctx, 0);
         let negative = self.num(ctx, NumOpcode::I64LtS, vec![payload, zero]);
         self.num(ctx, NumOpcode::I32And, vec![signed, negative])
@@ -774,7 +855,8 @@ impl FunctionLowering<'_, '_> {
                 let float_payload = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![abs_f]);
                 let signed_tag = self.i32_const(ctx, SIGNED);
                 let unsigned_tag = self.i32_const(ctx, UNSIGNED);
-                let is_signed = self.num(ctx, NumOpcode::I32Eq, vec![tag, signed_tag]);
+                let one = self.i32_const(ctx, 1);
+                let is_signed = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
                 let zero = self.i64_const(ctx, 0);
                 let is_neg = self.num(ctx, NumOpcode::I64LtS, vec![payload, zero]);
                 let negate = self.num(ctx, NumOpcode::I32And, vec![is_signed, is_neg]);

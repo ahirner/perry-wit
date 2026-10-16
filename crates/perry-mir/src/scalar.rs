@@ -37,6 +37,8 @@ use thiserror::Error;
 )]
 pub struct BinaryOp;
 
+pliron::dict_key!(UNCONSTRAINED_ARITH, "perry_unconstrained_arith");
+
 impl BinaryOp {
     pub fn new(ctx: &mut Context, kind: BinaryKind, lhs: Value, rhs: Value) -> Self {
         let ty = lhs.get_type(ctx);
@@ -56,6 +58,29 @@ impl BinaryOp {
 
     pub fn kind(&self, ctx: &Context) -> BinaryKind {
         *self.get_attr_perry_binary_kind(ctx).expect("binary kind")
+    }
+
+    pub fn set_unconstrained(&self, ctx: &mut Context, unconstrained: bool) {
+        if unconstrained {
+            self.get_operation().deref_mut(ctx).attributes.set(
+                UNCONSTRAINED_ARITH.clone(),
+                pliron::builtin::attributes::UnitAttr::new(),
+            );
+        } else {
+            self.get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .0
+                .remove(&UNCONSTRAINED_ARITH);
+        }
+    }
+
+    pub fn is_unconstrained(&self, ctx: &Context) -> bool {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .0
+            .contains_key(&UNCONSTRAINED_ARITH)
     }
 }
 

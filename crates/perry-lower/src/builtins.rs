@@ -24,7 +24,10 @@ impl<'s> FunctionBuilder<'s> {
         if method == streams::ITERATION {
             ensure!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
-                    || crate::collections::is_collection_or_view_record(ctx, receiver.get_type(ctx)),
+                    || crate::collections::is_collection_or_view_record(
+                        ctx,
+                        receiver.get_type(ctx)
+                    ),
                 "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
             );
             return Ok(Some(receiver));

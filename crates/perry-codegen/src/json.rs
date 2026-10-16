@@ -107,10 +107,16 @@ impl FunctionLowering<'_, '_> {
         let words = if let Some(fields) = record_fields {
             let mut words = Vec::with_capacity(2 + 3 * count);
             words.extend([RECORD, count as u32]);
-            for (index, (name, field)) in fields.iter().enumerate() {
+            let mut field_offset = record::HEADER;
+            for (name, field_ty) in fields.iter() {
                 let name = self.state.data.string(name);
-                let field = self.native_descriptor(ctx, *field)?;
-                words.extend([name, field, record::field(index)]);
+                let field = self.native_descriptor(ctx, *field_ty)?;
+                words.extend([name, field, field_offset]);
+                field_offset += if crate::values::is_numeric_type(ctx, *field_ty) {
+                    record::NUMERIC_SLOT
+                } else {
+                    record::SLOT
+                };
             }
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
@@ -169,13 +175,36 @@ impl FunctionLowering<'_, '_> {
         ty: TypeHandle,
     ) -> Result<()> {
         let value = value.into();
+        if let Some(inner) = optional_inner(ctx, ty) {
+            // Inside arrays, `undefined` is written as `null`.
+            let undefined = self.is_absent_value(ctx, value, ty)?;
+            let null = self.new_block(ctx, vec![]);
+            let defined = self.new_block(ctx, vec![]);
+            let join = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, undefined, (null, vec![]), (defined, vec![]));
+            self.block = null;
+            self.json_raw(ctx, writer, "null");
+            self.br(ctx, join, vec![]);
+            self.block = defined;
+            self.json_value(ctx, writer, value, inner)?;
+            self.br(ctx, join, vec![]);
+            self.block = join;
+            return Ok(());
+        }
         if let crate::repr::Carriers::Numeric { tag, payload } = value {
+            let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
+            let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+            let one = self.i32_const(ctx, 1);
+            let two = self.i32_const(ctx, 2);
+            let parity = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
+            let int_tag = self.num(ctx, NumOpcode::I32Sub, vec![two, parity]);
+            let norm_tag = self.select(ctx, is_float, float_tag, int_tag);
             let floats = self.new_block(ctx, vec![]);
             let signed = self.new_block(ctx, vec![]);
             let unsigned = self.new_block(ctx, vec![]);
             let invalid = self.new_block(ctx, vec![]);
             let done = self.new_block(ctx, vec![]);
-            self.br_table(ctx, tag, vec![floats, signed, unsigned], invalid);
+            self.br_table(ctx, norm_tag, vec![floats, signed, unsigned], invalid);
 
             self.block = invalid;
             let op = pliron_wasm::control::UnreachableOp::new(ctx).get_operation();
@@ -198,22 +227,6 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         let value = value.scalar()?;
-        if let Some(inner) = optional_inner(ctx, ty) {
-            // Inside arrays, `undefined` is written as `null`.
-            let undefined = self.is_absent(ctx, value, ty)?;
-            let null = self.new_block(ctx, vec![]);
-            let defined = self.new_block(ctx, vec![]);
-            let join = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, undefined, (null, vec![]), (defined, vec![]));
-            self.block = null;
-            self.json_raw(ctx, writer, "null");
-            self.br(ctx, join, vec![]);
-            self.block = defined;
-            self.json_value(ctx, writer, value, inner)?;
-            self.br(ctx, join, vec![]);
-            self.block = join;
-            return Ok(());
-        }
         if ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
             return self.json_number_string(ctx, writer, value);
         }
@@ -370,17 +383,21 @@ impl FunctionLowering<'_, '_> {
         } else if let Some((tuple_ty, _k_ty, v_ty)) = dict_entry {
             let kind = slot_kind(ctx, tuple_ty)?;
             let k_kind = slot_kind(ctx, _k_ty)?;
-            let v_kind = slot_kind(ctx, v_ty)?;
             let len = b.load(ctx, MemKind::I32, value, array::LEN);
             let data = b.load(ctx, MemKind::I32, value, array::DATA);
+            let val_offset = if crate::values::is_numeric_type(ctx, _k_ty) {
+                record::HEADER + record::NUMERIC_SLOT
+            } else {
+                record::field(1)
+            };
             b.counted_loop(ctx, len, |b, ctx, i| {
-                let slot = b.slot_address(ctx, data, i);
+                let slot = b.slot_address(ctx, data, i, tuple_ty);
                 let item = b.load(ctx, kind, slot, 0);
                 let key = b.load(ctx, k_kind, item, record::field(0));
-                let val = b.load(ctx, v_kind, item, record::field(1));
+                let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
                 let present = match optional_inner(ctx, v_ty) {
                     Some(_) => {
-                        let undefined = b.absence_test(ctx, val, v_ty, false)?;
+                        let undefined = b.absence_test_value(ctx, val, v_ty, false)?;
                         Some(b.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
                     }
                     None => None,
@@ -407,13 +424,12 @@ impl FunctionLowering<'_, '_> {
                     .map(|a| a.deref(ctx).element())
                     .map_err(|_| anyhow!("array"))
             })?;
-            let kind = slot_kind(ctx, element)?;
             let len = b.load(ctx, MemKind::I32, value, array::LEN);
             let data = b.load(ctx, MemKind::I32, value, array::DATA);
             b.counted_loop(ctx, len, |b, ctx, i| {
                 b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
-                let slot = b.slot_address(ctx, data, i);
-                let item = b.load(ctx, kind, slot, 0);
+                let slot = b.slot_address(ctx, data, i, element);
+                let item = b.load_slot_value(ctx, slot, 0, element)?;
                 b.json_value(ctx, writer, item, element)
             })?;
         }
@@ -467,11 +483,16 @@ impl FunctionLowering<'_, '_> {
         value: Value,
         items: &[TypeHandle],
     ) -> Result<()> {
-        for (index, &field_ty) in items.iter().enumerate() {
-            let kind = slot_kind(ctx, field_ty)?;
-            let slot = self.load(ctx, kind, value, record::field(index));
+        let mut offset = record::HEADER;
+        for &field_ty in items.iter() {
+            let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
             self.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
             self.json_value(ctx, writer, slot, field_ty)?;
+            offset += if crate::values::is_numeric_type(ctx, field_ty) {
+                record::NUMERIC_SLOT
+            } else {
+                record::SLOT
+            };
         }
         Ok(())
     }
@@ -485,13 +506,18 @@ impl FunctionLowering<'_, '_> {
         keys: &[String],
         types: &[TypeHandle],
     ) -> Result<()> {
-        for (index, (key, &field_ty)) in keys.iter().zip(types).enumerate() {
-            let kind = slot_kind(ctx, field_ty)?;
-            let slot = self.load(ctx, kind, value, record::field(index));
+        let mut offset = record::HEADER;
+        for (key, &field_ty) in keys.iter().zip(types) {
+            let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
+            offset += if crate::values::is_numeric_type(ctx, field_ty) {
+                record::NUMERIC_SLOT
+            } else {
+                record::SLOT
+            };
             let key = self.state.data.string(&json_key(key));
             let present = match optional_inner(ctx, field_ty) {
                 Some(_) => {
-                    let undefined = self.absence_test(ctx, slot, field_ty, false)?;
+                    let undefined = self.absence_test_value(ctx, slot, field_ty, false)?;
                     Some(self.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
                 }
                 None => None,
@@ -520,11 +546,11 @@ impl FunctionLowering<'_, '_> {
         let json = ty.deref(ctx).is::<JsonType>();
         let text = if json || optional_inner(ctx, ty).is_some() {
             // A top-level `undefined` stringifies to `undefined`.
-            let scalar = value.scalar()?;
             let undefined = if json {
+                let scalar = value.scalar()?;
                 self.num(ctx, NumOpcode::I32Eqz, vec![scalar])
             } else {
-                self.absence_test(ctx, scalar, ty, false)?
+                self.absence_test_value(ctx, value, ty, false)?
             };
             let i32 = i32_type(ctx);
             let write = self.new_block(ctx, vec![]);

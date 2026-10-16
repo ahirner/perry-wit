@@ -202,7 +202,7 @@ impl<'h> Shapes<'h> {
             decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
-            global_ids: if hir.functions.iter().any(|f| f.is_exported) {
+            global_ids: if !hir.functions.is_empty() {
                 hir.init
                     .iter()
                     .filter_map(|s| match s {
@@ -607,9 +607,13 @@ impl<'h> Shapes<'h> {
         view_prefix: &str,
     ) -> Result<TypedHandle<RecordType>> {
         let map_box = self.map_box_from_types(ctx, k_ty, v_ty)?;
+        let cursor_rec = self.cursor_tuple_type(ctx)?;
         self.mir_record_prefix(
             ctx,
-            vec![("_0".to_string(), map_box.into())],
+            vec![
+                ("_0".to_string(), map_box.into()),
+                ("_1".to_string(), cursor_rec.into()),
+            ],
             Some(view_prefix),
         )
     }
@@ -629,7 +633,9 @@ impl<'h> Shapes<'h> {
     ) -> Result<TypeHandle> {
         let k_ty = self.source_type(ctx, k)?;
         let v_ty = self.source_type(ctx, v)?;
-        Ok(self.map_view_from_types(ctx, k_ty, v_ty, view_prefix)?.into())
+        Ok(self
+            .map_view_from_types(ctx, k_ty, v_ty, view_prefix)?
+            .into())
     }
 
     pub(super) fn set_box_from_type(
@@ -664,9 +670,13 @@ impl<'h> Shapes<'h> {
         view_prefix: &str,
     ) -> Result<TypedHandle<RecordType>> {
         let set_box = self.set_box_from_type(ctx, elem_ty)?;
+        let cursor_rec = self.cursor_tuple_type(ctx)?;
         self.mir_record_prefix(
             ctx,
-            vec![("_0".to_string(), set_box.into())],
+            vec![
+                ("_0".to_string(), set_box.into()),
+                ("_1".to_string(), cursor_rec.into()),
+            ],
             Some(view_prefix),
         )
     }

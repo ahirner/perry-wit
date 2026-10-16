@@ -59,6 +59,29 @@ impl<'s> FunctionBuilder<'s> {
         }))
     }
 
+    pub(super) fn alloc_collection_view(
+        &mut self,
+        ctx: &mut Context,
+        box_val: Value,
+        view_prefix: &str,
+    ) -> Result<Value> {
+        let cursors_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
+        let cursors = self.append_value(ctx, &cursors_op);
+        let zero = self.number(ctx, 0.0);
+        let cursor = self.push_collection_cursor(ctx, cursors, zero)?;
+        let view_rec = self.shapes.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), box_val.get_type(ctx)),
+                ("_1".to_string(), cursor.get_type(ctx)),
+            ],
+            Some(view_prefix),
+        )?;
+        Ok(self.emit_value(ctx, |ctx| {
+            AllocOp::new(ctx, view_rec, vec![box_val, cursor])
+        }))
+    }
+
     pub(crate) fn collection_underlying_box(
         &mut self,
         ctx: &mut Context,
@@ -119,13 +142,28 @@ impl<'s> FunctionBuilder<'s> {
         let entry = self.element_at(ctx, entries, idx)?;
         if let Some((view_kind, _)) = collection_view_record(ctx, ty) {
             return match view_kind {
-                CollectionViewKind::MapKeys => {
+                CollectionViewKind::MapKeys | CollectionViewKind::SetValues => {
                     let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
                     Ok(self.append_value(ctx, &op))
                 }
                 CollectionViewKind::MapValues => {
                     let op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
                     Ok(self.append_value(ctx, &op))
+                }
+                CollectionViewKind::MapEntries => {
+                    let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                    let k = self.append_value(ctx, &k_op);
+                    let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+                    let v = self.append_value(ctx, &v_op);
+                    let tuple_rec = self.shapes.mir_record_prefix(
+                        ctx,
+                        vec![
+                            ("_0".to_string(), k.get_type(ctx)),
+                            ("_1".to_string(), v.get_type(ctx)),
+                        ],
+                        Some("tuple"),
+                    )?;
+                    Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v])))
                 }
                 CollectionViewKind::SetEntries => {
                     let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
@@ -195,6 +233,21 @@ impl<'s> FunctionBuilder<'s> {
                         map_entry_types(ctx, inner_box).context("expected Map inside MapValues")?;
                     Ok(v_ty)
                 }
+                CollectionViewKind::MapEntries => {
+                    let (k_ty, v_ty, _) = map_entry_types(ctx, inner_box)
+                        .context("expected Map inside MapEntries")?;
+                    let tuple_rec = self.shapes.mir_record_prefix(
+                        ctx,
+                        vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+                        Some("tuple"),
+                    )?;
+                    Ok(tuple_rec.into())
+                }
+                CollectionViewKind::SetValues => {
+                    let (elem_ty, _) =
+                        set_entry_type(ctx, inner_box).context("expected Set inside SetValues")?;
+                    Ok(elem_ty)
+                }
                 CollectionViewKind::SetEntries => {
                     let (elem_ty, _) =
                         set_entry_type(ctx, inner_box).context("expected Set inside SetEntries")?;
@@ -244,14 +297,30 @@ impl<'s> FunctionBuilder<'s> {
         Ok(cursor)
     }
 
-    pub(crate) fn pop_collection_cursor(&mut self, ctx: &mut Context, cursors: Value) -> Result<()> {
+    pub(crate) fn remove_collection_cursor(
+        &mut self,
+        ctx: &mut Context,
+        cursors: Value,
+        target: Value,
+    ) -> Result<()> {
         let len = self.array_length(ctx, cursors);
+        let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
-        let new_len_f64 = self.binary(ctx, BinaryKind::Sub, len, one);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let new_len = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, new_len_f64, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, cursors, new_len));
-        Ok(())
+        self.index_loop(ctx, "remove_cursor", zero, len, |b, ctx, ci, next, done| {
+            let c = b.element_at(ctx, cursors, ci)?;
+            let matched = b.compare(ctx, CompareKind::Eq, c, target);
+            let hit = b.new_block(ctx, "remove_cursor_hit");
+            b.branch(ctx, matched, hit, next);
+            b.switch_to(hit);
+            let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
+            let last_elem = b.element_at(ctx, cursors, last_idx)?;
+            b.emit(ctx, |ctx| ArraySetOp::new(ctx, cursors, ci, last_elem));
+            let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
+            b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, cursors, new_len));
+            b.jump(ctx, done);
+            Ok(())
+        })
     }
 
     fn zero_value_for_type(&mut self, ctx: &mut Context, ty: TypeHandle) -> Option<Value> {
@@ -291,7 +360,7 @@ impl<'s> FunctionBuilder<'s> {
 
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
-        let neg_one = self.number(ctx, -1.0);
+        let inf = self.number(ctx, f64::INFINITY);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
 
         let is_empty = self.compare(ctx, CompareKind::Eq, live, zero);
@@ -306,11 +375,24 @@ impl<'s> FunctionBuilder<'s> {
         let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
         let c_len = self.array_length(ctx, cursors);
-        self.index_loop(ctx, "reclaim_reset_cursors", zero, c_len, |b, ctx, ci, _, _| {
-            let c = b.element_at(ctx, cursors, ci)?;
-            b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), neg_one));
-            Ok(())
-        })?;
+        self.index_loop(
+            ctx,
+            "reclaim_reset_cursors",
+            zero,
+            c_len,
+            |b, ctx, ci, c_next, _| {
+                let c = b.element_at(ctx, cursors, ci)?;
+                let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+                let c_idx = b.append_value(ctx, &c_op);
+                let active = b.compare(ctx, CompareKind::Lt, c_idx, inf);
+                let rst_bb = b.new_block(ctx, "reclaim_rst_hit");
+                b.branch(ctx, active, rst_bb, c_next);
+                b.switch_to(rst_bb);
+                b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), zero));
+                b.jump(ctx, c_next);
+                Ok(())
+            },
+        )?;
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
@@ -351,19 +433,29 @@ impl<'s> FunctionBuilder<'s> {
             b.switch_to(dead_branch);
             let cur_w = b.load(ctx, write_slot)?;
             let cur_len = b.array_length(ctx, cursors);
-            b.index_loop(ctx, "reclaim_adj_cursors", zero, cur_len, |b, ctx, ci, c_next, _| {
-                let c = b.element_at(ctx, cursors, ci)?;
-                let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
-                let c_idx = b.append_value(ctx, &c_op);
-                let ge = b.compare(ctx, CompareKind::Ge, c_idx, cur_w);
-                let adj_bb = b.new_block(ctx, "reclaim_adj_hit");
-                b.branch(ctx, ge, adj_bb, c_next);
-                b.switch_to(adj_bb);
-                let dec = b.binary(ctx, BinaryKind::Sub, c_idx, one);
-                b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), dec));
-                b.jump(ctx, c_next);
-                Ok(())
-            })?;
+            b.index_loop(
+                ctx,
+                "reclaim_adj_cursors",
+                zero,
+                cur_len,
+                |b, ctx, ci, c_next, _| {
+                    let c = b.element_at(ctx, cursors, ci)?;
+                    let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+                    let c_idx = b.append_value(ctx, &c_op);
+                    let gt = b.compare(ctx, CompareKind::Gt, c_idx, cur_w);
+                    let active = b.compare(ctx, CompareKind::Lt, c_idx, inf);
+                    let bool_ty = gt.get_type(ctx);
+                    let should_adj =
+                        b.choose(ctx, bool_ty, gt, |_, _| Ok(active), |_, _| Ok(gt))?;
+                    let adj_bb = b.new_block(ctx, "reclaim_adj_hit");
+                    b.branch(ctx, should_adj, adj_bb, c_next);
+                    b.switch_to(adj_bb);
+                    let dec = b.binary(ctx, BinaryKind::Sub, c_idx, one);
+                    b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), dec));
+                    b.jump(ctx, c_next);
+                    Ok(())
+                },
+            )?;
             b.jump(ctx, next);
             Ok(())
         })?;
@@ -687,7 +779,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(box_val) = self.collection_underlying_box(ctx, coll)? {
             let entries = self.collection_entries_array(ctx, box_val)?;
             let zero = self.number(ctx, 0.0);
-            let neg_one = self.number(ctx, -1.0);
+            let inf = self.number(ctx, f64::INFINITY);
             let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
             let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
             self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
@@ -696,11 +788,24 @@ impl<'s> FunctionBuilder<'s> {
             });
             if let Some(cursors) = self.collection_cursors_array(ctx, box_val)? {
                 let c_len = self.array_length(ctx, cursors);
-                self.index_loop(ctx, "clear_cursors", zero, c_len, |b, ctx, ci, _, _| {
-                    let c = b.element_at(ctx, cursors, ci)?;
-                    b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), neg_one));
-                    Ok(())
-                })?;
+                self.index_loop(
+                    ctx,
+                    "clear_cursors",
+                    zero,
+                    c_len,
+                    |b, ctx, ci, c_next, _| {
+                        let c = b.element_at(ctx, cursors, ci)?;
+                        let c_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+                        let c_idx = b.append_value(ctx, &c_op);
+                        let active = b.compare(ctx, CompareKind::Lt, c_idx, inf);
+                        let rst_bb = b.new_block(ctx, "clear_rst_hit");
+                        b.branch(ctx, active, rst_bb, c_next);
+                        b.switch_to(rst_bb);
+                        b.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), zero));
+                        b.jump(ctx, c_next);
+                        Ok(())
+                    },
+                )?;
             }
             let ty = void_type(ctx);
             return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)));
@@ -731,11 +836,21 @@ impl<'s> FunctionBuilder<'s> {
         let entries = self.collection_entries_array(ctx, coll)?;
         let cursors = self.collection_cursors_array(ctx, coll)?;
         let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
         let index = self.entry_slot(ctx, zero.get_type(ctx));
-        self.store(ctx, index, zero);
-        let cursor = match cursors {
-            Some(c_arr) => Some(self.push_collection_cursor(ctx, c_arr, zero)?),
-            None => None,
+        let cursor = if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
+            let c_op = FieldGetOp::new(ctx, coll, "_1".to_string())?;
+            let c = self.append_value(ctx, &c_op);
+            let init_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+            let init_idx = self.append_value(ctx, &init_op);
+            self.store(ctx, index, init_idx);
+            Some((c, true))
+        } else {
+            self.store(ctx, index, zero);
+            match cursors {
+                Some(c_arr) => Some((self.push_collection_cursor(ctx, c_arr, zero)?, false)),
+                None => None,
+            }
         };
         let header = self.new_block(ctx, &format!("{label}_header"));
         let check = self.new_block(ctx, &format!("{label}_check"));
@@ -745,13 +860,16 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, header);
         self.switch_to(header);
         let current = self.load(ctx, index)?;
-        if let Some(c) = cursor {
-            self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), current));
-        }
         let limit = self.array_length(ctx, entries);
         let more = self.compare(ctx, CompareKind::Lt, current, limit);
         self.branch(ctx, more, check, done);
         self.switch_to(check);
+        let next_idx = self.binary(ctx, BinaryKind::Add, current, one);
+        if let Some((c, _)) = cursor {
+            self.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, c, "_0".to_string(), next_idx)
+            });
+        }
         let raw_entry = self.element_at(ctx, entries, current)?;
         if let Some(live) = self.collection_entry_live(ctx, raw_entry)? {
             self.branch(ctx, live, entered, next);
@@ -764,19 +882,24 @@ impl<'s> FunctionBuilder<'s> {
         body(self, ctx, current, item)?;
         self.jump(ctx, next);
         self.switch_to(next);
-        let cur_after = if let Some(c) = cursor {
+        let advanced = if let Some((c, _)) = cursor {
             let op = FieldGetOp::new(ctx, c, "_0".to_string())?;
             self.append_value(ctx, &op)
         } else {
-            self.load(ctx, index)?
+            let cur = self.load(ctx, index)?;
+            self.binary(ctx, BinaryKind::Add, cur, one)
         };
-        let one = self.number(ctx, 1.0);
-        let advanced = self.binary(ctx, BinaryKind::Add, cur_after, one);
         self.store(ctx, index, advanced);
         self.jump(ctx, header);
         self.switch_to(done);
-        if let Some(c_arr) = cursors {
-            self.pop_collection_cursor(ctx, c_arr)?;
+        if let Some((c, is_view)) = cursor {
+            if is_view {
+                let inf = self.number(ctx, f64::INFINITY);
+                self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), inf));
+            }
+            if let Some(c_arr) = cursors {
+                self.remove_collection_cursor(ctx, c_arr, c)?;
+            }
         }
         Ok(())
     }
@@ -933,7 +1056,7 @@ impl<'s> FunctionBuilder<'s> {
         elem_ty: TypeHandle,
     ) -> Result<Value> {
         if set_box_record(ctx, arr.get_type(ctx)).is_some() {
-            return Ok(arr);
+            return self.alloc_collection_view(ctx, arr, "set_values_box");
         }
         let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
         self.live_collection_loop(ctx, "set_values", arr, |b, ctx, _, item| {
@@ -950,12 +1073,7 @@ impl<'s> FunctionBuilder<'s> {
         elem_ty: TypeHandle,
     ) -> Result<Value> {
         if set_box_record(ctx, arr.get_type(ctx)).is_some() {
-            let view_rec = self.shapes.mir_record_prefix(
-                ctx,
-                vec![("_0".to_string(), arr.get_type(ctx))],
-                Some("set_entries_box"),
-            )?;
-            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, view_rec, vec![arr])));
+            return self.alloc_collection_view(ctx, arr, "set_entries_box");
         }
         let tuple_rec = self.shapes.mir_record_prefix(
             ctx,
@@ -1040,12 +1158,7 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(crate) fn kv_keys(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
         if map_box_record(ctx, arr.get_type(ctx)).is_some() {
-            let view_rec = self.shapes.mir_record_prefix(
-                ctx,
-                vec![("_0".to_string(), arr.get_type(ctx))],
-                Some("map_keys_box"),
-            )?;
-            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, view_rec, vec![arr])));
+            return self.alloc_collection_view(ctx, arr, "map_keys_box");
         }
         let (k_ty, _, _) =
             kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
@@ -1061,12 +1174,7 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(crate) fn kv_values(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
         if map_box_record(ctx, arr.get_type(ctx)).is_some() {
-            let view_rec = self.shapes.mir_record_prefix(
-                ctx,
-                vec![("_0".to_string(), arr.get_type(ctx))],
-                Some("map_values_box"),
-            )?;
-            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, view_rec, vec![arr])));
+            return self.alloc_collection_view(ctx, arr, "map_values_box");
         }
         let (_, v_ty, _) =
             kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
@@ -1082,7 +1190,7 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(crate) fn kv_entries(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
         if map_box_record(ctx, arr.get_type(ctx)).is_some() {
-            return Ok(arr);
+            return self.alloc_collection_view(ctx, arr, "map_entries_box");
         }
         let (k_ty, v_ty, _) =
             kv_entry_types(ctx, arr.get_type(ctx)).context("expected a Map or Record")?;
@@ -1304,8 +1412,8 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let entries_val = self.expression_with(ctx, entries_expr, expected)?;
         let entries_val = self.defined(ctx, entries_val)?;
-        let (k_ty, v_ty, _) = kv_entry_types(ctx, entries_val.get_type(ctx))
-            .or_else(|| expected.and_then(|e| kv_entry_types(ctx, e)))
+        let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
+            .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
             .context("Object.fromEntries requires an iterable of [key, value] pairs")?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,

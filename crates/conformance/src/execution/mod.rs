@@ -359,7 +359,7 @@ impl Executor {
                         "--noEmit",
                         "--strict",
                         "--target",
-                        "es2022",
+                        "es2023",
                         "--module",
                         "esnext",
                         "--skipLibCheck",
@@ -380,6 +380,10 @@ impl Executor {
         } else if matches!(case, Case::Command { .. }) {
             Outcome::Command(command(
                 Command::new("node")
+                    .args([
+                        "--disable-warning=ExperimentalWarning",
+                        "--experimental-strip-types",
+                    ])
                     .arg(&path)
                     .env("PERRY_CONFORMANCE", ENV_FIXTURE),
                 directory,

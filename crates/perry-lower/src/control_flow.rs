@@ -250,6 +250,7 @@ impl<'s> FunctionBuilder<'s> {
         let header = self.new_block(ctx, "header");
         let body_block = self.new_block(ctx, "body");
         let latch = self.new_block(ctx, "latch");
+        let exhausted_exit = self.new_block(ctx, "exhausted");
         let exit = self.new_block(ctx, "exit");
         let mut collection_iter = None;
         if !body_first
@@ -278,15 +279,25 @@ impl<'s> FunctionBuilder<'s> {
                     || crate::collections::map_entry_types(ctx, arr_ty).is_some()
                     || crate::collections::set_entry_type(ctx, arr_ty).is_some()
                 {
-                    let cursor_pair =
+                    let is_view = crate::collections::collection_view_record(ctx, arr_ty).is_some();
+                    let cursor_info =
                         if let Some(c_arr) = self.collection_cursors_array(ctx, arr_def)? {
-                            let init_idx = self.load(ctx, idx_slot)?;
-                            let c = self.push_collection_cursor(ctx, c_arr, init_idx)?;
-                            Some((c_arr, c))
+                            if is_view {
+                                let c_op = FieldGetOp::new(ctx, arr_def, "_1".to_string())?;
+                                let c = self.append_value(ctx, &c_op);
+                                let init_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
+                                let init_idx = self.append_value(ctx, &init_op);
+                                self.store(ctx, idx_slot, init_idx);
+                                Some((c_arr, c, true))
+                            } else {
+                                let init_idx = self.load(ctx, idx_slot)?;
+                                let c = self.push_collection_cursor(ctx, c_arr, init_idx)?;
+                                Some((c_arr, c, false))
+                            }
                         } else {
                             None
                         };
-                    collection_iter = Some(( idx_slot, arr_def, cursor_pair));
+                    collection_iter = Some((idx_slot, arr_def, cursor_info));
                 }
             }
         }
@@ -295,19 +306,23 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(header);
         match condition {
             None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
-            Some(Expr::Bool(false)) => self.jump(ctx, exit),
+            Some(Expr::Bool(false)) => self.jump(ctx, exhausted_exit),
             Some(condition) => {
                 let condition = self.condition(ctx, condition)?;
-                self.branch(ctx, condition, body_block, exit);
+                self.branch(ctx, condition, body_block, exhausted_exit);
             }
         }
 
         self.switch_to(body_block);
-        if let Some((idx_slot, arr_def, ref cursor_pair)) = collection_iter {
+        if let Some((idx_slot, arr_def, ref cursor_info)) = collection_iter {
             let idx_val = self.load(ctx, idx_slot)?;
-            if let Some((_, c)) = cursor_pair {
+            if let Some((_, c, _)) = cursor_info {
                 let c = *c;
-                self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), idx_val));
+                let one = self.number(ctx, 1.0);
+                let next_idx = self.binary(ctx, BinaryKind::Add, idx_val, one);
+                self.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, c, "_0".to_string(), next_idx)
+                });
             }
             let entries = self.collection_entries_array(ctx, arr_def)?;
             let entry = self.element_at(ctx, entries, idx_val)?;
@@ -327,18 +342,27 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, latch);
 
         self.switch_to(latch);
-        if let Some((idx_slot, _, Some((_, c)))) = collection_iter {
+        if let Some(update) = update {
+            self.effect(ctx, update)?;
+        }
+        if let Some((idx_slot, _, Some((_, c, _)))) = collection_iter {
             let cur_op = FieldGetOp::new(ctx, c, "_0".to_string())?;
             let cur_idx = self.append_value(ctx, &cur_op);
             self.store(ctx, idx_slot, cur_idx);
         }
-        if let Some(update) = update {
-            self.effect(ctx, update)?;
-        }
         self.jump(ctx, header);
+
+        self.switch_to(exhausted_exit);
+        if let Some((_, _, Some((c_arr, c, true)))) = collection_iter {
+            let inf = self.number(ctx, f64::INFINITY);
+            self.emit(ctx, |ctx| FieldSetOp::new(ctx, c, "_0".to_string(), inf));
+            self.remove_collection_cursor(ctx, c_arr, c)?;
+        }
+        self.jump(ctx, exit);
+
         self.switch_to(exit);
-        if let Some((_, _, Some((c_arr, _)))) = collection_iter {
-            self.pop_collection_cursor(ctx, c_arr)?;
+        if let Some((_, _, Some((c_arr, c, false)))) = collection_iter {
+            self.remove_collection_cursor(ctx, c_arr, c)?;
         }
         Ok(())
     }
