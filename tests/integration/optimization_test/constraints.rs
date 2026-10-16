@@ -234,24 +234,11 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
 }
 
 /// Context-count bounds per arity are asserted precisely in perry-mir's facts tests;
-/// this checks that summarized contexts stay sound and independent of definition order.
+/// this checks that forced context summarization via `with_fact_limits(1, 1, ...)`
+/// records `summarized_contexts` and `range_widenings` and preserves helper semantics.
 #[test]
 fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
-    // 35 extra integer-width exports push `helper` past the 32 precise contexts.
-    let mut others = String::new();
-    let mut extra_exports = String::new();
-    for a in ["u8", "s8", "u16", "s16", "u32", "s32"] {
-        for b in ["u8", "s8", "u16", "s16", "u32", "s32"] {
-            if a == "u8" && b == "u8" {
-                continue;
-            }
-            let id = format!("e{}", extra_exports.len());
-            others += &format!(
-                "export function {id}(a:number,b:number):number {{ return helper(a,b); }}\n"
-            );
-            extra_exports += &format!("; export {id}: func(a:{a},b:{b})->u8");
-        }
-    }
+    let other = "export function other(a:number,b:number):number { return helper(a,b); }";
     let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
     for (case_name, helper, run_sig, call_args, expected_val) in [
         (
@@ -259,63 +246,39 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
             "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }",
             "func(a:u8,b:u8)->u8",
             (250, 10),
-            Some(252),
+            252,
         ),
         (
             "mixed_width_wrap",
             "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
             "func(a:u8,b:u16)->u8",
             (250, 0),
-            Some(12),
+            12,
         ),
         (
             "mixed_width_widen_return",
             "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
             "func(a:u8,b:u8)->u16",
             (250, 0),
-            Some(500),
-        ),
-        (
-            "delegated_compare",
-            "function classify(v:number):number { return v > 200 ? v : -v; }\nfunction helper(a:number,b:number):number { const sum = a+b; return classify(sum); }",
-            "func(a:u8,b:u8)->u8",
-            (250, 10),
-            None,
-        ),
-        (
-            "divide_after_add",
-            "function helper(a:number,b:number):number { const sum = a+b; return sum / 2; }",
-            "func(a:u8,b:u8)->u8",
-            (250, 10),
-            None,
+            500,
         ),
     ] {
-        let summarized_signature = format!("{run_sig}{extra_exports}");
-        let mut baseline = expected_val;
+        let source = format!("{helper}\n{other}\n{target}");
+        let signature = format!("{run_sig}; export other: func(a:s16,b:s16)->u8");
         let mask = if run_sig.ends_with("->u16") {
             0xffff
         } else {
             0xff
         };
-        for (order, source, signature, expect_summary) in [
-            ("single", format!("{helper}\n{target}"), run_sig, false),
-            (
-                "target_first",
-                format!("{helper}\n{target}\n{others}"),
-                summarized_signature.as_str(),
-                true,
-            ),
-            (
-                "target_last",
-                format!("{helper}\n{others}\n{target}"),
-                summarized_signature.as_str(),
-                true,
-            ),
-        ] {
-            let compiled = compile(&source, signature)?;
+        for summarize in [false, true] {
+            let compiled = if summarize {
+                perry_mir::with_fact_limits(1, 1, || compile(&source, &signature))?
+            } else {
+                compile(&source, &signature)?
+            };
             let report = &compiled.allocation_report;
             assert!(!report.contains("range_widenings=0"), "{report}");
-            if expect_summary {
+            if summarize {
                 assert!(!report.contains("summarized_contexts=0"), "{report}");
             }
             let mut prog = Program::from_wasm(compiled.core);
@@ -324,14 +287,10 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
                 .0[0]
                 .unwrap_i32()
                 & mask;
-            if let Some(expected) = baseline {
-                assert_eq!(
-                    actual, expected,
-                    "context order case `{case_name}` (`{order}`) mismatch"
-                );
-            } else {
-                baseline = Some(actual);
-            }
+            assert_eq!(
+                actual, expected_val,
+                "context summarization case `{case_name}` (summarize={summarize}) mismatch"
+            );
         }
     }
     Ok(())

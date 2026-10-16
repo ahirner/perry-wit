@@ -4,8 +4,9 @@ use crate::core_program::Program;
 use anyhow::Result;
 use wasmtime::Val;
 
-/// Iterator resumption and exhaustion are checked against Node by the `ecma.json.command`
-/// conformance case; this covers live views over mutated collections and churn cost.
+/// Live iterator mutation, resumption, and compaction are checked by the stateful
+/// `ecma.collection.iterators` generator; this covers property presence, key hygiene,
+/// iterator identity, and linear churn cost.
 #[test]
 fn collection_mutation_during_iteration_and_property_presence_preserve_semantics() -> Result<()> {
     let mut program = Program::from_wasm(
@@ -40,92 +41,8 @@ export function run(): number {
         entries[0][0] === "x" &&
         entries[0][1] === undefined;
 
-    const s1 = new Set<number>([1, 2, 3]);
-    let s1Total = 0;
-    s1.forEach((v) => {
-        s1.delete(v);
-        s1Total = s1Total + v;
-    });
-
-    const s2 = new Set([1, 2, 3]);
-    let s2Total = 0;
-    for (const v of s2) {
-        s2.delete(v);
-        s2Total = s2Total + v;
-    }
-
-    const m1 = new Map<number, number>([[1, 10], [2, 20], [3, 30]]);
-    let m1Total = 0;
-    m1.forEach((v, k) => {
-        m1.delete(k);
-        m1Total = m1Total + v;
-    });
-
-    const m2 = new Map([[1, 10], [2, 20], [3, 30]]);
-    let m2Total = 0;
-    for (const [k, v] of m2) {
-        m2.delete(k);
-        m2Total = m2Total + v;
-    }
-
     const nested = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
     const nestedOk = nested.get("key").has(4) && nested.get("key").size === 2;
-
-    const s3 = new Set([1, 2]);
-    let s3Total = 0;
-    s3.forEach((v) => {
-        s3Total = s3Total + v;
-        if (v === 1) {
-            s3.clear();
-            s3.add(9);
-        }
-    });
-
-    // Iterators created before a mutation observe it (Set.keys lowers like Set.values).
-    const liveSet = new Set<number>([1, 2]);
-    const setIter = liveSet.values();
-    liveSet.delete(2);
-    liveSet.add(4);
-    let liveSetTotal = 0;
-    for (const v of setIter) {
-        liveSetTotal = liveSetTotal + v;
-    }
-
-    const liveSetE = new Set<number>([1, 2]);
-    const setEntIter = liveSetE.entries();
-    liveSetE.delete(2);
-    liveSetE.add(4);
-    let liveSetEntTotal = 0;
-    for (const [k, v] of setEntIter) {
-        liveSetEntTotal = liveSetEntTotal + k + v;
-    }
-
-    const liveMap = new Map<number, number>([[1, 10], [2, 20]]);
-    const mapValIter = liveMap.values();
-    liveMap.delete(2);
-    liveMap.set(4, 40);
-    let liveMapValTotal = 0;
-    for (const v of mapValIter) {
-        liveMapValTotal = liveMapValTotal + v;
-    }
-
-    const liveMapK = new Map<number, number>([[1, 10], [2, 20]]);
-    const mapKeyIter = liveMapK.keys();
-    liveMapK.delete(2);
-    liveMapK.set(4, 40);
-    let liveMapKeyTotal = 0;
-    for (const k of mapKeyIter) {
-        liveMapKeyTotal = liveMapKeyTotal + k;
-    }
-
-    const liveMapE = new Map<number, number>([[1, 10], [2, 20]]);
-    const mapEntIter = liveMapE.entries();
-    liveMapE.delete(2);
-    liveMapE.set(4, 40);
-    let liveMapEntTotal = 0;
-    for (const [k, v] of mapEntIter) {
-        liveMapEntTotal = liveMapEntTotal + k + v;
-    }
 
     const idSet = new Set<number>([1]);
     const iterIdentity = (idSet.values() as unknown) !== (idSet.values() as unknown);
@@ -136,74 +53,12 @@ export function run(): number {
     const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
     const nulHygiene = nulSet.size === 3 && nulSet.has("\u0000perry_set_type_args") && nulSet.has("__perry_set_type_args");
 
-    // Paused iterators survive loop exit and observe clear() and compaction between loops.
-    const resumeClear = new Set<number>([1, 2, 3]);
-    const rcIter = resumeClear.values();
-    let rcTotal = 0;
-    for (const v of rcIter) {
-        rcTotal = rcTotal + v;
-        break;
-    }
-    resumeClear.clear();
-    resumeClear.add(4);
-    resumeClear.add(5);
-    for (const v of rcIter) {
-        rcTotal = rcTotal + v;
-    }
-
-    const compSet = new Set<number>();
-    for (let i = 0; i < 96; i = i + 1) {
-        compSet.add(i);
-    }
-    const itA = compSet.values();
-    const itB = compSet.values();
-    let compTotal = 0;
-    for (const v of itA) {
-        compTotal = compTotal + v;
-        if (v === 20) break;
-    }
-    for (let i = 0; i < 65; i = i + 1) {
-        compSet.delete(i);
-    }
-    for (const v of itA) {
-        compTotal = compTotal + v;
-    }
-    for (const v of itB) {
-        compTotal = compTotal + v;
-    }
-
-    const mvMap = new Map<number, number>([[1, 10], [2, 20], [3, 30]]);
-    const mvIter = mvMap.values();
-    let mvTotal = 0;
-    for (const v of mvIter) {
-        mvTotal = mvTotal + v;
-        break;
-    }
-    mvMap.delete(2);
-    mvMap.set(4, 40);
-    for (const v of mvIter) {
-        mvTotal = mvTotal + v;
-    }
-
     return copiedPresence &&
         enumPresence &&
-        s1Total === 6 &&
-        s2Total === 6 &&
-        m1Total === 60 &&
-        m2Total === 60 &&
         nestedOk &&
-        s3Total === 10 &&
-        liveSetTotal === 5 &&
-        liveSetEntTotal === 10 &&
-        liveMapValTotal === 50 &&
-        liveMapKeyTotal === 5 &&
-        liveMapEntTotal === 55 &&
         iterIdentity &&
         spreadOk &&
-        nulHygiene &&
-        rcTotal === 10 &&
-        compTotal === 5170 &&
-        mvTotal === 80
+        nulHygiene
         ? 1
         : 0;
 }

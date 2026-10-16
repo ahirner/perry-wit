@@ -475,7 +475,7 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
 
 #[test]
 fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()> {
-    use crate::facts::ProgramFacts;
+    use crate::facts::{ProgramFacts, with_fact_limits};
     use pliron::{
         builtin::{
             op_interfaces::SymbolOpInterface,
@@ -484,42 +484,24 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
         pass::AnalysisManager,
     };
     use std::fmt::Write;
-    // Every u8/f64 mix of six parameters: 64 distinct contexts, twice the precise budget.
-    let arity = 6;
+    // Every u8/f64 mix of two parameters: 4 distinct contexts, twice the precise budget of 2.
+    let arity = 2;
     let ctx = &mut Context::new();
-    let params_decl = (0..arity)
-        .map(|i| format!("p{i}: builtin.fp64"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let params_types = vec!["builtin.fp64"; arity].join(", ");
-    let mut body_ops = String::new();
-    body_ops.push_str("        acc0 = perry.binary Add p0, p1 : builtin.fp64;\n");
-    for i in 2..arity {
-        let prev = i - 2;
-        let next = i - 1;
-        body_ops.push_str(&format!(
-            "        acc{next} = perry.binary Add acc{prev}, p{i} : builtin.fp64;\n"
-        ));
-    }
-    let last_acc = format!("acc{}", arity - 2);
-    let mut text = format!(
-        r#"builtin.module @test {{ ^module():
-              builtin.func @helper: builtin.function <({params_types}) -> (builtin.fp64)> {{
-              ^entry({params_decl}):
-{body_ops}        perry.return {last_acc}
-              }}"#
+    let mut text = String::from(
+        r#"builtin.module @test { ^module():
+              builtin.func @helper: builtin.function <(builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
+              ^entry(p0: builtin.fp64, p1: builtin.fp64):
+                acc = perry.binary Add p0, p1 : builtin.fp64;
+                perry.return acc
+              }"#,
     );
-    let call_args = (0..arity)
-        .map(|i| format!("p{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let combos = 1usize << arity;
     for mask in 0..combos {
         writeln!(
             text,
-            r#"; builtin.func @e{mask}: builtin.function <({params_types}) -> (builtin.fp64)> {{
-                  ^entry({params_decl}):
-                    res = perry.call helper ({call_args}) : builtin.fp64;
+            r#"; builtin.func @e{mask}: builtin.function <(builtin.fp64, builtin.fp64) -> (builtin.fp64)> {{
+                  ^entry(p0: builtin.fp64, p1: builtin.fp64):
+                    res = perry.call helper (p0, p1) : builtin.fp64;
                     perry.return res
                 }}"#
         )
@@ -548,10 +530,10 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
         }
     }
     let mut analyses = AnalysisManager::default();
-    let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
-    // One generic context, 32 precise ones and one shared summary.
-    assert_eq!(facts.context_counts(&pliron::ident!("helper")), (1, 33));
-    assert_eq!(facts.summarized_contexts, combos - 32);
+    let facts = with_fact_limits(2, 2, || analyses.get_analysis::<ProgramFacts>(module, ctx))?;
+    // One generic context, 2 precise ones and one shared summary.
+    assert_eq!(facts.context_counts(&pliron::ident!("helper")), (1, 3));
+    assert_eq!(facts.summarized_contexts, combos - 2);
     Ok(())
 }
 
