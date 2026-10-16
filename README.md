@@ -110,7 +110,7 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("h
 
 - **Export Mapping**: WIT kebab-case export names map to TypeScript camelCase functions. Unexported functions remain internal.
 - **Asynchronous Execution**: Exporting an `async func` expects a TypeScript function returning `Promise<T>`.
-- **Type Marshalling**: Records, dense arrays, options, variants cross component boundaries directly. WIT 64-bit integers (`s64`, `u64`) map to TypeScript `bigint` (or explicit `s64`/`u64` from `"perry:types"`). Outbound byte lists accept UTF-8 strings or `Uint8Array` buffers.
+- **Type Marshalling**: Records, dense arrays, options, variants cross component boundaries directly. The 64-bit integers map to TypeScript `bigint`. Outbound byte lists accept UTF-8 strings or `Uint8Array` buffers.
 - **Result Handling**: Explicit `{ ok, value }` objects, `{ ok: false, error }` objects, thrown errors map to WIT `result` variants.
 - **Core Emission**: Passing `--core-only` emits the linked core module without component wrapping.
 
@@ -225,7 +225,7 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)
                        WASI 0.3 P3 Component
 ```
 
-1. **HIR Lowering**: Resolves the static module graph and lowers TypeScript AST through Perry HIR, preserving lexical scopes. The private [`hir_compat`](crates/perry-lower/src/hir_compat/mod.rs) boundary owns source metadata, constructor type IDs, argument-preservation rewrites, and recognition of compiler-generated iterator records. Contextual inference and MIR emission consume its typed views.
+1. **HIR Lowering**: Transforms TypeScript AST into Perry HIR, resolving imports, establishing lexical scopes.
 2. **MIR Generation**: Lowers Perry HIR to typed pliron MIR. Local variables initialize as slots, converted into SSA values, block arguments via `mem2reg`.
 3. **Code Generation**: Translates MIR to WebAssembly operations, selects value representations, synthesizes export glue.
 4. **Control Flow Structuring**: Structures reducible control flow with Ramsey's dominator-tree algorithm, keeping single-use values on the operand stack.
@@ -235,16 +235,25 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)
 
 Perry-WIT supports a strictly typed subset of TypeScript designed for ahead-of-time compilation:
 
-- **Numbers**: Unconstrained `number` values use IEEE 754 doubles, including fractional division, remainder, negative zero and NaN. Without requiring any `perry:types` imports, WIT integer parameters and results (`u8`, `s8`, `u16`, `s16`, `u32`, `s32`, `u64`, `s64`) automatically specialize `number` and `bigint` values across arithmetic, branches, loops, records/arrays and direct or async calls. Optional `import type { u8, s8, u16, s16, u32, s32, u64, s64 } from "perry:types"` (and WIT-generated integer aliases) can also be used on local bindings, parameters, returns, and `as` casts for explicit width wrapping. Integer addition, subtraction and multiplication wrap at the inferred 8-, 16-, 32- or 64-bit width. A wider required result widens the computation (`u8 + u8 → u32` returns `510` for `255 + 255`), and integer computations without a narrower result requirement (`const c: number = a + b`) promote to 64-bit WebAssembly `i64` arithmetic so intermediates do not overflow narrow widths prematurely. Mixed signed and unsigned inputs use the smallest signed width that subsumes both (`u8 + s8 → s16`, `u8 + s16 → s16`, `u16 + s16 → s32`, `u32 + s32 → s64`, or `u64` at 64 bits). WIT `s64` and `u64` accept TypeScript `bigint` (or explicit `s64`/`u64`) and preserve all 64 bits; `Number(value)` remains an explicit lossy conversion. Built-in numeric contracts (`Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.trunc`, `Math.round`, `Number.isInteger`, `Number.isSafeInteger`, `Number.isFinite`, `Number.isNaN`, `parseInt`, `parseFloat`, `Number(str)`, `+str`, `.length`, and `.codePointAt()`) participate in integer domain and range inference. Floating-point boundary conversions retain their saturating behavior, and raw `compile-core` compilation without WIT constraints retains ordinary `number` semantics.
+- **Numbers**: Values evaluate as IEEE 754 64-bit floats by default, specializing to native integer representations when constrained by WIT boundaries or type annotations. See [Numerical Tower](#numerical-tower).
 - **Records**: Supports interfaces, type literals, object literals with closed shapes. Structurally equivalent types share identical record layouts. Recursive interfaces are supported.
 - **Arrays**: Arrays are dense, homogeneous. Out-of-bounds or non-integral indexing returns `undefined`. Writing at `length` appends a new element. Any other out-of-bounds write throws a `RangeError`.
 - **Strings**: Text storage uses UTF-8 byte sequences with cached Unicode scalar length. Appending reuses spare buffer capacity for amortized linear growth. Indexing operates on Unicode scalar values, matching Node.js behavior for BMP scalars. Astral characters count as single scalar values, while surrogate halves are rejected.
 - **Exceptions**: Standard error classes (`Error`, `TypeError`, `RangeError`, `ReferenceError`, and `SyntaxError`) are catchable via `try`, `catch`, `finally`, preserving `cause` properties across rethrows. Escaping exceptions map to declared WIT error variants or trap exports lacking an error mapping.
 - **Control Flow**: Supports standard control flow constructs: conditional branches, loops, `break`, `continue`, short-circuit logic, ternary expressions, recursive function calls.
-- **Async**: Asynchronous functions execute over the WASI 0.3 callback ABI. Awaiting an already-settled promise continues inline without microtask queue latency. Integer domains propagate through async calls, awaits, timer payloads and scalar promise joins; exact 64-bit values survive suspension. Promises passed to general operations retain their declared payload representation. Supported combinators include `Promise.all`, `Promise.race`, `Promise.allSettled`.
+- **Async**: Asynchronous functions execute over the WASI 0.3 callback ABI. Awaiting an already-settled promise continues inline without microtask queue latency. Supported combinators include `Promise.all`, `Promise.race`, `Promise.allSettled`.
 - **Byte Streams**: Supports default readers, asynchronous iteration, BYOB readers with caller-allocated buffers, minimum read lengths, explicit cancellation. Stream writes maintain bounded buffer reuse.
 - **Temporal**: Supports ISO calendar operations via `Instant.from`, `PlainDate.from`, `PlainDateTime.from`. Instants expose `epochMilliseconds`. Plain dates, times expose date and time fields, ISO string conversion, arithmetic via `.add({ days })`. Unsupported calendar formats, time zone manipulations produce compile-time diagnostics.
-- **Standard Library**: Supports `Math`, UTC `Date`, string manipulation, `Uint8Array`, `TextEncoder`, `TextDecoder`, schema-directed `JSON.stringify` and `JSON.parse` (including exact 64-bit `s64`/`u64` integer codecs and direct MIR deep-copy normalization for typed `JSON.parse<T>(JSON.stringify(x))`), `crypto.getRandomValues`, `node:timers/promises`, `node:fs/promises`, HTTP `Headers`, `Request`, `Response`, standard stream bridges.
+- **Standard Library**: Supports `Math`, UTC `Date`, string manipulation, `Uint8Array`, `TextEncoder`, `TextDecoder`, schema-directed `JSON.stringify`, `JSON.parse`, `crypto.getRandomValues`, `node:timers/promises`, `node:fs/promises`, HTTP `Headers`, `Request`, `Response`, standard stream bridges.
+
+### Numerical Tower
+
+Perry-WIT stratifies numeric representations across WebAssembly primitive types:
+
+- **Floating-point default**: Unconstrained JavaScript `number` values evaluate as IEEE 754 64-bit floats (`f64`), preserving fractional division, remainder, negative zero, and `NaN` semantics.
+- **Integer specialization**: Values constrained by WIT interfaces or explicit integer types (`u8`–`u64`, `s8`–`s64`) specialize to native WebAssembly integer instructions. WIT 64-bit integers (`s64`, `u64`) map to TypeScript `bigint`.
+- **Subsumption joins**: Mixed numeric operations promote to the smallest representation subsuming both operands. Mixed signedness widens to the next enclosing signed width (e.g., `u8 + s8 → s16`, `u16 + s16 → s32`).
+- **Optimization interaction**: Intermediate integer computations without narrow result requirements evaluate in native 64-bit `i64` registers, preventing premature overflow without heap allocations. Range inference and constant bounds analysis eliminate redundant bounds checks and modular reductions.
 
 ## Contributing
 

@@ -111,57 +111,11 @@ Runtime builders assemble scheduling hooks, combinators, scalar capabilities, pr
 
 #### Optimization
 
-Pliron's `Passes` and `AnalysisManager` schedule verified transformations and cache analyses for each unchanged MIR snapshot. Mutating passes invalidate affected analyses. The optimizer first promotes locals to SSA, specializes WIT numeric domains, then runs canonicalization, SCCP, CFG simplification and DCE to convergence. Ownership rewrites follow this cleanup; append fast-path expansion runs once in its late phase.
+Pliron pass pipelines optimize the typed SSA intermediate representation:
 
-| Responsibility | Pliron contribution | Perry contribution |
-| --- | --- | --- |
-| Arithmetic and comparison folding | SCCP propagation, materialization, DCE; `APInt` arithmetic | `ConstFoldInterface` semantics for scalar operations and conversions |
-| Constant branches | SCCP reachability and CFG simplification | `BranchOpFoldInterface` for MIR terminators; unused block-argument adapter |
-| Async frames, leases, GC roots, append liveness | Cached SSA liveness and dominance | Block-local live intervals from definition and last-use positions; deterministic frame layout, root selection, ownership transfer rules |
-| Optional/conversion simplification, record decomposition, character scalarization, owned append, append fast paths | `MatchRewrite` traversal and `IRRewriter` mutation | Rewrite patterns and semantic predicates |
-| Record promotion | `Mem2RegPass` | Record-to-slot decomposition |
-| Successful-unwrap reuse | Cached dominance and rewriting | Exception-aware availability rules |
-| Numeric and runtime facts | Integer types, cloning, analysis caching; Tarjan SCCs for CFG and call-graph cycles | Shared dependency worklist, context selection, range widening, parameter provenance, effect transfer and buffer-detachment rules |
-| Leaf inlining and argument promotion | Cloning, rewriting, cached call effects | Legality and profitability rules |
-
-WIT constraints enter before arithmetic folding. Cached `ProgramFacts` uses one dependency queue for numeric domains, ranges, result-width requirements, reference-parameter provenance and callee effects. Dependencies connect SSA values, CFG edges, synchronous and asynchronous calls, and every return result. Queue membership bits suppress duplicate work. Local effects are classified once per snapshot; changing a callee summary revisits dependent call sites. Function contexts are keyed by argument domains and result requirements. Finite domain choices, recursive context reuse and conservative range widening ensure termination. Representation rewriting fixes integer wrap points before algebraic optimization. Contexts that preserve representations and callee choices reuse the original body. The same snapshot supplies bounds-check facts. The [numeric semantics](README.md#semantics) define wrapping, widening, exact 64-bit values and floating-point boundaries.
-
-##### Fact product lattice
-
-`ProgramFacts` computes the least fixpoint over a reduced product lattice ([Cousot & Cousot 1979]) $\mathcal{L} = \mathcal{D}_{\text{num}} \times \mathcal{I}_{\text{range}} \times \mathcal{R}_{\text{req}} \times \mathcal{O}_{\text{out}} \times \mathcal{H}_{\text{heap}}$ across the interprocedural dependency graph:
-
-1. **Bottom (`never` / $\bot$)**: Unreachable control-flow paths, diverging terminators, and unvisited SSA values evaluate at $\bot$ (`Fact::Bottom`, `Range::Bottom`, `Outcomes::Bottom`), satisfying $\bot \sqcup x = x$.
-2. **Numeric Domain Lattice ($\mathcal{D}_{\text{num}}$)**:
-   $$\bot < \mathcal{I} < \mathtt{Numeric}\;(\mathtt{f64})$$
-   The integer sub-lattice $\mathcal{I} = \{ \mathtt{u8}, \mathtt{s8}, \mathtt{u16}, \mathtt{s16}, \mathtt{u32}, \mathtt{s32}, \mathtt{u64}, \mathtt{s64} \}$ is partially ordered by value-set inclusion (`Integer::common`):
-   - **Same signedness**: $\mathtt{u8} \sqsubset \mathtt{u16} \sqsubset \mathtt{u32} \sqsubset \mathtt{u64}$ and $\mathtt{s8} \sqsubset \mathtt{s16} \sqsubset \mathtt{s32} \sqsubset \mathtt{s64}$ with join $\max(w_1, w_2)$.
-   - **Mixed signedness ($\mathtt{u}w_u \sqcup \mathtt{s}w_s$)**: If $w_s > w_u$, the signed domain subsumes the unsigned range ($\mathtt{u8} \sqcup \mathtt{s16} = \mathtt{s16}$, $\mathtt{u16} \sqcup \mathtt{s32} = \mathtt{s32}$, $\mathtt{u32} \sqcup \mathtt{s64} = \mathtt{s64}$). If $w_s \le w_u < 64$, the join steps to the smallest signed width $w' > w_u$ in $\{8, 16, 32, 64\}$ ($\mathtt{u8} \sqcup \mathtt{s8} = \mathtt{s16}$, $\mathtt{u16} \sqcup \mathtt{s16} = \mathtt{s32}$, $\mathtt{u32} \sqcup \mathtt{s32} = \mathtt{s64}$). At 64 bits, $\mathtt{u64} \sqcup \mathtt{s64} = \mathtt{u64}$.
-   - Joining any integer domain with $\mathtt{Numeric}$ yields $\mathtt{Numeric}$ ($\top_{\text{num}}$).
-3. **Backward Demand Lattice ($\mathcal{R}_{\text{req}}$)**:
-   $$\mathtt{Inferred}\;(\text{unconstrained}) < \mathsf{Integer}(\mathcal{I}) < \mathtt{Original}\;(\top_{\text{req}})$$
-   Backward demand propagates from WIT export signatures, explicit type annotations, array indices, and bitwise operations. When integer arithmetic lacks a narrower requirement, `width_defaults` promotes its evaluation domain via `integer.unconstrained()` to native WebAssembly `i64` ($\mathtt{s64}$ or $\mathtt{u64}$), avoiding premature overflow in 64-bit registers without heap allocation ([Stephenson et al. 2000]).
-4. **Interval Range Lattice ($\mathcal{I}_{\text{range}}$)**:
-   $$\bot_{\text{range}} < [l, u] \subseteq [-2^{63}, 2^{64}-1] < \top_{\text{range}}$$
-   Unstable interval bounds widen eagerly on repeated expansion (`expansions >= 1`) directly to domain boundaries ([Cousot & Cousot 1977], [Rodrigues et al. 2013]). Staged landmark widening through bitwidth thresholds is planned to refine loop induction ranges before reaching domain extremes.
-5. **Heap Facts ($\mathcal{H}_{\text{heap}}$)**: Record fields and array element summaries propagate `(Fact, Range)` through heap cells across bounded allocation-site alias sets ($\le 32$ sites before collapsing to a per-type summary cell). Optional values propagate payload facts directly, while nullish absence modes (`Undefined`, `Null`, `Both`) are verified structurally. A dedicated presence dataflow lattice ($\bot < \{\mathsf{Present}, \mathsf{Absent}\} < \top$) is planned to track narrowing across nullish condition branches.
-6. **Promise Settlement Outcomes ($\mathcal{O}_{\text{out}}$)**: The 4-state `Outcomes` lattice (`Bottom`, `Fulfilled`, `Rejected`, `Either`) tracks promise settlement status across await points and combinators.
-7. **Context Specialization**: At most 32 precise `(arg_domains, required_result)` contexts are specialized per function before subsequent call sites join monotonically into a summarized context.
-
-Aggregate allocation identities and stable slot ranges participate in the same worklist before decomposition. Record fields, array element summaries, block arguments, retained calls and return values preserve aliases. Writes join into their selected slots, including writes reached through aliases; unrelated record fields retain their facts. Array extension copies element facts while preserving references to shared elements. Unknown storage or calls invalidate reachable objects, and recursive source schemas use finite reserved summary identities. Each alias set holds at most 32 allocation sites before collapsing to a typed summary; the optimizer reports these fallbacks. Collapse also invalidates existing aliases, with a one-time cost proportional to the affected objects. Heap operations and field indices are classified once per MIR snapshot. Declared ABI and carrier layouts govern storage types and representation boundaries.
-
-Array identities carry length bounds and subscribe their readers to the same queue. Dense literals establish an initialized prefix. Writes inside that prefix preserve the exact length; possible appends and extensions retain the minimum length while widening the maximum. Unknown views or calls remove precise bounds. These are stable bounds across all executions of an allocation site, not lengths at individual program points. The bounds pass borrows the facts to replace fixed lengths with constants and proven reads with unchecked projections. Canonicalization and pliron SCCP/DCE eliminate redundant bounds checks. Byte-buffer detachment retains separate legality checks.
-
-Runtime summaries retain allocation, collection, suspension, reentry, record mutation, escape and failure information. Reference-parameter provenance follows SSA uses and branch arguments in the shared queue. Async rejection remains distinct from synchronous throwing. Promise settlement alternatives propagate through calls, joins and aggregate slots in the same queue; unknown sources remain conservative. Status conventions and escaping exceptions are separate facts, so a caught failure retains its internal status without requiring an export error channel. Proven fulfilled awaits omit rejection branches; possible pending host work retains the existing unhandled-await reporting path and cancellation. Allocation reports, argument promotion, lifetime assignment, GC roots and export scopes borrow effect projections from `ProgramFacts`. Capability transfers copy fixed-size flags; escape relations grow in place. Boundary scopes account for initializers and canonical marshalling before lowering inserts runtime calls. Runtime frame constructors register their resume handlers; the dispatcher emits calls to those handlers. Async frame slots are cleared at collection and suspension points. Lifetime attributes preserve cached control-flow and value analyses. Repeated-allocation facts distinguish call-graph recursion from the location of allocations: pliron SCCs identify recursive functions and cyclic CFG blocks, and the shared queue propagates allocation effects at those call sites. An allocation before a non-allocating loop or recursive call remains bounded. Bounded synchronous tasks use regions for records, arrays, variants, frame storage and temporary reference lists. Repeated allocations, unbounded helpers, suspension, reentry, persistent initialization and resource-bearing boundaries retain collection. Checked builds also retain collection. Collector roots are eliminated directly at producers during lowering.
-
-#### JSON construction
-
-An expected JSON type selects a generated MIR decoder for numbers, exact 64-bit integers (`s64`/`u64`), booleans, strings, numeric/string unions, optional values, records, arrays and tuples. Recursive schemas reserve decoder identities before constructing their bodies. The decoder writes known fields directly into native storage and retains unknown fields in JSON residue. Dynamic JSON and schemas requiring snapshot conversion use the shared graph destination. When a typed `JSON.parse<T>(JSON.stringify(x))` round-trip operates on a statically known source shape without unknown JSON residue, `NormalizeJsonCopyPass` rewrites it directly into an allocating, schema-normalizing MIR deep copy (`NaN`/`±Infinity` to `null` or `SyntaxError`, `-0.0` to `+0.0`, `undefined` elements to `null`, and dropped omitted fields) without serializing or reparsing text.
-
-Typed construction and dynamic parsing share the JSON lexer, Unicode-escape validation and number conversion. Runtime strings carry validated immutable UTF-8; both parser destinations preserve that contract instead of rescanning it. Raw byte adapters validate UTF-8 before entering the shared lexer. Number tokens collect decimal facts during lexical validation; conversion retains correctly rounded IEEE-754 behavior, while `s64` and `u64` targets parse and format exact 64-bit signed and unsigned integer tokens directly.
-
-A decoder carries its lookahead through SSA and returns a value plus a deferred schema-failure flag. Repeated object keys replace both the candidate value and its schema result. Syntax errors take precedence at completion; malformed input unwinds bounded container state while partial values remain unpublished. Parsing preserves the depth limit of 128, nullable/absent distinctions and independent mutable views of immutable snapshots.
-
-Generated decoders form a verified synchronous construction group. Every direct callee belongs to that group, and its operations complete without collection, suspension, callbacks or conservative allocation. Collection and root publication occur at the caller; allocation, escape, task and failure effects remain visible to the shared analysis. Repeated internal GC checks and root setup are omitted under this proof.
+- **Pass Pipeline**: Local variable slots promote to SSA values via `mem2reg`. Canonicalization, sparse conditional constant propagation (SCCP), control-flow graph simplification, and dead code elimination iterate to convergence.
+- **Fact Propagation**: `ProgramFacts` propagates representations, bitwidth demand, and interval ranges across SSA values and function boundaries. Intermediate integer expressions widen to subsuming types or evaluate in 64-bit `i64` registers when unconstrained to prevent premature overflow without heap allocation. Range bounds analysis eliminates redundant array bounds checks. Staged threshold widening and dataflow presence tracking remain planned future refinements.
+- **JSON Lowering**: Statically typed JSON serialization and parsing lower directly to specialized MIR decoders and schema-normalizing deep copies for known object shapes.
 
 ### 5. Code Generation
 
@@ -171,8 +125,6 @@ The code generator translates typed MIR into WebAssembly instructions:
 - **Operand Stack Scheduling**: Single-use values defined in the same block as their user fold into expression trees evaluated on the operand stack when effect and trap ordering permits. Constants rematerialize at use sites. Other live values and used block parameters occupy WebAssembly locals, with locals reused across non-overlapping live ranges.
 - **Canonical ABI Marshalling**: Synthesizes boundary stubs directly around compiled entry points according to the [Canonical ABI]. Inbound values lift from flat registers into typed guest objects, while outbound values lower into caller return areas.
 
-Pliron CFG simplification and DCE run on the lowered Wasm IR to convergence before control-flow structurization.
-
 The resulting core WebAssembly module can be emitted directly for low-level embedding or unit testing.
 
 ### 6. Component Encoding
@@ -181,16 +133,16 @@ The component wrapper binds native WASI 0.3 imports, generates canonical ABI ada
 
 Interface glue implements the [Canonical ABI] around exported entry points:
 
-- **Synchronous Exports**: Emits flat Canonical ABI entry points, lifts arguments, invokes the MIR body and lowers results. Task scopes provide `cabi_post_<export>` for cleanup; independent scalar scopes call the implementation directly.
+- **Synchronous Exports**: Emits flat Canonical ABI entry points, lifts arguments, invokes the MIR body, lowers results, and provides `cabi_post_<export>`.
 - **Asynchronous Exports**: Synthesizes the stackless WASI 0.3 callback trio: `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`.
-- **Memory Allocation**: Exposes `cabi_realloc` when export lowering or a reachable canonical import requires host allocation. The export binds directly to the linked guest allocator. Surviving memory operations, data and helpers determine whether the core module needs memory.
+- **Memory Allocation**: Exposes `cabi_realloc`, binding Canonical ABI dynamic allocations directly to the guest `talc` allocator.
 
 ## Memory
 
 Perry-WIT manages all heap-allocated objects in a single, non-moving guest memory space managed by `talc`.
 
 ### Text
-Strings are stored as validated UTF-8 byte sequences using Unicode scalar indexing. Lone surrogates and UTF-16 code-unit operations are rejected at compile time. Canonical ABI string inputs carry valid UTF-8. `TextDecoder` replaces malformed byte sequences by default and rejects them in fatal mode. JSON validates its grammar and Unicode escapes against these established string invariants. Binary payloads remain intact as raw byte views without intermediate transcoding. Repeated appends reuse spare buffer capacity for amortized linear copying.
+Strings are stored as validated UTF-8 byte sequences using Unicode scalar indexing. Lone surrogates and UTF-16 code-unit operations are rejected at compile time. External text entering through Canonical ABI boundaries, JSON, or `TextDecoder` undergoes strict UTF-8 validation. Binary payloads remain intact as raw byte views without intermediate transcoding. Repeated appends reuse spare buffer capacity for amortized linear copying.
 
 ### Heap
 Records, dictionaries, finite unions, JSON trees, byte views, and Promise outcomes share a unified managed heap.
@@ -252,7 +204,7 @@ Complex algorithmic operations—including JSON serialization, date calculations
 Helper libraries compile to standalone `wasm32-unknown-unknown` binaries without allocators or system runtimes. The resulting bytecode artifacts embed directly into the compiler binary during build time, removing any runtime dependency on Rust or LLVM.
 
 ### Capability Pruning
-The linker computes transitive function reachability from surviving core calls and required ABI exports. Reachable canonical imports contribute allocator roots when their ABI requires host allocation. Ordinary calls carry helper dependencies; unreferenced functions are pruned. Helper data retains each library's private placement. Constant address stores and zero fills are evaluated in initialization order before function indices are assigned. Fully evaluated initialization sequences lose their startup roots; ordinary calls and table references still retain callable functions. Unsupported instructions or writes outside the supported private segments preserve the complete runtime initialization sequence.
+When compiling a user component, the compiler scans AST capability requirements to identify only the helper functions actually referenced by the program. Unreferenced helper functions and unused data sections are pruned completely.
 
 ### Static Relocation
 During code generation, the compiler relocates helper functions, signatures, and element tables directly into the target WebAssembly module. Instructions are re-encoded to target local function indices, allowing pure helper routines to execute with zero call overhead.
@@ -285,24 +237,12 @@ Verification rests on two complementary boundaries:
 1. **Source Equivalence**: Conformance fixtures run under both Node.js and compiled WASI 0.3 components. These checks compare evaluation order, lexical scope, runtime values, exception unwinding, and standard library behaviors.
 2. **Host Integration**: Controlled Wasmtime hosts verify Canonical ABI marshalling, stackless coroutine suspension, cancellation signal propagation, fuel scaling bounds, and deterministic resource cleanup across serial invocations.
 
-The benchmark harness compares every unchanged-semantics workload against the checked-in baseline. Named core size, stripped component size, guest fuel, initial memory and peak memory must each stay within 105% of their baseline; zero baselines remain zero. Input hashes and locked Wasmtime versions are verified before comparison. Allocation counters, function and helper counts, specialization and convergence statistics, compilation time and execution time appear in the JSON report. Timing is informational. Linux CI runs the comparison using its existing test build and uploads the report.
-
-The scalar artifact test inspects named and stripped Wasm: pure `s32` addition is one directly exported function containing only two argument loads and `i32.add`. It has no forwarding call, memory, runtime helper, allocator or cleanup export. Signed 8- and 16-bit boundaries use sign-extension instructions; producer range guarantees suppress redundant normalization. Generated stubs that only forward arguments and results contribute an export name on the implementation. Marshalling and stateful stubs retain their boundary behavior. Native/Wasm library and CLI parity checks cover every WIT integer width, widening, exact 64-bit arithmetic and unconstrained raw compilation.
-
 ## References
 
-- **[Cousot & Cousot 1977]**: P. Cousot, R. Cousot. *Abstract Interpretation: A Unified Lattice Model for Static Analysis of Programs by Construction or Approximation of Fixpoints*. ACM POPL, pp. 238–252, 1977.
-- **[Cousot & Cousot 1979]**: P. Cousot, R. Cousot. *Systematic Design of Program Analysis Frameworks*. ACM POPL, pp. 269–282, 1979.
 - **[Liskov & Shrira 1988]**: B. Liskov, L. Shrira. *Promises: Linguistic Support for Efficient Asynchronous Procedure Calls in Distributed Systems*. ACM PLDI, pp. 260–267, 1988.
-- **[Stephenson et al. 2000]**: M. Stephenson, J. Babb, S. Amarasinghe. *Bitwidth Analysis with Application to Silicon Compilation*. ACM PLDI, pp. 108–120, 2000.
-- **[Rodrigues et al. 2013]**: R. E. Rodrigues, V. H. S. Campos, F. M. Q. Pereira. *A Fast and Low-Overhead Technique to Secure Programs Against Integer Overflows*. IEEE/ACM CGO, 2013.
 - **[Ramsey 2022]**: N. Ramsey. *Beyond Relooper: Recursive Translation of Unstructured Control Flow to Structured Control Flow (Functional Pearl)*. Proceedings of the ACM on Programming Languages 6(ICFP), 2022.
 - **[Canonical ABI]**: WebAssembly Community Group. *Canonical ABI Explainer*. WebAssembly/component-model, living design document.
 
-[Cousot & Cousot 1977]: https://doi.org/10.1145/512950.512973
-[Cousot & Cousot 1979]: https://doi.org/10.1145/567752.567778
 [Liskov & Shrira 1988]: https://doi.org/10.1145/53990.54016
-[Stephenson et al. 2000]: https://doi.org/10.1145/349299.349317
-[Rodrigues et al. 2013]: https://doi.org/10.1109/CGO.2013.6494993
 [Ramsey 2022]: https://doi.org/10.1145/3547621
 [Canonical ABI]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md
