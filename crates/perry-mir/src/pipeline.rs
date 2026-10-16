@@ -25,6 +25,89 @@ pub fn optimization_statistics(
         .unwrap_or_default()
 }
 
+/// Well-founded lexicographical ranking tuple proving termination of the `cleanup` fixed-point loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct IrPotential {
+    allocs: usize,
+    locals: usize,
+    blocks: usize,
+    cond_brs: usize,
+    block_args: usize,
+    non_const_ops: usize,
+    cast_depth: usize,
+    total_ops: usize,
+}
+
+fn cast_depth(ctx: &Context, mut value: pliron::value::Value) -> usize {
+    let mut depth = 0;
+    while let Some(def) = value
+        .defining_op()
+        .filter(|&op| Operation::get_op::<crate::scalar::NumericCastOp>(op, ctx).is_some())
+    {
+        depth += 1;
+        value = def.deref(ctx).get_operand(0);
+    }
+    depth
+}
+
+impl IrPotential {
+    fn measure(root: Ptr<Operation>, ctx: &Context) -> Self {
+        use pliron::{
+            builtin::{op_interfaces::OneRegionInterface, ops::ConstantOp},
+            linked_list::ContainsLinkedList,
+            op::Op,
+        };
+        if !cfg!(any(test, debug_assertions)) {
+            return Self::default();
+        }
+        let mut p = Self::default();
+        for f in crate::aggregates::functions(root, ctx) {
+            for b in f.get_region(ctx).deref(ctx).iter(ctx) {
+                p.blocks += 1;
+                p.block_args += b.deref(ctx).arguments().count();
+            }
+            for op in crate::aggregates::operations(ctx, &f) {
+                p.total_ops += 1;
+                p.cast_depth += op
+                    .deref(ctx)
+                    .operands()
+                    .map(|v| cast_depth(ctx, v))
+                    .sum::<usize>();
+                match Operation::get_opid(op, ctx) {
+                    id if id == crate::heap::AllocOp::get_opid_static() => p.allocs += 1,
+                    id if id == crate::locals::LocalOp::get_opid_static() => p.locals += 1,
+                    id if id == crate::control::CondBrOp::get_opid_static() => p.cond_brs += 1,
+                    id if id == ConstantOp::get_opid_static() => {}
+                    _ => p.non_const_ops += 1,
+                }
+            }
+        }
+        p
+    }
+}
+
+fn run_to_fixpoint(
+    passes: &mut Passes,
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<u64> {
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        let before = IrPotential::measure(root, ctx);
+        if passes.run(root, ctx, analyses)?.ir_changed == IRStatus::Unchanged {
+            debug_assert_eq!(IrPotential::measure(root, ctx), before);
+            return Ok(rounds);
+        }
+        let after = IrPotential::measure(root, ctx);
+        debug_assert!(
+            after < before,
+            "non-monotonic cleanup round {rounds}: {before:?} -> {after:?}"
+        );
+    }
+}
+
 /// Promote locals and simplify to a fixed point before ownership and lifetime lowering.
 pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisManager> {
     verify_operation(root, ctx)?;
@@ -59,24 +142,13 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     cleanup.add_pass(Mem2RegPass);
     cleanup.add_pass(DCEPass);
     cleanup.add_pass(SimplifyCFGPass);
-    let mut rounds = 0;
-    loop {
-        rounds += 1;
-        if cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Unchanged {
-            break;
-        }
-    }
+    let mut rounds = run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
     let mut bounds = Passes::default();
     bounds.add_pass(crate::unwraps::ReuseUnwraps);
     bounds.add_pass(ProveBounds);
     bounds.run(root, ctx, &mut analyses)?;
-    loop {
-        rounds += 1;
-        if cleanup.run(root, ctx, &mut analyses)?.ir_changed == IRStatus::Unchanged {
-            break;
-        }
-    }
+    rounds += run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
     let mut ownership = Passes::default();
     ownership.add_pass(crate::append::AppendPass);
@@ -197,3 +269,68 @@ impl Pass for Transform {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pliron::{irfmt::parsers::spaced, parsable::parse_from_str};
+
+    fn parse(ctx: &mut Context, src: &str) -> Ptr<Operation> {
+        parse_from_str(spaced(Operation::top_level_parser()), ctx, src).unwrap()
+    }
+
+    #[test]
+    fn cleanup_rounds_strictly_decrease_ir_potential() -> Result<()> {
+        let ctx = &mut Context::new();
+        let root = parse(
+            ctx,
+            r#"
+            builtin.module @cascade {
+              ^module():
+                builtin.func @run: builtin.function <() -> (builtin.fp64)> {
+                  ^entry():
+                    two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+                    four = builtin.constant <builtin.double 4.0> : builtin.fp64;
+                    p = perry.alloc Unassigned (two, four) : perry.record <Pair { a: builtin.fp64, b: builtin.fp64 }>;
+                    a = perry.field_get p."a" : builtin.fp64;
+                    b = perry.field_get p."b" : builtin.fp64;
+                    take = perry.compare Lt a, b : builtin.integer i1;
+                    perry.cond_br if take ^yes(b) else ^no(a)
+                  ^yes(ans: builtin.fp64):
+                    perry.return ans
+                  ^no(fallback: builtin.fp64):
+                    perry.return fallback
+                }
+            }
+            "#,
+        );
+        let before = IrPotential::measure(root, ctx);
+        canonicalize(root, ctx)?;
+        let after = IrPotential::measure(root, ctx);
+        assert!(after < before, "{before:?} -> {after:?}");
+        assert!(optimization_statistics(root, ctx).cleanup_rounds >= 3);
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "non-monotonic cleanup round")]
+    fn fixpoint_rejects_non_monotonic_pass() {
+        let ctx = &mut Context::new();
+        let root = parse(
+            ctx,
+            r#"
+            builtin.module @oscillate {
+              ^module():
+                builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+                  ^entry(x: builtin.fp64):
+                    perry.return x
+                }
+            }
+            "#,
+        );
+        let mut passes = Passes::default();
+        passes.add_pass(Transform("bogus-change", |_, _| Ok(IRStatus::Changed)));
+        let _ = run_to_fixpoint(&mut passes, root, ctx, &mut AnalysisManager::default());
+    }
+}
+
