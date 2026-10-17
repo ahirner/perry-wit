@@ -29,6 +29,8 @@ impl ExitStatus {
 #[serde(tag = "kind", content = "input", rename_all = "snake_case")]
 pub enum Case {
     Program(Program),
+    Aggregate(crate::aggregates::AggregateCase),
+    Collection(crate::collections::CollectionCase),
     Stream(crate::streams::StreamCase),
     Fetch(crate::fetch::FetchCase),
     Handler(crate::handler::HandlerCase),
@@ -76,10 +78,8 @@ impl Case {
     }
     /// The case followed by its metamorphic forms, which must observe identically.
     pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
-        if let Self::Program(program) = self
-            && program.form == Form::Direct
-        {
-            Form::ALL
+        match self {
+            Self::Program(program) if program.form == Form::Direct => Form::ALL
                 .into_iter()
                 .map(|form| {
                     if form == Form::Direct {
@@ -91,13 +91,22 @@ impl Case {
                         }))
                     }
                 })
-                .collect()
-        } else {
-            vec![Cow::Borrowed(self)]
+                .collect(),
+            Self::Aggregate(case) if !case.permuted => vec![
+                Cow::Borrowed(self),
+                Cow::Owned(Self::Aggregate(case.with_permuted(true))),
+            ],
+            Self::Collection(case) if !case.permuted => vec![
+                Cow::Borrowed(self),
+                Cow::Owned(Self::Collection(case.with_permuted(true))),
+            ],
+            _ => vec![Cow::Borrowed(self)],
         }
     }
     pub fn source(&self) -> String {
         match self {
+            Self::Aggregate(case) => case.source(),
+            Self::Collection(case) => case.source(),
             Self::Stream(case) => case.source(),
             Self::Fetch(case) => case.source(),
             Self::Handler(case) => case.source(),
@@ -523,6 +532,8 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.extend(crate::capabilities::contracts());
     contracts.push(crate::handler::contract());
     contracts.extend(crate::scaling::contracts());
+    contracts.push(crate::aggregates::contract());
+    contracts.push(crate::collections::contract());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(

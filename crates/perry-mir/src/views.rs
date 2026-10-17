@@ -1,5 +1,5 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
-use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType};
+use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType};
 use pliron::{
     builtin::op_interfaces::{OneOpdInterface, OneResultInterface},
     common_traits::Verify,
@@ -15,7 +15,7 @@ use pliron::{
 };
 use std::collections::HashSet;
 
-/// Only matching record fields and array elements may widen their admitted absence states.
+/// Only matching record fields, array elements, and variant cases may widen their admitted states.
 /// No field is added, removed, reordered or converted to another representation.
 pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
     fn compatible(
@@ -63,9 +63,26 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
                     .zip(b)
                     .all(|((a, at), (b, bt))| a == b && compatible(ctx, *at, *bt, seen));
         }
+        if let (Some(a), Some(b)) = (
+            a.downcast_ref::<VariantType>(),
+            b.downcast_ref::<VariantType>(),
+        ) {
+            return a.cases().iter().all(|(tag, a_payload)| {
+                b.cases()
+                    .iter()
+                    .find(|(b_tag, _)| b_tag == tag)
+                    .is_some_and(|(_, b_payload)| match (a_payload, b_payload) {
+                        (None, None) => true,
+                        (Some(at), Some(bt)) => compatible(ctx, *at, *bt, seen),
+                        _ => false,
+                    })
+            });
+        }
         false
     }
-    let aggregate = source.deref(ctx).is::<RecordType>() || source.deref(ctx).is::<ArrayType>();
+    let aggregate = source.deref(ctx).is::<RecordType>()
+        || source.deref(ctx).is::<ArrayType>()
+        || source.deref(ctx).is::<VariantType>();
     aggregate && compatible(ctx, source, target, &mut HashSet::new())
 }
 

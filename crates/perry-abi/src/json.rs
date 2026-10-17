@@ -9,6 +9,8 @@ pub mod kind {
     pub const OBJECT: u32 = 6;
     pub const EXCEPTION: u32 = 7;
     pub const NATIVE: u32 = 8;
+    pub const INT64: u32 = 9;
+    pub const UINT64: u32 = 10;
 }
 pub const MAX_DEPTH: u32 = 128;
 pub const MEMBER_COUNT: usize = 20;

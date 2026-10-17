@@ -1,8 +1,8 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use crate::sdk::{to_camel_case, to_pascal_case};
+use crate::sdk::{qualified_type_name, to_camel_case, to_pascal_case};
 use anyhow::{Result, ensure};
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
-use perry_lower::hir::{FunctionType, Type as HirType};
+use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
 use std::collections::{BTreeMap, HashMap};
 use wit_parser::{Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem};
 
@@ -14,18 +14,13 @@ pub(super) fn canonical(resolve: &Resolve, mut id: TypeId) -> TypeId {
 }
 
 pub(super) fn source_type(resolve: &Resolve, id: TypeId) -> HirType {
-    HirType::Generic {
-        base: "PerryWitResource".into(),
-        type_args: vec![HirType::StringLiteral(
-            canonical(resolve, id).index().to_string(),
-        )],
-    }
+    HirType::Named(qualified_type_name(resolve, canonical(resolve, id)))
 }
 
 pub(super) fn definitions(
     resolve: &Resolve,
     world: WorldId,
-    foreign: &mut HashMap<String, HirType>,
+    foreign: &mut HashMap<String, Foreign>,
     bindings: &mut Vec<Import>,
 ) -> Result<Vec<ResourceDefinition>> {
     let mut definitions = BTreeMap::new();
@@ -83,8 +78,8 @@ pub(super) fn definitions(
                 for (name, operation, input, output) in helpers {
                     let binding = format!("{module}#{name}");
                     foreign.insert(
-                        format!("wit-function:{binding}"),
-                        HirType::Function(FunctionType {
+                        binding.clone(),
+                        Foreign::Function(FunctionType {
                             params: vec![("value".into(), input, false)],
                             return_type: Box::new(output),
                             is_async: false,

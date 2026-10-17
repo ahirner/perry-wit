@@ -2,7 +2,7 @@
 //! `perry-runtime`, executed in wasmtime with fuel metering (raw exports, no component):
 //! control flow, exceptions, async functions, records and arrays, and code size.
 use perry_codegen::status_code;
-use perry_mir::attrs::ErrorKind;
+use perry_mir::ErrorKind;
 use wasmtime::Val;
 
 use crate::core_program::Program;

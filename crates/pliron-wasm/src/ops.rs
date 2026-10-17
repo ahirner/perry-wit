@@ -5,7 +5,7 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        attributes::{IdentifierAttr, IntegerAttr, StringAttr, TypeAttr},
+        attributes::{IdentifierAttr, IntegerAttr, StringAttr, TypeAttr, VecAttr},
         op_interfaces::{
             NOpdsInterface, NRegionsInterface, NResultsInterface, OneResultInterface,
             SymbolOpInterface, SymbolTableInterface,
@@ -484,21 +484,42 @@ fn export_key() -> Identifier {
         .expect("wasm_export is a valid identifier")
 }
 
-/// Export `function` from the emitted module under `name`.
+/// Add an export of `function` under `name`. Several exports may share one implementation.
 pub fn set_export(ctx: &mut Context, function: &FuncOp, name: &str) {
-    function
-        .get_operation()
-        .deref_mut(ctx)
-        .attributes
-        .set(export_key(), StringAttr::new(name.to_string()));
+    let mut op = function.get_operation().deref_mut(ctx);
+    if let Some(names) = op.attributes.get_mut::<VecAttr>(&export_key()) {
+        if !names.0.iter().any(|attr| {
+            attr.downcast_ref::<StringAttr>()
+                .is_some_and(|existing| AsRef::<str>::as_ref(existing) == name)
+        }) {
+            names.0.push(Box::new(StringAttr::new(name.to_owned())));
+        }
+    } else {
+        op.attributes.set(
+            export_key(),
+            VecAttr::new(vec![Box::new(StringAttr::new(name.to_owned()))]),
+        );
+    }
 }
 
-/// The export name of `function`, if it is exported.
-pub(crate) fn export_name(ctx: &Context, function: &FuncOp) -> Option<String> {
+/// The export names of `function` in declaration order.
+pub(crate) fn export_names(ctx: &Context, function: &FuncOp) -> Vec<String> {
     function
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<StringAttr>(&export_key())
-        .map(|name| name.clone().into())
+        .get::<VecAttr>(&export_key())
+        .map(|names| {
+            names
+                .0
+                .iter()
+                .map(|name| {
+                    name.downcast_ref::<StringAttr>()
+                        .expect("export name")
+                        .clone()
+                        .into()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

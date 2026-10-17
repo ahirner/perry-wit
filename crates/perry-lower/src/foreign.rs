@@ -1,6 +1,6 @@
 //! Imported async functions specialize only their canonical input views.
 use super::*;
-use perry_mir::foreign::{ForeignOp, Phase};
+use perry_mir::{ForeignOp, Phase};
 
 /// Native values can cross an outbound boundary without cloning aggregate headers. This
 /// relation only applies while lowering the import; it never creates a mutable native alias
@@ -17,12 +17,12 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
         }
         let expected = expected.deref(ctx);
         let actual = actual.deref(ctx);
-        if expected.is::<perry_mir::types::ByteInputType>() {
+        if expected.is::<perry_mir::ByteInputType>() {
             return actual.is::<BytesType>() || actual.is::<StringType>();
         }
         if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<perry_mir::types::OptionalType>(),
-            actual.downcast_ref::<perry_mir::types::OptionalType>(),
+            expected.downcast_ref::<perry_mir::OptionalType>(),
+            actual.downcast_ref::<perry_mir::OptionalType>(),
         ) {
             return (!b.absence().admits_null() || a.absence().admits_null())
                 && (!b.absence().admits_undefined() || a.absence().admits_undefined())
@@ -47,8 +47,8 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
                     .all(|((an, at), (bn, bt))| an == bn && accepts(ctx, *at, *bt, seen));
         }
         if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<perry_mir::types::VariantType>(),
-            actual.downcast_ref::<perry_mir::types::VariantType>(),
+            expected.downcast_ref::<perry_mir::VariantType>(),
+            actual.downcast_ref::<perry_mir::VariantType>(),
         ) {
             return a.cases().len() == b.cases().len()
                 && a.cases().iter().zip(b.cases()).all(|((an, at), (bn, bt))| {
@@ -96,7 +96,7 @@ pub(super) fn wrapper(
     let block = function.get_entry_block(ctx);
     let mut inserter = IRInserter::<DummyListener>::new_at_block_end(block);
     let args = block.deref(ctx).arguments().collect();
-    let transfer = perry_mir::types::TransferType::get(ctx).into();
+    let transfer = perry_mir::TransferType::get(ctx).into();
     let promise = PromiseType::get(ctx, transfer).into();
     let start = ForeignOp::new(ctx, Phase::Start, binding, args, vec![promise]);
     inserter.append_op(ctx, &start);

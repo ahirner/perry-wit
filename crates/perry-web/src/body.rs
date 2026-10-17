@@ -98,6 +98,7 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
 
 /// Read the whole body as `form`. A snapshot is handed over, not copied: once read, the
 /// body never exposes it again.
+#[inline]
 fn read(object: *mut u8, form: Form) -> *mut u8 {
     let promise = promise_new();
     if !body(object).stream.is_null() {

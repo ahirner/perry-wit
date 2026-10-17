@@ -1,14 +1,14 @@
 //! Typed JSON serialization.
 use crate::{
+    aggregates::record_slot,
     function::FunctionLowering,
-    repr::{i32_type, optional_inner, slot_kind, wasm_type},
+    repr::{Carriers, i32_type, optional_inner, slot_kind, wasm_type},
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array, record};
 use perry_mir::{
-    intrinsics::Intrinsic,
-    types::{ArrayType, DateType, ExceptionType, JsonType, OptionalType, RecordType, StringType},
+    ArrayType, DateType, ExceptionType, Intrinsic, JsonType, OptionalType, RecordType, StringType,
 };
 use pliron::{
     builtin::{
@@ -50,30 +50,69 @@ fn json_key(name: &str) -> String {
 }
 
 impl FunctionLowering<'_, '_> {
-    pub(crate) fn native_descriptor(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<u32> {
+    pub(super) fn json_cursor_key(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        ty: TypeHandle,
+    ) -> Result<()> {
+        let (table, count) = if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let record = record.deref(ctx);
+            let mut names = record.fields()?.iter().enumerate().collect::<Vec<_>>();
+            names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+            });
+            let mut bytes = Vec::with_capacity(names.len() * 8);
+            for (index, (name, _)) in &names {
+                bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
+                bytes.extend_from_slice(&(*index as u32).to_le_bytes());
+            }
+            (self.state.data.append(4, &bytes), names.len())
+        } else if ty.deref(ctx).is::<perry_mir::VariantType>() {
+            let mut bytes = Vec::with_capacity(16);
+            for (index, name) in [(0u32, "tag"), (1u32, "val")] {
+                bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
+                bytes.extend_from_slice(&index.to_le_bytes());
+            }
+            (self.state.data.append(4, &bytes), 2)
+        } else {
+            return Err(anyhow!("unsupported json_cursor_key schema"));
+        };
+        let table = self.i32_const(ctx, table as i32);
+        let count = self.i32_const(ctx, count as i32);
+        let cursor = self.operand(ctx, op, 0)?;
+        let index = self.runtime(ctx, Runtime::JsonCursorKey, vec![cursor, table, count]);
+        self.define(ctx, op, index);
+        Ok(())
+    }
+
+    pub(crate) fn native_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
         use perry_abi::layout::descriptor::{
-            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, STRING,
+            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, SIGNED_INT, STRING, UNSIGNED_INT,
         };
         if let Some(&address) = self.state.native_descriptors.get(&ty) {
             return Ok(address);
         }
-        let record_fields = TypedHandle::<RecordType>::from_handle(ty, ctx)
-            .ok()
-            .map(|record| record.deref(ctx).fields().map(|fields| fields.to_vec()))
+        let definition = ty.deref(ctx);
+        let record_fields = definition
+            .downcast_ref::<RecordType>()
+            .map(RecordType::fields)
             .transpose()
             .map_err(|_| anyhow!("unresolved native record"))?;
-        let count = record_fields.as_ref().map_or(0, Vec::len);
-        let address = self.state.data.align(4);
-        let new_len = self.state.data.bytes.len() + 8 + 12 * count;
-        self.state.data.bytes.resize(new_len, 0);
+        let count = record_fields.map_or(0, <[_]>::len);
+        let address = self.state.data.append(4, &vec![0; 8 + 12 * count]);
         self.state.native_descriptors.insert(ty, address);
-        let mut words = if let Some(fields) = record_fields {
+        let words = if let Some(fields) = record_fields {
             let mut words = Vec::with_capacity(2 + 3 * count);
             words.extend([RECORD, count as u32]);
-            for (index, (name, field)) in fields.into_iter().enumerate() {
-                let name = self.state.data.string(&name);
-                let field = self.native_descriptor(ctx, field)?;
-                words.extend([name, field, record::field(index)]);
+            let mut field_offset = record::HEADER;
+            for (name, field_ty) in fields.iter() {
+                let name = self.state.data.string(name);
+                let field = self.native_descriptor(ctx, *field_ty)?;
+                words.extend([name, field, field_offset]);
+                field_offset += record_slot(ctx, *field_ty);
             }
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
@@ -86,8 +125,14 @@ impl FunctionLowering<'_, '_> {
         } else {
             let kind = if ty.deref(ctx).is::<FP64Type>() {
                 NUMBER
-            } else if ty.deref(ctx).is::<IntegerType>() {
-                BOOLEAN
+            } else if let Some(int) = ty.deref(ctx).downcast_ref::<IntegerType>() {
+                if int.width() == 1 {
+                    BOOLEAN
+                } else if int.signedness() == pliron::builtin::types::Signedness::Unsigned {
+                    UNSIGNED_INT
+                } else {
+                    SIGNED_INT
+                }
             } else if ty.deref(ctx).is::<StringType>() {
                 STRING
             } else if ty.deref(ctx).is::<ExceptionType>() {
@@ -98,7 +143,7 @@ impl FunctionLowering<'_, '_> {
             vec![kind, 0]
         };
         let offset = (address - crate::DATA_BASE) as usize;
-        for (index, word) in words.drain(..).enumerate() {
+        for (index, word) in words.into_iter().enumerate() {
             self.state.data.bytes[offset + index * 4..offset + index * 4 + 4]
                 .copy_from_slice(&word.to_le_bytes());
         }
@@ -122,12 +167,13 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         writer: Value,
-        value: Value,
+        value: impl Into<Carriers<Value>>,
         ty: TypeHandle,
     ) -> Result<()> {
+        let value = value.into();
         if let Some(inner) = optional_inner(ctx, ty) {
             // Inside arrays, `undefined` is written as `null`.
-            let undefined = self.is_absent(ctx, value, ty)?;
+            let undefined = self.is_absent_value(ctx, value, ty)?;
             let null = self.new_block(ctx, vec![]);
             let defined = self.new_block(ctx, vec![]);
             let join = self.new_block(ctx, vec![]);
@@ -141,7 +187,37 @@ impl FunctionLowering<'_, '_> {
             self.block = join;
             return Ok(());
         }
-        if ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+        if let Carriers::Numeric { tag, payload } = value {
+            let norm_tag = self.canonical_numeric_tag(ctx, tag);
+            let floats = self.new_block(ctx, vec![]);
+            let signed = self.new_block(ctx, vec![]);
+            let unsigned = self.new_block(ctx, vec![]);
+            let invalid = self.new_block(ctx, vec![]);
+            let done = self.new_block(ctx, vec![]);
+            self.br_table(ctx, norm_tag, vec![floats, signed, unsigned], invalid);
+
+            self.block = invalid;
+            let op = pliron_wasm::control::UnreachableOp::new(ctx).get_operation();
+            self.insert(ctx, op);
+
+            self.block = floats;
+            let float = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+            self.runtime_void(ctx, Runtime::StdJsonNumber, vec![writer, float]);
+            self.br(ctx, done, vec![]);
+
+            self.block = signed;
+            self.runtime_void(ctx, Runtime::StdJsonWriteI64, vec![writer, payload]);
+            self.br(ctx, done, vec![]);
+
+            self.block = unsigned;
+            self.runtime_void(ctx, Runtime::StdJsonWriteU64, vec![writer, payload]);
+            self.br(ctx, done, vec![]);
+
+            self.block = done;
+            return Ok(());
+        }
+        let value = value.scalar()?;
+        if ty.deref(ctx).is::<perry_mir::NumberStringType>() {
             return self.json_number_string(ctx, writer, value);
         }
         let deref = ty.deref(ctx);
@@ -159,8 +235,7 @@ impl FunctionLowering<'_, '_> {
             drop(deref);
             let text = self.date_intrinsic(ctx, Intrinsic::DateJson, vec![value])?;
             let string = StringType::get(ctx).into();
-            let nullable =
-                OptionalType::get_with(ctx, string, perry_mir::attrs::Absence::Null).into();
+            let nullable = OptionalType::get_with(ctx, string, perry_mir::Absence::Null).into();
             return self.json_value(ctx, writer, text, nullable);
         }
         if deref.is::<ExceptionType>() {
@@ -173,21 +248,36 @@ impl FunctionLowering<'_, '_> {
             self.runtime_void(ctx, Runtime::StdJsonValue, vec![writer, value]);
             return Ok(());
         }
-        if deref
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|i| i.width() == 1)
-        {
+        if let Some(int) = deref.downcast_ref::<IntegerType>() {
+            let width = int.width();
+            let unsigned = int.signedness() == pliron::builtin::types::Signedness::Unsigned;
             drop(deref);
-            let (true_data, true_len) = self.static_text(ctx, "true");
-            let (false_data, false_len) = self.static_text(ctx, "false");
-            let data = self.select(ctx, value, true_data, false_data);
-            let len = self.select(ctx, value, true_len, false_len);
-            self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
+            if width == 1 {
+                let (true_data, true_len) = self.static_text(ctx, "true");
+                let (false_data, false_len) = self.static_text(ctx, "false");
+                let data = self.select(ctx, value, true_data, false_data);
+                let len = self.select(ctx, value, true_len, false_len);
+                self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
+            } else {
+                let value = if width == 64 {
+                    value
+                } else if unsigned {
+                    self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
+                } else {
+                    self.num(ctx, NumOpcode::I64ExtendI32S, vec![value])
+                };
+                let runtime = if unsigned {
+                    Runtime::StdJsonWriteU64
+                } else {
+                    Runtime::StdJsonWriteI64
+                };
+                self.runtime_void(ctx, runtime, vec![writer, value]);
+            }
             return Ok(());
         }
         let container = deref.is::<RecordType>()
             || deref.is::<ArrayType>()
-            || deref.is::<perry_mir::types::VariantType>();
+            || deref.is::<perry_mir::VariantType>();
         drop(deref);
         ensure!(
             container,
@@ -217,8 +307,26 @@ impl FunctionLowering<'_, '_> {
         let mut b = FunctionLowering::glue(self.state, ctx, &function);
         let record_type = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
         let tuple = record_type.is_some_and(|record| record.deref(ctx).is_tuple());
-        let variant_type = TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx).ok();
-        let (open, close) = if (record_type.is_some() && !tuple) || variant_type.is_some() {
+        let variant_type = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx).ok();
+        let dict_entry = TypedHandle::<ArrayType>::from_handle(ty, ctx)
+            .ok()
+            .map(|a| a.deref(ctx).element())
+            .and_then(|elem| {
+                let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
+                let rec_ref = rec.deref(ctx);
+                if !rec_ref.is_tuple() || !rec_ref.name().as_ref().starts_with("dict_tuple_") {
+                    return None;
+                }
+                let fields = rec_ref.fields().ok()?;
+                if fields.len() != 2 {
+                    return None;
+                }
+                Some((elem, fields[0].1, fields[1].1))
+            });
+        let (open, close) = if (record_type.is_some() && !tuple)
+            || variant_type.is_some()
+            || dict_entry.is_some()
+        {
             ('{', '}')
         } else {
             ('[', ']')
@@ -261,19 +369,52 @@ impl FunctionLowering<'_, '_> {
                 &["tag", "val"],
                 count,
             );
+        } else if let Some((tuple_ty, k_ty, v_ty)) = dict_entry {
+            let kind = slot_kind(ctx, tuple_ty)?;
+            let k_kind = slot_kind(ctx, k_ty)?;
+            let len = b.load(ctx, MemKind::I32, value, array::LEN);
+            let data = b.load(ctx, MemKind::I32, value, array::DATA);
+            let val_offset = record::HEADER + record_slot(ctx, k_ty);
+            b.counted_loop(ctx, len, |b, ctx, i| {
+                let slot = b.slot_address(ctx, data, i, tuple_ty);
+                let item = b.load(ctx, kind, slot, 0);
+                let key = b.load(ctx, k_kind, item, record::HEADER);
+                let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
+                let present = match optional_inner(ctx, v_ty) {
+                    Some(_) => {
+                        let undefined = b.absence_test_value(ctx, val, v_ty, false)?;
+                        Some(b.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
+                    }
+                    None => None,
+                };
+                let member = b.new_block(ctx, vec![]);
+                let next = b.new_block(ctx, vec![]);
+                match present {
+                    Some(present) => b.cond_br(ctx, present, (member, vec![]), (next, vec![])),
+                    None => b.br(ctx, member, vec![]),
+                }
+                b.block = member;
+                b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
+                b.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, key]);
+                b.json_raw(ctx, writer, ":");
+                let val_write_ty = optional_inner(ctx, v_ty).unwrap_or(v_ty);
+                b.json_value(ctx, writer, val, val_write_ty)?;
+                b.br(ctx, next, vec![]);
+                b.block = next;
+                Ok(())
+            })?;
         } else {
             let element = FunctionLowering::element_type(ctx, value).or_else(|_| {
                 TypedHandle::<ArrayType>::from_handle(ty, ctx)
                     .map(|a| a.deref(ctx).element())
                     .map_err(|_| anyhow!("array"))
             })?;
-            let kind = slot_kind(ctx, element)?;
             let len = b.load(ctx, MemKind::I32, value, array::LEN);
             let data = b.load(ctx, MemKind::I32, value, array::DATA);
             b.counted_loop(ctx, len, |b, ctx, i| {
                 b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
-                let slot = b.slot_address(ctx, data, i);
-                let item = b.load(ctx, kind, slot, 0);
+                let slot = b.slot_address(ctx, data, i, element);
+                let item = b.load_slot_value(ctx, slot, 0, element)?;
                 b.json_value(ctx, writer, item, element)
             })?;
         }
@@ -327,11 +468,12 @@ impl FunctionLowering<'_, '_> {
         value: Value,
         items: &[TypeHandle],
     ) -> Result<()> {
-        for (index, &field_ty) in items.iter().enumerate() {
-            let kind = slot_kind(ctx, field_ty)?;
-            let slot = self.load(ctx, kind, value, record::field(index));
+        let mut offset = record::HEADER;
+        for &field_ty in items.iter() {
+            let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
             self.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
             self.json_value(ctx, writer, slot, field_ty)?;
+            offset += record_slot(ctx, field_ty);
         }
         Ok(())
     }
@@ -345,13 +487,14 @@ impl FunctionLowering<'_, '_> {
         keys: &[String],
         types: &[TypeHandle],
     ) -> Result<()> {
-        for (index, (key, &field_ty)) in keys.iter().zip(types).enumerate() {
-            let kind = slot_kind(ctx, field_ty)?;
-            let slot = self.load(ctx, kind, value, record::field(index));
+        let mut offset = record::HEADER;
+        for (key, &field_ty) in keys.iter().zip(types) {
+            let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
+            offset += record_slot(ctx, field_ty);
             let key = self.state.data.string(&json_key(key));
             let present = match optional_inner(ctx, field_ty) {
                 Some(_) => {
-                    let undefined = self.absence_test(ctx, slot, field_ty, false)?;
+                    let undefined = self.absence_test_value(ctx, slot, field_ty, false)?;
                     Some(self.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
                 }
                 None => None,
@@ -373,16 +516,18 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(super) fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        let value = self.operand(ctx, op, 0)?;
-        let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+        let input = op.deref(ctx).get_operand(0);
+        let value = self.mapped_value(ctx, input)?;
+        let ty = input.get_type(ctx);
         let writer = self.runtime(ctx, Runtime::StdJsonWriter, vec![]);
         let json = ty.deref(ctx).is::<JsonType>();
         let text = if json || optional_inner(ctx, ty).is_some() {
             // A top-level `undefined` stringifies to `undefined`.
             let undefined = if json {
-                self.num(ctx, NumOpcode::I32Eqz, vec![value])
+                let scalar = value.scalar()?;
+                self.num(ctx, NumOpcode::I32Eqz, vec![scalar])
             } else {
-                self.absence_test(ctx, value, ty, false)?
+                self.absence_test_value(ctx, value, ty, false)?
             };
             let i32 = i32_type(ctx);
             let write = self.new_block(ctx, vec![]);

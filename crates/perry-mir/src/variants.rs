@@ -22,7 +22,7 @@ use pliron::{
     verify_err,
 };
 
-pub fn cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Option<TypeHandle>)>> {
+pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Option<TypeHandle>)>> {
     let ty = ty.deref(ctx);
     if let Some(variant) = ty.downcast_ref::<VariantType>() {
         return Ok(variant.cases().to_vec());
@@ -71,7 +71,7 @@ impl VariantNewOp {
 }
 impl Verify for VariantNewOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let cases = cases(ctx, self.get_result(ctx).get_type(ctx))?;
+        let cases = variant_cases(ctx, self.get_result(ctx).get_type(ctx))?;
         let operands: Vec<_> = self
             .get_operation()
             .deref(ctx)
@@ -112,7 +112,7 @@ impl VariantTagOp {
 }
 impl Verify for VariantTagOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if cases(ctx, self.get_operand(ctx).get_type(ctx)).is_err()
+        if variant_cases(ctx, self.get_operand(ctx).get_type(ctx)).is_err()
             || !self
                 .get_result(ctx)
                 .get_type(ctx)
@@ -156,7 +156,7 @@ impl VariantPayloadOp {
 }
 impl Verify for VariantPayloadOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let cases = cases(ctx, self.get_operand(ctx).get_type(ctx))?;
+        let cases = variant_cases(ctx, self.get_operand(ctx).get_type(ctx))?;
         if !cases
             .iter()
             .any(|(_, payload)| admits_payload(ctx, self.get_result(ctx).get_type(ctx), *payload))

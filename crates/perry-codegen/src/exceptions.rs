@@ -9,11 +9,8 @@ use crate::{
 use anyhow::{Result, bail};
 use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
 use perry_mir::{
-    attrs::ErrorKind,
-    exceptions::{
-        CatchOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp, RethrowOp,
-    },
-    types::{BigIntType, ExceptionType, StringType},
+    BigIntType, CatchOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
+    ExitOp, RaiseOp, RethrowOp, StringType,
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -105,7 +102,7 @@ impl FunctionLowering<'_, '_> {
         if ty.deref(ctx).is::<ExceptionType>() {
             return Ok(value);
         }
-        if ty.deref(ctx).is::<perry_mir::types::JsonType>() {
+        if ty.deref(ctx).is::<perry_mir::JsonType>() {
             return Ok(self.runtime(ctx, Runtime::StdJsonToException, vec![value]));
         }
         let inner = crate::repr::optional_inner(ctx, ty).unwrap_or(ty);

@@ -1,8 +1,7 @@
 //! Bounded frame storage for closed scalar records with no escaping aliases.
 use crate::{
     attrs::Tier,
-    effects,
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
 };
 use pliron::{
     builtin::{
@@ -10,7 +9,9 @@ use pliron::{
         ops::FuncOp,
     },
     context::{Context, Ptr},
+    irbuild::IRStatus,
     linked_list::ContainsLinkedList,
+    op::Op,
     operation::Operation,
     r#type::{Typed, TypedHandle},
 };
@@ -21,7 +22,7 @@ use pliron::{
 fn frame_candidates(
     ctx: &Context,
     function: &FuncOp,
-    summaries: &std::collections::HashMap<pliron::identifier::Identifier, effects::Summary>,
+    summaries: &crate::facts::ProgramFacts,
 ) -> Vec<AllocOp> {
     if crate::calls::is_async(ctx, function) {
         return vec![];
@@ -40,7 +41,21 @@ fn frame_candidates(
                     .expect("verified record");
             let record = record.deref(ctx);
             let fields = record.fields().expect("verified fields");
-            let size = 8 + 8 * fields.len();
+            let payload_bytes: usize = fields
+                .iter()
+                .map(|(_, ty)| {
+                    if crate::optional::optional_value(ctx, *ty)
+                        .unwrap_or(*ty)
+                        .deref(ctx)
+                        .is::<crate::types::NumericType>()
+                    {
+                        16
+                    } else {
+                        8
+                    }
+                })
+                .sum();
+            let size = 8 + payload_bytes;
             if bytes + size > 448
                 || fields
                     .iter()
@@ -53,12 +68,13 @@ fn frame_candidates(
                 let operand = usage.find_index(ctx);
                 if operand == 0
                     && (Operation::get_op::<FieldGetOp>(op, ctx).is_some()
+                        || Operation::get_op::<FieldPresentOp>(op, ctx).is_some()
                         || Operation::get_op::<FieldSetOp>(op, ctx).is_some())
                 {
                     return true;
                 }
                 Operation::get_op::<crate::calls::CallOp>(op, ctx)
-                    .and_then(|call| summaries.get(&call.callee(ctx)))
+                    .and_then(|call| summaries.effects(&call.callee(ctx)))
                     .is_some_and(|summary| !summary.escapes.contains(&operand))
             });
             if local {
@@ -69,22 +85,40 @@ fn frame_candidates(
         .collect()
 }
 
-pub(crate) fn assign(root: Ptr<Operation>, ctx: &Context) {
-    let functions = crate::aggregates::functions(root, ctx);
-    let summaries = effects::summarize(ctx, &functions);
-    for function in &functions {
+pub(crate) fn assign(
+    root: Ptr<Operation>,
+    ctx: &Context,
+    summaries: &crate::facts::ProgramFacts,
+) -> IRStatus {
+    let mut status = IRStatus::Unchanged;
+    for function in crate::aggregates::functions(root, ctx) {
+        let frame: std::collections::HashSet<_> = frame_candidates(ctx, &function, summaries)
+            .into_iter()
+            .map(|allocation| allocation.get_operation())
+            .collect();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
                 if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
-                    allocation.set_tier(ctx, Tier::Instance);
+                    let tier = if frame.contains(&op) {
+                        Tier::Frame
+                    } else {
+                        Tier::Instance
+                    };
+                    if allocation.tier(ctx) != tier {
+                        allocation.set_tier(ctx, tier);
+                        status = IRStatus::Changed;
+                    }
                 }
-                if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx) {
+                if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx)
+                    && array
+                        .get_attr_perry_array_tier(ctx)
+                        .is_none_or(|tier| *tier != Tier::Instance)
+                {
                     array.set_attr_perry_array_tier(ctx, Tier::Instance);
+                    status = IRStatus::Changed;
                 }
             }
         }
-        for allocation in frame_candidates(ctx, function, &summaries) {
-            allocation.set_tier(ctx, Tier::Frame);
-        }
     }
+    status
 }

@@ -2,6 +2,7 @@
 
 mod case_properties;
 mod casing;
+mod normalize;
 
 /// Returns scalar code point as f64, or f64::NAN if out-of-range or invalid position.
 #[unsafe(no_mangle)]
@@ -174,6 +175,23 @@ pub extern "C" fn str_case_convert(
     } else {
         u64::from(byte_len) | (u64::from(scalar_len) << 32)
     }
+}
+
+/// Normalizes UTF-8 text (`mode` bit 0 = compose, bit 1 = compat), returning packed
+/// byte/scalar lengths, or u64::MAX on overflow. With `out_ptr = 0`, measures without writing.
+#[unsafe(no_mangle)]
+pub extern "C" fn str_normalize(src_ptr: u32, src_byte_len: u32, out_ptr: u32, mode: u32) -> u64 {
+    if src_byte_len == 0 {
+        return 0;
+    }
+    // SAFETY: compiled callers supply valid UTF-8 and a separate output allocation.
+    let input = unsafe {
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+            src_ptr as *const u8,
+            src_byte_len as usize,
+        ))
+    };
+    normalize::normalize_utf8(input, out_ptr, (mode & 1) != 0, (mode & 2) != 0)
 }
 
 /// Returns the number of chunks produced by splitting haystack by sep.

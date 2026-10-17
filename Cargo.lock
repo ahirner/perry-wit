@@ -872,6 +872,11 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hashbrown"
@@ -879,8 +884,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2 0.2.21",
- "equivalent",
  "foldhash",
  "serde",
  "serde_core",
@@ -1402,8 +1405,8 @@ dependencies = [
 
 [[package]]
 name = "perry-api-manifest"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 
 [[package]]
 name = "perry-codegen"
@@ -1427,6 +1430,7 @@ dependencies = [
  "bytes",
  "http",
  "http-body-util",
+ "perry-mir",
  "perry-wit",
  "proptest",
  "proptest-state-machine",
@@ -1443,8 +1447,8 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 dependencies = [
  "serde",
  "serde_json",
@@ -1452,8 +1456,8 @@ dependencies = [
 
 [[package]]
 name = "perry-dispatch"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 
 [[package]]
 name = "perry-fetch-helper"
@@ -1468,8 +1472,8 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 dependencies = [
  "anyhow",
  "perry-api-manifest",
@@ -1515,6 +1519,7 @@ name = "perry-mir"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "perry-abi",
  "perry-wit-diagnostics",
  "pliron",
  "regex",
@@ -1531,8 +1536,8 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -1578,8 +1583,8 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-model"
-version = "0.5.1657"
-source = "git+https://github.com/PerryTS/perry?rev=a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa#a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa"
+version = "0.5.1659"
+source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
 
 [[package]]
 name = "perry-web"
@@ -1606,6 +1611,7 @@ dependencies = [
  "pliron",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "wasm-encoder 0.261.0",
@@ -1685,7 +1691,7 @@ dependencies = [
  "combine",
  "downcast-rs",
  "dyn-clone",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "hi_sparse_bitset",
  "indexmap",
  "inventory",

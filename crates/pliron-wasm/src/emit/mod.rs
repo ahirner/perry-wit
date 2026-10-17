@@ -24,7 +24,7 @@ mod structure;
 mod values;
 
 use crate::{
-    ops::{ImportFuncOp, export_name},
+    ops::{ImportFuncOp, export_names},
     types::val_type,
 };
 use function::FunctionEmitter;
@@ -184,7 +184,7 @@ pub fn emit_module(ctx: &Context, module: &ModuleOp, options: &EmitOptions) -> E
     let mut local_names = IndirectNameMap::new();
     for (offset, (function, (params, results))) in functions.iter().zip(signatures).enumerate() {
         let index = (imports.len() + offset) as u32;
-        if let Some(name) = export_name(ctx, function) {
+        for name in export_names(ctx, function) {
             exports.export(&name, ExportKind::Func, index);
         }
         let emitted =

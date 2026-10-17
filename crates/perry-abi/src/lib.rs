@@ -11,6 +11,7 @@ use core::ptr;
 
 pub mod json;
 pub mod layout;
+pub mod number;
 // Public because `perry-runtime` compiles this source too and uses the compact counter.
 pub mod utf8;
 /// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
@@ -48,6 +49,8 @@ pub const TAG_STRING: u32 = 3;
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
 /// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+/// Bits of an omitted optional field in a `number | undefined` slot.
+pub const OMITTED_BITS: u64 = 0x7FF0_0000_0000_0003;
 /// Offset of an array's data address ([layout::array::DATA]).
 pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
@@ -81,6 +84,7 @@ mod imports {
         pub(crate) fn perry_operation_unpin(token: u32);
         pub(crate) fn perry_promise_new_typed(references: u32) -> *mut u8;
         pub(crate) fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
+        pub(crate) fn perry_array_grow_typed(array: *mut u8, references: u32);
         pub(crate) fn perry_alloc(size: u32) -> *mut u8;
         pub(crate) fn perry_cabi_release(data: *mut u8);
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
@@ -136,7 +140,7 @@ mod imports {
 mod imports {
     extern crate std;
     pub(crate) use perry_runtime::{
-        array::perry_array_new_typed,
+        array::{perry_array_grow_typed, perry_array_new_typed},
         exception::{
             perry_exception_message, perry_exception_new, perry_raise, perry_raise_with_cause,
             perry_status,
@@ -231,12 +235,21 @@ pub fn unpin(token: u32) {
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes of valid UTF-8.
+#[inline(never)]
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let bytes = core::slice::from_raw_parts(data, len as usize);
-        imports::perry_string_adopt_counted(data, len, scalars_length(bytes))
+        adopt_counted(data, len, scalars_length(bytes))
     }
+}
+
+/// Adopt immutable UTF-8 with the scalar count established by its producer.
+///
+/// # Safety
+/// `data` contains `len` readable UTF-8 bytes with exactly `scalars` scalars and outlives the task.
+pub unsafe fn adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8 {
+    unsafe { imports::perry_string_adopt_counted(data, len, scalars) }
 }
 
 /// # Safety
@@ -373,13 +386,36 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
 /// A reference array and its writable slots; allocation cannot collect inside a helper.
 #[allow(unused_unsafe)]
 pub fn array_storage(len: usize) -> (*mut u8, &'static mut [u64]) {
+    array_storage_typed(len, true)
+}
+
+/// Typed array slots whose pointer map follows their representation.
+#[allow(unused_unsafe)]
+pub fn array_storage_typed(len: usize, references: bool) -> (*mut u8, &'static mut [u64]) {
     // SAFETY: a fresh array with capacity for `len` (layout of `perry_runtime::array`).
     unsafe {
         let len = u32::try_from(len).expect("array length overflow");
-        let array = imports::perry_array_new_typed(len, 1);
+        let array = imports::perry_array_new_typed(len, u32::from(references));
         let data = *(array.add(ARRAY_DATA as usize) as *const *mut u64);
         *(array as *mut u32) = len;
-        (array, core::slice::from_raw_parts_mut(data, len as usize))
+        (
+            array,
+            if len == 0 {
+                &mut []
+            } else {
+                core::slice::from_raw_parts_mut(data, len as usize)
+            },
+        )
+    }
+}
+
+/// Grow an exclusively owned helper array without collecting.
+///
+/// # Safety
+/// `array` was created with the same reference flag and remains exclusively owned.
+pub unsafe fn array_grow(array: *mut u8, references: bool) {
+    unsafe {
+        imports::perry_array_grow_typed(array, u32::from(references));
     }
 }
 
@@ -485,6 +521,7 @@ impl Buffer {
     }
 
     /// Make room for at least `additional` more bytes.
+    #[inline(never)]
     pub fn reserve(&mut self, additional: usize) {
         let required = self
             .len
@@ -520,6 +557,7 @@ impl Buffer {
         self.len = (self.len + count).min(self.cap);
     }
 
+    #[inline(never)]
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
         self.reserve(bytes.len());
         // SAFETY: capacity was ensured above.
@@ -538,6 +576,17 @@ impl Buffer {
         // SAFETY: `len` bytes at `ptr` are initialized.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    /// Transfer ownership of valid UTF-8 bytes in this buffer into a runtime string.
+    ///
+    /// # Safety
+    /// `self` must contain `self.len` bytes of valid UTF-8.
+    pub unsafe fn into_string(self) -> *mut u8 {
+        if self.len == 0 {
+            return from_static("");
+        }
+        unsafe { adopt(self.ptr, self.len as u32) }
+    }
 }
 
 impl Default for Buffer {
@@ -552,7 +601,7 @@ pub fn json_syntax_message(input: &[u8], offset: u32) -> *mut u8 {
     let mut message = Buffer::new();
     json::syntax_message(input, offset, |part| message.extend_from_slice(part));
     // SAFETY: the buffer owns valid UTF-8 and transfers its payload to the string.
-    unsafe { adopt(message.ptr, message.len as u32) }
+    unsafe { message.into_string() }
 }
 
 /// The message of a live exception supplied by the compiler or another helper.
@@ -570,6 +619,7 @@ pub fn exception_value(tag: u32, value: u64) -> *mut u8 {
 
 /// Reject a native operation with category, code and its original path or URL.
 #[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
+#[inline(never)]
 pub fn reject_native(
     promise: *mut u8,
     kind: u32,
@@ -579,6 +629,7 @@ pub fn reject_native(
     location_key: &str,
     location: &[u8],
 ) {
+    #[inline(never)]
     fn string(bytes: &[u8]) -> *mut u8 {
         let data = alloc(bytes.len() as u32);
         let node = unsafe { alloc_shaped(32, &[0, 3, 4, 8, 24]) };

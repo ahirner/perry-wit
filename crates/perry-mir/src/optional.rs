@@ -120,6 +120,39 @@ impl Verify for UndefinedOp {
     }
 }
 
+/// The omitted-property sentinel of an optional record field.
+#[pliron_op(
+    name = "perry.omitted",
+    format = "` : ` type($0)",
+    interfaces = [NOpdsInterface<0>, OneResultInterface]
+)]
+pub struct OmittedOp;
+
+impl OmittedOp {
+    pub fn with_type(ctx: &mut Context, ty: TypeHandle) -> Self {
+        OmittedOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![ty],
+                vec![],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for OmittedOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_undefined)
+        {
+            verify_err!(self.loc(ctx), OptionalErr::Result("perry.omitted"))?
+        }
+        Ok(())
+    }
+}
+
 /// A defined value viewed as `T | undefined`.
 #[pliron_op(
     name = "perry.wrap",
@@ -219,10 +252,11 @@ impl ToNumberOp {
 
 impl Verify for ToNumberOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let number = FP64Type::get(ctx).into();
-        if inner(ctx, operand(self, ctx), "perry.to_number")? != number
-            || self.get_result(ctx).get_type(ctx) != number
-        {
+        let number: TypeHandle = FP64Type::get(ctx).into();
+        let numeric: TypeHandle = crate::types::NumericType::get(ctx).into();
+        let inner_ty = inner(ctx, operand(self, ctx), "perry.to_number")?;
+        let res_ty = self.get_result(ctx).get_type(ctx);
+        if (inner_ty != number && inner_ty != numeric) || res_ty != inner_ty {
             verify_err!(self.loc(ctx), OptionalErr::Result("perry.to_number"))?
         }
         Ok(())
@@ -265,7 +299,14 @@ impl Verify for ToStringOp {
     }
 }
 
-pure!(UndefinedOp, WrapOp, IsUndefinedOp, ToNumberOp, ToStringOp);
+pure!(
+    UndefinedOp,
+    OmittedOp,
+    WrapOp,
+    IsUndefinedOp,
+    ToNumberOp,
+    ToStringOp
+);
 
 /// The explicit `null` value of a nullable type.
 #[pliron_op(

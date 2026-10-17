@@ -1,5 +1,8 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
-use super::{append_number, canonical, key_bytes, native_snapshot, node, string_bytes, word};
+use super::{
+    append_i64, append_number, append_u64, canonical, key_bytes, native_snapshot, node,
+    string_bytes, word,
+};
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
 use perry_abi::json::{MAX_DEPTH, kind::*};
 
@@ -115,6 +118,24 @@ pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
     }
 }
 
+/// Append a signed 64-bit integer with exact decimal digits.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_write_i64(w: *mut u8, value: i64) {
+    let w = writer(w);
+    if !w.failed {
+        append_i64(&mut w.text, value);
+    }
+}
+
+/// Append an unsigned 64-bit integer with exact decimal digits.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_write_u64(w: *mut u8, value: u64) {
+    let w = writer(w);
+    if !w.failed {
+        append_u64(&mut w.text, value);
+    }
+}
+
 /// Append a string as a JSON string literal (ECMAScript `QuoteJSONString`).
 ///
 /// # Safety
@@ -174,7 +195,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                 continue;
             }
             EXCEPTION => text.extend_from_slice(b"{}"),
-            NULL => text.extend_from_slice(b"null"),
+            NULL | UNDEFINED => text.extend_from_slice(b"null"),
             BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
                 b"true"
             } else {
@@ -184,6 +205,16 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                 // SAFETY: number nodes hold an f64 at 8.
                 let number = unsafe { *(current.add(8) as *const f64) };
                 append_number(text, number);
+            }
+            INT64 => {
+                // SAFETY: INT64 nodes hold an i64 at 8.
+                let integer = unsafe { *(current.add(8) as *const i64) };
+                append_i64(text, integer);
+            }
+            UINT64 => {
+                // SAFETY: UINT64 nodes hold a u64 at 8.
+                let integer = unsafe { *(current.add(8) as *const u64) };
+                append_u64(text, integer);
             }
             STRING => quote(text, string_bytes(current)),
             kind @ (ARRAY | OBJECT) => {
@@ -204,11 +235,11 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             let Some(container) = stack.last_mut() else {
                 return true;
             };
+            let object = word(container.node, 0) == OBJECT;
             let mut member = container.next;
-            while member != 0 && word(node(member), 0) == UNDEFINED {
+            while object && member != 0 && word(node(member), 0) == UNDEFINED {
                 member = word(node(member), 4);
             }
-            let object = word(container.node, 0) == OBJECT;
             if member == 0 {
                 text.push(if object { b'}' } else { b']' });
                 stack.pop();
@@ -268,7 +299,7 @@ pub(crate) unsafe extern "C" fn std_json_extras(
         &[]
     };
     let mut member = word(graph, 16);
-    let mut index = 0;
+    let mut index = if object { 0 } else { word(graph, 28) };
     while member != 0 {
         let value = node(member);
         let keep = if object {

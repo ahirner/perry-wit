@@ -183,12 +183,19 @@ impl Drop for Page {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+struct DirectoryTable {
+    /// Populated page entries; a large allocation occupies several entries.
+    occupied: usize,
+    pages: [*mut Page; 1024],
+}
+
 /// Two-level direct lookup for the guest's 32-bit address space. The host test version uses
 /// the host address space without reserving a directory proportional to native addresses.
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 struct Directory {
-    tables: Vec<Option<Box<[*mut Page; 1024]>>>,
+    tables: Vec<Option<Box<DirectoryTable>>>,
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
@@ -217,7 +224,7 @@ impl Directory {
             self.tables
                 .get(number >> 10)
                 .and_then(Option::as_ref)
-                .map_or(ptr::null_mut(), |table| table[number & 1023])
+                .map_or(ptr::null_mut(), |table| table.pages[number & 1023])
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -233,11 +240,23 @@ impl Directory {
             if self.tables.len() <= high {
                 self.tables.resize_with(high + 1, || None);
             }
-            let table = self.tables[high].get_or_insert_with(|| {
-                // SAFETY: all-zero bytes represent null pointers; initialize directly on the heap.
-                unsafe { Box::<[*mut Page; 1024]>::new_zeroed().assume_init() }
+            let slot = &mut self.tables[high];
+            if slot.is_none() && page.is_null() {
+                return;
+            }
+            let table = slot.get_or_insert_with(|| {
+                // SAFETY: zero is a valid count and null pointer; initialize directly on the heap.
+                unsafe { Box::<DirectoryTable>::new_zeroed().assume_init() }
             });
-            table[number & 1023] = page;
+            let previous = core::mem::replace(&mut table.pages[number & 1023], page);
+            match (previous.is_null(), page.is_null()) {
+                (true, false) => table.occupied += 1,
+                (false, true) => table.occupied -= 1,
+                _ => {}
+            }
+            if table.occupied == 0 {
+                *slot = None;
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -469,6 +488,17 @@ impl Collector {
     }
     pub(crate) fn counters(&self) -> Counters {
         self.counters
+    }
+
+    pub(crate) fn directory_tables(&self) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.directory.tables.iter().flatten().count()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0
+        }
     }
 
     pub(crate) fn set_poison(&mut self, enabled: bool) {

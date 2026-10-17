@@ -15,7 +15,7 @@
 //! Options distinguish admitted null and undefined states; tuples use `{ _0: A, _1: B }`.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use perry_mir::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
@@ -24,9 +24,57 @@ use pliron::{
     identifier::Identifier,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
+mod arguments;
+mod collection_types;
+mod representation;
+pub(crate) use arguments::{Argument, ArgumentId, Kind};
 pub(super) mod generics;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum ShapeKey {
+    Named(String),
+    Generic(generics::DeclarationId, Vec<ArgumentId>),
+    Utility(String, Vec<ArgumentId>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum DecoderInput {
+    Snapshot,
+    Cursor,
+    Text,
+}
+
+/// The runtime carrier type of a binding, paired with its declared WIT integer domain when
+/// annotated with a width-specific integer type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct BindingType {
+    pub(super) carrier: TypeHandle,
+    pub(super) integer: Option<TypedHandle<IntegerType>>,
+}
+
+impl BindingType {
+    pub(super) const fn plain(carrier: TypeHandle) -> Self {
+        Self {
+            carrier,
+            integer: None,
+        }
+    }
+
+    pub(super) fn wit_type(self) -> TypeHandle {
+        self.integer.map_or(self.carrier, Into::into)
+    }
+
+    pub(super) fn expected_type(self, ctx: &Context) -> TypeHandle {
+        self.integer
+            .filter(|int| int.deref(ctx).width() == 64)
+            .map_or(self.carrier, Into::into)
+    }
+}
 
 #[derive(Clone)]
 enum PendingShape {
@@ -37,22 +85,31 @@ enum PendingShape {
 pub(super) struct Shapes<'h> {
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
-    pub(super) decoders: RefCell<HashMap<TypeHandle, Identifier>>,
-    pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, TypeHandle>>,
-    pub(super) global_ids: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(super) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(super) hir: &'h HirModule,
-    locations: &'h crate::locations::Locations<'h>,
-    /// WIT types by SDK name, and the local names they are imported under.
-    foreign: &'h HashMap<String, HirType>,
-    aliases: HashMap<String, String>,
+    pub(super) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
+    pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
+    pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
+    pub(super) type_env: perry_hir::HirTypeEnv,
+    pub(super) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
+    pub(super) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
+    pub(super) classes: HashMap<&'h str, (usize, &'h perry_hir::ir::Class)>,
+    pub(super) static_fields:
+        HashMap<(&'h str, &'h str), (perry_hir::types::LocalId, &'h perry_hir::ir::ClassField)>,
+    pub(super) class_records: RefCell<HashMap<TypeHandle, (String, Vec<ArgumentId>)>>,
+    object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
+    function_names: HashSet<&'h str>,
+    local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
+    pub(super) metadata: &'h crate::hir_compat::Metadata<'h>,
+    foreign: &'h HashMap<String, crate::hir::Foreign>,
+    integer_imports: HashMap<&'h str, (u32, Signedness)>,
+    imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
+    foreign_functions: HashMap<&'h str, (String, &'h perry_hir::types::FunctionType)>,
     /// Named types whose fields are being computed, with the record name reserved when a
     /// field refers back to the type.
-    pending: RefCell<HashMap<String, PendingShape>>,
+    pending: RefCell<HashMap<ShapeKey, PendingShape>>,
     /// Record names reserved for recursive types.
     reserved: RefCell<usize>,
     /// Resolved named types, so a recursive interface keeps its reserved name.
-    named: RefCell<HashMap<String, TypeHandle>>,
+    named: RefCell<HashMap<ShapeKey, TypeHandle>>,
     inputs: RefCell<HashMap<TypeHandle, TypeHandle>>,
 }
 
@@ -83,48 +140,108 @@ impl<'h> Shapes<'h> {
     pub(super) fn new(
         module: pliron::builtin::ops::ModuleOp,
         hir: &'h HirModule,
-        foreign: &'h HashMap<String, HirType>,
-        inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
-        locations: &'h crate::locations::Locations<'h>,
+        foreign: &'h HashMap<String, crate::hir::Foreign>,
+        metadata: &'h crate::hir_compat::Metadata<'h>,
     ) -> Self {
-        let aliases = hir
-            .imports
-            .iter()
-            .flat_map(|import| import.specifiers.iter().map(move |s| (&import.source, s)))
-            .filter_map(|(source, specifier)| {
+        let mut integer_imports = HashMap::new();
+        let mut imported_types = HashMap::new();
+        let mut foreign_functions = HashMap::new();
+        for import in &hir.imports {
+            for specifier in &import.specifiers {
                 let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                    return None;
+                    continue;
                 };
-                [
-                    format!("wit:{source}#{imported}"),
-                    format!("wit:{imported}"),
-                ]
-                .into_iter()
-                .find(|name| foreign.contains_key(name))
-                .map(|name| (local.clone(), name))
-            })
+                if import.source == "perry:types"
+                    && let Some(spec) = Self::perry_integer_spec(&format!("perry:types/{imported}"))
+                {
+                    integer_imports.insert(local.as_str(), spec);
+                    continue;
+                }
+                let binding = format!("{}#{imported}", import.source);
+                if let Some(crate::hir::Foreign::Function(signature)) = foreign.get(&binding) {
+                    foreign_functions.insert(local.as_str(), (binding.clone(), signature));
+                }
+                if let Some(entry) = [binding.as_str(), imported.as_str()]
+                    .into_iter()
+                    .find_map(|key| foreign.get(key))
+                    .filter(|entry| !matches!(entry, crate::hir::Foreign::Function(_)))
+                {
+                    imported_types.insert(local.as_str(), entry);
+                }
+            }
+        }
+        let interfaces = hir
+            .interfaces
+            .iter()
+            .enumerate()
+            .map(|(idx, interface)| (interface.name.as_str(), (idx, interface)))
             .collect();
+        let type_aliases = hir
+            .type_aliases
+            .iter()
+            .enumerate()
+            .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
+            .collect();
+        let mut classes = HashMap::new();
+        let mut static_fields = HashMap::new();
+        let mut next_static_id = 0x8000_0000u32;
+        let mut object_literal_shapes = HashMap::new();
+        for (idx, class) in hir.classes.iter().enumerate() {
+            if crate::hir_compat::is_object_literal(&class.name) {
+                object_literal_shapes.insert(
+                    class.name.as_str(),
+                    class.fields.iter().map(|f| f.name.as_str()).collect(),
+                );
+            } else {
+                classes.insert(class.name.as_str(), (idx, class));
+                for field in &class.static_fields {
+                    static_fields.insert(
+                        (class.name.as_str(), field.name.as_str()),
+                        (next_static_id, field),
+                    );
+                    next_static_id += 1;
+                }
+            }
+        }
+        let function_names = hir
+            .functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect();
+        let mut global_ids: HashSet<perry_hir::types::LocalId> = if !hir.functions.is_empty() {
+            hir.init
+                .iter()
+                .filter_map(|s| match s {
+                    perry_hir::ir::Stmt::Let { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
+        if !hir.functions.is_empty() || !classes.is_empty() {
+            global_ids.extend(static_fields.values().map(|(id, _)| *id));
+        }
         Shapes {
             module,
             decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
-            global_ids: if hir.functions.iter().any(|f| f.is_exported) {
-                hir.init
-                    .iter()
-                    .filter_map(|s| match s {
-                        perry_hir::ir::Stmt::Let { id, .. } => Some(*id),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                Default::default()
-            },
-            inferred_bindings,
-            hir,
-            locations,
+            global_ids,
+            type_env: perry_hir::HirTypeEnv::from_module(hir),
+            interfaces,
+            type_aliases,
+            classes,
+            static_fields,
+            class_records: RefCell::new(HashMap::new()),
+            object_literal_shapes,
+            function_names,
+            local_source_spans: &hir.local_source_spans,
+            metadata,
             foreign,
-            aliases,
+            integer_imports,
+            imported_types,
+            foreign_functions,
             pending: RefCell::new(HashMap::new()),
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),
@@ -137,8 +254,8 @@ impl<'h> Shapes<'h> {
         error: anyhow::Error,
         id: perry_hir::types::LocalId,
     ) -> anyhow::Error {
-        match self.hir.local_source_spans.get(&id) {
-            Some(span) => self.locations.annotate(
+        match self.local_source_spans.get(&id) {
+            Some(span) => self.metadata.locations.annotate(
                 error,
                 swc_common::Span::new(
                     swc_common::BytePos(span.start),
@@ -149,191 +266,49 @@ impl<'h> Shapes<'h> {
         }
     }
 
+    pub(super) fn annotate_byte_offset(
+        &self,
+        error: anyhow::Error,
+        byte_offset: u32,
+        len: u32,
+    ) -> anyhow::Error {
+        if byte_offset == 0 {
+            return error;
+        }
+        self.metadata.locations.annotate(
+            error,
+            swc_common::Span::new(
+                swc_common::BytePos(byte_offset),
+                swc_common::BytePos(byte_offset.saturating_add(len)),
+            ),
+        )
+    }
+
+    pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+        self.metadata.locations.annotate_call(error, byte_offset)
+    }
+
     pub(super) fn has_function(&self, name: &str) -> bool {
-        self.hir
-            .functions
-            .iter()
-            .any(|function| function.name == name)
+        self.function_names.contains(name)
     }
 
     pub(super) fn foreign_function(
         &self,
         local: &str,
     ) -> Option<(String, &perry_hir::types::FunctionType)> {
-        self.hir.imports.iter().find_map(|import| {
-            import.specifiers.iter().find_map(|specifier| {
-                let perry_hir::ir::ImportSpecifier::Named {
-                    imported,
-                    local: name,
-                } = specifier
-                else {
-                    return None;
-                };
-                if name != local {
-                    return None;
-                }
-                let binding = format!("{}#{imported}", import.source);
-                let HirType::Function(signature) =
-                    self.foreign.get(&format!("wit-function:{binding}"))?
-                else {
-                    return None;
-                };
-                Some((binding, signature))
-            })
-        })
+        self.foreign_functions
+            .get(local)
+            .map(|(binding, sig)| (binding.clone(), *sig))
     }
 
-    /// MIR type of a HIR value type, for the types supported so far.
-    pub(super) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
-        Ok(match ty {
-            HirType::BigInt => perry_mir::types::BigIntType::get(ctx).into(),
-            HirType::Number | HirType::Int32 => FP64Type::get(ctx).into(),
-            HirType::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
-            HirType::String | HirType::StringLiteral(_) => StringType::get(ctx).into(),
-            HirType::Null | HirType::Void => {
-                let inner = FP64Type::get(ctx).into();
-                let absence = if matches!(ty, HirType::Null) {
-                    perry_mir::attrs::Absence::Null
-                } else {
-                    perry_mir::attrs::Absence::Undefined
-                };
-                OptionalType::get_with(ctx, inner, absence).into()
-            }
-            HirType::Array(element) => {
-                let element = self.value_type(ctx, element)?;
-                ArrayType::get(ctx, element).into()
-            }
-            HirType::Named(name) => self.named(ctx, name)?,
-            HirType::Generic { base, type_args } if base == "PerryWitResource" => {
-                let [HirType::StringLiteral(key)] = type_args.as_slice() else {
-                    bail!("invalid WIT resource identity")
-                };
-                perry_mir::types::ResourceType::get(ctx, key.parse()?).into()
-            }
-            HirType::Generic { base, type_args } if base == "WitInput" => {
-                let [inner] = type_args.as_slice() else {
-                    bail!("WitInput needs one type argument");
-                };
-                let inner = self.value_type(ctx, inner)?;
-                self.input_type(ctx, inner)?
-            }
-            HirType::Generic { base, type_args }
-                if base == "ReadableStream"
-                    && matches!(type_args.as_slice(), [HirType::Named(n)] if n == "Uint8Array")
-                    && !self.is_user_type(base) =>
-            {
-                perry_mir::types::ReadableType::get(ctx).into()
-            }
-            HirType::Promise(inner) => {
-                let settled = self.settled_type(ctx, inner)?;
-                PromiseType::get(ctx, settled).into()
-            }
-            HirType::Generic { base, type_args } => self.generic(ctx, base, type_args)?,
-            HirType::Object(object) => {
-                ensure!(
-                    object.index_signature.is_none(),
-                    "index signatures are outside the closed-record profile"
-                );
-                let fields = object
-                    .properties
-                    .iter()
-                    .map(|(name, info)| (name.as_str(), &info.ty, info.optional))
-                    .collect();
-                self.hir_record(ctx, None, fields)?.into()
-            }
-            HirType::Union(members) => {
-                if members
-                    .iter()
-                    .all(|m| matches!(m, HirType::StringLiteral(_)))
-                {
-                    return Ok(StringType::get(ctx).into());
-                }
-                let results: Option<Vec<&perry_hir::types::ObjectType>> = members
-                    .iter()
-                    .map(|member| match member {
-                        HirType::Object(object)
-                            if matches!(
-                                object.properties.get("ok").map(|p| &p.ty),
-                                Some(HirType::Boolean)
-                            ) =>
-                        {
-                            Some(object)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(alternatives) = results {
-                    return self.result(ctx, &alternatives);
-                }
-                if members.iter().any(|ty| matches!(ty, HirType::Number))
-                    && members.iter().any(|ty| matches!(ty, HirType::String))
-                    && members
-                        .iter()
-                        .all(|ty| matches!(ty, HirType::Number | HirType::String))
-                {
-                    return Ok(perry_mir::types::NumberStringType::get(ctx).into());
-                }
-                let defined: Vec<&HirType> = members
-                    .iter()
-                    .filter(|m| !matches!(m, HirType::Void | HirType::Null))
-                    .collect();
-                if defined.len() < members.len() {
-                    // `T | undefined` (R8), `T | null` and `T | null | undefined`.
-                    let inner = match defined.as_slice() {
-                        [defined] => self.value_type(ctx, defined)?,
-                        [] => bail!("an absence-only union needs a declared value type"),
-                        defined => self.value_type(
-                            ctx,
-                            &HirType::Union(defined.iter().map(|ty| (*ty).clone()).collect()),
-                        )?,
-                    };
-                    let absence = match (
-                        members.iter().any(|m| matches!(m, HirType::Null)),
-                        members.iter().any(|m| matches!(m, HirType::Void)),
-                    ) {
-                        (true, true) => perry_mir::attrs::Absence::Both,
-                        (true, false) => perry_mir::attrs::Absence::Null,
-                        _ => perry_mir::attrs::Absence::Undefined,
-                    };
-                    OptionalType::get_with(ctx, inner, absence).into()
-                } else {
-                    self.variant(ctx, &defined)?
-                }
-            }
-            HirType::Tuple(elements) => {
-                let fields = elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, ty)| Ok((format!("_{i}"), self.value_type(ctx, ty)?)))
-                    .collect::<Result<Vec<_>>>()?;
-                self.mir_record_kind(ctx, fields, true)?.into()
-            }
-            HirType::Any | HirType::Unknown => return Err(PerryDiagnostic::error(
-                DiagnosticCode::MissingTypeAnnotation,
-                "the value type cannot be inferred for the MIR backend",
-            )
-            .with_help(
-                "Add a concrete type annotation to this binding, parameter, or function return.",
-            )
-            .into()),
-            other => {
-                return Err(PerryDiagnostic::error(
-                    DiagnosticCode::UnsupportedType,
-                    format!("MIR backend does not support type {other:?} yet"),
-                )
-                .into());
-            }
-        })
-    }
-
-    fn input_type(&self, ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+    pub(super) fn input_type(&self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
         if let Some(mapped) = self.inputs.borrow().get(&ty) {
             return Ok(*mapped);
         }
         let deref = ty.deref(ctx);
-        let mapped = if deref.is::<perry_mir::types::BytesType>() {
+        let mapped = if deref.is::<perry_mir::BytesType>() {
             drop(deref);
-            perry_mir::types::ByteInputType::get(ctx).into()
+            perry_mir::ByteInputType::get(ctx).into()
         } else if let Some(array) = deref.downcast_ref::<ArrayType>() {
             let element = array.element();
             drop(deref);
@@ -344,7 +319,7 @@ impl<'h> Shapes<'h> {
             drop(deref);
             let value = self.input_type(ctx, value)?;
             OptionalType::get_with(ctx, value, absence).into()
-        } else if let Some(variant) = deref.downcast_ref::<perry_mir::types::VariantType>() {
+        } else if let Some(variant) = deref.downcast_ref::<perry_mir::VariantType>() {
             let cases = variant.cases().to_vec();
             drop(deref);
             let cases = cases
@@ -353,7 +328,7 @@ impl<'h> Shapes<'h> {
                     Ok((tag, payload.map(|ty| self.input_type(ctx, ty)).transpose()?))
                 })
                 .collect::<Result<_>>()?;
-            perry_mir::types::VariantType::get(ctx, cases).into()
+            perry_mir::VariantType::get(ctx, cases).into()
         } else if let Some(record) = deref.downcast_ref::<RecordType>() {
             let get = if record.is_tuple() {
                 RecordType::get_tuple
@@ -382,180 +357,173 @@ impl<'h> Shapes<'h> {
         Ok(mapped)
     }
 
-    /// SDK results use disjoint, statically typed payload slots. The inactive slot is absent.
-    fn result(
-        &self,
-        ctx: &mut Context,
-        alternatives: &[&perry_hir::types::ObjectType],
-    ) -> Result<TypeHandle> {
-        ensure!(
-            alternatives.len() == 2,
-            "a tagged result needs exactly two alternatives"
-        );
-        let mut fields = vec![(
-            "ok".to_string(),
-            IntegerType::get(ctx, 1, Signedness::Signless).into(),
-        )];
-        for name in ["value", "error"] {
-            let mut payload = None;
-            for object in alternatives {
-                ensure!(
-                    object
-                        .properties
-                        .keys()
-                        .all(|key| ["ok", "value", "error"].contains(&key.as_str())),
-                    "result alternatives only contain ok, value and error"
-                );
-                if let Some(info) = object.properties.get(name) {
-                    ensure!(
-                        payload.is_none(),
-                        "result payload {name} appears in both alternatives"
-                    );
-                    payload = Some(self.value_type(ctx, &info.ty)?);
-                }
-            }
-            if let Some(ty) = payload {
-                // Inactive payload fields must admit undefined, including nullable payloads.
-                let ty = OptionalType::get(ctx, ty).into();
-                fields.push((name.to_string(), ty));
-            }
-        }
-        Ok(self.mir_record(ctx, fields)?.into())
-    }
-
-    fn variant(&self, ctx: &mut Context, members: &[&HirType]) -> Result<TypeHandle> {
-        let mut cases = Vec::new();
-        for member in members {
-            let HirType::Object(object) = member else {
-                bail!("unions other than tagged object types are not supported yet")
-            };
-            let Some(HirType::StringLiteral(tag)) = object.properties.get("tag").map(|p| &p.ty)
-            else {
-                bail!("union members need a literal `tag`")
-            };
-            ensure!(
-                object.properties.keys().all(|k| k == "tag" || k == "val"),
-                "union members have `tag` and `val` only"
-            );
-            ensure!(
-                !cases.iter().any(|(name, _)| name == tag),
-                "variant tags must be distinct"
-            );
-            let payload = object
-                .properties
-                .get("val")
-                .map(|info| self.value_type(ctx, &info.ty))
-                .transpose()?;
-            cases.push((tag.clone(), payload));
-        }
-        Ok(perry_mir::types::VariantType::get(ctx, cases).into())
-    }
-
-    /// The value a promise of `ty` settles with; `void` settles `undefined`.
-    pub(super) fn settled_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
-        match ty {
-            HirType::Void => {
-                let number = FP64Type::get(ctx).into();
-                Ok(OptionalType::get(ctx, number).into())
-            }
-            ty => self.value_type(ctx, ty),
-        }
+    pub(super) fn is_explicit_binding(&self, id: perry_hir::types::LocalId) -> bool {
+        self.local_source_spans.contains_key(&id) && !self.metadata.inferred_bindings.contains(&id)
     }
 
     /// Whether the program declares a type of this name (shadowing a built-in class).
     pub(super) fn is_user_type(&self, name: &str) -> bool {
-        self.hir.interfaces.iter().any(|i| i.name == name)
-            || self.hir.type_aliases.iter().any(|a| a.name == name)
-            || self.hir.classes.iter().any(|c| c.name == name)
+        self.interfaces.contains_key(name)
+            || self.type_aliases.contains_key(name)
+            || self.classes.contains_key(name)
     }
 
-    fn named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
-        if let Some(ty) = self.named.borrow().get(name) {
+    pub(super) fn class_of_type(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+    ) -> Option<(&'h str, Vec<ArgumentId>)> {
+        let inner = crate::optional_value(ctx, ty).unwrap_or(ty);
+        let (name, args) = self.class_records.borrow().get(&inner)?.clone();
+        let (&class_name, _) = self.classes.get_key_value(name.as_str())?;
+        Some((class_name, args))
+    }
+
+    pub(super) fn static_field(
+        &self,
+        class_name: &str,
+        field_name: &str,
+    ) -> Option<(perry_hir::types::LocalId, &'h perry_hir::ir::ClassField)> {
+        self.static_fields.get(&(class_name, field_name)).copied()
+    }
+
+    pub(super) fn class_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let norm = crate::hir_compat::method(method_name).name();
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let func = class.methods.iter().find(|m| m.name == norm)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_static_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let norm = crate::hir_compat::method(method_name).name();
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let func = class.static_methods.iter().find(|m| m.name == norm)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_getter(
+        &self,
+        class_name: &str,
+        prop_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let (_, func) = class.getters.iter().find(|(n, _)| n == prop_name)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_setter(
+        &self,
+        class_name: &str,
+        prop_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let (_, func) = class.setters.iter().find(|(n, _)| n == prop_name)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
+        let key = ShapeKey::Named(name.to_owned());
+        if let Some(ty) = self.named.borrow().get(&key) {
             return Ok(*ty);
         }
-        let ty = self.resolve_named(ctx, name)?;
+        let ty = self
+            .resolve_named(ctx, name)
+            .map_err(|error| self.metadata.locations.annotate_type(error, name))?;
         // A re-entrant reference returns the opaque record; only the outermost call caches.
-        if !self.pending.borrow().contains_key(name) {
-            self.named.borrow_mut().insert(name.to_string(), ty);
+        if self.pending.borrow().is_empty() {
+            self.named.borrow_mut().insert(key, ty);
         }
         Ok(ty)
     }
 
-    fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
-        // Built-in classes the subset models (a user type of the same name takes precedence).
-        let user = self.hir.interfaces.iter().any(|i| i.name == name)
-            || self.hir.type_aliases.iter().any(|a| a.name == name);
+    fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
+        if let Some((width, _)) = Self::perry_integer_spec(name) {
+            return Ok(if width == 64 {
+                perry_mir::BigIntType::get(ctx).into()
+            } else {
+                FP64Type::get(ctx).into()
+            });
+        }
+        // Built-in classes the subset models (a user type or explicit import takes precedence).
+        let user = self.is_user_type(name);
         if !user {
-            let key = self.aliases.get(name).map_or(name, String::as_str);
-            if let Some(foreign) = self.foreign.get(key) {
-                return self.value_type(ctx, foreign);
+            if let Some(&(width, _)) = self.integer_imports.get(name) {
+                return Ok(if width == 64 {
+                    perry_mir::BigIntType::get(ctx).into()
+                } else {
+                    FP64Type::get(ctx).into()
+                });
+            }
+            if let Some(entry) = self.imported_types.get(name) {
+                return self.foreign_value_type(ctx, entry);
             }
             match name {
                 "AbortController" | "AbortSignal" => {
-                    return Ok(perry_mir::types::AbortType::get(ctx).into());
+                    return Ok(perry_mir::AbortType::get(ctx).into());
                 }
-                "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
-                "URL" => return Ok(perry_mir::types::UrlType::get(ctx).into()),
-                "URLSearchParams" => return Ok(perry_mir::types::SearchParamsType::get(ctx).into()),
+                "Uint8Array" => return Ok(perry_mir::BytesType::get(ctx).into()),
+                "URL" => return Ok(perry_mir::UrlType::get(ctx).into()),
+                "URLSearchParams" => return Ok(perry_mir::SearchParamsType::get(ctx).into()),
                 "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" => {
-                    return Ok(perry_mir::types::ExceptionType::get(ctx).into());
+                    return Ok(perry_mir::ExceptionType::get(ctx).into());
                 }
-                "RegExp" => return Ok(perry_mir::types::RegexType::get(ctx).into()),
-                "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
-                "Temporal.Instant" => return Ok(perry_mir::types::InstantType::get(ctx).into()),
+                "RegExp" => return Ok(perry_mir::RegexType::get(ctx).into()),
+                "Date" => return Ok(perry_mir::DateType::get(ctx).into()),
+                "Temporal.Instant" => return Ok(perry_mir::InstantType::get(ctx).into()),
                 "Temporal.PlainDate" => {
-                    return Ok(perry_mir::types::PlainDateType::get(ctx).into());
+                    return Ok(perry_mir::PlainDateType::get(ctx).into());
                 }
                 "Temporal.PlainDateTime" => {
-                    return Ok(perry_mir::types::PlainDateTimeType::get(ctx).into());
+                    return Ok(perry_mir::PlainDateTimeType::get(ctx).into());
                 }
-
-                "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
-                "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),
-                "Request" => return Ok(perry_mir::types::RequestType::get(ctx).into()),
-                // Byte streams: `ReadableStream<Uint8Array>` and its default reader.
-                "ReadableStream" => return Ok(perry_mir::types::ReadableType::get(ctx).into()),
-                "ArrayBuffer" => return Ok(perry_mir::types::ByteBufferType::get(ctx).into()),
+                "Headers" => return Ok(perry_mir::HeadersType::get(ctx).into()),
+                "Response" => return Ok(perry_mir::ResponseType::get(ctx).into()),
+                "Request" => return Ok(perry_mir::RequestType::get(ctx).into()),
+                "ReadableStream" => return Ok(perry_mir::ReadableType::get(ctx).into()),
+                "ArrayBuffer" => return Ok(perry_mir::ByteBufferType::get(ctx).into()),
                 "ReadableStreamBYOBReader" => {
-                    return Ok(perry_mir::types::ByobReaderType::get(ctx).into());
+                    return Ok(perry_mir::ByobReaderType::get(ctx).into());
                 }
                 "ReadableStreamDefaultReader" => {
-                    return Ok(perry_mir::types::ReaderType::get(ctx).into());
+                    return Ok(perry_mir::ReaderType::get(ctx).into());
                 }
-                "TextDecoder" => return Ok(perry_mir::types::DecoderType::get(ctx).into()),
+                "TextDecoder" => return Ok(perry_mir::DecoderType::get(ctx).into()),
                 _ => {}
             }
-        }
-        if let Some(interface) = self.hir.interfaces.iter().find(|i| i.name == name) {
-            if !interface.type_params.is_empty() {
-                return self.generic(ctx, name, &[]);
+            if let Some(entry) = self.foreign.get(name) {
+                return self.foreign_value_type(ctx, entry);
             }
-            ensure!(
-                interface.extends.is_empty() && interface.methods.is_empty(),
-                "interface {name}: inheritance and methods are not supported yet"
-            );
-            let fields = interface
-                .properties
-                .iter()
-                .map(|p| (p.name.as_str(), &p.ty, p.optional))
-                .collect();
-            return Ok(self.hir_record(ctx, Some(name), fields)?.into());
         }
-        if let Some(alias) = self.hir.type_aliases.iter().find(|a| a.name == name) {
-            if !alias.type_params.is_empty() {
-                return self.generic(ctx, name, &[]);
-            }
-            return self.value_type(ctx, &alias.ty);
+        if user {
+            return self.generic(ctx, name, &[]);
         }
         bail!("type {name} is not supported by the MIR backend yet")
     }
 
-    /// A record from HIR field types; `named` is the interface they come from, if any.
-    fn hir_record(
+    /// Reserve recursive identity before resolving source fields.
+    fn source_record(
         &self,
-        ctx: &mut Context,
-        named: Option<&str>,
-        mut fields: Vec<(&str, &HirType, bool)>,
+        ctx: &Context,
+        named: Option<&ShapeKey>,
+        fields: Vec<(&str, ArgumentId, bool)>,
+    ) -> Result<TypedHandle<RecordType>> {
+        self.source_record_prefix(ctx, named, None, fields)
+    }
+
+    fn source_record_prefix(
+        &self,
+        ctx: &Context,
+        named: Option<&ShapeKey>,
+        prefix: Option<&str>,
+        mut fields: Vec<(&str, ArgumentId, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
         let names: Vec<&str> = fields.iter().map(|(name, _, _)| *name).collect();
@@ -569,26 +537,36 @@ impl<'h> Shapes<'h> {
                 Some(PendingShape::Resolving) => {
                     let mut count = self.reserved.borrow_mut();
                     *count += 1;
-                    let reserved = format!("{}_rec{}", record_name(&names), *count);
+                    let base = match prefix {
+                        Some(p) => format!("{p}_{}", record_name(&names)),
+                        None => record_name(&names),
+                    };
+                    let reserved = format!("{base}_rec{}", *count);
                     self.pending
                         .borrow_mut()
-                        .insert(named.to_string(), PendingShape::Recursive(reserved.clone()));
+                        .insert(named.clone(), PendingShape::Recursive(reserved.clone()));
                     return RecordType::get(ctx, identifier(&reserved)?, None)
                         .map_err(|e| anyhow!("{}", e.disp(ctx)));
                 }
                 None => {
                     self.pending
                         .borrow_mut()
-                        .insert(named.to_string(), PendingShape::Resolving);
+                        .insert(named.clone(), PendingShape::Resolving);
                 }
             }
         }
         let typed = fields
             .iter()
             .map(|(field, ty, optional)| {
-                let ty = self
-                    .value_type(ctx, ty)
-                    .with_context(|| format!("field {field}"))?;
+                let ty = if !*optional
+                    && let Some(int_ty) = self.source_integer_type(ctx, *ty)
+                    && int_ty.deref(ctx).width() == 64
+                {
+                    int_ty.into()
+                } else {
+                    self.source_type(ctx, *ty)
+                        .with_context(|| format!("field {field}"))?
+                };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()
                 } else {
@@ -605,31 +583,44 @@ impl<'h> Shapes<'h> {
         match reserved {
             Some(name) => RecordType::get(ctx, identifier(&name)?, Some(typed))
                 .map_err(|e| anyhow!("{}", e.disp(ctx))),
-            None => self.mir_record(ctx, typed),
+            None => self.mir_record_prefix(ctx, typed, prefix),
         }
     }
 
     /// A record from MIR field types, in any order.
     pub(super) fn mir_record(
         &self,
-        ctx: &mut Context,
+        ctx: &Context,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_kind(ctx, fields, false)
+        self.mir_record_prefix(ctx, fields, None)
     }
 
-    fn mir_record_kind(
+    pub(super) fn mir_record_kind(
         &self,
-        ctx: &mut Context,
-        mut fields: Vec<(String, TypeHandle)>,
+        ctx: &Context,
+        fields: Vec<(String, TypeHandle)>,
         tuple: bool,
     ) -> Result<TypedHandle<RecordType>> {
+        self.mir_record_prefix(ctx, fields, tuple.then_some("tuple"))
+    }
+
+    pub(super) fn mir_record_prefix(
+        &self,
+        ctx: &Context,
+        mut fields: Vec<(String, TypeHandle)>,
+        prefix: Option<&str>,
+    ) -> Result<TypedHandle<RecordType>> {
+        let tuple = prefix.is_some_and(|p| !p.starts_with("class_"));
         if !tuple {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }
         let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
         let base = record_name(&names);
-        let base = if tuple { format!("tuple_{base}") } else { base };
+        let base = match prefix {
+            Some(p) => format!("{p}_{base}"),
+            None => base,
+        };
         let get = if tuple {
             RecordType::get_tuple
         } else {
@@ -651,11 +642,9 @@ impl<'h> Shapes<'h> {
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.
-    pub(super) fn literal_fields(&self, class_name: &str) -> Option<Vec<&'h str>> {
-        if !class_name.starts_with("__AnonShape_") {
-            return None;
-        }
-        let class = self.hir.classes.iter().find(|c| c.name == class_name)?;
-        Some(class.fields.iter().map(|f| f.name.as_str()).collect())
+    pub(super) fn literal_fields(&self, class_name: &str) -> Option<&[&'h str]> {
+        self.object_literal_shapes
+            .get(class_name)
+            .map(Vec::as_slice)
     }
 }

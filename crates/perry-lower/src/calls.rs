@@ -7,21 +7,51 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
+        byte_offset: u32,
     ) -> Result<Option<Value>> {
-        if let Expr::ExternFuncRef { name, .. } = callee {
-            use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
-            match (name.as_str(), args) {
-                (TDZ_CHECK, [Expr::LocalGet(id), Expr::String(_)]) => {
-                    self.load(ctx, self.local(*id)?)?;
-                    return Ok(None);
+        if let Some(call) = hir_compat::runtime_call(callee, args) {
+            use hir_compat::RuntimeCall;
+            return match call {
+                RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
+                    anyhow!("cannot find name '{ident}'"),
+                    byte_offset,
+                    ident.len() as u32,
+                )),
+                RuntimeCall::CheckInitialized { local, value } => {
+                    let value = value.map(|value| self.expression(ctx, value)).transpose()?;
+                    self.load(ctx, self.local(local)?)?;
+                    Ok(value)
                 }
-                (TDZ_CHECK_THEN, [Expr::LocalGet(id), Expr::String(_), value]) => {
-                    let value = self.expression(ctx, value)?;
-                    self.load(ctx, self.local(*id)?)?;
-                    return Ok(Some(value));
+                RuntimeCall::CollectionEpoch => Ok(Some(self.number(ctx, 0.0))),
+                RuntimeCall::CollectionCursor { collection, index } => {
+                    let collection = self.expression(ctx, collection)?;
+                    let index = self.expression(ctx, index)?;
+                    let len = self.array_length(ctx, collection);
+                    let in_bounds = self.compare(ctx, CompareKind::Lt, index, len);
+                    let absent = self.number(ctx, -1.0);
+                    self.choose(
+                        ctx,
+                        FP64Type::get(ctx).into(),
+                        in_bounds,
+                        |_, _| Ok(index),
+                        |_, _| Ok(absent),
+                    )
+                    .map(Some)
                 }
-                _ => {}
-            }
+                RuntimeCall::ExitCode(args) => {
+                    let [code] = args else {
+                        bail!("process.exitCode takes one value");
+                    };
+                    let code = self.expression(ctx, code)?;
+                    let code = self.arithmetic(ctx, code);
+                    ensure!(
+                        kind(ctx, code)? == Kind::Number,
+                        "process.exitCode must be a number"
+                    );
+                    self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
+                    Ok(None)
+                }
+            };
         }
         if let Expr::PropertyGet {
             object, property, ..
@@ -42,16 +72,6 @@ impl<'s> FunctionBuilder<'s> {
             return self.temporal_factory(ctx, class, property, args).map(Some);
         }
 
-        if let Expr::Closure { params, body, .. } = callee
-            && let [param] = params.as_slice()
-            && param.name == "__perry_obj_iife"
-        {
-            ensure!(
-                matches!(args, [Expr::Object(fields)] if fields.is_empty()),
-                "object literals with methods are not supported yet"
-            );
-            return self.object_spread(ctx, param.id, body).map(Some);
-        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
@@ -103,24 +123,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             return self.method(ctx, object, property, args);
         }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && name == "js_process_exit_code_set"
-        {
-            let [code] = args else {
-                bail!("process.exitCode takes one value");
-            };
-            let code = self.expression(ctx, code)?;
-            let code = self.arithmetic(ctx, code);
-            ensure!(
-                kind(ctx, code)? == Kind::Number,
-                "process.exitCode must be a number"
-            );
-            self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
-            return Ok(None);
-        }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && name == program::ESM_EXPORT_INIT
-        {
+        if hir_compat::is_import_initializer(callee) {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
             return Ok(None);
         }
@@ -171,8 +174,7 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some((inner, states)) = optional_parts(ctx, ty)
                     && foreign::accepts_input(ctx, inner, actual)
                 {
-                    let wrapped =
-                        perry_mir::types::OptionalType::get_with(ctx, actual, states).into();
+                    let wrapped = perry_mir::OptionalType::get_with(ctx, actual, states).into();
                     self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
                 } else {
                     self.fit(ctx, value, ty)?
@@ -191,18 +193,53 @@ impl<'s> FunctionBuilder<'s> {
                 let op = AsyncCallOp::new(ctx, wrapper, values, payload);
                 return Ok(Some(self.append_value(ctx, &op)));
             }
-            let op = perry_mir::foreign::ForeignOp::new(
-                ctx,
-                perry_mir::foreign::Phase::Call,
-                &binding,
-                values,
-                results,
-            );
+            let op =
+                perry_mir::ForeignOp::new(ctx, perry_mir::Phase::Call, &binding, values, results);
             self.append(ctx, &op);
             return Ok(op.get_operation().deref(ctx).results().next());
         }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && name == "structuredClone"
+        {
+            let [arg] = args else {
+                bail!("structuredClone requires one argument");
+            };
+            let val = self.expression(ctx, arg)?;
+            return self.clone_structured_value(ctx, val).map(Some);
+        }
+        let callee = match callee {
+            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callee),
+            _ => callee,
+        };
+        if matches!(callee, Expr::Closure { .. }) {
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for arg in args {
+                arg_vals.push(self.expression(ctx, arg)?);
+            }
+            return self.array_callback(ctx, callee, &arg_vals).map(Some);
+        }
         let Expr::FuncRef(id) = callee else {
-            bail!("only direct calls to module functions are supported yet");
+            return Err(match callee {
+                Expr::LocalGet(id) => {
+                    let error = anyhow!(
+                        "indirect calls through local or parameter bindings are not supported yet; call a declared module function directly"
+                    );
+                    let error = self.shapes.annotate_call(error, byte_offset);
+                    self.shapes.annotate_local(error, *id)
+                }
+                Expr::Closure { .. } => anyhow!(
+                    "immediately invoked function expressions and closure calls are not supported yet; declare a named function instead"
+                ),
+                Expr::ExternFuncRef { name, .. } => {
+                    anyhow!("call to external or unresolved function '{name}' is not supported yet")
+                }
+                Expr::IndexGet { .. } => {
+                    anyhow!("computed method or element calls are not supported yet")
+                }
+                _ => anyhow!(
+                    "indirect function calls are not supported yet; call a declared module function directly"
+                ),
+            });
         };
         let signature = self
             .signatures
@@ -210,33 +247,158 @@ impl<'s> FunctionBuilder<'s> {
             .context("call to an unknown function")?;
         let name = &signature.name;
         let params = &signature.params;
-        ensure!(
-            args.len() == params.len(),
-            "call to {name} with {} arguments, expected {}",
-            args.len(),
-            params.len()
-        );
-        let values = args
-            .iter()
-            .zip(params)
-            .map(|(arg, param)| {
-                let value = self.expression_with(ctx, arg, Some(*param))?;
-                self.fit(ctx, value, *param)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut values = Vec::with_capacity(params.len());
+        if signature.has_rest {
+            let fixed_len = params.len().saturating_sub(1);
+            for (i, param) in params.iter().take(fixed_len).enumerate() {
+                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
+                if let Some(arg) = args.get(i) {
+                    if is_never {
+                        let value = self.expression_with(ctx, arg, None)?;
+                        let fitted = if value.get_type(ctx) == param.carrier {
+                            value
+                        } else {
+                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
+                        };
+                        values.push(fitted);
+                    } else {
+                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
+                        values.push(self.fit(ctx, value, param.carrier)?);
+                    }
+                } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
+                    values
+                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
+                } else if let Some(Some(def)) = signature.defaults.get(i) {
+                    let value = self.expression_with(ctx, def, Some(param.carrier))?;
+                    values.push(self.fit(ctx, value, param.carrier)?);
+                } else {
+                    bail!(
+                        "call to {name} with {} arguments, expected at least {}",
+                        args.len(),
+                        fixed_len
+                    );
+                }
+            }
+            let rest_param = &params[fixed_len];
+            let rest_arr_ty = TypedHandle::<ArrayType>::from_handle(rest_param.carrier, ctx)
+                .context("rest parameter must have an array type")?;
+            let elem_ty = rest_arr_ty.deref(ctx).element();
+            let rest_args = args.get(fixed_len..).unwrap_or(&[]);
+            let mut rest_vals = Vec::with_capacity(rest_args.len());
+            for arg in rest_args {
+                let v = self.expression_with(ctx, arg, Some(elem_ty))?;
+                rest_vals.push(self.fit(ctx, v, elem_ty)?);
+            }
+            let rest_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, rest_vals));
+            values.push(rest_arr);
+        } else {
+            ensure!(
+                args.len() <= params.len(),
+                "call to {name} with {} arguments, expected {}",
+                args.len(),
+                params.len()
+            );
+            for (i, param) in params.iter().enumerate() {
+                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
+                if let Some(arg) = args.get(i) {
+                    if is_never {
+                        let value = self.expression_with(ctx, arg, None)?;
+                        let fitted = if value.get_type(ctx) == param.carrier {
+                            value
+                        } else {
+                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
+                        };
+                        values.push(fitted);
+                    } else {
+                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
+                        values.push(self.fit(ctx, value, param.carrier)?);
+                    }
+                } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
+                    values
+                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
+                } else if let Some(Some(def)) = signature.defaults.get(i) {
+                    let value = self.expression_with(ctx, def, Some(param.carrier))?;
+                    values.push(self.fit(ctx, value, param.carrier)?);
+                } else {
+                    bail!(
+                        "call to {name} with {} arguments, expected {}",
+                        args.len(),
+                        params.len()
+                    );
+                }
+            }
+        }
         if signature.is_async {
-            let &[value] = signature.results.as_slice() else {
+            let Some(result) = signature.result else {
                 bail!("async function {name} settles one result");
             };
             let promise = self.emit_value(ctx, |ctx| {
-                AsyncCallOp::new(ctx, name.clone(), values, value)
+                AsyncCallOp::new(ctx, name.clone(), values, result.carrier)
             });
             return Ok(Some(promise));
         }
-        let op = CallOp::new(ctx, name.clone(), values, signature.results.clone());
+        let op = CallOp::new(ctx, name.clone(), values, signature.carrier_results());
         self.append(ctx, &op);
-        let operation = op.get_operation().deref(ctx);
-        Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
+        let result = {
+            let operation = op.get_operation().deref(ctx);
+            (operation.get_num_results() == 1).then(|| operation.get_result(0))
+        };
+        if let (Some(mut value), Some(result_ty)) = (result, signature.result) {
+            if let Some(int_ty) = result_ty.integer {
+                value = self.wrap_integer(ctx, value, int_ty, result_ty.carrier);
+            }
+            if signature.returns_never {
+                self.never_values.insert(value);
+            }
+            return Ok(Some(value));
+        }
+        Ok(result)
+    }
+
+    pub(super) fn clone_structured_value(
+        &mut self,
+        ctx: &mut Context,
+        val: Value,
+    ) -> Result<Value> {
+        let ty = val.get_type(ctx);
+        if TypedHandle::<ArrayType>::from_handle(ty, ctx).is_ok() {
+            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![val])));
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let fields = rec
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .to_vec();
+            let mut field_vals = Vec::with_capacity(fields.len());
+            for (field_name, field_ty) in fields {
+                let can_omit = absence(ctx, field_ty).is_some_and(|a| a.admits_undefined());
+                let op = FieldGetOp::new(ctx, val, field_name.clone())?;
+                let raw = self.field_read(ctx, &op)?;
+                let cloned = self.clone_structured_value(ctx, raw)?;
+                let cloned_ty = cloned.get_type(ctx);
+                let field_val = if can_omit
+                    && absence(ctx, cloned_ty).is_some_and(|a| a.admits_undefined())
+                {
+                    let op = FieldPresentOp::new(ctx, val, field_name)?;
+                    let is_present = self.emit_value(ctx, |_| op);
+                    self.choose(
+                        ctx,
+                        cloned_ty,
+                        is_present,
+                        |_, _| Ok(cloned),
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, cloned_ty))),
+                    )?
+                } else {
+                    cloned
+                };
+                field_vals.push(field_val);
+            }
+            let allocated = self.emit_value(ctx, |ctx| AllocOp::new(ctx, rec, field_vals));
+            self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![allocated, val]);
+            return Ok(allocated);
+        }
+        Ok(val)
     }
 
     /// The array literal given to a promise combinator: plain values among promises of `T`

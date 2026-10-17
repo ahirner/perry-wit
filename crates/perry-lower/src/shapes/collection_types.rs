@@ -1,0 +1,188 @@
+//! MIR records of `Map`, `Set`, their live views, dictionaries and pairs.
+use super::*;
+use crate::collections::{CollectionViewKind, EntryKind};
+
+impl Shapes<'_> {
+    /// The `tuple` record `[first, second]`: iterated entries and `[key, value]` pairs.
+    pub(crate) fn pair_type(
+        &self,
+        ctx: &Context,
+        first: TypeHandle,
+        second: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        self.mir_record_prefix(
+            ctx,
+            vec![("_0".to_string(), first), ("_1".to_string(), second)],
+            Some("tuple"),
+        )
+    }
+
+    /// A `Map` entry `{ _0: key, _1: value, _2: live, _3: seq }`.
+    pub(crate) fn map_tuple_type(
+        &self,
+        ctx: &Context,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let f64_ty = FP64Type::get(ctx).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), k_ty),
+                ("_1".to_string(), v_ty),
+                ("_2".to_string(), i1_ty),
+                ("_3".to_string(), f64_ty),
+            ],
+            Some("map_tuple"),
+        )
+    }
+
+    /// A `Set` entry `{ _0: value, _1: live, _2: seq }`.
+    pub(crate) fn set_tuple_type(
+        &self,
+        ctx: &Context,
+        elem_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let f64_ty = FP64Type::get(ctx).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), elem_ty),
+                ("_1".to_string(), i1_ty),
+                ("_2".to_string(), f64_ty),
+            ],
+            Some("set_tuple"),
+        )
+    }
+
+    /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
+    pub(crate) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), f64_ty),
+                ("_1".to_string(), f64_ty),
+                ("_2".to_string(), f64_ty),
+            ],
+            Some("cursor_tuple"),
+        )
+    }
+
+    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
+    pub(crate) fn collection_box_type(
+        &self,
+        ctx: &Context,
+        entry: TypedHandle<RecordType>,
+        kind: EntryKind,
+    ) -> Result<TypedHandle<RecordType>> {
+        let entries_arr = ArrayType::get(ctx, entry.into()).into();
+        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), entries_arr),
+                ("_1".to_string(), f64_ty),
+                ("_2".to_string(), f64_ty),
+                ("_3".to_string(), f64_ty),
+            ],
+            Some(kind.box_prefix()),
+        )
+    }
+
+    /// A live `view` `{ _0: box, _1: cursor }` over a box of type `box_ty`.
+    pub(crate) fn collection_view_type(
+        &self,
+        ctx: &Context,
+        box_ty: TypeHandle,
+        view: CollectionViewKind,
+    ) -> Result<TypedHandle<RecordType>> {
+        let cursor_rec = self.cursor_tuple_type(ctx)?;
+        self.mir_record_prefix(
+            ctx,
+            vec![
+                ("_0".to_string(), box_ty),
+                ("_1".to_string(), cursor_rec.into()),
+            ],
+            Some(view.record_prefix()),
+        )
+    }
+
+    /// `Map<K, V>` from source types.
+    pub(crate) fn map_type(&self, ctx: &Context, k: &HirType, v: &HirType) -> Result<TypeHandle> {
+        let k_ty = self.value_type(ctx, k)?;
+        let v_ty = self.value_type(ctx, v)?;
+        Ok(self.map_box_type(ctx, k_ty, v_ty)?.into())
+    }
+
+    /// `Set<T>` from a source type.
+    pub(crate) fn set_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
+        let elem_ty = self.value_type(ctx, elem)?;
+        Ok(self.set_box_type(ctx, elem_ty)?.into())
+    }
+
+    fn map_box_type(
+        &self,
+        ctx: &Context,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        let entry = self.map_tuple_type(ctx, k_ty, v_ty)?;
+        self.collection_box_type(ctx, entry, EntryKind::Map)
+    }
+
+    fn set_box_type(&self, ctx: &Context, elem_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
+        let entry = self.set_tuple_type(ctx, elem_ty)?;
+        self.collection_box_type(ctx, entry, EntryKind::Set)
+    }
+
+    /// A `Record<K, V>` dictionary from argument types.
+    pub(super) fn dict_source_type(
+        &self,
+        ctx: &Context,
+        k: ArgumentId,
+        v: ArgumentId,
+    ) -> Result<TypeHandle> {
+        let k_ty = self.source_type(ctx, k)?;
+        let v_ty = self.source_type(ctx, v)?;
+        let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
+        let entry = self.mir_record_prefix(ctx, fields, Some("dict_tuple"))?;
+        Ok(ArrayType::get(ctx, entry.into()).into())
+    }
+
+    /// `Map<K, V>` from argument types.
+    pub(super) fn map_source_type(
+        &self,
+        ctx: &Context,
+        k: ArgumentId,
+        v: ArgumentId,
+    ) -> Result<TypeHandle> {
+        let k_ty = self.source_type(ctx, k)?;
+        let v_ty = self.source_type(ctx, v)?;
+        Ok(self.map_box_type(ctx, k_ty, v_ty)?.into())
+    }
+
+    /// `Set<T>` from an argument type.
+    pub(super) fn set_source_type(&self, ctx: &Context, elem: ArgumentId) -> Result<TypeHandle> {
+        let elem_ty = self.source_type(ctx, elem)?;
+        Ok(self.set_box_type(ctx, elem_ty)?.into())
+    }
+
+    /// A live `view` from its generic arguments: `[K, V]` over a `Map`, `[T]` over a `Set`.
+    pub(super) fn collection_view_source_type(
+        &self,
+        ctx: &Context,
+        view: CollectionViewKind,
+        arguments: &[ArgumentId],
+    ) -> Result<TypeHandle> {
+        let box_rec = match (view.source(), arguments) {
+            (EntryKind::Map, &[k, v]) => self.map_source_type(ctx, k, v)?,
+            (EntryKind::Set, &[element]) => self.set_source_type(ctx, element)?,
+            (EntryKind::Map, _) => bail!("{} needs key and value type arguments", view.type_name()),
+            (EntryKind::Set, _) => bail!("{} needs one element type argument", view.type_name()),
+        };
+        Ok(self.collection_view_type(ctx, box_rec, view)?.into())
+    }
+}

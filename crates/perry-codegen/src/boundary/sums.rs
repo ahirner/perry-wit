@@ -1,6 +1,6 @@
 //! Canonical discriminants and payloads for closed WIT sums.
 use super::*;
-use perry_mir::optional::{absence, optional_value};
+use perry_mir::{absence, optional_value};
 
 /// A WIT `result` that a source function fills completion-style: a compatible return is
 /// `ok`, a checked throw is `err`.
@@ -166,7 +166,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         completion: Completion<'_>,
         case: usize,
-        payload: Option<(TypeHandle, Value)>,
+        payload: Option<(TypeHandle, Carriers<Value>)>,
         address: Value,
     ) -> Result<()> {
         let ty = completion.result;
@@ -190,7 +190,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         completion: Completion<'_>,
         case: usize,
-        payload: Option<(TypeHandle, Value)>,
+        payload: Option<(TypeHandle, Carriers<Value>)>,
     ) -> Result<Vec<Value>> {
         let ty = completion.result;
         let mut out = vec![self.i32_const(ctx, case as i32)];
@@ -225,7 +225,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         completion: Completion<'_>,
         exception: Value,
-    ) -> Result<Option<(TypeHandle, Value)>> {
+    ) -> Result<Option<(TypeHandle, Carriers<Value>)>> {
         use perry_abi::layout::exception as exception_layout;
         let Some(err) = completion.err else {
             return Ok(None);
@@ -257,7 +257,7 @@ impl FunctionLowering<'_, '_> {
             let trap = UnreachableOp::new(ctx).get_operation();
             self.insert(ctx, trap);
             self.block = valid;
-            let string = perry_mir::types::StringType::get(ctx).into();
+            let string = perry_mir::StringType::get(ctx).into();
             let mir = RecordType::get(
                 ctx,
                 identifier("perry_completion_error"),
@@ -268,17 +268,17 @@ impl FunctionLowering<'_, '_> {
             let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
             let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
             let value = self.build_record(ctx, mir, vec![("name", name), ("message", message)])?;
-            return Ok(Some((mir, value)));
+            return Ok(Some((mir, Carriers::Scalar(value))));
         }
         let (expected, mir, kind) = match err {
             AbiType::String | AbiType::Enum(_) => (
                 exception_layout::TAG_STRING,
-                perry_mir::types::StringType::get(ctx).into(),
+                perry_mir::StringType::get(ctx).into(),
                 MemKind::I32,
             ),
             AbiType::S64 | AbiType::U64 => (
                 exception_layout::TAG_BIGINT,
-                perry_mir::types::BigIntType::get(ctx).into(),
+                perry_mir::BigIntType::get(ctx).into(),
                 MemKind::I32,
             ),
             AbiType::Bool => (
@@ -317,7 +317,7 @@ impl FunctionLowering<'_, '_> {
         if self.state.collectible && repr(ctx, mir)? == Repr::Ref {
             self.runtime(ctx, Runtime::GcPin, vec![value]);
         }
-        Ok(Some((mir, value)))
+        Ok(Some((mir, Carriers::Scalar(value))))
     }
     pub(super) fn sum_switch(
         &mut self,
@@ -362,7 +362,7 @@ impl FunctionLowering<'_, '_> {
                 record_field(ctx, record, if case == 0 { "value" } else { "error" })?.1
             }
             AbiType::Variant(cases) => {
-                let variant = TypedHandle::<perry_mir::types::VariantType>::from_handle(mir, ctx)?;
+                let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)?;
                 return variant
                     .deref(ctx)
                     .cases()
@@ -399,7 +399,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Enum(names) => {
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT enum needs a string literal union"
                 );
                 let text = self.state.data.string(&names[case]);
@@ -442,7 +442,8 @@ impl FunctionLowering<'_, '_> {
                             absence(ctx, *field).is_some_and(|a| a.admits_undefined()),
                             "inactive result field {name} must admit undefined"
                         );
-                        self.undefined(ctx, *field)?
+                        let field_lift = scalar_mir_type(ctx, *field);
+                        self.undefined(ctx, field_lift)?
                     };
                     values.push((name.as_str(), value));
                 }
@@ -505,6 +506,7 @@ impl FunctionLowering<'_, '_> {
             |b, ctx, case| {
                 let payload = if let Some(payload) = ty.cases()[case] {
                     let mir = b.payload_type(ctx, ty, mir, case)?;
+                    let lift_mir = scalar_mir_type(ctx, mir);
                     let mut values = payload
                         .flat()
                         .into_iter()
@@ -512,7 +514,7 @@ impl FunctionLowering<'_, '_> {
                         .map(|(i, target)| b.coerce_flat(ctx, raw[i + 1], layout[i + 1], target))
                         .collect::<Vec<_>>();
                     values.reverse();
-                    Some(b.lift_flat(ctx, payload, mir, &mut values)?)
+                    Some(b.lift_flat(ctx, payload, lift_mir, &mut values)?)
                 } else {
                     None
                 };
@@ -535,7 +537,14 @@ impl FunctionLowering<'_, '_> {
             self.sum_switch(ctx, tag, ty.cases().len(), vec![result], |b, ctx, case| {
                 let payload = if let Some(payload) = ty.cases()[case] {
                     let mir = b.payload_type(ctx, ty, mir, case)?;
-                    Some(b.lift_load(ctx, payload, mir, address, offset + ty.payload_offset())?)
+                    let lift_mir = scalar_mir_type(ctx, mir);
+                    Some(b.lift_load(
+                        ctx,
+                        payload,
+                        lift_mir,
+                        address,
+                        offset + ty.payload_offset(),
+                    )?)
                 } else {
                     None
                 };
@@ -549,7 +558,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
     ) -> Result<Value> {
         Ok(match ty {
             AbiType::Option(_) => {
@@ -557,30 +566,33 @@ impl FunctionLowering<'_, '_> {
                     optional_value(ctx, mir).is_some(),
                     "WIT option needs a nullable TypeScript value"
                 );
-                let absent = self.is_absent(ctx, value, mir)?;
+                let absent = self.is_absent_value(ctx, value, mir)?;
                 self.num(ctx, NumOpcode::I32Eqz, vec![absent])
             }
             AbiType::Result { .. } => {
+                let value = value.scalar()?;
                 let record = self.record_type(ctx, mir)?;
-                let (index, field) = record_field(ctx, record, "ok")?;
+                let (offset, field) = Self::record_type_field_slot(ctx, record, "ok")?;
                 ensure!(
                     repr(ctx, field)? == Repr::Bool,
                     "result ok field must be boolean"
                 );
-                let ok = self.load(ctx, MemKind::I32, value, record::field(index));
+                let ok = self.load(ctx, MemKind::I32, value, offset);
                 self.num(ctx, NumOpcode::I32Eqz, vec![ok])
             }
             AbiType::Variant(cases) => {
+                let value = value.scalar()?;
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::VariantType>(),
+                    mir.deref(ctx).is::<perry_mir::VariantType>(),
                     "variant needs a closed tagged union"
                 );
                 let tag = self.load(ctx, MemKind::I32, value, 0);
                 self.string_tag(ctx, cases.iter().map(|(name, _)| name.as_str()), tag)
             }
             AbiType::Enum(names) => {
+                let value = value.scalar()?;
                 ensure!(
-                    mir.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT enum needs a string literal union"
                 );
                 self.string_tag(ctx, names.iter().map(String::as_str), value)
@@ -613,25 +625,25 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
         case: usize,
-    ) -> Result<Value> {
+    ) -> Result<Carriers<Value>> {
         if matches!(ty, AbiType::Option(_)) {
             return Ok(value);
         }
+        let value = value.scalar()?;
         if matches!(ty, AbiType::Variant(_)) {
             let payload = self.payload_type(ctx, ty, mir, case)?;
-            return Ok(self.load(ctx, slot_kind(ctx, payload)?, value, 8));
+            return self.load_slot_value(ctx, value, 8, payload);
         }
         let record = self.record_type(ctx, mir)?;
         let name = if case == 0 { "value" } else { "error" };
-        let (index, field) = record_field(ctx, record, name)?;
-        let kind = slot_kind(ctx, field)?;
-        let value = self.load(ctx, kind, value, record::field(index));
+        let (offset, field) = Self::record_type_field_slot(ctx, record, name)?;
+        let value = self.load_slot_value(ctx, value, offset, field)?;
         if !matches!(ty.cases()[case], Some(AbiType::Option(_)))
             && optional_value(ctx, field).is_some()
         {
-            let absent = self.is_absent(ctx, value, field)?;
+            let absent = self.is_absent_value(ctx, value, field)?;
             let trap = self.new_block(ctx, vec![]);
             let present = self.new_block(ctx, vec![]);
             self.cond_br(ctx, absent, (trap, vec![]), (present, vec![]));
@@ -648,7 +660,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
         address: Value,
         offset: u32,
     ) -> Result<()> {
@@ -677,7 +689,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
     ) -> Result<Vec<Value>> {
         let tag = self.sum_tag(ctx, ty, mir, value)?;
         let layout = ty.sum_flat();

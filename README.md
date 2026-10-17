@@ -216,7 +216,10 @@ Automated test suites evaluate component efficiency across four dimensions:
 Perry-WIT compiles TypeScript ahead-of-time directly into native WebAssembly instructions without an embedded JavaScript engine:
 
 ```text
-TypeScript ──► Perry HIR ──► perry MIR (pliron)
+TypeScript ──► Perry HIR ──► Typed MIR (pliron)
+                                   │
+                                   ▼
+                           Optimization Loop
                                    │
                                    ▼
                          perry-codegen (pliron-wasm)
@@ -226,16 +229,16 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)
 ```
 
 1. **HIR Lowering**: Transforms TypeScript AST into Perry HIR, resolving imports, establishing lexical scopes.
-2. **MIR Generation**: Lowers Perry HIR to typed pliron MIR. Local variables initialize as slots, converted into SSA values, block arguments via `mem2reg`.
-3. **Code Generation**: Translates MIR to WebAssembly operations, selects value representations, synthesizes export glue.
-4. **Control Flow Structuring**: Structures reducible control flow with Ramsey's dominator-tree algorithm, keeping single-use values on the operand stack.
-5. **Linking**: Relocates runtime memory management helpers into the module, embeds WIT world metadata, encodes the final component.
+2. **MIR Lowering**: Lowers Perry HIR to typed pliron MIR with local variable slots, structured block joins, and root frames.
+3. **Optimization**: Promotes local slots to SSA via `mem2reg`, iterating fact propagation, constant folding, and dead code elimination to convergence.
+4. **Code Generation**: Translates optimized MIR to WebAssembly operations with operand stack scheduling and Ramsey dominator-tree control flow structuring.
+5. **Component Encoding**: Relocates runtime memory management helpers, embeds WIT world metadata, and synthesizes Canonical ABI adapters.
 
 ## Semantics
 
 Perry-WIT supports a strictly typed subset of TypeScript designed for ahead-of-time compilation:
 
-- **Numbers**: Values are IEEE 754 64-bit floats with standard ECMAScript arithmetic, including modulo, negative zero, NaN. Integers, single-precision floats convert at WIT boundaries.
+- **Numbers**: Values evaluate as IEEE 754 64-bit floats by default, specializing to native integer representations when constrained by WIT boundaries or type annotations. See [Numerical Tower](#numerical-tower).
 - **Records**: Supports interfaces, type literals, object literals with closed shapes. Structurally equivalent types share identical record layouts. Recursive interfaces are supported.
 - **Arrays**: Arrays are dense, homogeneous. Out-of-bounds or non-integral indexing returns `undefined`. Writing at `length` appends a new element. Any other out-of-bounds write throws a `RangeError`.
 - **Strings**: Text storage uses UTF-8 byte sequences with cached Unicode scalar length. Appending reuses spare buffer capacity for amortized linear growth. Indexing operates on Unicode scalar values, matching Node.js behavior for BMP scalars. Astral characters count as single scalar values, while surrogate halves are rejected.
@@ -245,6 +248,15 @@ Perry-WIT supports a strictly typed subset of TypeScript designed for ahead-of-t
 - **Byte Streams**: Supports default readers, asynchronous iteration, BYOB readers with caller-allocated buffers, minimum read lengths, explicit cancellation. Stream writes maintain bounded buffer reuse.
 - **Temporal**: Supports ISO calendar operations via `Instant.from`, `PlainDate.from`, `PlainDateTime.from`. Instants expose `epochMilliseconds`. Plain dates, times expose date and time fields, ISO string conversion, arithmetic via `.add({ days })`. Unsupported calendar formats, time zone manipulations produce compile-time diagnostics.
 - **Standard Library**: Supports `Math`, UTC `Date`, string manipulation, `Uint8Array`, `TextEncoder`, `TextDecoder`, schema-directed `JSON.stringify`, `JSON.parse`, `crypto.getRandomValues`, `node:timers/promises`, `node:fs/promises`, HTTP `Headers`, `Request`, `Response`, standard stream bridges.
+
+### Numerical Tower
+
+Perry-WIT stratifies numeric representations across WebAssembly primitive types:
+
+- **Floating-point default**: Unconstrained JavaScript `number` values evaluate as IEEE 754 64-bit floats (`f64`), preserving fractional division, remainder, negative zero, and `NaN` semantics.
+- **Integer specialization**: Values constrained by WIT interfaces or explicit integer types (`u8`–`u64`, `s8`–`s64`) specialize to native WebAssembly integer instructions. WIT 64-bit integers (`s64`, `u64`) map to TypeScript `bigint`.
+- **Subsumption joins**: Mixed numeric operations promote to the smallest representation subsuming both operands. Mixed signedness widens to the next enclosing signed width (e.g., `u8 + s8 → s16`, `u16 + s16 → s32`).
+- **Optimization interaction**: Intermediate integer computations without narrow result requirements evaluate in native 64-bit `i64` registers, preventing premature overflow without heap allocations. Range inference and constant bounds analysis eliminate redundant bounds checks and modular reductions.
 
 ## Contributing
 

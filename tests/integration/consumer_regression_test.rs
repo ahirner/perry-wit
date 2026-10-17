@@ -12,6 +12,8 @@ fn array_callbacks_and_iteration_match_javascript() {
     let source = r#"
 function twice(n:number):number {return n*2;}
 function nothing(n:number):void {}
+function missingDefault():number {throw new Error('missing');}
+function refill(values:number[]):number {values.push(1,2);return 8;}
 export function callbacks():number {
  let calls=0;
  const numbers:number[]=[1,2,3];
@@ -24,6 +26,8 @@ export function callbacks():number {
  catch(e){if(e.message!=='stop')return 3;}
  const finished=values.map(n=>{try {return n*2;}finally {trace++;}});
  if(trace!==16 || finished[1]!==8)return 4;
+ const wrapped=values.map(n=>n+(trace as number));
+ if(wrapped[0]!==17 || wrapped[1]!==20)return 7;
  const small:number[]=[1,2,3];
  const cases:number[]=small.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
  const loops:number[]=small.map(n=>{while(true){return n*2;}});
@@ -42,6 +46,17 @@ export function iteration():number {
  for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
  let text='';
  for(const word of 'c,d'.split(',')){text+=word;}
+ const [first, , missing = visits + 4] = values;
+ const [label, count] = ['ok', 3] as [string, number];
+ if(first!==1 || missing!==3 || label!=='ok' || count!==3)return 2;
+ const [, absent = 7] = [5];
+ if(absent!==7)return 3;
+ let thrown=0;
+ try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
+ if(thrown!==1)return 4;
+ const exhausted:number[]=[];
+ const [filled=refill(exhausted), stillMissing=9]=exhausted;
+ if(filled!==8 || stillMissing!==9)return 5;
  for(const scalar of 'é🙂a'){text+=scalar+':';}
  return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
 }
@@ -198,7 +213,16 @@ function size(value:Choice):number {
     } finally { const ignored = 0; }
 }
 function present(value:{n:number} | null | undefined):number { return value ? value.n : 10; }
-export function run():number {return size({tag:'text',val:'abc'}) + size({tag:'number',val:4}) + present({n:7}) + present(null) + present(undefined);}
+interface Options { query?: { search?: string } }
+function label(options:Options):string {return options.query?.search?.trim().toLowerCase() ?? '';}
+function checked(options:Options, visits:number[]):Options {visits.push(1);return options;}
+function nested():boolean {
+ const visits:number[]=[];
+ const options:Options={query:{search:' OK '}};
+ const value=checked(options,visits).query?.search?.trim().toLowerCase() ?? '';
+ return label({})==='' && label({query:{}})==='' && value==='ok' && visits.length===1;
+}
+export function run():number {if(!nested())return -1;return size({tag:'text',val:'abc'}) + size({tag:'number',val:4}) + present({n:7}) + present(null) + present(undefined);}
 "#;
     assert_eq!(Program::new(source).outcome("run", &[]), (35.0, 0));
 }
@@ -324,7 +348,8 @@ fn generic_interfaces_aliases_and_defaults_resolve_to_concrete_shapes() {
 interface Item { n:number }
 interface Pair<Item,Other=Item> { a:Item; b:Other }
 interface Page<T> {items:T[];next:string|null}
-interface Entry<T=string> {value:T}
+interface Base<T> {value:T}
+interface Entry<T=string> extends Base<T> {}
 type Box<T> = {item:T};
 interface Link<T> {value:T;next:Link<T>|null}
 function size(page:Page<Entry>) {const items = page.items; const first = items[0]; return first.value.length;}
@@ -337,7 +362,9 @@ export function run():number {
  return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
 }
 "#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (29.0, 0));
+    let values = Program::new(source).call("run", &[]).0;
+    assert_eq!(values.len(), 1, "the known projection cannot throw");
+    assert_eq!(values[0].unwrap_f64(), 29.0);
 }
 
 #[test]
@@ -352,4 +379,576 @@ fn unsupported_iterators_have_direct_diagnostics() {
             "{error:#}"
         );
     }
+}
+
+#[test]
+fn text_pipeline_join_replace_regex_split_and_non_throwing_char_loops() {
+    let source = r#"
+export function charLoop(s: string): number {
+    let count = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '-') count++;
+    }
+    return count;
+}
+
+export function run(): number {
+    const words = '  hello,  world;foo\tbar  '.trim().split(/[,;\s]+/);
+    if (words.join('-') !== 'hello-world-foo-bar') return 1;
+    if (words.join('') !== 'helloworldfoobar') return 2;
+    if (words.join() !== 'hello,world,foo,bar') return 3;
+    const nums: number[] = [1, 2, 3];
+    if (nums.join(':') !== '1:2:3') return 4;
+    const empty: string[] = [];
+    if (empty.join(',') !== '') return 5;
+    const opts: Array<string | null | undefined> = ['a', null, undefined, 'b'];
+    if (opts.join('-') !== 'a---b') return 6;
+
+    if ('a-b-c'.replace('-', '_') !== 'a_b-c') return 7;
+    if ('a-b-c'.replaceAll('-', '_') !== 'a_b_c') return 8;
+    if ('hello   world\tfoo'.replace(/\s+/, ' ') !== 'hello world\tfoo') return 9;
+    if ('hello   world\tfoo'.replace(/\s+/g, ' ') !== 'hello world foo') return 10;
+    if ('hello   world\tfoo'.replaceAll(/\s+/g, '_') !== 'hello_world_foo') return 11;
+    if ('abc'.replace(/b/, '[$&:$`:$\':$$]') !== 'a[b:a:c:$]c') return 12;
+    if ('ab'.replaceAll('', '-') !== '-a-b-') return 13;
+    if ('ab'.replace(/(?:)/g, '-') !== '-a-b-') return 19;
+    if (JSON.stringify('ab'.split(/(?:)/)) !== '["a","b"]') return 20;
+    if (JSON.stringify('ab'.split(/^/)) !== '["ab"]') return 21;
+    if (JSON.stringify('ab'.split(/$/)) !== '["ab"]') return 22;
+    if (JSON.stringify('ab'.split(/b$/)) !== '["a",""]') return 23;
+    if (JSON.stringify(''.split(/$/)) !== '[]') return 24;
+
+    if ('  hi  '.trimStart() !== 'hi  ' || '  hi  '.trimEnd() !== '  hi') return 14;
+    if ('5'.padStart(3, '0') !== '005' || '5'.padEnd(3, '0') !== '500') return 15;
+    if ('abc'.padStart(6, 'xy') !== 'xyxabc' || 'abc'.padEnd(6, 'xy') !== 'abcxyx') return 16;
+    if ('é🙂z'.at(0) !== 'é' || 'é🙂z'.at(-2) !== '🙂' || 'é🙂z'.at(9) !== undefined) return 17;
+
+    let clean = '';
+    for (const ch of 'a-b c') {
+        clean += ch === '-' || ch === ' ' ? '_' : ch;
+    }
+    if (clean !== 'a_b_c') return 18;
+    return charLoop('a-b-c');
+}
+"#;
+    let mut program = Program::checked(source, "text-pipeline.ts");
+    let char_loop = program.call("charLoop", &[wasmtime::Val::I32(0)]);
+    assert_eq!(
+        char_loop.0.len(),
+        1,
+        "in-bounds character loop must not emit an exception status return"
+    );
+    assert_eq!(program.outcome("run", &[]), (2.0, 0));
+
+    let err = perry_wit::compile_core(
+        "export function run(): string { return 'a'.replaceAll(/a/, 'b'); }",
+        "replace-all-non-global.ts",
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("global"), "{err:#}");
+}
+
+#[test]
+fn typed_record_spread_and_destructuring_across_bindings_loops_and_params() {
+    let source = r#"
+interface Item { id: number; name: string; plu: string; price?: number }
+interface Pair { a: number; b: number; c?: number }
+
+function sumPair({ a, b: second, c = 10 }: Pair): number {
+    return a + second + c;
+}
+
+export function run(): number {
+    const base: Item = { id: 1, name: 'Soup', plu: '100', price: 500 };
+    const updated: Item = { ...base, plu: '200' };
+    if (updated.id !== 1 || updated.name !== 'Soup' || updated.plu !== '200' || updated.price !== 500) return 1;
+    if (base.plu !== '100') return 2;
+
+    const { id, name: label, price = 0, ...rest } = updated;
+    if (id !== 1 || label !== 'Soup' || price !== 500 || rest.plu !== '200') return 3;
+
+    const items: Pair[] = [{ a: 1, b: 2 }, { a: 3, b: 4, c: 5 }];
+    let total = 0;
+    for (const { a, b: beta, c = 10 } of items) {
+        total += a + beta + c;
+    }
+    if (total !== 25) return 4;
+
+    const mapped = items.map(({ a, b, c = 1 }) => a * 10 + b + c);
+    if (mapped[0] !== 13 || mapped[1] !== 39) return 5;
+
+    if (sumPair({ a: 2, b: 3 }) !== 15 || sumPair({ a: 2, b: 3, c: 4 }) !== 9) return 6;
+
+    const withP: { p?: number } = { p: 1 };
+    const explicitUndef: { p?: number } = { p: undefined };
+    const omitted: { p?: number } = {};
+    const overUndef = { ...withP, ...explicitUndef };
+    if (overUndef.p !== undefined || !('p' in overUndef)) return 7;
+    const overOmitted = { ...withP, ...omitted };
+    if (overOmitted.p !== 1 || !('p' in overOmitted)) return 8;
+    const copyOmitted = { ...omitted };
+    if ('p' in omitted || 'p' in copyOmitted || Object.keys(copyOmitted).length !== 0) return 9;
+    const partial: { p?: number; q: number } = { q: 1 };
+    const { q, ...restOmitted } = partial;
+    if (q !== 1 || 'p' in restOmitted || Object.keys(restOmitted).length !== 0) return 10;
+    const nullableA: { p: number | null } = { p: 1 };
+    const nullableB: { p: number | null } = { p: null };
+    if (({ ...nullableA, ...nullableB }).p !== null) return 11;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "record-spread-destructure.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn default_and_rest_parameters_on_functions_and_closures() {
+    let source = r#"
+function formatTag(label = 'item', count = 1, suffix: string | null = null): string {
+    return `${label}:${count}:${suffix ?? 'none'}`;
+}
+
+function sumWithBase(base = 10, ...values: number[]): number {
+    return values.reduce((acc, v) => acc + v, base);
+}
+
+export function run(): number {
+    if (formatTag() !== 'item:1:none') return 1;
+    if (formatTag(undefined, 5) !== 'item:5:none') return 2;
+    if (formatTag('box', undefined, 'kg') !== 'box:1:kg') return 3;
+    if (formatTag('box', 2, null) !== 'box:2:none') return 4;
+
+    if (sumWithBase() !== 10) return 5;
+    if (sumWithBase(5, 1, 2, 3) !== 11) return 6;
+
+    let calls = 0;
+    const arr: Array<number | undefined> = [undefined, 7];
+    const filled = arr.map((v = ++calls, i = v + 10) => v + i);
+    if (calls !== 1 || filled[0] !== 1 || filled[1] !== 8) return 7;
+
+    const present: Array<number | undefined> = [1];
+    const unthrown = present.map((v = JSON.parse<number>('bad')) => v);
+    if (unthrown[0] !== 1) return 8;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "default-rest-params.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn temporal_plain_date_subtract_and_compact_helper_footprint() {
+    let source = r#"
+export function run(): number {
+    const leap = Temporal.PlainDate.from('2024-02-29');
+    const prev = leap.subtract({ days: 1 });
+    const next = leap.add({ days: 1 });
+    if (prev.toString() !== '2024-02-28') return 1;
+    if (next.toString() !== '2024-03-01') return 2;
+    if (leap.year !== 2024 || leap.month !== 2 || leap.day !== 29 || leap.dayOfWeek !== 4) return 3;
+
+    const dt = Temporal.PlainDateTime.from('2024-03-01T12:30:00');
+    const dtPrev = dt.subtract({ days: 2 });
+    if (dtPrev.toString() !== '2024-02-28T12:30:00') return 4;
+
+    const inst = Temporal.Instant.from('1970-01-01T00:00:02.500Z');
+    if (inst.epochMilliseconds !== 2500 || inst.toString() !== '1970-01-01T00:00:02.5Z') return 5;
+    if (Temporal.Now.timeZoneId() !== 'UTC') return 6;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "temporal-compact.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+
+    let date_only = perry_wit::compile_core(
+        "export function check(): number { const d = Temporal.PlainDate.from('2024-02-29').subtract({ days: 1 }); return d.day; }",
+        "plain-date-only.ts",
+    )
+    .unwrap();
+    assert!(
+        date_only.len() < 24_576,
+        "PlainDate-only module should remain compact, got {} bytes",
+        date_only.len()
+    );
+}
+
+#[test]
+fn optional_chaining_logical_operators_utility_types_and_array_combinators() {
+    let source = r#"
+type A = { tag: 'a'; val: number };
+type B = { tag: 'b'; val: string };
+type C = { tag: 'c'; val: boolean };
+type AB = A | B;
+type ABC = AB | C;
+type OnlyAB = Exclude<ABC, C>;
+type JustA = Extract<ABC, { tag: 'a' }>;
+type DefiniteString = NonNullable<string | null | undefined>;
+
+function checkVariant(x: ABC): number {
+    if (x.tag === 'a' && x.val > 5) return x.val;
+    if (x.tag !== 'b' || x.val.length === 0) return 0;
+    return x.val.length;
+}
+
+function reduceAndForEach(items: number[]): number {
+    let sum = 0;
+    items.forEach((x, idx) => { sum += x + idx; });
+    const prod = items.reduce((acc, x) => acc * x, 1);
+    const bare = items.reduce((acc, x) => acc + x);
+    return sum + prod + bare;
+}
+
+export function run(): number {
+    const map = new Map<string, { label: string }>();
+    map.set('k', { label: 'found' });
+    const hit = map.get('k')?.label ?? null;
+    const miss = map.get('missing')?.label ?? null;
+    if (hit !== 'found' || miss !== null) return 1;
+
+    const s1: DefiniteString = '' || 'fallback';
+    const s2: DefiniteString = 'primary' || 'fallback';
+    const s3: DefiniteString = 'left' && 'right';
+    const s4: DefiniteString = '' && 'right';
+    if (s1 !== 'fallback' || s2 !== 'primary' || s3 !== 'right' || s4 !== '') return 2;
+
+    const ab: OnlyAB = { tag: 'a', val: 9 };
+    const ja: JustA = { tag: 'a', val: 3 };
+    if (checkVariant(ab) !== 9 || ja.val !== 3 || checkVariant({ tag: 'b', val: 'hi' }) !== 2) return 3;
+
+    const nums: number[] = [2, 3, 4];
+    if (reduceAndForEach(nums) !== (2 + 0 + 3 + 1 + 4 + 2) + 24 + 9) return 4;
+    if (nums.at(-1) !== 4 || nums.at(0) !== 2 || nums.at(5) !== undefined) return 5;
+    if (nums.at(NaN) !== 2 || nums.at(-Infinity) !== undefined) return 13;
+    if (nums.findLast(x => x < 4) !== 3 || nums.findLastIndex(x => x < 4) !== 1) return 6;
+    if (nums.findLast(x => x > 9) !== undefined || nums.findLastIndex(x => x > 9) !== -1) return 7;
+    const shrink: number[] = [1, 2, 3];
+    let shrinkCalls = 0;
+    shrink.findLast((_v, _i, arr) => { shrinkCalls++; arr.pop(); arr.pop(); return false; });
+    if (shrinkCalls !== 3) return 14;
+
+    const rev = nums.toReversed();
+    if (rev.join(',') !== '4,3,2' || nums.join(',') !== '2,3,4') return 8;
+    const copy = nums.slice(1, -1);
+    if (copy.join(',') !== '3') return 9;
+    if (nums.slice(NaN).join(',') !== '2,3,4' || nums.slice(0, NaN).length !== 0) return 15;
+    if ([1, 2, 3, 4].slice(-1.5).join(',') !== '4') return 16;
+    const mutRev = [1, 2, 3].reverse();
+    if (mutRev.join(',') !== '3,2,1') return 10;
+
+    const nested: number[][] = [[1, 2], [], [3]];
+    if (nested.flat().join(',') !== '1,2,3') return 11;
+
+    const hex = (255).toString(16);
+    const bin = (-10).toString(2);
+    if (hex !== 'ff' || bin !== '-1010') return 12;
+    if ((18446744073709551616).toString(16) !== '10000000000000000') return 17;
+    if ((0.1).toString(3) !== '0.0022002200220022002200220022002201') return 18;
+    if ((1e-20).toString(2) !== '0.00000000000000000000000000000000000000000000000000000000000000000010111100111001010000100001100100100100100001000100011') return 19;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "smaller-gaps.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn nullable_numeric_conversions_and_nested_specialized_layouts_compose() {
+    let (r, p) = perry_wit::component::wit::resolve_source(
+        "p.wit",
+        "package test:probe;world test{export run:func(x:f64)->string;}",
+    )
+    .unwrap();
+    let w = r.select_world(&[p], Some("test")).unwrap();
+
+    for (name, helper) in [
+        (
+            "null_to_undefined",
+            "function f(n:number|null):number|undefined{return n===null?undefined:n;}",
+        ),
+        (
+            "undefined_to_null",
+            "function f(n:number|undefined):number|null{return n===undefined?null:n;}",
+        ),
+        (
+            "null_to_plain",
+            "function f(n:number|null):number{return n===null?0.5:n;}",
+        ),
+        (
+            "plain_to_undefined",
+            "function f(n:number):number|undefined{return n===0?undefined:n;}",
+        ),
+    ] {
+        let source = format!(
+            "{helper} export function run(x:number):string{{const n=f(parseInt(x===0?'9007199254740993':'bad'));return JSON.stringify(n??0.5);}}"
+        );
+        perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+            .unwrap_or_else(|e| panic!("{name} normal failed: {e:#}"));
+        perry_mir::with_fact_limits(1, 1, || {
+            perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+        })
+        .unwrap_or_else(|e| panic!("{name} summary failed: {e:#}"));
+    }
+
+    for reverse in [false, true] {
+        let a = "const a:S={inner:{a:w,b:0.5},opt:w};";
+        let b = "const b:S={inner:{a:w,b:w},opt:0.5};";
+        let decls = if reverse {
+            format!("{b}{a}")
+        } else {
+            format!("{a}{b}")
+        };
+        let source = format!(
+            "interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} export function run(x:number):string{{const w=parseInt(x===0?'9007199254740993':'bad');{decls}return JSON.stringify(a)+','+JSON.stringify(b);}}"
+        );
+        perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+            .unwrap_or_else(|e| panic!("nested_{reverse} failed: {e:#}"));
+    }
+}
+
+#[test]
+fn json_record_spread_and_rest_preserve_undeclared_extras() {
+    let source = r#"
+interface Row {
+    Order: number;
+}
+
+export function run(): number {
+    const rows = JSON.parse<Row[]>('[{"Order":1,"Extra":"keep","Components":[{"x":1}]}]');
+    const s1 = JSON.stringify({ ...rows[0], Components: undefined });
+    if (s1 !== '{"Order":1,"Extra":"keep"}') return 1;
+
+    const { Components, ...row } = rows[0];
+    const s2 = JSON.stringify(row);
+    if (s2 !== '{"Order":1,"Extra":"keep"}') return 2;
+
+    const s3 = JSON.stringify({ ...rows[0], Order: 2, Components: undefined });
+    if (s3 !== '{"Order":2,"Extra":"keep"}') return 3;
+
+    const s4 = JSON.stringify({ ...rows[0], Extra: "override", Components: undefined });
+    if (s4 !== '{"Extra":"override","Order":1}') return 4;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "json-extras-spread-rest.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn collections_from_iterables_regex_exec_temporal_and_smaller_gaps() {
+    let source = r#"
+interface Item {
+    id: string;
+    label: string;
+    score: number;
+}
+
+function stringifyUnknown(v: unknown): string {
+    return JSON.stringify(v);
+}
+
+function extractId<T extends { id: string }>(item: T): string {
+    return item.id;
+}
+
+type Kind = 'a' | 'b';
+
+function assertNever(x: never): never {
+    throw new Error('unexpected: ' + String(x));
+}
+
+function classifyKind(k: Kind): number {
+    if (k === 'a') return 1;
+    if (k === 'b') return 2;
+    const _exhaustive: never = k;
+    return assertNever(_exhaustive);
+}
+
+class Counter {
+    static step = 2;
+    static scaled(n: number): number {
+        return n * Counter.step;
+    }
+    static from(n: number): Counter {
+        return new Counter(n);
+    }
+
+    count: number;
+    label = 'ctr';
+
+    constructor(initial = 0) {
+        this.count = initial;
+    }
+
+    get value(): number {
+        return this.count;
+    }
+
+    set value(v: number) {
+        this.count = v;
+    }
+
+    inc(by = 1): number {
+        this.count += by;
+        return this.count;
+    }
+
+    describe(): string {
+        return `${this.label}:${this.count}`;
+    }
+}
+
+class Box<T> {
+    constructor(public item: T) {}
+    unwrap(): T {
+        return this.item;
+    }
+}
+
+export function run(): number {
+    // FR 2: new Map(cs.map(c => [c.label, c])), Array.from, array rest destructuring
+    const items: Item[] = [
+        { id: 'i1', label: 'alpha', score: 10 },
+        { id: 'i2', label: 'beta', score: 20 },
+        { id: 'i3', label: 'gamma', score: 30 },
+    ];
+    const byLabel = new Map(items.map(c => [c.label, c]));
+    if (byLabel.size !== 3 || byLabel.get('beta')?.score !== 20) return 1;
+
+    const range = Array.from({ length: 4 }, (_v, i) => i * 2);
+    if (range.join(',') !== '0,2,4,6') return 2;
+
+    const fromSet = Array.from(new Set(['x', 'y', 'x']), s => s.toUpperCase());
+    if (fromSet.join(',') !== 'X,Y') return 3;
+
+    const parts = ['head', 'second', 't1', 't2', 't3'];
+    const [first, second, ...rest] = parts;
+    if (first !== 'head' || second !== 'second' || rest.join(':') !== 't1:t2:t3') return 4;
+
+    const shortParts = ['only'];
+    const [only, missing = 'def', ...emptyRest] = shortParts;
+    if (only !== 'only' || missing !== 'def' || emptyRest.length !== 0) return 5;
+
+    // FR 3: RegExp.prototype.exec, String.prototype.match, /i flag
+    const rx = /^([a-z]+)-(\d+)$/i;
+    if (!rx.test('AbC-42') || rx.test('AbC-xx')) return 6;
+    const m = rx.exec('AbC-42');
+    if (m === null || m[0] !== 'AbC-42' || m[1] !== 'AbC' || m[2] !== '42') return 7;
+    if (rx.exec('nope') !== null) return 8;
+
+    const matched = ' Item-99 '.trim().match(/^item-(\d+)$/i);
+    if (matched === null || matched[0] !== 'Item-99' || matched[1] !== '99') return 9;
+
+    const allNums = 'a12b34c56'.match(/\d+/g);
+    if (allNums === null || allNums.join(',') !== '12,34,56') return 10;
+
+    if ('Hello HELLO hello'.replace(/hello/gi, 'hi') !== 'hi hi hi') return 11;
+
+    // FR 4: Temporal.PlainDate.from(fields, options), until, compare
+    const d1 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 29 });
+    const d2 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 31 }, { overflow: 'constrain' });
+    if (d1.toString() !== '2024-02-29' || d2.toString() !== '2024-02-29') return 12;
+
+    const d3 = Temporal.PlainDate.from('2024-03-10');
+    if (d1.until(d3).days !== 10 || d3.until(d1).days !== -10) return 13;
+    if (Temporal.PlainDate.compare(d1, d2) !== 0) return 14;
+    if (Temporal.PlainDate.compare(d1, d3) !== -1 || Temporal.PlainDate.compare(d3, d1) !== 1) return 15;
+
+    // Smaller gaps: unknown parameter, local closure, bigint arithmetic, lastIndexOf, with,
+    // Math.max/min(...xs), labeled break, Set methods, Map.groupBy, structuredClone, normalize, bounded generics
+    const parsed: unknown = JSON.parse('{"k":7}');
+    if (stringifyUnknown(parsed) !== '{"k":7}') return 16;
+
+    const isBig = (x: Item): boolean => x.score >= 20;
+    const filtered = items.filter(isBig);
+    if (filtered.length !== 2 || !isBig(items[2]) || isBig(items[0])) return 17;
+
+    const b1: bigint = 100n;
+    const b2: bigint = 35n;
+    if (b1 - b2 !== 65n || b1 + b2 !== 135n || b1 * 2n !== 200n || b1 / b2 !== 2n || b1 % b2 !== 30n) return 18;
+    if (!(b1 > b2) || !(b2 < b1)) return 19;
+
+    const nums = [10, 20, 30, 20, 10];
+    if (nums.lastIndexOf(20) !== 3 || nums.lastIndexOf(99) !== -1 || nums.lastIndexOf(20, 2) !== 1) return 20;
+    const replaced = nums.with(1, 99);
+    if (replaced.join(',') !== '10,99,30,20,10' || nums.join(',') !== '10,20,30,20,10') return 21;
+    const replacedNeg = nums.with(-1, 77);
+    if (replacedNeg.join(',') !== '10,20,30,20,77') return 22;
+
+    if (Math.max(...nums) !== 30 || Math.min(...nums) !== 10 || Math.max(1, 5, 3, 9, 2) !== 9) return 23;
+
+    let sum = 0;
+    outer: for (let i = 0; i < 5; i++) {
+        for (let j = 0; j < 5; j++) {
+            if (i === 2 && j === 1) break outer;
+            sum += 1;
+        }
+    }
+    if (sum !== 11) return 24;
+
+    const sA = new Set(['a', 'b', 'c']);
+    const sB = new Set(['b', 'd']);
+    if ([...sA.difference(sB)].join(',') !== 'a,c') return 25;
+    if ([...sA.intersection(sB)].join(',') !== 'b') return 26;
+    if ([...sA.union(sB)].join(',') !== 'a,b,c,d') return 27;
+    if ([...sA.symmetricDifference(sB)].join(',') !== 'a,c,d') return 28;
+    if (!new Set(['a', 'b']).isSubsetOf(sA) || sB.isSubsetOf(sA)) return 29;
+    if (!sA.isSupersetOf(new Set(['a'])) || !sA.isDisjointFrom(new Set(['z']))) return 30;
+
+    const grouped = Map.groupBy(items, item => item.score >= 20 ? 'high' : 'low');
+    if (grouped.get('low')?.length !== 1 || grouped.get('high')?.length !== 2) return 31;
+
+    const orig = { a: 1, nested: [2, 3] };
+    const cloned = structuredClone(orig);
+    orig.a = 99;
+    orig.nested.push(4);
+    if (cloned.a !== 1 || cloned.nested.join(',') !== '2,3') return 32;
+
+    if ('e\u0301'.normalize() !== '\u00e9' || '\u00e9'.normalize('NFD') !== 'e\u0301') return 33;
+
+    if (extractId(items[0]) !== 'i1') return 34;
+
+    if (classifyKind('a') !== 1 || classifyKind('b') !== 2) return 35;
+
+    const c = new Counter(5);
+    if (c.value !== 5 || c.inc(3) !== 8 || c.inc() !== 9) return 36;
+    c.value = 12;
+    if (++c.value !== 13 || c.describe() !== 'ctr:13' || Counter.scaled(4) !== 8) return 37;
+
+    const c2 = Counter.from(10);
+    c2.inc(5);
+    if (c2.describe() !== 'ctr:15') return 38;
+
+    const boxed = new Box<string>('hello');
+    if (!(c instanceof Counter) || (c instanceof Box) || !(boxed instanceof Box) || (boxed instanceof Counter)) return 39;
+    if (boxed.unwrap() !== 'hello') return 40;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "conformance-fr2-fr5.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+
+    let inheritance_err = perry_wit::compile_core(
+        "class A {} class B extends A {} export function run(): number { return 0; }",
+        "inheritance.ts",
+    )
+    .expect_err("class inheritance should be rejected");
+    assert!(
+        format!("{inheritance_err:#}").contains("class inheritance is not supported yet"),
+        "unexpected error: {inheritance_err:#}"
+    );
+
+    let trim_only = perry_wit::compile_core(
+        "export function check(s: string): string { return s.trim(); }",
+        "trim-only.ts",
+    )
+    .unwrap();
+    assert!(
+        trim_only.len() < 6_144,
+        "String.prototype.trim core module should remain compact, got {} bytes",
+        trim_only.len()
+    );
 }

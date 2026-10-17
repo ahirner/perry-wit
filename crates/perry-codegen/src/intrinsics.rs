@@ -3,15 +3,16 @@ use crate::strings;
 use crate::{
     MONOTONIC_CLOCK,
     function::FunctionLowering,
-    repr::{Repr, repr},
+    repr::{Carriers, Repr, repr},
     runtime::{Runtime, W},
 };
 use anyhow::{Result, bail, ensure};
-use perry_mir::{intrinsics::Intrinsic, optional::absence};
+use perry_mir::{Intrinsic, NumericType, absence};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
     r#type::{Typed, TypedHandle},
+    value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -30,6 +31,73 @@ impl FunctionLowering<'_, '_> {
         op: Ptr<Operation>,
         intrinsic: Intrinsic,
     ) -> Result<()> {
+        if intrinsic == Intrinsic::ParseInt {
+            let str_op = op.deref(ctx).get_operand(0);
+            let str_val = self.mapped(ctx, str_op)?;
+            let (radix_tag, radix_payload) = self.numeric_operand(ctx, op, 1)?;
+            let out = *self
+                .state
+                .numeric_result
+                .get_or_insert_with(|| self.state.data.append(8, &[0; 8]));
+            let out_ptr = self.i32_const(ctx, out as i32);
+            let tag = self.runtime(
+                ctx,
+                Runtime::StdParseInt,
+                vec![str_val, radix_tag, radix_payload, out_ptr],
+            );
+            let payload = self.load(ctx, MemKind::I64, out_ptr, 0);
+            let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let numeric_ty = NumericType::get(ctx).into();
+            let value =
+                self.cast_value(ctx, Carriers::Numeric { tag, payload }, numeric_ty, res_ty)?;
+            self.define_value(ctx, op, value);
+            return Ok(());
+        }
+        // Integer and tagged arguments keep their exact value; floats take the generic paths.
+        let exact_number = |ctx: &Context| {
+            let arg_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            arg_ty.deref(ctx).is::<NumericType>() || crate::numeric::integer(ctx, arg_ty).is_some()
+        };
+        if intrinsic == Intrinsic::NumberToString && exact_number(ctx) {
+            let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
+            let norm_tag = self.canonical_numeric_tag(ctx, tag);
+            let value = self.runtime(ctx, Runtime::StdNumberToString, vec![norm_tag, payload]);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if intrinsic == Intrinsic::NumberToStringRadix {
+            let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
+            let norm_tag = self.canonical_numeric_tag(ctx, tag);
+            let radix_op = op.deref(ctx).get_operand(1);
+            let radix = self.mapped(ctx, radix_op)?;
+            let value = self.runtime(
+                ctx,
+                Runtime::StdNumberToStringRadix,
+                vec![norm_tag, payload, radix],
+            );
+            let status = self.runtime(ctx, Runtime::Status, vec![]);
+            self.throw_status_if(ctx, status, status);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        let predicate = match intrinsic {
+            Intrinsic::NumberIsNaN => Some(NumberPredicate::NaN),
+            Intrinsic::NumberIsFinite => Some(NumberPredicate::Finite),
+            Intrinsic::NumberIsInteger => Some(NumberPredicate::Integer),
+            Intrinsic::NumberIsSafeInteger => Some(NumberPredicate::SafeInteger),
+            _ => None,
+        };
+        if let Some(predicate) = predicate
+            && exact_number(ctx)
+        {
+            let result = self.number_predicate(ctx, op, predicate)?;
+            self.define(ctx, op, result);
+            return Ok(());
+        }
+        if let Some(value) = self.numeric_intrinsic(ctx, op, intrinsic)? {
+            self.define_value(ctx, op, value);
+            return Ok(());
+        }
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
             Intrinsic::ExceptionEqual => Some(self.runtime(ctx, Runtime::StdExceptionEqual, args)),
@@ -78,19 +146,78 @@ impl FunctionLowering<'_, '_> {
                 self.runtime_void(ctx, Runtime::ExitCodeSet, args);
                 None
             }
+            Intrinsic::MathFloor
+            | Intrinsic::MathCeil
+            | Intrinsic::MathTrunc
+            | Intrinsic::MathRound
+                if crate::numeric::integer(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+                    .is_some() =>
+            {
+                Some(args[0])
+            }
             Intrinsic::MathFloor => Some(self.num(ctx, NumOpcode::F64Floor, args)),
             Intrinsic::MathCeil => Some(self.num(ctx, NumOpcode::F64Ceil, args)),
             Intrinsic::MathTrunc => Some(self.num(ctx, NumOpcode::F64Trunc, args)),
-            Intrinsic::MathAbs => Some(self.num(ctx, NumOpcode::F64Abs, args)),
+            Intrinsic::MathAbs => {
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
+                    if !signed {
+                        Some(args[0])
+                    } else if bits == 64 {
+                        let x = args[0];
+                        let zero = self.i64_const(ctx, 0);
+                        let neg = self.num(ctx, NumOpcode::I64Sub, vec![zero, x]);
+                        let is_neg = self.num(ctx, NumOpcode::I64LtS, vec![x, zero]);
+                        Some(self.select(ctx, is_neg, neg, x))
+                    } else {
+                        let x = args[0];
+                        let zero = self.i32_const(ctx, 0);
+                        let neg = self.num(ctx, NumOpcode::I32Sub, vec![zero, x]);
+                        let is_neg = self.num(ctx, NumOpcode::I32LtS, vec![x, zero]);
+                        let abs = self.select(ctx, is_neg, neg, x);
+                        Some(self.normalize_integer(ctx, abs, ty))
+                    }
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64Abs, args))
+                }
+            }
             Intrinsic::MathSqrt => Some(self.num(ctx, NumOpcode::F64Sqrt, args)),
             Intrinsic::BytesAt => {
                 let data = self.load(ctx, MemKind::I32, args[0], perry_abi::BYTES_DATA as u32);
                 let address = self.num(ctx, NumOpcode::I32Add, vec![data, args[1]]);
                 let byte = self.load(ctx, MemKind::I32U8, address, 0);
-                Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, _)) = crate::numeric::integer(ctx, ty) {
+                    if bits == 64 {
+                        Some(self.num(ctx, NumOpcode::I64ExtendI32U, vec![byte]))
+                    } else {
+                        Some(self.normalize_integer(ctx, byte, ty))
+                    }
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
+                }
             }
-            Intrinsic::MathMin => Some(self.num(ctx, NumOpcode::F64Min, args)),
-            Intrinsic::MathMax => Some(self.num(ctx, NumOpcode::F64Max, args)),
+            Intrinsic::MathMin | Intrinsic::MathMax => {
+                let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
+                    let cmp_op = match (bits == 64, signed) {
+                        (false, false) => NumOpcode::I32LtU,
+                        (false, true) => NumOpcode::I32LtS,
+                        (true, false) => NumOpcode::I64LtU,
+                        (true, true) => NumOpcode::I64LtS,
+                    };
+                    let lt = self.num(ctx, cmp_op, vec![args[0], args[1]]);
+                    if intrinsic == Intrinsic::MathMin {
+                        Some(self.select(ctx, lt, args[0], args[1]))
+                    } else {
+                        Some(self.select(ctx, lt, args[1], args[0]))
+                    }
+                } else if intrinsic == Intrinsic::MathMin {
+                    Some(self.num(ctx, NumOpcode::F64Min, args))
+                } else {
+                    Some(self.num(ctx, NumOpcode::F64Max, args))
+                }
+            }
             Intrinsic::MathRound => {
                 // floor(x), plus one when the fraction is at least ½; the result keeps the
                 // sign of x, so -0.4 rounds to -0 as in ECMAScript.
@@ -103,6 +230,36 @@ impl FunctionLowering<'_, '_> {
                 let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
                 let rounded = self.select(ctx, up, next, floor);
                 Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
+            }
+            Intrinsic::ParseInt => Some(self.runtime(ctx, Runtime::StdParseInt, args)),
+            Intrinsic::ParseFloat => Some(self.runtime(ctx, Runtime::StdParseFloat, args)),
+            Intrinsic::StringToNumber => Some(self.runtime(ctx, Runtime::StdStringToNumber, args)),
+            Intrinsic::NumberIsNaN => {
+                let x = args[0];
+                Some(self.num(ctx, NumOpcode::F64Ne, vec![x, x]))
+            }
+            Intrinsic::NumberIsFinite => {
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![args[0]]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                Some(self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]))
+            }
+            Intrinsic::NumberIsInteger => {
+                let x = args[0];
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
+                Some(self.num(ctx, NumOpcode::I32And, vec![finite, integral]))
+            }
+            Intrinsic::NumberIsSafeInteger => {
+                let x = args[0];
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+                let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
+                let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
+                Some(self.num(ctx, NumOpcode::I32And, vec![in_range, integral]))
             }
             Intrinsic::DateFromTime
             | Intrinsic::DateTime
@@ -174,8 +331,45 @@ impl FunctionLowering<'_, '_> {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
             }
+            Intrinsic::JsonCursorBegin => Some(self.runtime(ctx, Runtime::JsonCursorBegin, args)),
+            Intrinsic::JsonCursorByte => Some(self.runtime(ctx, Runtime::JsonCursorByte, args)),
+            Intrinsic::JsonCursorNumber => Some(self.runtime(ctx, Runtime::JsonCursorNumber, args)),
+            Intrinsic::JsonCursorI64 => Some(self.runtime(ctx, Runtime::JsonCursorI64, args)),
+            Intrinsic::JsonCursorU64 => Some(self.runtime(ctx, Runtime::JsonCursorU64, args)),
+            Intrinsic::JsonToI64 => Some(self.runtime(ctx, Runtime::StdJsonToI64, args)),
+            Intrinsic::JsonToU64 => Some(self.runtime(ctx, Runtime::StdJsonToU64, args)),
+            Intrinsic::JsonCursorBoolean => {
+                Some(self.runtime(ctx, Runtime::JsonCursorBoolean, args))
+            }
+            Intrinsic::JsonCursorString => Some(self.runtime(ctx, Runtime::JsonCursorString, args)),
+            Intrinsic::JsonCursorValue => Some(self.runtime(ctx, Runtime::JsonCursorValue, args)),
+            Intrinsic::JsonCursorMember => Some(self.runtime(ctx, Runtime::JsonCursorMember, args)),
+            Intrinsic::JsonCursorConsume => {
+                self.runtime_void(ctx, Runtime::JsonCursorConsume, args);
+                None
+            }
+            Intrinsic::JsonCursorDiscard => {
+                self.runtime_void(ctx, Runtime::JsonCursorDiscard, args);
+                None
+            }
+            Intrinsic::JsonCursorTail => Some(self.runtime(ctx, Runtime::JsonCursorTail, args)),
+            Intrinsic::JsonCursorSeek => Some(self.runtime(ctx, Runtime::JsonCursorSeek, args)),
+            Intrinsic::JsonCursorFinish => {
+                self.runtime_void(ctx, Runtime::JsonCursorFinish, args);
+                None
+            }
+            Intrinsic::JsonResidue => {
+                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                let offset = if ty.deref(ctx).is::<perry_mir::RecordType>() {
+                    perry_abi::layout::record::JSON
+                } else {
+                    perry_abi::layout::variant::JSON
+                };
+                self.store(ctx, MemKind::I32, args[0], offset, args[1]);
+                None
+            }
             Intrinsic::JsonRetain => {
-                use perry_mir::types::{JsonType, RecordType};
+                use perry_mir::{JsonType, RecordType};
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
                 let (offset, graph) =
                     if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
@@ -208,36 +402,43 @@ impl FunctionLowering<'_, '_> {
                 self.store(ctx, MemKind::I32, args[0], offset, graph);
                 None
             }
+            Intrinsic::JsonSpread => {
+                if self.state.retains_json {
+                    let offset = perry_abi::layout::record::JSON;
+                    let base = self.load(ctx, MemKind::I32, args[0], offset);
+                    let src = self.load(ctx, MemKind::I32, args[1], offset);
+                    let merged = self.runtime(ctx, Runtime::StdJsonMergeResidue, vec![base, src]);
+                    self.store(ctx, MemKind::I32, args[0], offset, merged);
+                }
+                None
+            }
+            Intrinsic::JsonExclude => {
+                if self.state.retains_json {
+                    let offset = perry_abi::layout::record::JSON;
+                    let graph = self.load(ctx, MemKind::I32, args[0], offset);
+                    let filtered =
+                        self.runtime(ctx, Runtime::StdJsonExcludeKey, vec![graph, args[1]]);
+                    self.store(ctx, MemKind::I32, args[0], offset, filtered);
+                }
+                None
+            }
             Intrinsic::JsonParse => {
-                use perry_abi::layout::string::{DATA, LEN};
-                let string = args[0];
-                let data = self.load(ctx, MemKind::I32, string, DATA);
-                let len = self.load(ctx, MemKind::I32, string, LEN);
-                let measured = self.runtime(ctx, Runtime::JsonMeasure, vec![data, len]);
-                let thirty_two = self.i64_const(ctx, 32);
-                let error = self.num(ctx, NumOpcode::I64ShrU, vec![measured, thirty_two]);
-                let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
-                let failed = self.new_block(ctx, vec![]);
-                let valid = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, error, (failed, vec![]), (valid, vec![]));
-                self.block = failed;
-                let offset = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let status = self.runtime(ctx, Runtime::StdRaiseSyntax, vec![data, len, offset]);
-                let (target, throw_args) = self.throw_target(ctx, status);
-                self.br(ctx, target, throw_args);
-                self.block = valid;
-                let size = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let out = self.alloc(ctx, size);
-                let populated =
-                    self.runtime(ctx, Runtime::JsonPopulate, vec![data, len, out, size]);
-                Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
+                let value = self.runtime(ctx, Runtime::JsonParseString, args);
+                let status = self.runtime(ctx, Runtime::Status, vec![]);
+                self.throw_status_if(ctx, status, status);
+                Some(value)
             }
             Intrinsic::InstantFromMs
             | Intrinsic::InstantFrom
             | Intrinsic::PlainDateFrom
+            | Intrinsic::PlainDateFromFields
             | Intrinsic::PlainDateTimeFrom
             | Intrinsic::PlainDateAddDays
+            | Intrinsic::PlainDateAddCalendar
             | Intrinsic::PlainDateTimeAddDays
+            | Intrinsic::PlainDateTimeAddCalendar
+            | Intrinsic::PlainDateEpochDays
+            | Intrinsic::PlainDateUntilPart
             | Intrinsic::InstantMs
             | Intrinsic::PlainDatePart
             | Intrinsic::PlainDateTimePart
@@ -426,6 +627,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::BigIntToString => Runtime::StdBigintToString,
                     Intrinsic::StringFromCodePoint => Runtime::StdStringFromCodePoint,
                     Intrinsic::StringCodePointAt => Runtime::StdStringCodePointAt,
+                    Intrinsic::StringAt => Runtime::StdStringAt,
                     Intrinsic::StringIndex => Runtime::StdStringIndex,
                     Intrinsic::StringSlice => Runtime::StdStringSlice,
                     Intrinsic::StringSubstring => Runtime::StdStringSubstring,
@@ -434,8 +636,15 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::StringStartsWith => Runtime::StdStringStartsWith,
                     Intrinsic::StringEndsWith => Runtime::StdStringEndsWith,
                     Intrinsic::StringTrim => Runtime::StdStringTrim,
+                    Intrinsic::StringTrimStart => Runtime::StdStringTrimStart,
+                    Intrinsic::StringTrimEnd => Runtime::StdStringTrimEnd,
+                    Intrinsic::StringPadStart => Runtime::StdStringPadStart,
+                    Intrinsic::StringPadEnd => Runtime::StdStringPadEnd,
+                    Intrinsic::StringReplace => Runtime::StdStringReplace,
+                    Intrinsic::StringReplaceAll => Runtime::StdStringReplaceAll,
                     Intrinsic::StringSplit => Runtime::StdStringSplit,
                     Intrinsic::StringRepeat => Runtime::StdStringRepeat,
+                    Intrinsic::StringNormalize => Runtime::StdStringNormalize,
                     Intrinsic::BytesNew => Runtime::StdBytesNew,
                     Intrinsic::BytesFromArray => Runtime::StdBytesFromArray,
                     Intrinsic::BytesBuffer => Runtime::StdBytesBuffer,
@@ -457,7 +666,11 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::UrlSetPathname => Runtime::WebUrlSetPathname,
                     Intrinsic::UrlAppend => Runtime::WebUrlAppend,
                     Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
+                    Intrinsic::RegexExec => Runtime::StdRegexExec,
+                    Intrinsic::RegexMatch => Runtime::StdRegexMatch,
                     Intrinsic::RegexSearch => Runtime::StdRegexSearch,
+                    Intrinsic::RegexReplace => Runtime::StdRegexReplace,
+                    Intrinsic::RegexSplit => Runtime::StdRegexSplit,
                     Intrinsic::DecoderValidateLabel => Runtime::StdDecoderValidateLabel,
                     Intrinsic::DecoderNew => Runtime::StdDecoderNew,
                     Intrinsic::TextDecode => Runtime::StdDecoderDecode,
@@ -554,9 +767,7 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(mut value) = value {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            if absence(ctx, ty) == Some(perry_mir::attrs::Absence::Null)
-                && repr(ctx, ty)? == Repr::Ref
-            {
+            if absence(ctx, ty) == Some(perry_mir::Absence::Null) && repr(ctx, ty)? == Repr::Ref {
                 // Helpers use C null pointers; compiled null has a stable distinct sentinel.
                 let absent = self.num(ctx, NumOpcode::I32Eqz, vec![value]);
                 let null = self.null(ctx, ty)?;
@@ -566,4 +777,69 @@ impl FunctionLowering<'_, '_> {
         }
         Ok(())
     }
+
+    /// Evaluate a `Number.is*` predicate on an exact operand: integer tags are finite and
+    /// integral, and only their magnitude decides safety.
+    fn number_predicate(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        predicate: NumberPredicate,
+    ) -> Result<Value> {
+        let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
+        let float_tag = self.i32_const(ctx, perry_abi::layout::numeric::FLOAT);
+        let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
+        Ok(match predicate {
+            NumberPredicate::NaN => {
+                let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                let is_nan = self.num(ctx, NumOpcode::F64Ne, vec![f, f]);
+                self.num(ctx, NumOpcode::I32And, vec![is_float, is_nan])
+            }
+            NumberPredicate::Finite => {
+                let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                self.num(ctx, NumOpcode::I32Or, vec![not_float, finite])
+            }
+            NumberPredicate::Integer => {
+                let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                let inf = self.f64_const(ctx, f64::INFINITY);
+                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
+                let float_int = self.num(ctx, NumOpcode::I32And, vec![finite, integral]);
+                self.num(ctx, NumOpcode::I32Or, vec![not_float, float_int])
+            }
+            NumberPredicate::SafeInteger => {
+                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
+                let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
+                let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
+                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
+                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
+                let float_safe = self.num(ctx, NumOpcode::I32And, vec![in_range, integral]);
+                let min_i64 = self.i64_const(ctx, (-9_007_199_254_740_991i64) as u64);
+                let max_i64 = self.i64_const(ctx, 9_007_199_254_740_991);
+                let ge_min = self.num(ctx, NumOpcode::I64GeS, vec![payload, min_i64]);
+                let le_max = self.num(ctx, NumOpcode::I64LeS, vec![payload, max_i64]);
+                let signed_safe = self.num(ctx, NumOpcode::I32And, vec![ge_min, le_max]);
+                let unsigned_safe = self.num(ctx, NumOpcode::I64LeU, vec![payload, max_i64]);
+                let one = self.i32_const(ctx, 1);
+                let is_signed = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
+                let int_safe = self.select(ctx, is_signed, signed_safe, unsigned_safe);
+                let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
+                self.select(ctx, is_float, float_safe, int_safe)
+            }
+        })
+    }
+}
+
+/// The `Number.is*` predicates lowered exactly on integer and tagged operands.
+#[derive(Clone, Copy)]
+enum NumberPredicate {
+    NaN,
+    Finite,
+    Integer,
+    SafeInteger,
 }

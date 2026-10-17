@@ -38,8 +38,8 @@ world handler {
 }";
 
 const ADAPTER: &str = r#"
-import type { PerryHttpHandlerTypesMethod as __PerryMethod,
-  PerryHttpHandlerTypesScheme as __PerryScheme } from './handler-types/world';
+import type { Method as __PerryMethod,
+  Scheme as __PerryScheme } from './handler-types/world';
 import { request as __perryRequest, body as __perryBody, method as __perryMethod,
   methodOther as __perryMethodOther, hasScheme as __perryHasScheme, scheme as __perryScheme,
   schemeOther as __perrySchemeOther, authority as __perryAuthority, path as __perryPath,
@@ -102,6 +102,7 @@ pub(crate) fn compile(
     file_name: &str,
     modules: &std::collections::BTreeMap<String, String>,
     types: &Resolve,
+    types_world: WorldId,
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
@@ -109,12 +110,12 @@ pub(crate) fn compile(
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
     let program = format!("{source}\n{adapter}");
     let ctx = &mut Context::new();
-    let mir = lower(
+    let (mir, mut analyses) = lower(
         ctx,
         &program,
         file_name,
         modules,
-        &wit_types::foreign(types),
+        &wit_types::foreign(types, Some(types_world)),
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;
@@ -152,9 +153,14 @@ pub(crate) fn compile(
         bindings: vec![],
         resources: vec![],
     };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports)?;
-    let core = finish(core, streams.as_ref())?;
+    let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let (core, helpers) = finish(
+        core,
+        streams.as_ref(),
+        &crate::link::canonical::Requirements::for_world(&resolve, world),
+    )?;
+    allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
     let component = componentize
         .then(|| ComponentOutput::encode(&core, &resolve, world))
         .transpose()?;

@@ -224,10 +224,19 @@ impl FunctionEmitter<'_> {
     /// Values with locals that evaluating `op` reads: its operands, through folded and
     /// constant definitions, which are evaluated in place.
     fn reads(&self, op: Ptr<Operation>, out: &mut Vec<Value>) {
+        let mut previous = None;
         for operand in op.deref(self.ctx).operands() {
             match operand.defining_op() {
-                Some(def) if self.in_place(def) => self.reads(def, out),
-                _ => out.push(operand),
+                Some(def) if self.in_place(def) => {
+                    if previous != Some(def) {
+                        self.reads(def, out);
+                        previous = Some(def);
+                    }
+                }
+                _ => {
+                    out.push(operand);
+                    previous = None;
+                }
             }
         }
     }

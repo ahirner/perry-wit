@@ -162,7 +162,7 @@ impl LoadOp {
         })
     }
 
-    pub fn slot(&self, ctx: &Context) -> Value {
+    pub(crate) fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 }
@@ -232,11 +232,11 @@ impl StoreOp {
         }
     }
 
-    pub fn slot(&self, ctx: &Context) -> Value {
+    pub(crate) fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
-    pub fn value(&self, ctx: &Context) -> Value {
+    pub(crate) fn value(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
     }
 }

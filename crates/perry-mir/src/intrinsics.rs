@@ -17,13 +17,12 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        attributes::IdentifierAttr,
+        attributes::TypeAttr,
         types::{FP64Type, IntegerType, Signedness},
     },
     common_traits::Verify,
     context::{Context, Ptr},
-    derive::{op_interface_impl, pliron_op},
-    identifier::Identifier,
+    derive::{op_interface_impl, pliron_attr, pliron_op},
     op::{Op, op_cast},
     operation::Operation,
     opts::dce::SideEffects,
@@ -34,6 +33,12 @@ use pliron::{
 };
 use thiserror::Error;
 
+mod promises;
+pub use promises::{
+    Combinator, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, SettledField,
+    SettledFieldOp,
+};
+
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Ty {
@@ -42,6 +47,8 @@ enum Ty {
     Index,
     /// Unicode scalar value, or -1 for the empty result of charAt. Internal MIR only.
     Scalar,
+    I64,
+    U64,
     Number,
     Bool,
     String,
@@ -49,6 +56,7 @@ enum Ty {
     NullString,
     OptNumber,
     StringArray,
+    NullStringArray,
     NumberArray,
     Bytes,
     ByteBuffer,
@@ -57,6 +65,7 @@ enum Ty {
     Url,
     SearchParams,
     Json,
+    JsonCursor,
     Date,
     Decoder,
     Regex,
@@ -95,6 +104,8 @@ impl Ty {
         match self {
             Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
             Ty::Index | Ty::Scalar => crate::collections::index_type(ctx),
+            Ty::I64 => IntegerType::get(ctx, 64, Signedness::Signed).into(),
+            Ty::U64 => IntegerType::get(ctx, 64, Signedness::Unsigned).into(),
             Ty::Number => number,
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Ty::String => string,
@@ -104,6 +115,10 @@ impl Ty {
             }
             Ty::OptNumber => OptionalType::get(ctx, number).into(),
             Ty::StringArray => ArrayType::get(ctx, string).into(),
+            Ty::NullStringArray => {
+                let array = ArrayType::get(ctx, string).into();
+                OptionalType::get_with(ctx, array, crate::attrs::Absence::Null).into()
+            }
             Ty::NumberArray => ArrayType::get(ctx, number).into(),
             Ty::Bytes => BytesType::get(ctx).into(),
             Ty::ByteBuffer => crate::types::ByteBufferType::get(ctx).into(),
@@ -112,6 +127,7 @@ impl Ty {
             Ty::Url => crate::types::UrlType::get(ctx).into(),
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
+            Ty::JsonCursor => crate::types::JsonCursorType::get(ctx).into(),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -193,7 +209,13 @@ impl Ty {
             Ty::BigInt => deref.is::<crate::types::BigIntType>(),
             Ty::Index | Ty::Scalar => deref
                 .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 32 && i.signedness() == Signedness::Signless),
+                .is_some_and(|i| i.width() == 32),
+            Ty::I64 => deref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|i| i.width() == 64 && i.is_signed()),
+            Ty::U64 => deref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|i| i.width() == 64 && i.is_unsigned()),
             Ty::Number => deref.is::<FP64Type>(),
             Ty::Bool => deref
                 .downcast_ref::<IntegerType>()
@@ -209,6 +231,13 @@ impl Ty {
             }
             Ty::OptNumber => optional_of(&number),
             Ty::StringArray => array_of(&string),
+            Ty::NullStringArray => {
+                optional_of(&|t| {
+                    t.deref(ctx)
+                        .downcast_ref::<ArrayType>()
+                        .is_some_and(|a| string(a.element()))
+                }) && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
+            }
             Ty::NumberArray => array_of(&number),
             Ty::Bytes => deref.is::<BytesType>(),
             Ty::ByteBuffer => deref.is::<crate::types::ByteBufferType>(),
@@ -217,6 +246,7 @@ impl Ty {
             Ty::Url => deref.is::<crate::types::UrlType>(),
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
+            Ty::JsonCursor => deref.is::<crate::types::JsonCursorType>(),
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -299,24 +329,16 @@ macro_rules! operand {
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
+        #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
         pub enum Intrinsic {
             $($variant,)*
         }
 
         impl Intrinsic {
-            const ALL: &[Intrinsic] = &[$(Intrinsic::$variant,)*];
-
             pub fn name(self) -> &'static str {
                 match self {
                     $(Intrinsic::$variant => $name,)*
-                }
-            }
-
-            /// The name as an identifier, validated at compile time.
-            fn identifier(self) -> Identifier {
-                match self {
-                    $(Intrinsic::$variant => pliron::ident!($name),)*
                 }
             }
 
@@ -337,13 +359,14 @@ macro_rules! intrinsics {
 }
 
 intrinsics! {
-    BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws;
-    BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure;
+    BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws, atomic;
+    BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure, atomic;
     BigIntToNumber = "bigint_to_number" (BigInt) -> (Number), pure, noalloc;
-    BigIntToString = "bigint_to_string" (BigInt) -> (String), pure;
+    BigIntToString = "bigint_to_string" (BigInt) -> (String), pure, atomic;
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
-    NumberToString = "number_to_string" (Number) -> (String), pure;
+    NumberToString = "number_to_string" (Number) -> (String), pure, atomic;
+    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws, atomic;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
     PerformanceNow = "performance_now" () -> (Number), noalloc;
@@ -357,6 +380,13 @@ intrinsics! {
     MathSqrt = "math_sqrt" (Number) -> (Number), pure, noalloc;
     MathMin = "math_min" (Number, Number) -> (Number), pure, noalloc;
     MathMax = "math_max" (Number, Number) -> (Number), pure, noalloc;
+    ParseInt = "parse_int" (String, Number) -> (Number), pure, noalloc;
+    ParseFloat = "parse_float" (String) -> (Number), pure, noalloc;
+    StringToNumber = "string_to_number" (String) -> (Number), pure, noalloc;
+    NumberIsNaN = "number_is_nan" (Number) -> (Bool), pure, noalloc;
+    NumberIsFinite = "number_is_finite" (Number) -> (Bool), pure, noalloc;
+    NumberIsInteger = "number_is_integer" (Number) -> (Bool), pure, noalloc;
+    NumberIsSafeInteger = "number_is_safe_integer" (Number) -> (Bool), pure, noalloc;
     DateFromTime = "date_from_time" (Number) -> (Date);
     DateTime = "date_time" (Date) -> (Number), noalloc;
     DateParse = "date_parse" (String) -> (Number), pure, noalloc;
@@ -365,7 +395,7 @@ intrinsics! {
     DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number), noalloc;
     DateIso = "date_iso" (Date) -> (String), throws;
     DateJson = "date_json" (Date) -> (NullString);
-    StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws;
+    StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws, atomic;
     StringCharAt = "string_char_at" (String, Number) -> (String), pure, atomic;
     StringCharAtIndex = "string_char_at_index" (String, Index) -> (String), pure, atomic;
     StringScalarAtIndex = "string_scalar_at_index" (String, Index) -> (Scalar), pure, noalloc;
@@ -383,11 +413,19 @@ intrinsics! {
     StringStartsWith = "string_starts_with" (String, String, Number) -> (Bool), pure, noalloc;
     StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), pure, noalloc;
     StringTrim = "string_trim" (String) -> (String), pure, atomic;
+    StringTrimStart = "string_trim_start" (String) -> (String), pure, atomic;
+    StringTrimEnd = "string_trim_end" (String) -> (String), pure, atomic;
+    StringPadStart = "string_pad_start" (String, Number, String) -> (String), pure, atomic;
+    StringPadEnd = "string_pad_end" (String, Number, String) -> (String), pure, atomic;
+    StringReplace = "string_replace" (String, String, String) -> (String), pure, atomic;
+    StringReplaceAll = "string_replace_all" (String, String, String) -> (String), pure, atomic;
+    StringAt = "string_at" (String, Number) -> (OptString), pure, atomic;
     StringSplit = "string_split" (String, String) -> (StringArray), pure, atomic;
     StringIndex = "string_index" (String, Number) -> (OptString), pure, atomic;
     StringLower = "string_lower" (String) -> (String), pure, atomic;
     StringUpper = "string_upper" (String) -> (String), pure, atomic;
-    StringRepeat = "string_repeat" (String, Number) -> (String), throws;
+    StringRepeat = "string_repeat" (String, Number) -> (String), throws, atomic;
+    StringNormalize = "string_normalize" (String, String) -> (String), throws, atomic;
     BytesNew = "bytes_new" (Number) -> (Bytes), throws;
     BytesFromArray = "bytes_from_array" (NumberArray) -> (Bytes);
     BytesCopy = "bytes_copy" (Bytes) -> (Bytes), throws;
@@ -415,16 +453,39 @@ intrinsics! {
     DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure, noalloc;
     DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure, noalloc;
     RegexSearch = "regex_search" (String, Regex) -> (Number), pure, noalloc;
+    RegexExec = "regex_exec" (String, Regex) -> (NullStringArray), pure, atomic;
+    RegexMatch = "regex_match" (String, Regex) -> (NullStringArray), pure, atomic;
+    RegexReplace = "regex_replace" (String, Regex, String) -> (String), pure, atomic;
+    RegexSplit = "regex_split" (String, Regex) -> (StringArray), pure, atomic;
     DecoderValidateLabel = "decoder_validate_label" (String) -> (), throws, atomic;
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
-    JsonParse = "json_parse" (String) -> (Json), throws;
+    JsonParse = "json_parse" (String) -> (Json), throws, atomic;
+    JsonCursorBegin = "json_cursor_begin" (String) -> (JsonCursor), atomic;
+    JsonCursorByte = "json_cursor_byte" (JsonCursor) -> (Index), noalloc;
+    JsonCursorConsume = "json_cursor_consume" (JsonCursor, Index) -> (), noalloc;
+    JsonCursorNumber = "json_cursor_number" (JsonCursor) -> (Number), noalloc;
+    JsonCursorI64 = "json_cursor_i64" (JsonCursor) -> (I64), throws, noalloc;
+    JsonCursorU64 = "json_cursor_u64" (JsonCursor) -> (U64), throws, noalloc;
+    JsonCursorBoolean = "json_cursor_boolean" (JsonCursor) -> (Bool), noalloc;
+    JsonCursorString = "json_cursor_string" (JsonCursor) -> (String), atomic;
+    JsonCursorDiscard = "json_cursor_discard" (JsonCursor) -> (), noalloc;
+    JsonCursorValue = "json_cursor_value" (JsonCursor) -> (Json), atomic;
+    JsonCursorMember = "json_cursor_member" (JsonCursor, Json) -> (Json), atomic;
+    JsonCursorTail = "json_cursor_tail" (JsonCursor, Json, Index) -> (Json), atomic;
+    JsonCursorSeek = "json_cursor_seek" (JsonCursor, Index) -> (Index), noalloc;
+    JsonCursorFinish = "json_cursor_finish" (JsonCursor, Bool) -> (), throws, atomic;
+    JsonResidue = "json_residue" (Aggregate, Json) -> (), noalloc;
     JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
+    JsonSpread = "json_spread" (Aggregate, Aggregate) -> ();
+    JsonExclude = "json_exclude" (Aggregate, String) -> ();
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
     JsonLength = "json_length" (Json) -> (OptNumber), throws;
     JsonToNumber = "json_to_number" (Json) -> (Number), throws;
+    JsonToI64 = "json_to_i64" (Json) -> (I64), throws;
+    JsonToU64 = "json_to_u64" (Json) -> (U64), throws;
     JsonRequireNumber = "json_require_number" (Json) -> (Number), throws;
     JsonToString = "json_to_string" (Json) -> (String), throws;
     JsonToBool = "json_to_bool" (Json) -> (Bool), throws;
@@ -445,22 +506,27 @@ intrinsics! {
     JsonFromString = "json_from_string" (String) -> (Json), pure;
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
-    JsonUndefined = "json_undefined" () -> (Json), pure;
+    JsonUndefined = "json_undefined" () -> (Json), pure, noalloc;
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
-    InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws;
-    InstantFrom = "instant_from" (String) -> (Instant), throws;
+    InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws, atomic;
+    InstantFrom = "instant_from" (String) -> (Instant), throws, atomic;
     InstantMs = "instant_ms" (Instant) -> (Number), pure, noalloc;
-    InstantString = "instant_string" (Instant) -> (String), pure;
-    PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws;
-    PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws;
+    InstantString = "instant_string" (Instant) -> (String), pure, atomic;
+    PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws, atomic;
+    PlainDateFromFields = "plain_date_from_fields" (Number, Number, Number, Number) -> (PlainDate), throws, atomic;
+    PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws, atomic;
+    PlainDateAddCalendar = "plain_date_add_calendar" (PlainDate, Number, Number, Number, Number, Number) -> (PlainDate), throws, atomic;
+    PlainDateEpochDays = "plain_date_epoch_days" (PlainDate) -> (Number), pure, noalloc;
+    PlainDateUntilPart = "plain_date_until_part" (PlainDate, PlainDate, Number, Number) -> (Number), pure, noalloc;
     PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure, noalloc;
-    PlainDateString = "plain_date_string" (PlainDate) -> (String), pure;
-    PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws;
-    PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws;
+    PlainDateString = "plain_date_string" (PlainDate) -> (String), pure, atomic;
+    PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws, atomic;
+    PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws, atomic;
+    PlainDateTimeAddCalendar = "plain_date_time_add_calendar" (PlainDateTime, Number, Number, Number, Number, Number) -> (PlainDateTime), throws, atomic;
     PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure, noalloc;
-    PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure;
+    PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure, atomic;
 
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
     JsonStrictEqual = "json_strict_equal" (Json, Json) -> (Bool), pure, noalloc;
@@ -570,16 +636,8 @@ impl Intrinsic {
         }
     }
 
-    pub(crate) fn may_allocate(self) -> bool {
-        self.allocation() != crate::effects::Allocation::None
-    }
-
-    fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|i| i.name() == name)
-    }
-
     /// Pure services can be removed when unused.
-    pub fn pure(self) -> bool {
+    pub(crate) fn pure(self) -> bool {
         self.flags().contains(&"pure")
     }
 
@@ -592,6 +650,54 @@ impl Intrinsic {
     pub fn has_result(self) -> bool {
         !self.types().1.is_empty()
     }
+
+    /// Semantic numeric contract used by `facts` for range and integer domain propagation.
+    pub(crate) fn numeric_contract(self) -> Option<BuiltinContract> {
+        match self {
+            Self::MathFloor | Self::MathCeil | Self::MathTrunc | Self::MathRound => {
+                Some(BuiltinContract::Round)
+            }
+            Self::MathAbs => Some(BuiltinContract::Abs),
+            Self::MathMin => Some(BuiltinContract::Min),
+            Self::MathMax => Some(BuiltinContract::Max),
+            Self::BytesLength | Self::BufferLength | Self::BytesOffset => {
+                Some(BuiltinContract::UnsignedCount)
+            }
+            Self::BytesAt | Self::BytesGet => Some(BuiltinContract::ByteValue),
+            Self::MathSqrt
+            | Self::ParseInt
+            | Self::ParseFloat
+            | Self::StringToNumber
+            | Self::NumberToString
+            | Self::NumberToStringRadix => Some(BuiltinContract::NumberOnly),
+            Self::NumberIsNaN
+            | Self::NumberIsFinite
+            | Self::NumberIsInteger
+            | Self::NumberIsSafeInteger => Some(BuiltinContract::Predicate),
+            _ => None,
+        }
+    }
+}
+
+/// Builtin numeric and value-range contract for `ProgramFacts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuiltinContract {
+    /// `Math.floor`, `Math.ceil`, `Math.trunc`, `Math.round`: identity on exact integers.
+    Round,
+    /// `Math.abs`: preserves integer domain and non-negative bounds when negation cannot overflow.
+    Abs,
+    /// `Math.min`: preserves common integer domain and elementwise minimum bounds.
+    Min,
+    /// `Math.max`: preserves common integer domain and elementwise maximum bounds.
+    Max,
+    /// Non-negative 32-bit byte/buffer length or offset (`0..=u32::MAX`).
+    UnsignedCount,
+    /// Unsigned byte read (`0..=255`).
+    ByteValue,
+    /// Produces or consumes an IEEE-754 `f64` number (`Math.sqrt`, `parseInt`, `parseFloat`, `Number(s)`).
+    NumberOnly,
+    /// Boolean numeric predicate (`Number.isInteger`, `Number.isSafeInteger`, `Number.isFinite`, `Number.isNaN`).
+    Predicate,
 }
 
 /// Whether `op` may throw: it implements [MayThrowInterface], and for intrinsics the service
@@ -605,8 +711,8 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 
 #[derive(Debug, Error)]
 enum IntrinsicErr {
-    #[error("unknown intrinsic {0}")]
-    Unknown(String),
+    #[error("missing intrinsic attribute")]
+    Missing,
     #[error("intrinsic {0} has the wrong operand or result types")]
     Signature(String),
 }
@@ -614,8 +720,8 @@ enum IntrinsicErr {
 /// A call of a host or runtime service.
 #[pliron_op(
     name = "perry.intrinsic",
-    format = "attr($perry_intrinsic, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
-    attributes = (perry_intrinsic: IdentifierAttr)
+    format = "attr($perry_intrinsic, $Intrinsic) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
+    attributes = (perry_intrinsic: Intrinsic)
 )]
 pub struct IntrinsicOp;
 
@@ -630,24 +736,19 @@ impl IntrinsicOp {
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
-        op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(intrinsic.identifier()));
+        op.set_attr_perry_intrinsic(ctx, intrinsic);
         op
     }
 
     pub fn intrinsic(&self, ctx: &Context) -> Option<Intrinsic> {
-        let name: Identifier = self.get_attr_perry_intrinsic(ctx)?.clone().into();
-        Intrinsic::from_name(name.as_ref())
+        self.get_attr_perry_intrinsic(ctx).map(|i| *i)
     }
 }
 
 impl Verify for IntrinsicOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let Some(intrinsic) = self.intrinsic(ctx) else {
-            let name = format!(
-                "{:?}",
-                self.get_attr_perry_intrinsic(ctx).map(|a| a.clone())
-            );
-            return verify_err!(self.loc(ctx), IntrinsicErr::Unknown(name));
+            return verify_err!(self.loc(ctx), IntrinsicErr::Missing);
         };
         let op = self.get_operation().deref(ctx);
         let operands: Vec<_> = op.operands().map(|v| v.get_type(ctx)).collect();
@@ -658,7 +759,55 @@ impl Verify for IntrinsicOp {
             && operands.iter().zip(ins).all(|(t, e)| e.matches(ctx, *t));
         let results_fit = results.len() == outs.len()
             && results.iter().zip(outs).all(|(t, e)| e.matches(ctx, *t));
-        if !operands_fit || !results_fit {
+        let specialized_int_fit = match intrinsic {
+            Intrinsic::MathFloor
+            | Intrinsic::MathCeil
+            | Intrinsic::MathTrunc
+            | Intrinsic::MathRound
+            | Intrinsic::MathAbs
+            | Intrinsic::MathMin
+            | Intrinsic::MathMax => {
+                operands.len() == ins.len()
+                    && results.len() == 1
+                    && (results[0].deref(ctx).is::<IntegerType>()
+                        || results[0].deref(ctx).is::<crate::types::NumericType>())
+                    && operands.iter().all(|&t| t == results[0])
+            }
+            Intrinsic::BytesAt => {
+                operands_fit && results.len() == 1 && results[0].deref(ctx).is::<IntegerType>()
+            }
+            Intrinsic::ParseInt => {
+                operands.len() == 2
+                    && results.len() == 1
+                    && operands[0].deref(ctx).is::<StringType>()
+                    && (operands[1].deref(ctx).is::<FP64Type>()
+                        || operands[1].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[1].deref(ctx).is::<IntegerType>())
+                    && (results[0].deref(ctx).is::<FP64Type>()
+                        || results[0].deref(ctx).is::<crate::types::NumericType>()
+                        || results[0].deref(ctx).is::<IntegerType>())
+            }
+            Intrinsic::NumberToString
+            | Intrinsic::NumberIsNaN
+            | Intrinsic::NumberIsFinite
+            | Intrinsic::NumberIsInteger
+            | Intrinsic::NumberIsSafeInteger => {
+                operands.len() == 1
+                    && (operands[0].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[0].deref(ctx).is::<IntegerType>())
+                    && results_fit
+            }
+            Intrinsic::NumberToStringRadix => {
+                operands.len() == 2
+                    && (operands[0].deref(ctx).is::<FP64Type>()
+                        || operands[0].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[0].deref(ctx).is::<IntegerType>())
+                    && operands[1].deref(ctx).is::<FP64Type>()
+                    && results_fit
+            }
+            _ => false,
+        };
+        if !(operands_fit && results_fit) && !specialized_int_fit {
             verify_err!(
                 self.loc(ctx),
                 IntrinsicErr::Signature(intrinsic.name().into())
@@ -744,222 +893,56 @@ impl MayThrowInterface for JsonStringifyOp {
     }
 }
 
-#[derive(Debug, Error)]
-#[error("perry.promise_combinator takes an array of promises of one type")]
-struct CombinatorErr;
-
-/// How a [PromiseCombinatorOp] settles.
-#[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
-pub enum Combinator {
-    /// `Promise.all`: an array of every value, or the first rejection.
-    All,
-    /// `Promise.race`: the first settled input, in time and then input order.
-    Race,
-    /// `Promise.allSettled`: every input once all have settled, as `perry.settled` views.
-    AllSettled,
-}
-
-/// `Promise.all`, `Promise.race` and `Promise.allSettled` of `perry.array<perry.promise<T>>`.
+/// Select a record field by its static schema names, without allocating a key string.
 #[pliron_op(
-    name = "perry.promise_combinator",
-    format = "attr($perry_combinator, $Combinator) ` ` $0 ` : ` type($0)",
+    name = "perry.json_cursor_key",
+    format = "$0 ` : ` type($0) ` schema ` attr($perry_json_record, $TypeAttr)",
     interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    attributes = (perry_combinator: Combinator)
+    attributes = (perry_json_record: pliron::builtin::attributes::TypeAttr)
 )]
-pub struct PromiseCombinatorOp;
-
-impl PromiseCombinatorOp {
-    /// `None` unless `promises` is an array of promises.
-    pub fn new(ctx: &mut Context, combinator: Combinator, promises: Value) -> Option<Self> {
-        use crate::types::PromiseType;
-        let element =
-            pliron::r#type::TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
-                .ok()?
-                .deref(ctx)
-                .element();
-        let value = pliron::r#type::TypedHandle::<PromiseType>::from_handle(element, ctx)
-            .ok()?
-            .deref(ctx)
-            .value();
-        let settled = match combinator {
-            Combinator::All => ArrayType::get(ctx, value).into(),
-            Combinator::Race => value,
-            Combinator::AllSettled => {
-                let settled = crate::types::SettledType::get(ctx, value).into();
-                ArrayType::get(ctx, settled).into()
-            }
-        };
-        let result = PromiseType::get(ctx, settled).into();
-        let op = PromiseCombinatorOp {
+pub struct JsonCursorKeyOp;
+impl JsonCursorKeyOp {
+    pub fn new(ctx: &mut Context, cursor: Value, record: TypeHandle) -> Self {
+        let index = crate::collections::index_type(ctx);
+        let op = Self {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
-                vec![result],
-                vec![promises],
+                vec![index],
+                vec![cursor],
                 vec![],
                 0,
             ),
         };
-        op.set_attr_perry_combinator(ctx, combinator);
-        Some(op)
+        op.set_attr_perry_json_record(ctx, pliron::builtin::attributes::TypeAttr::new(record));
+        op
     }
-
-    pub fn combinator(&self, ctx: &Context) -> Combinator {
-        *self.get_attr_perry_combinator(ctx).expect("combinator")
-    }
-}
-
-impl Verify for PromiseCombinatorOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        use crate::types::PromiseType;
-        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
-        let ok = pliron::r#type::TypedHandle::<ArrayType>::from_handle(operand, ctx)
-            .is_ok_and(|a| a.deref(ctx).element().deref(ctx).is::<PromiseType>());
-        if !ok {
-            verify_err!(self.loc(ctx), CombinatorErr)?
-        }
-        Ok(())
+    pub fn record(&self, ctx: &Context) -> TypeHandle {
+        self.get_attr_perry_json_record(ctx)
+            .expect("record schema")
+            .get_type(ctx)
     }
 }
-
-/// A promise fulfilled with its operand: a plain value among a combinator's inputs
-/// (`Promise.all([pending, 1])`).
-#[pliron_op(
-    name = "perry.promise_resolved",
-    format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
-)]
-pub struct PromiseResolvedOp;
-
-impl PromiseResolvedOp {
-    pub fn new(ctx: &mut Context, value: Value) -> Self {
-        let ty = value.get_type(ctx);
-        let result = crate::types::PromiseType::get(ctx, ty).into();
-        PromiseResolvedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![value],
-                vec![],
-                0,
-            ),
-        }
-    }
-}
-
-/// A promise rejected with its operand (`Promise.reject(e)`), of `perry.promise<T>` for the
-/// settled type `T` its context expects.
-#[pliron_op(
-    name = "perry.promise_rejected",
-    format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
-)]
-pub struct PromiseRejectedOp;
-
-impl PromiseRejectedOp {
-    pub fn new(ctx: &mut Context, reason: Value, settled: pliron::r#type::TypeHandle) -> Self {
-        let result = crate::types::PromiseType::get(ctx, settled).into();
-        PromiseRejectedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![reason],
-                vec![],
-                0,
-            ),
-        }
-    }
-}
-
-impl Verify for PromiseRejectedOp {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Verify for PromiseResolvedOp {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Error)]
-#[error("perry.settled_field reads a perry.settled value")]
-struct SettledErr;
-
-/// A property of a `Promise.allSettled` result element.
-#[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
-pub enum SettledField {
-    /// `"fulfilled"` or `"rejected"`.
-    Status,
-    /// The fulfillment value, or `undefined`.
-    Value,
-    /// The rejection (an exception), or `undefined`.
-    Reason,
-}
-
-/// `settled.status`, `settled.value` or `settled.reason`.
-#[pliron_op(
-    name = "perry.settled_field",
-    format = "attr($perry_settled_field, $SettledField) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    attributes = (perry_settled_field: SettledField)
-)]
-pub struct SettledFieldOp;
-
-impl SettledFieldOp {
-    /// `None` unless `settled` is a `perry.settled` value.
-    pub fn new(ctx: &mut Context, field: SettledField, settled: Value) -> Option<Self> {
-        use crate::types::SettledType;
-        let value =
-            pliron::r#type::TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
-                .ok()?
-                .deref(ctx)
-                .value();
-        let result = match field {
-            SettledField::Status => StringType::get(ctx).into(),
-            SettledField::Value => OptionalType::get(ctx, value).into(),
-            SettledField::Reason => {
-                let exception = ExceptionType::get(ctx).into();
-                OptionalType::get(ctx, exception).into()
-            }
-        };
-        let op = SettledFieldOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![settled],
-                vec![],
-                0,
-            ),
-        };
-        op.set_attr_perry_settled_field(ctx, field);
-        Some(op)
-    }
-
-    pub fn field(&self, ctx: &Context) -> SettledField {
-        *self.get_attr_perry_settled_field(ctx).expect("field")
-    }
-}
-
-impl Verify for SettledFieldOp {
+impl Verify for JsonCursorKeyOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
-        if !operand.deref(ctx).is::<crate::types::SettledType>() {
-            verify_err!(self.loc(ctx), SettledErr)?
+        let schema = self.record(ctx);
+        let schema_ref = schema.deref(ctx);
+        if !operand.deref(ctx).is::<crate::types::JsonCursorType>()
+            || !(schema_ref.is::<crate::types::RecordType>()
+                || schema_ref.is::<crate::types::VariantType>())
+        {
+            verify_err!(
+                self.loc(ctx),
+                IntrinsicErr::Signature("json_cursor_key".into())
+            )?
         }
         Ok(())
     }
 }
-
 #[op_interface_impl]
-impl SideEffects for SettledFieldOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
+impl SideEffects for JsonCursorKeyOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
+        true
     }
 }

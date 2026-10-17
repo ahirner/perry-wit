@@ -1,5 +1,5 @@
 //! Scalar arithmetic and comparison.
-use crate::attrs::{BinaryKind, CompareKind, ConvertKind};
+use crate::attrs::{BinaryKind, CompareKind};
 use pliron::{
     builtin::{
         op_interfaces::{
@@ -15,7 +15,7 @@ use pliron::{
     operation::Operation,
     opts::dce::SideEffects,
     result::Result,
-    r#type::Typed,
+    r#type::{TypeHandle, Typed},
     value::Value,
     verify_err,
 };
@@ -37,6 +37,8 @@ use thiserror::Error;
 )]
 pub struct BinaryOp;
 
+pliron::dict_key!(UNCONSTRAINED_ARITH, "perry_unconstrained_arith");
+
 impl BinaryOp {
     pub fn new(ctx: &mut Context, kind: BinaryKind, lhs: Value, rhs: Value) -> Self {
         let ty = lhs.get_type(ctx);
@@ -56,6 +58,30 @@ impl BinaryOp {
 
     pub fn kind(&self, ctx: &Context) -> BinaryKind {
         *self.get_attr_perry_binary_kind(ctx).expect("binary kind")
+    }
+
+    /// Marks numeric add/sub/mul whose exact result no integer consumer constrains.
+    pub(crate) fn set_unconstrained(&self, ctx: &mut Context, unconstrained: bool) {
+        if unconstrained {
+            self.get_operation().deref_mut(ctx).attributes.set(
+                UNCONSTRAINED_ARITH.clone(),
+                pliron::builtin::attributes::UnitAttr::new(),
+            );
+        } else {
+            self.get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .0
+                .remove(&UNCONSTRAINED_ARITH);
+        }
+    }
+
+    pub fn is_unconstrained(&self, ctx: &Context) -> bool {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .0
+            .contains_key(&UNCONSTRAINED_ARITH)
     }
 }
 
@@ -129,79 +155,77 @@ pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
         .is_some_and(|ty| ty.width() == 1 && ty.signedness() == Signedness::Signless)
 }
 
-/// Conversion between `f64` and signless `i32`.
+/// A representation conversion with explicit source and destination numeric types.
+/// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
+/// conversion to an integer saturates, matching the existing floating-point WIT boundary.
 #[pliron_op(
-    name = "perry.convert",
-    format = "attr($perry_convert_kind, $ConvertKind) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface],
-    attributes = (perry_convert_kind: ConvertKind)
+    name = "perry.numeric_cast",
+    format = "$0 ` : ` type($0)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface]
 )]
-pub struct ConvertOp;
+pub struct NumericCastOp;
 
-impl ConvertOp {
-    pub fn new(ctx: &mut Context, kind: crate::attrs::ConvertKind, value: Value) -> Self {
-        use crate::attrs::ConvertKind;
-        let ty = match kind {
-            ConvertKind::I32ToF64 => pliron::builtin::types::FP64Type::get(ctx).into(),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                IntegerType::get(ctx, 32, Signedness::Signless).into()
-            }
-        };
-        let op = ConvertOp {
+impl NumericCastOp {
+    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
+        Self {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
-                vec![ty],
+                vec![target],
                 vec![value],
                 vec![],
                 0,
             ),
-        };
-        op.set_attr_perry_convert_kind(ctx, kind);
-        op
-    }
-
-    pub fn kind(&self, ctx: &Context) -> crate::attrs::ConvertKind {
-        *self.get_attr_perry_convert_kind(ctx).expect("convert kind")
+        }
     }
 }
 
 #[derive(Debug, Error)]
-#[error("perry.convert {0:?} has operand or result of the wrong type")]
-pub(crate) struct ConvertErr(crate::attrs::ConvertKind);
+#[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
+struct NumericCastErr;
 
-impl Verify for ConvertOp {
+impl Verify for NumericCastOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        use crate::attrs::ConvertKind;
-        let kind = self.kind(ctx);
-        let input = self.get_operation().deref(ctx).get_operand(0);
-        let is_f64 = |v: Value| {
-            v.get_type(ctx)
-                .deref(ctx)
-                .is::<pliron::builtin::types::FP64Type>()
-        };
-        let is_i32 = |v: Value| {
-            v.get_type(ctx)
+        let op = self.get_operation().deref(ctx);
+        let source = op.get_operand(0).get_type(ctx);
+        let target = op.get_result(0).get_type(ctx);
+        if source.deref(ctx).is::<crate::types::BigIntType>()
+            || target.deref(ctx).is::<crate::types::BigIntType>()
+        {
+            let other = if source.deref(ctx).is::<crate::types::BigIntType>() {
+                target
+            } else {
+                source
+            };
+            if other
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()
-                .is_some_and(|ty| ty.width() == 32 && ty.signedness() == Signedness::Signless)
-        };
-        let ok = match kind {
-            ConvertKind::I32ToF64 => is_i32(input) && is_f64(self.get_result(ctx)),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                is_f64(input) && is_i32(self.get_result(ctx))
+                .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            {
+                return Ok(());
             }
-        };
-        if !ok {
-            verify_err!(self.loc(ctx), ConvertErr(kind))?
+            verify_err!(self.loc(ctx), NumericCastErr)?;
+        }
+        for value in op.operands().chain(op.results()) {
+            let ty = value.get_type(ctx);
+            let ty = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+            let ty = ty.deref(ctx);
+            if !ty.is::<crate::types::NumericType>()
+                && !ty.is::<pliron::builtin::types::FP64Type>()
+                && !ty
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            {
+                verify_err!(self.loc(ctx), NumericCastErr)?;
+            }
         }
         Ok(())
     }
 }
 
 #[op_interface_impl]
-impl SideEffects for ConvertOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
+impl SideEffects for NumericCastOp {
+    fn has_side_effects(&self, _: &Context) -> bool {
         false
     }
 }

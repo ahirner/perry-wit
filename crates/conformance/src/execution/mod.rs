@@ -125,6 +125,27 @@ pub struct Evidence {
     /// The unchanged program's component outcome, for fault cases only.
     pub(crate) control: Option<Outcome>,
 }
+impl Evidence {
+    pub fn first_values(&self) -> Result<(&str, &str)> {
+        let (
+            Outcome::Values {
+                observations: oracle,
+                ..
+            },
+            Outcome::Values {
+                observations: component,
+                ..
+            },
+        ) = (&self.oracle, &self.component)
+        else {
+            bail!("expected both oracle and component to succeed with values, got {self:?}");
+        };
+        let (Some(o), Some(c)) = (oracle.first(), component.first()) else {
+            bail!("expected non-empty observations, got {self:?}");
+        };
+        Ok((&o.value, &c.value))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fault {
     Value,
@@ -214,10 +235,33 @@ pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
             }
         }
     }
+    if let Some((first, rest)) = evidence.split_first()
+        && let Outcome::Values {
+            observations: baseline,
+            stdout,
+            stderr,
+            ..
+        } = &first.component
+    {
+        for result in rest {
+            if let Outcome::Values {
+                observations,
+                stdout: output,
+                stderr: errors,
+                ..
+            } = &result.component
+            {
+                ensure!(
+                    observations == baseline && output == stdout && errors == stderr,
+                    "metamorphic form changed component observations"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
-pub(crate) fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
+pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
     equivalence(case, &evidence.oracle, &evidence.component, evidence)
 }
 
@@ -307,7 +351,7 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
             let _ = child.kill();
             break (child.wait()?, true);
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(1));
     };
     Ok(Captured {
         exit: status.code(),
@@ -359,7 +403,7 @@ impl Executor {
                         "--noEmit",
                         "--strict",
                         "--target",
-                        "es2022",
+                        "es2023",
                         "--module",
                         "esnext",
                         "--skipLibCheck",
@@ -377,9 +421,17 @@ impl Executor {
         }
         let oracle = if matches!(case, Case::Reject { .. }) {
             Outcome::Compile("expected source-domain rejection".into())
+        } else if let Case::Aggregate(agg) = case
+            && agg.uses_wide_exact_int()
+        {
+            agg.expected_outcome()
         } else if matches!(case, Case::Command { .. }) {
             Outcome::Command(command(
                 Command::new("node")
+                    .args([
+                        "--disable-warning=ExperimentalWarning",
+                        "--experimental-strip-types",
+                    ])
                     .arg(&path)
                     .env("PERRY_CONFORMANCE", ENV_FIXTURE),
                 directory,
@@ -469,27 +521,59 @@ impl Executor {
     }
 }
 
+fn cached_handler_sdk() -> Result<&'static [(PathBuf, Vec<u8>)]> {
+    static SDK_FILES: std::sync::OnceLock<Vec<(PathBuf, Vec<u8>)>> = std::sync::OnceLock::new();
+    if let Some(files) = SDK_FILES.get() {
+        return Ok(files.as_slice());
+    }
+    let temp = tempfile::tempdir()?;
+    let out_dir = temp.path().join("handler-types");
+    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
+        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
+        world: Some("handler".into()),
+        out_dir: out_dir.clone(),
+        project_root: Some(temp.path().into()),
+        entry: "case.ts".into(),
+        initialize_tsconfig: false,
+    })?;
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&out_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            files.push((PathBuf::from(entry.file_name()), fs::read(&path)?));
+        }
+    }
+    let _ = SDK_FILES.set(files);
+    Ok(SDK_FILES.get().expect("initialized").as_slice())
+}
+
 fn environment(directory: &Path) -> Result<()> {
+    static INPUTS_JSON: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    static ASYNC_WIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     fs::write(directory.join("fixture.txt"), FIXTURE)?;
     fs::write(directory.join("world.wit"), WIT)?;
-    fs::write(directory.join("async-world.wit"), async_wit())?;
+    fs::write(
+        directory.join("async-world.wit"),
+        ASYNC_WIT.get_or_init(async_wit),
+    )?;
     fs::write(
         directory.join("capabilities.d.ts"),
         "/// <reference path=\"./handler-types/runtime.d.ts\" />\ndeclare module \"test:generated/control\" { export function release():void; }",
     )?;
-    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
-        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
-        world: Some("handler".into()),
-        out_dir: directory.join("handler-types"),
-        project_root: Some(directory.into()),
-        entry: "case.ts".into(),
-        initialize_tsconfig: false,
-    })?;
+    let handler_types = directory.join("handler-types");
+    fs::create_dir_all(&handler_types)?;
+    for (rel, bytes) in cached_handler_sdk()? {
+        let target = handler_types.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, bytes)?;
+    }
     fs::write(directory.join("oracle.mjs"), include_str!("../oracle.mjs"))?;
-    fs::write(
-        directory.join("inputs.json"),
-        serde_json::to_vec(&INPUTS.map(number))?,
-    )?;
+    let inputs = INPUTS_JSON
+        .get_or_init(|| serde_json::to_vec(&INPUTS.map(number)).expect("inputs serialize"));
+    fs::write(directory.join("inputs.json"), inputs)?;
     Ok(())
 }
 

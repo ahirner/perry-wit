@@ -699,3 +699,45 @@ builtin.module @m {{
         assert!(verify_operation(module, ctx).is_err());
     }
 }
+
+#[test]
+fn multiple_exports_share_one_function() {
+    use pliron::builtin::op_interfaces::SymbolOpInterface;
+    let ctx = &mut Context::new();
+    let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &format!(
+        "builtin.module @m {{ ^module(): builtin.func @identity: builtin.function <({I32}) -> ({I32})> {{ ^entry(x: {I32}): wasm.return x }} }}"
+    )).unwrap();
+    let module = Operation::get_op::<ModuleOp>(module, ctx).unwrap();
+    let function = Operation::get_op::<FuncOp>(
+        module.get_body(ctx, 0).deref(ctx).iter(ctx).next().unwrap(),
+        ctx,
+    )
+    .unwrap();
+    assert_eq!(function.get_symbol_name(ctx).as_ref(), "identity");
+    for name in ["first", "second", "first"] {
+        crate::ops::set_export(ctx, &function, name);
+    }
+    let bytes = emit_module(ctx, &module, &EmitOptions::default()).unwrap();
+    let exports = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .filter_map(|payload| {
+            if let wasmparser::Payload::ExportSection(section) = payload.unwrap() {
+                Some(
+                    section
+                        .into_iter()
+                        .map(|e| {
+                            let e = e.unwrap();
+                            (e.name.to_owned(), e.index)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(exports, [("first".to_owned(), 0), ("second".to_owned(), 0)]);
+    assert_eq!(i32_of(call(&bytes, "first", &[Val::I32(17)])), 17);
+    assert_eq!(i32_of(call(&bytes, "second", &[Val::I32(-9)])), -9);
+}

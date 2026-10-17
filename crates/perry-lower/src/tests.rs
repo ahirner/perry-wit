@@ -13,7 +13,7 @@ fn lowered(source: &str) -> String {
     let ctx = &mut Context::new();
     let module = lower_without_foreign(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
     let op = module.get_operation();
-    perry_mir::pipeline::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    perry_mir::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     let printed = Operation::get_op_dyn(op, ctx).disp(ctx).to_string();
     for slot_op in ["perry.local", "perry.load", "perry.store"] {
         assert!(
@@ -97,7 +97,12 @@ export function run(x: number): number {
 "#,
     );
     assert!(printed.contains("perry.concat_reuse"), "{printed}");
-    assert!(printed.contains("perry.convert I32ToF64"), "{printed}");
+    assert!(
+        printed
+            .lines()
+            .any(|line| line.contains("perry.numeric_cast") && line.contains("builtin.fp64")),
+        "{printed}"
+    );
 }
 
 #[test]
@@ -112,13 +117,66 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "generator function",
         ),
         (
-            "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
+            "export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }",
             "MIR backend does not support",
+        ),
+        (
+            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+            "cannot find name 'a'",
+        ),
+        (
+            "export function run(cb: number): number {\n  return (cb as any)(1);\n}",
+            "indirect calls through local or parameter bindings are not supported yet",
+        ),
+        (
+            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+            "method toFixed is not supported on number yet",
+        ),
+        (
+            "export function run(s: string): number {\n  return (s as any).byteLength;\n}",
+            "property byteLength is not supported on string yet",
+        ),
+        (
+            "export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}",
+            "operator Pow on bigint and bigint is not supported yet",
         ),
     ] {
         let error = rejected(source);
         assert!(error.contains(expected), "{source}: {error}");
     }
+    let ctx = &mut Context::new();
+    let err = lower_without_foreign(
+        ctx,
+        "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+        "case.ts",
+    )
+    .err()
+    .expect("rejection");
+    let diag = err
+        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+        .expect("diagnostic");
+    assert_eq!(diag.message, "cannot find name 'a'");
+    let span = diag.span.as_ref().expect("span on unresolved identifier");
+    assert_eq!(span.start_line, 5);
+    assert_eq!(span.start_column, 13);
+
+    let call_err = lower_without_foreign(
+        ctx,
+        "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+        "case.ts",
+    )
+    .err()
+    .expect("rejection");
+    let call_diag = call_err
+        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+        .expect("diagnostic");
+    assert_eq!(
+        call_diag.message,
+        "method toFixed is not supported on number yet"
+    );
+    let call_span = call_diag.span.as_ref().expect("span on method call");
+    assert_eq!(call_span.start_line, 2);
+    assert_eq!(call_span.start_column, 10);
 }
 
 #[test]
@@ -157,15 +215,14 @@ export function run(x: number): number {
         "perry.alloc Instance",
         "perry.array_new Instance",
         "perry.array_push",
-        "perry.array_get",
+        "perry.array_at",
         "perry.array_set",
         "perry.field_set",
-        "perry.unwrap",
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
-    // Indices stay f64: the bounds and integrality check is part of `perry.array_get`.
-    assert!(!printed.contains("perry.convert F64ToI32"), "{printed}");
+    assert!(!printed.contains("perry.array_get"), "{printed}");
+    assert!(!printed.contains("perry.unwrap"), "{printed}");
 }
 
 #[test]
@@ -283,19 +340,6 @@ export function run(n: number): number {
 }
 
 #[test]
-#[ignore]
-fn dump_hir() {
-    let path = std::env::var("PERRY_HIR").expect("PERRY_HIR=<file.ts>");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let ast = perry_parser::parse_typescript(&source, "case.ts").unwrap();
-    let hir = perry_hir::lower_module(&ast, "main", "case.ts").unwrap();
-    println!("{:#?}", hir.functions);
-    println!("INIT {:#?}", hir.init);
-    println!("GLOBALS {:#?}", hir.globals);
-    println!("IMPORTS {:#?}", hir.imports);
-}
-
-#[test]
 fn async_functions_await_promises_and_timers() {
     let printed = lowered(
         r#"
@@ -321,23 +365,9 @@ export async function run(x: number): Promise<number> {
         "perry.await",
         "perry.timer",
         "perry.promise <builtin.fp64 >",
-        "perry_async",
+        "asynchronous=true",
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
-    }
-}
-
-#[test]
-#[ignore]
-fn dump_mir() {
-    let path = std::env::var("PERRY_MIR").expect("PERRY_MIR=<file.ts>");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let ctx = &mut Context::new();
-    let module = lower_without_foreign(ctx, &source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
-    let op = module.get_operation();
-    println!("{}", Operation::get_op_dyn(op, ctx).disp(ctx));
-    if let Err(e) = pliron::operation::verify_operation(op, ctx) {
-        println!("VERIFY: {}", e.disp(ctx));
     }
 }
 
@@ -353,7 +383,7 @@ export function local(x: number): number { const cell: Cell = { value: x }; retu
 export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
 "#;
     let module = lower_without_foreign(ctx, source, "lifetimes.ts").unwrap();
-    perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
+    perry_mir::canonicalize(module.get_operation(), ctx).unwrap();
     let printed = module.disp(ctx).to_string();
     assert!(printed.contains("perry.call read"), "{printed}");
     assert!(printed.contains("perry.call save"), "{printed}");
@@ -366,12 +396,12 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
 fn unsupported_temporal_forms_are_rejected() {
     for (source, message) in [
         (
-            "export function f(): string { return Temporal.Now.instant().toString(); }",
-            "Temporal.Now.instant is not supported",
+            "export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }",
+            "Temporal.ZonedDateTime.from is not supported",
         ),
         (
-            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ months: 1 }).toString(); }",
-            "literal { days }",
+            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }",
+            "duration field hours is not supported",
         ),
         (
             "export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }",
@@ -381,4 +411,43 @@ fn unsupported_temporal_forms_are_rejected() {
         let error = rejected(source);
         assert!(error.contains(message), "{source}: {error}");
     }
+}
+
+#[test]
+fn dense_destructuring_preserves_defaults_and_missing_elements() {
+    let printed = lowered(
+        r#"
+export function run(n: number): number {
+    const values: number[] = [n, 4];
+    const [first, , missing = 7] = values;
+    const [text, count] = ['ok', 3] as [string, number];
+    return first + missing + count + text.length;
+}
+"#,
+    );
+    assert!(!printed.contains("arrayRecord"), "{printed}");
+}
+
+#[test]
+fn constructor_types_survive_nested_calls_and_inference_revisits() {
+    let printed = lowered(
+        r#"
+interface Parent<T> { value: T }
+interface Child extends Parent<number> { extra: number }
+function make() {
+    if (false) { const skipped = new Map<number, boolean>(); }
+    return new Map<string, Set<number>>([['key', new Set<number>([3])]]);
+}
+export function run(n: number): number {
+    const shapes = new Map<string, {value:number}>();
+    shapes.set("a", {value:n});
+    const inferred = new Set([3, 4]);
+    const inferredMap = new Map([[1, 2], [3, 4]]);
+    const values = make();
+    const pair: Child = {value: n, extra: values.size};
+    return pair.value + pair.extra + inferred.size + inferredMap.size;
+}
+"#,
+    );
+    assert!(!printed.contains("perry_constructor"), "{printed}");
 }

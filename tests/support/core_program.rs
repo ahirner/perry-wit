@@ -93,8 +93,7 @@ impl Program {
     pub(crate) fn memory_bytes(&mut self) -> usize {
         self.instance
             .get_memory(&mut self.store, "memory")
-            .expect("modules export their memory")
-            .data_size(&self.store)
+            .map_or(0, |memory| memory.data_size(&self.store))
     }
 
     /// Force collection at every safe point and poison reclaimed memory, or stop doing so.

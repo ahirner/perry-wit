@@ -1,13 +1,14 @@
 //! perry MIR → pliron `wasm` dialect → core Wasm (`TODOs.md` P4).
 //!
-//! The output defines and exports linear memory, places string constants in data segments
+//! The output defines and exports linear memory when required, places string constants in data segments
 //! from `DATA_BASE`, and imports runtime functions from `HELPER_MODULE`; `perry-wit`'s linker
 //! resolves those against `perry-runtime` and the helper libraries. Exports are either the raw
 //! functions ([Exports::Raw], for tests) or canonical-ABI component exports
 //! ([Exports::Canonical], see [boundary]). Representation decisions for this first slice:
 //!
-//! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
-//!   `i32` addresses.
+//! - `f64` stays `f64`; semantic integers use `i32` through 32 bits and `i64` through 64 bits,
+//!   with narrow results normalized at their wrap points. Records, arrays, strings and
+//!   promises are `i32` addresses.
 //! - `undefined` (R8) is the signalling-NaN bit pattern [perry_abi::UNDEFINED_BITS] for
 //!   numbers, the null address for references and `2` for booleans. Wasm arithmetic only
 //!   produces quiet NaNs, so no computed number can be mistaken for `undefined`;
@@ -26,9 +27,14 @@
 //! function, whose ops `ops` dispatches to the topical modules; `async_split` turns async
 //! functions into state machines and [boundary] binds them to the canonical ABI.
 use anyhow::{Context as _, Result, anyhow};
-use perry_mir::attrs::ErrorKind;
+use perry_mir::ErrorKind;
 use pliron::{
-    builtin::ops::ModuleOp, context::Context, op::Op, operation::verify_operation,
+    builtin::ops::ModuleOp,
+    context::Context,
+    op::Op,
+    operation::verify_operation,
+    opts::{dce::DCEPass, simplify_cfg::SimplifyCFGPass},
+    pass::{AnalysisManager, PMConfig, Pass, Passes},
     printable::Printable,
 };
 use pliron_wasm::emit::{DataSegment, EmitOptions, Memory, emit_module};
@@ -47,6 +53,7 @@ mod json;
 mod lease;
 mod memory;
 mod module;
+mod numeric;
 mod ops;
 mod optional;
 mod regex;
@@ -54,6 +61,7 @@ mod repr;
 mod runtime;
 mod strings;
 mod temporal;
+mod values;
 mod variants;
 
 pub use memory::explain_tiers;
@@ -66,6 +74,10 @@ const DATA_BASE: u32 = 16;
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
+/// Omitted property in a `boolean | undefined` slot.
+const OMITTED_BOOL: i32 = 4;
+/// Omitted property in a reference `T | undefined` slot.
+const OMITTED_REF: i32 = 2;
 
 /// How functions are exported.
 pub enum Exports {
@@ -90,8 +102,27 @@ pub enum Exports {
 
 /// Lower a canonicalized MIR module and encode it as a core Wasm module that still imports
 /// runtime functions from `HELPER_MODULE`.
-pub fn compile(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<Vec<u8>> {
-    let (wasm, data) = module::lower(ctx, mir, exports)?;
+pub fn compile(
+    ctx: &mut Context,
+    mir: &ModuleOp,
+    exports: &Exports,
+    analyses: &mut AnalysisManager,
+) -> Result<Vec<u8>> {
+    let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses)?;
+    let mut cleanup = Passes::default();
+    cleanup.add_pass(SimplifyCFGPass);
+    cleanup.add_pass(DCEPass);
+    let mut lowered_analyses = AnalysisManager::default();
+    lowered_analyses.set_config(PMConfig {
+        verify_after_all: true,
+        ..PMConfig::default()
+    });
+    while cleanup
+        .run(wasm.get_operation(), ctx, &mut lowered_analyses)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?
+        .ir_changed
+        == pliron::irbuild::IRStatus::Changed
+    {}
     // Resuming an `await` inside a loop enters the loop at a second block.
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);
@@ -101,9 +132,13 @@ pub fn compile(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<V
         .context("verifying the lowered wasm module")?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
-        memory: Memory::Define {
-            min_pages: end.div_ceil(65536).max(1) as u64,
-            export: Some("memory".into()),
+        memory: if memory {
+            Memory::Define {
+                min_pages: end.div_ceil(65536).max(1) as u64,
+                export: Some("memory".into()),
+            }
+        } else {
+            Memory::None
         },
         data: if data.is_empty() {
             vec![]

@@ -45,6 +45,7 @@ mod mir_codegen_test;
 mod mir_collection_test;
 mod mir_string_test;
 mod module_test;
+mod optimization_test;
 mod regex_test;
 mod resource_test;
 mod runtime_error_test;

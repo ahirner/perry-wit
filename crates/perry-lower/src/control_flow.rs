@@ -1,5 +1,6 @@
 //! Structured source control flow expressed as ordinary typed MIR blocks.
 use super::*;
+use crate::collections::LiveCursor;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
@@ -56,8 +57,12 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(next);
             }
         }
+        let label = self.pending_label.take();
         self.jump(ctx, default);
-        self.controls.push(Control::Switch { break_to: done });
+        self.controls.push(Control::Switch {
+            label,
+            break_to: done,
+        });
         let guards = self.variant_guards.len();
         let mut fallthrough = false;
         for (index, (case, &block)) in cases.iter().zip(&blocks).enumerate() {
@@ -177,7 +182,7 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = exception.get_type(ctx);
                 let slot = self.entry_slot(ctx, ty);
                 self.store(ctx, slot, exception);
-                self.locals.insert(*id, slot);
+                self.locals.insert(*id, LocalBinding::plain(slot));
             }
             if let Some(rethrow) = rethrow_block {
                 self.finallies.push(outer);
@@ -225,7 +230,7 @@ impl<'s> FunctionBuilder<'s> {
         if self.handlers.is_empty() {
             self.emit(ctx, |ctx| {
                 let rethrow = RethrowOp::new(ctx, status);
-                perry_mir::exceptions::set_exit_only(ctx, &rethrow);
+                perry_mir::set_exit_only(ctx, &rethrow);
                 rethrow
             });
         } else {
@@ -244,27 +249,55 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         body_first: bool,
     ) -> Result<()> {
+        let label = self.pending_label.take();
         if let Some(init) = init {
             self.statement(ctx, init)?;
         }
         let header = self.new_block(ctx, "header");
         let body_block = self.new_block(ctx, "body");
         let latch = self.new_block(ctx, "latch");
+        let exhausted_exit = self.new_block(ctx, "exhausted");
         let exit = self.new_block(ctx, "exit");
+        let collection_loop = if body_first {
+            None
+        } else {
+            self.collection_loop(ctx, condition)?
+        };
         self.jump(ctx, if body_first { body_block } else { header });
 
         self.switch_to(header);
         match condition {
             None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
-            Some(Expr::Bool(false)) => self.jump(ctx, exit),
+            Some(Expr::Bool(false)) => self.jump(ctx, exhausted_exit),
             Some(condition) => {
                 let condition = self.condition(ctx, condition)?;
-                self.branch(ctx, condition, body_block, exit);
+                self.branch(ctx, condition, body_block, exhausted_exit);
             }
         }
 
         self.switch_to(body_block);
+        if let Some(CollectionLoop {
+            index,
+            collection,
+            cursor,
+        }) = collection_loop
+        {
+            let idx_val = self.load(ctx, index)?;
+            let entries = self.collection_entries_array(ctx, collection)?;
+            let entry = self.element_at(ctx, entries, idx_val)?;
+            if let Some(cursor) = cursor {
+                let one = self.number(ctx, 1.0);
+                let next_idx = self.binary(ctx, BinaryKind::Add, idx_val, one);
+                cursor.advance(self, ctx, next_idx, entry)?;
+            }
+            if let Some(live) = self.collection_entry_live(ctx, entry)? {
+                let live_body = self.new_block(ctx, "loop_live_body");
+                self.branch(ctx, live, live_body, latch);
+                self.switch_to(live_body);
+            }
+        }
         self.controls.push(Control::Loop {
+            label,
             continue_to: latch,
             break_to: exit,
         });
@@ -277,8 +310,61 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(update) = update {
             self.effect(ctx, update)?;
         }
+        let cursor = collection_loop.and_then(|lp| lp.cursor.map(|cursor| (lp.index, cursor)));
+        if let Some((index, cursor)) = cursor {
+            let position = cursor.position(self, ctx)?;
+            self.store(ctx, index, position);
+        }
         self.jump(ctx, header);
+
+        self.switch_to(exhausted_exit);
+        if let Some((_, cursor)) = cursor {
+            cursor.exhausted(self, ctx)?;
+        }
+        self.jump(ctx, exit);
+
         self.switch_to(exit);
         Ok(())
     }
+
+    /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
+    /// a cursor so deletes in the body neither skip nor repeat entries.
+    fn collection_loop(
+        &mut self,
+        ctx: &mut Context,
+        condition: Option<&'s Expr>,
+    ) -> Result<Option<CollectionLoop>> {
+        let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition) else {
+            return Ok(None);
+        };
+        let (Ok(arr_slot), Ok(index)) = (self.local(arr_id), self.local(idx_id)) else {
+            return Ok(None);
+        };
+        let arr_val = self.load(ctx, arr_slot)?;
+        let Ok(collection) = self.defined(ctx, arr_val) else {
+            return Ok(None);
+        };
+        let ty = collection.get_type(ctx);
+        if !(crate::collections::is_collection_or_view_record(ctx, ty)
+            || crate::collections::map_entry_types(ctx, ty).is_some()
+            || crate::collections::set_entry_type(ctx, ty).is_some())
+        {
+            return Ok(None);
+        }
+        let cursor = LiveCursor::open(self, ctx, collection, index)?;
+        Ok(Some(CollectionLoop {
+            index,
+            collection,
+            cursor,
+        }))
+    }
+}
+
+/// A loop over a live collection: the loop's index slot, the collection and its cursor
+/// (`None` for bare entry arrays, which have no cursor array).
+#[derive(Clone, Copy)]
+struct CollectionLoop {
+    index: Value,
+    collection: Value,
+    cursor: Option<LiveCursor>,
 }

@@ -2,12 +2,13 @@
 //! and the translation of its ops in reverse post-order.
 use crate::{
     analysis::value_order,
-    async_split, lease,
+    async_split,
     module::ModuleState,
-    repr::{i32_type, wasm_type},
+    repr::i32_type,
+    values::{self, Carriers},
 };
 use anyhow::{Context as _, Result, anyhow};
-use perry_mir::exceptions::CaughtOp;
+use perry_mir::CaughtOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -35,11 +36,12 @@ pub(crate) struct FunctionLowering<'s, 'e> {
     /// The block new ops are appended to.
     pub(crate) block: Ptr<BasicBlock>,
     /// Wasm value of each MIR value defined so far.
-    pub(crate) values: HashMap<Value, Value>,
+    pub(crate) values: HashMap<Value, Carriers<Value>>,
     /// Wasm block of each MIR block.
     pub(crate) blocks: HashMap<Ptr<BasicBlock>, Ptr<BasicBlock>>,
     /// Whether the function returns an exception status after its results.
     pub(crate) throws: bool,
+    pub(crate) atomic_construction: bool,
     /// Wasm result types, without the status.
     pub(crate) results: Vec<TypeHandle>,
     pub(crate) throw_block: Option<Ptr<BasicBlock>>,
@@ -78,6 +80,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             values: HashMap::new(),
             blocks: HashMap::new(),
             throws: false,
+            atomic_construction: false,
             results: vec![],
             throw_block: None,
             landing: None,
@@ -99,22 +102,21 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         mir: &FuncOp,
     ) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
-        let throws = state.throws.contains(&symbol);
-        let may_collect = state.call_effects[&symbol].may_collect;
+        let throws = state.may_throw(&symbol);
+        let may_collect = state
+            .program_facts
+            .effects(&symbol)
+            .expect("function effects")
+            .effects
+            .may_collect;
         let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
             .map_err(|_| anyhow!("function type"))?;
         let (mir_params, mir_results) = {
             let ty = ty.deref(ctx);
             (ty.arg_types(), ty.res_types())
         };
-        let params = mir_params
-            .into_iter()
-            .map(|t| wasm_type(ctx, t))
-            .collect::<Result<Vec<_>>>()?;
-        let results = mir_results
-            .into_iter()
-            .map(|t| wasm_type(ctx, t))
-            .collect::<Result<Vec<_>>>()?;
+        let params = values::signature(ctx, mir_params)?;
+        let results = values::signature(ctx, mir_results)?;
         let mut signature_results = results.clone();
         if throws {
             signature_results.push(i32_type(ctx));
@@ -124,6 +126,13 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         let entry = function.get_entry_block(ctx);
         let mut lowering = FunctionLowering::glue(state, ctx, &function);
         lowering.throws = throws;
+        lowering.atomic_construction = lowering
+            .state
+            .program_facts
+            .effects(&mir.get_symbol_name(ctx))
+            .expect("function effects")
+            .effects
+            .atomic_construction;
         lowering.results = results;
         lowering.map_blocks(ctx, mir, Some(entry))?;
         if may_collect {
@@ -155,19 +164,13 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                         .arguments()
                         .map(|arg| arg.get_type(ctx))
                         .collect();
-                    let types = mir_types
-                        .into_iter()
-                        .map(|t| wasm_type(ctx, t))
-                        .collect::<Result<Vec<_>>>()?;
+                    let types = values::signature(ctx, mir_types)?;
                     self.new_block(ctx, types)
                 }
             };
-            let pairs: Vec<_> = mir_block
-                .deref(ctx)
-                .arguments()
-                .zip(block.deref(ctx).arguments())
-                .collect();
-            self.values.extend(pairs);
+            let logical: Vec<_> = mir_block.deref(ctx).arguments().collect();
+            let physical: Vec<_> = block.deref(ctx).arguments().collect();
+            self.bind_values(ctx, logical, physical)?;
             self.blocks.insert(mir_block, block);
         }
         Ok(self.blocks[&mir_blocks[0]])
@@ -180,7 +183,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             pliron::graph::traversals::region::DFSTraversal::new(ctx, &mir.get_region(ctx))
                 .reverse_post_order()
                 .collect();
-        let live = lease::live_after_ops(ctx, mir);
+        let live = self.state.live;
         let order = value_order(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
@@ -190,20 +193,19 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             let mut index = 0;
             while index < ops.len() {
                 let op = ops[index];
-                self.clear_dead_frame_slots(ctx, op, &live[&op]);
-                let root_mark = self.safe_point(ctx, op, &live[&op], &order)?;
+                if Operation::get_op::<perry_mir::AwaitOp>(op, ctx).is_some() {
+                    self.clear_dead_frame_slots(ctx, op, live.after(op));
+                }
+                let root_mark = self.safe_point(ctx, op, live.after(op), &order)?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops
                     .get(index + 1)
                     .copied()
                     .filter(|next| Operation::get_op::<CaughtOp>(*next, ctx).is_some());
                 if caught.is_some() {
-                    let mut types = Vec::new();
                     let mir_types: Vec<_> =
                         op.deref(ctx).results().map(|r| r.get_type(ctx)).collect();
-                    for ty in mir_types {
-                        types.push(wasm_type(ctx, ty)?);
-                    }
+                    let types = values::signature(ctx, mir_types)?;
                     let mut args = vec![i32_type(ctx)];
                     args.extend(types.iter().copied());
                     self.landing = Some((self.new_block(ctx, args), types));
@@ -219,15 +221,17 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                     let zero = self.i32_const(ctx, 0);
                     let mut args = vec![zero];
                     for result in &results {
-                        args.push(self.values[result]);
+                        args.extend(self.values[result].iter());
                     }
                     self.br(ctx, landing, args);
                     self.block = landing;
-                    let status = landing.deref(ctx).get_argument(0);
-                    for (position, result) in results.iter().enumerate() {
-                        let arg = landing.deref(ctx).get_argument(position + 1);
-                        self.values.insert(*result, arg);
-                    }
+                    let landing_args: Vec<_> = landing.deref(ctx).arguments().collect();
+                    let status = landing_args[0];
+                    self.bind_values(
+                        ctx,
+                        results.iter().copied(),
+                        landing_args[1..].iter().copied(),
+                    )?;
                     self.spill(ctx, &results);
                     self.define(ctx, caught, status);
                     let results: Vec<_> = caught.deref(ctx).results().collect();
@@ -251,9 +255,11 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             .iter()
             .filter_map(|v| frame.slots.get(v).map(|slot| (*v, *slot)))
             .collect();
-        for (value, (offset, kind)) in stores {
+        for (value, slot) in stores {
             if let Some(&wasm) = self.values.get(&value) {
-                self.store(ctx, kind, frame_value, offset, wasm);
+                for ((offset, kind), carrier) in slot.iter().zip(wasm.iter()) {
+                    self.store(ctx, kind, frame_value, offset, carrier);
+                }
             }
         }
     }

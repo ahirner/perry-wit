@@ -8,12 +8,13 @@ use crate::{
     function::FunctionLowering,
     host::{EffectHost, Foreign, ValueHost},
     module::ModuleState,
-    repr::{Repr, i32_type, repr, slot_kind, wasm_type},
+    repr::{Carriers, Repr, i32_type, repr, wasm_type},
     runtime::Runtime,
+    values::is_numeric_type,
 };
 use anyhow::{Result, anyhow, bail, ensure};
-use perry_abi::layout::{array as layout, record, string as strings};
-use perry_mir::types::{ArrayType, RecordType};
+use perry_abi::layout::{array as layout, string as strings};
+use perry_mir::{ArrayType, RecordType};
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
@@ -38,10 +39,12 @@ mod imports;
 mod integers;
 mod parameters;
 mod resources;
+mod scopes;
 mod sums;
 
-pub(super) use exports::{export, realloc};
+pub(super) use exports::export;
 pub(super) use resources::{emit_drain, used_keys};
+pub(super) use scopes::Scope;
 
 /// A WIT value type as the canonical ABI sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -163,6 +166,23 @@ pub enum Flat {
 }
 
 impl AbiType {
+    /// Exact integer domain supplied by WIT, independent of the source representation.
+    pub fn integer_type(&self, ctx: &Context) -> Option<TypeHandle> {
+        use Signedness::{Signed, Unsigned};
+        let (bits, sign) = match self {
+            Self::S8 => (8, Signed),
+            Self::U8 => (8, Unsigned),
+            Self::S16 => (16, Signed),
+            Self::U16 => (16, Unsigned),
+            Self::S32 => (32, Signed),
+            Self::U32 => (32, Unsigned),
+            Self::S64 => (64, Signed),
+            Self::U64 => (64, Unsigned),
+            _ => return None,
+        };
+        Some(IntegerType::get(ctx, bits, sign).into())
+    }
+
     fn flatten(&self, out: &mut Vec<Flat>) {
         match self {
             AbiType::Bool
@@ -301,6 +321,23 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
     Ok(())
 }
 
+pub(super) fn scalar_mir_type(ctx: &mut Context, mir_ty: TypeHandle) -> TypeHandle {
+    if mir_ty.deref(ctx).is::<perry_mir::NumericType>() {
+        return FP64Type::get(ctx).into();
+    }
+    if let Ok(optional) = TypedHandle::<perry_mir::OptionalType>::from_handle(mir_ty, ctx) {
+        let (value, absence) = {
+            let opt = optional.deref(ctx);
+            (opt.value(), opt.absence())
+        };
+        if value.deref(ctx).is::<perry_mir::NumericType>() {
+            let f64_ty = FP64Type::get(ctx).into();
+            return perry_mir::OptionalType::get_with(ctx, f64_ty, absence).into();
+        }
+    }
+    mir_ty
+}
+
 impl FunctionLowering<'_, '_> {
     /// Acknowledge every outstanding host transfer before releasing a cancelled task.
     fn abort_task(&mut self, ctx: &mut Context) -> Result<()> {
@@ -313,7 +350,10 @@ impl FunctionLowering<'_, '_> {
             (self.state.uses_http_server, Runtime::WebServeClose),
             (self.state.uses_fetch, Runtime::WebFetchClose),
             (self.state.uses_streams, Runtime::WebStreamsClose),
-            (self.state.uses_io, Runtime::IoCancel),
+            (
+                self.state.uses_io || self.state.reports_rejection,
+                Runtime::IoCancel,
+            ),
         ] {
             if used {
                 self.runtime_void(ctx, function, vec![]);
@@ -337,6 +377,12 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         raw: Value,
     ) -> Result<Value> {
+        if let Some(source) = ty.integer_type(ctx)
+            && matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64)
+        {
+            let value = self.normalize_integer(ctx, raw, source);
+            return self.numeric_cast(ctx, value, source, mir_ty);
+        }
         let opcode = match ty {
             AbiType::Resource { key, owned } => {
                 return self.lift_resource(ctx, *key, *owned, mir_ty, raw);
@@ -396,9 +442,10 @@ impl FunctionLowering<'_, '_> {
                 let mut values = Vec::new();
                 for (name, field_ty) in fields {
                     let (_, field_mir) = record_field(ctx, record, name)?;
+                    let lift_mir = scalar_mir_type(ctx, field_mir);
                     values.push((
                         name.as_str(),
-                        self.lift_flat(ctx, field_ty, field_mir, flat)?,
+                        self.lift_flat(ctx, field_ty, lift_mir, flat)?,
                     ));
                 }
                 self.build_record(ctx, mir_ty, values)
@@ -443,7 +490,8 @@ impl FunctionLowering<'_, '_> {
                 let mut values = Vec::new();
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (_, field_mir) = record_field(ctx, record, name)?;
-                    let value = self.lift_load(ctx, field_ty, field_mir, address, offset + at)?;
+                    let lift_mir = scalar_mir_type(ctx, field_mir);
+                    let value = self.lift_load(ctx, field_ty, lift_mir, address, offset + at)?;
                     values.push((name.as_str(), value));
                 }
                 self.build_record(ctx, mir_ty, values)
@@ -466,7 +514,7 @@ impl FunctionLowering<'_, '_> {
         handle: Value,
     ) -> Result<Value> {
         ensure!(
-            mir_ty.deref(ctx).is::<perry_mir::types::ReadableType>(),
+            mir_ty.deref(ctx).is::<perry_mir::ReadableType>(),
             "WIT stream<u8> needs a TypeScript ReadableStream<Uint8Array>"
         );
         self.state.uses_streams = true;
@@ -481,7 +529,7 @@ impl FunctionLowering<'_, '_> {
         len: Value,
     ) -> Result<Value> {
         ensure!(
-            mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+            mir_ty.deref(ctx).is::<perry_mir::StringType>(),
             "WIT string needs a TypeScript string"
         );
         let string = self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len]);
@@ -499,7 +547,7 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
-        if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::types::BytesType>() {
+        if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::BytesType>() {
             let bytes = self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr]);
             if self.state.collectible {
                 self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
@@ -510,7 +558,7 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = slot_kind(ctx, element_mir)?;
+        let lift_mir = scalar_mir_type(ctx, element_mir);
         let array = self.new_array(ctx, len, element_mir)?;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
         let size = element.size() as i32;
@@ -518,9 +566,10 @@ impl FunctionLowering<'_, '_> {
             let stride = b.i32_const(ctx, size);
             let offset = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let source = b.num(ctx, NumOpcode::I32Add, vec![ptr, offset]);
-            let value = b.lift_load(ctx, element, element_mir, source, 0)?;
-            let slot = b.slot_address(ctx, data, i);
-            b.store(ctx, kind, slot, 0, value);
+            let value = b.lift_load(ctx, element, lift_mir, source, 0)?;
+            let carriers = b.cast_value(ctx, Carriers::Scalar(value), lift_mir, element_mir)?;
+            let slot = b.slot_address(ctx, data, i, element_mir);
+            b.store_slot_value(ctx, slot, 0, element_mir, carriers)?;
             Ok(())
         })?;
         self.store(ctx, MemKind::I32, array, layout::LEN, len);
@@ -554,13 +603,15 @@ impl FunctionLowering<'_, '_> {
             values.len(),
             record.deref(ctx).name()
         );
-        let size = self.i32_const(ctx, record::field(field_count) as i32);
+        let byte_size = Self::record_size(ctx, record)?;
+        let size = self.i32_const(ctx, byte_size as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
         self.record_header(ctx, object, record);
         for (field, value) in values {
-            let (index, field_mir) = record_field(ctx, record, field)?;
-            let kind = slot_kind(ctx, field_mir)?;
-            self.store(ctx, kind, object, record::field(index), value);
+            let (offset, field_mir) = Self::record_type_field_slot(ctx, record, field)?;
+            let source_mir = scalar_mir_type(ctx, field_mir);
+            let carriers = self.cast_value(ctx, Carriers::Scalar(value), source_mir, field_mir)?;
+            self.store_slot_value(ctx, object, offset, field_mir, carriers)?;
         }
         Ok(object)
     }
@@ -571,8 +622,25 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
     ) -> Result<Value> {
+        if let Some(target) = ty.integer_type(ctx)
+            && (matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64) || is_numeric_type(ctx, mir_ty))
+        {
+            return self.cast_value(ctx, value, mir_ty, target)?.scalar();
+        }
+        if matches!(ty, AbiType::F32 | AbiType::F64)
+            && (crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, _)| bits > 1)
+                || is_numeric_type(ctx, mir_ty))
+        {
+            let target = FP64Type::get(ctx).into();
+            let value = self.cast_value(ctx, value, mir_ty, target)?.scalar()?;
+            return Ok(if matches!(ty, AbiType::F32) {
+                self.num(ctx, NumOpcode::F32DemoteF64, vec![value])
+            } else {
+                value
+            });
+        }
         if ty.is_sum() {
             let mut flat = self.lower_sum_flat(ctx, ty, mir_ty, value)?;
             ensure!(
@@ -581,6 +649,7 @@ impl FunctionLowering<'_, '_> {
             );
             return Ok(flat.remove(0));
         }
+        let value = value.scalar()?;
         let opcode = match ty {
             AbiType::Resource { key, owned } => {
                 return self.lower_resource(ctx, *key, *owned, mir_ty, value);
@@ -608,7 +677,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
         address: Value,
         offset: u32,
     ) -> Result<()> {
@@ -622,8 +691,9 @@ impl FunctionLowering<'_, '_> {
             AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
             AbiType::OkHandle { .. } => bail!("handle results are returned flat"),
             AbiType::String => {
+                let value = value.scalar()?;
                 ensure!(
-                    mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT string needs a TypeScript string"
                 );
                 let data = self.load(ctx, MemKind::I32, value, strings::DATA);
@@ -632,16 +702,18 @@ impl FunctionLowering<'_, '_> {
                 self.store(ctx, MemKind::I32, address, offset + 4, len);
             }
             AbiType::List(element) => {
+                let value = value.scalar()?;
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 self.store(ctx, MemKind::I32, address, offset, buffer);
                 self.store(ctx, MemKind::I32, address, offset + 4, len);
             }
             AbiType::Record(fields) => {
+                let value = value.scalar()?;
                 let record = self.record_type(ctx, mir_ty)?;
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
-                    let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = slot_kind(ctx, field_mir)?;
-                    let field = self.load(ctx, kind, value, record::field(index));
+                    let (field_offset, field_mir) =
+                        Self::record_type_field_slot(ctx, record, name)?;
+                    let field = self.load_slot_value(ctx, value, field_offset, field_mir)?;
                     self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
                 }
             }
@@ -665,14 +737,14 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<(Value, Value)> {
         if *element == AbiType::U8 {
-            if mir_ty.deref(ctx).is::<perry_mir::types::StringType>() {
+            if mir_ty.deref(ctx).is::<perry_mir::StringType>() {
                 return Ok((
                     self.load(ctx, MemKind::I32, value, strings::DATA),
                     self.load(ctx, MemKind::I32, value, strings::LEN),
                 ));
             }
-            if mir_ty.deref(ctx).is::<perry_mir::types::BytesType>()
-                || mir_ty.deref(ctx).is::<perry_mir::types::ByteInputType>()
+            if mir_ty.deref(ctx).is::<perry_mir::BytesType>()
+                || mir_ty.deref(ctx).is::<perry_mir::ByteInputType>()
             {
                 let view = self.runtime(ctx, Runtime::StdBytesBoundary, vec![value]);
                 let data = self.load(ctx, MemKind::I32, view, 4);
@@ -689,7 +761,6 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = slot_kind(ctx, element_mir)?;
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
         let data = self.load(ctx, MemKind::I32, value, layout::DATA);
         let stride = self.i32_const(ctx, element.size() as i32);
@@ -697,8 +768,8 @@ impl FunctionLowering<'_, '_> {
         let buffer = self.alloc(ctx, bytes);
         let size = element.size() as i32;
         self.counted_loop(ctx, len, |b, ctx, i| {
-            let slot = b.slot_address(ctx, data, i);
-            let item = b.load(ctx, kind, slot, 0);
+            let slot = b.slot_address(ctx, data, i, element_mir);
+            let item = b.load_slot_value(ctx, slot, 0, element_mir)?;
             let stride = b.i32_const(ctx, size);
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
@@ -734,7 +805,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
-        value: Value,
+        value: Carriers<Value>,
         out: &mut Vec<Value>,
     ) -> Result<()> {
         match ty {
@@ -745,29 +816,38 @@ impl FunctionLowering<'_, '_> {
             AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
             AbiType::OkHandle { flat, .. } => {
                 // `ok` (0), the handle, and zeros for the rest of the error payload.
-                expect_number(ctx, mir_ty, ty)?;
+                let f64_ty = FP64Type::get(ctx).into();
+                let value = if is_numeric_type(ctx, mir_ty) {
+                    self.cast_value(ctx, value, mir_ty, f64_ty)?.scalar()?
+                } else {
+                    expect_number(ctx, mir_ty, ty)?;
+                    value.scalar()?
+                };
                 let zero = self.i32_const(ctx, 0);
                 let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
                 self.flat_i32s(ctx, flat, &[zero, handle], out)?;
             }
             AbiType::String => {
+                let value = value.scalar()?;
                 ensure!(
-                    mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT string needs a TypeScript string"
                 );
                 out.push(self.load(ctx, MemKind::I32, value, strings::DATA));
                 out.push(self.load(ctx, MemKind::I32, value, strings::LEN));
             }
             AbiType::List(element) => {
+                let value = value.scalar()?;
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 out.extend([buffer, len]);
             }
             AbiType::Record(fields) => {
+                let value = value.scalar()?;
                 let record = self.record_type(ctx, mir_ty)?;
                 for (name, field_ty) in fields {
-                    let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = slot_kind(ctx, field_mir)?;
-                    let field = self.load(ctx, kind, value, record::field(index));
+                    let (field_offset, field_mir) =
+                        Self::record_type_field_slot(ctx, record, name)?;
+                    let field = self.load_slot_value(ctx, value, field_offset, field_mir)?;
                     self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
                 }
             }

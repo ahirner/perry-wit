@@ -4,6 +4,7 @@ pub mod record {
     pub const JSON: u32 = 4;
     pub const HEADER: u32 = 8;
     pub const SLOT: u32 = 8;
+    pub const NUMERIC_SLOT: u32 = 16;
 
     pub const fn field(index: usize) -> u32 {
         HEADER + SLOT * index as u32
@@ -15,6 +16,10 @@ pub mod array {
     pub const CAP: u32 = 4;
     pub const DATA: u32 = 8;
     pub const SLOT: u32 = 8;
+    pub const NUMERIC_SLOT: u32 = 16;
+    pub const SCALAR_ELEMENTS: u32 = 0;
+    pub const REFERENCE_ELEMENTS: u32 = 1;
+    pub const NUMERIC_ELEMENTS: u32 = 2;
 }
 
 pub mod variant {
@@ -120,5 +125,24 @@ pub mod descriptor {
     pub const ARRAY: u32 = 5;
     pub const EXCEPTION: u32 = 6;
     pub const OPTIONAL: u32 = 7;
+    pub const SIGNED_INT: u32 = 8;
+    pub const UNSIGNED_INT: u32 = 9;
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
+}
+
+pub mod numeric {
+    pub const FLOAT: i32 = 0;
+    pub const SIGNED: i32 = 1;
+    pub const UNSIGNED: i32 = 2;
+    pub const UNDEFINED: i32 = 3;
+    pub const NULL: i32 = 4;
+    pub const OMITTED: i32 = 5;
+    pub const U8: i32 = 6;
+    pub const S8: i32 = 7;
+    pub const U16: i32 = 8;
+    pub const S16: i32 = 9;
+    pub const U32: i32 = 10;
+    pub const S32: i32 = 11;
+    pub const U64: i32 = 12;
+    pub const S64: i32 = 13;
 }

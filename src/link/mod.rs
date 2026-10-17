@@ -17,6 +17,7 @@ use wasm_encoder::{
 };
 use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator};
 
+pub(crate) mod canonical;
 mod data_relocations;
 pub(crate) mod libraries;
 mod type_compaction;
@@ -75,30 +76,32 @@ impl StreamAnchor {
 /// [link_helpers_with] without byte streams (helper tests link core modules directly).
 #[allow(dead_code)] // Used by the helper tests, which include this module.
 pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
-    link_helpers_with(core_wasm, None)
+    Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
 /// [link_helpers] for a module of a WIT world whose byte streams use `streams`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
-) -> Result<Vec<u8>> {
+    canonical: &canonical::Requirements,
+) -> Result<(Vec<u8>, u32)> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
+    let mut export_realloc = canonical.export_realloc;
     for payload in Parser::new(0).parse_all(&core_wasm) {
         if let Payload::ImportSection(imports) = payload? {
             for import in imports.into_imports() {
                 let import = import?;
                 if import.module == HELPER_MODULE {
                     has_helper_imports = true;
-                    break;
                 }
+                export_realloc |= canonical.import(import.module, import.name);
             }
         }
     }
 
-    if !has_helper_imports {
-        return Ok(core_wasm);
+    if !has_helper_imports && !export_realloc {
+        return Ok((core_wasm, 0));
     }
 
     // 2. Parse core module sections
@@ -217,13 +220,19 @@ pub(crate) fn link_helpers_with(
             .or_default()
             .insert(entry_name.to_string());
     }
+    if export_realloc {
+        requested_by_lib
+            .entry(LibraryId::Runtime)
+            .or_default()
+            .insert("perry_cabi_realloc".into());
+    }
     // Libraries may call each other through `__perry_helper` imports (the runtime formats
     // numbers with the number helper): request those entries too, to a fixpoint.
     loop {
         let mut added = Vec::new();
         for (lib_id, entries) in &requested_by_lib {
             let lib = Library::parse(lib_id.for_memory(collectible))?;
-            let reachable = lib.reachable(entries.iter().map(String::as_str))?;
+            let reachable = lib.reachable(entries.iter().map(String::as_str), &BTreeSet::new())?;
             for &orig in reachable
                 .iter()
                 .filter(|&&orig| orig < lib.imports.len() as u32)
@@ -231,6 +240,9 @@ pub(crate) fn link_helpers_with(
                 let (module, name, _) = &lib.imports[orig as usize];
                 if module == HELPER_MODULE {
                     added.push((LibraryId::for_entry(name)?, name.clone()));
+                } else if !export_realloc && canonical.import(module, name) {
+                    export_realloc = true;
+                    added.push((LibraryId::Runtime, "perry_cabi_realloc".into()));
                 }
             }
         }
@@ -277,7 +289,7 @@ pub(crate) fn link_helpers_with(
     let mut prepared_libs = Vec::new();
     for (lib_id, entries) in requested_by_lib {
         let lib = Library::parse(lib_id.for_memory(collectible))?;
-        let reachable = lib.reachable(entries.iter().map(String::as_str))?;
+        let reachable = lib.reachable(entries.iter().map(String::as_str), &BTreeSet::new())?;
         let type_base = new_types.len();
         for ty in &lib.types {
             push_type(&mut new_types, ty)?;
@@ -343,6 +355,76 @@ pub(crate) fn link_helpers_with(
         let old_func_idx = next_import_func_idx + i;
         let new_func_idx = num_new_imported_funcs + i;
         old_to_new_func_index.insert(old_func_idx, new_func_idx);
+    }
+
+    // Determine existing static data extent from core module
+    let mut existing_data_end = 1024u32;
+    for seg in &core_data {
+        if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
+            let mut reader = offset_expr.get_operators_reader();
+            if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
+                let end = (value as u32).saturating_add(seg.data.len() as u32);
+                existing_data_end = existing_data_end.max(end);
+            }
+        }
+    }
+
+    // Allocate memory and table placements for each helper library
+    struct LibPlacement {
+        memory_base: u32,
+        table_base: u32,
+    }
+    let mut helper_memory = HelperMemory::new(existing_data_end);
+    let mut current_table_size = if !core_tables.is_empty() {
+        core_tables[0].ty.initial as u32
+    } else {
+        0
+    };
+    let mut lib_placements = Vec::new();
+    for prep in &prepared_libs {
+        let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
+
+        let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
+        current_table_size = table_base
+            .checked_add(prep.lib.table_size)
+            .context("helper table exceeds table32")?;
+
+        lib_placements.push(LibPlacement {
+            memory_base,
+            table_base,
+        });
+    }
+
+    let needs_stack = helper_memory.needs_stack;
+    let stack_global_index = core_globals.len() as u32;
+    let stack_top = helper_memory.stack_top()?;
+
+    if needs_stack && !core_memories.is_empty() {
+        let needed_pages = stack_top.div_ceil(65_536) as u64;
+        if core_memories[0].initial < needed_pages {
+            core_memories[0].initial = needed_pages;
+        }
+    }
+
+    let folded: Vec<_> = prepared_libs
+        .iter()
+        .zip(&lib_placements)
+        .map(|(prep, placement)| {
+            data_relocations::fold(
+                &prep.lib,
+                placement.memory_base,
+                placement.table_base,
+                stack_top,
+            )
+        })
+        .collect();
+
+    for (prep, folded) in prepared_libs.iter_mut().zip(&folded) {
+        if let Some(folded) = folded {
+            prep.reachable = prep
+                .lib
+                .reachable(prep.entries.iter().map(String::as_str), &folded.functions)?;
+        }
     }
 
     // 4. Assign indices to the selected helper functions
@@ -418,55 +500,6 @@ pub(crate) fn link_helpers_with(
         new_code.function(&rewritten);
     }
 
-    // Determine existing static data extent from core module
-    let mut existing_data_end = 1024u32;
-    for seg in &core_data {
-        if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
-            let mut reader = offset_expr.get_operators_reader();
-            if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
-                let end = (value as u32).saturating_add(seg.data.len() as u32);
-                existing_data_end = existing_data_end.max(end);
-            }
-        }
-    }
-
-    // Allocate memory and table placements for each helper library
-    struct LibPlacement {
-        memory_base: u32,
-        table_base: u32,
-    }
-    let mut helper_memory = HelperMemory::new(existing_data_end);
-    let mut current_table_size = if !core_tables.is_empty() {
-        core_tables[0].ty.initial as u32
-    } else {
-        0
-    };
-    let mut lib_placements = Vec::new();
-    for prep in &prepared_libs {
-        let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
-
-        let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
-        current_table_size = table_base
-            .checked_add(prep.lib.table_size)
-            .context("helper table exceeds table32")?;
-
-        lib_placements.push(LibPlacement {
-            memory_base,
-            table_base,
-        });
-    }
-
-    let needs_stack = helper_memory.needs_stack;
-    let stack_global_index = core_globals.len() as u32;
-    let stack_top = helper_memory.stack_top()?;
-
-    if needs_stack && !core_memories.is_empty() {
-        let needed_pages = stack_top.div_ceil(65_536) as u64;
-        if core_memories[0].initial < needed_pages {
-            core_memories[0].initial = needed_pages;
-        }
-    }
-
     // Emit helper functions
     for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         let mut relocation = Relocations {
@@ -501,24 +534,14 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    let folded: Vec<_> = prepared_libs
-        .iter()
-        .zip(&lib_placements)
-        .map(|(prep, placement)| {
-            data_relocations::fold(
-                &prep.lib,
-                placement.memory_base,
-                placement.table_base,
-                stack_top,
-            )
-        })
-        .collect();
-
     // Helper initialization
     let mut helper_inits = Vec::new();
     for (prep, folded) in prepared_libs.iter().zip(&folded) {
         for orig in prep.lib.initializers() {
-            if folded.as_ref().is_some_and(|data| data.function == orig) {
+            if folded
+                .as_ref()
+                .is_some_and(|data| data.functions.contains(&orig))
+            {
                 continue;
             }
             if let Some(&new_idx) = prep.helper_defined_indices.get(&orig)
@@ -686,6 +709,13 @@ pub(crate) fn link_helpers_with(
         };
         new_exports.export(export.name, kind, export.index);
     }
+    if export_realloc {
+        new_exports.export(
+            "cabi_realloc",
+            ExportKind::Func,
+            entry_index[&(LibraryId::Runtime, "perry_cabi_realloc".into())],
+        );
+    }
     module.section(&new_exports);
 
     // Start
@@ -825,5 +855,5 @@ pub(crate) fn link_helpers_with(
     if let Err(e) = Validator::new().validate_all(&result) {
         anyhow::bail!("Validating linked Wasm output: {e:?}");
     }
-    Ok(result)
+    Ok((result, current_helper_func_idx - helper_func_start_idx))
 }

@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use perry_abi::layout::variant;
-use perry_mir::{types::VariantType, variants::admits_payload};
+use perry_mir::{VariantType, admits_payload};
 use pliron::{
     context::Context,
     r#type::{TypeHandle, TypedHandle},
@@ -82,7 +82,7 @@ impl FunctionLowering<'_, '_> {
         self.br(ctx, done, vec![]);
         self.block = strings;
         let payload = self.load(ctx, MemKind::I32, value, variant::VALUE);
-        let ty = perry_mir::types::StringType::get(ctx).into();
+        let ty = perry_mir::StringType::get(ctx).into();
         self.json_value(ctx, writer, payload, ty)?;
         self.br(ctx, done, vec![]);
         self.block = done;
@@ -157,7 +157,7 @@ impl FunctionLowering<'_, '_> {
             self.cond_br(ctx, matches, (member, vec![]), (next, vec![]));
             self.block = member;
             let slot = self.load(ctx, slot_kind(ctx, payload)?, value, variant::VALUE);
-            if perry_mir::optional::absence(ctx, payload).is_some_and(|a| a.admits_undefined()) {
+            if perry_mir::absence(ctx, payload).is_some_and(|a| a.admits_undefined()) {
                 let absent = self.absence_test(ctx, slot, payload, false)?;
                 let present = self.new_block(ctx, vec![]);
                 self.cond_br(ctx, absent, (done, vec![two]), (present, vec![]));
@@ -183,7 +183,7 @@ impl FunctionLowering<'_, '_> {
         object: Value,
         result: TypeHandle,
     ) -> Result<Value> {
-        let cases = perry_mir::variants::cases(ctx, ty)?;
+        let cases = perry_mir::variant_cases(ctx, ty)?;
         let tag = self.load(ctx, MemKind::I32, object, variant::TAG);
         let mut admitted = self.i32_const(ctx, 0);
         let mut present = self.i32_const(ctx, 0);
@@ -201,10 +201,10 @@ impl FunctionLowering<'_, '_> {
             }
         }
         let invalid = self.num(ctx, NumOpcode::I32Eqz, vec![admitted]);
-        self.throw_if(ctx, invalid, perry_mir::attrs::ErrorKind::TypeError);
+        self.throw_if(ctx, invalid, perry_mir::ErrorKind::TypeError);
         let kind = slot_kind(ctx, result)?;
         let value = self.load(ctx, kind, object, variant::VALUE);
-        if perry_mir::optional::absence(ctx, result).is_some_and(|a| a.admits_undefined()) {
+        if perry_mir::absence(ctx, result).is_some_and(|a| a.admits_undefined()) {
             let undefined = self.undefined(ctx, result)?;
             Ok(self.select(ctx, present, value, undefined))
         } else {

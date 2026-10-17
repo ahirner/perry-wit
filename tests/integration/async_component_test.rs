@@ -262,6 +262,46 @@ async fn instantiate(check_memory: bool) -> Result<(Store<Host>, Instance)> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn exact_integers_survive_timer_payloads_and_host_suspension() -> Result<()> {
+    use perry_wit::api::{Program, Wit};
+    let source = br#"
+import { setTimeout } from 'node:timers/promises';
+async function add(a:bigint,b:bigint):Promise<bigint> {
+  const saved = await setTimeout(1,a);
+  await setTimeout(1);
+  return saved+b;
+}
+export async function run(a:bigint,b:bigint):Promise<bigint> { return await add(a,b); }
+"#;
+    let wit = b"package test:integer-suspension; world test { include wasi:cli/imports@0.3.0; export run: async func(a:u64,b:u64)->u64; }";
+    let compiled = perry_wit::api::compile(
+        &Program {
+            source: source.as_slice().into(),
+            ..Default::default()
+        },
+        &Wit {
+            application: wit.as_slice().into(),
+            dependencies: vec![],
+        },
+        &Default::default(),
+    )?;
+    let engine = async_engine()?;
+    let component = Component::new(&engine, &compiled.component.unwrap().stripped)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(u64, u64), (u64,)>(&mut store, "run")?;
+    for (a, b) in [(u64::MAX, 1), (9_007_199_254_740_993, 2)] {
+        assert_eq!(
+            run.call_async(&mut store, (a, b)).await?,
+            (a.wrapping_add(b),)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let (mut store, instance) = instantiate(false).await?;
 

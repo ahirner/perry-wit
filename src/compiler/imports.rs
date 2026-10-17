@@ -2,14 +2,14 @@
 use super::{bind::abi_type, wit_types};
 use crate::sdk::to_camel_case;
 use perry_codegen::boundary::Import;
-use perry_lower::hir::{FunctionType, Type as HirType};
+use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
 use std::collections::HashMap;
 use wit_parser::{Resolve, WorldId, WorldItem};
 
 pub(super) fn bindings(
     resolve: &Resolve,
     world: WorldId,
-    foreign: &mut HashMap<String, HirType>,
+    foreign: &mut HashMap<String, Foreign>,
 ) -> Vec<Import> {
     let mut imports = Vec::new();
     for (key, item) in &resolve.worlds[world].imports {
@@ -66,8 +66,8 @@ pub(super) fn bindings(
             };
             let binding = format!("{module}#{}", to_camel_case(&function.name));
             foreign.insert(
-                format!("wit-function:{binding}"),
-                HirType::Function(FunctionType {
+                binding.clone(),
+                Foreign::Function(FunctionType {
                     params,
                     return_type: Box::new(result),
                     is_async: function.kind.is_async(),

@@ -1,6 +1,6 @@
 //! Keep unobserved character strings in scalar SSA form through comparison and append.
 use crate::{
-    aggregates::{functions, operations},
+    aggregates::operations,
     collections::{ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp},
     intrinsics::{Intrinsic, IntrinsicOp},
     scalar::CompareOp,
@@ -8,17 +8,22 @@ use crate::{
 use pliron::{
     builtin::{
         attributes::IntegerAttr,
-        ops::ConstantOp,
+        ops::{ConstantOp, FuncOp},
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    irbuild::{
+        inserter::Inserter,
+        match_rewrite::{MatchRewrite, MatchRewriter},
+        rewriter::Rewriter,
+    },
     op::Op,
     operation::Operation,
+    result::Result,
     utils::apint::{APInt, bw},
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 enum CompareOperand {
@@ -87,7 +92,7 @@ fn classify_user(ctx: &Context, op: Ptr<Operation>, character: Value) -> Option<
 
 fn lower_compare_operand(
     ctx: &mut Context,
-    user: Ptr<Operation>,
+    rewriter: &mut MatchRewriter,
     scalar: Value,
     operand: CompareOperand,
 ) -> Value {
@@ -97,7 +102,7 @@ fn lower_compare_operand(
             let ty = IntegerType::get(ctx, 32, Signedness::Signless);
             let attr = IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
             let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
-            constant.insert_before(ctx, user);
+            rewriter.insert_operation(ctx, constant);
             constant.deref(ctx).get_result(0)
         }
     }
@@ -105,74 +110,99 @@ fn lower_compare_operand(
 
 /// Materialized characters that escape, enter unknown calls or join other string values
 /// retain their ordinary representation. The existing append pass supplies ownership proof.
-pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
-    let mut status = IRStatus::Unchanged;
-    for function in functions(root, ctx) {
-        let body = operations(ctx, &function);
-        let mut order: HashMap<_, _> = body.iter().enumerate().map(|(i, &op)| (op, i)).collect();
-        let candidates: Vec<_> = body
-            .into_iter()
-            .filter_map(
-                |op| match Operation::get_op::<IntrinsicOp>(op, ctx)?.intrinsic(ctx)? {
-                    Intrinsic::StringCharAt => Some((op, Intrinsic::StringScalarAt)),
-                    Intrinsic::StringCharAtIndex => Some((op, Intrinsic::StringScalarAtIndex)),
-                    _ => None,
-                },
-            )
-            .collect();
-        for (op, kind) in candidates {
-            let character = op.deref(ctx).get_result(0);
-            let mut seen = HashSet::new();
-            let Some(mut users) = character
-                .uses(ctx)
+#[derive(Default)]
+pub(crate) struct ScalarizeCharacters {
+    order: HashMap<Ptr<Operation>, HashMap<Ptr<Operation>, usize>>,
+}
+
+impl ScalarizeCharacters {
+    fn matched_scalar_op(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
+        let kind = match Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))? {
+            Intrinsic::StringCharAt => Intrinsic::StringScalarAt,
+            Intrinsic::StringCharAtIndex => Intrinsic::StringScalarAtIndex,
+            _ => return None,
+        };
+        let character = op.deref(ctx).get_result(0);
+        let users = character.uses(ctx);
+        (!users.is_empty()
+            && users
                 .iter()
-                .map(|usage| usage.user_op())
-                .filter(|user| seen.insert(*user))
-                .map(|user| Some((user, classify_user(ctx, user, character)?)))
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            if users.is_empty() {
-                continue;
-            }
-            users.sort_unstable_by_key(|(user, _)| order[user]);
-            let args = op.deref(ctx).operands().collect();
-            let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
-            scalar.insert_before(ctx, op);
-            let scalar = scalar.deref(ctx).get_result(0);
-            for (user, action) in users {
-                let replacement = match action {
-                    UserAction::Compare { kind, lhs, rhs } => {
-                        let lhs = lower_compare_operand(ctx, user, scalar, lhs);
-                        let rhs = lower_compare_operand(ctx, user, scalar, rhs);
-                        CompareOp::new(ctx, kind, lhs, rhs).get_operation()
-                    }
-                    UserAction::Length => {
-                        IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
-                            .get_operation()
-                    }
-                    UserAction::Concat { prefix, append } => IntrinsicOp::new(
-                        ctx,
-                        if append {
-                            Intrinsic::StringScalarAppend
-                        } else {
-                            Intrinsic::StringScalarConcat
-                        },
-                        vec![prefix, scalar],
-                    )
-                    .get_operation(),
-                };
-                order.insert(replacement, order[&user]);
-                replacement.insert_before(ctx, user);
-                let old = user.deref(ctx).get_result(0);
-                let new = replacement.deref(ctx).get_result(0);
-                old.replace_all_uses_with(ctx, &new);
-                Operation::erase(user, ctx);
-            }
-            Operation::erase(op, ctx);
-            status = IRStatus::Changed;
-        }
+                .all(|usage| classify_user(ctx, usage.user_op(), character).is_some()))
+        .then_some(kind)
     }
-    status
+}
+
+impl MatchRewrite for ScalarizeCharacters {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        Self::matched_scalar_op(ctx, op).is_some()
+    }
+
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut MatchRewriter,
+        op: Ptr<Operation>,
+    ) -> Result<()> {
+        let Some(kind) = Self::matched_scalar_op(ctx, op) else {
+            return Ok(());
+        };
+        let Some(parent_op) = op.deref(ctx).get_parent_op(ctx) else {
+            return Ok(());
+        };
+        let Some(function) = Operation::get_op::<FuncOp>(parent_op, ctx) else {
+            return Ok(());
+        };
+        let character = op.deref(ctx).get_result(0);
+        let mut users: Vec<_> = character
+            .uses(ctx)
+            .iter()
+            .map(|usage| usage.user_op())
+            .collect();
+        let order = self
+            .order
+            .entry(function.get_operation())
+            .or_insert_with(|| {
+                operations(ctx, &function)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, op)| (op, index))
+                    .collect()
+            });
+        users.sort_unstable_by_key(|user| order[user]);
+        users.dedup();
+        let args = op.deref(ctx).operands().collect();
+        let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
+        rewriter.insert_operation(ctx, scalar);
+        let scalar = scalar.deref(ctx).get_result(0);
+        for user in users {
+            let action = classify_user(ctx, user, character).expect("validated character user");
+            rewriter.set_insertion_point_before_operation(user);
+            let replacement = match action {
+                UserAction::Compare { kind, lhs, rhs } => {
+                    let lhs = lower_compare_operand(ctx, rewriter, scalar, lhs);
+                    let rhs = lower_compare_operand(ctx, rewriter, scalar, rhs);
+                    CompareOp::new(ctx, kind, lhs, rhs).get_operation()
+                }
+                UserAction::Length => {
+                    IntrinsicOp::new(ctx, Intrinsic::StringScalarLength, vec![scalar])
+                        .get_operation()
+                }
+                UserAction::Concat { prefix, append } => IntrinsicOp::new(
+                    ctx,
+                    if append {
+                        Intrinsic::StringScalarAppend
+                    } else {
+                        Intrinsic::StringScalarConcat
+                    },
+                    vec![prefix, scalar],
+                )
+                .get_operation(),
+            };
+            order.insert(replacement, order[&user]);
+            rewriter.insert_operation(ctx, replacement);
+            rewriter.replace_operation(ctx, user, replacement);
+        }
+        rewriter.erase_operation(ctx, op);
+        Ok(())
+    }
 }

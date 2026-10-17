@@ -1,3 +1,7 @@
+mod effects;
+mod facts;
+mod optimization;
+
 use pliron::{
     context::{Context, Ptr},
     irbuild::IRStatus,
@@ -188,102 +192,15 @@ builtin.module @m {
             && printed.contains("next: perry.record <Node> }>"),
         "{printed}"
     );
-    Ok(())
-}
-
-#[test]
-fn dce_removes_unused_allocation_and_reads() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(
-        ctx,
-        &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.\"x\" : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
-        ),
-    );
-    assert_eq!(dce(module, ctx)?, IRStatus::Changed);
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(
-        !printed.contains("perry.alloc")
-            && !printed.contains("perry.field_get")
-            && !printed.contains("perry.binary"),
-        "{printed}"
-    );
-    Ok(())
-}
-
-#[test]
-fn dce_keeps_field_writes() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(
-        ctx,
-        &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.\"x\" = v;",
-        ),
-    );
-    dce(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(
-        printed.contains("perry.alloc") && printed.contains("perry.field_set"),
-        "{printed}"
-    );
-    Ok(())
-}
-
-/// The sum loop as the builder emits it: mutable `let` bindings as slots, no SSA joins.
-const SLOTTED_LOOP: &str = r#"
-builtin.module @m {
-  ^module():
-    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
-      ^entry(n: builtin.fp64):
-        i = perry.local : perry.slot <builtin.fp64>;
-        sum = perry.local : perry.slot <builtin.fp64>;
-        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
-        perry.store i = zero;
-        perry.store sum = zero;
-        perry.br ^header()
-      ^header():
-        iv = perry.load i : builtin.fp64;
-        more = perry.compare Lt iv, n : builtin.integer i1;
-        perry.cond_br if more ^body() else ^exit()
-      ^body():
-        ib = perry.load i : builtin.fp64;
-        sb = perry.load sum : builtin.fp64;
-        next_sum = perry.binary Add sb, ib : builtin.fp64;
-        perry.store sum = next_sum;
-        one = builtin.constant <builtin.double 1.0> : builtin.fp64;
-        next_i = perry.binary Add ib, one : builtin.fp64;
-        perry.store i = next_i;
-        perry.br ^header()
-      ^exit():
-        result = perry.load sum : builtin.fp64;
-        perry.return result
-    }
-}
-"#;
-
-#[test]
-fn mem2reg_turns_slots_into_block_arguments() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(ctx, SLOTTED_LOOP);
-    verify_operation(module, ctx)?;
-    let status =
-        pliron::opts::mem2reg::mem2reg(module, ctx, &mut pliron::pass::AnalysisManager::default())?;
-    assert_eq!(status, IRStatus::Changed);
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
-    for gone in ["perry.local", "perry.load", "perry.store"] {
-        assert!(!printed.contains(gone), "{gone} survived:\n{printed}");
-    }
-    let header = printed
-        .lines()
-        .find(|line| line.trim_start().starts_with("^header"))
-        .expect("header block");
-    assert_eq!(
-        header.matches("builtin.fp64").count(),
-        2,
-        "loop header must carry i and sum: {header}"
-    );
+    let function = crate::aggregates::functions(module, ctx)[0];
+    crate::calls::set_exported(ctx, &function);
+    let mut analyses = pliron::pass::AnalysisManager::default();
+    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(module, ctx)?;
+    let returned = crate::aggregates::operations(ctx, &function)
+        .into_iter()
+        .find(|&op| Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some())
+        .unwrap();
+    assert!(!facts.is_count(ctx, &function, returned.deref(ctx).get_operand(0)));
     Ok(())
 }
 
@@ -500,18 +417,6 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         ],
         "array_get, to_number and the rest are pure reads"
     );
-}
-
-#[test]
-fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(ctx, TEMPORARY_RECORDS);
-    crate::pipeline::canonicalize(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(!printed.contains("perry.alloc"), "{printed}");
-    assert!(!printed.contains("perry.field_get"), "{printed}");
-    assert!(!printed.contains("perry.local"), "{printed}");
-    Ok(())
 }
 
 #[test]

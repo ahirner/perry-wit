@@ -1,0 +1,67 @@
+{
+  "compiler_revision": "2f606a2a075b025f681dbf9eda5b8982353199a8",
+  "compiler_source_changes": false,
+  "comparison_harness_sha256": "01dd5bbe3e3995f620ce0112c598dcdace8a14ecd97aa07a03688ae0aca4fef5",
+  "comparison_harness_changes": "Preserve captured workloads and baseline measurements; add optimizer/helper counts, compilation timing, input provenance checks, and require successful 64-bit compilation. Declare stderr for the async fixture's existing exception fallback, as required by the typed-error contract. Original baseline metrics and source fixture hashes are unchanged. Report consumed instantiation and first-invocation fuel separately; retain the historical fuel measurement and captured baseline unchanged. Extract comparison into a private gate module, borrow workload names and check their set once. Import perry-mir's canonicalize from its crate-root API. The comparison hash covers the listed harness files concatenated in order; capture hashes, measured workloads, baseline metrics and the 105% limits are unchanged.",
+  "harness_changes": "Added core sizes and optimization fixtures; replaced TCP HTTP transport with a fixed in-process response before capture.",
+  "host": "macOS-27.0-arm64-arm-64bit",
+  "rust": "1.98.1",
+  "wasmtime": "49.0.2",
+  "pliron": "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97",
+  "perry": "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa",
+  "command": "nix develop -c env PERRY_BENCH_REPORT=baseline.json cargo test --locked --test benchmark -- --include-ignored --nocapture",
+  "inputs_sha256": {
+    "tests/benchmark.rs": "2d2986e34ec228fd2707f378c1a7addf7b99eff14bb12cf4692e41afcb984bfb",
+    "tests/fixtures/bounded_response.ts": "1c241eb9c11f18e7e3519eadaa3651b057a3fc23e5670dd6e552cc6d7f24aaba",
+    "examples/merge_task/index.ts": "b75f1fca889dd47bb7c804492e7fb692d18e993b8c0c2f2bde783a5cbdad44d5",
+    "examples/merge_task/world.wit": "9dfd4b7831ed20e1fb6112ee90b6480d4e619faeca20ec7f9b144f4475cf0c27",
+    "template/src/index.ts": "b99d15ba6c19757a26ce78e3164b3f4c4f7a8383316f2dc521d94b4eafc97802",
+    "template/wit/world.wit": "7f9999dc0d5d7fbb0e5b48dbd77103c70a7abb2dd62b85fa1c2e52be85a01c29",
+    "Cargo.lock": "ba12ee1a710ca502f223298fea5ad9323df1c68d4f1b04c2db97f895009c8f95",
+    "flake.lock": "3df1dd6349d24224c0640090e83f27123e7693f123e86bb08668e4d901b9f9e6",
+    "rust-toolchain.toml": "57a3594d0a82d0cb3fcd40aad07c1aa4d7ea43d09e1ff4a1e2f65c0bf8d5a41c",
+    "tests/fixtures/optimization/add.ts": "94abcdada492dda13bf7b3f4af2eb65ea14760c7577b7d0f4e276d855e33b01f",
+    "tests/fixtures/optimization/add_bigint.ts": "ca81d3fa154aa868a76e429101aa8970f06dd97a901c2846c98cc196e8d426a5",
+    "tests/fixtures/optimization/async.ts": "ac11ac535e2b812df6b4268db887be4ce4203cfdca69ae3a7c6b4da6a27f142c",
+    "tests/fixtures/optimization/recursive.ts": "5ebc559f73a22f6993ebc5b877c294d6583ed78f8a599a955db7f95a7bb3b825",
+    "tests/fixtures/optimization/shared.ts": "d3ec71305c9578182532a03024c2e8e0cc58e7422e6679bd31ed315814f2a5dd",
+    "tests/fixtures/optimization/unwrap.ts": "4f598faffa95041f98c7534dc5ea1c56bf6c3d233f3e02f01709433db8007d97"
+  },
+  "measurement": {
+    "core": "names retained",
+    "component": "stripped",
+    "memory_checks": "separate instrumented execution for microbenchmark counters",
+    "timing_samples": 5,
+    "http": "4 MiB in a single host Full body; no socket or transport scheduling",
+    "initialization_fuel": "Consumed Wasmtime fuel during instantiation, before export calls; module initialization triggered by a first export remains invocation fuel.",
+    "invocation_fuel": "Consumed fuel for the first export call on a fresh instance, including its post-return cleanup; component timing uses a separate warm-up and samples.",
+    "fuel": "Historical field: warmed component call; first core optimization-fixture call; instantiation plus first raw microbenchmark call."
+  },
+  "scalar_nix": {
+    "compiler": "/nix/store/gmqp7ba5rwd1ykgzfjiwm9mfsryscfxs-perry-wit-0.1.0/bin/perry-wit",
+    "options": [
+      "--world",
+      "integers",
+      "--core-only",
+      "--keep-names"
+    ],
+    "typescript": "export function add(x: number, y: number): number { return x + y; }\nexport function add2(x: number, y: number): number { return x + y; }\n",
+    "wit": "package perry:demo@0.1.0;\nworld integers { export add: func(x: s32, y: s32) -> s32; }\nworld floats { export add2: func(x: f64, y: f64) -> f64; }\n",
+    "core_bytes": 2975,
+    "sha256": "57d87ad675d2993c544d6f1885894828aaea0556219981b32054997e478c7482",
+    "defined_functions": 20,
+    "memories": 1,
+    "exports": [
+      "add",
+      "cabi_post_add",
+      "cabi_realloc",
+      "memory"
+    ],
+    "f64_add": 1,
+    "plan_baseline_core_bytes": 2963
+  },
+  "comparison_harness_files": [
+    "tests/benchmark.rs",
+    "tests/benchmark/gate.rs"
+  ]
+}

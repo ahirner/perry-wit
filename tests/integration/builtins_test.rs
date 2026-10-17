@@ -3,7 +3,7 @@
 //! scalar indices, `Uint8Array` copies and `JSON` escapes. Rounding, epoch reads, encoded
 //! subviews and case mapping are conformance contracts or Node differential tests elsewhere.
 use perry_codegen::status_code;
-use perry_mir::attrs::ErrorKind;
+use perry_mir::ErrorKind;
 use wasmtime::Val;
 
 use crate::core_program::Program;

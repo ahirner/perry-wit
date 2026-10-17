@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Result, bail, ensure};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
-use perry_mir::calls::is_exported;
+use perry_mir::is_exported;
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
@@ -17,6 +17,84 @@ use pliron::{
 };
 use std::collections::BTreeMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+
+/// Validate source number/bigint distinctions before exposing integer domains to MIR.
+pub(crate) fn constrain_numbers(
+    ctx: &mut Context,
+    mir: &ModuleOp,
+    exports: &[Export],
+) -> Result<()> {
+    use pliron::{
+        builtin::{
+            type_interfaces::FunctionTypeInterface,
+            types::{FP64Type, FunctionType},
+        },
+        r#type::TypedHandle,
+    };
+    let functions = module_functions(ctx, mir);
+    for export in exports {
+        let Some(function) = functions
+            .iter()
+            .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
+        else {
+            continue;
+        };
+        let existing =
+            perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
+        let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
+        if args.len() != export.params.len()
+            || results.len() != usize::from(export.result.is_some())
+        {
+            continue;
+        }
+        let mut constrained = false;
+        for (source, abi) in args
+            .iter_mut()
+            .zip(&export.params)
+            .chain(results.iter_mut().zip(export.result.iter()))
+        {
+            let Some(integer) = abi.integer_type(ctx) else {
+                continue;
+            };
+            let wide = matches!(abi, AbiType::S64 | AbiType::U64);
+            let is_wide_int = source
+                .deref(ctx)
+                .downcast_ref::<pliron::builtin::types::IntegerType>()
+                .is_some_and(|int| int.width() == 64);
+            ensure!(
+                !wide || source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int,
+                "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
+            );
+            if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
+                || (!wide
+                    && (source.deref(ctx).is::<FP64Type>()
+                        || source
+                            .deref(ctx)
+                            .is::<pliron::builtin::types::IntegerType>()))
+            {
+                *source = integer;
+                constrained = true;
+            }
+        }
+        if constrained {
+            perry_mir::constrain_signature(ctx, function, args, results);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn specialized_implementations(ctx: &Context, mir: &ModuleOp, exports: &mut [Export]) {
+    let functions = module_functions(ctx, mir);
+    for export in exports {
+        if let Some(function) = functions
+            .iter()
+            .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
+        {
+            export.function = perry_mir::specialized_implementation(ctx, function).to_string();
+        }
+    }
+}
 
 /// The component exports of `world`, each bound to the exported TypeScript function with the
 /// SDK's implementation name. Missing implementations are errors; extra exports are ignored.

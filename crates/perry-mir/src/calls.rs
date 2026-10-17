@@ -219,51 +219,96 @@ impl crate::exceptions::MayThrowInterface for AwaitOp {
     }
 }
 
-/// Function attribute marking a module export; each call of one is a task (D3, D5).
-pub(crate) const EXPORT_KEY: &str = "perry_export";
+pliron::dict_key!(FUNCTION_META, "perry_function_meta");
 
-/// Mark `function` as exported from the component.
-pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
+fn update_meta(
+    ctx: &mut Context,
+    function: &FuncOp,
+    update: impl FnOnce(&mut crate::attrs::FunctionMeta),
+) {
+    let mut meta = function_meta(ctx, function);
+    update(&mut meta);
     function
         .get_operation()
         .deref_mut(ctx)
         .attributes
-        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+        .set(FUNCTION_META.clone(), meta);
+}
+
+/// Read the function's [crate::attrs::FunctionMeta] flags.
+pub(crate) fn function_meta(ctx: &Context, function: &FuncOp) -> crate::attrs::FunctionMeta {
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<crate::attrs::FunctionMeta>(&FUNCTION_META)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Mark `function` as exported from the component; each call of one is a task (D3, D5).
+pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
+    update_meta(ctx, function, |m| m.exported = true);
 }
 
 /// Whether `function` is exported from the component.
 pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
-    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&key)
-        .is_some_and(|flag| bool::from(flag.clone()))
+    function_meta(ctx, function).exported
 }
 
-/// Function attribute marking an `async` function. Its body may `perry.await`; callers start it
-/// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
-pub(crate) const ASYNC_KEY: &str = "perry_async";
+/// Mark `function` as a specialized implementation entry created by ProgramFacts.
+pub(crate) fn set_specialized_entry(ctx: &mut Context, function: &FuncOp) {
+    update_meta(ctx, function, |m| m.specialized_entry = true);
+}
 
+/// Whether `function` is a specialized implementation entry.
+pub(crate) fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
+    function_meta(ctx, function).specialized_entry
+}
+
+/// Request one uninterrupted construction scope. ProgramFacts verifies the closed
+/// synchronous call group and each operation before codegen omits internal safe points.
+pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
+    update_meta(ctx, function, |m| m.atomic_construction = true);
+}
+
+/// Whether `function` requested an uninterrupted construction scope.
+pub(crate) fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
+    function_meta(ctx, function).atomic_construction
+}
+
+/// Mark `function` as an `async` function. Its body may `perry.await`; callers start it
+/// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
 pub fn set_async(ctx: &mut Context, function: &FuncOp) {
-    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
+    update_meta(ctx, function, |m| m.asynchronous = true);
+}
+
+pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
+    function_meta(ctx, function).asynchronous
+}
+
+pliron::dict_key!(JSON_DECODER_KIND, "perry_json_decoder_kind");
+
+/// Mark `function` as a compiler-generated JSON decoder with semantic `kind`.
+pub fn set_json_decoder(ctx: &mut Context, function: &FuncOp, kind: crate::attrs::JsonDecoderKind) {
     function
         .get_operation()
         .deref_mut(ctx)
         .attributes
-        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+        .set(JSON_DECODER_KIND.clone(), kind);
 }
 
-pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
-    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
+/// The semantic kind of a compiler-generated JSON decoder, if `function` is one.
+pub(crate) fn json_decoder_kind(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Option<crate::attrs::JsonDecoderKind> {
     function
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<pliron::builtin::attributes::BoolAttr>(&key)
-        .is_some_and(|flag| bool::from(flag.clone()))
+        .get::<crate::attrs::JsonDecoderKind>(&JSON_DECODER_KIND)
+        .copied()
 }
 
 #[derive(Debug, Error)]

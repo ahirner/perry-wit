@@ -6,7 +6,7 @@ mod format;
 #[path = "parse.rs"]
 mod parse;
 
-use ixdtf::records::UtcOffsetRecordOrZ;
+use parse::Offset;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 const NANOS_PER_DAY: i128 = 86_400 * NANOS_PER_SECOND;
@@ -54,11 +54,12 @@ impl Instant {
     /// Calendar and named-zone annotations are outside this supported subset.
     pub fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
-        let date = parsed.date.ok_or(Error::Syntax)?;
         let time = parsed.time.ok_or(Error::Syntax)?;
         let offset = parsed.offset.ok_or(Error::Syntax)?;
-        let local = parse::date_time(date, time)?;
-        Self::from_epoch_nanoseconds(local.position() - parse::offset_nanoseconds(offset)?)
+        let local = parse::date_time(parsed.date, time)?;
+        Self::from_epoch_nanoseconds(
+            local.position() - i128::from(parse::offset_nanoseconds(offset)),
+        )
     }
 
     /// UTC interchange: YYYY-MM-DDTHH:mm:ss[.1-9 digits]Z, without leap seconds.
@@ -127,16 +128,10 @@ impl PlainDateTime {
     /// Temporal.PlainDateTime.from: numeric offsets are ignored; Z is rejected.
     pub fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
-        if parsed.offset == Some(UtcOffsetRecordOrZ::Z) {
+        if parsed.offset == Some(Offset::Z) {
             return Err(Error::Syntax);
         }
-        if let Some(offset) = parsed.offset {
-            parse::offset_nanoseconds(offset)?;
-        }
-        parse::date_time(
-            parsed.date.ok_or(Error::Syntax)?,
-            parsed.time.unwrap_or_default(),
-        )
+        parse::date_time(parsed.date, parsed.time.unwrap_or_default())
     }
 
     /// Temporal.PlainDate.from: validates like PlainDateTime, then discards the time.
@@ -148,11 +143,118 @@ impl PlainDateTime {
         })
     }
 
+    /// Temporal.PlainDate.from({ year, month, day }, { overflow }) construction.
+    pub fn from_fields(year: f64, month: f64, day: f64, constrain: bool) -> Result<Self, Error> {
+        if !year.is_finite() || !month.is_finite() || !day.is_finite() {
+            return Err(Error::Range);
+        }
+        if year <= f64::from(datealgo::YEAR_MIN) - 1.0
+            || year >= f64::from(datealgo::YEAR_MAX) + 1.0
+            || month < 1.0
+            || day < 1.0
+        {
+            return Err(Error::Range);
+        }
+        let y = year as i32;
+        let month = if constrain {
+            if month >= 12.0 { 12 } else { month as u8 }
+        } else if month < 13.0 {
+            month as u8
+        } else {
+            return Err(Error::Range);
+        };
+        let max_day = datealgo::days_in_month(y, month);
+        let day = if constrain {
+            if day >= f64::from(max_day) {
+                max_day
+            } else {
+                day as u8
+            }
+        } else if day < f64::from(max_day) + 1.0 {
+            day as u8
+        } else {
+            return Err(Error::Range);
+        };
+        Self {
+            day: datealgo::date_to_rd((y, month, day)),
+            nanosecond: 0,
+        }
+        .checked()
+    }
+
     /// The supported Temporal.add({days}) operation, preserving all time fields.
     pub fn add_days(self, days: i64) -> Result<Self, Error> {
         let day = i64::from(self.day).checked_add(days).ok_or(Error::Range)?;
         let day = i32::try_from(day).map_err(|_| Error::Range)?;
         Self { day, ..self }.checked()
+    }
+
+    /// Calendar addition for years, months, weeks, and days.
+    pub fn add_calendar(
+        self,
+        years: i64,
+        months: i64,
+        weeks: i64,
+        days: i64,
+        constrain: bool,
+    ) -> Result<Self, Error> {
+        let mut base = self;
+        if years != 0 || months != 0 {
+            let (y, m, d) = self.date();
+            let total_months = i64::from(y)
+                .checked_mul(12)
+                .and_then(|ym| ym.checked_add(i64::from(m) - 1))
+                .and_then(|ym| ym.checked_add(years.checked_mul(12)?))
+                .and_then(|ym| ym.checked_add(months))
+                .ok_or(Error::Range)?;
+            let new_y = i32::try_from(total_months.div_euclid(12)).map_err(|_| Error::Range)?;
+            let new_m = (total_months.rem_euclid(12) + 1) as u8;
+            if !(datealgo::YEAR_MIN..=datealgo::YEAR_MAX).contains(&new_y) {
+                return Err(Error::Range);
+            }
+            let max_d = datealgo::days_in_month(new_y, new_m);
+            let new_d = if d > max_d {
+                if constrain {
+                    max_d
+                } else {
+                    return Err(Error::Range);
+                }
+            } else {
+                d
+            };
+            base = Self {
+                day: datealgo::date_to_rd((new_y, new_m, new_d)),
+                nanosecond: self.nanosecond,
+            }
+            .checked()?;
+        }
+        let total_days = weeks
+            .checked_mul(7)
+            .and_then(|w| w.checked_add(days))
+            .ok_or(Error::Range)?;
+        base.add_days(total_days)
+    }
+
+    /// Signed `(months, remaining_days)` from `self` until `other` in the ISO 8601 calendar.
+    pub fn until_months_and_days(self, other: Self) -> (i32, i32) {
+        let sign = (other.day - self.day).signum();
+        if sign == 0 {
+            return (0, 0);
+        }
+        let (y1, m1, _) = self.date();
+        let (y2, m2, _) = other.date();
+        let mut months = (y2 - y1) * 12 + (i32::from(m2) - i32::from(m1));
+        let advance = |m: i32| -> i32 {
+            self.add_calendar(0, i64::from(m), 0, 0, true)
+                .map_or(other.day, |d| d.day)
+        };
+        while (other.day - advance(months)) * sign < 0 {
+            months -= sign;
+        }
+        while (other.day - advance(months + sign)) * sign >= 0 {
+            months += sign;
+        }
+        (months, other.day - advance(months))
     }
 
     pub fn date(self) -> (i32, u8, u8) {
@@ -182,8 +284,11 @@ impl PlainDateTime {
     }
 
     fn checked(self) -> Result<Self, Error> {
-        let limit = INSTANT_LIMIT + NANOS_PER_DAY;
-        if self.position() <= -limit || self.position() >= limit {
+        const DAY_LIMIT: i32 = 100_000_001;
+        if self.day < -DAY_LIMIT
+            || (self.day == -DAY_LIMIT && self.nanosecond == 0)
+            || self.day >= DAY_LIMIT
+        {
             return Err(Error::Range);
         }
         Ok(self)

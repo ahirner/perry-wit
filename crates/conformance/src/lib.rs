@@ -1,4 +1,6 @@
 //! Executable contracts for the compiler's declared static TypeScript domains.
+pub mod aggregates;
+pub mod collections;
 pub mod execution;
 pub mod program;
 pub mod registry;

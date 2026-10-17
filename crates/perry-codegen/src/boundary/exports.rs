@@ -6,8 +6,10 @@ pub(crate) fn export(
     ctx: &mut Context,
     state: &mut ModuleState,
     function: &FuncOp,
+    lowered: &FuncOp,
     export: &Export,
 ) -> Result<()> {
+    let scope = Scope::for_export(state, export, &function.get_symbol_name(ctx));
     let is_async = state
         .async_functions
         .contains(&function.get_symbol_name(ctx));
@@ -73,7 +75,9 @@ pub(crate) fn export(
     flat.reverse();
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
-    b.task_enter(ctx);
+    if scope == Scope::Task {
+        b.task_enter(ctx);
+    }
     let initialization = b.initialization_status(ctx);
     let mut joined_types = mir_results
         .iter()
@@ -96,7 +100,7 @@ pub(crate) fn export(
         joined
     });
     let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
-    let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
+    let throws = b.state.may_throw(&function.get_symbol_name(ctx));
     let mut call_results = mir_results
         .iter()
         .map(|t| wasm_type(ctx, *t))
@@ -168,7 +172,9 @@ pub(crate) fn export(
     )?;
     let returned = if let Some(completion) = completion {
         let ty = completion.result;
-        let payload = mir_results.first().map(|ty| (*ty, values[0]));
+        let payload = mir_results
+            .first()
+            .map(|ty| (*ty, Carriers::Scalar(values[0])));
         if flat_result_len == 1 {
             b.completion_flat(ctx, completion, 0, payload)?
         } else {
@@ -180,12 +186,14 @@ pub(crate) fn export(
     } else {
         match (&export.result, mir_results.first()) {
             (Some(ty), Some(mir_ty)) if flat_result_len == 1 => {
-                vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
+                let mut flat = Vec::new();
+                b.lower_flat_values(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), &mut flat)?;
+                flat
             }
             (Some(ty), Some(mir_ty)) => {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);
-                b.lower_store(ctx, ty, *mir_ty, values[0], area, 0)?;
+                b.lower_store(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), area, 0)?;
                 vec![area]
             }
             _ => vec![],
@@ -196,7 +204,11 @@ pub(crate) fn export(
     let ret = ReturnOp::new(ctx, returned).get_operation();
     b.insert(ctx, ret);
     let state = b.state;
-    state.wasm.append_operation(ctx, glue.get_operation(), 0);
+    crate::module::append_export(ctx, state, &glue, lowered, &export.core_name);
+
+    if scope == Scope::Direct {
+        return Ok(());
+    }
 
     // `cabi_post_<export>` receives the core results and ends the task.
     let post_name = format!("cabi_post_{}", export.core_name);
@@ -430,7 +442,7 @@ fn async_export(
                 let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
                 b.insert(ctx, ret);
             } else {
-                if uses_io {
+                if uses_io || b.state.reports_rejection {
                     b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
                     let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
                     let closed = b.new_block(ctx, vec![]);
@@ -471,8 +483,8 @@ fn async_export(
         if let Some(outcome) = outcome {
             flat.push(outcome);
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
-            let kind = slot_kind(ctx, *mir_ty)?;
-            let value = b.load(ctx, kind, promise, perry_abi::layout::promise::VALUE);
+            let value =
+                b.load_slot_value(ctx, promise, perry_abi::layout::promise::VALUE, *mir_ty)?;
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.alloc(ctx, size);
@@ -658,7 +670,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);
         b.br(ctx, next, vec![]);
         b.block = other;
-        if b.state.uses_io {
+        if b.state.uses_io || b.state.reports_rejection {
             b.runtime(ctx, Runtime::IoEvent, vec![event, handle, subtask_state]);
         }
         b.br(ctx, next, vec![]);
@@ -677,24 +689,4 @@ fn async_export(
             .append_operation(ctx, callback.get_operation(), 0);
     }
     Ok(())
-}
-
-/// `cabi_realloc`, through which the host lowers strings and lists into guest memory.
-pub(crate) fn realloc(ctx: &mut Context, state: &mut ModuleState) {
-    let i32 = i32_type(ctx);
-    let ty = FunctionType::get(ctx, vec![i32; 4], vec![i32]);
-    let function = FuncOp::new(ctx, pliron::ident!("cabi_realloc"), ty);
-    set_export(ctx, &function, "cabi_realloc");
-    let args: Vec<_> = function
-        .get_entry_block(ctx)
-        .deref(ctx)
-        .arguments()
-        .collect();
-    let mut b = FunctionLowering::glue(state, ctx, &function);
-    let block = b.runtime(ctx, Runtime::CabiRealloc, args);
-    let ret = ReturnOp::new(ctx, vec![block]).get_operation();
-    b.insert(ctx, ret);
-    b.state
-        .wasm
-        .append_operation(ctx, function.get_operation(), 0);
 }

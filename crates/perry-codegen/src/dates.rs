@@ -1,7 +1,7 @@
 //! Boxed UTC dates and their calendar helper calls.
 use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use anyhow::{Result, bail};
-use perry_mir::intrinsics::Intrinsic;
+use perry_mir::Intrinsic;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 

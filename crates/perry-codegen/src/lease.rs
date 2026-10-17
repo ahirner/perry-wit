@@ -20,10 +20,8 @@
 //!
 //! Without the proof the operations allocate fresh objects, which is always correct.
 use perry_mir::{
-    calls::AwaitOp,
-    intrinsics::{Intrinsic, IntrinsicOp},
-    optional::{IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp, WrapOp},
-    scalar::CompareOp,
+    AwaitOp, CompareOp, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp,
+    WrapOp,
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -37,7 +35,7 @@ use pliron::{
     operation::Operation,
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Classes of leasable operations: each operation's objects are reused by the next call of the
 /// same class.
@@ -48,7 +46,11 @@ fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
 }
 
 /// The leased operations of `function`.
-pub(crate) fn leased(ctx: &Context, function: &FuncOp) -> HashSet<Ptr<Operation>> {
+pub(crate) fn leased(
+    ctx: &Context,
+    function: &FuncOp,
+    live: &perry_mir::LiveValues,
+) -> HashSet<Ptr<Operation>> {
     let ops: Vec<Ptr<Operation>> = function
         .get_region(ctx)
         .deref(ctx)
@@ -56,7 +58,6 @@ pub(crate) fn leased(ctx: &Context, function: &FuncOp) -> HashSet<Ptr<Operation>
         .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
         .collect();
     let mut leased = HashSet::new();
-    let mut live_after = None;
     for class in CLASSES {
         let members: Vec<_> = ops
             .iter()
@@ -69,11 +70,11 @@ pub(crate) fn leased(ctx: &Context, function: &FuncOp) -> HashSet<Ptr<Operation>
         let Some(derived) = derived(ctx, &members) else {
             continue;
         };
-        let live = live_after.get_or_insert_with(|| live_after_ops(ctx, function));
         let dead = members.iter().all(|op| {
             let result = op.deref(ctx).get_result(0);
-            live.get(op)
-                .is_none_or(|values| values.iter().all(|v| *v == result || !derived.contains(v)))
+            live.after(*op)
+                .values()
+                .all(|v| v == result || !derived.contains(&v))
         });
         if dead {
             leased.extend(members);
@@ -152,56 +153,4 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
         }
     }
     Some(derived)
-}
-
-/// The values live right after each operation (backward liveness over the CFG).
-pub(super) fn live_after_ops(
-    ctx: &Context,
-    function: &FuncOp,
-) -> HashMap<Ptr<Operation>, HashSet<Value>> {
-    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-    let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
-    let live_out = |live_in: &HashMap<Ptr<BasicBlock>, HashSet<Value>>, block: Ptr<BasicBlock>| {
-        let mut live = HashSet::new();
-        for succ in block.deref(ctx).succs(ctx) {
-            live.extend(live_in.get(&succ).into_iter().flatten().copied());
-        }
-        live
-    };
-    loop {
-        let mut changed = false;
-        for &block in blocks.iter().rev() {
-            let mut live = live_out(&live_in, block);
-            let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-            for op in ops.iter().rev() {
-                for result in op.deref(ctx).results() {
-                    live.remove(&result);
-                }
-                live.extend(op.deref(ctx).operands());
-            }
-            for argument in block.deref(ctx).arguments() {
-                live.remove(&argument);
-            }
-            if live_in.get(&block) != Some(&live) {
-                live_in.insert(block, live);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut after = HashMap::new();
-    for &block in &blocks {
-        let mut live = live_out(&live_in, block);
-        let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-        for op in ops.iter().rev() {
-            after.insert(*op, live.clone());
-            for result in op.deref(ctx).results() {
-                live.remove(&result);
-            }
-            live.extend(op.deref(ctx).operands());
-        }
-    }
-    after
 }

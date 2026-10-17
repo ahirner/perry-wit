@@ -126,6 +126,31 @@ pub(crate) unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, o
 }
 
 /// # Safety
+/// Output must be exclusively guest-owned outside helper stack/data during this call.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
+    year: f64,
+    month: f64,
+    day: f64,
+    constrain: u32,
+    output: u32,
+) -> u64 {
+    // SAFETY: no input range; output ownership is the caller's contract.
+    unsafe {
+        transform(0, 0, output, 16, |_, output| {
+            if constrain > 1 {
+                return Err(Error::Range);
+            }
+            write_plain(
+                PlainDateTime::from_fields(year, month, day, constrain != 0)?,
+                output,
+            );
+            Ok(16)
+        })
+    }
+}
+
+/// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32) -> u64 {
@@ -138,6 +163,83 @@ pub(crate) unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, outpu
             write_plain(plain(input)?.add_days(days as i64)?, output);
             Ok(16)
         })
+    }
+}
+
+/// # Safety
+/// Same caller-owned, disjoint memory contract as time_instant_parse.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn time_plain_add_calendar(
+    input: u32,
+    years: f64,
+    months: f64,
+    weeks: f64,
+    days: f64,
+    constrain: u32,
+    output: u32,
+) -> u64 {
+    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
+    unsafe {
+        transform(input, 16, output, 16, |input, output| {
+            if constrain > 1 {
+                return Err(Error::Range);
+            }
+            let mut sign = 0i64;
+            let mut to_int = |v: f64| -> Result<i64, Error> {
+                if !v.is_finite() || v.abs() > 200_000_002.0 || v != (v as i64) as f64 {
+                    return Err(Error::Range);
+                }
+                let n = v as i64;
+                if n != 0 {
+                    let s = n.signum();
+                    if sign != 0 && sign != s {
+                        return Err(Error::Range);
+                    }
+                    sign = s;
+                }
+                Ok(n)
+            };
+            let y = to_int(years)?;
+            let m = to_int(months)?;
+            let w = to_int(weeks)?;
+            let d = to_int(days)?;
+            write_plain(
+                plain(input)?.add_calendar(y, m, w, d, constrain != 0)?,
+                output,
+            );
+            Ok(16)
+        })
+    }
+}
+
+/// # Safety
+/// Inputs must be initialized immutable guest-owned storage outside helper stack/data.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn time_plain_until_part(
+    a: u32,
+    b: u32,
+    largest_unit: u32,
+    part: u32,
+) -> f64 {
+    let (Ok(a), Ok(b)) = (GuestRange::new(a, 16), GuestRange::new(b, 16)) else {
+        return f64::NAN;
+    };
+    // SAFETY: checked bounds and caller's immutable ownership contract.
+    let (Ok(a), Ok(b)) = (plain(unsafe { a.bytes() }), plain(unsafe { b.bytes() })) else {
+        return f64::NAN;
+    };
+    let (months, rem_days) = a.until_months_and_days(b);
+    let (years, months) = if largest_unit == 3 {
+        (months / 12, months % 12)
+    } else {
+        (0, months)
+    };
+    match part {
+        0 => f64::from(years),
+        1 => f64::from(months),
+        2 => 0.0,
+        3 => f64::from(rem_days),
+        _ => f64::NAN,
     }
 }
 

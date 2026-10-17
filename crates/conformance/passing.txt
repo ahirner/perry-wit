@@ -48,3 +48,5 @@ wasi.http.handler
 ecma.error.values
 web.streams.byob_reader
 web.fetch.bounded_byob_body
+ecma.aggregate.specialization
+ecma.collection.iterators

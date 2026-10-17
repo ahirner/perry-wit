@@ -2,14 +2,29 @@
 use super::*;
 
 pub(super) fn merge_absence(
-    left: Option<perry_mir::attrs::Absence>,
-    right: Option<perry_mir::attrs::Absence>,
-) -> Option<perry_mir::attrs::Absence> {
+    left: Option<perry_mir::Absence>,
+    right: Option<perry_mir::Absence>,
+) -> Option<perry_mir::Absence> {
     match (left, right) {
         (None, other) | (other, None) => other,
         (Some(left), Some(right)) if left == right => Some(left),
-        (Some(_), Some(_)) => Some(perry_mir::attrs::Absence::Both),
+        (Some(_), Some(_)) => Some(perry_mir::Absence::Both),
     }
+}
+
+/// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
+/// from `T | null`.
+pub(super) fn admitting(
+    ctx: &mut Context,
+    ty: TypeHandle,
+    state: perry_mir::Absence,
+) -> TypeHandle {
+    let states = match absence(ctx, ty) {
+        Some(existing) if existing != state => perry_mir::Absence::Both,
+        _ => state,
+    };
+    let inner = optional_value(ctx, ty).unwrap_or(ty);
+    perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,20 +65,61 @@ pub(super) enum Kind {
     PlainDateTime,
 }
 
+impl Kind {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Kind::BigInt => "bigint",
+            Kind::Url => "URL",
+            Kind::SearchParams => "URLSearchParams",
+            Kind::Number => "number",
+            Kind::Boolean => "boolean",
+            Kind::String => "string",
+            Kind::Record => "record",
+            Kind::Variant => "variant",
+            Kind::NumberString => "number | string",
+            Kind::Resource => "WIT resource",
+            Kind::Array => "array",
+            Kind::Exception => "Error",
+            Kind::Bytes => "Uint8Array",
+            Kind::ByteBuffer => "ArrayBuffer",
+            Kind::ByobReader => "ReadableStreamBYOBReader",
+            Kind::Json => "JSON value",
+            Kind::Date => "Date",
+            Kind::Decoder => "TextDecoder",
+            Kind::Regex => "RegExp",
+            Kind::Settled => "PromiseSettlementResult",
+            Kind::Stats => "Stats",
+            Kind::Headers => "Headers",
+            Kind::Response => "Response",
+            Kind::Request => "Request",
+            Kind::Writable => "WritableStream",
+            Kind::Writer => "WritableStreamDefaultWriter",
+            Kind::Readable => "ReadableStream",
+            Kind::Reader => "ReadableStreamDefaultReader",
+            Kind::ReadResult => "ReadableStreamReadResult",
+            Kind::Incoming => "IncomingRequest",
+            Kind::Abort => "AbortController",
+            Kind::Instant => "Temporal.Instant",
+            Kind::PlainDate => "Temporal.PlainDate",
+            Kind::PlainDateTime => "Temporal.PlainDateTime",
+        }
+    }
+}
+
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
-    if ty.is::<perry_mir::types::BigIntType>() {
+    if ty.is::<perry_mir::BigIntType>() {
         Ok(Kind::BigInt)
     } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
     } else if ty.is::<StringType>() {
         Ok(Kind::String)
-    } else if ty.is::<perry_mir::types::ResourceType>() {
+    } else if ty.is::<perry_mir::ResourceType>() {
         Ok(Kind::Resource)
-    } else if ty.is::<perry_mir::types::NumberStringType>() {
+    } else if ty.is::<perry_mir::NumberStringType>() {
         Ok(Kind::NumberString)
-    } else if ty.is::<perry_mir::types::VariantType>() {
+    } else if ty.is::<perry_mir::VariantType>() {
         Ok(Kind::Variant)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
@@ -73,15 +129,15 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Exception)
     } else if ty.is::<BytesType>() {
         Ok(Kind::Bytes)
-    } else if ty.is::<perry_mir::types::UrlType>() {
+    } else if ty.is::<perry_mir::UrlType>() {
         Ok(Kind::Url)
-    } else if ty.is::<perry_mir::types::SearchParamsType>() {
+    } else if ty.is::<perry_mir::SearchParamsType>() {
         Ok(Kind::SearchParams)
     } else if ty.is::<JsonType>() {
         Ok(Kind::Json)
-    } else if ty.is::<perry_mir::types::RegexType>() {
+    } else if ty.is::<perry_mir::RegexType>() {
         Ok(Kind::Regex)
-    } else if ty.is::<perry_mir::types::DecoderType>() {
+    } else if ty.is::<perry_mir::DecoderType>() {
         Ok(Kind::Decoder)
     } else if ty.is::<DateType>() {
         Ok(Kind::Date)
@@ -101,9 +157,9 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Writer)
     } else if ty.is::<ReadableType>() {
         Ok(Kind::Readable)
-    } else if ty.is::<perry_mir::types::ByteBufferType>() {
+    } else if ty.is::<perry_mir::ByteBufferType>() {
         Ok(Kind::ByteBuffer)
-    } else if ty.is::<perry_mir::types::ByobReaderType>() {
+    } else if ty.is::<perry_mir::ByobReaderType>() {
         Ok(Kind::ByobReader)
     } else if ty.is::<ReaderType>() {
         Ok(Kind::Reader)
@@ -119,6 +175,11 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Incoming)
     } else if ty.is::<ReadResultType>() {
         Ok(Kind::ReadResult)
+    } else if ty
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|int| int.width() == 64)
+    {
+        Ok(Kind::BigInt)
     } else if ty
         .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
@@ -161,6 +222,30 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.append_value(ctx, &op))
     }
 
+    /// View `value` with `undefined` excluded from its absence states (after a `!== undefined` check).
+    pub(super) fn strip_undefined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        match optional_parts(ctx, ty) {
+            Some((_, perry_mir::Absence::Undefined)) => self.defined(ctx, value),
+            Some((inner, perry_mir::Absence::Both)) => {
+                let target =
+                    perry_mir::OptionalType::get_with(ctx, inner, perry_mir::Absence::Null).into();
+                let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                self.choose(
+                    ctx,
+                    target,
+                    is_null,
+                    |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target))),
+                    |b, ctx| {
+                        let defined = b.defined(ctx, value)?;
+                        b.fit(ctx, defined, target)
+                    },
+                )
+            }
+            _ => Ok(value),
+        }
+    }
+
     /// View `value` as `T | undefined`.
     pub(super) fn optional(&mut self, ctx: &mut Context, value: Value) -> Value {
         if self.is_optional(ctx, value) {
@@ -180,7 +265,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let ty = value.get_type(ctx);
         let wanted = optional_value(ctx, target).unwrap_or(target);
-        if wanted.deref(ctx).is::<perry_mir::types::NumberStringType>()
+        if wanted.deref(ctx).is::<perry_mir::NumberStringType>()
             && (ty.deref(ctx).is::<FP64Type>() || ty.deref(ctx).is::<StringType>())
         {
             let tag = if ty.deref(ctx).is::<FP64Type>() {
@@ -189,11 +274,11 @@ impl<'s> FunctionBuilder<'s> {
                 "string"
             };
             let boxed = self.emit_value(ctx, |ctx| {
-                perry_mir::variants::VariantNewOp::new(ctx, wanted, tag, Some(value))
+                perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value))
             });
             return self.fit(ctx, boxed, target);
         }
-        if target.deref(ctx).is::<perry_mir::types::ByteInputType>() {
+        if target.deref(ctx).is::<perry_mir::ByteInputType>() {
             let convert = if ty.deref(ctx).is::<StringType>() {
                 Some(Intrinsic::StringByteInput)
             } else if ty.deref(ctx).is::<BytesType>() {
@@ -231,7 +316,7 @@ impl<'s> FunctionBuilder<'s> {
                         ctx,
                         target,
                         undefined,
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))),
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, target))),
                         null_or_value,
                     )
                 } else {
@@ -244,6 +329,14 @@ impl<'s> FunctionBuilder<'s> {
                 Intrinsic::JsonToString
             } else if self.is_bool_type(ctx, target) {
                 Intrinsic::JsonToBool
+            } else if let Some(int) = target.deref(ctx).downcast_ref::<IntegerType>()
+                && int.width() == 64
+            {
+                if int.is_signed() {
+                    Intrinsic::JsonToI64
+                } else {
+                    Intrinsic::JsonToU64
+                }
             } else {
                 return self.decode_aggregate(ctx, value, target);
             };
@@ -266,8 +359,53 @@ impl<'s> FunctionBuilder<'s> {
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
             return self.fit(ctx, converted, target);
         }
+        if thrown.deref(ctx).is::<perry_mir::BigIntType>()
+            && wanted
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64)
+        {
+            let defined = self.defined(ctx, value)?;
+            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
+            return self.fit(ctx, casted, target);
+        }
+        if thrown
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int| int.width() == 64)
+            && wanted.deref(ctx).is::<perry_mir::BigIntType>()
+        {
+            let defined = self.defined(ctx, value)?;
+            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
+            return self.fit(ctx, casted, target);
+        }
         if ty == target {
             Ok(value)
+        } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
+            let json_ty: TypeHandle = JsonType::get(ctx).into();
+            let boxed = if let Some(abs) = absence(ctx, ty)
+                && abs.admits_undefined()
+            {
+                let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                self.choose(
+                    ctx,
+                    json_ty,
+                    is_undef,
+                    |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, json_ty))),
+                    |b, ctx| {
+                        let def = b.defined(ctx, value)?;
+                        let text =
+                            b.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, def));
+                        let text = b.defined(ctx, text)?;
+                        Ok(b.intrinsic(ctx, Intrinsic::JsonParse, vec![text]))
+                    },
+                )?
+            } else {
+                let text = self.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, value));
+                let text = self.defined(ctx, text)?;
+                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+            };
+            self.fit(ctx, boxed, target)
         } else if optional_value(ctx, target) == Some(ty) {
             Ok(self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, target)))
         } else if optional_value(ctx, target).is_some()
@@ -276,13 +414,92 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.emit_value(ctx, |ctx| OptionalCastOp::new(ctx, value, target)))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
-        } else if perry_mir::views::can_widen(ctx, ty, target) {
+        } else if perry_mir::can_widen(ctx, ty, target) {
             Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::views::AggregateViewOp::new(ctx, value, target)
+                perry_mir::AggregateViewOp::new(ctx, value, target)
             }))
         } else {
             let source = optional_value(ctx, ty).unwrap_or(ty);
             let wanted = optional_value(ctx, target).unwrap_or(target);
+            if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
+                && let Ok(src_rec) = TypedHandle::<RecordType>::from_handle(source, ctx)
+                && let Ok(dst_rec) = TypedHandle::<RecordType>::from_handle(wanted, ctx)
+                && !src_rec.deref(ctx).is_tuple()
+                && !dst_rec.deref(ctx).is_tuple()
+            {
+                let src_fields = src_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
+                let dst_fields = dst_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
+                if let (Some(src_fields), Some(dst_fields)) = (src_fields, dst_fields)
+                    && (!dst_fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
+                    && dst_fields
+                        .iter()
+                        .all(|(name, _)| src_fields.iter().any(|(s, _)| s == name))
+                {
+                    let rec_val = if ty == source {
+                        value
+                    } else {
+                        self.defined(ctx, value)?
+                    };
+                    let mut projected_fields = Vec::with_capacity(dst_fields.len());
+                    let mut ok = true;
+                    for (name, dst_field_ty) in dst_fields {
+                        let (_, src_field_ty) = src_fields
+                            .iter()
+                            .find(|(s, _)| s == &name)
+                            .expect("checked field existence");
+                        let field_res = if optional_value(ctx, *src_field_ty).is_some()
+                            && absence(ctx, dst_field_ty).is_some_and(|a| a.admits_undefined())
+                        {
+                            let present = self.emit_value(ctx, |ctx| {
+                                perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())
+                                    .expect("field present")
+                            });
+                            let field_name = name.clone();
+                            self.choose(
+                                ctx,
+                                dst_field_ty,
+                                present,
+                                |b, ctx| {
+                                    let op = FieldGetOp::new(ctx, rec_val, field_name.clone())?;
+                                    let raw = b.field_read(ctx, &op)?;
+                                    b.fit(ctx, raw, dst_field_ty)
+                                },
+                                |b, ctx| {
+                                    Ok(b.emit_value(ctx, |ctx| {
+                                        perry_mir::OmittedOp::with_type(ctx, dst_field_ty)
+                                    }))
+                                },
+                            )
+                        } else {
+                            let op = FieldGetOp::new(ctx, rec_val, name)?;
+                            let raw = self.field_read(ctx, &op)?;
+                            self.fit(ctx, raw, dst_field_ty)
+                        };
+                        match field_res {
+                            Ok(v) => projected_fields.push(v),
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        let projected = self
+                            .emit_value(ctx, |ctx| AllocOp::new(ctx, dst_rec, projected_fields));
+                        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
+                        return self.fit(ctx, projected, target);
+                    }
+                }
+            }
+            if self.never_values.contains(&value) {
+                return Ok(
+                    if absence(ctx, target).is_some_and(|a| a.admits_undefined()) {
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))
+                    } else {
+                        self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
+                    },
+                );
+            }
             let code =
                 if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
                     DiagnosticCode::IncompatibleRecordLayout
@@ -396,9 +613,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         Ok(match kind(ctx, value)? {
             Kind::NumberString => {
-                let tag = self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantTagOp::new(ctx, value)
-                });
+                let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value));
                 let number = self.string(ctx, "number");
                 let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
                 self.choose_string(
@@ -407,19 +622,32 @@ impl<'s> FunctionBuilder<'s> {
                     |b, ctx| {
                         let ty = FP64Type::get(ctx).into();
                         let payload = b.emit_value(ctx, |ctx| {
-                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
                         });
                         b.display(ctx, payload)
                     },
                     |b, ctx| {
                         let ty = StringType::get(ctx).into();
                         Ok(b.emit_value(ctx, |ctx| {
-                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
                         }))
                     },
                 )?
             }
-            Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value]),
+            Kind::BigInt => {
+                let value = if value
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|int| int.width() == 64)
+                {
+                    let bigint = perry_mir::BigIntType::get(ctx).into();
+                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
+                } else {
+                    value
+                };
+                self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
+            }
             Kind::String => value,
             Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
             Kind::Number => self.intrinsic(ctx, Intrinsic::NumberToString, vec![value]),
@@ -457,9 +685,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let name = match kind(ctx, value)? {
             Kind::NumberString => {
-                return Ok(self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantTagOp::new(ctx, value)
-                }));
+                return Ok(self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value)));
             }
             Kind::BigInt => "bigint",
             Kind::Number => "number",
@@ -477,5 +703,5 @@ impl<'s> FunctionBuilder<'s> {
 /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
 pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
     let number = FP64Type::get(ctx).into();
-    perry_mir::types::OptionalType::get(ctx, number).into()
+    perry_mir::OptionalType::get(ctx, number).into()
 }

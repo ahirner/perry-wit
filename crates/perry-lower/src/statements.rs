@@ -5,16 +5,69 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
         let mut rest = statements;
         while let Some((first, tail)) = rest.split_first() {
-            rest = match self.destructured_element(rest) {
-                Some((id, value, after)) => {
-                    self.binding(ctx, id, &HirType::Any, Some(value))?;
-                    after
+            rest = match self.iteration.element(rest) {
+                Some(element) => {
+                    let value = self.conditional(
+                        ctx,
+                        element.condition,
+                        element.missing,
+                        element.value,
+                        None,
+                    )?;
+                    let slot = self.entry_slot(ctx, value.get_type(ctx));
+                    self.store(ctx, slot, value);
+                    self.locals.insert(element.id, LocalBinding::plain(slot));
+                    let done = self.condition(ctx, element.condition)?;
+                    let done = self.choose(
+                        ctx,
+                        done.get_type(ctx),
+                        done,
+                        |b, ctx| Ok(b.boolean(ctx, true)),
+                        |b, ctx| {
+                            let available = match element.available {
+                                hir_compat::Availability::Test(test) => b.condition(ctx, test)?,
+                                hir_compat::Availability::Known(available) => {
+                                    b.boolean(ctx, available)
+                                }
+                            };
+                            b.choose(
+                                ctx,
+                                available.get_type(ctx),
+                                available,
+                                |b, ctx| {
+                                    if let Some(advance) = element.advance {
+                                        b.effect(ctx, advance)?;
+                                    }
+                                    Ok(b.boolean(ctx, false))
+                                },
+                                |b, ctx| Ok(b.boolean(ctx, true)),
+                            )
+                        },
+                    )?;
+                    self.store(ctx, self.local(element.done)?, done);
+                    element.rest
                 }
                 None => {
-                    self.statement(ctx, first).map_err(|error| match first {
+                    let prev_rest_keys = self.rest_excluded_keys;
+                    if matches!(first, Stmt::Let { .. }) {
+                        self.rest_excluded_keys = tail
+                            .iter()
+                            .take_while(|s| matches!(s, Stmt::Let { .. }))
+                            .find_map(|s| match s {
+                                Stmt::Let {
+                                    init: Some(Expr::ObjectRest { exclude_keys, .. }),
+                                    ..
+                                } => Some(exclude_keys.as_slice()),
+                                _ => None,
+                            })
+                            .unwrap_or(&[]);
+                    }
+                    let res = self.statement(ctx, first).map_err(|error| match first {
                         Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
                         _ => error,
-                    })?;
+                    });
+                    self.rest_excluded_keys = prev_rest_keys;
+                    res?;
                     tail
                 }
             };
@@ -22,66 +75,24 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// Array destructuring declares each element as `let e = undefined` and assigns it in
-    /// `if (guard) { <iterator pull> } else { e = i < a.length ? a[i] : undefined }`. With a
-    /// statically false guard this is `let e = a[i]` (a read that is `undefined` out of
-    /// bounds, R8): the element, its initializer and the statements after the pair.
-    fn destructured_element(
-        &self,
-        statements: &'s [Stmt],
-    ) -> Option<(LocalId, &'s Expr, &'s [Stmt])> {
-        let [
-            Stmt::Let {
-                id,
-                ty: HirType::Any,
-                init: Some(Expr::Undefined),
-                ..
-            },
-            Stmt::If {
-                condition: Expr::LocalGet(guard),
-                else_branch: Some(else_branch),
-                ..
-            },
-            after @ ..,
-        ] = statements
-        else {
-            return None;
-        };
-        let [Stmt::Expr(Expr::LocalSet(target, value))] = else_branch.as_slice() else {
-            return None;
-        };
-        if target != id || !self.false_guards.contains(guard) {
-            return None;
-        }
-        let value = match &**value {
-            Expr::Conditional {
-                then_expr,
-                else_expr,
-                ..
-            } if matches!(**else_expr, Expr::Undefined)
-                && matches!(**then_expr, Expr::IndexGet { .. }) =>
-            {
-                &**then_expr
-            }
-            other => other,
-        };
-        Some((*id, value, after))
-    }
-
     pub(super) fn statement(&mut self, ctx: &mut Context, statement: &'s Stmt) -> Result<()> {
         match statement {
             Stmt::If {
-                condition: Expr::LocalGet(guard),
+                condition,
                 else_branch,
                 ..
-            } if self.false_guards.contains(guard) => {
+            } if self.iteration.is_guard(condition) => {
                 if let Some(else_branch) = else_branch {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::Let { id, ty, init, .. } => self
-                .binding(ctx, *id, ty, init.as_ref())
-                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Stmt::Let {
+                id, name, ty, init, ..
+            } => {
+                self.iteration.register_binding(*id, name, init.as_ref());
+                self.binding(ctx, *id, ty, init.as_ref())
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?;
+            }
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
@@ -92,19 +103,35 @@ impl<'s> FunctionBuilder<'s> {
                 // An async function adopts a returned promise (and its result type) after
                 // the finalizers ran.
                 let (mut values, adopted) = match value {
-                    Some(expr) => {
-                        let expected = self
-                            .results
-                            .first()
-                            .copied()
-                            .context("a void function returns a value")?;
-                        let value = self.expression_with(ctx, expr, Some(expected))?;
-                        if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
-                            (Vec::with_capacity(1), Some((value, expected)))
-                        } else {
-                            (vec![self.fit(ctx, value, expected)?], None)
+                    Some(expr) => match self.result {
+                        Some(result) => {
+                            let value =
+                                self.expression_with(ctx, expr, Some(result.expected_type(ctx)))?;
+                            if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                                (Vec::with_capacity(1), Some((value, result.carrier)))
+                            } else {
+                                (vec![self.fit_binding(ctx, value, result)?], None)
+                            }
                         }
-                    }
+                        None => {
+                            let is_never_expr = match expr {
+                                Expr::LocalGet(id) => {
+                                    self.locals.get(id).is_some_and(|b| b.is_never)
+                                }
+                                Expr::Call { callee, .. } => {
+                                    if let Expr::FuncRef(fid) = callee.as_ref() {
+                                        self.signatures.get(fid).is_some_and(|s| s.returns_never)
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            };
+                            ensure!(is_never_expr, "a void function returns a value");
+                            self.effect(ctx, expr)?;
+                            (self.implicit_results(ctx), None)
+                        }
+                    },
                     None => (self.implicit_results(ctx), None),
                 };
                 self.run_finallies(ctx, |_| true)?;
@@ -125,7 +152,7 @@ impl<'s> FunctionBuilder<'s> {
                     values
                         .iter()
                         .map(|v| v.get_type(ctx))
-                        .eq(self.results.iter().copied()),
+                        .eq(self.result.iter().map(|r| r.carrier)),
                     "return value type differs from the declared result"
                 );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
@@ -201,7 +228,7 @@ impl<'s> FunctionBuilder<'s> {
                     .find_map(|(index, control)| match (statement, control) {
                         (
                             Stmt::Break,
-                            Control::Loop { break_to, .. } | Control::Switch { break_to },
+                            Control::Loop { break_to, .. } | Control::Switch { break_to, .. },
                         ) => Some((index, *break_to)),
                         (Stmt::Continue, Control::Loop { continue_to, .. }) => {
                             Some((index, *continue_to))
@@ -209,6 +236,74 @@ impl<'s> FunctionBuilder<'s> {
                         _ => None,
                     })
                     .context("break/continue has no enclosing target")?;
+                self.run_finallies(ctx, |f| f.controls > index)?;
+                self.jump(ctx, target);
+                self.after_terminator(ctx);
+            }
+            Stmt::Labeled { label, body } => {
+                if matches!(
+                    body.as_ref(),
+                    Stmt::For { .. }
+                        | Stmt::While { .. }
+                        | Stmt::DoWhile { .. }
+                        | Stmt::Switch { .. }
+                ) {
+                    self.pending_label = Some(label.as_str());
+                    self.statement(ctx, body)?;
+                } else {
+                    let exit = self.new_block(ctx, "labeled_exit");
+                    self.controls.push(Control::Labeled {
+                        label: label.as_str(),
+                        break_to: exit,
+                    });
+                    let res = self.statement(ctx, body);
+                    self.controls.pop();
+                    res?;
+                    self.jump(ctx, exit);
+                    self.switch_to(exit);
+                }
+            }
+            Stmt::LabeledBreak(target_label) => {
+                let (index, target) = self
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, control)| match control {
+                        Control::Loop {
+                            label: Some(l),
+                            break_to,
+                            ..
+                        }
+                        | Control::Switch {
+                            label: Some(l),
+                            break_to,
+                        } if *l == target_label.as_str() => Some((index, *break_to)),
+                        Control::Labeled { label, break_to } if *label == target_label.as_str() => {
+                            Some((index, *break_to))
+                        }
+                        _ => None,
+                    })
+                    .with_context(|| format!("break {target_label} has no enclosing target"))?;
+                self.run_finallies(ctx, |f| f.controls > index)?;
+                self.jump(ctx, target);
+                self.after_terminator(ctx);
+            }
+            Stmt::LabeledContinue(target_label) => {
+                let (index, target) = self
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, control)| match control {
+                        Control::Loop {
+                            label: Some(l),
+                            continue_to,
+                            ..
+                        } if *l == target_label.as_str() => Some((index, *continue_to)),
+                        _ => None,
+                    })
+                    .with_context(|| format!("continue {target_label} has no enclosing target"))?;
                 self.run_finallies(ctx, |f| f.controls > index)?;
                 self.jump(ctx, target);
                 self.after_terminator(ctx);
@@ -238,49 +333,99 @@ impl<'s> FunctionBuilder<'s> {
                 catch,
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
+            Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
             // Perry HIR exposes no variant names, only `Debug`: show the whole node.
             other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
     }
 
-    /// `let id: ty = init`. Array destructuring's iterator guard and the iterator of its
-    /// protocol arm (`guard ? GetIterator(a) : undefined`) bind nothing when the guard is
-    /// statically false.
-    fn binding(
+    pub(super) fn binding(
         &mut self,
         ctx: &mut Context,
         id: LocalId,
         ty: &HirType,
         init: Option<&'s Expr>,
     ) -> Result<()> {
-        if let Some(guard) = init
-            && self.iterator_guard(ctx, guard)?
-        {
-            self.false_guards.insert(id);
+        if let Some(expr @ (Expr::Closure { .. } | Expr::FuncRef(_))) = init {
+            self.closures.insert(id, expr);
             return Ok(());
         }
-        if let Some(Expr::Conditional { condition, .. }) = init
-            && matches!(condition.as_ref(), Expr::LocalGet(guard) if self.false_guards.contains(guard))
+        if let Some(init) = init
+            && let Some(source) = self.iteration.guard(id, init)
         {
+            if let Some(source) = source {
+                let source = self.expression(ctx, source)?;
+                let source = self.defined(ctx, source)?;
+                let tuple = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+                    .is_ok_and(|record| record.deref(ctx).is_tuple());
+                ensure!(
+                    kind(ctx, source)? == Kind::Array || tuple,
+                    "array destructuring is supported for arrays so far"
+                );
+            }
             return Ok(());
         }
         // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
         // type. An explicit type the subset cannot represent is an error, not a fallback.
         // `Array(Any)` is such a binding too (array destructuring's element source).
         let declared = match ty {
-            HirType::Any | HirType::Unknown => None,
-            HirType::Array(element) if matches!(**element, HirType::Any) => None,
+            HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_) => None,
+            HirType::Array(element)
+                if matches!(
+                    **element,
+                    HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_)
+                ) =>
+            {
+                None
+            }
+            HirType::Generic { base, type_args }
+                if matches!(
+                    base.as_str(),
+                    "Map"
+                        | "ReadonlyMap"
+                        | "MapKeys"
+                        | "MapValues"
+                        | "MapEntries"
+                        | "Set"
+                        | "ReadonlySet"
+                        | "SetValues"
+                        | "SetEntries"
+                        | "Array"
+                        | "ReadonlyArray"
+                        | "Record"
+                ) && (type_args.is_empty()
+                    || type_args.iter().any(|t| {
+                        matches!(t, HirType::Any | HirType::Unknown | HirType::TypeVar(_))
+                    })) =>
+            {
+                None
+            }
+            ty if !self.shapes.is_explicit_binding(id) && infer::contains_type_var(ty) => None,
             ty => Some(self.shapes.value_type(ctx, ty)?),
         };
+        let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
+            self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
+        });
+        let expr_expected = integer
+            .filter(|int_ty| int_ty.deref(ctx).width() == 64)
+            .map(TypeHandle::from)
+            .or(declared);
         let init = init
-            .map(|e| self.expression_with(ctx, e, declared))
+            .map(|e| self.expression_with(ctx, e, expr_expected))
             .transpose()?;
+        if integer.is_none()
+            && let Some(value) = init
+            && let Some(src) = self.integer64_source(ctx, value)
+        {
+            integer = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok();
+        }
+        let is_never = matches!(ty, HirType::Never);
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
-        let ty = match (declared, init) {
+        let carrier = match (declared, init) {
             (Some(ty), Some(value))
-                if self.shapes.inferred_bindings.contains(&id)
+                if self.shapes.metadata.inferred_bindings.contains(&id)
                     && (optional_value(ctx, value.get_type(ctx))
                         .unwrap_or(value.get_type(ctx))
                         == optional_value(ctx, ty).unwrap_or(ty)
@@ -291,26 +436,55 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Some(ty), _) => ty,
             (None, Some(value)) => value.get_type(ctx),
+            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
             (None, None) => bail!("an untyped binding needs an initializer"),
         };
+        let binding = BindingType { carrier, integer };
         let slot = if self.shapes.global_ids.contains(&id) {
-            self.shapes.globals.borrow_mut().insert(id, ty);
-            self.global_slot(ctx, id, ty)?
+            self.shapes.globals.borrow_mut().insert(id, binding);
+            self.global_slot(ctx, id, carrier)?
         } else {
-            self.entry_slot(ctx, ty)
+            self.entry_slot(ctx, carrier)
         };
         if let Some(value) = init {
-            let value = self.fit(ctx, value, ty)?;
+            let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
+        } else if is_never {
+            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier));
+            self.store(ctx, slot, undef);
         }
-        self.locals.insert(id, slot);
+        self.locals.insert(
+            id,
+            LocalBinding {
+                slot,
+                integer,
+                is_never,
+            },
+        );
         Ok(())
     }
 
     /// Lower an expression evaluated for its effects; void calls are allowed here.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
-        if let Expr::Call { callee, args, .. } = expr {
-            self.call(ctx, callee, args)?;
+        if self.iteration.is_release(expr) {
+            return Ok(());
+        }
+        if let Expr::Call {
+            callee,
+            args,
+            byte_offset,
+            ..
+        } = expr
+        {
+            self.call(ctx, callee, args, *byte_offset)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
+        } else if let Expr::StaticMethodCall {
+            class_name,
+            method_name,
+            args,
+        } = expr
+        {
+            self.class_static_method_call(ctx, class_name, method_name, args)?;
         } else if let Expr::ProcessExit(code) = expr {
             let code = match code {
                 Some(code) => {
@@ -331,33 +505,5 @@ impl<'s> FunctionBuilder<'s> {
             self.expression(ctx, expr)?;
         }
         Ok(())
-    }
-
-    /// Whether `expr` is array destructuring's guard for the iterator protocol, which is
-    /// false for MIR arrays: they are plain arrays, and `Array.prototype[Symbol.iterator]`
-    /// cannot be patched. Other sources are an error.
-    fn iterator_guard(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<bool> {
-        let source = match expr {
-            Expr::ArrayIterationPatched => return Ok(true),
-            Expr::NativeMethodCall {
-                module,
-                object: None,
-                method,
-                args,
-                ..
-            } if module == "__perry_runtime" && method == "arrayDestructureNeedsIterator" => {
-                let [source] = args.as_slice() else {
-                    bail!("arrayDestructureNeedsIterator takes one value");
-                };
-                source
-            }
-            _ => return Ok(false),
-        };
-        let source = self.expression(ctx, source)?;
-        ensure!(
-            kind(ctx, source)? == Kind::Array,
-            "array destructuring is supported for arrays so far"
-        );
-        Ok(true)
     }
 }

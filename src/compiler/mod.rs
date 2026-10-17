@@ -9,7 +9,7 @@ mod wit_types;
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
-use pliron::{context::Context, op::Op, printable::Printable};
+use pliron::{context::Context, op::Op, pass::AnalysisManager, printable::Printable};
 use std::{
     collections::BTreeMap,
     fs,
@@ -139,18 +139,27 @@ pub(crate) fn compile_sources(
             identity,
             modules,
             resolve,
+            world,
             componentize,
             memory_checks,
         );
     }
     let ctx = &mut Context::new();
-    let mut foreign = wit_types::foreign(resolve);
+    let mut foreign = wit_types::foreign(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir = lower(ctx, source, identity, modules, &foreign)?;
-    let exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
+    let mir =
+        perry_lower::lower_sources(ctx, source, identity, modules, &foreign).map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
+        })?;
+    let mut exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
+    bind::constrain_numbers(ctx, &mir, &exports).map_err(|error| {
+        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
+    })?;
+    let mut analyses = optimize(ctx, &mir)?;
+    bind::specialized_implementations(ctx, &mir, &mut exports);
     bind::check_main(ctx, &mir, &exports).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
@@ -158,7 +167,8 @@ pub(crate) fn compile_sources(
     let streams = bind::stream_anchor(resolve, world);
     let stdout = imports
         .iter()
-        .any(|name| name.starts_with("wasi:cli/stdout@"));
+        .any(|name| name.starts_with("wasi:cli/stdout@"))
+        && uses_stdout(ctx, &mir);
     let stderr = imports
         .iter()
         .any(|name| name.starts_with("wasi:cli/stderr@"));
@@ -169,16 +179,23 @@ pub(crate) fn compile_sources(
         bindings,
         resources,
     };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+    let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)
+        .map_err(|error| {
+            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    let core = finish(core, streams.as_ref()).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
+    let (core, helpers) = finish(
+        core,
+        streams.as_ref(),
+        &link::canonical::Requirements::for_world(resolve, world),
+    )
+    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))?;
     let core = link::raw::available_stdio(core, stdout, stderr).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
+    allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
     let component = componentize
         .then(|| ComponentOutput::encode(&core, resolve, world))
         .transpose()
@@ -218,16 +235,16 @@ pub(crate) fn compile_core_sources(
     memory_checks: bool,
 ) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, identity, modules, &Default::default())?;
+    let (mir, mut analyses) = lower(ctx, source, identity, modules, &Default::default())?;
     let exports = if memory_checks {
         Exports::RawChecked
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports).map_err(|error| {
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    link::raw::without_p3(finish(core, None)?)
+    link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
 }
 
@@ -236,27 +253,61 @@ fn lower(
     source: &str,
     file_name: &str,
     modules: &BTreeMap<String, String>,
-    foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
-) -> Result<pliron::builtin::ops::ModuleOp> {
+    foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
+) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let mir =
         perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
-    perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
+    let analyses = optimize(ctx, &mir)?;
+    Ok((mir, analyses))
+}
+
+fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
+    let analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
             crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
         })?;
-    Ok(mir)
+    Ok(analyses)
 }
 
-fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {
-    let core =
-        link::link_helpers_with(core, streams).context("linking perry-runtime and helpers")?;
+fn finish(
+    core: Vec<u8>,
+    streams: Option<&link::StreamAnchor>,
+    canonical: &link::canonical::Requirements,
+) -> Result<(Vec<u8>, u32)> {
+    let (core, helpers) = link::link_helpers_with(core, streams, canonical)
+        .context("linking perry-runtime and helpers")?;
     let core = link::compact(&core).context("interning core function signatures")?;
     audit::validate_guest(&core).context("validating stackless core Wasm")?;
-    Ok(core)
+    Ok((core, helpers))
+}
+
+fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
+    use perry_mir::{Intrinsic, IntrinsicOp};
+    use pliron::{
+        builtin::{
+            op_interfaces::{OneRegionInterface, SingleBlockRegionInterface},
+            ops::FuncOp,
+        },
+        linked_list::ContainsLinkedList,
+        operation::Operation,
+    };
+    mir.get_body(ctx, 0)
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .flat_map(|f| f.get_region(ctx).deref(ctx).iter(ctx).collect::<Vec<_>>())
+        .flat_map(|b| b.deref(ctx).iter(ctx).collect::<Vec<_>>())
+        .filter_map(|op| Operation::get_op::<IntrinsicOp>(op, ctx))
+        .any(|op| {
+            matches!(
+                op.intrinsic(ctx),
+                Some(Intrinsic::PrintOut | Intrinsic::WritableStdout)
+            )
+        })
 }
 
 pub fn compile_file(

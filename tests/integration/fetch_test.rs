@@ -78,12 +78,32 @@ impl WasiHttpView for Host {
 }
 
 /// Compile `source`, call its `run(url)` export against `server` and return the result.
-async fn run(source: &str, server: &http_fixture::HttpFixture) -> Result<String> {
+async fn run(
+    source: &str,
+    server: &http_fixture::HttpFixture,
+    expects_json_parser: bool,
+) -> Result<String> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), WIT)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("fetch"))?;
     let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
+    let mut has_json_parser = false;
+    for payload in wasmparser::Parser::new(0).parse_all(&compiled.core) {
+        if let wasmparser::Payload::CustomSection(section) = payload?
+            && section.name() == "name"
+        {
+            for subsection in wasmparser::NameSectionReader::new(section.data_reader()) {
+                if let wasmparser::Name::Function(names) = subsection? {
+                    for entry in names {
+                        has_json_parser |=
+                            matches!(entry?.name, "json_measure" | "json_populate_measured");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(has_json_parser, expects_json_parser);
     let engine = async_engine()?;
     let component =
         wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
@@ -126,7 +146,7 @@ async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
         "/bytes" => http_fixture::Reply::Bytes(200, (0..20_000u32).map(|i| i as u8).collect()),
         _ => http_fixture::Reply::Body(404, "no".into()),
     });
-    let text = run(SOURCE, &server).await?;
+    let text = run(SOURCE, &server, false).await?;
     assert_eq!(
         text,
         "POST abc héllo|201|true|yes|20000|20000|true|404|false"
@@ -158,7 +178,7 @@ async fn fetched_json_documents_merge_like_node() -> Result<()> {
     });
     // Recorded from Node 22.
     assert_eq!(
-        run(MERGE, &server).await?,
+        run(MERGE, &server, true).await?,
         r#"{"1":true,"2":"x","b":1,"a":null,"c":"é"}|true"#
     );
     Ok(())

@@ -1,9 +1,11 @@
-//! Allocation-free JSON parsing into caller-owned typed nodes.
+//! Shared JSON grammar with fixed-buffer and dynamic graph destinations.
 
 #[path = "json/number.rs"]
 mod number;
 #[path = "json/parse.rs"]
 mod parse;
+#[path = "json/reader.rs"]
+mod reader;
 #[path = "json/storage.rs"]
 mod storage;
 
@@ -29,3 +31,11 @@ pub enum Error {
     Depth(usize),
     Capacity,
 }
+
+#[cfg(target_arch = "wasm32")]
+#[path = "json/pool.rs"]
+mod pool;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "json/cursor.rs"]
+mod cursor;

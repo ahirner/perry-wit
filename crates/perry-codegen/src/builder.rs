@@ -5,6 +5,7 @@ use crate::{
     host::{EffectHost, Host, ValueHost},
     repr::i32_type,
     runtime::Runtime,
+    values::Carriers,
 };
 use anyhow::{Result, anyhow};
 use pliron::{
@@ -192,11 +193,19 @@ impl FunctionLowering<'_, '_> {
 
     /// The Wasm value of MIR `value`; frame-resident values are loaded from the frame.
     pub(crate) fn mapped(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.mapped_value(ctx, value)?.scalar()
+    }
+
+    pub(crate) fn mapped_value(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+    ) -> Result<Carriers<Value>> {
         if let Some(frame) = &self.frame
-            && let Some(&(offset, kind)) = frame.slots.get(&value)
+            && let Some(&slot) = frame.slots.get(&value)
         {
             let frame = frame.frame;
-            return Ok(self.load(ctx, kind, frame, offset));
+            return slot.try_map(|(offset, kind)| Ok(self.load(ctx, kind, frame, offset)));
         }
         self.values
             .get(&value)
@@ -255,6 +264,15 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {
+        self.define_value(ctx, op, Carriers::Scalar(value));
+    }
+
+    pub(crate) fn define_value(
+        &mut self,
+        ctx: &Context,
+        op: Ptr<Operation>,
+        value: Carriers<Value>,
+    ) {
         self.values.insert(op.deref(ctx).get_result(0), value);
     }
 

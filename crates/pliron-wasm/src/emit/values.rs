@@ -55,13 +55,30 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
 
+    /// Push `values` onto the operand stack, evaluating an in-place multi-result op once for
+    /// its contiguous slice of results.
+    pub(super) fn values(&mut self, values: &[Value]) -> EmitResult<()> {
+        let mut index = 0;
+        while index < values.len() {
+            let value = values[index];
+            if let Some(def) = value.defining_op()
+                && self.in_place(def)
+            {
+                self.tree(def)?;
+                index += def.deref(self.ctx).get_num_results();
+            } else {
+                self.value(value)?;
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Push `op`'s operands, then emit `op` itself.
     fn tree(&mut self, op: Ptr<Operation>) -> EmitResult<()> {
         let ctx = self.ctx;
         let operands: Vec<_> = op.deref(ctx).operands().collect();
-        for operand in operands {
-            self.value(operand)?;
-        }
+        self.values(&operands)?;
         let instruction = if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
