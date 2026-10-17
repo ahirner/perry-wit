@@ -67,6 +67,9 @@ impl<'s> FunctionBuilder<'s> {
         field: &str,
         value: &'s Expr,
     ) -> Result<Value> {
+        if let Expr::ClassRef(class_name) = object {
+            return self.class_static_field_set(ctx, class_name, field, value);
+        }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
         if let Some((k_ty, v_ty, tuple_rec)) =
@@ -75,6 +78,11 @@ impl<'s> FunctionBuilder<'s> {
             let key = self.string(ctx, field);
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             return self.kv_set(ctx, record, key, val, k_ty, v_ty, tuple_rec);
+        }
+        if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
+            && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)
+        {
+            return self.class_setter_call(ctx, record, owner_class, &type_args, setter, value);
         }
         ensure!(
             kind(ctx, record)? == Kind::Record,
@@ -262,13 +270,23 @@ impl<'s> FunctionBuilder<'s> {
                 let first = first.get_type(ctx);
                 let inner = optional_value(ctx, first).unwrap_or(first);
                 let mut states = absence(ctx, first);
+                let mut uniform = true;
                 for value in rest {
                     let ty = value.get_type(ctx);
-                    ensure!(
-                        optional_value(ctx, ty).unwrap_or(ty) == inner,
-                        "array literals must have one element type"
-                    );
+                    if optional_value(ctx, ty).unwrap_or(ty) != inner {
+                        uniform = false;
+                        break;
+                    }
                     states = merge_absence(states, absence(ctx, ty));
+                }
+                if !uniform {
+                    let fields: Vec<(String, TypeHandle)> = values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| (format!("_{i}"), v.get_type(ctx)))
+                        .collect();
+                    let record = self.shapes.mir_record_kind(ctx, fields, true)?;
+                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
                 }
                 states.map_or(inner, |states| {
                     perry_mir::OptionalType::get_with(ctx, inner, states).into()
@@ -381,9 +399,23 @@ impl<'s> FunctionBuilder<'s> {
                     })
                 })
         });
+        enum ResidueStep {
+            Spread(Value),
+            Exclude(String),
+        }
+        let mut residue_steps: Vec<ResidueStep> = Vec::new();
         let mut field_values: Vec<(String, Value)> = Vec::new();
         for (idx, (key, val_expr)) in parts.iter().enumerate() {
             if let Some(key) = key {
+                if expected_record.is_some_and(|rec| rec.deref(ctx).field(key).is_none())
+                    && matches!(val_expr, Expr::Undefined)
+                {
+                    field_values.retain(|(k, _)| k != key);
+                    if !residue_steps.is_empty() {
+                        residue_steps.push(ResidueStep::Exclude(key.clone()));
+                    }
+                    continue;
+                }
                 let expected_field_ty = expected_record
                     .and_then(|rec| rec.deref(ctx).field(key).map(|(_, ty)| ty))
                     .or_else(|| {
@@ -404,6 +436,21 @@ impl<'s> FunctionBuilder<'s> {
                                     };
                                     crate::coerce::admitting(ctx, base_ty, abs)
                                 })
+                                .or_else(|| {
+                                    let abs = if matches!(val_expr, Expr::Null) {
+                                        perry_mir::Absence::Null
+                                    } else {
+                                        perry_mir::Absence::Undefined
+                                    };
+                                    Some(
+                                        perry_mir::OptionalType::get_with(
+                                            ctx,
+                                            FP64Type::get(ctx).into(),
+                                            abs,
+                                        )
+                                        .into(),
+                                    )
+                                })
                         } else {
                             None
                         }
@@ -415,6 +462,9 @@ impl<'s> FunctionBuilder<'s> {
                     Some(target_ty) => self.fit(ctx, val, target_ty)?,
                     None => val,
                 };
+                if !residue_steps.is_empty() {
+                    residue_steps.push(ResidueStep::Exclude(key.clone()));
+                }
                 if let Some((_, existing)) = field_values.iter_mut().find(|(k, _)| k == key) {
                     let existing_ty = existing.get_type(ctx);
                     let val_ty = val.get_type(ctx);
@@ -455,6 +505,7 @@ impl<'s> FunctionBuilder<'s> {
                     .context(
                         "object spread is supported over typed records or JSON values with static keys",
                     )?;
+                residue_steps.push(ResidueStep::Spread(src));
                 let src_fields: Vec<(String, TypeHandle)> = src_rec
                     .deref(ctx)
                     .fields()
@@ -601,7 +652,19 @@ impl<'s> FunctionBuilder<'s> {
         }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+        let alloc = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands));
+        for step in residue_steps {
+            match step {
+                ResidueStep::Spread(src) => {
+                    self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![alloc, src]);
+                }
+                ResidueStep::Exclude(key) => {
+                    let key_val = self.string(ctx, &key);
+                    self.intrinsic_void(ctx, Intrinsic::JsonExclude, vec![alloc, key_val]);
+                }
+            }
+        }
+        Ok(alloc)
     }
 
     /// `const { a, ...rest } = obj`: allocate a record with the remaining fields of `obj`.
@@ -675,6 +738,12 @@ impl<'s> FunctionBuilder<'s> {
         }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+        let alloc = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands));
+        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![alloc, src]);
+        for key in exclude_keys {
+            let key_val = self.string(ctx, key);
+            self.intrinsic_void(ctx, Intrinsic::JsonExclude, vec![alloc, key_val]);
+        }
+        Ok(alloc)
     }
 }

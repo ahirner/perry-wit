@@ -256,6 +256,8 @@ runtime_functions! {
     StdJsonRequireNumber = "std_json_require_number" (I32) -> F64;
     StdJsonRequireObject = "std_json_require_object" (I32);
     StdJsonSet = "std_json_set" (I32, I32, I32);
+    StdJsonMergeResidue = "std_json_merge_residue" (I32, I32) -> I32;
+    StdJsonExcludeKey = "std_json_exclude_key" (I32, I32) -> I32;
     StdJsonToBool = "std_json_to_bool" (I32) -> I32;
     StdJsonToNumber = "std_json_to_number" (I32) -> F64;
     StdJsonToI64 = "std_json_to_i64" (I32) -> I64;
@@ -275,6 +277,8 @@ runtime_functions! {
     StdParseInt = "std_parse_int" (I32, I32, I64, I32) -> I32;
     StdRaiseInvalidDate = "std_raise_invalid_date" () -> I32;
     StdRandomUuid = "std_random_uuid" () -> I32;
+    StdRegexExec = "std_regex_exec" (I32, I32) -> I32;
+    StdRegexMatch = "std_regex_match" (I32, I32) -> I32;
     StdRegexReplace = "std_regex_replace" (I32, I32, I32) -> I32;
     StdRegexSearch = "std_regex_search" (I32, I32) -> F64;
     StdRegexSplit = "std_regex_split" (I32, I32) -> I32;
@@ -290,6 +294,7 @@ runtime_functions! {
     StdStringLastIndexOf = "std_string_last_index_of" (I32, I32, F64) -> F64;
     StdStringPadEnd = "std_string_pad_end" (I32, F64, I32) -> I32;
     StdStringPadStart = "std_string_pad_start" (I32, F64, I32) -> I32;
+    StdStringNormalize = "std_string_normalize" (I32, I32) -> I32;
     StdStringRepeat = "std_string_repeat" (I32, F64) -> I32;
     StdStringReplace = "std_string_replace" (I32, I32, I32) -> I32;
     StdStringReplaceAll = "std_string_replace_all" (I32, I32, I32) -> I32;
@@ -312,12 +317,15 @@ runtime_functions! {
     TimeInstantFromMs = "time_instant_from_ms" (F64, I32) -> I64;
     TimeInstantMs = "time_instant_ms" (I32) -> F64;
     TimeInstantParse = "time_instant_parse" (I32, I32, I32) -> I64;
+    TimePlainAddCalendar = "time_plain_add_calendar" (I32, F64, F64, F64, F64, I32, I32) -> I64;
     TimePlainAddDays = "time_plain_add_days" (I32, F64, I32) -> I64;
     TimePlainDateFormat = "time_plain_date_format" (I32, I32, I32) -> I64;
+    TimePlainDateFromFields = "time_plain_date_from_fields" (F64, F64, F64, I32, I32) -> I64;
     TimePlainDateParse = "time_plain_date_parse" (I32, I32, I32) -> I64;
     TimePlainFormat = "time_plain_format" (I32, I32, I32) -> I64;
     TimePlainParse = "time_plain_parse" (I32, I32, I32) -> I64;
     TimePlainPart = "time_plain_part" (I32, I32) -> F64;
+    TimePlainUntilPart = "time_plain_until_part" (I32, I32, I32, I32) -> F64;
     WebBodyBytes = "web_body_bytes" (I32) -> I32;
     WebBodyJson = "web_body_json" (I32) -> I32;
     WebBodyStream = "web_body_stream" (I32) -> I32;

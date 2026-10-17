@@ -699,6 +699,47 @@ pub(crate) unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, valu
     append(object, value, key);
 }
 
+/// Merge undeclared JSON residue from `source` into `base`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_merge_residue(base: *mut u8, source: *mut u8) -> *mut u8 {
+    if source.is_null() {
+        return base;
+    }
+    let out = new_node(OBJECT);
+    if !base.is_null() {
+        std_json_assign(out, base);
+    }
+    std_json_assign(out, source);
+    out
+}
+
+/// Remove a key from a JSON residue object graph.
+///
+/// # Safety
+/// `key` must be a valid string pointer when `graph` is non-null.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_exclude_key(graph: *mut u8, key: *mut u8) -> *mut u8 {
+    if graph.is_null() || word(graph, 0) != OBJECT {
+        return graph;
+    }
+    let target = unsafe { crate::runtime::bytes(key) };
+    let out = new_node(OBJECT);
+    let mut child = word(graph, 16);
+    while child != 0 {
+        let member = node(child);
+        let k = node(word(member, 24));
+        if string_bytes(k) != target {
+            append(out, member, k);
+        }
+        child = word(member, 4);
+    }
+    if word(out, 16) == 0 {
+        core::ptr::null_mut()
+    } else {
+        out
+    }
+}
+
 /// A number as a JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {

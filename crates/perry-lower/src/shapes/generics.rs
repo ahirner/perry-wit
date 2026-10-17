@@ -1,10 +1,13 @@
-//! Instantiation of generic interfaces and type aliases using interned source types.
+//! Instantiation of generic interfaces, type aliases, and classes using interned source types.
 use super::*;
-use perry_hir::ir::{Interface, TypeAlias};
+use perry_hir::ir::{Class, Interface, TypeAlias};
 
 pub(crate) trait DeclarationLookup {
     fn interface(&self, name: &str) -> Option<(usize, &Interface)>;
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)>;
+    fn class(&self, _name: &str) -> Option<(usize, &Class)> {
+        None
+    }
 }
 
 impl DeclarationLookup for (&[Interface], &[TypeAlias]) {
@@ -13,6 +16,18 @@ impl DeclarationLookup for (&[Interface], &[TypeAlias]) {
     }
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
         self.1.iter().enumerate().find(|(_, a)| a.name == name)
+    }
+}
+
+impl DeclarationLookup for (&[Interface], &[TypeAlias], &[Class]) {
+    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
+        self.0.iter().enumerate().find(|(_, i)| i.name == name)
+    }
+    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
+        self.1.iter().enumerate().find(|(_, a)| a.name == name)
+    }
+    fn class(&self, name: &str) -> Option<(usize, &Class)> {
+        self.2.iter().enumerate().find(|(_, c)| c.name == name)
     }
 }
 
@@ -30,10 +45,29 @@ impl DeclarationLookup
     }
 }
 
+impl DeclarationLookup
+    for (
+        &HashMap<&str, (usize, &Interface)>,
+        &HashMap<&str, (usize, &TypeAlias)>,
+        &HashMap<&str, (usize, &Class)>,
+    )
+{
+    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
+        self.0.get(name).copied()
+    }
+    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
+        self.1.get(name).copied()
+    }
+    fn class(&self, name: &str) -> Option<(usize, &Class)> {
+        self.2.get(name).copied()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum DeclarationId {
     Interface(usize),
     Alias(usize),
+    Class(usize),
 }
 
 /// The generic declaration an instantiation expands.
@@ -41,12 +75,16 @@ pub(super) enum DeclarationId {
 enum Declaration<'a> {
     Interface(&'a Interface),
     Alias(&'a TypeAlias),
+    Class(&'a Class),
 }
 
 impl<'a> Declaration<'a> {
     fn find<L: DeclarationLookup>(lookup: &'a L, base: &str) -> Option<(DeclarationId, Self)> {
         if let Some((index, interface)) = lookup.interface(base) {
             return Some((DeclarationId::Interface(index), Self::Interface(interface)));
+        }
+        if let Some((index, class)) = lookup.class(base) {
+            return Some((DeclarationId::Class(index), Self::Class(class)));
         }
         let (index, alias) = lookup.type_alias(base)?;
         Some((DeclarationId::Alias(index), Self::Alias(alias)))
@@ -56,6 +94,7 @@ impl<'a> Declaration<'a> {
         match self {
             Self::Interface(interface) => &interface.type_params,
             Self::Alias(alias) => &alias.type_params,
+            Self::Class(class) => &class.type_params,
         }
     }
 
@@ -77,9 +116,13 @@ impl<'a> Declaration<'a> {
                 Some(argument) => *argument,
                 None => Argument::from_hir(
                     ctx,
-                    parameter.default.as_deref().with_context(|| {
-                        format!("missing type argument {} of {base}", parameter.name)
-                    })?,
+                    parameter
+                        .default
+                        .as_deref()
+                        .or(parameter.constraint.as_deref())
+                        .with_context(|| {
+                            format!("missing type argument {} of {base}", parameter.name)
+                        })?,
                     &bindings,
                     &mut remaining,
                 )?,
@@ -90,10 +133,29 @@ impl<'a> Declaration<'a> {
     }
 }
 
-impl Shapes<'_> {
+impl<'s> Shapes<'s> {
+    pub(crate) fn class_value_type(
+        &self,
+        ctx: &Context,
+        class_name: &str,
+        type_args: &[ArgumentId],
+        ty: &HirType,
+    ) -> Result<TypeHandle> {
+        let Some((_, class)) = self.classes.get(class_name) else {
+            return self.value_type(ctx, ty);
+        };
+        if class.type_params.is_empty() {
+            return self.value_type(ctx, ty);
+        }
+        let bindings = Declaration::Class(class).bind(ctx, class_name, type_args)?;
+        let mut remaining = 4096;
+        let arg = Argument::from_hir(ctx, ty, &bindings, &mut remaining)?;
+        self.source_type(ctx, arg)
+    }
+
     /// The MIR type of `base<arguments>`: missing arguments take their declared defaults,
     /// and each distinct instantiation is one named record (or the aliased type).
-    pub(super) fn generic(
+    pub(crate) fn generic(
         &self,
         ctx: &Context,
         base: &str,
@@ -106,7 +168,7 @@ impl Shapes<'_> {
                 return self.source_type(ctx, *inner);
             }
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
-                let lookup = (&self.interfaces, &self.type_aliases);
+                let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
                 let expanded = expand_utility_type_with_lookup(ctx, &lookup, base, arguments, 0)
                     .with_context(|| {
                         format!("MIR backend could not resolve utility type {base}")
@@ -118,7 +180,7 @@ impl Shapes<'_> {
                 if let Some(ty) = self.named.borrow().get(&key) {
                     return Ok(*ty);
                 }
-                let lookup = (&self.interfaces, &self.type_aliases);
+                let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
                 let properties =
                     resolve_utility_record_properties(ctx, &lookup, base, arguments, 0)
                         .with_context(|| {
@@ -140,17 +202,17 @@ impl Shapes<'_> {
                 return Ok(ty);
             }
         }
-        let lookup = (&self.interfaces, &self.type_aliases);
+        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         let (identity, declaration) = Declaration::find(&lookup, base).with_context(|| {
             format!("MIR backend does not support unresolved generic type {base}")
         })?;
         let bindings = declaration.bind(ctx, base, arguments)?;
-        let effective_args = declaration
+        let effective_args: Vec<ArgumentId> = declaration
             .parameters()
             .iter()
             .map(|parameter| bindings[parameter.name.as_str()])
             .collect();
-        let key = ShapeKey::Generic(identity, effective_args);
+        let key = ShapeKey::Generic(identity, effective_args.clone());
         if let Some(ty) = self.named.borrow().get(&key) {
             return Ok(*ty);
         }
@@ -179,6 +241,25 @@ impl Shapes<'_> {
                         .collect(),
                 )?
                 .into()
+            }
+            Declaration::Class(class) => {
+                let properties = collect_class_properties(ctx, class, &bindings)
+                    .with_context(|| format!("failed to resolve fields of class {base}"))?;
+                let prefix = format!("class_{}", class.name);
+                let rec = self.source_record_prefix(
+                    ctx,
+                    Some(&key),
+                    Some(&prefix),
+                    properties
+                        .iter()
+                        .map(|(name, ty, optional)| (name.as_str(), *ty, *optional))
+                        .collect(),
+                )?;
+                let ty: TypeHandle = rec.into();
+                self.class_records
+                    .borrow_mut()
+                    .insert(ty, (class.name.clone(), effective_args));
+                ty
             }
             Declaration::Alias(alias) => {
                 let value = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)?;
@@ -229,6 +310,24 @@ impl Shapes<'_> {
         }
         Ok(ty)
     }
+}
+
+pub(super) fn collect_class_properties(
+    ctx: &Context,
+    class: &Class,
+    bindings: &HashMap<&str, ArgumentId>,
+) -> Option<Vec<(String, ArgumentId, bool)>> {
+    let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
+    let mut remaining = 4096;
+    for f in &class.fields {
+        let field_ty = Argument::from_hir(ctx, &f.ty, bindings, &mut remaining).ok()?;
+        if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == f.name) {
+            *existing = (f.name.clone(), field_ty, false);
+        } else {
+            merged.push((f.name.clone(), field_ty, false));
+        }
+    }
+    Some(merged)
 }
 
 pub(super) fn collect_interface_properties<L: DeclarationLookup>(
@@ -620,6 +719,7 @@ pub(super) fn resolve_generic_properties<L: DeclarationLookup>(
         Declaration::Interface(interface) => {
             collect_interface_properties(ctx, lookup, interface, &bindings, depth + 1)
         }
+        Declaration::Class(class) => collect_class_properties(ctx, class, &bindings),
         Declaration::Alias(alias) => {
             let mut remaining = 4096;
             let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;

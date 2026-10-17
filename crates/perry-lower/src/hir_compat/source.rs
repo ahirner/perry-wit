@@ -56,15 +56,39 @@ pub(crate) fn validate(module: &ast::Module, locations: &Locations<'_>) -> Resul
 
 /// Bindings with no declared type may keep the initializer's absence states.
 pub(super) fn inferred_bindings(module: &ast::Module) -> std::collections::HashSet<(u32, u32)> {
+    fn collect_pat(pat: &ast::Pat, out: &mut std::collections::HashSet<(u32, u32)>) {
+        match pat {
+            ast::Pat::Ident(binding) if binding.type_ann.is_none() => {
+                out.insert((binding.id.span.lo.0, binding.id.span.hi.0));
+            }
+            ast::Pat::Array(arr) if arr.type_ann.is_none() => {
+                for elem in arr.elems.iter().flatten() {
+                    collect_pat(elem, out);
+                }
+            }
+            ast::Pat::Object(obj) if obj.type_ann.is_none() => {
+                for prop in &obj.props {
+                    match prop {
+                        ast::ObjectPatProp::KeyValue(kv) => collect_pat(&kv.value, out),
+                        ast::ObjectPatProp::Assign(assign) => {
+                            out.insert((assign.key.span.lo.0, assign.key.span.hi.0));
+                        }
+                        ast::ObjectPatProp::Rest(rest) => collect_pat(&rest.arg, out),
+                    }
+                }
+            }
+            ast::Pat::Rest(rest) if rest.type_ann.is_none() => collect_pat(&rest.arg, out),
+            ast::Pat::Assign(assign) => collect_pat(&assign.left, out),
+            _ => {}
+        }
+    }
+
     #[derive(Default)]
     struct Bindings(std::collections::HashSet<(u32, u32)>);
     impl Visit for Bindings {
         fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            if let ast::Pat::Ident(binding) = &declaration.name
-                && binding.type_ann.is_none()
-                && declaration.init.is_some()
-            {
-                self.0.insert((binding.id.span.lo.0, binding.id.span.hi.0));
+            if declaration.init.is_some() {
+                collect_pat(&declaration.name, &mut self.0);
             }
             declaration.visit_children_with(self);
         }

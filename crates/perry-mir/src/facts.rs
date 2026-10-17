@@ -147,7 +147,12 @@ impl Body {
                         .is_some())
                     || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
                         |op| op.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt),
-                    ))
+                    )
+                    || op
+                        .deref(ctx)
+                        .operands()
+                        .chain(op.deref(ctx).results())
+                        .any(|v| v.get_type(ctx).deref(ctx).is::<crate::types::BigIntType>()))
             {
                 has_integer_constraints = true;
             }
@@ -774,11 +779,25 @@ impl Analysis for ProgramFacts {
             let mut defaulted = false;
             while let Some((id, _, value)) = solver.width_defaults.pop() {
                 solver.analysis.constraint_visits += 1;
-                if !solver.analysis.states[id].required.contains_key(&value)
-                    && let Some(integer) = solver.analysis.states[id].fact(value).integer()
-                {
-                    solver.require(id, value, Some(integer.unconstrained()));
-                    defaulted = true;
+                if !solver.analysis.states[id].required.contains_key(&value) {
+                    let default_int = solver.analysis.states[id]
+                        .fact(value)
+                        .integer()
+                        .map(Integer::unconstrained)
+                        .or_else(|| {
+                            value
+                                .get_type(ctx)
+                                .deref(ctx)
+                                .is::<crate::types::BigIntType>()
+                                .then_some(Integer {
+                                    bits: 64,
+                                    signed: true,
+                                })
+                        });
+                    if let Some(integer) = default_int {
+                        solver.require(id, value, Some(integer));
+                        defaulted = true;
+                    }
                 }
             }
             if !defaulted {

@@ -137,8 +137,8 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "property byteLength is not supported on string yet",
         ),
         (
-            "export function run(a: bigint, b: bigint): bigint {\n  return a / b;\n}",
-            "operator Div on bigint and bigint is not supported yet",
+            "export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}",
+            "operator Pow on bigint and bigint is not supported yet",
         ),
     ] {
         let error = rejected(source);
@@ -400,8 +400,8 @@ fn unsupported_temporal_forms_are_rejected() {
             "Temporal.ZonedDateTime.from is not supported",
         ),
         (
-            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ months: 1 }).toString(); }",
-            "literal { days }",
+            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }",
+            "duration field hours is not supported",
         ),
         (
             "export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }",

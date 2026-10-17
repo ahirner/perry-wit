@@ -55,6 +55,7 @@ impl LibraryId {
             "str_code_point_at"
             | "str_from_code_point"
             | "str_case_convert"
+            | "str_normalize"
             | "str_split_count"
             | "str_split_populate"
             | "str_join_total_len"
@@ -75,7 +76,10 @@ impl LibraryId {
             | "time_plain_add_days"
             | "time_plain_part"
             | "time_plain_format"
-            | "time_plain_date_format" => Self::Time,
+            | "time_plain_date_format"
+            | "time_plain_date_from_fields"
+            | "time_plain_date_until_days"
+            | "time_plain_date_compare" => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
     }
@@ -853,28 +857,20 @@ mod tests {
             ("time", TIME),
             ("number", NUMBER),
             ("runtime", RUNTIME),
+            ("runtime_collectible", COLLECTIBLE_RUNTIME),
             ("fs", FS),
             ("web", WEB),
             ("json", JSON),
             ("std", STD),
+            ("text", TEXT),
         ] {
             let library = Library::parse(bytes).unwrap();
             assert!(
                 library
                     .fixed_stack_bound(None)
                     .is_some_and(|size| size < 8192),
-                "{name}: {:?}; unbounded exports: {:?}",
-                library.fixed_stack_bound(None),
-                library
-                    .exports
-                    .keys()
-                    .filter(|entry| {
-                        let reachable = library
-                            .reachable([entry.as_str()], &BTreeSet::new())
-                            .expect("reachable");
-                        library.fixed_stack_bound(Some(&reachable)).is_none()
-                    })
-                    .collect::<Vec<_>>()
+                "{name}: {:?}",
+                library.fixed_stack_bound(None)
             );
         }
     }

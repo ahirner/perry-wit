@@ -15,6 +15,7 @@ mod array_methods;
 mod builder;
 mod builtins;
 mod calls;
+mod classes;
 mod coerce;
 mod collections;
 mod control_flow;

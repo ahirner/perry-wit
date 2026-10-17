@@ -52,11 +52,18 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }
-            (op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul), Kind::BigInt, Kind::BigInt) => {
+            (
+                op
+                @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod),
+                Kind::BigInt,
+                Kind::BigInt,
+            ) => {
                 let kind = match op {
                     BinaryOp::Add => BinaryKind::Add,
                     BinaryOp::Sub => BinaryKind::Sub,
-                    _ => BinaryKind::Mul,
+                    BinaryOp::Mul => BinaryKind::Mul,
+                    BinaryOp::Div => BinaryKind::Div,
+                    _ => BinaryKind::Rem,
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }
@@ -300,7 +307,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// The negation of a boolean.
-    fn not(&mut self, ctx: &mut Context, value: Value) -> Value {
+    pub(super) fn not(&mut self, ctx: &mut Context, value: Value) -> Value {
         let no = self.boolean(ctx, false);
         self.compare(ctx, CompareKind::Eq, value, no)
     }

@@ -576,6 +576,17 @@ impl Buffer {
         // SAFETY: `len` bytes at `ptr` are initialized.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    /// Transfer ownership of valid UTF-8 bytes in this buffer into a runtime string.
+    ///
+    /// # Safety
+    /// `self` must contain `self.len` bytes of valid UTF-8.
+    pub unsafe fn into_string(self) -> *mut u8 {
+        if self.len == 0 {
+            return from_static("");
+        }
+        unsafe { adopt(self.ptr, self.len as u32) }
+    }
 }
 
 impl Default for Buffer {
@@ -590,7 +601,7 @@ pub fn json_syntax_message(input: &[u8], offset: u32) -> *mut u8 {
     let mut message = Buffer::new();
     json::syntax_message(input, offset, |part| message.extend_from_slice(part));
     // SAFETY: the buffer owns valid UTF-8 and transfers its payload to the string.
-    unsafe { adopt(message.ptr, message.len as u32) }
+    unsafe { message.into_string() }
 }
 
 /// The message of a live exception supplied by the compiler or another helper.

@@ -127,9 +127,11 @@ impl<'s> FunctionBuilder<'s> {
             await_initialization: false,
             base_params: params.iter().copied().map(BindingType::plain).collect(),
             params: params.iter().copied().map(BindingType::plain).collect(),
+            never_params: Vec::new(),
             defaults: Vec::new(),
             has_rest: false,
             result: results.first().copied().map(BindingType::plain),
+            returns_never: false,
         };
         let ty = FunctionType::get(ctx, params, results);
         let function = FuncOp::new(ctx, name.clone(), ty);

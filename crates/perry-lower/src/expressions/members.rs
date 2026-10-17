@@ -15,8 +15,56 @@ impl<'s> FunctionBuilder<'s> {
         op: &BinaryOp,
         prefix: bool,
     ) -> Result<Value> {
+        if let Expr::ClassRef(class_name) = object {
+            let (id, _) = self
+                .shapes
+                .static_field(class_name, property)
+                .with_context(|| format!("static field {class_name}.{property} not found"))?;
+            let update_op = match op {
+                BinaryOp::Add => UpdateOp::Increment,
+                BinaryOp::Sub => UpdateOp::Decrement,
+                _ => bail!("invalid property update"),
+            };
+            return self.update(ctx, id, &update_op, prefix);
+        }
         let object = self.expression(ctx, object)?;
         let object = self.defined(ctx, object)?;
+        if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, object.get_type(ctx))
+            && (self.shapes.class_getter(class_name, property).is_some()
+                || self.shapes.class_setter(class_name, property).is_some())
+        {
+            let previous = if let Some((owner_class, getter)) =
+                self.shapes.class_getter(class_name, property)
+            {
+                self.class_getter_call(ctx, object, owner_class, &type_args, getter)?
+            } else {
+                let get = FieldGetOp::new(ctx, object, property.to_string())
+                    .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
+                self.append_value(ctx, &get)
+            };
+            let field_type = previous.get_type(ctx);
+            let old = self.arithmetic(ctx, previous);
+            ensure!(
+                kind(ctx, old)? == Kind::Number,
+                "property update needs a numeric field"
+            );
+            let one = self.number(ctx, 1.0);
+            let kind = match op {
+                BinaryOp::Add => BinaryKind::Add,
+                BinaryOp::Sub => BinaryKind::Sub,
+                _ => bail!("invalid property update"),
+            };
+            let next = self.binary(ctx, kind, old, one);
+            let stored = self.fit(ctx, next, field_type)?;
+            if let Some((owner_class, setter)) = self.shapes.class_setter(class_name, property) {
+                self.class_setter_call_value(ctx, object, owner_class, &type_args, setter, stored)?;
+            } else {
+                self.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, object, property.to_string(), stored)
+                });
+            }
+            return Ok(if prefix { next } else { old });
+        }
         let get = FieldGetOp::new(ctx, object, property.to_string())
             .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
         let previous = self.append_value(ctx, &get);
@@ -47,6 +95,9 @@ impl<'s> FunctionBuilder<'s> {
         object: &'s Expr,
         property: &str,
     ) -> Result<Value> {
+        if let Expr::ClassRef(class_name) = object {
+            return self.class_static_field_get(ctx, class_name, property);
+        }
         let value = self.expression(ctx, object)?;
         // Property access on `undefined` throws TypeError, in ECMAScript and here.
         let value = self.defined(ctx, value)?;
@@ -138,12 +189,20 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Record, "length") if let Some(len) = tuple_length(ctx, ty)? => {
                 self.number(ctx, len as f64)
             }
-            (Kind::Record, field) => {
-                let op = FieldGetOp::new(ctx, value, field.to_string()).map_err(|_| {
-                    anyhow!("property {field} does not exist on this shape (subset rule R1)")
-                })?;
-                self.field_read(ctx, &op)?
+            (Kind::Record, field)
+                if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, ty)
+                    && let Some((owner_class, getter)) =
+                        self.shapes.class_getter(class_name, field) =>
+            {
+                self.class_getter_call(ctx, value, owner_class, &type_args, getter)?
             }
+            (Kind::Record, field) => match FieldGetOp::new(ctx, value, field.to_string()) {
+                Ok(op) => self.field_read(ctx, &op)?,
+                Err(_) if self.rest_excluded_keys.iter().any(|k| k == field) => {
+                    self.absent_literal(ctx, false, None)?
+                }
+                Err(_) => bail!("property {field} does not exist on this shape (subset rule R1)"),
+            },
             (receiver_kind, property) => {
                 bail!(
                     "property {property} is not supported on {} yet",

@@ -56,6 +56,7 @@ enum Ty {
     NullString,
     OptNumber,
     StringArray,
+    NullStringArray,
     NumberArray,
     Bytes,
     ByteBuffer,
@@ -114,6 +115,10 @@ impl Ty {
             }
             Ty::OptNumber => OptionalType::get(ctx, number).into(),
             Ty::StringArray => ArrayType::get(ctx, string).into(),
+            Ty::NullStringArray => {
+                let array = ArrayType::get(ctx, string).into();
+                OptionalType::get_with(ctx, array, crate::attrs::Absence::Null).into()
+            }
             Ty::NumberArray => ArrayType::get(ctx, number).into(),
             Ty::Bytes => BytesType::get(ctx).into(),
             Ty::ByteBuffer => crate::types::ByteBufferType::get(ctx).into(),
@@ -226,6 +231,13 @@ impl Ty {
             }
             Ty::OptNumber => optional_of(&number),
             Ty::StringArray => array_of(&string),
+            Ty::NullStringArray => {
+                optional_of(&|t| {
+                    t.deref(ctx)
+                        .downcast_ref::<ArrayType>()
+                        .is_some_and(|a| string(a.element()))
+                }) && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
+            }
             Ty::NumberArray => array_of(&number),
             Ty::Bytes => deref.is::<BytesType>(),
             Ty::ByteBuffer => deref.is::<crate::types::ByteBufferType>(),
@@ -347,14 +359,14 @@ macro_rules! intrinsics {
 }
 
 intrinsics! {
-    BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws;
-    BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure;
+    BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws, atomic;
+    BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure, atomic;
     BigIntToNumber = "bigint_to_number" (BigInt) -> (Number), pure, noalloc;
-    BigIntToString = "bigint_to_string" (BigInt) -> (String), pure;
+    BigIntToString = "bigint_to_string" (BigInt) -> (String), pure, atomic;
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
-    NumberToString = "number_to_string" (Number) -> (String), pure;
-    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws;
+    NumberToString = "number_to_string" (Number) -> (String), pure, atomic;
+    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws, atomic;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
     PerformanceNow = "performance_now" () -> (Number), noalloc;
@@ -383,7 +395,7 @@ intrinsics! {
     DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number), noalloc;
     DateIso = "date_iso" (Date) -> (String), throws;
     DateJson = "date_json" (Date) -> (NullString);
-    StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws;
+    StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws, atomic;
     StringCharAt = "string_char_at" (String, Number) -> (String), pure, atomic;
     StringCharAtIndex = "string_char_at_index" (String, Index) -> (String), pure, atomic;
     StringScalarAtIndex = "string_scalar_at_index" (String, Index) -> (Scalar), pure, noalloc;
@@ -412,7 +424,8 @@ intrinsics! {
     StringIndex = "string_index" (String, Number) -> (OptString), pure, atomic;
     StringLower = "string_lower" (String) -> (String), pure, atomic;
     StringUpper = "string_upper" (String) -> (String), pure, atomic;
-    StringRepeat = "string_repeat" (String, Number) -> (String), throws;
+    StringRepeat = "string_repeat" (String, Number) -> (String), throws, atomic;
+    StringNormalize = "string_normalize" (String, String) -> (String), throws, atomic;
     BytesNew = "bytes_new" (Number) -> (Bytes), throws;
     BytesFromArray = "bytes_from_array" (NumberArray) -> (Bytes);
     BytesCopy = "bytes_copy" (Bytes) -> (Bytes), throws;
@@ -440,6 +453,8 @@ intrinsics! {
     DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure, noalloc;
     DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure, noalloc;
     RegexSearch = "regex_search" (String, Regex) -> (Number), pure, noalloc;
+    RegexExec = "regex_exec" (String, Regex) -> (NullStringArray), pure, atomic;
+    RegexMatch = "regex_match" (String, Regex) -> (NullStringArray), pure, atomic;
     RegexReplace = "regex_replace" (String, Regex, String) -> (String), pure, atomic;
     RegexSplit = "regex_split" (String, Regex) -> (StringArray), pure, atomic;
     DecoderValidateLabel = "decoder_validate_label" (String) -> (), throws, atomic;
@@ -462,6 +477,8 @@ intrinsics! {
     JsonCursorFinish = "json_cursor_finish" (JsonCursor, Bool) -> (), throws, atomic;
     JsonResidue = "json_residue" (Aggregate, Json) -> (), noalloc;
     JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
+    JsonSpread = "json_spread" (Aggregate, Aggregate) -> ();
+    JsonExclude = "json_exclude" (Aggregate, String) -> ();
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
@@ -493,18 +510,23 @@ intrinsics! {
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
-    InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws;
-    InstantFrom = "instant_from" (String) -> (Instant), throws;
+    InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws, atomic;
+    InstantFrom = "instant_from" (String) -> (Instant), throws, atomic;
     InstantMs = "instant_ms" (Instant) -> (Number), pure, noalloc;
-    InstantString = "instant_string" (Instant) -> (String), pure;
-    PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws;
-    PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws;
+    InstantString = "instant_string" (Instant) -> (String), pure, atomic;
+    PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws, atomic;
+    PlainDateFromFields = "plain_date_from_fields" (Number, Number, Number, Number) -> (PlainDate), throws, atomic;
+    PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws, atomic;
+    PlainDateAddCalendar = "plain_date_add_calendar" (PlainDate, Number, Number, Number, Number, Number) -> (PlainDate), throws, atomic;
+    PlainDateEpochDays = "plain_date_epoch_days" (PlainDate) -> (Number), pure, noalloc;
+    PlainDateUntilPart = "plain_date_until_part" (PlainDate, PlainDate, Number, Number) -> (Number), pure, noalloc;
     PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure, noalloc;
-    PlainDateString = "plain_date_string" (PlainDate) -> (String), pure;
-    PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws;
-    PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws;
+    PlainDateString = "plain_date_string" (PlainDate) -> (String), pure, atomic;
+    PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws, atomic;
+    PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws, atomic;
+    PlainDateTimeAddCalendar = "plain_date_time_add_calendar" (PlainDateTime, Number, Number, Number, Number, Number) -> (PlainDateTime), throws, atomic;
     PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure, noalloc;
-    PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure;
+    PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure, atomic;
 
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
     JsonStrictEqual = "json_strict_equal" (Json, Json) -> (Bool), pure, noalloc;
@@ -612,10 +634,6 @@ impl Intrinsic {
         } else {
             crate::effects::Allocation::Conservative
         }
-    }
-
-    pub(crate) fn may_allocate(self) -> bool {
-        self.allocation() != crate::effects::Allocation::None
     }
 
     /// Pure services can be removed when unused.

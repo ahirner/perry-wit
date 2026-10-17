@@ -175,6 +175,53 @@ impl<'s> FunctionBuilder<'s> {
         else {
             bail!("spread calls require a dense array push receiver")
         };
+        if matches!(hir_compat::method(property).name(), "max" | "min") {
+            let is_max = hir_compat::method(property).name() == "max";
+            let init = self.number(
+                ctx,
+                if is_max {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                },
+            );
+            let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
+            self.store(ctx, acc_slot, init);
+            let op = if is_max {
+                Intrinsic::MathMax
+            } else {
+                Intrinsic::MathMin
+            };
+            for argument in args {
+                match argument {
+                    perry_hir::CallArg::Expr(expr) => {
+                        let val = self.number_operand(ctx, expr)?;
+                        let cur = self.load(ctx, acc_slot)?;
+                        let next = self.intrinsic(ctx, op, vec![cur, val]);
+                        self.store(ctx, acc_slot, next);
+                    }
+                    perry_hir::CallArg::Spread(expr) => {
+                        let arr = self.expression(ctx, expr)?;
+                        let arr = self.defined(ctx, arr)?;
+                        ensure!(
+                            kind(ctx, arr)? == Kind::Array,
+                            "Math.max/min spread requires an array"
+                        );
+                        let len = self.array_length(ctx, arr);
+                        let zero = self.number(ctx, 0.0);
+                        self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
+                            let item = b.element_at(ctx, arr, idx)?;
+                            let val = b.arithmetic(ctx, item);
+                            let cur = b.load(ctx, acc_slot)?;
+                            let next = b.intrinsic(ctx, op, vec![cur, val]);
+                            b.store(ctx, acc_slot, next);
+                            Ok(())
+                        })?;
+                    }
+                }
+            }
+            return self.load(ctx, acc_slot);
+        }
         ensure!(
             matches!(hir_compat::method(property).name(), "push" | "concat"),
             "spread calls are supported for dense array push"

@@ -283,6 +283,183 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
+    pub(super) fn set_binary_op(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        other_expr: &'s Expr,
+        elem_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+        method: &str,
+    ) -> Result<Value> {
+        let other = self.expression(ctx, other_expr)?;
+        let other = self.defined(ctx, other)?;
+        let out = self.empty_set(ctx, Some(receiver.get_type(ctx)))?;
+        match method {
+            "difference" => {
+                self.live_collection_loop(ctx, "set_diff", receiver, |b, ctx, _, val| {
+                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
+                    let keep = b.not(ctx, in_other);
+                    let add_bb = b.new_block(ctx, "set_diff_add");
+                    let cont_bb = b.new_block(ctx, "set_diff_cont");
+                    b.branch(ctx, keep, add_bb, cont_bb);
+                    b.switch_to(add_bb);
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    b.jump(ctx, cont_bb);
+                    b.switch_to(cont_bb);
+                    Ok(())
+                })?;
+            }
+            "intersection" => {
+                self.live_collection_loop(ctx, "set_inter", receiver, |b, ctx, _, val| {
+                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
+                    let add_bb = b.new_block(ctx, "set_inter_add");
+                    let cont_bb = b.new_block(ctx, "set_inter_cont");
+                    b.branch(ctx, in_other, add_bb, cont_bb);
+                    b.switch_to(add_bb);
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    b.jump(ctx, cont_bb);
+                    b.switch_to(cont_bb);
+                    Ok(())
+                })?;
+            }
+            "union" => {
+                self.live_collection_loop(ctx, "set_union_a", receiver, |b, ctx, _, val| {
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    Ok(())
+                })?;
+                self.live_collection_loop(ctx, "set_union_b", other, |b, ctx, _, val| {
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    Ok(())
+                })?;
+            }
+            "symmetricDifference" => {
+                self.live_collection_loop(ctx, "set_sym_a", receiver, |b, ctx, _, val| {
+                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
+                    let keep = b.not(ctx, in_other);
+                    let add_bb = b.new_block(ctx, "set_sym_a_add");
+                    let cont_bb = b.new_block(ctx, "set_sym_a_cont");
+                    b.branch(ctx, keep, add_bb, cont_bb);
+                    b.switch_to(add_bb);
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    b.jump(ctx, cont_bb);
+                    b.switch_to(cont_bb);
+                    Ok(())
+                })?;
+                self.live_collection_loop(ctx, "set_sym_b", other, |b, ctx, _, val| {
+                    let in_recv = b.set_has(ctx, receiver, val, elem_ty)?;
+                    let keep = b.not(ctx, in_recv);
+                    let add_bb = b.new_block(ctx, "set_sym_b_add");
+                    let cont_bb = b.new_block(ctx, "set_sym_b_cont");
+                    b.branch(ctx, keep, add_bb, cont_bb);
+                    b.switch_to(add_bb);
+                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                    b.jump(ctx, cont_bb);
+                    b.switch_to(cont_bb);
+                    Ok(())
+                })?;
+            }
+            _ => bail!("unsupported Set binary op {method}"),
+        }
+        Ok(out)
+    }
+
+    pub(super) fn set_relation_op(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        other_expr: &'s Expr,
+        elem_ty: TypeHandle,
+        method: &str,
+    ) -> Result<Value> {
+        let other = self.expression(ctx, other_expr)?;
+        let other = self.defined(ctx, other)?;
+        let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let res_slot = self.entry_slot(ctx, i1);
+        let init_true = self.boolean(ctx, true);
+        self.store(ctx, res_slot, init_true);
+        let (iter_set, check_set, negate) = match method {
+            "isSubsetOf" => (receiver, other, false),
+            "isSupersetOf" => (other, receiver, false),
+            "isDisjointFrom" => (receiver, other, true),
+            _ => bail!("unsupported Set relation op {method}"),
+        };
+        self.live_collection_loop(ctx, "set_rel", iter_set, |b, ctx, _, val| {
+            let has = b.set_has(ctx, check_set, val, elem_ty)?;
+            let bad = if negate { has } else { b.not(ctx, has) };
+            let fail_bb = b.new_block(ctx, "set_rel_fail");
+            let cont_bb = b.new_block(ctx, "set_rel_cont");
+            b.branch(ctx, bad, fail_bb, cont_bb);
+            b.switch_to(fail_bb);
+            let f = b.boolean(ctx, false);
+            b.store(ctx, res_slot, f);
+            b.jump(ctx, cont_bb);
+            b.switch_to(cont_bb);
+            Ok(())
+        })?;
+        self.load(ctx, res_slot)
+    }
+
+    pub(super) fn map_group_by(
+        &mut self,
+        ctx: &mut Context,
+        items_expr: &'s Expr,
+        callback: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let items = self.expression(ctx, items_expr)?;
+        let items = self.defined(ctx, items)?;
+        let elem_ty = self.array_element(ctx, items)?;
+        let group_arr_ty: TypeHandle = ArrayType::get(ctx, elem_ty).into();
+
+        let alloc_bb = self.new_block(ctx, "groupby_alloc");
+        let loop_start_bb = self.new_block(ctx, "groupby_start");
+        self.jump(ctx, alloc_bb);
+        self.switch_to(loop_start_bb);
+
+        let len = self.array_length(ctx, items);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "map_groupby", zero, len, |b, ctx, idx, _, _| {
+            let elem = b.element_at(ctx, items, idx)?;
+            let raw_key = b.array_callback(ctx, callback, &[elem, idx])?;
+            let k_ty = expected
+                .and_then(|exp| map_entry_types(ctx, exp).map(|(k, _, _)| k))
+                .unwrap_or_else(|| raw_key.get_type(ctx));
+            let key = b.fit(ctx, raw_key, k_ty)?;
+            let tuple_rec =
+                match expected.and_then(|exp| map_entry_types(ctx, exp).map(|(_, _, r)| r)) {
+                    Some(r) => r,
+                    None => b.shapes.map_tuple_type(ctx, k_ty, group_arr_ty)?,
+                };
+
+            let body_bb = b.block;
+            b.switch_to(alloc_bb);
+            let out_map = b.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)?;
+            b.jump(ctx, loop_start_bb);
+            b.switch_to(body_bb);
+
+            let existing_opt = b.kv_get(ctx, out_map, key, k_ty, group_arr_ty)?;
+            let is_undef = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, existing_opt));
+            let new_bb = b.new_block(ctx, "groupby_new");
+            let push_bb = b.new_block(ctx, "groupby_push");
+            let done_bb = b.new_block(ctx, "groupby_done");
+            b.branch(ctx, is_undef, new_bb, push_bb);
+
+            b.switch_to(new_bb);
+            let fresh_arr = b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![elem]));
+            b.kv_set(ctx, out_map, key, fresh_arr, k_ty, group_arr_ty, tuple_rec)?;
+            b.jump(ctx, done_bb);
+
+            b.switch_to(push_bb);
+            let existing_arr = b.defined(ctx, existing_opt)?;
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, existing_arr, elem));
+            b.jump(ctx, done_bb);
+
+            b.switch_to(done_bb);
+            Ok(out_map)
+        })
+    }
+
     /// `set.values()`/`set.keys()`: a live view of a box, else a copied array.
     pub(super) fn set_values(
         &mut self,

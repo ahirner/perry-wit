@@ -249,6 +249,13 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         entry: Value,
     ) -> Result<(Value, Value)> {
+        if entry.get_type(ctx).deref(ctx).is::<ArrayType>() {
+            let zero = self.number(ctx, 0.0);
+            let one = self.number(ctx, 1.0);
+            let k = self.element_at(ctx, entry, zero)?;
+            let v = self.element_at(ctx, entry, one)?;
+            return Ok((k, v));
+        }
         let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
         let k = self.append_value(ctx, &k_op);
         let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;

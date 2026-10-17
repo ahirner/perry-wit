@@ -33,7 +33,7 @@ impl Shapes<'_> {
                 perry_mir::Absence::Null,
             )
             .into()),
-            Kind::Void => Ok(OptionalType::get_with(
+            Kind::Void | Kind::Never => Ok(OptionalType::get_with(
                 ctx,
                 FP64Type::get(ctx).into(),
                 perry_mir::Absence::Undefined,
@@ -48,7 +48,8 @@ impl Shapes<'_> {
                 let settled = self.settled_source_type(ctx, *inner)?;
                 Ok(PromiseType::get(ctx, settled).into())
             }
-            Kind::Any | Kind::Unknown => Err(PerryDiagnostic::error(
+            Kind::Unknown => Ok(perry_mir::JsonType::get(ctx).into()),
+            Kind::Any => Err(PerryDiagnostic::error(
                 DiagnosticCode::MissingTypeAnnotation,
                 "the value type cannot be inferred for the MIR backend",
             )
@@ -147,7 +148,7 @@ impl Shapes<'_> {
                     )?
                     .into())
             }
-            Kind::Function { .. } | Kind::Symbol | Kind::Never => {
+            Kind::Function { .. } | Kind::Symbol => {
                 let hir_ty = source.to_hir(ctx);
                 Err(PerryDiagnostic::error(
                     DiagnosticCode::UnsupportedType,
@@ -159,7 +160,7 @@ impl Shapes<'_> {
     }
 
     fn union_type(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases);
+        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         let flattened = super::generics::flatten_union_with_lookup(ctx, &lookup, members, 0);
         let members = flattened.as_slice();
         if members
@@ -228,7 +229,7 @@ impl Shapes<'_> {
 
     /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
     fn result(&self, ctx: &Context, alternatives: &[ArgumentId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases);
+        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         ensure!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
@@ -281,7 +282,7 @@ impl Shapes<'_> {
     }
 
     fn variant(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases);
+        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         let mut cases = Vec::new();
         for member in members {
             let (tag, valid_props, val_arg) = {

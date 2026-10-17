@@ -48,10 +48,26 @@ impl<'s> FunctionBuilder<'s> {
                     element.rest
                 }
                 None => {
-                    self.statement(ctx, first).map_err(|error| match first {
+                    let prev_rest_keys = self.rest_excluded_keys;
+                    if matches!(first, Stmt::Let { .. }) {
+                        self.rest_excluded_keys = tail
+                            .iter()
+                            .take_while(|s| matches!(s, Stmt::Let { .. }))
+                            .find_map(|s| match s {
+                                Stmt::Let {
+                                    init: Some(Expr::ObjectRest { exclude_keys, .. }),
+                                    ..
+                                } => Some(exclude_keys.as_slice()),
+                                _ => None,
+                            })
+                            .unwrap_or(&[]);
+                    }
+                    let res = self.statement(ctx, first).map_err(|error| match first {
                         Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
                         _ => error,
-                    })?;
+                    });
+                    self.rest_excluded_keys = prev_rest_keys;
+                    res?;
                     tail
                 }
             };
@@ -87,16 +103,35 @@ impl<'s> FunctionBuilder<'s> {
                 // An async function adopts a returned promise (and its result type) after
                 // the finalizers ran.
                 let (mut values, adopted) = match value {
-                    Some(expr) => {
-                        let result = self.result.context("a void function returns a value")?;
-                        let value =
-                            self.expression_with(ctx, expr, Some(result.expected_type(ctx)))?;
-                        if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
-                            (Vec::with_capacity(1), Some((value, result.carrier)))
-                        } else {
-                            (vec![self.fit_binding(ctx, value, result)?], None)
+                    Some(expr) => match self.result {
+                        Some(result) => {
+                            let value =
+                                self.expression_with(ctx, expr, Some(result.expected_type(ctx)))?;
+                            if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                                (Vec::with_capacity(1), Some((value, result.carrier)))
+                            } else {
+                                (vec![self.fit_binding(ctx, value, result)?], None)
+                            }
                         }
-                    }
+                        None => {
+                            let is_never_expr = match expr {
+                                Expr::LocalGet(id) => {
+                                    self.locals.get(id).is_some_and(|b| b.is_never)
+                                }
+                                Expr::Call { callee, .. } => {
+                                    if let Expr::FuncRef(fid) = callee.as_ref() {
+                                        self.signatures.get(fid).is_some_and(|s| s.returns_never)
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            };
+                            ensure!(is_never_expr, "a void function returns a value");
+                            self.effect(ctx, expr)?;
+                            (self.implicit_results(ctx), None)
+                        }
+                    },
                     None => (self.implicit_results(ctx), None),
                 };
                 self.run_finallies(ctx, |_| true)?;
@@ -193,7 +228,7 @@ impl<'s> FunctionBuilder<'s> {
                     .find_map(|(index, control)| match (statement, control) {
                         (
                             Stmt::Break,
-                            Control::Loop { break_to, .. } | Control::Switch { break_to },
+                            Control::Loop { break_to, .. } | Control::Switch { break_to, .. },
                         ) => Some((index, *break_to)),
                         (Stmt::Continue, Control::Loop { continue_to, .. }) => {
                             Some((index, *continue_to))
@@ -201,6 +236,74 @@ impl<'s> FunctionBuilder<'s> {
                         _ => None,
                     })
                     .context("break/continue has no enclosing target")?;
+                self.run_finallies(ctx, |f| f.controls > index)?;
+                self.jump(ctx, target);
+                self.after_terminator(ctx);
+            }
+            Stmt::Labeled { label, body } => {
+                if matches!(
+                    body.as_ref(),
+                    Stmt::For { .. }
+                        | Stmt::While { .. }
+                        | Stmt::DoWhile { .. }
+                        | Stmt::Switch { .. }
+                ) {
+                    self.pending_label = Some(label.as_str());
+                    self.statement(ctx, body)?;
+                } else {
+                    let exit = self.new_block(ctx, "labeled_exit");
+                    self.controls.push(Control::Labeled {
+                        label: label.as_str(),
+                        break_to: exit,
+                    });
+                    let res = self.statement(ctx, body);
+                    self.controls.pop();
+                    res?;
+                    self.jump(ctx, exit);
+                    self.switch_to(exit);
+                }
+            }
+            Stmt::LabeledBreak(target_label) => {
+                let (index, target) = self
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, control)| match control {
+                        Control::Loop {
+                            label: Some(l),
+                            break_to,
+                            ..
+                        }
+                        | Control::Switch {
+                            label: Some(l),
+                            break_to,
+                        } if *l == target_label.as_str() => Some((index, *break_to)),
+                        Control::Labeled { label, break_to } if *label == target_label.as_str() => {
+                            Some((index, *break_to))
+                        }
+                        _ => None,
+                    })
+                    .with_context(|| format!("break {target_label} has no enclosing target"))?;
+                self.run_finallies(ctx, |f| f.controls > index)?;
+                self.jump(ctx, target);
+                self.after_terminator(ctx);
+            }
+            Stmt::LabeledContinue(target_label) => {
+                let (index, target) = self
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, control)| match control {
+                        Control::Loop {
+                            label: Some(l),
+                            continue_to,
+                            ..
+                        } if *l == target_label.as_str() => Some((index, *continue_to)),
+                        _ => None,
+                    })
+                    .with_context(|| format!("continue {target_label} has no enclosing target"))?;
                 self.run_finallies(ctx, |f| f.controls > index)?;
                 self.jump(ctx, target);
                 self.after_terminator(ctx);
@@ -230,20 +333,24 @@ impl<'s> FunctionBuilder<'s> {
                 catch,
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
-            Stmt::PreallocateBoxes { .. } => {}
+            Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
             // Perry HIR exposes no variant names, only `Debug`: show the whole node.
             other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
     }
 
-    fn binding(
+    pub(super) fn binding(
         &mut self,
         ctx: &mut Context,
         id: LocalId,
         ty: &HirType,
         init: Option<&'s Expr>,
     ) -> Result<()> {
+        if let Some(expr @ (Expr::Closure { .. } | Expr::FuncRef(_))) = init {
+            self.closures.insert(id, expr);
+            return Ok(());
+        }
         if let Some(init) = init
             && let Some(source) = self.iteration.guard(id, init)
         {
@@ -263,11 +370,11 @@ impl<'s> FunctionBuilder<'s> {
         // type. An explicit type the subset cannot represent is an error, not a fallback.
         // `Array(Any)` is such a binding too (array destructuring's element source).
         let declared = match ty {
-            HirType::Any | HirType::Unknown | HirType::TypeVar(_) => None,
+            HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_) => None,
             HirType::Array(element)
                 if matches!(
                     **element,
-                    HirType::Any | HirType::Unknown | HirType::TypeVar(_)
+                    HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_)
                 ) =>
             {
                 None
@@ -313,6 +420,7 @@ impl<'s> FunctionBuilder<'s> {
         {
             integer = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok();
         }
+        let is_never = matches!(ty, HirType::Never);
         // Inferred bindings preserve absence states and the selected reader mode.
         // HIR's getReader signature assumes the default overload.
         let carrier = match (declared, init) {
@@ -328,6 +436,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Some(ty), _) => ty,
             (None, Some(value)) => value.get_type(ctx),
+            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
             (None, None) => bail!("an untyped binding needs an initializer"),
         };
         let binding = BindingType { carrier, integer };
@@ -340,8 +449,18 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(value) = init {
             let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
+        } else if is_never {
+            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier));
+            self.store(ctx, slot, undef);
         }
-        self.locals.insert(id, LocalBinding { slot, integer });
+        self.locals.insert(
+            id,
+            LocalBinding {
+                slot,
+                integer,
+                is_never,
+            },
+        );
         Ok(())
     }
 
@@ -359,6 +478,13 @@ impl<'s> FunctionBuilder<'s> {
         {
             self.call(ctx, callee, args, *byte_offset)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
+        } else if let Expr::StaticMethodCall {
+            class_name,
+            method_name,
+            args,
+        } = expr
+        {
+            self.class_static_method_call(ctx, class_name, method_name, args)?;
         } else if let Expr::ProcessExit(code) = expr {
             let code = match code {
                 Some(code) => {

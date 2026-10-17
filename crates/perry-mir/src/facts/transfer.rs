@@ -521,17 +521,43 @@ impl Solver {
             }
         }
         if let Some(binary) = Operation::get_op::<BinaryOp>(op, ctx)
-            && matches!(
+            && (matches!(
                 binary.kind(ctx),
                 BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul
-            )
+            ) || (matches!(binary.kind(ctx), BinaryKind::Div | BinaryKind::Rem)
+                && operation
+                    .get_result(0)
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .is::<crate::types::BigIntType>()))
         {
             let result = operation.get_result(0);
             let was_integer = self.analysis.states[id].fact(result).integer().is_some();
             let required = self.analysis.states[id].required.get(&result).copied();
+            let mut operand_required = required;
+            if operand_required.is_none()
+                && result
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .is::<crate::types::BigIntType>()
+            {
+                operand_required = self.analysis.states[id]
+                    .fact(operation.get_operand(0))
+                    .integer()
+                    .or_else(|| {
+                        self.analysis.states[id]
+                            .fact(operation.get_operand(1))
+                            .integer()
+                    });
+                if let Some(integer) = operand_required
+                    && self.analysis.keys[id].specialize
+                {
+                    self.require(id, result, Some(integer));
+                }
+            }
             let constrained = self.analysis.states[id].is_constrained(result);
             for input in operation.operands() {
-                self.require(id, input, required);
+                self.require(id, input, operand_required);
                 self.constrain(id, input, constrained);
             }
             let mut fact = self.arithmetic(
@@ -555,7 +581,11 @@ impl Solver {
                 && self.analysis.keys[id].specialize
                 && required.is_none()
                 && !result.get_type(ctx).deref(ctx).is::<IntegerType>()
-                && self.analysis.states[id].fact(result).integer().is_some()
+                && (self.analysis.states[id].fact(result).integer().is_some()
+                    || result
+                        .get_type(ctx)
+                        .deref(ctx)
+                        .is::<crate::types::BigIntType>())
             {
                 self.width_defaults.push((id, index, result));
             }

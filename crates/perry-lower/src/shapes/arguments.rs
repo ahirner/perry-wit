@@ -8,17 +8,17 @@ use pliron::{
 };
 use std::collections::HashMap;
 
-pub(super) type ArgumentId = TypedHandle<Argument>;
+pub(crate) type ArgumentId = TypedHandle<Argument>;
 
 #[pliron_type(name = "perry.source_argument", format, verifier = "succ")]
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) struct Argument {
+pub(crate) struct Argument {
     kind: Kind,
 }
 
 #[format]
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Void,
     Null,
     Boolean,
@@ -63,11 +63,11 @@ pub(super) enum Kind {
 
 #[format("`[` vec($0, Char(`,`)) `]`")]
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) struct PropertyOrder(Vec<String>);
+pub(crate) struct PropertyOrder(Vec<String>);
 
 #[format]
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) struct Property {
+pub(crate) struct Property {
     pub(super) name: String,
     pub(super) ty: ArgumentId,
     pub(super) optional: bool,
@@ -76,18 +76,22 @@ pub(super) struct Property {
 
 #[format]
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) struct Parameter {
+pub(crate) struct Parameter {
     name: String,
     ty: ArgumentId,
     optional: bool,
 }
 
 impl Argument {
-    pub(super) fn from_kind(ctx: &Context, kind: Kind) -> ArgumentId {
+    pub(crate) fn from_kind(ctx: &Context, kind: Kind) -> ArgumentId {
         Type::instantiate(Self { kind }, ctx)
     }
 
-    pub(super) fn from_hir(
+    pub(crate) fn intern_hir(ctx: &Context, ty: &HirType) -> Result<ArgumentId> {
+        Self::from_hir(ctx, ty, &HashMap::new(), &mut 4096)
+    }
+
+    pub(crate) fn from_hir(
         ctx: &Context,
         ty: &HirType,
         bindings: &HashMap<&str, ArgumentId>,

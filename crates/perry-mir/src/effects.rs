@@ -389,7 +389,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
                         || Operation::get_op::<IntrinsicOp>(op, ctx)
                             .and_then(|i| i.intrinsic(ctx))
-                            .is_some_and(|i| i.may_allocate())
+                            .is_some_and(|i| i.allocation() == Allocation::Conservative)
                         || Operation::get_op::<JsonStringifyOp>(op, ctx).is_some();
                 if let Some(target) = target {
                     callees[index].push(target);

@@ -402,6 +402,26 @@ impl FunctionLowering<'_, '_> {
                 self.store(ctx, MemKind::I32, args[0], offset, graph);
                 None
             }
+            Intrinsic::JsonSpread => {
+                if self.state.retains_json {
+                    let offset = perry_abi::layout::record::JSON;
+                    let base = self.load(ctx, MemKind::I32, args[0], offset);
+                    let src = self.load(ctx, MemKind::I32, args[1], offset);
+                    let merged = self.runtime(ctx, Runtime::StdJsonMergeResidue, vec![base, src]);
+                    self.store(ctx, MemKind::I32, args[0], offset, merged);
+                }
+                None
+            }
+            Intrinsic::JsonExclude => {
+                if self.state.retains_json {
+                    let offset = perry_abi::layout::record::JSON;
+                    let graph = self.load(ctx, MemKind::I32, args[0], offset);
+                    let filtered =
+                        self.runtime(ctx, Runtime::StdJsonExcludeKey, vec![graph, args[1]]);
+                    self.store(ctx, MemKind::I32, args[0], offset, filtered);
+                }
+                None
+            }
             Intrinsic::JsonParse => {
                 let value = self.runtime(ctx, Runtime::JsonParseString, args);
                 let status = self.runtime(ctx, Runtime::Status, vec![]);
@@ -411,9 +431,14 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::InstantFromMs
             | Intrinsic::InstantFrom
             | Intrinsic::PlainDateFrom
+            | Intrinsic::PlainDateFromFields
             | Intrinsic::PlainDateTimeFrom
             | Intrinsic::PlainDateAddDays
+            | Intrinsic::PlainDateAddCalendar
             | Intrinsic::PlainDateTimeAddDays
+            | Intrinsic::PlainDateTimeAddCalendar
+            | Intrinsic::PlainDateEpochDays
+            | Intrinsic::PlainDateUntilPart
             | Intrinsic::InstantMs
             | Intrinsic::PlainDatePart
             | Intrinsic::PlainDateTimePart
@@ -619,6 +644,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::StringReplaceAll => Runtime::StdStringReplaceAll,
                     Intrinsic::StringSplit => Runtime::StdStringSplit,
                     Intrinsic::StringRepeat => Runtime::StdStringRepeat,
+                    Intrinsic::StringNormalize => Runtime::StdStringNormalize,
                     Intrinsic::BytesNew => Runtime::StdBytesNew,
                     Intrinsic::BytesFromArray => Runtime::StdBytesFromArray,
                     Intrinsic::BytesBuffer => Runtime::StdBytesBuffer,
@@ -640,6 +666,8 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::UrlSetPathname => Runtime::WebUrlSetPathname,
                     Intrinsic::UrlAppend => Runtime::WebUrlAppend,
                     Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
+                    Intrinsic::RegexExec => Runtime::StdRegexExec,
+                    Intrinsic::RegexMatch => Runtime::StdRegexMatch,
                     Intrinsic::RegexSearch => Runtime::StdRegexSearch,
                     Intrinsic::RegexReplace => Runtime::StdRegexReplace,
                     Intrinsic::RegexSplit => Runtime::StdRegexSplit,

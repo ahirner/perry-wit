@@ -9,7 +9,9 @@ pub(super) struct Signature {
     pub(super) params: Vec<BindingType>,
     pub(super) base_params: Vec<BindingType>,
     pub(super) defaults: Vec<Option<Expr>>,
+    pub(super) never_params: Vec<bool>,
     pub(super) has_rest: bool,
+    pub(super) returns_never: bool,
     pub(super) result: Option<BindingType>,
 }
 
@@ -42,6 +44,19 @@ pub(super) fn build_module(
 ) -> Result<ModuleOp> {
     let locations = &metadata.locations;
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
+    // Subclass instances flow into base-typed bindings, where methods would bind statically
+    // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
+    if let Some(class) = hir
+        .classes
+        .iter()
+        .find(|class| class.extends_name.is_some())
+    {
+        bail!(
+            "class {} extends {}: class inheritance is not supported yet",
+            class.name,
+            class.extends_name.as_deref().unwrap_or_default()
+        );
+    }
     let shapes = Shapes::new(module, hir, foreign, metadata);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
@@ -102,6 +117,7 @@ pub(super) fn build_module(
         let mut params = Vec::with_capacity(function.params.len());
         let mut base_params = Vec::with_capacity(function.params.len());
         let mut defaults = Vec::with_capacity(function.params.len());
+        let mut never_params = Vec::with_capacity(function.params.len());
         let has_rest = function.params.last().is_some_and(|p| p.is_rest);
         for (idx, param) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
@@ -126,6 +142,7 @@ pub(super) fn build_module(
                 integer,
             });
             defaults.push(param.default.clone());
+            never_params.push(matches!(param.ty, HirType::Never));
         }
         let result_carrier = match (&function.return_type, function.is_async) {
             (HirType::Void, false) => Ok(None),
@@ -154,7 +171,9 @@ pub(super) fn build_module(
                 params,
                 base_params,
                 defaults,
+                never_params,
                 has_rest,
+                returns_never: matches!(function.return_type, HirType::Never),
                 result,
             },
         );
@@ -162,10 +181,11 @@ pub(super) fn build_module(
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
-    let has_init = hir.init.iter().any(|statement| {
-        !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
-            if hir_compat::is_import_initializer(callee))
-    });
+    let has_init = !shapes.static_fields.is_empty()
+        || hir.init.iter().any(|statement| {
+            !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
+                if hir_compat::is_import_initializer(callee))
+        });
     if has_init {
         // Top-level statements (with top-level `await`) form the async main function of a
         // command (`wasi:cli/run`), settling `undefined`.
@@ -181,7 +201,9 @@ pub(super) fn build_module(
             params: vec![],
             base_params: vec![],
             defaults: vec![],
+            never_params: vec![],
             has_rest: false,
+            returns_never: false,
             result: if persistent && !locations.async_init() {
                 None
             } else {

@@ -57,8 +57,12 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(next);
             }
         }
+        let label = self.pending_label.take();
         self.jump(ctx, default);
-        self.controls.push(Control::Switch { break_to: done });
+        self.controls.push(Control::Switch {
+            label,
+            break_to: done,
+        });
         let guards = self.variant_guards.len();
         let mut fallthrough = false;
         for (index, (case, &block)) in cases.iter().zip(&blocks).enumerate() {
@@ -245,6 +249,7 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         body_first: bool,
     ) -> Result<()> {
+        let label = self.pending_label.take();
         if let Some(init) = init {
             self.statement(ctx, init)?;
         }
@@ -292,6 +297,7 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         self.controls.push(Control::Loop {
+            label,
             continue_to: latch,
             break_to: exit,
         });

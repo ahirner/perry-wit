@@ -581,15 +581,22 @@ impl FunctionLowering<'_, '_> {
         operands: Vec<Value>,
         divisor: Option<i32>,
     ) -> Result<Value> {
-        if let Some((bits, _)) = integer(ctx, ty) {
-            let opcode = match (kind, bits == 64) {
-                (BinaryKind::Add, false) => NumOpcode::I32Add,
-                (BinaryKind::Sub, false) => NumOpcode::I32Sub,
-                (BinaryKind::Mul, false) => NumOpcode::I32Mul,
-                (BinaryKind::Add, true) => NumOpcode::I64Add,
-                (BinaryKind::Sub, true) => NumOpcode::I64Sub,
-                (BinaryKind::Mul, true) => NumOpcode::I64Mul,
-                _ => bail!("integer {kind:?} requires explicit division semantics"),
+        if let Some((bits, signed)) = integer(ctx, ty) {
+            let opcode = match (kind, bits == 64, signed) {
+                (BinaryKind::Add, false, _) => NumOpcode::I32Add,
+                (BinaryKind::Sub, false, _) => NumOpcode::I32Sub,
+                (BinaryKind::Mul, false, _) => NumOpcode::I32Mul,
+                (BinaryKind::Div, false, true) => NumOpcode::I32DivS,
+                (BinaryKind::Div, false, false) => NumOpcode::I32DivU,
+                (BinaryKind::Rem, false, true) => NumOpcode::I32RemS,
+                (BinaryKind::Rem, false, false) => NumOpcode::I32RemU,
+                (BinaryKind::Add, true, _) => NumOpcode::I64Add,
+                (BinaryKind::Sub, true, _) => NumOpcode::I64Sub,
+                (BinaryKind::Mul, true, _) => NumOpcode::I64Mul,
+                (BinaryKind::Div, true, true) => NumOpcode::I64DivS,
+                (BinaryKind::Div, true, false) => NumOpcode::I64DivU,
+                (BinaryKind::Rem, true, true) => NumOpcode::I64RemS,
+                (BinaryKind::Rem, true, false) => NumOpcode::I64RemU,
             };
             let value = self.num(ctx, opcode, operands);
             return Ok(self.normalize_integer(ctx, value, ty));

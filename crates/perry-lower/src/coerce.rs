@@ -381,6 +381,31 @@ impl<'s> FunctionBuilder<'s> {
         }
         if ty == target {
             Ok(value)
+        } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
+            let json_ty: TypeHandle = JsonType::get(ctx).into();
+            let boxed = if let Some(abs) = absence(ctx, ty)
+                && abs.admits_undefined()
+            {
+                let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                self.choose(
+                    ctx,
+                    json_ty,
+                    is_undef,
+                    |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, json_ty))),
+                    |b, ctx| {
+                        let def = b.defined(ctx, value)?;
+                        let text =
+                            b.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, def));
+                        let text = b.defined(ctx, text)?;
+                        Ok(b.intrinsic(ctx, Intrinsic::JsonParse, vec![text]))
+                    },
+                )?
+            } else {
+                let text = self.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, value));
+                let text = self.defined(ctx, text)?;
+                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+            };
+            self.fit(ctx, boxed, target)
         } else if optional_value(ctx, target) == Some(ty) {
             Ok(self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, target)))
         } else if optional_value(ctx, target).is_some()
@@ -396,6 +421,85 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             let source = optional_value(ctx, ty).unwrap_or(ty);
             let wanted = optional_value(ctx, target).unwrap_or(target);
+            if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
+                && let Ok(src_rec) = TypedHandle::<RecordType>::from_handle(source, ctx)
+                && let Ok(dst_rec) = TypedHandle::<RecordType>::from_handle(wanted, ctx)
+                && !src_rec.deref(ctx).is_tuple()
+                && !dst_rec.deref(ctx).is_tuple()
+            {
+                let src_fields = src_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
+                let dst_fields = dst_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
+                if let (Some(src_fields), Some(dst_fields)) = (src_fields, dst_fields)
+                    && (!dst_fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
+                    && dst_fields
+                        .iter()
+                        .all(|(name, _)| src_fields.iter().any(|(s, _)| s == name))
+                {
+                    let rec_val = if ty == source {
+                        value
+                    } else {
+                        self.defined(ctx, value)?
+                    };
+                    let mut projected_fields = Vec::with_capacity(dst_fields.len());
+                    let mut ok = true;
+                    for (name, dst_field_ty) in dst_fields {
+                        let (_, src_field_ty) = src_fields
+                            .iter()
+                            .find(|(s, _)| s == &name)
+                            .expect("checked field existence");
+                        let field_res = if optional_value(ctx, *src_field_ty).is_some()
+                            && absence(ctx, dst_field_ty).is_some_and(|a| a.admits_undefined())
+                        {
+                            let present = self.emit_value(ctx, |ctx| {
+                                perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())
+                                    .expect("field present")
+                            });
+                            let field_name = name.clone();
+                            self.choose(
+                                ctx,
+                                dst_field_ty,
+                                present,
+                                |b, ctx| {
+                                    let op = FieldGetOp::new(ctx, rec_val, field_name.clone())?;
+                                    let raw = b.field_read(ctx, &op)?;
+                                    b.fit(ctx, raw, dst_field_ty)
+                                },
+                                |b, ctx| {
+                                    Ok(b.emit_value(ctx, |ctx| {
+                                        perry_mir::OmittedOp::with_type(ctx, dst_field_ty)
+                                    }))
+                                },
+                            )
+                        } else {
+                            let op = FieldGetOp::new(ctx, rec_val, name)?;
+                            let raw = self.field_read(ctx, &op)?;
+                            self.fit(ctx, raw, dst_field_ty)
+                        };
+                        match field_res {
+                            Ok(v) => projected_fields.push(v),
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        let projected = self
+                            .emit_value(ctx, |ctx| AllocOp::new(ctx, dst_rec, projected_fields));
+                        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
+                        return self.fit(ctx, projected, target);
+                    }
+                }
+            }
+            if self.never_values.contains(&value) {
+                return Ok(
+                    if absence(ctx, target).is_some_and(|a| a.admits_undefined()) {
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))
+                    } else {
+                        self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
+                    },
+                );
+            }
             let code =
                 if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
                     DiagnosticCode::IncompatibleRecordLayout

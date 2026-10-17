@@ -395,7 +395,15 @@ impl MatchRewrite for DecomposeRecords {
         allocation.get_result(ctx).uses(ctx).iter().all(|usage| {
             usage.find_index(ctx) == 0
                 && (Operation::get_op::<FieldGetOp>(usage.user_op(), ctx).is_some()
-                    || Operation::get_op::<FieldSetOp>(usage.user_op(), ctx).is_some())
+                    || Operation::get_op::<FieldSetOp>(usage.user_op(), ctx).is_some()
+                    || Operation::get_op::<crate::IntrinsicOp>(usage.user_op(), ctx).is_some_and(
+                        |intr| {
+                            matches!(
+                                intr.intrinsic(ctx),
+                                Some(crate::Intrinsic::JsonSpread | crate::Intrinsic::JsonExclude)
+                            )
+                        },
+                    ))
         })
     }
 
@@ -451,6 +459,8 @@ impl MatchRewrite for DecomposeRecords {
                 let store = StoreOp::new(ctx, slots[&set.field(ctx)], value);
                 rewriter.insert_op(ctx, &store);
                 rewriter.replace_operation(ctx, op, store.get_operation());
+            } else {
+                rewriter.erase_operation(ctx, op);
             }
         }
         rewriter.erase_operation(ctx, allocation.get_operation());

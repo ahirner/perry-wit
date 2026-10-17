@@ -193,10 +193,16 @@ fn coalesce_key(ctx: &Context, analysis: &ProgramFacts, id: usize) -> CoalesceKe
                     value_specs.push(analysis.specialized_value_type(ctx, id, res));
                 }
                 if let Some(bin) = Operation::get_op::<BinaryOp>(op, ctx)
-                    && matches!(
+                    && (matches!(
                         bin.kind(ctx),
                         BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul
-                    )
+                    ) || (matches!(bin.kind(ctx), BinaryKind::Div | BinaryKind::Rem)
+                        && op
+                            .deref(ctx)
+                            .get_result(0)
+                            .get_type(ctx)
+                            .deref(ctx)
+                            .is::<crate::types::BigIntType>()))
                 {
                     constrained_bins.push(state.is_constrained(op.deref(ctx).get_result(0)));
                 }

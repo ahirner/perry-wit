@@ -706,3 +706,249 @@ fn nullable_numeric_conversions_and_nested_specialized_layouts_compose() {
             .unwrap_or_else(|e| panic!("nested_{reverse} failed: {e:#}"));
     }
 }
+
+#[test]
+fn json_record_spread_and_rest_preserve_undeclared_extras() {
+    let source = r#"
+interface Row {
+    Order: number;
+}
+
+export function run(): number {
+    const rows = JSON.parse<Row[]>('[{"Order":1,"Extra":"keep","Components":[{"x":1}]}]');
+    const s1 = JSON.stringify({ ...rows[0], Components: undefined });
+    if (s1 !== '{"Order":1,"Extra":"keep"}') return 1;
+
+    const { Components, ...row } = rows[0];
+    const s2 = JSON.stringify(row);
+    if (s2 !== '{"Order":1,"Extra":"keep"}') return 2;
+
+    const s3 = JSON.stringify({ ...rows[0], Order: 2, Components: undefined });
+    if (s3 !== '{"Order":2,"Extra":"keep"}') return 3;
+
+    const s4 = JSON.stringify({ ...rows[0], Extra: "override", Components: undefined });
+    if (s4 !== '{"Extra":"override","Order":1}') return 4;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "json-extras-spread-rest.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn collections_from_iterables_regex_exec_temporal_and_smaller_gaps() {
+    let source = r#"
+interface Item {
+    id: string;
+    label: string;
+    score: number;
+}
+
+function stringifyUnknown(v: unknown): string {
+    return JSON.stringify(v);
+}
+
+function extractId<T extends { id: string }>(item: T): string {
+    return item.id;
+}
+
+type Kind = 'a' | 'b';
+
+function assertNever(x: never): never {
+    throw new Error('unexpected: ' + String(x));
+}
+
+function classifyKind(k: Kind): number {
+    if (k === 'a') return 1;
+    if (k === 'b') return 2;
+    const _exhaustive: never = k;
+    return assertNever(_exhaustive);
+}
+
+class Counter {
+    static step = 2;
+    static scaled(n: number): number {
+        return n * Counter.step;
+    }
+    static from(n: number): Counter {
+        return new Counter(n);
+    }
+
+    count: number;
+    label = 'ctr';
+
+    constructor(initial = 0) {
+        this.count = initial;
+    }
+
+    get value(): number {
+        return this.count;
+    }
+
+    set value(v: number) {
+        this.count = v;
+    }
+
+    inc(by = 1): number {
+        this.count += by;
+        return this.count;
+    }
+
+    describe(): string {
+        return `${this.label}:${this.count}`;
+    }
+}
+
+class Box<T> {
+    constructor(public item: T) {}
+    unwrap(): T {
+        return this.item;
+    }
+}
+
+export function run(): number {
+    // FR 2: new Map(cs.map(c => [c.label, c])), Array.from, array rest destructuring
+    const items: Item[] = [
+        { id: 'i1', label: 'alpha', score: 10 },
+        { id: 'i2', label: 'beta', score: 20 },
+        { id: 'i3', label: 'gamma', score: 30 },
+    ];
+    const byLabel = new Map(items.map(c => [c.label, c]));
+    if (byLabel.size !== 3 || byLabel.get('beta')?.score !== 20) return 1;
+
+    const range = Array.from({ length: 4 }, (_v, i) => i * 2);
+    if (range.join(',') !== '0,2,4,6') return 2;
+
+    const fromSet = Array.from(new Set(['x', 'y', 'x']), s => s.toUpperCase());
+    if (fromSet.join(',') !== 'X,Y') return 3;
+
+    const parts = ['head', 'second', 't1', 't2', 't3'];
+    const [first, second, ...rest] = parts;
+    if (first !== 'head' || second !== 'second' || rest.join(':') !== 't1:t2:t3') return 4;
+
+    const shortParts = ['only'];
+    const [only, missing = 'def', ...emptyRest] = shortParts;
+    if (only !== 'only' || missing !== 'def' || emptyRest.length !== 0) return 5;
+
+    // FR 3: RegExp.prototype.exec, String.prototype.match, /i flag
+    const rx = /^([a-z]+)-(\d+)$/i;
+    if (!rx.test('AbC-42') || rx.test('AbC-xx')) return 6;
+    const m = rx.exec('AbC-42');
+    if (m === null || m[0] !== 'AbC-42' || m[1] !== 'AbC' || m[2] !== '42') return 7;
+    if (rx.exec('nope') !== null) return 8;
+
+    const matched = ' Item-99 '.trim().match(/^item-(\d+)$/i);
+    if (matched === null || matched[0] !== 'Item-99' || matched[1] !== '99') return 9;
+
+    const allNums = 'a12b34c56'.match(/\d+/g);
+    if (allNums === null || allNums.join(',') !== '12,34,56') return 10;
+
+    if ('Hello HELLO hello'.replace(/hello/gi, 'hi') !== 'hi hi hi') return 11;
+
+    // FR 4: Temporal.PlainDate.from(fields, options), until, compare
+    const d1 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 29 });
+    const d2 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 31 }, { overflow: 'constrain' });
+    if (d1.toString() !== '2024-02-29' || d2.toString() !== '2024-02-29') return 12;
+
+    const d3 = Temporal.PlainDate.from('2024-03-10');
+    if (d1.until(d3).days !== 10 || d3.until(d1).days !== -10) return 13;
+    if (Temporal.PlainDate.compare(d1, d2) !== 0) return 14;
+    if (Temporal.PlainDate.compare(d1, d3) !== -1 || Temporal.PlainDate.compare(d3, d1) !== 1) return 15;
+
+    // Smaller gaps: unknown parameter, local closure, bigint arithmetic, lastIndexOf, with,
+    // Math.max/min(...xs), labeled break, Set methods, Map.groupBy, structuredClone, normalize, bounded generics
+    const parsed: unknown = JSON.parse('{"k":7}');
+    if (stringifyUnknown(parsed) !== '{"k":7}') return 16;
+
+    const isBig = (x: Item): boolean => x.score >= 20;
+    const filtered = items.filter(isBig);
+    if (filtered.length !== 2 || !isBig(items[2]) || isBig(items[0])) return 17;
+
+    const b1: bigint = 100n;
+    const b2: bigint = 35n;
+    if (b1 - b2 !== 65n || b1 + b2 !== 135n || b1 * 2n !== 200n || b1 / b2 !== 2n || b1 % b2 !== 30n) return 18;
+    if (!(b1 > b2) || !(b2 < b1)) return 19;
+
+    const nums = [10, 20, 30, 20, 10];
+    if (nums.lastIndexOf(20) !== 3 || nums.lastIndexOf(99) !== -1 || nums.lastIndexOf(20, 2) !== 1) return 20;
+    const replaced = nums.with(1, 99);
+    if (replaced.join(',') !== '10,99,30,20,10' || nums.join(',') !== '10,20,30,20,10') return 21;
+    const replacedNeg = nums.with(-1, 77);
+    if (replacedNeg.join(',') !== '10,20,30,20,77') return 22;
+
+    if (Math.max(...nums) !== 30 || Math.min(...nums) !== 10 || Math.max(1, 5, 3, 9, 2) !== 9) return 23;
+
+    let sum = 0;
+    outer: for (let i = 0; i < 5; i++) {
+        for (let j = 0; j < 5; j++) {
+            if (i === 2 && j === 1) break outer;
+            sum += 1;
+        }
+    }
+    if (sum !== 11) return 24;
+
+    const sA = new Set(['a', 'b', 'c']);
+    const sB = new Set(['b', 'd']);
+    if ([...sA.difference(sB)].join(',') !== 'a,c') return 25;
+    if ([...sA.intersection(sB)].join(',') !== 'b') return 26;
+    if ([...sA.union(sB)].join(',') !== 'a,b,c,d') return 27;
+    if ([...sA.symmetricDifference(sB)].join(',') !== 'a,c,d') return 28;
+    if (!new Set(['a', 'b']).isSubsetOf(sA) || sB.isSubsetOf(sA)) return 29;
+    if (!sA.isSupersetOf(new Set(['a'])) || !sA.isDisjointFrom(new Set(['z']))) return 30;
+
+    const grouped = Map.groupBy(items, item => item.score >= 20 ? 'high' : 'low');
+    if (grouped.get('low')?.length !== 1 || grouped.get('high')?.length !== 2) return 31;
+
+    const orig = { a: 1, nested: [2, 3] };
+    const cloned = structuredClone(orig);
+    orig.a = 99;
+    orig.nested.push(4);
+    if (cloned.a !== 1 || cloned.nested.join(',') !== '2,3') return 32;
+
+    if ('e\u0301'.normalize() !== '\u00e9' || '\u00e9'.normalize('NFD') !== 'e\u0301') return 33;
+
+    if (extractId(items[0]) !== 'i1') return 34;
+
+    if (classifyKind('a') !== 1 || classifyKind('b') !== 2) return 35;
+
+    const c = new Counter(5);
+    if (c.value !== 5 || c.inc(3) !== 8 || c.inc() !== 9) return 36;
+    c.value = 12;
+    if (++c.value !== 13 || c.describe() !== 'ctr:13' || Counter.scaled(4) !== 8) return 37;
+
+    const c2 = Counter.from(10);
+    c2.inc(5);
+    if (c2.describe() !== 'ctr:15') return 38;
+
+    const boxed = new Box<string>('hello');
+    if (!(c instanceof Counter) || (c instanceof Box) || !(boxed instanceof Box) || (boxed instanceof Counter)) return 39;
+    if (boxed.unwrap() !== 'hello') return 40;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "conformance-fr2-fr5.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+
+    let inheritance_err = perry_wit::compile_core(
+        "class A {} class B extends A {} export function run(): number { return 0; }",
+        "inheritance.ts",
+    )
+    .expect_err("class inheritance should be rejected");
+    assert!(
+        format!("{inheritance_err:#}").contains("class inheritance is not supported yet"),
+        "unexpected error: {inheritance_err:#}"
+    );
+
+    let trim_only = perry_wit::compile_core(
+        "export function check(s: string): string { return s.trim(); }",
+        "trim-only.ts",
+    )
+    .unwrap();
+    assert!(
+        trim_only.len() < 6_144,
+        "String.prototype.trim core module should remain compact, got {} bytes",
+        trim_only.len()
+    );
+}

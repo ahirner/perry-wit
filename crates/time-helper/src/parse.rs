@@ -18,7 +18,7 @@ pub(crate) struct TimeRecord {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Offset {
     Z,
-    Nanoseconds(i128),
+    Nanoseconds(i64),
 }
 
 pub(crate) struct ParsedRecord {
@@ -187,9 +187,8 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
             if off_hour > 23 || off_min > 59 || off_sec > 59 {
                 return Err(Error::Range);
             }
-            let seconds =
-                i128::from(off_hour) * 3600 + i128::from(off_min) * 60 + i128::from(off_sec);
-            let total = seconds * NANOS_PER_SECOND + i128::from(off_nano);
+            let seconds = i64::from(off_hour) * 3600 + i64::from(off_min) * 60 + i64::from(off_sec);
+            let total = seconds * (NANOS_PER_SECOND as i64) + i64::from(off_nano);
             Some(Offset::Nanoseconds(if sign == b'-' {
                 -total
             } else {
@@ -224,7 +223,7 @@ pub(crate) fn date_time(date: DateRecord, time: TimeRecord) -> Result<PlainDateT
     .checked()
 }
 
-pub(crate) fn offset_nanoseconds(offset: Offset) -> i128 {
+pub(crate) fn offset_nanoseconds(offset: Offset) -> i64 {
     match offset {
         Offset::Z => 0,
         Offset::Nanoseconds(nanos) => nanos,

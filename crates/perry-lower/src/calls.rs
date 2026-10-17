@@ -198,6 +198,26 @@ impl<'s> FunctionBuilder<'s> {
             self.append(ctx, &op);
             return Ok(op.get_operation().deref(ctx).results().next());
         }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && name == "structuredClone"
+        {
+            let [arg] = args else {
+                bail!("structuredClone requires one argument");
+            };
+            let val = self.expression(ctx, arg)?;
+            return self.clone_structured_value(ctx, val).map(Some);
+        }
+        let callee = match callee {
+            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callee),
+            _ => callee,
+        };
+        if matches!(callee, Expr::Closure { .. }) {
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for arg in args {
+                arg_vals.push(self.expression(ctx, arg)?);
+            }
+            return self.array_callback(ctx, callee, &arg_vals).map(Some);
+        }
         let Expr::FuncRef(id) = callee else {
             return Err(match callee {
                 Expr::LocalGet(id) => {
@@ -231,9 +251,20 @@ impl<'s> FunctionBuilder<'s> {
         if signature.has_rest {
             let fixed_len = params.len().saturating_sub(1);
             for (i, param) in params.iter().take(fixed_len).enumerate() {
+                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
                 if let Some(arg) = args.get(i) {
-                    let value = self.expression_with(ctx, arg, Some(param.carrier))?;
-                    values.push(self.fit(ctx, value, param.carrier)?);
+                    if is_never {
+                        let value = self.expression_with(ctx, arg, None)?;
+                        let fitted = if value.get_type(ctx) == param.carrier {
+                            value
+                        } else {
+                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
+                        };
+                        values.push(fitted);
+                    } else {
+                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
+                        values.push(self.fit(ctx, value, param.carrier)?);
+                    }
                 } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
                     values
                         .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
@@ -268,9 +299,20 @@ impl<'s> FunctionBuilder<'s> {
                 params.len()
             );
             for (i, param) in params.iter().enumerate() {
+                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
                 if let Some(arg) = args.get(i) {
-                    let value = self.expression_with(ctx, arg, Some(param.carrier))?;
-                    values.push(self.fit(ctx, value, param.carrier)?);
+                    if is_never {
+                        let value = self.expression_with(ctx, arg, None)?;
+                        let fitted = if value.get_type(ctx) == param.carrier {
+                            value
+                        } else {
+                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
+                        };
+                        values.push(fitted);
+                    } else {
+                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
+                        values.push(self.fit(ctx, value, param.carrier)?);
+                    }
                 } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
                     values
                         .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
@@ -305,9 +347,58 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(int_ty) = result_ty.integer {
                 value = self.wrap_integer(ctx, value, int_ty, result_ty.carrier);
             }
+            if signature.returns_never {
+                self.never_values.insert(value);
+            }
             return Ok(Some(value));
         }
         Ok(result)
+    }
+
+    pub(super) fn clone_structured_value(
+        &mut self,
+        ctx: &mut Context,
+        val: Value,
+    ) -> Result<Value> {
+        let ty = val.get_type(ctx);
+        if TypedHandle::<ArrayType>::from_handle(ty, ctx).is_ok() {
+            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![val])));
+        }
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+            let fields = rec
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .to_vec();
+            let mut field_vals = Vec::with_capacity(fields.len());
+            for (field_name, field_ty) in fields {
+                let can_omit = absence(ctx, field_ty).is_some_and(|a| a.admits_undefined());
+                let op = FieldGetOp::new(ctx, val, field_name.clone())?;
+                let raw = self.field_read(ctx, &op)?;
+                let cloned = self.clone_structured_value(ctx, raw)?;
+                let cloned_ty = cloned.get_type(ctx);
+                let field_val = if can_omit
+                    && absence(ctx, cloned_ty).is_some_and(|a| a.admits_undefined())
+                {
+                    let op = FieldPresentOp::new(ctx, val, field_name)?;
+                    let is_present = self.emit_value(ctx, |_| op);
+                    self.choose(
+                        ctx,
+                        cloned_ty,
+                        is_present,
+                        |_, _| Ok(cloned),
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, cloned_ty))),
+                    )?
+                } else {
+                    cloned
+                };
+                field_vals.push(field_val);
+            }
+            let allocated = self.emit_value(ctx, |ctx| AllocOp::new(ctx, rec, field_vals));
+            self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![allocated, val]);
+            return Ok(allocated);
+        }
+        Ok(val)
     }
 
     /// The array literal given to a promise combinator: plain values among promises of `T`

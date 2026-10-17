@@ -434,13 +434,17 @@ fn value_reaches_stringify(
             if Operation::get_op::<JsonStringifyOp>(user, ctx).is_some() {
                 return true;
             }
-            if let Some(intr) = Operation::get_op::<IntrinsicOp>(user, ctx)
-                && matches!(
-                    intr.intrinsic(ctx),
-                    Some(Intrinsic::JsonResidue | Intrinsic::JsonRetain)
-                )
-            {
-                return true;
+            if let Some(intr) = Operation::get_op::<IntrinsicOp>(user, ctx) {
+                match intr.intrinsic(ctx) {
+                    Some(Intrinsic::JsonResidue | Intrinsic::JsonRetain) => return true,
+                    Some(Intrinsic::JsonSpread) => {
+                        let op_ref = user.deref(ctx);
+                        if op_ref.get_num_operands() >= 2 && val == op_ref.get_operand(1) {
+                            worklist.push(op_ref.get_operand(0));
+                        }
+                    }
+                    _ => {}
+                }
             }
             if let Some(call) = Operation::get_op::<CallOp>(user, ctx)
                 && funcs_by_name

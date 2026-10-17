@@ -13,6 +13,7 @@ pub(in crate::facts) enum OperationKind {
     Truncate,
     Concat,
     ConcatSegments,
+    JsonSpread,
     Alias { operand: usize },
     Return,
     Call,
@@ -123,6 +124,13 @@ impl OperationKind {
             || Operation::get_op::<crate::intrinsics::JsonStringifyOp>(op, ctx).is_some()
         {
             return Self::None;
+        }
+        if let Some(intr) = Operation::get_op::<crate::IntrinsicOp>(op, ctx) {
+            match intr.intrinsic(ctx) {
+                Some(crate::Intrinsic::JsonSpread) => return Self::JsonSpread,
+                Some(crate::Intrinsic::JsonExclude) => return Self::None,
+                _ => {}
+            }
         }
         Self::Unknown
     }
@@ -463,6 +471,23 @@ impl Solver {
                             to
                         };
                         self.copy_aliases(ctx, from, to, reader);
+                    }
+                }
+            }
+            OperationKind::JsonSpread => {
+                if let (Some(to), Some(from)) = (
+                    self.heap_value(ctx, id, operation.get_operand(0)),
+                    self.heap_value(ctx, id, operation.get_operand(1)),
+                ) {
+                    self.analysis.heap.cells[to].readers.insert(reader);
+                    self.analysis.heap.cells[from].readers.insert(reader);
+                    let src_open = self.analysis.heap.cells[from].summarized
+                        || self.analysis.heap.cells[from]
+                            .objects
+                            .iter()
+                            .any(|&obj| self.analysis.heap.objects[obj].open);
+                    if src_open {
+                        self.open_aliases(to, reader);
                     }
                 }
             }

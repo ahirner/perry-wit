@@ -5,27 +5,27 @@ use perry_mir::{ArrayAtOp, OptionalType};
 /// The frame of an inline array callback being lowered: its `return`s store into `slot` and
 /// branch to `done` instead of leaving the enclosing function.
 pub(super) struct CallbackReturn {
-    done: Ptr<BasicBlock>,
+    pub(super) done: Ptr<BasicBlock>,
     /// The result slot, from the declared return type or the first typed `return`.
-    slot: Option<Value>,
+    pub(super) slot: Option<Value>,
     /// Whether the callback may complete without a value, making its result optional.
-    optional: bool,
+    pub(super) optional: bool,
     /// Blocks ending in `return;` before the slot existed; they store `undefined` afterwards.
-    empty_returns: Vec<Ptr<BasicBlock>>,
+    pub(super) empty_returns: Vec<Ptr<BasicBlock>>,
 }
 
 // How a statement list may complete, as a bit set.
-const FALLTHROUGH: u8 = 1;
+pub(super) const FALLTHROUGH: u8 = 1;
 const RETURN: u8 = 2;
 const BREAK: u8 = 4;
 const CONTINUE: u8 = 8;
 const LABELLED: u8 = 16;
 // Return-type inference also sees syntactically present returns on unreachable paths.
-const EMPTY_RETURN: u8 = 32;
+pub(super) const EMPTY_RETURN: u8 = 32;
 
 /// The ways `statements` may complete; a callback whose body may fall through returns
 /// `undefined` on that path.
-fn completions(statements: &[Stmt]) -> u8 {
+pub(super) fn completions(statements: &[Stmt]) -> u8 {
     let mut result = FALLTHROUGH;
     for statement in statements {
         let next = match statement {
@@ -202,6 +202,10 @@ impl<'s> FunctionBuilder<'s> {
         callback: &'s Expr,
         arguments: &[Value],
     ) -> Result<Value> {
+        let callback = match callback {
+            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
+            _ => callback,
+        };
         if let Expr::FuncRef(id) = callback {
             let signature = self.signatures.get(id).context("unknown callback")?;
             ensure!(
@@ -246,6 +250,7 @@ impl<'s> FunctionBuilder<'s> {
             "array callbacks must be synchronous with at most three parameters; rest parameters are not supported"
         );
         let saved_locals = self.locals.clone();
+        let saved_closures = self.closures.clone();
         // Guards only grow above this length inside the body; branches truncate back.
         let guards = self.variant_guards.len();
         for (param, &value) in params.iter().zip(arguments) {
@@ -340,6 +345,7 @@ impl<'s> FunctionBuilder<'s> {
             result = self.callback_return(ctx, None);
         }
         self.locals = saved_locals;
+        self.closures = saved_closures;
         self.variant_guards.truncate(guards);
         self.finallies = finallies;
         self.controls = controls;
@@ -746,8 +752,12 @@ impl<'s> FunctionBuilder<'s> {
         let len = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
+        let callback_resolved = match callback {
+            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
+            _ => callback,
+        };
         let (acc_slot, start_step) = if let Some(init_expr) = initial {
-            let expected_acc = if let Expr::Closure { params, .. } = callback {
+            let expected_acc = if let Expr::Closure { params, .. } = callback_resolved {
                 params
                     .first()
                     .map(|p| &p.ty)
@@ -1149,6 +1159,185 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
+    /// `array.lastIndexOf(needle, fromIndex?)`.
+    pub(super) fn array_last_index_of(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        needle: &'s Expr,
+        from: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let needle = self.expression(ctx, needle)?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        let neg_one = self.number(ctx, -1.0);
+        let num_ty = FP64Type::get(ctx).into();
+        let last_idx = self.binary(ctx, BinaryKind::Sub, len, one);
+        let start = match from {
+            None | Some(Expr::Undefined) => last_idx,
+            Some(from_expr) => {
+                let raw_from = self.number_operand(ctx, from_expr)?;
+                let from_val = self.integer_or_infinity(ctx, raw_from)?;
+                let is_neg = self.compare(ctx, CompareKind::Lt, from_val, zero);
+                self.choose(
+                    ctx,
+                    num_ty,
+                    is_neg,
+                    |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, from_val)),
+                    |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::MathMin, vec![from_val, last_idx])),
+                )?
+            }
+        };
+        let count_raw = self.binary(ctx, BinaryKind::Add, start, one);
+        let count = self.intrinsic(ctx, Intrinsic::MathMax, vec![count_raw, zero]);
+        let result = self.entry_slot(ctx, num_ty);
+        self.store(ctx, result, neg_one);
+        self.index_loop(
+            ctx,
+            "last_index_of",
+            zero,
+            count,
+            |b, ctx, step, next, done| {
+                let current = b.binary(ctx, BinaryKind::Sub, start, step);
+                let available = b.array_length(ctx, array);
+                let present = b.compare(ctx, CompareKind::Lt, current, available);
+                let read = b.new_block(ctx, "last_index_read");
+                b.branch(ctx, present, read, next);
+                b.switch_to(read);
+                let item = b.element_at(ctx, array, current)?;
+                let matched = b.compare(ctx, CompareKind::Eq, item, needle);
+                let hit = b.new_block(ctx, "last_index_hit");
+                b.branch(ctx, matched, hit, next);
+                b.switch_to(hit);
+                b.store(ctx, result, current);
+                b.jump(ctx, done);
+                Ok(())
+            },
+        )?;
+        self.load(ctx, result)
+    }
+
+    /// `array.with(index, value)`.
+    pub(super) fn array_with(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: &'s Expr,
+        value: &'s Expr,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let elem_ty = self.array_element(ctx, array)?;
+        let raw_idx = self.number_operand(ctx, index)?;
+        let idx = self.integer_or_infinity(ctx, raw_idx)?;
+        let val = self.expression_with(ctx, value, Some(elem_ty))?;
+        let val = self.fit(ctx, val, elem_ty)?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
+        let num_ty = FP64Type::get(ctx).into();
+        let resolved_idx = self.choose(
+            ctx,
+            num_ty,
+            is_neg,
+            |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, idx)),
+            |_, _| Ok(idx),
+        )?;
+        let ge_zero = self.compare(ctx, CompareKind::Ge, resolved_idx, zero);
+        let lt_len = self.compare(ctx, CompareKind::Lt, resolved_idx, len);
+        let in_bounds = self.choose(
+            ctx,
+            ge_zero.get_type(ctx),
+            ge_zero,
+            |_, _| Ok(lt_len),
+            |b, ctx| Ok(b.boolean(ctx, false)),
+        )?;
+        let ok_b = self.new_block(ctx, "with_ok");
+        let err_b = self.new_block(ctx, "with_err");
+        self.branch(ctx, in_bounds, ok_b, err_b);
+        self.switch_to(err_b);
+        let msg = self.string(ctx, "Invalid index for Array.prototype.with");
+        let err = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::RangeError, msg));
+        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, err));
+        self.propagate(ctx, status);
+        self.after_terminator(ctx);
+        self.switch_to(ok_b);
+        let cloned = self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]));
+        self.emit(ctx, |ctx| ArraySetOp::new(ctx, cloned, resolved_idx, val));
+        Ok(cloned)
+    }
+
+    /// `Array.from(source, mapFn?)`.
+    pub(super) fn array_from(
+        &mut self,
+        ctx: &mut Context,
+        source: &'s Expr,
+        map_fn: Option<&'s Expr>,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let map_fn = map_fn.filter(|f| !matches!(f, Expr::Undefined));
+        let src_val = self.expression(ctx, source)?;
+        let src_val = self.defined(ctx, src_val)?;
+        let src_ty = src_val.get_type(ctx);
+        let arr_val = if crate::collections::is_collection_or_view_record(ctx, src_ty)
+            || crate::collections::set_entry_type(ctx, src_ty).is_some()
+            || crate::collections::map_entry_types(ctx, src_ty).is_some()
+        {
+            self.materialize_collection_to_array(ctx, src_val)?
+        } else if TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok() {
+            if map_fn.is_none() {
+                return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![src_val])));
+            }
+            src_val
+        } else if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src_ty, ctx)
+            && !rec.deref(ctx).is_tuple()
+            && rec.deref(ctx).field("length").is_some()
+        {
+            let op = FieldGetOp::new(ctx, src_val, "length".to_string())?;
+            let raw_len = self.field_read(ctx, &op)?;
+            let raw_len = self.arithmetic(ctx, raw_len);
+            let len_trunc = self.integer_or_infinity(ctx, raw_len)?;
+            let zero = self.number(ctx, 0.0);
+            let len = self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]);
+            let expected_elem = expected
+                .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
+                .map(|a| a.deref(ctx).element());
+            let prepare = self.block;
+            return self.index_loop(ctx, "array_from_len", zero, len, |b, ctx, idx, _, _| {
+                let f64_ty = FP64Type::get(ctx).into();
+                let undef = b.emit_value(ctx, |ctx| UndefinedOp::new(ctx, f64_ty));
+                let item = if let Some(cb) = map_fn {
+                    let mapped = b.array_callback(ctx, cb, &[undef, idx])?;
+                    match expected_elem {
+                        Some(elem_ty) => b.fit(ctx, mapped, elem_ty)?,
+                        None => mapped,
+                    }
+                } else {
+                    match expected_elem {
+                        Some(elem_ty) => b.fit(ctx, undef, elem_ty)?,
+                        None => undef,
+                    }
+                };
+                let append = b.block;
+                let elem_ty = expected_elem.unwrap_or_else(|| item.get_type(ctx));
+                let allocation = ArrayNewOp::new(ctx, elem_ty, vec![]);
+                insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
+                let result = allocation.get_result(ctx);
+                b.switch_to(append);
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
+                Ok(result)
+            });
+        } else {
+            bail!("Array.from source must be an array, Set, Map, or {{ length }} object");
+        };
+        let Some(cb) = map_fn else {
+            return Ok(arr_val);
+        };
+        self.array_transform(ctx, arr_val, cb, false)
+    }
+
     /// `for (i = start; i < limit; i++) body` over `f64` indices. `body` gets `i`, the block
     /// that advances to the next index, and the loop's exit, where lowering continues.
     pub(super) fn index_loop<T>(
@@ -1203,7 +1392,7 @@ impl<'s> FunctionBuilder<'s> {
 
 /// Insert `operations`, in order, before the terminator of an already closed `block`: for
 /// values whose type is known only after later code was lowered.
-fn insert_before_terminator(
+pub(super) fn insert_before_terminator(
     ctx: &mut Context,
     block: Ptr<BasicBlock>,
     operations: impl IntoIterator<Item = Ptr<Operation>>,

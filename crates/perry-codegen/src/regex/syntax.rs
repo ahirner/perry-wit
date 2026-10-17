@@ -7,16 +7,20 @@ const SPACE: &str =
 
 pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
     ensure!(
-        flags.chars().all(|c| matches!(c, 'u' | 's' | 'g')),
-        "Regex search supports only the u, s, and g flags"
+        flags.chars().all(|c| matches!(c, 'u' | 's' | 'g' | 'i')),
+        "Regex search supports only the u, s, g, and i flags"
     );
     ensure!(
         flags.matches('u').count() <= 1
             && flags.matches('s').count() <= 1
-            && flags.matches('g').count() <= 1,
+            && flags.matches('g').count() <= 1
+            && flags.matches('i').count() <= 1,
         "Duplicate regex flags"
     );
     let mut output = String::new();
+    if flags.contains('i') {
+        output.push_str("(?i)");
+    }
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
     while let Some(character) = chars.next() {

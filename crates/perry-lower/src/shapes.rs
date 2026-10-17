@@ -32,7 +32,7 @@ use std::{
 mod arguments;
 mod collection_types;
 mod representation;
-use arguments::{Argument, ArgumentId, Kind};
+pub(crate) use arguments::{Argument, ArgumentId, Kind};
 pub(super) mod generics;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -91,7 +91,10 @@ pub(super) struct Shapes<'h> {
     pub(super) type_env: perry_hir::HirTypeEnv,
     pub(super) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(super) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
-    user_classes: HashSet<&'h str>,
+    pub(super) classes: HashMap<&'h str, (usize, &'h perry_hir::ir::Class)>,
+    pub(super) static_fields:
+        HashMap<(&'h str, &'h str), (perry_hir::types::LocalId, &'h perry_hir::ir::ClassField)>,
+    pub(super) class_records: RefCell<HashMap<TypeHandle, (String, Vec<ArgumentId>)>>,
     object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
     function_names: HashSet<&'h str>,
     local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
@@ -179,16 +182,25 @@ impl<'h> Shapes<'h> {
             .enumerate()
             .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
             .collect();
-        let mut user_classes = HashSet::new();
+        let mut classes = HashMap::new();
+        let mut static_fields = HashMap::new();
+        let mut next_static_id = 0x8000_0000u32;
         let mut object_literal_shapes = HashMap::new();
-        for class in &hir.classes {
+        for (idx, class) in hir.classes.iter().enumerate() {
             if crate::hir_compat::is_object_literal(&class.name) {
                 object_literal_shapes.insert(
                     class.name.as_str(),
                     class.fields.iter().map(|f| f.name.as_str()).collect(),
                 );
             } else {
-                user_classes.insert(class.name.as_str());
+                classes.insert(class.name.as_str(), (idx, class));
+                for field in &class.static_fields {
+                    static_fields.insert(
+                        (class.name.as_str(), field.name.as_str()),
+                        (next_static_id, field),
+                    );
+                    next_static_id += 1;
+                }
             }
         }
         let function_names = hir
@@ -196,26 +208,32 @@ impl<'h> Shapes<'h> {
             .iter()
             .map(|function| function.name.as_str())
             .collect();
+        let mut global_ids: HashSet<perry_hir::types::LocalId> = if !hir.functions.is_empty() {
+            hir.init
+                .iter()
+                .filter_map(|s| match s {
+                    perry_hir::ir::Stmt::Let { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
+        if !hir.functions.is_empty() || !classes.is_empty() {
+            global_ids.extend(static_fields.values().map(|(id, _)| *id));
+        }
         Shapes {
             module,
             decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
-            global_ids: if !hir.functions.is_empty() {
-                hir.init
-                    .iter()
-                    .filter_map(|s| match s {
-                        perry_hir::ir::Stmt::Let { id, .. } => Some(*id),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                Default::default()
-            },
+            global_ids,
             type_env: perry_hir::HirTypeEnv::from_module(hir),
             interfaces,
             type_aliases,
-            user_classes,
+            classes,
+            static_fields,
+            class_records: RefCell::new(HashMap::new()),
             object_literal_shapes,
             function_names,
             local_source_spans: &hir.local_source_spans,
@@ -347,7 +365,68 @@ impl<'h> Shapes<'h> {
     pub(super) fn is_user_type(&self, name: &str) -> bool {
         self.interfaces.contains_key(name)
             || self.type_aliases.contains_key(name)
-            || self.user_classes.contains(name)
+            || self.classes.contains_key(name)
+    }
+
+    pub(super) fn class_of_type(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+    ) -> Option<(&'h str, Vec<ArgumentId>)> {
+        let inner = crate::optional_value(ctx, ty).unwrap_or(ty);
+        let (name, args) = self.class_records.borrow().get(&inner)?.clone();
+        let (&class_name, _) = self.classes.get_key_value(name.as_str())?;
+        Some((class_name, args))
+    }
+
+    pub(super) fn static_field(
+        &self,
+        class_name: &str,
+        field_name: &str,
+    ) -> Option<(perry_hir::types::LocalId, &'h perry_hir::ir::ClassField)> {
+        self.static_fields.get(&(class_name, field_name)).copied()
+    }
+
+    pub(super) fn class_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let norm = crate::hir_compat::method(method_name).name();
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let func = class.methods.iter().find(|m| m.name == norm)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_static_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let norm = crate::hir_compat::method(method_name).name();
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let func = class.static_methods.iter().find(|m| m.name == norm)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_getter(
+        &self,
+        class_name: &str,
+        prop_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let (_, func) = class.getters.iter().find(|(n, _)| n == prop_name)?;
+        Some((owner_name, func))
+    }
+
+    pub(super) fn class_setter(
+        &self,
+        class_name: &str,
+        prop_name: &str,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let (_, func) = class.setters.iter().find(|(n, _)| n == prop_name)?;
+        Some((owner_name, func))
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
@@ -374,7 +453,7 @@ impl<'h> Shapes<'h> {
             });
         }
         // Built-in classes the subset models (a user type or explicit import takes precedence).
-        let user = self.interfaces.contains_key(name) || self.type_aliases.contains_key(name);
+        let user = self.is_user_type(name);
         if !user {
             if let Some(&(width, _)) = self.integer_imports.get(name) {
                 return Ok(if width == 64 {
@@ -434,6 +513,16 @@ impl<'h> Shapes<'h> {
         &self,
         ctx: &Context,
         named: Option<&ShapeKey>,
+        fields: Vec<(&str, ArgumentId, bool)>,
+    ) -> Result<TypedHandle<RecordType>> {
+        self.source_record_prefix(ctx, named, None, fields)
+    }
+
+    fn source_record_prefix(
+        &self,
+        ctx: &Context,
+        named: Option<&ShapeKey>,
+        prefix: Option<&str>,
         mut fields: Vec<(&str, ArgumentId, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
@@ -448,7 +537,11 @@ impl<'h> Shapes<'h> {
                 Some(PendingShape::Resolving) => {
                     let mut count = self.reserved.borrow_mut();
                     *count += 1;
-                    let reserved = format!("{}_rec{}", record_name(&names), *count);
+                    let base = match prefix {
+                        Some(p) => format!("{p}_{}", record_name(&names)),
+                        None => record_name(&names),
+                    };
+                    let reserved = format!("{base}_rec{}", *count);
                     self.pending
                         .borrow_mut()
                         .insert(named.clone(), PendingShape::Recursive(reserved.clone()));
@@ -490,7 +583,7 @@ impl<'h> Shapes<'h> {
         match reserved {
             Some(name) => RecordType::get(ctx, identifier(&name)?, Some(typed))
                 .map_err(|e| anyhow!("{}", e.disp(ctx))),
-            None => self.mir_record(ctx, typed),
+            None => self.mir_record_prefix(ctx, typed, prefix),
         }
     }
 
@@ -518,7 +611,7 @@ impl<'h> Shapes<'h> {
         mut fields: Vec<(String, TypeHandle)>,
         prefix: Option<&str>,
     ) -> Result<TypedHandle<RecordType>> {
-        let tuple = prefix.is_some();
+        let tuple = prefix.is_some_and(|p| !p.starts_with("class_"));
         if !tuple {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }

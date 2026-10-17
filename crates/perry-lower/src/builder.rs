@@ -1,12 +1,18 @@
 //! The per-function MIR builder: its state and the IR plumbing every lowering uses.
 use super::*;
 
-pub(super) enum Control {
+pub(super) enum Control<'s> {
     Loop {
+        label: Option<&'s str>,
         continue_to: Ptr<BasicBlock>,
         break_to: Ptr<BasicBlock>,
     },
     Switch {
+        label: Option<&'s str>,
+        break_to: Ptr<BasicBlock>,
+    },
+    Labeled {
+        label: &'s str,
         break_to: Ptr<BasicBlock>,
     },
 }
@@ -36,6 +42,7 @@ pub(super) const EXIT_STATUS: u64 = 5;
 pub(super) struct LocalBinding {
     pub(super) slot: Value,
     pub(super) integer: Option<TypedHandle<IntegerType>>,
+    pub(super) is_never: bool,
 }
 
 impl LocalBinding {
@@ -43,6 +50,7 @@ impl LocalBinding {
         Self {
             slot,
             integer: None,
+            is_never: false,
         }
     }
 }
@@ -54,13 +62,16 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
     pub(super) locals: HashMap<LocalId, LocalBinding>,
+    pub(super) closures: HashMap<LocalId, &'s Expr>,
+    pub(super) never_values: HashSet<Value>,
+    pub(super) pending_label: Option<&'s str>,
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
     pub(super) iteration: hir_compat::Iteration,
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
     pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
-    pub(super) controls: Vec<Control>,
+    pub(super) controls: Vec<Control<'s>>,
     pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
     pub(super) handlers: Vec<Handler>,
     pub(super) finallies: Vec<Finally<'s>>,
@@ -71,6 +82,8 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
+    pub(super) rest_excluded_keys: &'s [String],
+    pub(super) this_slot: Option<(Value, &'s str, Vec<shapes::ArgumentId>)>,
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -130,12 +143,14 @@ impl<'s> FunctionBuilder<'s> {
                 LocalBinding {
                     slot,
                     integer: binding.integer,
+                    is_never: false,
                 },
             );
         }
         for (index, (&param, &binding)) in params.iter().zip(&signature.params).enumerate() {
             let arg_val = builder.entry.deref(ctx).get_argument(index);
             let base_binding = signature.base_params.get(index).copied().unwrap_or(binding);
+            let is_never = signature.never_params.get(index).copied().unwrap_or(false);
             if let Some(Some(default_expr)) = signature.defaults.get(index)
                 && !matches!(default_expr, Expr::Undefined)
             {
@@ -164,6 +179,7 @@ impl<'s> FunctionBuilder<'s> {
                     LocalBinding {
                         slot,
                         integer: base_binding.integer,
+                        is_never,
                     },
                 );
             } else {
@@ -174,6 +190,7 @@ impl<'s> FunctionBuilder<'s> {
                     LocalBinding {
                         slot,
                         integer: binding.integer,
+                        is_never,
                     },
                 );
             }
@@ -182,6 +199,15 @@ impl<'s> FunctionBuilder<'s> {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
             let await_ = AwaitOp::new(ctx, promise)?;
             builder.append_value(ctx, &await_);
+        }
+        if matches!(signature.name.as_ref(), perry_mir::INITIALIZER | MAIN)
+            && !shapes.static_fields.is_empty()
+        {
+            let mut static_inits: Vec<_> = shapes.static_fields.values().copied().collect();
+            static_inits.sort_by_key(|(id, _)| *id);
+            for (id, field) in static_inits {
+                builder.binding(ctx, id, &field.ty, field.init.as_ref())?;
+            }
         }
         let body = strip_synthetic_default_guards(body, params, &signature.defaults);
         builder.statements(ctx, body)?;
@@ -209,6 +235,9 @@ impl<'s> FunctionBuilder<'s> {
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
+            closures: HashMap::new(),
+            never_values: HashSet::new(),
+            pending_label: None,
             global_slots: HashSet::new(),
             iteration: hir_compat::Iteration::default(),
             variant_guards: Vec::new(),
@@ -222,6 +251,8 @@ impl<'s> FunctionBuilder<'s> {
             result: signature.result,
             is_async: signature.is_async,
             labels: 0,
+            rest_excluded_keys: &[],
+            this_slot: None,
         }
     }
 }
@@ -416,13 +447,17 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn load_local(&mut self, ctx: &mut Context, id: LocalId) -> Result<Value> {
         let binding = self.local_binding(id)?;
         let loaded = self.load(ctx, binding.slot)?;
-        if let Some(int_ty) = binding.integer
+        let result = if let Some(int_ty) = binding.integer
             && int_ty.deref(ctx).width() == 64
         {
-            Ok(self.wrap_integer(ctx, loaded, int_ty, loaded.get_type(ctx)))
+            self.wrap_integer(ctx, loaded, int_ty, loaded.get_type(ctx))
         } else {
-            Ok(loaded)
+            loaded
+        };
+        if binding.is_never {
+            self.never_values.insert(result);
         }
+        Ok(result)
     }
 
     pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {

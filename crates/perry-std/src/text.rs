@@ -1,4 +1,5 @@
 //! UTF-8 string methods indexed by Unicode scalar values.
+mod normalize;
 use crate::runtime::{bytes, from_static, scalars_length};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.
@@ -344,18 +345,71 @@ fn space(scalar: char) -> bool {
     perry_abi::number::space(scalar)
 }
 
+#[inline]
+fn ascii_space(byte: u8) -> bool {
+    byte <= 0x20 && matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+fn trim_start_bytes(mut bytes: &[u8]) -> &[u8] {
+    while let Some(&first) = bytes.first() {
+        if first < 0x80 {
+            if ascii_space(first) {
+                bytes = &bytes[1..];
+                continue;
+            }
+            break;
+        }
+        let s = unsafe { core::str::from_utf8_unchecked(bytes) };
+        let Some(ch) = s.chars().next() else {
+            break;
+        };
+        if space(ch) {
+            bytes = &bytes[ch.len_utf8()..];
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn trim_end_bytes(mut bytes: &[u8]) -> &[u8] {
+    while let Some(&last) = bytes.last() {
+        if last < 0x80 {
+            if ascii_space(last) {
+                bytes = &bytes[..bytes.len() - 1];
+                continue;
+            }
+            break;
+        }
+        let s = unsafe { core::str::from_utf8_unchecked(bytes) };
+        let Some(ch) = s.chars().next_back() else {
+            break;
+        };
+        if space(ch) {
+            bytes = &bytes[..bytes.len() - ch.len_utf8()];
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn trim_bytes(bytes: &[u8]) -> &[u8] {
+    trim_end_bytes(trim_start_bytes(bytes))
+}
+
 /// `s.trim()`.
 ///
 /// # Safety
 /// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
-    let view = view(string);
-    let trimmed = view.text.trim_matches(space);
-    if trimmed.len() == view.text.len() {
+    let text = unsafe { crate::runtime::bytes(string) };
+    let trimmed = trim_bytes(text);
+    if trimmed.len() == text.len() {
         return string;
     }
-    let from = trimmed.as_ptr() as usize - view.text.as_ptr() as usize;
+    let from = trimmed.as_ptr() as usize - text.as_ptr() as usize;
     unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
@@ -365,13 +419,13 @@ pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
 /// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
-    let view = view(string);
-    let trimmed = view.text.trim_start_matches(space);
-    if trimmed.len() == view.text.len() {
+    let text = unsafe { crate::runtime::bytes(string) };
+    let trimmed = trim_start_bytes(text);
+    if trimmed.len() == text.len() {
         return string;
     }
-    let from = view.text.len() - trimmed.len();
-    unsafe { crate::runtime::string_view(string, from as u32, view.text.len() as u32) }
+    let from = text.len() - trimmed.len();
+    unsafe { crate::runtime::string_view(string, from as u32, text.len() as u32) }
 }
 
 /// `s.trimEnd()`.
@@ -380,9 +434,9 @@ pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u
 /// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
-    let view = view(string);
-    let trimmed = view.text.trim_end_matches(space);
-    if trimmed.len() == view.text.len() {
+    let text = unsafe { crate::runtime::bytes(string) };
+    let trimmed = trim_end_bytes(text);
+    if trimmed.len() == text.len() {
         return string;
     }
     unsafe { crate::runtime::string_view(string, 0, trimmed.len() as u32) }
@@ -466,37 +520,37 @@ fn replace_string(
     let mut out = crate::runtime::Buffer::new();
     if pat.is_empty() {
         if !replace_all {
-            crate::regex::push_substitution(&mut out, text, 0, 0, rep);
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
             out.extend_from_slice(text);
         } else {
             let mut pos = 0;
-            crate::regex::push_substitution(&mut out, text, 0, 0, rep);
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
             for ch in text_str.chars() {
                 let end = pos + ch.len_utf8();
                 out.extend_from_slice(text.get(pos..end).unwrap_or(&[]));
-                crate::regex::push_substitution(&mut out, text, end, end, rep);
+                crate::regex::push_substitution(&mut out, text, end, end, rep, &[]);
                 pos = end;
             }
         }
-        return crate::runtime::from_bytes(out.as_slice());
+        return unsafe { out.into_string() };
     }
     let Some(first) = find(text, pat) else {
         return string;
     };
     out.extend_from_slice(text.get(..first).unwrap_or(&[]));
-    crate::regex::push_substitution(&mut out, text, first, first + pat.len(), rep);
+    crate::regex::push_substitution(&mut out, text, first, first + pat.len(), rep, &[]);
     let mut cursor = first + pat.len();
     if replace_all {
         while let Some(rel) = find(text.get(cursor..).unwrap_or(&[]), pat) {
             let start = cursor + rel;
             let end = start + pat.len();
             out.extend_from_slice(text.get(cursor..start).unwrap_or(&[]));
-            crate::regex::push_substitution(&mut out, text, start, end, rep);
+            crate::regex::push_substitution(&mut out, text, start, end, rep, &[]);
             cursor = end;
         }
     }
     out.extend_from_slice(text.get(cursor..).unwrap_or(&[]));
-    crate::runtime::from_bytes(out.as_slice())
+    unsafe { out.into_string() }
 }
 
 /// `s.replace(needle, replacement)` for string search.
@@ -570,48 +624,50 @@ struct AsciiString {
     cursor_scalar: u32,
     cursor_byte: u32,
 }
-struct AsciiStrings([AsciiString; 128]);
-// SAFETY: ASCII strings never update a position cursor or their immutable payload.
-unsafe impl Sync for AsciiStrings {}
-const ASCII: [u8; 128] = {
-    let mut bytes = [0; 128];
-    let mut index = 0;
-    while index < 128 {
-        bytes[index] = index as u8;
-        index += 1;
-    }
-    bytes
-};
-static ASCII_BYTES: [u8; 128] = ASCII;
-static ASCII_STRINGS: AsciiStrings = {
-    let mut strings = [AsciiString {
-        len: 1,
-        scalars: 1,
-        data: core::ptr::null(),
-        buffer: core::ptr::null(),
-        owner: core::ptr::null(),
-        offset: 0,
-        cursor_scalar: 0,
-        cursor_byte: 0,
-    }; 128];
-    let mut index = 0;
-    while index < 128 {
-        // SAFETY: all positions name bytes of the static ASCII table.
-        strings[index].data = unsafe { ASCII_BYTES.as_ptr().add(index) };
-        index += 1;
-    }
-    AsciiStrings(strings)
-};
+static mut ASCII_STRINGS: [AsciiString; 128] = [AsciiString {
+    len: 0,
+    scalars: 0,
+    data: core::ptr::null(),
+    buffer: core::ptr::null(),
+    owner: core::ptr::null(),
+    offset: 0,
+    cursor_scalar: 0,
+    cursor_byte: 0,
+}; 128];
+
 /// Static ASCII headers used by compiled character reads.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_ascii_strings() -> *const u8 {
-    (&raw const ASCII_STRINGS.0).cast()
+    unsafe {
+        let base = (&raw mut ASCII_STRINGS).cast::<AsciiString>();
+        if (*base).len == 0 {
+            let mut index = 0usize;
+            while index < 128 {
+                let entry = base.add(index);
+                let byte_ptr = (&raw const (*entry).cursor_byte).cast::<u8>();
+                entry.write(AsciiString {
+                    len: 1,
+                    scalars: 1,
+                    data: byte_ptr,
+                    buffer: core::ptr::null(),
+                    owner: core::ptr::null(),
+                    offset: 0,
+                    cursor_scalar: 0,
+                    cursor_byte: index as u32,
+                });
+                index += 1;
+            }
+        }
+        base.cast()
+    }
 }
 
 fn ascii_character(byte: u8) -> *mut u8 {
-    (&raw const ASCII_STRINGS.0[byte as usize])
-        .cast_mut()
-        .cast()
+    unsafe {
+        std_ascii_strings()
+            .add((byte as usize) * core::mem::size_of::<AsciiString>())
+            .cast_mut()
+    }
 }
 
 /// `String.fromCodePoint(value)`: one Unicode scalar; surrogate code points are rejected.
@@ -689,7 +745,7 @@ fn parse_decimal_prefix(rest: &[u8]) -> Option<(&[u8], perry_abi::number::Decima
 /// ECMAScript `parseFloat(string)`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
-    let trimmed = view(string).text.trim_start_matches(space).as_bytes();
+    let trimmed = trim_start_bytes(unsafe { crate::runtime::bytes(string) });
     let (negative, rest) = match trimmed.first() {
         Some(b'-') => (true, &trimmed[1..]),
         Some(b'+') => (false, &trimmed[1..]),
@@ -711,7 +767,7 @@ pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
 /// ECMAScript `StringToNumber` (`Number(string)`).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_to_number(string: *mut u8) -> f64 {
-    let trimmed = view(string).text.trim_matches(space).as_bytes();
+    let trimmed = trim_bytes(unsafe { crate::runtime::bytes(string) });
     if trimmed.is_empty() {
         return 0.0;
     }

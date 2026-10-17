@@ -80,12 +80,41 @@ impl FunctionLowering<'_, '_> {
                 let args = self.string_parts(ctx, args[0]);
                 Some(self.time_value(ctx, Runtime::TimePlainDateParse, args))
             }
+            Intrinsic::PlainDateFromFields => {
+                let constrain = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[3]]);
+                Some(self.time_value(
+                    ctx,
+                    Runtime::TimePlainDateFromFields,
+                    vec![args[0], args[1], args[2], constrain],
+                ))
+            }
             Intrinsic::PlainDateTimeFrom => {
                 let args = self.string_parts(ctx, args[0]);
                 Some(self.time_value(ctx, Runtime::TimePlainParse, args))
             }
             Intrinsic::PlainDateAddDays | Intrinsic::PlainDateTimeAddDays => {
                 Some(self.time_value(ctx, Runtime::TimePlainAddDays, args))
+            }
+            Intrinsic::PlainDateAddCalendar | Intrinsic::PlainDateTimeAddCalendar => {
+                let constrain = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[5]]);
+                Some(self.time_value(
+                    ctx,
+                    Runtime::TimePlainAddCalendar,
+                    vec![args[0], args[1], args[2], args[3], args[4], constrain],
+                ))
+            }
+            Intrinsic::PlainDateEpochDays => {
+                let day = self.load(ctx, MemKind::I32, args[0], 0);
+                Some(self.num(ctx, NumOpcode::F64ConvertI32S, vec![day]))
+            }
+            Intrinsic::PlainDateUntilPart => {
+                let unit = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[2]]);
+                let part = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[3]]);
+                Some(self.runtime(
+                    ctx,
+                    Runtime::TimePlainUntilPart,
+                    vec![args[0], args[1], unit, part],
+                ))
             }
             Intrinsic::InstantMs => Some(self.runtime(ctx, Runtime::TimeInstantMs, args)),
             Intrinsic::PlainDatePart | Intrinsic::PlainDateTimePart => {

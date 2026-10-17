@@ -15,6 +15,9 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
         let method = hir_compat::method(method);
+        if let Expr::ClassRef(class_name) = object {
+            return self.class_static_method_call(ctx, class_name, method.name(), args);
+        }
         if method == hir_compat::Method::Iteration && matches!(object, Expr::UrlSearchParamsNew(_))
         {
             bail!(
@@ -33,6 +36,12 @@ impl<'s> FunctionBuilder<'s> {
                 "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
             );
             return Ok(Some(receiver));
+        }
+        if let Some((class_name, type_args)) =
+            self.shapes.class_of_type(ctx, receiver.get_type(ctx))
+            && let Some((owner_class, func)) = self.shapes.class_method(class_name, method.name())
+        {
+            return self.class_method_call(ctx, receiver, owner_class, &type_args, func, args);
         }
         if method == hir_compat::Method::Push {
             ensure!(
@@ -136,6 +145,23 @@ impl<'s> FunctionBuilder<'s> {
                 ensure!(args.is_empty(), "array.pop takes no arguments");
                 Some(self.array_pop(ctx, receiver)?)
             }
+            (Kind::Array, "with") => {
+                let [index, value] = args else {
+                    bail!("array.with requires index and value arguments");
+                };
+                Some(self.array_with(ctx, receiver, index, value)?)
+            }
+            (Kind::String, "normalize") => {
+                ensure!(
+                    args.len() <= 1,
+                    "string.normalize accepts at most one form argument"
+                );
+                let form = match args.first() {
+                    None | Some(Expr::Undefined) => self.string(ctx, "NFC"),
+                    Some(arg) => self.string_operand(ctx, arg)?,
+                };
+                self.call_intrinsic(ctx, Intrinsic::StringNormalize, vec![receiver, form])
+            }
             (Kind::String, "localeCompare") => {
                 let [other] = args else {
                     bail!("string.localeCompare requires one string");
@@ -167,6 +193,14 @@ impl<'s> FunctionBuilder<'s> {
                     _ => bail!("array.{method} requires a value and optional starting index"),
                 };
                 Some(self.array_search(ctx, receiver, value, from_index, method == "includes")?)
+            }
+            (Kind::Array, "lastIndexOf") => {
+                let (value, from_index) = match args {
+                    [value] => (value, None),
+                    [value, from_index] => (value, Some(from_index)),
+                    _ => bail!("array.lastIndexOf requires a value and optional starting index"),
+                };
+                Some(self.array_last_index_of(ctx, receiver, value, from_index)?)
             }
             (Kind::String, "split") => {
                 let [separator] = args else {
@@ -225,6 +259,20 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let text = self.string_operand(ctx, text)?;
                 Some(self.regex_test(ctx, receiver, text))
+            }
+            (Kind::Regex, "exec") => {
+                let [text] = args else {
+                    bail!("regex.exec requires one string");
+                };
+                let text = self.string_operand(ctx, text)?;
+                self.call_intrinsic(ctx, Intrinsic::RegexExec, vec![text, receiver])
+            }
+            (Kind::String, "match") => {
+                let [regex] = args else {
+                    bail!("string.match requires one literal regex");
+                };
+                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+                self.call_intrinsic(ctx, Intrinsic::RegexMatch, vec![receiver, regex])
             }
             (Kind::String, "search") => {
                 let [regex] = args else {
@@ -442,13 +490,22 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn regex_has_global(ctx: &Context, regex: Value) -> bool {
-        if let Some(op) = regex.defining_op()
-            && let Some(const_op) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx)
-        {
-            const_op.flags(ctx).contains('g')
-        } else {
-            false
+        let Some(op) = regex.defining_op() else {
+            return false;
+        };
+        if let Some(const_op) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
+            return const_op.flags(ctx).contains('g');
         }
+        if Operation::get_op::<perry_mir::LoadOp>(op, ctx).is_some() {
+            let slot = op.deref(ctx).get_operand(0);
+            return slot.uses(ctx).iter().any(|u| {
+                let user = u.user_op();
+                Operation::get_op::<perry_mir::StoreOp>(user, ctx).is_some()
+                    && user.deref(ctx).get_operand(0) == slot
+                    && Self::regex_has_global(ctx, user.deref(ctx).get_operand(1))
+            });
+        }
+        false
     }
 
     /// `JSON.stringify(value)`.
@@ -521,7 +578,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(error)
     }
 
-    /// `value instanceof Error` or a supported Error subclass.
+    /// `value instanceof Error` or a supported Error subclass or user-defined class.
     pub(super) fn instance_of(
         &mut self,
         ctx: &mut Context,
@@ -529,6 +586,13 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
+        if self.shapes.classes.contains_key(ty) {
+            let is_inst = self
+                .shapes
+                .class_of_type(ctx, value.get_type(ctx))
+                .is_some_and(|(c, _)| c == ty);
+            return Ok(self.boolean(ctx, is_inst));
+        }
         let (error, code) = match ty {
             "Error" => (ErrorKind::Any, 0),
             "TypeError" => (ErrorKind::TypeError, 1),
@@ -601,6 +665,36 @@ impl<'s> FunctionBuilder<'s> {
             result = self.intrinsic(ctx, intrinsic, vec![result, value]);
         }
         Ok(result)
+    }
+
+    /// `Math.min(...array)` or `Math.max(...array)`.
+    pub(super) fn math_extremum_spread(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        empty: f64,
+        array: &'s Expr,
+    ) -> Result<Value> {
+        let arr = self.expression(ctx, array)?;
+        let arr = self.defined(ctx, arr)?;
+        ensure!(
+            kind(ctx, arr)? == Kind::Array,
+            "Math.max/min spread requires an array"
+        );
+        let init = self.number(ctx, empty);
+        let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
+        self.store(ctx, acc_slot, init);
+        let len = self.array_length(ctx, arr);
+        let zero = self.number(ctx, 0.0);
+        self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
+            let item = b.element_at(ctx, arr, idx)?;
+            let val = b.arithmetic(ctx, item);
+            let cur = b.load(ctx, acc_slot)?;
+            let next = b.intrinsic(ctx, intrinsic, vec![cur, val]);
+            b.store(ctx, acc_slot, next);
+            Ok(())
+        })?;
+        self.load(ctx, acc_slot)
     }
 
     /// `new Uint8Array(source)` or `Uint8Array.from(source)`.

@@ -72,7 +72,17 @@ impl<'s> FunctionBuilder<'s> {
             Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
             Expr::StringCoerce(expr) | Expr::TemplateStringCoerce(expr) => {
                 let value = self.expression(ctx, expr)?;
-                self.display(ctx, value)?
+                if let Some((class_name, type_args)) =
+                    self.shapes.class_of_type(ctx, value.get_type(ctx))
+                    && let Some((owner_class, func)) =
+                        self.shapes.class_method(class_name, "toString")
+                {
+                    let recv = self.defined(ctx, value)?;
+                    self.class_method_call(ctx, recv, owner_class, &type_args, func, &[])?
+                        .context("toString() produced no value")?
+                } else {
+                    self.display(ctx, value)?
+                }
             }
             Expr::Number(value) => self.number(ctx, *value),
             Expr::Integer(value) => self.number(ctx, *value as f64),
@@ -147,6 +157,16 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::MathMax(values) => {
                 self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
+            }
+            Expr::MathMinSpread(array) => {
+                self.math_extremum_spread(ctx, Intrinsic::MathMin, f64::INFINITY, array)?
+            }
+            Expr::MathMaxSpread(array) => {
+                self.math_extremum_spread(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, array)?
+            }
+            Expr::StructuredClone { value, .. } => {
+                let val = self.expression_with(ctx, value, expected)?;
+                self.clone_structured_value(ctx, val)?
             }
             Expr::ParseInt { string, radix } => {
                 let value = self.expression(ctx, string)?;
@@ -441,6 +461,31 @@ impl<'s> FunctionBuilder<'s> {
                 args,
                 ..
             } => self.web_method(ctx, object, method, args)?,
+            Expr::This => self.class_this(ctx)?,
+            Expr::StaticFieldGet {
+                class_name,
+                field_name,
+            } => self.class_static_field_get(ctx, class_name, field_name)?,
+            Expr::StaticFieldSet {
+                class_name,
+                field_name,
+                value,
+            } => self.class_static_field_set(ctx, class_name, field_name, value)?,
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                args,
+            } => self
+                .class_static_method_call(ctx, class_name, method_name, args)?
+                .context("a void static method call has no value")?,
+            Expr::New {
+                class_name,
+                args,
+                type_args,
+                ..
+            } if self.shapes.classes.contains_key(class_name.as_str()) => {
+                self.class_new(ctx, class_name, args, type_args, expected)?
+            }
             Expr::New {
                 class_name, args, ..
             } => self.object_literal(ctx, class_name, args, expected)?,
@@ -460,6 +505,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::Array(items) => self.array_literal(ctx, items, expected)?,
             Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
+            Expr::ArrayFrom(iterable) => self.array_from(ctx, iterable, None, expected)?,
+            Expr::ArrayFromMapped {
+                iterable, map_fn, ..
+            } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
             Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
                 let array = self.expression(ctx, array)?;
                 self.array_transform(
@@ -598,7 +647,12 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `local = value`, fitted to the local's type.
-    fn local_set(&mut self, ctx: &mut Context, id: LocalId, value: &'s Expr) -> Result<Value> {
+    pub(super) fn local_set(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        value: &'s Expr,
+    ) -> Result<Value> {
         let local = self.local_binding(id)?;
         let binding = BindingType {
             carrier: self.slot_type(ctx, local.slot)?,
@@ -611,7 +665,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `++local`, `local--` and their relatives.
-    fn update(
+    pub(super) fn update(
         &mut self,
         ctx: &mut Context,
         id: LocalId,

@@ -267,6 +267,13 @@ pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHa
             _ => None,
         };
     }
+    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx)
+        && let Ok(elem_arr) = TypedHandle::<ArrayType>::from_handle(arr.deref(ctx).element(), ctx)
+    {
+        let inner = elem_arr.deref(ctx).element();
+        return Some((inner, inner));
+    }
     None
 }
 
@@ -480,6 +487,26 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayIsArray(v) => Ok(Some(self.array_is_array(ctx, v)?)),
             Expr::In { property, object } => Ok(Some(self.in_operator(ctx, property, object)?)),
             Expr::Delete(inner) => Ok(Some(self.delete_operator(ctx, inner)?)),
+            Expr::MapGroupBy { items, key_fn } => {
+                Ok(Some(self.map_group_by(ctx, items, key_fn, expected)?))
+            }
+            Expr::Call { callee, args, .. }
+                if matches!(
+                    callee.as_ref(),
+                    Expr::PropertyGet { object, property, .. }
+                        if property == "groupBy"
+                            && matches!(
+                                object.as_ref(),
+                                Expr::PropertyGet { object: g, property: m, .. }
+                                    if matches!(g.as_ref(), Expr::GlobalGet(_)) && m == "Map"
+                            )
+                ) =>
+            {
+                let [items, key_fn] = args.as_slice() else {
+                    bail!("Map.groupBy requires (items, callbackFn)");
+                };
+                Ok(Some(self.map_group_by(ctx, items, key_fn, expected)?))
+            }
             _ => Ok(None),
         }
     }
@@ -591,6 +618,18 @@ impl<'s> FunctionBuilder<'s> {
                         bail!("Set.forEach requires one callback argument");
                     };
                     Some(self.set_for_each(ctx, receiver, callback)?)
+                }
+                "difference" | "union" | "intersection" | "symmetricDifference" => {
+                    let [other] = args else {
+                        bail!("Set.{method} requires one Set argument");
+                    };
+                    Some(self.set_binary_op(ctx, receiver, other, elem_ty, tuple_rec, method)?)
+                }
+                "isSubsetOf" | "isSupersetOf" | "isDisjointFrom" => {
+                    let [other] = args else {
+                        bail!("Set.{method} requires one Set argument");
+                    };
+                    Some(self.set_relation_op(ctx, receiver, other, elem_ty, method)?)
                 }
                 _ => return Ok(None),
             };

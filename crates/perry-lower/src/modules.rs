@@ -351,7 +351,9 @@ impl Graph<'_> {
                         .insert(function.ident.sym.to_string(), self.body.len());
                 }
                 ast::ModuleItem::Stmt(ast::Stmt::Decl(
-                    decl @ (ast::Decl::TsInterface(_) | ast::Decl::TsTypeAlias(_)),
+                    decl @ (ast::Decl::TsInterface(_)
+                    | ast::Decl::TsTypeAlias(_)
+                    | ast::Decl::Class(_)),
                 )) => {
                     self.types
                         .extend(declared(decl)?.into_iter().map(|id| id.sym.to_string()));
@@ -503,6 +505,7 @@ fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
     Ok(match decl {
         ast::Decl::Fn(function) => vec![&function.ident],
+        ast::Decl::Class(class) => vec![&class.ident],
         ast::Decl::TsInterface(interface) => vec![&interface.id],
         ast::Decl::TsTypeAlias(alias) => vec![&alias.id],
         ast::Decl::Var(var) => var
