@@ -561,10 +561,13 @@ pub(super) fn unresolved_types(
                     param.ty = HirType::Array(Box::new(HirType::Number));
                 }
             } else if let Some(default_expr) = &param.default
-                && matches!(default_expr, Expr::Null)
                 && is_resolvable_type(&param.ty)
             {
-                param.ty = with_absences(param.ty.clone(), vec![HirType::Null]);
+                if matches!(default_expr, Expr::Null) {
+                    param.ty = with_absences(param.ty.clone(), vec![HirType::Null]);
+                } else if matches!(default_expr, Expr::Undefined) && !function.is_exported {
+                    param.ty = with_absences(param.ty.clone(), vec![HirType::Void]);
+                }
             }
             env.locals.insert(param.id, param.ty.clone());
         }

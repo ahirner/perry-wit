@@ -376,9 +376,9 @@ impl<'s> FunctionBuilder<'s> {
                     TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
                 })
                 .or_else(|| {
-                    parts
-                        .iter()
-                        .find_map(|(k, v)| k.is_none().then(|| self.peek_record_type(ctx, v)).flatten())
+                    parts.iter().find_map(|(k, v)| {
+                        k.is_none().then(|| self.peek_record_type(ctx, v)).flatten()
+                    })
                 })
         });
         let mut field_values: Vec<(String, Value)> = Vec::new();
@@ -460,52 +460,94 @@ impl<'s> FunctionBuilder<'s> {
                     .fields()
                     .map_err(|_| anyhow!("record without fields"))?
                     .to_vec();
-                for (field_name, _) in src_fields {
+                for (field_name, src_field_ty) in src_fields {
+                    let can_omit = absence(ctx, src_field_ty).is_some_and(|a| a.admits_undefined());
                     let op = FieldGetOp::new(ctx, src, field_name.clone())?;
                     let loaded = self.field_read(ctx, &op)?;
-                    let loaded = match expected_record
-                        .and_then(|rec| rec.deref(ctx).field(&field_name).map(|(_, ty)| ty))
-                    {
-                        Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
-                        None => loaded,
-                    };
+                    let expected_field_ty = expected_record
+                        .and_then(|rec| rec.deref(ctx).field(&field_name).map(|(_, ty)| ty));
                     if let Some((_, existing)) =
                         field_values.iter_mut().find(|(k, _)| k == &field_name)
                     {
-                        let loaded_ty = loaded.get_type(ctx);
-                        if absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined()) {
+                        if can_omit {
                             let prev = *existing;
                             let prev_ty = prev.get_type(ctx);
-                            let target_ty = expected_record
-                                .and_then(|rec| {
-                                    rec.deref(ctx).field(&field_name).map(|(_, ty)| ty)
-                                })
-                                .unwrap_or_else(|| {
-                                    if !absence(ctx, prev_ty)
-                                        .is_some_and(|a| a.admits_undefined())
-                                    {
-                                        prev_ty
-                                    } else {
-                                        loaded_ty
-                                    }
-                                });
-                            let is_undef =
-                                self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
+                            let loaded_ty = loaded.get_type(ctx);
+                            let target_ty = expected_field_ty.unwrap_or_else(|| {
+                                if let Some(states) =
+                                    merge_absence(absence(ctx, prev_ty), absence(ctx, loaded_ty))
+                                {
+                                    let inner = optional_value(ctx, loaded_ty)
+                                        .or_else(|| optional_value(ctx, prev_ty))
+                                        .unwrap_or(loaded_ty);
+                                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
+                                } else {
+                                    loaded_ty
+                                }
+                            });
+                            let op = FieldPresentOp::new(ctx, src, field_name.clone())?;
+                            let is_present = self.emit_value(ctx, |_| op);
                             *existing = self.choose(
                                 ctx,
                                 target_ty,
-                                is_undef,
-                                |b, ctx| b.fit(ctx, prev, target_ty),
+                                is_present,
                                 |b, ctx| {
-                                    let def = b.strip_undefined(ctx, loaded)?;
-                                    b.fit(ctx, def, target_ty)
+                                    if !absence(ctx, target_ty)
+                                        .is_some_and(|a| a.admits_undefined())
+                                        && absence(ctx, loaded_ty)
+                                            .is_some_and(|a| a.admits_undefined())
+                                    {
+                                        let is_undef = b
+                                            .emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
+                                        b.choose(
+                                            ctx,
+                                            target_ty,
+                                            is_undef,
+                                            |b, ctx| b.fit(ctx, prev, target_ty),
+                                            |b, ctx| {
+                                                let def = b.strip_undefined(ctx, loaded)?;
+                                                b.fit(ctx, def, target_ty)
+                                            },
+                                        )
+                                    } else {
+                                        b.fit(ctx, loaded, target_ty)
+                                    }
                                 },
+                                |b, ctx| b.fit(ctx, prev, target_ty),
                             )?;
                         } else {
+                            let loaded = match expected_field_ty {
+                                Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
+                                None => loaded,
+                            };
                             *existing = loaded;
                         }
                     } else {
-                        field_values.push((field_name, loaded));
+                        let loaded = match expected_field_ty {
+                            Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
+                            None => loaded,
+                        };
+                        let loaded_ty = loaded.get_type(ctx);
+                        let val = if can_omit
+                            && absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined())
+                        {
+                            let op = FieldPresentOp::new(ctx, src, field_name.clone())?;
+                            let is_present = self.emit_value(ctx, |_| op);
+                            self.choose(
+                                ctx,
+                                loaded_ty,
+                                is_present,
+                                |_, _| Ok(loaded),
+                                |b, ctx| {
+                                    Ok(b.emit_value(ctx, |ctx| {
+                                        OmittedOp::with_type(ctx, loaded_ty)
+                                    }))
+                                },
+                            )?
+                        } else {
+                            loaded
+                        };
+                        field_values.push((field_name, val));
                     }
                 }
             }
@@ -586,7 +628,8 @@ impl<'s> FunctionBuilder<'s> {
             .cloned()
             .collect();
         let mut field_values: Vec<(String, Value)> = Vec::with_capacity(src_fields.len());
-        for (field_name, _) in src_fields {
+        for (field_name, src_field_ty) in src_fields {
+            let can_omit = absence(ctx, src_field_ty).is_some_and(|a| a.admits_undefined());
             let op = FieldGetOp::new(ctx, src, field_name.clone())?;
             let loaded = self.field_read(ctx, &op)?;
             let loaded = match expected_record
@@ -595,7 +638,21 @@ impl<'s> FunctionBuilder<'s> {
                 Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
                 None => loaded,
             };
-            field_values.push((field_name, loaded));
+            let loaded_ty = loaded.get_type(ctx);
+            let val = if can_omit && absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined()) {
+                let op = FieldPresentOp::new(ctx, src, field_name.clone())?;
+                let is_present = self.emit_value(ctx, |_| op);
+                self.choose(
+                    ctx,
+                    loaded_ty,
+                    is_present,
+                    |_, _| Ok(loaded),
+                    |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, loaded_ty))),
+                )?
+            } else {
+                loaded
+            };
+            field_values.push((field_name, val));
         }
         let record = match expected_record {
             Some(rec) => rec,

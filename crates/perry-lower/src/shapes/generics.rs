@@ -107,11 +107,10 @@ impl Shapes<'_> {
             }
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
                 let lookup = (&self.interfaces, &self.type_aliases);
-                let expanded =
-                    expand_utility_type_with_lookup(ctx, &lookup, base, arguments, 0)
-                        .with_context(|| {
-                            format!("MIR backend could not resolve utility type {base}")
-                        })?;
+                let expanded = expand_utility_type_with_lookup(ctx, &lookup, base, arguments, 0)
+                    .with_context(|| {
+                        format!("MIR backend could not resolve utility type {base}")
+                    })?;
                 return self.source_type(ctx, expanded);
             }
             if matches!(base, "Partial" | "Required" | "Pick" | "Omit") {
@@ -293,11 +292,7 @@ pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
                             Kind::Named(_) | Kind::Generic { .. } => {
                                 let flat =
                                     flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
-                                if flat != [target] {
-                                    Some(flat)
-                                } else {
-                                    None
-                                }
+                                if flat != [target] { Some(flat) } else { None }
                             }
                             _ => None,
                         }
@@ -315,22 +310,20 @@ pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
                     expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
                 {
                     Some(vec![expanded])
-                } else if let Some((_, Declaration::Alias(alias))) = Declaration::find(lookup, &base)
+                } else if let Some((_, Declaration::Alias(alias))) =
+                    Declaration::find(lookup, &base)
                     && let Ok(bindings) = Declaration::Alias(alias).bind(ctx, &base, &arguments)
                 {
                     let mut remaining = 4096;
-                    if let Ok(target) = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)
+                    if let Ok(target) =
+                        Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)
                     {
                         match target.deref(ctx).kind() {
                             Kind::Union(nested) => Some(nested.clone()),
                             Kind::Named(_) | Kind::Generic { .. } => {
                                 let flat =
                                     flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
-                                if flat != [target] {
-                                    Some(flat)
-                                } else {
-                                    None
-                                }
+                                if flat != [target] { Some(flat) } else { None }
                             }
                             _ => None,
                         }
@@ -494,7 +487,9 @@ fn extract_string_keys<L: DeclarationLookup>(
             let (_, Declaration::Alias(alias)) = Declaration::find(lookup, &base)? else {
                 return None;
             };
-            let bindings = Declaration::Alias(alias).bind(ctx, &base, &arguments).ok()?;
+            let bindings = Declaration::Alias(alias)
+                .bind(ctx, &base, &arguments)
+                .ok()?;
             let mut remaining = 4096;
             let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
             extract_string_keys(ctx, lookup, target, depth + 1)

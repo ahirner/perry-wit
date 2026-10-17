@@ -412,6 +412,12 @@ export function run(): number {
     if ('hello   world\tfoo'.replaceAll(/\s+/g, '_') !== 'hello_world_foo') return 11;
     if ('abc'.replace(/b/, '[$&:$`:$\':$$]') !== 'a[b:a:c:$]c') return 12;
     if ('ab'.replaceAll('', '-') !== '-a-b-') return 13;
+    if ('ab'.replace(/(?:)/g, '-') !== '-a-b-') return 19;
+    if (JSON.stringify('ab'.split(/(?:)/)) !== '["a","b"]') return 20;
+    if (JSON.stringify('ab'.split(/^/)) !== '["ab"]') return 21;
+    if (JSON.stringify('ab'.split(/$/)) !== '["ab"]') return 22;
+    if (JSON.stringify('ab'.split(/b$/)) !== '["a",""]') return 23;
+    if (JSON.stringify(''.split(/$/)) !== '[]') return 24;
 
     if ('  hi  '.trimStart() !== 'hi  ' || '  hi  '.trimEnd() !== '  hi') return 14;
     if ('5'.padStart(3, '0') !== '005' || '5'.padEnd(3, '0') !== '500') return 15;
@@ -427,10 +433,7 @@ export function run(): number {
 }
 "#;
     let mut program = Program::checked(source, "text-pipeline.ts");
-    let char_loop = program.call(
-        "charLoop",
-        &[wasmtime::Val::I32(0)],
-    );
+    let char_loop = program.call("charLoop", &[wasmtime::Val::I32(0)]);
     assert_eq!(
         char_loop.0.len(),
         1,
@@ -476,6 +479,22 @@ export function run(): number {
     if (mapped[0] !== 13 || mapped[1] !== 39) return 5;
 
     if (sumPair({ a: 2, b: 3 }) !== 15 || sumPair({ a: 2, b: 3, c: 4 }) !== 9) return 6;
+
+    const withP: { p?: number } = { p: 1 };
+    const explicitUndef: { p?: number } = { p: undefined };
+    const omitted: { p?: number } = {};
+    const overUndef = { ...withP, ...explicitUndef };
+    if (overUndef.p !== undefined || !('p' in overUndef)) return 7;
+    const overOmitted = { ...withP, ...omitted };
+    if (overOmitted.p !== 1 || !('p' in overOmitted)) return 8;
+    const copyOmitted = { ...omitted };
+    if ('p' in omitted || 'p' in copyOmitted || Object.keys(copyOmitted).length !== 0) return 9;
+    const partial: { p?: number; q: number } = { q: 1 };
+    const { q, ...restOmitted } = partial;
+    if (q !== 1 || 'p' in restOmitted || Object.keys(restOmitted).length !== 0) return 10;
+    const nullableA: { p: number | null } = { p: 1 };
+    const nullableB: { p: number | null } = { p: null };
+    if (({ ...nullableA, ...nullableB }).p !== null) return 11;
     return 0;
 }
 "#;
@@ -503,9 +522,14 @@ export function run(): number {
     if (sumWithBase() !== 10) return 5;
     if (sumWithBase(5, 1, 2, 3) !== 11) return 6;
 
-    const arr: Array<number | undefined> = [1, undefined, 3];
-    const filled = arr.map((x = 9) => x * 2);
-    if (filled[0] !== 2 || filled[1] !== 18 || filled[2] !== 6) return 7;
+    let calls = 0;
+    const arr: Array<number | undefined> = [undefined, 7];
+    const filled = arr.map((v = ++calls, i = v + 10) => v + i);
+    if (calls !== 1 || filled[0] !== 1 || filled[1] !== 8) return 7;
+
+    const present: Array<number | undefined> = [1];
+    const unthrown = present.map((v = JSON.parse<number>('bad')) => v);
+    if (unthrown[0] !== 1) return 8;
     return 0;
 }
 "#;
@@ -550,7 +574,7 @@ export function run(): number {
 }
 
 #[test]
-fn smaller_gaps_inference_logical_values_utility_types_and_collection_methods() {
+fn optional_chaining_logical_operators_utility_types_and_array_combinators() {
     let source = r#"
 type A = { tag: 'a'; val: number };
 type B = { tag: 'b'; val: string };
@@ -595,13 +619,20 @@ export function run(): number {
     const nums: number[] = [2, 3, 4];
     if (reduceAndForEach(nums) !== (2 + 0 + 3 + 1 + 4 + 2) + 24 + 9) return 4;
     if (nums.at(-1) !== 4 || nums.at(0) !== 2 || nums.at(5) !== undefined) return 5;
+    if (nums.at(NaN) !== 2 || nums.at(-Infinity) !== undefined) return 13;
     if (nums.findLast(x => x < 4) !== 3 || nums.findLastIndex(x => x < 4) !== 1) return 6;
     if (nums.findLast(x => x > 9) !== undefined || nums.findLastIndex(x => x > 9) !== -1) return 7;
+    const shrink: number[] = [1, 2, 3];
+    let shrinkCalls = 0;
+    shrink.findLast((_v, _i, arr) => { shrinkCalls++; arr.pop(); arr.pop(); return false; });
+    if (shrinkCalls !== 3) return 14;
 
     const rev = nums.toReversed();
     if (rev.join(',') !== '4,3,2' || nums.join(',') !== '2,3,4') return 8;
     const copy = nums.slice(1, -1);
     if (copy.join(',') !== '3') return 9;
+    if (nums.slice(NaN).join(',') !== '2,3,4' || nums.slice(0, NaN).length !== 0) return 15;
+    if ([1, 2, 3, 4].slice(-1.5).join(',') !== '4') return 16;
     const mutRev = [1, 2, 3].reverse();
     if (mutRev.join(',') !== '3,2,1') return 10;
 
@@ -611,6 +642,9 @@ export function run(): number {
     const hex = (255).toString(16);
     const bin = (-10).toString(2);
     if (hex !== 'ff' || bin !== '-1010') return 12;
+    if ((18446744073709551616).toString(16) !== '10000000000000000') return 17;
+    if ((0.1).toString(3) !== '0.0022002200220022002200220022002201') return 18;
+    if ((1e-20).toString(2) !== '0.00000000000000000000000000000000000000000000000000000000000000000010111100111001010000100001100100100100100001000100011') return 19;
 
     return 0;
 }
@@ -619,3 +653,56 @@ export function run(): number {
     assert_eq!(program.outcome("run", &[]), (0.0, 0));
 }
 
+#[test]
+fn nullable_numeric_conversions_and_nested_specialized_layouts_compose() {
+    let (r, p) = perry_wit::component::wit::resolve_source(
+        "p.wit",
+        "package test:probe;world test{export run:func(x:f64)->string;}",
+    )
+    .unwrap();
+    let w = r.select_world(&[p], Some("test")).unwrap();
+
+    for (name, helper) in [
+        (
+            "null_to_undefined",
+            "function f(n:number|null):number|undefined{return n===null?undefined:n;}",
+        ),
+        (
+            "undefined_to_null",
+            "function f(n:number|undefined):number|null{return n===undefined?null:n;}",
+        ),
+        (
+            "null_to_plain",
+            "function f(n:number|null):number{return n===null?0.5:n;}",
+        ),
+        (
+            "plain_to_undefined",
+            "function f(n:number):number|undefined{return n===0?undefined:n;}",
+        ),
+    ] {
+        let source = format!(
+            "{helper} export function run(x:number):string{{const n=f(parseInt(x===0?'9007199254740993':'bad'));return JSON.stringify(n??0.5);}}"
+        );
+        perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+            .unwrap_or_else(|e| panic!("{name} normal failed: {e:#}"));
+        perry_mir::with_fact_limits(1, 1, || {
+            perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+        })
+        .unwrap_or_else(|e| panic!("{name} summary failed: {e:#}"));
+    }
+
+    for reverse in [false, true] {
+        let a = "const a:S={inner:{a:w,b:0.5},opt:w};";
+        let b = "const b:S={inner:{a:w,b:w},opt:0.5};";
+        let decls = if reverse {
+            format!("{b}{a}")
+        } else {
+            format!("{a}{b}")
+        };
+        let source = format!(
+            "interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} export function run(x:number):string{{const w=parseInt(x===0?'9007199254740993':'bad');{decls}return JSON.stringify(a)+','+JSON.stringify(b);}}"
+        );
+        perry_wit::compile_for_world(&source, "probe.ts", &r, w, true)
+            .unwrap_or_else(|e| panic!("nested_{reverse} failed: {e:#}"));
+    }
+}

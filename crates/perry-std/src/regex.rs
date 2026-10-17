@@ -34,8 +34,7 @@ unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usi
         let class = unsafe { *program.add(8 + prev as usize) };
         let offset = unsafe { *state.add(4 + usize::from(class) * 4).cast::<u32>() };
         state = unsafe { rev_rows.add(offset as usize) };
-        if unsafe { *state.cast::<u32>() } != 0 && text.get(pos).is_none_or(|&b| b & 0xc0 != 0x80)
-        {
+        if unsafe { *state.cast::<u32>() } != 0 && text.get(pos).is_none_or(|&b| b & 0xc0 != 0x80) {
             best_start = Some(pos);
         }
     }
@@ -224,10 +223,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
 /// # Safety
 /// `string` is a live immutable string; `program` is a DFA table.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_regex_split(
-    string: *mut u8,
-    program: *const u8,
-) -> *mut u8 {
+pub(crate) unsafe extern "C" fn std_regex_split(string: *mut u8, program: *const u8) -> *mut u8 {
     let text = unsafe { runtime::bytes(string) };
     if text.is_empty() {
         if (unsafe { next_match(text, 0, program) }).is_some() {
@@ -252,6 +248,9 @@ pub(crate) unsafe extern "C" fn std_regex_split(
                 let Some((start, end)) = (unsafe { next_match(text, pos, program) }) else {
                     break;
                 };
+                if start == text.len() && end == text.len() {
+                    break;
+                }
                 if end == last_end {
                     pos = next_scalar_boundary(text, pos);
                 } else {

@@ -177,7 +177,7 @@ impl<'s> FunctionBuilder<'s> {
             let box_opt = self.collection_underlying_box(ctx, coll)?;
             return self.find_live_match(ctx, "map_delete", arr, key, k_ty, |b, ctx, _, entry| {
                 let cleared = [("_0", k_ty), ("_1", v_ty)];
-                b.tombstone_entry(ctx, entry, EntryKind::Map, &cleared, box_opt)
+                b.tombstone_entry(ctx, arr, entry, EntryKind::Map, &cleared, box_opt)
             });
         }
         let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
@@ -244,7 +244,8 @@ impl<'s> FunctionBuilder<'s> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
-        let present = self.set_has(ctx, coll, val, elem_ty)?;
+        let present =
+            self.find_live_match(ctx, "set_has", arr, val, elem_ty, |_, _, _, _| Ok(()))?;
         self.append_unless(ctx, "set_add", present, arr, box_opt, |b, ctx| {
             let live_true = b.boolean(ctx, true);
             let seq = b.next_collection_seq(ctx, box_opt)?;
@@ -278,7 +279,7 @@ impl<'s> FunctionBuilder<'s> {
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
         self.find_live_match(ctx, "set_delete", arr, val, elem_ty, |b, ctx, _, entry| {
-            b.tombstone_entry(ctx, entry, EntryKind::Set, &[("_0", elem_ty)], box_opt)
+            b.tombstone_entry(ctx, arr, entry, EntryKind::Set, &[("_0", elem_ty)], box_opt)
         })
     }
 

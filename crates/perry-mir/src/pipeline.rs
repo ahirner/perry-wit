@@ -333,4 +333,3 @@ mod tests {
         let _ = run_to_fixpoint(&mut passes, root, ctx, &mut AnalysisManager::default());
     }
 }
-

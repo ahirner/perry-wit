@@ -302,10 +302,9 @@ impl<'s> FunctionBuilder<'s> {
         let expected_inner = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
         if let Some(ty) = expected_inner
             && !ty.deref(ctx).is::<JsonType>()
+            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
         {
-            if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-                return self.record_object_spread(ctx, parts, None, Some(rec));
-            }
+            return self.record_object_spread(ctx, parts, None, Some(rec));
         }
         if expected_inner.is_none() {
             if let Some((None, first_spread)) = parts.first() {
@@ -368,7 +367,7 @@ impl<'s> FunctionBuilder<'s> {
                     continue;
                 }
                 let source = self.json_operand(ctx, source)?.context(
-                    "object spread is supported over typed records or JSON values with static keys"
+                    "object spread is supported over typed records or JSON values with static keys",
                 )?;
                 self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }

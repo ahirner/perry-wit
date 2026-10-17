@@ -39,10 +39,26 @@ export function run(query: number): number {
         .core,
     );
     for (query, expected, label) in [
-        (0, 1, "copied undefined property remains present with undefined value"),
-        (1, 101, "Object.keys counts on stack/heap records with omitted vs copied undefined"),
-        (2, 10, "assigned undefined stays present while JSON.parse('{}') omits missing field"),
-        (3, 1, "Object.values and Object.entries include explicit undefined property"),
+        (
+            0,
+            1,
+            "copied undefined property remains present with undefined value",
+        ),
+        (
+            1,
+            101,
+            "Object.keys counts on stack/heap records with omitted vs copied undefined",
+        ),
+        (
+            2,
+            10,
+            "assigned undefined stays present while JSON.parse('{}') omits missing field",
+        ),
+        (
+            3,
+            1,
+            "Object.values and Object.entries include explicit undefined property",
+        ),
     ] {
         assert_eq!(
             program.call("run", &[Val::I32(query)]).0[0].unwrap_i32(),
@@ -85,10 +101,22 @@ export function run(query: number): number {
         .core,
     );
     for (query, expected, label) in [
-        (0, 12, "nested Map<string, Set<number>> preserves inner Set membership and size"),
+        (
+            0,
+            12,
+            "nested Map<string, Set<number>> preserves inner Set membership and size",
+        ),
         (1, 1, "Set.values() allocates distinct iterator instances"),
-        (2, 245, "spreading Set into array preserves order and elements"),
-        (3, 311, "Set string keys with NUL or internal prefix do not collide with metadata"),
+        (
+            2,
+            245,
+            "spreading Set into array preserves order and elements",
+        ),
+        (
+            3,
+            311,
+            "Set string keys with NUL or internal prefix do not collide with metadata",
+        ),
     ] {
         assert_eq!(
             program.call("run", &[Val::I32(query)]).0[0].unwrap_i32(),

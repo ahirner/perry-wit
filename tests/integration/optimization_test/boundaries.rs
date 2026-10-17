@@ -64,7 +64,11 @@ fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
         world,
         true,
     )?;
-    assert!(!inspect_wasm(&compiled.core)?.exports.contains(&"cabi_realloc"));
+    assert!(
+        !inspect_wasm(&compiled.core)?
+            .exports
+            .contains(&"cabi_realloc")
+    );
     // Component encoding validates the reachable import and export ABI without realloc.
     assert!(compiled.component.is_some());
     Ok(())

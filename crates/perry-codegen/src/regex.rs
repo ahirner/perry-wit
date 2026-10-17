@@ -87,10 +87,10 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
         fwd_representatives[usize::from(class)] = byte as u8;
     }
     let start_bof = fwd_dfa.start_state_forward(&Input::new(b"").anchored(Anchored::Yes))?;
-    let start_word = fwd_dfa
-        .start_state_forward(&Input::new(&b"a"[..]).range(1..1).anchored(Anchored::Yes))?;
-    let start_nonword = fwd_dfa
-        .start_state_forward(&Input::new(&b" "[..]).range(1..1).anchored(Anchored::Yes))?;
+    let start_word =
+        fwd_dfa.start_state_forward(&Input::new(&b"a"[..]).range(1..1).anchored(Anchored::Yes))?;
+    let start_nonword =
+        fwd_dfa.start_state_forward(&Input::new(&b" "[..]).range(1..1).anchored(Anchored::Yes))?;
     let mut fwd_ids = BTreeMap::new();
     let mut fwd_pending = VecDeque::new();
     for s in [start_bof, start_word, start_nonword] {
@@ -107,8 +107,8 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
             !fwd_dfa.is_quit_state(state),
             "Regex requires an unsupported runtime fallback"
         );
-        let state_flags =
-            u32::from(fwd_dfa.is_match_state(state)) | (u32::from(fwd_dfa.is_dead_state(state)) << 1);
+        let state_flags = u32::from(fwd_dfa.is_match_state(state))
+            | (u32::from(fwd_dfa.is_dead_state(state)) << 1);
         fwd_rows.push(state_flags);
         for next in fwd_representatives
             .iter()

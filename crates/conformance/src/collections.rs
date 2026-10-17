@@ -441,9 +441,7 @@ impl CollectionCase {
                 if is_set {
                     out.push_str(&format!("{indent}coll.add(k);\n"));
                 } else {
-                    out.push_str(&format!(
-                        "{indent}coll.set(k, valueFor(k, bias + 1));\n"
-                    ));
+                    out.push_str(&format!("{indent}coll.set(k, valueFor(k, bias + 1));\n"));
                 }
             }
             InLoopMutation::InsertOffset(off) => {

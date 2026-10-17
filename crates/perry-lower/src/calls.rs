@@ -235,7 +235,8 @@ impl<'s> FunctionBuilder<'s> {
                     let value = self.expression_with(ctx, arg, Some(param.carrier))?;
                     values.push(self.fit(ctx, value, param.carrier)?);
                 } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
-                    values.push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
+                    values
+                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
                 } else if let Some(Some(def)) = signature.defaults.get(i) {
                     let value = self.expression_with(ctx, def, Some(param.carrier))?;
                     values.push(self.fit(ctx, value, param.carrier)?);
@@ -271,7 +272,8 @@ impl<'s> FunctionBuilder<'s> {
                     let value = self.expression_with(ctx, arg, Some(param.carrier))?;
                     values.push(self.fit(ctx, value, param.carrier)?);
                 } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
-                    values.push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
+                    values
+                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
                 } else if let Some(Some(def)) = signature.defaults.get(i) {
                     let value = self.expression_with(ctx, def, Some(param.carrier))?;
                     values.push(self.fit(ctx, value, param.carrier)?);

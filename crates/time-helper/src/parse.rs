@@ -190,7 +190,11 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
             let seconds =
                 i128::from(off_hour) * 3600 + i128::from(off_min) * 60 + i128::from(off_sec);
             let total = seconds * NANOS_PER_SECOND + i128::from(off_nano);
-            Some(Offset::Nanoseconds(if sign == b'-' { -total } else { total }))
+            Some(Offset::Nanoseconds(if sign == b'-' {
+                -total
+            } else {
+                total
+            }))
         }
         _ => None,
     };

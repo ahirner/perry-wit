@@ -61,12 +61,17 @@ impl ProgramFacts {
             {
                 let base = op.deref(ctx).get_operand(0);
                 if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
+                    let payload_spec = if Operation::get_op::<OptionalCastOp>(op, ctx).is_some() {
+                        crate::optional::optional_value(ctx, base_spec)?
+                    } else {
+                        base_spec
+                    };
                     let absence = ty
                         .deref(ctx)
                         .downcast_ref::<crate::types::OptionalType>()?
                         .absence();
                     let opt_ty: TypeHandle =
-                        crate::types::OptionalType::get_with(ctx, base_spec, absence).into();
+                        crate::types::OptionalType::get_with(ctx, payload_spec, absence).into();
                     return (opt_ty != ty).then_some(opt_ty);
                 }
             }
@@ -213,37 +218,28 @@ impl ProgramFacts {
         }
         // Field types are copied out: instantiating types while the record is borrowed would
         // re-borrow the type storage mutably.
-        let (rec_name, is_tuple, fields) = {
+        let (is_tuple, fields) = {
             let deref = ty.deref(ctx);
             let rec = deref.downcast_ref::<RecordType>()?;
-            (
-                rec.name().clone(),
-                rec.is_tuple(),
-                rec.fields().ok()?.to_vec(),
-            )
+            (rec.is_tuple(), rec.fields().ok()?.to_vec())
         };
+        let (layout_key, _) = self.layout_key(ctx, ty, objects, &mut Vec::new())?;
+        let record_name = layout_key.record_identifier();
         let is_rec = is_recursive_type(ctx, ty, &mut HashSet::new());
-        let reserved_name = if is_rec {
-            let (reserved_id, _) =
-                self.specialization_tag(ctx, ty, objects, &mut HashSet::new())?;
-            let name = Legaliser::default().legalise(&reserved_id);
+        if is_rec {
             let reserved_handle: TypeHandle = if is_tuple {
-                RecordType::get_tuple(ctx, name.clone(), None)
+                RecordType::get_tuple(ctx, record_name.clone(), None)
                     .expect("recursive tuple layout reservation must succeed")
                     .into()
             } else {
-                RecordType::get(ctx, name.clone(), None)
+                RecordType::get(ctx, record_name.clone(), None)
                     .expect("recursive record layout reservation must succeed")
                     .into()
             };
             visiting.insert(ty, reserved_handle);
-            Some(name)
-        } else {
-            None
-        };
+        }
         let mut real_change = false;
         let mut spec_fields = Vec::with_capacity(fields.len());
-        let mut spec_tag = String::new();
         for (idx, (fname, fty)) in fields.into_iter().enumerate() {
             let mut field_slots = Vec::with_capacity(objects.len());
             for &o in objects {
@@ -266,7 +262,6 @@ impl ProgramFacts {
                 .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
                 spec_fields.push((fname, new_fty));
-                spec_tag.push_str(&format!("_{idx}"));
                 real_change = true;
             } else if aggregate(ctx, fty) {
                 let mut field_objects = BTreeSet::new();
@@ -276,9 +271,7 @@ impl ProgramFacts {
                 if let Some((new_fty, sub_real)) =
                     self.specialized_type_inner(ctx, fty, &field_objects, visiting)
                 {
-                    let tag = type_spec_tag(ctx, new_fty);
                     spec_fields.push((fname, new_fty));
-                    spec_tag.push_str(&format!("_{idx}_{tag}"));
                     if sub_real {
                         real_change = true;
                     }
@@ -295,25 +288,16 @@ impl ProgramFacts {
             }
             return None;
         }
-        let handle = if let Some(reserved_name) = reserved_name {
-            if is_tuple {
-                RecordType::get_tuple(ctx, reserved_name, Some(spec_fields))
-                    .expect("specialized recursive tuple layout must be consistent")
-            } else {
-                RecordType::get(ctx, reserved_name, Some(spec_fields))
-                    .expect("specialized recursive record layout must be consistent")
-            }
+        let handle = if is_tuple {
+            RecordType::get_tuple(ctx, record_name, Some(spec_fields))
+                .expect("specialized tuple layout must be consistent")
         } else {
-            // The suffix only appends identifier characters, so a fresh legaliser keeps the name.
-            let new_name = Legaliser::default().legalise(&format!("{rec_name}__num{spec_tag}"));
-            if is_tuple {
-                RecordType::get_tuple(ctx, new_name, Some(spec_fields))
-                    .expect("specialized tuple layout must be consistent")
-            } else {
-                RecordType::get(ctx, new_name, Some(spec_fields))
-                    .expect("specialized record layout must be consistent")
-            }
+            RecordType::get(ctx, record_name, Some(spec_fields))
+                .expect("specialized record layout must be consistent")
         };
+        if is_rec {
+            visiting.remove(&ty);
+        }
         Some((handle.into(), true))
     }
 
@@ -415,29 +399,36 @@ impl ProgramFacts {
         false
     }
 
-    fn specialization_tag(
+    fn layout_key(
         &self,
         ctx: &Context,
         ty: TypeHandle,
         objects: &BTreeSet<usize>,
-        visiting: &mut HashSet<TypeHandle>,
-    ) -> Option<(String, bool)> {
+        visiting: &mut Vec<TypeHandle>,
+    ) -> Option<(LayoutKey, bool)> {
         if objects.is_empty() {
             return None;
         }
-        if visiting.contains(&ty) {
+        if let Some(pos) = visiting.iter().position(|&v_ty| v_ty == ty) {
+            let depth = visiting.len() - 1 - pos;
             let real = self.has_numeric_specialization(ctx, ty, objects, &mut HashSet::new());
-            return Some(("self".to_string(), real));
+            return Some((LayoutKey::SelfRef(depth), real));
         }
         if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
             let (inner, absence) = (opt.value(), opt.absence());
-            let (tag, real) = self.specialization_tag(ctx, inner, objects, visiting)?;
-            return Some((format!("opt{}_{tag}", absence as u8), real));
+            let (inner_key, real) = self.layout_key(ctx, inner, objects, visiting)?;
+            return Some((
+                LayoutKey::Optional {
+                    absence: absence as u8,
+                    inner: Box::new(inner_key),
+                },
+                real,
+            ));
         }
         if let Some(promise) = ty.deref(ctx).downcast_ref::<crate::types::PromiseType>() {
             let inner = promise.value();
-            let (tag, real) = self.specialization_tag(ctx, inner, objects, visiting)?;
-            return Some((format!("prom_{tag}"), real));
+            let (inner_key, real) = self.layout_key(ctx, inner, objects, visiting)?;
+            return Some((LayoutKey::Promise(Box::new(inner_key)), real));
         }
         let array_elem = ty
             .deref(ctx)
@@ -455,38 +446,42 @@ impl ProgramFacts {
                 .iter()
                 .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
-                return Some(("arr_perry_numeric".to_string(), true));
+                return Some((LayoutKey::Array(Box::new(LayoutKey::Numeric)), true));
             }
             if aggregate(ctx, elem_ty) {
                 let mut elem_objects = BTreeSet::new();
                 for &s in &element_slots {
                     elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
                 }
-                if let Some((sub_tag, real)) =
-                    self.specialization_tag(ctx, elem_ty, &elem_objects, visiting)
+                if let Some((sub_key, real)) =
+                    self.layout_key(ctx, elem_ty, &elem_objects, visiting)
                 {
-                    return Some((format!("arr_{sub_tag}"), real));
+                    return Some((LayoutKey::Array(Box::new(sub_key)), real));
                 }
             }
             return None;
         }
-        let (rec_name, fields) = {
+        let (rec_name, is_tuple, fields) = {
             let deref = ty.deref(ctx);
             let rec = deref.downcast_ref::<RecordType>()?;
-            (rec.name().clone(), rec.fields().ok()?.to_vec())
+            (
+                rec.name().clone(),
+                rec.is_tuple(),
+                rec.fields().ok()?.to_vec(),
+            )
         };
-        visiting.insert(ty);
+        visiting.push(ty);
         let mut real_change = false;
-        let mut spec_tag = String::new();
+        let mut specialized_fields = Vec::new();
         for (idx, (_fname, fty)) in fields.into_iter().enumerate() {
             let mut field_slots = Vec::with_capacity(objects.len());
             for &o in objects {
                 let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    visiting.remove(&ty);
+                    visiting.pop();
                     return None;
                 };
                 let Some(&s) = slots.get(idx) else {
-                    visiting.remove(&ty);
+                    visiting.pop();
                     return None;
                 };
                 field_slots.push(s);
@@ -495,25 +490,32 @@ impl ProgramFacts {
                 .iter()
                 .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
             if all_numeric && numeric_type_for(ctx, fty).is_some() {
-                spec_tag.push_str(&format!("_{idx}"));
+                specialized_fields.push((idx, LayoutKey::Numeric));
                 real_change = true;
             } else if aggregate(ctx, fty) {
                 let mut field_objects = BTreeSet::new();
                 for &s in &field_slots {
                     field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
                 }
-                if let Some((sub_tag, sub_real)) =
-                    self.specialization_tag(ctx, fty, &field_objects, visiting)
+                if let Some((sub_key, sub_real)) =
+                    self.layout_key(ctx, fty, &field_objects, visiting)
                 {
-                    spec_tag.push_str(&format!("_{idx}_{sub_tag}"));
+                    specialized_fields.push((idx, sub_key));
                     if sub_real {
                         real_change = true;
                     }
                 }
             }
         }
-        visiting.remove(&ty);
-        real_change.then_some((format!("{rec_name}__num_rec{spec_tag}"), true))
+        visiting.pop();
+        real_change.then_some((
+            LayoutKey::Record {
+                base_name: rec_name,
+                is_tuple,
+                specialized_fields,
+            },
+            true,
+        ))
     }
 
     pub(in crate::facts) fn verify_cell_layout_lossless(
@@ -645,6 +647,80 @@ impl ProgramFacts {
     }
 }
 
+/// Canonical structural key for a specialized aggregate layout.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum LayoutKey {
+    SelfRef(usize),
+    Numeric,
+    Optional {
+        absence: u8,
+        inner: Box<Self>,
+    },
+    Promise(Box<Self>),
+    Array(Box<Self>),
+    Record {
+        base_name: Identifier,
+        is_tuple: bool,
+        specialized_fields: Vec<(usize, Self)>,
+    },
+}
+
+impl LayoutKey {
+    fn record_identifier(&self) -> Identifier {
+        let mut out = String::from("perry_layout_");
+        self.write_encoded(&mut out);
+        Legaliser::default().legalise(&out)
+    }
+
+    fn write_encoded(&self, out: &mut String) {
+        use std::fmt::Write;
+        match self {
+            Self::SelfRef(depth) => {
+                let _ = write!(out, "S{depth}_");
+            }
+            Self::Numeric => out.push('N'),
+            Self::Optional { absence, inner } => {
+                let _ = write!(out, "O{absence}_");
+                inner.write_encoded(out);
+            }
+            Self::Promise(inner) => {
+                out.push('P');
+                inner.write_encoded(out);
+            }
+            Self::Array(inner) => {
+                out.push('A');
+                inner.write_encoded(out);
+            }
+            Self::Record {
+                base_name,
+                is_tuple,
+                specialized_fields,
+            } => {
+                out.push(if *is_tuple { 'T' } else { 'R' });
+                write_ident(out, base_name.as_ref());
+                let _ = write!(out, "{}_", specialized_fields.len());
+                for (idx, field_key) in specialized_fields {
+                    let _ = write!(out, "F{idx}_");
+                    field_key.write_encoded(out);
+                }
+            }
+        }
+    }
+}
+
+fn write_ident(out: &mut String, ident: &str) {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(ident.len());
+    for ch in ident.chars() {
+        if (ch.is_ascii_alphanumeric() && ch != 'X') || ch == '_' {
+            encoded.push(ch);
+        } else {
+            let _ = write!(encoded, "X{:x}_", ch as u32);
+        }
+    }
+    let _ = write!(out, "{}_{encoded}_", encoded.len());
+}
+
 /// The numeric representation of an `f64` (or optional `f64`) slot type.
 fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     if ty.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
@@ -666,35 +742,6 @@ fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
         );
     }
     None
-}
-
-/// An identifier-safe tag distinguishing nested specialized layouts in record names.
-fn type_spec_tag(ctx: &Context, ty: TypeHandle) -> String {
-    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
-        return format!("opt_{}", type_spec_tag(ctx, opt.value()));
-    }
-    if let Some(arr) = ty.deref(ctx).downcast_ref::<ArrayType>() {
-        return format!("arr_{}", type_spec_tag(ctx, arr.element()));
-    }
-    if let Some(rec) = ty.deref(ctx).downcast_ref::<RecordType>() {
-        let s: String = rec
-            .name()
-            .as_ref()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        return format!("rec_{s}");
-    }
-    if ty.deref(ctx).is::<crate::types::NumericType>() {
-        return "num".to_string();
-    }
-    "scalar".to_string()
 }
 
 /// Whether `ty` reaches a record already on the `visiting` path.

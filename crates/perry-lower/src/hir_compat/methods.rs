@@ -36,6 +36,7 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
                         | "findLast"
                         | "findLastIndex"
                         | "at"
+                        | "pop"
                         | "padStart"
                         | "padEnd"
                         | "trimStart"

@@ -13,7 +13,10 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         match (class, factory) {
             ("Now", "timeZoneId") => {
-                ensure!(args.is_empty(), "Temporal.Now.timeZoneId takes no arguments");
+                ensure!(
+                    args.is_empty(),
+                    "Temporal.Now.timeZoneId takes no arguments"
+                );
                 return Ok(self.string(ctx, "UTC"));
             }
             ("Now", "instant") => {
@@ -47,8 +50,7 @@ impl<'s> FunctionBuilder<'s> {
                 let iso = self.intrinsic(ctx, Intrinsic::DateIso, vec![ms]);
                 let start = self.number(ctx, 0.0);
                 let end = self.number(ctx, -1.0);
-                let local_iso =
-                    self.intrinsic(ctx, Intrinsic::StringSlice, vec![iso, start, end]);
+                let local_iso = self.intrinsic(ctx, Intrinsic::StringSlice, vec![iso, start, end]);
                 return Ok(self.intrinsic(ctx, Intrinsic::PlainDateTimeFrom, vec![local_iso]));
             }
             _ => {}

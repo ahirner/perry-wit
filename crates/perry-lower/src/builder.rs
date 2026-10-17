@@ -135,12 +135,10 @@ impl<'s> FunctionBuilder<'s> {
         }
         for (index, (&param, &binding)) in params.iter().zip(&signature.params).enumerate() {
             let arg_val = builder.entry.deref(ctx).get_argument(index);
-            let base_binding = signature
-                .base_params
-                .get(index)
-                .copied()
-                .unwrap_or(binding);
-            if let Some(Some(default_expr)) = signature.defaults.get(index) {
+            let base_binding = signature.base_params.get(index).copied().unwrap_or(binding);
+            if let Some(Some(default_expr)) = signature.defaults.get(index)
+                && !matches!(default_expr, Expr::Undefined)
+            {
                 let is_undef = if builder.is_optional(ctx, arg_val) {
                     builder.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, arg_val))
                 } else {

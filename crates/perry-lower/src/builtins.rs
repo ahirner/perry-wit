@@ -116,7 +116,10 @@ impl<'s> FunctionBuilder<'s> {
                 Some(self.array_reverse(ctx, receiver, method == "toReversed")?)
             }
             (Kind::Array, "flat") => {
-                ensure!(args.len() <= 1, "array.flat accepts at most one depth argument");
+                ensure!(
+                    args.len() <= 1,
+                    "array.flat accepts at most one depth argument"
+                );
                 Some(self.array_flat(ctx, receiver, arg(0))?)
             }
             (Kind::Array, "findLast" | "findLastIndex") => {
@@ -128,6 +131,10 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Array, "at") => {
                 ensure!(args.len() <= 1, "array.at accepts at most one index");
                 Some(self.array_at(ctx, receiver, arg(0))?)
+            }
+            (Kind::Array, "pop") => {
+                ensure!(args.is_empty(), "array.pop takes no arguments");
+                Some(self.array_pop(ctx, receiver)?)
             }
             (Kind::String, "localeCompare") => {
                 let [other] = args else {
@@ -195,7 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                     }
                     Kind::Regex => {
                         if method == "replaceAll" && !Self::regex_has_global(ctx, search_val) {
-                            bail!("String.prototype.replaceAll called with a non-global RegExp argument");
+                            bail!(
+                                "String.prototype.replaceAll called with a non-global RegExp argument"
+                            );
                         }
                         self.call_intrinsic(
                             ctx,
@@ -337,15 +346,8 @@ impl<'s> FunctionBuilder<'s> {
             }
             (
                 Kind::String,
-                "toLowerCase"
-                | "toUpperCase"
-                | "trim"
-                | "trimStart"
-                | "trimLeft"
-                | "trimEnd"
-                | "trimRight"
-                | "toLocaleLowerCase"
-                | "toLocaleUpperCase",
+                "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimLeft" | "trimEnd"
+                | "trimRight" | "toLocaleLowerCase" | "toLocaleUpperCase",
             ) => {
                 let intrinsic = match method {
                     "trim" => Intrinsic::StringTrim,
@@ -362,7 +364,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::String, "toString") => Some(receiver),
             (Kind::Number, "toString") => {
-                ensure!(args.len() <= 1, "Number.prototype.toString accepts at most one radix");
+                ensure!(
+                    args.len() <= 1,
+                    "Number.prototype.toString accepts at most one radix"
+                );
                 let num = self.arithmetic(ctx, receiver);
                 match arg(0) {
                     None | Some(Expr::Undefined) => {

@@ -232,8 +232,13 @@ impl Shapes<'_> {
         ensure!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
-                    && super::generics::resolve_record_properties(ctx, &lookup, alternatives[0], 0)
-                        .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
+                    && super::generics::resolve_record_properties(
+                        ctx,
+                        &lookup,
+                        alternatives[0],
+                        0
+                    )
+                    .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
             "a tagged result needs exactly two alternatives"
         );
         let mut fields = vec![(
@@ -285,8 +290,7 @@ impl Shapes<'_> {
                 else {
                     bail!("unions other than tagged object types are not supported yet");
                 };
-                let Some((_, tag_ty, _)) =
-                    properties.iter().find(|(p_name, _, _)| p_name == "tag")
+                let Some((_, tag_ty, _)) = properties.iter().find(|(p_name, _, _)| p_name == "tag")
                 else {
                     bail!("union members need a literal `tag`");
                 };

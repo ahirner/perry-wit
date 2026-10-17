@@ -382,7 +382,9 @@ impl<'s> FunctionBuilder<'s> {
                 let rhs_expected = expected.or_else(|| {
                     let base_ty = defined_lhs.get_type(ctx);
                     Some(match right {
-                        Expr::Null => crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null),
+                        Expr::Null => {
+                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null)
+                        }
                         Expr::Undefined => {
                             crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
                         }
@@ -396,7 +398,10 @@ impl<'s> FunctionBuilder<'s> {
                 let rhs = rhs?;
                 let falsy_end = self.block;
 
-                if expected.is_none() && rhs.get_type(ctx) == i1_ty && defined_lhs.get_type(ctx) != i1_ty {
+                if expected.is_none()
+                    && rhs.get_type(ctx) == i1_ty
+                    && defined_lhs.get_type(ctx) != i1_ty
+                {
                     let result = self.entry_slot(ctx, i1_ty);
                     self.switch_to(truthy_end);
                     let t = self.boolean(ctx, true);
@@ -414,7 +419,9 @@ impl<'s> FunctionBuilder<'s> {
                     None => {
                         let left_ty = defined_lhs.get_type(ctx);
                         let right_ty = rhs.get_type(ctx);
-                        if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
+                        if let Some(states) =
+                            merge_absence(absence(ctx, left_ty), absence(ctx, right_ty))
+                        {
                             let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
                             perry_mir::OptionalType::get_with(ctx, inner, states).into()
                         } else {
@@ -440,9 +447,12 @@ impl<'s> FunctionBuilder<'s> {
 
                 self.switch_to(truthy_block);
                 let rhs_expected = expected.or_else(|| {
-                    let base_ty = optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
+                    let base_ty =
+                        optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
                     Some(match right {
-                        Expr::Null => crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null),
+                        Expr::Null => {
+                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null)
+                        }
                         Expr::Undefined => {
                             crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
                         }
@@ -477,7 +487,9 @@ impl<'s> FunctionBuilder<'s> {
                         let inner = optional_value(ctx, right_ty)
                             .or_else(|| optional_value(ctx, left_ty))
                             .unwrap_or(right_ty);
-                        if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
+                        if let Some(states) =
+                            merge_absence(absence(ctx, left_ty), absence(ctx, right_ty))
+                        {
                             perry_mir::OptionalType::get_with(ctx, inner, states).into()
                         } else {
                             inner
@@ -506,7 +518,9 @@ impl<'s> FunctionBuilder<'s> {
                                 is_null,
                                 |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
                                 |b, ctx| {
-                                    Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty)))
+                                    Ok(b.emit_value(ctx, |ctx| {
+                                        OmittedOp::with_type(ctx, result_ty)
+                                    }))
                                 },
                             )?
                         }

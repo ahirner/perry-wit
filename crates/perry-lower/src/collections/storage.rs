@@ -441,11 +441,27 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn tombstone_entry(
         &mut self,
         ctx: &mut Context,
+        entries: Value,
         entry: Value,
         kind: EntryKind,
         cleared: &[(&str, TypeHandle)],
         owner: Option<Value>,
     ) -> Result<()> {
+        if let Some(box_val) = owner {
+            let live = self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
+            return self.reclaim_after_delete(ctx, box_val, entries, live, entry, kind, cleared);
+        }
+        self.clear_tombstone_entry(ctx, entry, kind, cleared);
+        Ok(())
+    }
+
+    fn clear_tombstone_entry(
+        &mut self,
+        ctx: &mut Context,
+        entry: Value,
+        kind: EntryKind,
+        cleared: &[(&str, TypeHandle)],
+    ) {
         let dead = self.boolean(ctx, false);
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, entry, kind.live_field().to_string(), dead)
@@ -457,11 +473,6 @@ impl<'s> FunctionBuilder<'s> {
                 });
             }
         }
-        if let Some(box_val) = owner {
-            self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
-            self.reclaim_after_delete(ctx, box_val, kind)?;
-        }
-        Ok(())
     }
 
     /// Add one to (`Add`) or remove one from (`Sub`) a box's live-entry count.
@@ -470,7 +481,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         box_val: Value,
         kind: BinaryKind,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let sz_op = FieldGetOp::new(ctx, box_val, "_1".to_string())?;
         let sz = self.append_value(ctx, &sz_op);
         let one = self.number(ctx, 1.0);
@@ -478,11 +489,18 @@ impl<'s> FunctionBuilder<'s> {
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, box_val, "_1".to_string(), next_sz)
         });
-        Ok(())
+        Ok(next_sz)
     }
 
     /// A reference-free placeholder of `ty`; `None` for types holding nothing to release.
     fn zero_value_for_type(&mut self, ctx: &mut Context, ty: TypeHandle) -> Option<Value> {
+        let inner = optional_value(ctx, ty).unwrap_or(ty);
+        if inner.deref(ctx).is::<FP64Type>()
+            || inner.deref(ctx).is::<IntegerType>()
+            || inner.deref(ctx).is::<BigIntType>()
+        {
+            return None;
+        }
         if optional_value(ctx, ty).is_some() {
             if absence(ctx, ty).is_some_and(|a| !a.admits_undefined()) {
                 return Some(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)));
@@ -492,16 +510,6 @@ impl<'s> FunctionBuilder<'s> {
         if ty.deref(ctx).is::<StringType>() {
             return Some(self.string(ctx, ""));
         }
-        if ty.deref(ctx).is::<FP64Type>() {
-            return Some(self.number(ctx, 0.0));
-        }
-        if let Ok(int_ty) = TypedHandle::<IntegerType>::from_handle(ty, ctx) {
-            if int_ty.deref(ctx).width() == 1 {
-                return Some(self.boolean(ctx, false));
-            }
-            let zero = self.number(ctx, 0.0);
-            return Some(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, ty)));
-        }
         if let Ok(arr_ty) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
             let elem_ty = arr_ty.deref(ctx).element();
             return Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![])));
@@ -509,19 +517,19 @@ impl<'s> FunctionBuilder<'s> {
         None
     }
 
-    /// After a delete: empty the entries when nothing is live, else compact once at least 32
-    /// and at least half of the slots are tombstones, bumping the box epoch.
+    /// After a delete: empty the entries when nothing is live, else mark the tombstone and
+    /// compact once at least 32 and at least half of the slots are tombstones, bumping the box epoch.
+    #[allow(clippy::too_many_arguments)]
     fn reclaim_after_delete(
         &mut self,
         ctx: &mut Context,
         box_val: Value,
+        entries: Value,
+        live: Value,
+        entry: Value,
         kind: EntryKind,
+        cleared: &[(&str, TypeHandle)],
     ) -> Result<()> {
-        let entries_op = FieldGetOp::new(ctx, box_val, "_0".to_string())?;
-        let entries = self.append_value(ctx, &entries_op);
-        let live_op = FieldGetOp::new(ctx, box_val, "_1".to_string())?;
-        let live = self.append_value(ctx, &live_op);
-
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
@@ -541,6 +549,7 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
+        self.clear_tombstone_entry(ctx, entry, kind, cleared);
         let cap = self.array_length(ctx, entries);
         let dead = self.binary(ctx, BinaryKind::Sub, cap, live);
         let min_dead = self.number(ctx, 32.0);

@@ -1,5 +1,6 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
+use crate::coerce::merge_absence;
 use perry_mir::{ArrayAtOp, OptionalType};
 /// The frame of an inline array callback being lowered: its `return`s store into `slot` and
 /// branch to `done` instead of leaving the enclosing function.
@@ -248,33 +249,63 @@ impl<'s> FunctionBuilder<'s> {
         // Guards only grow above this length inside the body; branches truncate back.
         let guards = self.variant_guards.len();
         for (param, &value) in params.iter().zip(arguments) {
-            let init_val = if let Some(default_expr) = &param.default {
-                if self.is_optional(ctx, value) {
-                    let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                    let def_val = self.expression(ctx, default_expr)?;
-                    let target_ty = def_val.get_type(ctx);
-                    self.choose(
-                        ctx,
-                        target_ty,
-                        is_undef,
-                        |b, ctx| {
-                            let d = b.expression_with(ctx, default_expr, Some(target_ty))?;
-                            b.fit(ctx, d, target_ty)
-                        },
-                        |b, ctx| {
-                            let s = b.strip_undefined(ctx, value)?;
-                            b.fit(ctx, s, target_ty)
-                        },
-                    )?
+            let val_ty = value.get_type(ctx);
+            if let Some(default_expr) = &param.default
+                && !matches!(default_expr, Expr::Undefined)
+                && absence(ctx, val_ty).is_some_and(|a| a.admits_undefined())
+            {
+                let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let then_block = self.new_block(ctx, "default_then");
+                let else_block = self.new_block(ctx, "default_else");
+                let join = self.new_block(ctx, "default_join");
+                self.branch(ctx, is_undef, then_block, else_block);
+
+                self.switch_to(else_block);
+                let present_val = self.strip_undefined(ctx, value)?;
+                let else_end = self.block;
+                let present_ty = present_val.get_type(ctx);
+
+                self.switch_to(then_block);
+                let def_val = self.expression_with(ctx, default_expr, Some(present_ty))?;
+                let then_end = self.block;
+                let then_terminated = self.terminated(ctx);
+
+                let target_ty = if !then_terminated {
+                    let def_ty = def_val.get_type(ctx);
+                    if let Some(states) =
+                        merge_absence(absence(ctx, present_ty), absence(ctx, def_ty))
+                    {
+                        let inner = optional_value(ctx, present_ty)
+                            .or_else(|| optional_value(ctx, def_ty))
+                            .unwrap_or(present_ty);
+                        OptionalType::get_with(ctx, inner, states).into()
+                    } else {
+                        present_ty
+                    }
                 } else {
-                    value
+                    present_ty
+                };
+
+                let slot = self.entry_slot(ctx, target_ty);
+                if !then_terminated {
+                    self.switch_to(then_end);
+                    let fitted_def = self.fit(ctx, def_val, target_ty)?;
+                    self.store(ctx, slot, fitted_def);
+                    self.jump(ctx, join);
                 }
+
+                self.switch_to(else_end);
+                let fitted_present = self.fit(ctx, present_val, target_ty)?;
+                self.store(ctx, slot, fitted_present);
+                self.jump(ctx, join);
+
+                self.switch_to(join);
+                self.locals.insert(param.id, LocalBinding::plain(slot));
             } else {
-                value
-            };
-            let slot = self.entry_slot(ctx, init_val.get_type(ctx));
-            self.store(ctx, slot, init_val);
-            self.locals.insert(param.id, LocalBinding::plain(slot));
+                let slot = self.entry_slot(ctx, val_ty);
+                self.store(ctx, slot, value);
+                self.locals.insert(param.id, LocalBinding::plain(slot));
+            }
         }
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
@@ -301,9 +332,9 @@ impl<'s> FunctionBuilder<'s> {
             empty_returns: Vec::new(),
         });
         let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
-        let param_defaults: Vec<Option<Expr>> =
-            params.iter().map(|p| p.default.clone()).collect();
-        let body = crate::builder::strip_synthetic_default_guards(body, &param_ids, &param_defaults);
+        let param_defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+        let body =
+            crate::builder::strip_synthetic_default_guards(body, &param_ids, &param_defaults);
         let mut result = self.statements(ctx, body);
         if result.is_ok() && self.reachable(ctx, self.block) {
             result = self.callback_return(ctx, None);
@@ -398,6 +429,14 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
+    pub(super) fn integer_or_infinity(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let number = FP64Type::get(ctx).into();
+        let zero = self.number(ctx, 0.0);
+        let trunc = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![value]);
+        let valid = self.compare(ctx, CompareKind::Eq, trunc, trunc);
+        self.choose(ctx, number, valid, |_, _| Ok(trunc), |_, _| Ok(zero))
+    }
+
     /// `array.includes(value, from?)` when `includes`, else `array.indexOf(value, from?)`.
     pub(super) fn array_search(
         &mut self,
@@ -418,9 +457,7 @@ impl<'s> FunctionBuilder<'s> {
             None => zero,
         };
         let limit = self.array_length(ctx, array);
-        let start = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![start]);
-        let valid = self.compare(ctx, CompareKind::Eq, start, start);
-        let start = self.choose(ctx, number, valid, |_, _| Ok(start), |_, _| Ok(zero))?;
+        let start = self.integer_or_infinity(ctx, start)?;
         let negative = self.compare(ctx, CompareKind::Lt, start, zero);
         let start = self.choose(
             ctx,
@@ -491,10 +528,10 @@ impl<'s> FunctionBuilder<'s> {
         let element = self.array_element(ctx, array)?;
         let limit = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
+        let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
         let miss = if index_only {
             self.number(ctx, -1.0)
         } else {
-            let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
             self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
         };
         let result_ty = miss.get_type(ctx);
@@ -503,10 +540,16 @@ impl<'s> FunctionBuilder<'s> {
         self.index_loop(ctx, "find", zero, limit, |b, ctx, current, next, done| {
             let available = b.array_length(ctx, array);
             let present = b.compare(ctx, CompareKind::Lt, current, available);
-            let read = b.new_block(ctx, "find_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let item = b.element_at(ctx, array, current)?;
+            let item = b.choose(
+                ctx,
+                opt_ty,
+                present,
+                |b, ctx| {
+                    let elem = b.element_at(ctx, array, current)?;
+                    b.fit(ctx, elem, opt_ty)
+                },
+                |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+            )?;
             let matched = b.array_callback(ctx, callback, &[item, current, array])?;
             let keep = b.truthy(ctx, matched)?;
             let hit = b.new_block(ctx, "find_hit");
@@ -837,7 +880,7 @@ impl<'s> FunctionBuilder<'s> {
         bound: Value,
         len: Value,
     ) -> Result<Value> {
-        let trunc = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![bound]);
+        let trunc = self.integer_or_infinity(ctx, bound)?;
         let zero = self.number(ctx, 0.0);
         let is_neg = self.compare(ctx, CompareKind::Lt, trunc, zero);
         let num_ty = FP64Type::get(ctx).into();
@@ -879,16 +922,22 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        self.index_loop(ctx, "slice", norm_start, norm_end, |b, ctx, step, next, _| {
-            let available = b.array_length(ctx, array);
-            let present = b.compare(ctx, CompareKind::Lt, step, available);
-            let read = b.new_block(ctx, "slice_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let item = b.element_at(ctx, array, step)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
-            Ok(())
-        })?;
+        self.index_loop(
+            ctx,
+            "slice",
+            norm_start,
+            norm_end,
+            |b, ctx, step, next, _| {
+                let available = b.array_length(ctx, array);
+                let present = b.compare(ctx, CompareKind::Lt, step, available);
+                let read = b.new_block(ctx, "slice_read");
+                b.branch(ctx, present, read, next);
+                b.switch_to(read);
+                let item = b.element_at(ctx, array, step)?;
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
+                Ok(())
+            },
+        )?;
         Ok(result)
     }
 
@@ -990,10 +1039,10 @@ impl<'s> FunctionBuilder<'s> {
         let limit = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
+        let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
         let miss = if index_only {
             self.number(ctx, -1.0)
         } else {
-            let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
             self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
         };
         let result_ty = miss.get_type(ctx);
@@ -1004,10 +1053,16 @@ impl<'s> FunctionBuilder<'s> {
             let current = b.binary(ctx, BinaryKind::Sub, last, step);
             let available = b.array_length(ctx, array);
             let present = b.compare(ctx, CompareKind::Lt, current, available);
-            let read = b.new_block(ctx, "find_last_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let item = b.element_at(ctx, array, current)?;
+            let item = b.choose(
+                ctx,
+                opt_ty,
+                present,
+                |b, ctx| {
+                    let elem = b.element_at(ctx, array, current)?;
+                    b.fit(ctx, elem, opt_ty)
+                },
+                |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+            )?;
             let matched = b.array_callback(ctx, callback, &[item, current, array])?;
             let keep = b.truthy(ctx, matched)?;
             let hit = b.new_block(ctx, "find_last_hit");
@@ -1035,7 +1090,7 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.defined(ctx, array)?;
         let element = self.array_element(ctx, array)?;
         let raw_idx = self.number_or(ctx, index, 0.0)?;
-        let idx = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![raw_idx]);
+        let idx = self.integer_or_infinity(ctx, raw_idx)?;
         let len = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
@@ -1063,6 +1118,31 @@ impl<'s> FunctionBuilder<'s> {
             in_bounds,
             |b, ctx| {
                 let item = b.element_at(ctx, array, resolved_idx)?;
+                b.fit(ctx, item, opt_ty)
+            },
+            |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+        )
+    }
+
+    /// `array.pop()`.
+    pub(super) fn array_pop(&mut self, ctx: &mut Context, array: Value) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let has_elems = self.compare(ctx, CompareKind::Gt, len, zero);
+        self.choose(
+            ctx,
+            opt_ty,
+            has_elems,
+            |b, ctx| {
+                let one = b.number(ctx, 1.0);
+                let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
+                let item = b.element_at(ctx, array, last_idx)?;
+                let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+                let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
+                b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, array, new_len));
                 b.fit(ctx, item, opt_ty)
             },
             |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
