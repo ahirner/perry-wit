@@ -203,7 +203,10 @@ pub(crate) fn prove_bounds(
                 Object::Array
             } else if intrinsic(ctx, op) == Some(Intrinsic::BytesGet) {
                 Object::Bytes
-            } else if intrinsic(ctx, op) == Some(Intrinsic::StringCharAt) {
+            } else if matches!(
+                intrinsic(ctx, op),
+                Some(Intrinsic::StringCharAt | Intrinsic::StringIndex)
+            ) {
                 Object::String
             } else {
                 continue;
@@ -345,8 +348,13 @@ fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value,
         let read = IntrinsicOp::new(ctx, Intrinsic::StringCharAtIndex, vec![object, index])
             .get_operation();
         read.insert_before(ctx, op);
-        let character = read.deref(ctx).get_result(0);
+        let mut character = read.deref(ctx).get_result(0);
         let result = op.deref(ctx).get_result(0);
+        if crate::optional::optional_value(ctx, result.get_type(ctx)).is_some() {
+            let wrap = WrapOp::new(ctx, character);
+            wrap.get_operation().insert_before(ctx, op);
+            character = wrap.get_result(ctx);
+        }
         result.replace_all_uses_with(ctx, &character);
         Operation::erase(op, ctx);
         return;

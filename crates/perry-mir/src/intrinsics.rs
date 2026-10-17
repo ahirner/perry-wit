@@ -354,6 +354,7 @@ intrinsics! {
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
     NumberToString = "number_to_string" (Number) -> (String), pure;
+    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
     PerformanceNow = "performance_now" () -> (Number), noalloc;
@@ -400,6 +401,13 @@ intrinsics! {
     StringStartsWith = "string_starts_with" (String, String, Number) -> (Bool), pure, noalloc;
     StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), pure, noalloc;
     StringTrim = "string_trim" (String) -> (String), pure, atomic;
+    StringTrimStart = "string_trim_start" (String) -> (String), pure, atomic;
+    StringTrimEnd = "string_trim_end" (String) -> (String), pure, atomic;
+    StringPadStart = "string_pad_start" (String, Number, String) -> (String), pure, atomic;
+    StringPadEnd = "string_pad_end" (String, Number, String) -> (String), pure, atomic;
+    StringReplace = "string_replace" (String, String, String) -> (String), pure, atomic;
+    StringReplaceAll = "string_replace_all" (String, String, String) -> (String), pure, atomic;
+    StringAt = "string_at" (String, Number) -> (OptString), pure, atomic;
     StringSplit = "string_split" (String, String) -> (StringArray), pure, atomic;
     StringIndex = "string_index" (String, Number) -> (OptString), pure, atomic;
     StringLower = "string_lower" (String) -> (String), pure, atomic;
@@ -432,6 +440,8 @@ intrinsics! {
     DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure, noalloc;
     DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure, noalloc;
     RegexSearch = "regex_search" (String, Regex) -> (Number), pure, noalloc;
+    RegexReplace = "regex_replace" (String, Regex, String) -> (String), pure, atomic;
+    RegexSplit = "regex_split" (String, Regex) -> (StringArray), pure, atomic;
     DecoderValidateLabel = "decoder_validate_label" (String) -> (), throws, atomic;
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
@@ -640,7 +650,8 @@ impl Intrinsic {
             | Self::ParseInt
             | Self::ParseFloat
             | Self::StringToNumber
-            | Self::NumberToString => Some(BuiltinContract::NumberOnly),
+            | Self::NumberToString
+            | Self::NumberToStringRadix => Some(BuiltinContract::NumberOnly),
             Self::NumberIsNaN
             | Self::NumberIsFinite
             | Self::NumberIsInteger
@@ -766,6 +777,14 @@ impl Verify for IntrinsicOp {
                 operands.len() == 1
                     && (operands[0].deref(ctx).is::<crate::types::NumericType>()
                         || operands[0].deref(ctx).is::<IntegerType>())
+                    && results_fit
+            }
+            Intrinsic::NumberToStringRadix => {
+                operands.len() == 2
+                    && (operands[0].deref(ctx).is::<FP64Type>()
+                        || operands[0].deref(ctx).is::<crate::types::NumericType>()
+                        || operands[0].deref(ctx).is::<IntegerType>())
+                    && operands[1].deref(ctx).is::<FP64Type>()
                     && results_fit
             }
             _ => false,

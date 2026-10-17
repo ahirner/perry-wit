@@ -359,6 +359,180 @@ pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
     unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
+/// `s.trimStart()`.
+///
+/// # Safety
+/// `string` is a live immutable UTF-8 string.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
+    let view = view(string);
+    let trimmed = view.text.trim_start_matches(space);
+    if trimmed.len() == view.text.len() {
+        return string;
+    }
+    let from = view.text.len() - trimmed.len();
+    unsafe { crate::runtime::string_view(string, from as u32, view.text.len() as u32) }
+}
+
+/// `s.trimEnd()`.
+///
+/// # Safety
+/// `string` is a live immutable UTF-8 string.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
+    let view = view(string);
+    let trimmed = view.text.trim_end_matches(space);
+    if trimmed.len() == view.text.len() {
+        return string;
+    }
+    unsafe { crate::runtime::string_view(string, 0, trimmed.len() as u32) }
+}
+
+fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> *mut u8 {
+    let view = view(string);
+    let target = integer(max_length);
+    if target <= view.scalars as i64 {
+        return string;
+    }
+    let fill_view = self::view(fill);
+    if fill_view.scalars == 0 {
+        return string;
+    }
+    let pad_scalars = (target as u64).saturating_sub(view.scalars);
+    let full = pad_scalars / fill_view.scalars;
+    let rem = pad_scalars % fill_view.scalars;
+    let rem_bytes = offset(&fill_view, rem);
+    let pad_bytes = full
+        .saturating_mul(fill_view.text.len() as u64)
+        .saturating_add(rem_bytes as u64);
+    let total = pad_bytes.saturating_add(view.text.len() as u64);
+    if total > u64::from(u32::MAX >> 2) {
+        crate::runtime::raise(crate::runtime::RANGE_ERROR, "Invalid string length");
+        return from_static("");
+    }
+    let data = crate::runtime::alloc(total as u32);
+    unsafe {
+        let mut cursor = data;
+        if is_end {
+            core::ptr::copy_nonoverlapping(view.text.as_ptr(), cursor, view.text.len());
+            cursor = cursor.add(view.text.len());
+        }
+        let fill_bytes = fill_view.text.len();
+        for _ in 0..full as usize {
+            core::ptr::copy_nonoverlapping(fill_view.text.as_ptr(), cursor, fill_bytes);
+            cursor = cursor.add(fill_bytes);
+        }
+        if rem_bytes > 0 {
+            core::ptr::copy_nonoverlapping(fill_view.text.as_ptr(), cursor, rem_bytes);
+            cursor = cursor.add(rem_bytes);
+        }
+        if !is_end {
+            core::ptr::copy_nonoverlapping(view.text.as_ptr(), cursor, view.text.len());
+        }
+        crate::runtime::adopt(data, total as u32)
+    }
+}
+
+/// `s.padStart(maxLength, fillString)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_pad_start(
+    string: *mut u8,
+    max_length: f64,
+    fill: *mut u8,
+) -> *mut u8 {
+    pad_string(string, max_length, fill, false)
+}
+
+/// `s.padEnd(maxLength, fillString)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_pad_end(
+    string: *mut u8,
+    max_length: f64,
+    fill: *mut u8,
+) -> *mut u8 {
+    pad_string(string, max_length, fill, true)
+}
+
+fn replace_string(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+    replace_all: bool,
+) -> *mut u8 {
+    let text_str = view(string).text;
+    let text = text_str.as_bytes();
+    let pat = view(needle).text.as_bytes();
+    let rep = view(replacement).text.as_bytes();
+    let mut out = crate::runtime::Buffer::new();
+    if pat.is_empty() {
+        if !replace_all {
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep);
+            out.extend_from_slice(text);
+        } else {
+            let mut pos = 0;
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep);
+            for ch in text_str.chars() {
+                let end = pos + ch.len_utf8();
+                out.extend_from_slice(text.get(pos..end).unwrap_or(&[]));
+                crate::regex::push_substitution(&mut out, text, end, end, rep);
+                pos = end;
+            }
+        }
+        return crate::runtime::from_bytes(out.as_slice());
+    }
+    let Some(first) = find(text, pat) else {
+        return string;
+    };
+    out.extend_from_slice(text.get(..first).unwrap_or(&[]));
+    crate::regex::push_substitution(&mut out, text, first, first + pat.len(), rep);
+    let mut cursor = first + pat.len();
+    if replace_all {
+        while let Some(rel) = find(text.get(cursor..).unwrap_or(&[]), pat) {
+            let start = cursor + rel;
+            let end = start + pat.len();
+            out.extend_from_slice(text.get(cursor..start).unwrap_or(&[]));
+            crate::regex::push_substitution(&mut out, text, start, end, rep);
+            cursor = end;
+        }
+    }
+    out.extend_from_slice(text.get(cursor..).unwrap_or(&[]));
+    crate::runtime::from_bytes(out.as_slice())
+}
+
+/// `s.replace(needle, replacement)` for string search.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_replace(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+) -> *mut u8 {
+    replace_string(string, needle, replacement, false)
+}
+
+/// `s.replaceAll(needle, replacement)` for string search.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_replace_all(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+) -> *mut u8 {
+    replace_string(string, needle, replacement, true)
+}
+
+/// `s.at(index)`: returns null pointer (`undefined`) when out of bounds.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_at(string: *mut u8, index: f64) -> *mut u8 {
+    let view = view(string);
+    let mut idx = integer(index);
+    if idx < 0 {
+        idx = (view.scalars as i64).saturating_add(idx);
+    }
+    if idx < 0 || (idx as u64) >= view.scalars {
+        return core::ptr::null_mut();
+    }
+    std_string_char_at(view.string, idx as f64)
+}
+
 /// `s.repeat(count)`; a negative or infinite count throws `RangeError`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut u8 {

@@ -317,22 +317,214 @@ impl<'s> FunctionBuilder<'s> {
         if matches!(op, LogicalOp::Coalesce) {
             return self.coalesce(ctx, left, right, expected);
         }
-        // Short-circuit through a result slot; mem2reg turns it into a block argument.
-        let lhs = self.condition(ctx, left)?;
-        let result = self.entry_slot(ctx, lhs.get_type(ctx));
-        self.store(ctx, result, lhs);
-        let rhs_block = self.new_block(ctx, "rhs");
-        let join = self.new_block(ctx, "join");
-        match op {
-            LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
-            _ => self.branch(ctx, lhs, join, rhs_block),
+        let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        if expected == Some(i1_ty) {
+            let lhs = self.condition(ctx, left)?;
+            let result = self.entry_slot(ctx, i1_ty);
+            self.store(ctx, result, lhs);
+            let rhs_block = self.new_block(ctx, "rhs");
+            let join = self.new_block(ctx, "join");
+            match op {
+                LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
+                _ => self.branch(ctx, lhs, join, rhs_block),
+            }
+            self.switch_to(rhs_block);
+            let mark = self.variant_guards.len();
+            self.variant_condition(left, matches!(op, LogicalOp::And));
+            let rhs = self.condition(ctx, right);
+            self.variant_guards.truncate(mark);
+            let rhs = rhs?;
+            self.store(ctx, result, rhs);
+            self.jump(ctx, join);
+            self.switch_to(join);
+            return self.load(ctx, result);
         }
-        self.switch_to(rhs_block);
-        let rhs = self.condition(ctx, right)?;
-        self.store(ctx, result, rhs);
-        self.jump(ctx, join);
-        self.switch_to(join);
-        self.load(ctx, result)
+
+        let lhs = self.expression(ctx, left)?;
+        if expected.is_none() && lhs.get_type(ctx) == i1_ty {
+            let result = self.entry_slot(ctx, i1_ty);
+            self.store(ctx, result, lhs);
+            let rhs_block = self.new_block(ctx, "rhs");
+            let join = self.new_block(ctx, "join");
+            match op {
+                LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
+                _ => self.branch(ctx, lhs, join, rhs_block),
+            }
+            self.switch_to(rhs_block);
+            let mark = self.variant_guards.len();
+            self.variant_condition(left, matches!(op, LogicalOp::And));
+            let rhs = self.condition(ctx, right);
+            self.variant_guards.truncate(mark);
+            let rhs = rhs?;
+            self.store(ctx, result, rhs);
+            self.jump(ctx, join);
+            self.switch_to(join);
+            return self.load(ctx, result);
+        }
+
+        let cond = self.truthy(ctx, lhs)?;
+        let truthy_block = self.new_block(ctx, "logical_truthy");
+        let falsy_block = self.new_block(ctx, "logical_falsy");
+        let join = self.new_block(ctx, "logical_join");
+        self.branch(ctx, cond, truthy_block, falsy_block);
+
+        match op {
+            LogicalOp::Or => {
+                self.switch_to(truthy_block);
+                let defined_lhs = if self.is_optional(ctx, lhs) {
+                    self.defined(ctx, lhs)?
+                } else {
+                    lhs
+                };
+                let truthy_end = self.block;
+
+                self.switch_to(falsy_block);
+                let rhs_expected = expected.or_else(|| {
+                    let base_ty = defined_lhs.get_type(ctx);
+                    Some(match right {
+                        Expr::Null => crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null),
+                        Expr::Undefined => {
+                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
+                        }
+                        _ => base_ty,
+                    })
+                });
+                let mark = self.variant_guards.len();
+                self.variant_condition(left, false);
+                let rhs = self.expression_with(ctx, right, rhs_expected);
+                self.variant_guards.truncate(mark);
+                let rhs = rhs?;
+                let falsy_end = self.block;
+
+                if expected.is_none() && rhs.get_type(ctx) == i1_ty && defined_lhs.get_type(ctx) != i1_ty {
+                    let result = self.entry_slot(ctx, i1_ty);
+                    self.switch_to(truthy_end);
+                    let t = self.boolean(ctx, true);
+                    self.store(ctx, result, t);
+                    self.jump(ctx, join);
+                    self.switch_to(falsy_end);
+                    self.store(ctx, result, rhs);
+                    self.jump(ctx, join);
+                    self.switch_to(join);
+                    return self.load(ctx, result);
+                }
+
+                let result_ty = match expected {
+                    Some(ty) => ty,
+                    None => {
+                        let left_ty = defined_lhs.get_type(ctx);
+                        let right_ty = rhs.get_type(ctx);
+                        if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
+                            let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
+                            perry_mir::OptionalType::get_with(ctx, inner, states).into()
+                        } else {
+                            left_ty
+                        }
+                    }
+                };
+                let result = self.entry_slot(ctx, result_ty);
+                self.switch_to(truthy_end);
+                let lhs_fitted = self.fit(ctx, defined_lhs, result_ty)?;
+                self.store(ctx, result, lhs_fitted);
+                self.jump(ctx, join);
+                self.switch_to(falsy_end);
+                let rhs_fitted = self.fit(ctx, rhs, result_ty)?;
+                self.store(ctx, result, rhs_fitted);
+                self.jump(ctx, join);
+                self.switch_to(join);
+                self.load(ctx, result)
+            }
+            LogicalOp::And => {
+                self.switch_to(falsy_block);
+                let falsy_end = self.block;
+
+                self.switch_to(truthy_block);
+                let rhs_expected = expected.or_else(|| {
+                    let base_ty = optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
+                    Some(match right {
+                        Expr::Null => crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null),
+                        Expr::Undefined => {
+                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
+                        }
+                        _ => base_ty,
+                    })
+                });
+                let mark = self.variant_guards.len();
+                self.variant_condition(left, true);
+                let rhs = self.expression_with(ctx, right, rhs_expected);
+                self.variant_guards.truncate(mark);
+                let rhs = rhs?;
+                let truthy_end = self.block;
+
+                if expected.is_none() && rhs.get_type(ctx) == i1_ty && lhs.get_type(ctx) != i1_ty {
+                    let result = self.entry_slot(ctx, i1_ty);
+                    self.switch_to(falsy_end);
+                    let f = self.boolean(ctx, false);
+                    self.store(ctx, result, f);
+                    self.jump(ctx, join);
+                    self.switch_to(truthy_end);
+                    self.store(ctx, result, rhs);
+                    self.jump(ctx, join);
+                    self.switch_to(join);
+                    return self.load(ctx, result);
+                }
+
+                let result_ty = match expected {
+                    Some(ty) => ty,
+                    None => {
+                        let left_ty = lhs.get_type(ctx);
+                        let right_ty = rhs.get_type(ctx);
+                        let inner = optional_value(ctx, right_ty)
+                            .or_else(|| optional_value(ctx, left_ty))
+                            .unwrap_or(right_ty);
+                        if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
+                            perry_mir::OptionalType::get_with(ctx, inner, states).into()
+                        } else {
+                            inner
+                        }
+                    }
+                };
+                let result = self.entry_slot(ctx, result_ty);
+                self.switch_to(falsy_end);
+                let left_ty = lhs.get_type(ctx);
+                let lhs_fitted = if optional_value(ctx, left_ty).is_some()
+                    && optional_value(ctx, left_ty) != optional_value(ctx, result_ty)
+                    && let Some((_, states)) = optional_parts(ctx, result_ty)
+                {
+                    match states {
+                        perry_mir::Absence::Null => {
+                            self.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))
+                        }
+                        perry_mir::Absence::Undefined => {
+                            self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))
+                        }
+                        perry_mir::Absence::Both => {
+                            let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, lhs));
+                            self.choose(
+                                ctx,
+                                result_ty,
+                                is_null,
+                                |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
+                                |b, ctx| {
+                                    Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty)))
+                                },
+                            )?
+                        }
+                    }
+                } else {
+                    self.fit(ctx, lhs, result_ty)?
+                };
+                self.store(ctx, result, lhs_fitted);
+                self.jump(ctx, join);
+                self.switch_to(truthy_end);
+                let rhs_fitted = self.fit(ctx, rhs, result_ty)?;
+                self.store(ctx, result, rhs_fitted);
+                self.jump(ctx, join);
+                self.switch_to(join);
+                self.load(ctx, result)
+            }
+            LogicalOp::Coalesce => unreachable!(),
+        }
     }
 
     /// `left ?? right`: evaluates `right` only when `left` is `null` or `undefined`.
@@ -366,7 +558,16 @@ impl<'s> FunctionBuilder<'s> {
         };
         let present_end = self.block;
         self.switch_to(fallback);
-        let rhs_expected = expected.or_else(|| Some(defined_lhs.get_type(ctx)));
+        let rhs_expected = expected.or_else(|| {
+            let base_ty = defined_lhs.get_type(ctx);
+            Some(match right {
+                Expr::Null => crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null),
+                Expr::Undefined => {
+                    crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
+                }
+                _ => base_ty,
+            })
+        });
         let rhs = self.expression_with(ctx, right, rhs_expected)?;
         let fallback_end = self.block;
         let result_ty = match expected {
@@ -402,11 +603,11 @@ impl<'s> FunctionBuilder<'s> {
         op: &UnaryOp,
         operand: &'s Expr,
     ) -> Result<Value> {
-        let value = self.expression(ctx, operand)?;
         if *op == UnaryOp::Not {
-            let value = self.truthy(ctx, value)?;
+            let value = self.condition(ctx, operand)?;
             return Ok(self.not(ctx, value));
         }
+        let value = self.expression(ctx, operand)?;
         let value = self.arithmetic(ctx, value);
         Ok(match (op, kind(ctx, value)?) {
             (UnaryOp::Neg, Kind::BigInt) => {
@@ -427,6 +628,16 @@ impl<'s> FunctionBuilder<'s> {
 
     /// The truthiness of `expr`, as a branch condition.
     pub(super) fn condition(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        if matches!(
+            expr,
+            Expr::Logical {
+                op: LogicalOp::And | LogicalOp::Or,
+                ..
+            }
+        ) {
+            let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.expression_with(ctx, expr, Some(i1_ty));
+        }
         let value = self.expression(ctx, expr)?;
         self.truthy(ctx, value)
     }

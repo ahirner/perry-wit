@@ -154,7 +154,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// The value of a record field read: `undefined` normalized, 64-bit integers as bigint.
-    fn field_read(&mut self, ctx: &mut Context, op: &FieldGetOp) -> Result<Value> {
+    pub(crate) fn field_read(&mut self, ctx: &mut Context, op: &FieldGetOp) -> Result<Value> {
         let loaded = self.append_value(ctx, op);
         let loaded = self.normalize_optional_read(ctx, loaded)?;
         Ok(

@@ -5,6 +5,7 @@ use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 const PUSH: &str = "$$perryArrayPush";
 const CONCAT: &str = "$$perryArrayConcat";
+const METHOD_PREFIX: &str = "$$perryMethod_";
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
 pub(super) fn preserve_arguments(module: &mut ast::Module) {
@@ -15,12 +16,39 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
             if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
-                && (method.sym == "concat"
+            {
+                if method.sym == "concat"
                     || (method.sym == "push"
                         && (call.args.len() != 1
-                            || call.args.iter().any(|argument| argument.spread.is_some()))))
-            {
-                method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
+                            || call.args.iter().any(|argument| argument.spread.is_some())))
+                {
+                    method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
+                } else if matches!(
+                    method.sym.as_ref(),
+                    "forEach"
+                        | "reduce"
+                        | "reduceRight"
+                        | "join"
+                        | "slice"
+                        | "reverse"
+                        | "toReversed"
+                        | "flat"
+                        | "findLast"
+                        | "findLastIndex"
+                        | "at"
+                        | "padStart"
+                        | "padEnd"
+                        | "trimStart"
+                        | "trimLeft"
+                        | "trimEnd"
+                        | "trimRight"
+                        | "replace"
+                        | "replaceAll"
+                        | "split"
+                ) || (method.sym.as_ref() == "toString" && !call.args.is_empty())
+                {
+                    method.sym = format!("{METHOD_PREFIX}{}", method.sym).into();
+                }
             }
         }
     }
@@ -37,6 +65,9 @@ pub(crate) enum Method<'a> {
 }
 
 pub(crate) fn method(name: &str) -> Method<'_> {
+    if let Some(rest) = name.strip_prefix(METHOD_PREFIX) {
+        return Method::Ordinary(rest);
+    }
     match name {
         streams::ITERATION => Method::Iteration,
         PUSH => Method::Push,

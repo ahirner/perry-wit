@@ -5,7 +5,7 @@ use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 /// A path through declared fields; reads are checked even if an alias changes the path.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct Path(LocalId, Vec<String>);
-fn path(expr: &Expr) -> Option<Path> {
+pub(super) fn path(expr: &Expr) -> Option<Path> {
     match expr {
         Expr::LocalGet(id) => Some(Path(*id, vec![])),
         Expr::PropertyGet {
@@ -27,6 +27,20 @@ impl<'s> FunctionBuilder<'s> {
         } = condition
         {
             self.variant_condition(operand, !truth);
+            return;
+        }
+        if let Expr::Logical { op, left, right } = condition {
+            match (op, truth) {
+                (LogicalOp::And, true) => {
+                    self.variant_condition(left, true);
+                    self.variant_condition(right, true);
+                }
+                (LogicalOp::Or, false) => {
+                    self.variant_condition(left, false);
+                    self.variant_condition(right, false);
+                }
+                _ => {}
+            }
             return;
         }
         let Expr::Compare { op, left, right } = condition else {

@@ -105,6 +105,15 @@ impl Shapes<'_> {
             {
                 return self.source_type(ctx, *inner);
             }
+            if matches!(base, "Exclude" | "Extract" | "NonNullable") {
+                let lookup = (&self.interfaces, &self.type_aliases);
+                let expanded =
+                    expand_utility_type_with_lookup(ctx, &lookup, base, arguments, 0)
+                        .with_context(|| {
+                            format!("MIR backend could not resolve utility type {base}")
+                        })?;
+                return self.source_type(ctx, expanded);
+            }
             if matches!(base, "Partial" | "Required" | "Pick" | "Omit") {
                 let key = ShapeKey::Utility(base.to_owned(), arguments.to_vec());
                 if let Some(ty) = self.named.borrow().get(&key) {
@@ -257,6 +266,193 @@ pub(super) fn collect_interface_properties<L: DeclarationLookup>(
     Some(merged)
 }
 
+pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
+    ctx: &Context,
+    lookup: &L,
+    members: &[ArgumentId],
+    depth: usize,
+) -> Vec<ArgumentId> {
+    if depth >= 32 {
+        return members.to_vec();
+    }
+    let mut out = Vec::new();
+    for &member in members {
+        let nested_union = match member.deref(ctx).kind() {
+            Kind::Union(nested) => Some(nested.clone()),
+            Kind::Named(name) => {
+                let name = name.clone();
+                if let Some((_, alias)) = lookup.type_alias(&name)
+                    && alias.type_params.is_empty()
+                {
+                    let mut remaining = 4096;
+                    if let Ok(target) =
+                        Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining)
+                    {
+                        match target.deref(ctx).kind() {
+                            Kind::Union(nested) => Some(nested.clone()),
+                            Kind::Named(_) | Kind::Generic { .. } => {
+                                let flat =
+                                    flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
+                                if flat != [target] {
+                                    Some(flat)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Kind::Generic { base, arguments } => {
+                let base = base.clone();
+                let arguments = arguments.clone();
+                if let Some(expanded) =
+                    expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
+                {
+                    Some(vec![expanded])
+                } else if let Some((_, Declaration::Alias(alias))) = Declaration::find(lookup, &base)
+                    && let Ok(bindings) = Declaration::Alias(alias).bind(ctx, &base, &arguments)
+                {
+                    let mut remaining = 4096;
+                    if let Ok(target) = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)
+                    {
+                        match target.deref(ctx).kind() {
+                            Kind::Union(nested) => Some(nested.clone()),
+                            Kind::Named(_) | Kind::Generic { .. } => {
+                                let flat =
+                                    flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
+                                if flat != [target] {
+                                    Some(flat)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(nested) = nested_union {
+            for item in flatten_union_with_lookup(ctx, lookup, &nested, depth + 1) {
+                if !out.contains(&item) {
+                    out.push(item);
+                }
+            }
+        } else if !out.contains(&member) {
+            out.push(member);
+        }
+    }
+    out
+}
+
+fn union_member_matches<L: DeclarationLookup>(
+    ctx: &Context,
+    lookup: &L,
+    member: ArgumentId,
+    pattern: ArgumentId,
+    depth: usize,
+) -> bool {
+    if depth >= 32 {
+        return false;
+    }
+    if member == pattern {
+        return true;
+    }
+    if matches!(
+        (member.deref(ctx).kind(), pattern.deref(ctx).kind()),
+        (Kind::StringLiteral(_), Kind::String) | (Kind::Number, Kind::Number)
+    ) {
+        return true;
+    }
+    if let (Some(member_props), Some(pattern_props)) = (
+        resolve_record_properties(ctx, lookup, member, depth + 1),
+        resolve_record_properties(ctx, lookup, pattern, depth + 1),
+    ) {
+        return !pattern_props.is_empty()
+            && pattern_props.iter().all(|(p_name, p_ty, p_opt)| {
+                member_props.iter().any(|(m_name, m_ty, m_opt)| {
+                    m_name == p_name
+                        && (!*m_opt || *p_opt)
+                        && union_member_matches(ctx, lookup, *m_ty, *p_ty, depth + 1)
+                })
+            });
+    }
+    false
+}
+
+pub(super) fn expand_utility_type_with_lookup<L: DeclarationLookup>(
+    ctx: &Context,
+    lookup: &L,
+    base: &str,
+    arguments: &[ArgumentId],
+    depth: usize,
+) -> Option<ArgumentId> {
+    if depth >= 32 || lookup.interface(base).is_some() || lookup.type_alias(base).is_some() {
+        return None;
+    }
+    match (base, arguments) {
+        ("NonNullable", [target]) => {
+            let members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
+            let filtered: Vec<ArgumentId> = members
+                .into_iter()
+                .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void))
+                .collect();
+            Some(match filtered.len() {
+                0 => Argument::from_kind(ctx, Kind::Never),
+                1 => filtered[0],
+                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
+            })
+        }
+        ("Exclude", [target, excluded]) => {
+            let target_members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
+            let excluded_members = flatten_union_with_lookup(ctx, lookup, &[*excluded], depth + 1);
+            let filtered: Vec<ArgumentId> = target_members
+                .into_iter()
+                .filter(|m| {
+                    !excluded_members
+                        .iter()
+                        .any(|ex| union_member_matches(ctx, lookup, *m, *ex, depth + 1))
+                })
+                .collect();
+            Some(match filtered.len() {
+                0 => Argument::from_kind(ctx, Kind::Never),
+                1 => filtered[0],
+                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
+            })
+        }
+        ("Extract", [target, extracted]) => {
+            let target_members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
+            let extracted_members =
+                flatten_union_with_lookup(ctx, lookup, &[*extracted], depth + 1);
+            let filtered: Vec<ArgumentId> = target_members
+                .into_iter()
+                .filter(|m| {
+                    extracted_members
+                        .iter()
+                        .any(|ex| union_member_matches(ctx, lookup, *m, *ex, depth + 1))
+                })
+                .collect();
+            Some(match filtered.len() {
+                0 => Argument::from_kind(ctx, Kind::Never),
+                1 => filtered[0],
+                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn extract_string_keys<L: DeclarationLookup>(
     ctx: &Context,
     lookup: &L,
@@ -277,13 +473,30 @@ fn extract_string_keys<L: DeclarationLookup>(
             Some(keys)
         }
         Kind::Named(name) => {
-            let (_, alias) = lookup.type_alias(name)?;
+            let name = name.clone();
+            let (_, alias) = lookup.type_alias(&name)?;
             if !alias.type_params.is_empty() {
                 return None;
             }
             let mut remaining = 4096;
             let target =
                 Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining).ok()?;
+            extract_string_keys(ctx, lookup, target, depth + 1)
+        }
+        Kind::Generic { base, arguments } => {
+            let base = base.clone();
+            let arguments = arguments.clone();
+            if let Some(expanded) =
+                expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
+            {
+                return extract_string_keys(ctx, lookup, expanded, depth + 1);
+            }
+            let (_, Declaration::Alias(alias)) = Declaration::find(lookup, &base)? else {
+                return None;
+            };
+            let bindings = Declaration::Alias(alias).bind(ctx, &base, &arguments).ok()?;
+            let mut remaining = 4096;
+            let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
             extract_string_keys(ctx, lookup, target, depth + 1)
         }
         _ => None,
@@ -320,6 +533,11 @@ pub(super) fn resolve_utility_record_properties<L: DeclarationLookup>(
     }
     match (base, arguments) {
         ("Readonly", [inner]) => resolve_record_properties(ctx, lookup, *inner, depth + 1),
+        ("Exclude" | "Extract" | "NonNullable", _) => {
+            let expanded =
+                expand_utility_type_with_lookup(ctx, lookup, base, arguments, depth + 1)?;
+            resolve_record_properties(ctx, lookup, expanded, depth + 1)
+        }
         ("Partial", [inner]) => {
             let mut props = resolve_record_properties(ctx, lookup, *inner, depth + 1)?;
             for (_, _, opt) in &mut props {
@@ -457,18 +675,26 @@ fn property_type_depth(
         let (_, ty, optional) = props.into_iter().find(|(name, _, _)| name == property)?;
         return Some(optional_property(ty.deref(ctx).to_hir(ctx), optional));
     }
-    let (_, Declaration::Alias(alias)) = Declaration::find(&lookup, base)? else {
-        return None;
+    let substituted = if let Some(expanded) =
+        expand_utility_type_with_lookup(ctx, &lookup, base, arguments, depth + 1)
+    {
+        expanded
+    } else {
+        let (_, Declaration::Alias(alias)) = Declaration::find(&lookup, base)? else {
+            return None;
+        };
+        let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
+        let mut remaining = 4096;
+        Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?
     };
-    let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
-    let mut remaining = 4096;
-    let substituted = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
     let target = {
         let sub_ref = substituted.deref(ctx);
         if let Kind::Union(members) = sub_ref.kind() {
-            let mut defined = members
-                .iter()
-                .copied()
+            let members = members.clone();
+            drop(sub_ref);
+            let flattened = flatten_union_with_lookup(ctx, &lookup, &members, depth + 1);
+            let mut defined = flattened
+                .into_iter()
                 .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void));
             let single = defined.next()?;
             if defined.next().is_some() {
@@ -687,4 +913,22 @@ fn dict_entry_types_generic(
     let mut remaining = 4096;
     let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
     dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth)
+}
+
+pub(crate) fn object_properties(
+    ctx: &Context,
+    interfaces: &[Interface],
+    type_aliases: &[TypeAlias],
+    ty: &HirType,
+) -> Option<Vec<(String, HirType, bool)>> {
+    let mut remaining = 4096;
+    let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
+    let lookup = (interfaces, type_aliases);
+    let props = resolve_record_properties(ctx, &lookup, arg, 0)?;
+    Some(
+        props
+            .into_iter()
+            .map(|(name, prop_arg, opt)| (name, prop_arg.deref(ctx).to_hir(ctx), opt))
+            .collect(),
+    )
 }

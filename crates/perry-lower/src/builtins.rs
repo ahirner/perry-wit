@@ -97,6 +97,38 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 Some(self.array_reduce(ctx, receiver, callback, arg(1), method == "reduceRight")?)
             }
+            (Kind::Array, "forEach") => {
+                let [callback] = args else {
+                    bail!("array.forEach requires one static callback")
+                };
+                Some(self.array_for_each(ctx, receiver, callback)?)
+            }
+            (Kind::Array, "join") => {
+                ensure!(args.len() <= 1, "array.join accepts at most one separator");
+                Some(self.array_join(ctx, receiver, arg(0))?)
+            }
+            (Kind::Array, "slice") => {
+                ensure!(args.len() <= 2, "array.slice accepts at most two bounds");
+                Some(self.array_slice(ctx, receiver, arg(0), arg(1))?)
+            }
+            (Kind::Array, "reverse" | "toReversed") => {
+                ensure!(args.is_empty(), "array.{method} takes no arguments");
+                Some(self.array_reverse(ctx, receiver, method == "toReversed")?)
+            }
+            (Kind::Array, "flat") => {
+                ensure!(args.len() <= 1, "array.flat accepts at most one depth argument");
+                Some(self.array_flat(ctx, receiver, arg(0))?)
+            }
+            (Kind::Array, "findLast" | "findLastIndex") => {
+                let [callback] = args else {
+                    bail!("array.{method} requires one static callback")
+                };
+                Some(self.array_find_last(ctx, receiver, callback, method == "findLastIndex")?)
+            }
+            (Kind::Array, "at") => {
+                ensure!(args.len() <= 1, "array.at accepts at most one index");
+                Some(self.array_at(ctx, receiver, arg(0))?)
+            }
             (Kind::String, "localeCompare") => {
                 let [other] = args else {
                     bail!("string.localeCompare requires one string");
@@ -131,12 +163,54 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::String, "split") => {
                 let [separator] = args else {
-                    bail!("string.split requires one string separator");
+                    bail!("string.split requires one string or regex separator");
                 };
-                let separator = self.string_operand(ctx, separator)?;
-                self.call_intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, separator])
+                let sep_val = self.expression(ctx, separator)?;
+                let sep_val = self.defined(ctx, sep_val)?;
+                match kind(ctx, sep_val)? {
+                    Kind::String => {
+                        self.call_intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, sep_val])
+                    }
+                    Kind::Regex => {
+                        self.call_intrinsic(ctx, Intrinsic::RegexSplit, vec![receiver, sep_val])
+                    }
+                    _ => bail!("string.split requires a string or literal regex separator"),
+                }
+            }
+            (Kind::String, "replace" | "replaceAll") => {
+                let [search, replacement] = args else {
+                    bail!("string.{method} requires a search pattern and replacement string");
+                };
+                let search_val = self.expression(ctx, search)?;
+                let search_val = self.defined(ctx, search_val)?;
+                let repl_val = self.string_operand(ctx, replacement)?;
+                match kind(ctx, search_val)? {
+                    Kind::String => {
+                        let intrinsic = if method == "replaceAll" {
+                            Intrinsic::StringReplaceAll
+                        } else {
+                            Intrinsic::StringReplace
+                        };
+                        self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
+                    }
+                    Kind::Regex => {
+                        if method == "replaceAll" && !Self::regex_has_global(ctx, search_val) {
+                            bail!("String.prototype.replaceAll called with a non-global RegExp argument");
+                        }
+                        self.call_intrinsic(
+                            ctx,
+                            Intrinsic::RegexReplace,
+                            vec![receiver, search_val, repl_val],
+                        )
+                    }
+                    _ => bail!("string.{method} requires a string or literal regex search pattern"),
+                }
             }
             (Kind::Regex, "test") => {
+                ensure!(
+                    !Self::regex_has_global(ctx, receiver),
+                    "Regex search supports only the u and s flags"
+                );
                 let [text] = args else {
                     bail!("literal regex.test requires one string");
                 };
@@ -148,6 +222,10 @@ impl<'s> FunctionBuilder<'s> {
                     bail!("string.search requires one literal regex");
                 };
                 let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+                ensure!(
+                    !Self::regex_has_global(ctx, regex),
+                    "Regex search supports only the u and s flags"
+                );
                 self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
             }
             (Kind::Decoder, "decode") => {
@@ -202,13 +280,28 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::String, "charAt" | "codePointAt" | "at") => {
                 let position = self.number_or(ctx, arg(0), 0.0)?;
-                let intrinsic = if method == "codePointAt" {
-                    Intrinsic::StringCodePointAt
-                } else {
-                    ensure!(method != "at", "String.prototype.at is not supported yet");
-                    Intrinsic::StringCharAt
+                let intrinsic = match method {
+                    "codePointAt" => Intrinsic::StringCodePointAt,
+                    "at" => Intrinsic::StringAt,
+                    _ => Intrinsic::StringCharAt,
                 };
                 self.call_intrinsic(ctx, intrinsic, vec![receiver, position])
+            }
+            (Kind::String, "padStart" | "padEnd") => {
+                let target_len = self.number_or(ctx, arg(0), 0.0)?;
+                let pad_str = match arg(1) {
+                    None | Some(Expr::Undefined) => self.string(ctx, " "),
+                    Some(expr) => {
+                        let val = self.expression(ctx, expr)?;
+                        self.display(ctx, val)?
+                    }
+                };
+                let intrinsic = if method == "padStart" {
+                    Intrinsic::StringPadStart
+                } else {
+                    Intrinsic::StringPadEnd
+                };
+                self.call_intrinsic(ctx, intrinsic, vec![receiver, target_len, pad_str])
             }
             (Kind::String, "slice" | "substring") => {
                 let start = self.number_or(ctx, arg(0), 0.0)?;
@@ -244,10 +337,20 @@ impl<'s> FunctionBuilder<'s> {
             }
             (
                 Kind::String,
-                "toLowerCase" | "toUpperCase" | "trim" | "toLocaleLowerCase" | "toLocaleUpperCase",
+                "toLowerCase"
+                | "toUpperCase"
+                | "trim"
+                | "trimStart"
+                | "trimLeft"
+                | "trimEnd"
+                | "trimRight"
+                | "toLocaleLowerCase"
+                | "toLocaleUpperCase",
             ) => {
                 let intrinsic = match method {
                     "trim" => Intrinsic::StringTrim,
+                    "trimStart" | "trimLeft" => Intrinsic::StringTrimStart,
+                    "trimEnd" | "trimRight" => Intrinsic::StringTrimEnd,
                     "toLowerCase" | "toLocaleLowerCase" => Intrinsic::StringLower,
                     _ => Intrinsic::StringUpper,
                 };
@@ -258,6 +361,19 @@ impl<'s> FunctionBuilder<'s> {
                 self.call_intrinsic(ctx, Intrinsic::StringRepeat, vec![receiver, count])
             }
             (Kind::String, "toString") => Some(receiver),
+            (Kind::Number, "toString") => {
+                ensure!(args.len() <= 1, "Number.prototype.toString accepts at most one radix");
+                let num = self.arithmetic(ctx, receiver);
+                match arg(0) {
+                    None | Some(Expr::Undefined) => {
+                        self.call_intrinsic(ctx, Intrinsic::NumberToString, vec![num])
+                    }
+                    Some(radix_expr) => {
+                        let radix = self.number_operand(ctx, radix_expr)?;
+                        self.call_intrinsic(ctx, Intrinsic::NumberToStringRadix, vec![num, radix])
+                    }
+                }
+            }
             (Kind::Bytes, "subarray" | "slice") => {
                 let start = self.number_or(ctx, arg(0), 0.0)?;
                 let end = self.number_or(ctx, arg(1), f64::INFINITY)?;
@@ -318,6 +434,16 @@ impl<'s> FunctionBuilder<'s> {
         self.emit_value(ctx, |ctx| {
             MirCompare::new(ctx, CompareKind::Ge, index, zero)
         })
+    }
+
+    pub(super) fn regex_has_global(ctx: &Context, regex: Value) -> bool {
+        if let Some(op) = regex.defining_op()
+            && let Some(const_op) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx)
+        {
+            const_op.flags(ctx).contains('g')
+        } else {
+            false
+        }
     }
 
     /// `JSON.stringify(value)`.

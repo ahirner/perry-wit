@@ -105,6 +105,8 @@ pub(super) fn is_resolvable_type(ty: &HirType) -> bool {
 
 pub(super) fn strip_nullish(ty: HirType) -> (HirType, Vec<HirType>) {
     match ty {
+        HirType::Null => (HirType::Void, vec![HirType::Null]),
+        HirType::Void => (HirType::Void, vec![HirType::Void]),
         HirType::Union(items) => {
             let mut defined = Vec::new();
             let mut absences = Vec::new();
@@ -213,32 +215,72 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             out
         }
         Expr::Conditional {
+            condition,
             then_expr,
             else_expr,
-            ..
         } => {
+            let is_undef_eq = matches!(
+                &**condition,
+                Expr::Compare {
+                    op: CompareOp::Eq,
+                    left,
+                    right
+                } if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined)
+            );
+            let is_undef_ne = matches!(
+                &**condition,
+                Expr::Compare {
+                    op: CompareOp::Ne,
+                    left,
+                    right
+                } if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined)
+            );
             if matches!(**then_expr, Expr::Undefined | Expr::Null) {
                 let absence = if matches!(**then_expr, Expr::Null) {
                     HirType::Null
                 } else {
                     HirType::Void
                 };
-                with_absences(expression(else_expr, env), vec![absence])
+                let else_ty = expression(else_expr, env);
+                if is_undef_eq {
+                    let (inner, mut absences) = strip_nullish(else_ty);
+                    absences.retain(|a| !matches!(a, HirType::Void));
+                    absences.push(absence);
+                    with_absences(inner, absences)
+                } else {
+                    with_absences(else_ty, vec![absence])
+                }
             } else if matches!(**else_expr, Expr::Undefined | Expr::Null) {
                 let absence = if matches!(**else_expr, Expr::Null) {
                     HirType::Null
                 } else {
                     HirType::Void
                 };
-                with_absences(expression(then_expr, env), vec![absence])
-            } else {
                 let then_ty = expression(then_expr, env);
-                let (_, else_absences) = strip_nullish(expression(else_expr, env));
+                if is_undef_ne {
+                    let (inner, mut absences) = strip_nullish(then_ty);
+                    absences.retain(|a| !matches!(a, HirType::Void));
+                    absences.push(absence);
+                    with_absences(inner, absences)
+                } else {
+                    with_absences(then_ty, vec![absence])
+                }
+            } else {
+                let mut then_ty = expression(then_expr, env);
+                if is_undef_ne {
+                    let (inner, mut absences) = strip_nullish(then_ty);
+                    absences.retain(|a| !matches!(a, HirType::Void));
+                    then_ty = with_absences(inner, absences);
+                }
+                let (_, mut else_absences) = strip_nullish(expression(else_expr, env));
+                if is_undef_eq {
+                    else_absences.retain(|a| !matches!(a, HirType::Void));
+                }
                 with_absences(then_ty, else_absences)
             }
         }
         Expr::Logical {
-            op: LogicalOp::Coalesce,
+            op: LogicalOp::Coalesce | LogicalOp::Or,
             left,
             right,
         } => {
@@ -250,6 +292,25 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 right_inner
             };
             with_absences(base, right_absences)
+        }
+        Expr::Logical {
+            op: LogicalOp::And,
+            left,
+            right,
+        } => {
+            let (left_inner, mut absences) = strip_nullish(expression(left, env));
+            let (right_inner, right_absences) = strip_nullish(expression(right, env));
+            for a in right_absences {
+                if !absences.contains(&a) {
+                    absences.push(a);
+                }
+            }
+            let base = if is_resolvable_type(&right_inner) {
+                right_inner
+            } else {
+                left_inner
+            };
+            with_absences(base, absences)
         }
         Expr::MapGet { map, .. } => match strip_nullish(expression(map, env)).0 {
             HirType::Generic { base, type_args }
@@ -322,10 +383,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             Expr::PropertyGet {
                 object, property, ..
             } if matches!(hir_compat::method(property).name(), "map" | "flatMap") => {
+                let m = hir_compat::method(property).name();
                 match args.first() {
-                    Some(callback) => {
-                        infer_closure_return(object, callback, env, property == "flatMap")
-                    }
+                    Some(callback) => infer_closure_return(object, callback, env, m == "flatMap"),
                     None => HirType::Any,
                 }
             }
@@ -333,17 +393,48 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 object, property, ..
             } if matches!(
                 hir_compat::method(property).name(),
-                "concat" | "filter" | "sort" | "toSorted"
+                "concat" | "filter" | "sort" | "toSorted" | "slice" | "reverse" | "toReversed"
             ) || hir_compat::method(property) == hir_compat::Method::Iteration =>
             {
                 expression(object, env)
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if property == "find" => match strip_nullish(expression(object, env)).0 {
-                HirType::Array(element) => with_absences(*element, vec![HirType::Void]),
-                _ => HirType::Any,
-            },
+            } if hir_compat::method(property).name() == "flat" => {
+                let zero_depth = matches!(
+                    args.first(),
+                    Some(Expr::Number(n)) if *n <= 0.0
+                ) || matches!(
+                    args.first(),
+                    Some(Expr::Integer(n)) if *n <= 0
+                );
+                let obj_ty = strip_nullish(expression(object, env)).0;
+                if !zero_depth
+                    && let HirType::Array(inner) = &obj_ty
+                    && matches!(inner.as_ref(), HirType::Array(_))
+                {
+                    (**inner).clone()
+                } else {
+                    obj_ty
+                }
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if matches!(hir_compat::method(property).name(), "find" | "findLast") => {
+                match strip_nullish(expression(object, env)).0 {
+                    HirType::Array(element) => with_absences(*element, vec![HirType::Void]),
+                    _ => HirType::Any,
+                }
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if hir_compat::method(property).name() == "at" => {
+                match strip_nullish(expression(object, env)).0 {
+                    HirType::Array(element) => with_absences(*element, vec![HirType::Void]),
+                    HirType::String => with_absences(HirType::String, vec![HirType::Void]),
+                    _ => HirType::Any,
+                }
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if matches!(
@@ -351,9 +442,24 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 "reduce" | "reduceRight"
             ) =>
             {
+                if let Some(Expr::Closure {
+                    params,
+                    return_type,
+                    ..
+                }) = args.first()
+                {
+                    if let Some(first) = params.first()
+                        && !matches!(first.ty, HirType::Any | HirType::Unknown)
+                    {
+                        return first.ty.clone();
+                    }
+                    if !matches!(return_type, HirType::Any | HirType::Unknown | HirType::Void) {
+                        return return_type.clone();
+                    }
+                }
                 if let Some(init) = args.get(1) {
                     let init_ty = expression(init, env);
-                    if !matches!(init_ty, HirType::Any | HirType::Unknown) {
+                    if is_resolvable_type(&init_ty) {
                         return init_ty;
                     }
                 }
@@ -363,9 +469,37 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 }
             }
             Expr::PropertyGet { property, .. }
+                if hir_compat::method(property).name() == "forEach" =>
+            {
+                HirType::Void
+            }
+            Expr::PropertyGet { property, .. }
                 if matches!(
                     hir_compat::method(property).name(),
-                    "findIndex" | "localeCompare"
+                    "join"
+                        | "replace"
+                        | "replaceAll"
+                        | "padStart"
+                        | "padEnd"
+                        | "trim"
+                        | "trimStart"
+                        | "trimLeft"
+                        | "trimEnd"
+                        | "trimRight"
+                        | "toString"
+                ) =>
+            {
+                HirType::String
+            }
+            Expr::PropertyGet { property, .. }
+                if hir_compat::method(property).name() == "split" =>
+            {
+                HirType::Array(Box::new(HirType::String))
+            }
+            Expr::PropertyGet { property, .. }
+                if matches!(
+                    hir_compat::method(property).name(),
+                    "findIndex" | "findLastIndex" | "localeCompare"
                 ) =>
             {
                 HirType::Number
@@ -390,13 +524,53 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             },
             Expr::PropertyGet {
                 object, property, ..
-            } if matches!(hir_compat::method(property).name(), "set" | "add") => {
+            } if matches!(hir_compat::method(property).name(), "set" | "add" | "subtract") => {
                 let obj_ty = strip_nullish(expression(object, env)).0;
                 if matches!(&obj_ty, HirType::Generic { base, .. } if matches!(base.as_str(), "Map" | "Set"))
+                    || matches!(
+                        &obj_ty,
+                        HirType::Named(name)
+                            if matches!(
+                                name.as_str(),
+                                "Temporal.PlainDate" | "Temporal.PlainDateTime"
+                            )
+                    )
                 {
                     obj_ty
                 } else {
                     perry_hir::infer_expr_type(expr, env)
+                }
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if matches!(
+                object.as_ref(),
+                Expr::PropertyGet { object: namespace, .. }
+                    if matches!(
+                        namespace.as_ref(),
+                        Expr::PropertyGet { object: global, property: name, .. }
+                            if matches!(global.as_ref(), Expr::GlobalGet(_)) && name == "Temporal"
+                    )
+            ) =>
+            {
+                let Expr::PropertyGet {
+                    property: class, ..
+                } = object.as_ref()
+                else {
+                    return perry_hir::infer_expr_type(expr, env);
+                };
+                match (class.as_str(), property.as_str()) {
+                    ("Instant", "from" | "fromEpochMilliseconds") | ("Now", "instant") => {
+                        HirType::Named(String::from("Temporal.Instant"))
+                    }
+                    ("PlainDate", "from") | ("Now", "plainDateISO") => {
+                        HirType::Named(String::from("Temporal.PlainDate"))
+                    }
+                    ("PlainDateTime", "from") | ("Now", "plainDateTimeISO") => {
+                        HirType::Named(String::from("Temporal.PlainDateTime"))
+                    }
+                    ("Now", "timeZoneId") => HirType::String,
+                    _ => perry_hir::infer_expr_type(expr, env),
                 }
             }
             Expr::PropertyGet {
@@ -510,6 +684,162 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 }
             },
         },
+        Expr::NativeMethodCall {
+            module,
+            class_name: None,
+            object: None,
+            method,
+            args,
+        } if module == "__perry_runtime" && method == "requireObjectCoercible" => args
+            .first()
+            .map(|a| strip_nullish(expression(a, env)).0)
+            .unwrap_or(HirType::Any),
+        Expr::ObjectSpread { parts } => {
+            let mut props: HashMap<String, perry_hir::types::PropertyInfo> = HashMap::new();
+            let mut single_spread_named: Option<String> = None;
+            let mut spread_count = 0usize;
+            let mut all_spreads_typed = true;
+            for (key, val_expr) in parts {
+                if let Some(key) = key {
+                    let val_ty = expression(val_expr, env);
+                    if matches!(val_expr, Expr::Null | Expr::Undefined)
+                        && let Some(existing) = props.get(key)
+                    {
+                        let abs = if matches!(val_expr, Expr::Null) {
+                            HirType::Null
+                        } else {
+                            HirType::Void
+                        };
+                        let widened = with_absences(existing.ty.clone(), vec![abs]);
+                        props.insert(
+                            key.clone(),
+                            perry_hir::types::PropertyInfo {
+                                ty: widened,
+                                optional: existing.optional,
+                                readonly: false,
+                            },
+                        );
+                    } else {
+                        props.insert(
+                            key.clone(),
+                            perry_hir::types::PropertyInfo {
+                                ty: val_ty,
+                                optional: false,
+                                readonly: false,
+                            },
+                        );
+                    }
+                } else {
+                    spread_count += 1;
+                    let src_ty = strip_nullish(expression(val_expr, env)).0;
+                    if spread_count == 1
+                        && let HirType::Named(name) = &src_ty
+                    {
+                        single_spread_named = Some(name.clone());
+                    } else {
+                        single_spread_named = None;
+                    }
+                    if let Some(resolved) = shapes::generics::object_properties(
+                        env.ctx,
+                        env.interfaces,
+                        env.type_aliases,
+                        &src_ty,
+                    ) {
+                        for (name, prop_ty, opt) in resolved {
+                            if opt && let Some(existing) = props.get(&name) {
+                                let (inner, _) = strip_nullish(prop_ty);
+                                let (_, existing_abs) = strip_nullish(existing.ty.clone());
+                                let merged = with_absences(inner, existing_abs);
+                                props.insert(
+                                    name,
+                                    perry_hir::types::PropertyInfo {
+                                        ty: merged,
+                                        optional: existing.optional,
+                                        readonly: false,
+                                    },
+                                );
+                            } else {
+                                props.insert(
+                                    name,
+                                    perry_hir::types::PropertyInfo {
+                                        ty: prop_ty,
+                                        optional: opt,
+                                        readonly: false,
+                                    },
+                                );
+                            }
+                        }
+                    } else if let HirType::Object(obj) = src_ty {
+                        for (name, info) in obj.properties {
+                            props.insert(name, info);
+                        }
+                    } else {
+                        all_spreads_typed = false;
+                    }
+                }
+            }
+            if !all_spreads_typed || props.is_empty() {
+                perry_hir::infer_expr_type(expr, env)
+            } else {
+                if let Some(named) = single_spread_named
+                    && let Some(orig) = shapes::generics::object_properties(
+                        env.ctx,
+                        env.interfaces,
+                        env.type_aliases,
+                        &HirType::Named(named.clone()),
+                    )
+                    && orig.len() == props.len()
+                    && orig.iter().all(|(k, t, opt)| {
+                        props
+                            .get(k)
+                            .is_some_and(|p| &p.ty == t && p.optional == *opt)
+                    })
+                {
+                    HirType::Named(named)
+                } else {
+                    HirType::Object(perry_hir::types::ObjectType {
+                        name: None,
+                        properties: props,
+                        property_order: None,
+                        index_signature: None,
+                    })
+                }
+            }
+        }
+        Expr::ObjectRest {
+            object,
+            exclude_keys,
+        } => {
+            let src_ty = strip_nullish(expression(object, env)).0;
+            if let Some(resolved) = shapes::generics::object_properties(
+                env.ctx,
+                env.interfaces,
+                env.type_aliases,
+                &src_ty,
+            ) {
+                let mut props = HashMap::new();
+                for (name, prop_ty, opt) in resolved {
+                    if !exclude_keys.contains(&name) {
+                        props.insert(
+                            name,
+                            perry_hir::types::PropertyInfo {
+                                ty: prop_ty,
+                                optional: opt,
+                                readonly: false,
+                            },
+                        );
+                    }
+                }
+                HirType::Object(perry_hir::types::ObjectType {
+                    name: None,
+                    properties: props,
+                    property_order: None,
+                    index_signature: None,
+                })
+            } else {
+                perry_hir::infer_expr_type(expr, env)
+            }
+        }
         _ => perry_hir::infer_expr_type(expr, env),
     };
     if contains_type_var(&ty) {

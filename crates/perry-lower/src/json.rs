@@ -125,7 +125,10 @@ impl<'s> FunctionBuilder<'s> {
             name: name.clone(),
             is_async: false,
             await_initialization: false,
+            base_params: params.iter().copied().map(BindingType::plain).collect(),
             params: params.iter().copied().map(BindingType::plain).collect(),
+            defaults: Vec::new(),
+            has_rest: false,
             result: results.first().copied().map(BindingType::plain),
         };
         let ty = FunctionType::get(ctx, params, results);
@@ -294,7 +297,65 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         parts: &'s [(Option<String>, Expr)],
+        expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        let expected_inner = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
+        if let Some(ty) = expected_inner
+            && !ty.deref(ctx).is::<JsonType>()
+        {
+            if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+                return self.record_object_spread(ctx, parts, None, Some(rec));
+            }
+        }
+        if expected_inner.is_none() {
+            if let Some((None, first_spread)) = parts.first() {
+                let first_src = self.expression(ctx, first_spread)?;
+                let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
+                let first_json = if is_exc {
+                    None
+                } else {
+                    self.json_operand(ctx, first_src)?
+                };
+                if !is_exc
+                    && first_json.is_none()
+                    && parts[1..]
+                        .iter()
+                        .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
+                {
+                    return self.record_object_spread(ctx, parts, Some(first_src), None);
+                }
+                let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
+                if !is_exc {
+                    let source = first_json.context(
+                        "object spread is supported over typed records or JSON values with static keys",
+                    )?;
+                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                }
+                for (key, value) in &parts[1..] {
+                    if let Some(key) = key {
+                        let key = self.string(ctx, key);
+                        let value = self.json_value(ctx, value)?;
+                        self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+                    } else {
+                        let source = self.expression(ctx, value)?;
+                        if matches!(kind(ctx, source), Ok(Kind::Exception)) {
+                            continue;
+                        }
+                        let source = self.json_operand(ctx, source)?.context(
+                            "object spread is supported over typed records or JSON values with static keys",
+                        )?;
+                        self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                    }
+                }
+                return Ok(object);
+            } else if parts.iter().any(|(k, _)| k.is_none())
+                && parts
+                    .iter()
+                    .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
+            {
+                return self.record_object_spread(ctx, parts, None, None);
+            }
+        }
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
         for (key, value) in parts {
             if let Some(key) = key {
@@ -307,7 +368,7 @@ impl<'s> FunctionBuilder<'s> {
                     continue;
                 }
                 let source = self.json_operand(ctx, source)?.context(
-                    "object spread is supported over JSON values (JSON.parse, response.json()) with static keys"
+                    "object spread is supported over typed records or JSON values with static keys"
                 )?;
                 self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }

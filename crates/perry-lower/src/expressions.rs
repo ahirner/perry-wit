@@ -20,6 +20,10 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(record) = self.iteration.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
+                hir_compat::RecordExpr::RequireObject(value) => {
+                    let v = self.expression_with(ctx, value, expected)?;
+                    self.defined(ctx, v)
+                }
                 hir_compat::RecordExpr::Length(source) => {
                     let source = self.expression(ctx, source)?;
                     if let Ok(record) =
@@ -58,7 +62,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::RegExpDynamic { .. } => {
                 bail!("RegExp construction is unsupported; use a bounded regex literal")
             }
-            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts)?,
+            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected)?,
+            Expr::ObjectRest {
+                object,
+                exclude_keys,
+            } => self.object_rest(ctx, object, exclude_keys, expected)?,
             Expr::BigInt(text) => self.bigint_literal(ctx, text)?,
             Expr::BigIntCoerce(expr) => self.bigint_coerce(ctx, expr)?,
             Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
@@ -673,10 +681,59 @@ impl<'s> FunctionBuilder<'s> {
             self.switch_to(join);
             return self.load(ctx, result);
         }
+        let (undef_eq_path, undef_ne_path) = match condition {
+            Expr::Compare {
+                op: op @ (CompareOp::Eq | CompareOp::Ne),
+                left,
+                right,
+            } => {
+                let tested = if matches!(**right, Expr::Undefined) {
+                    Some(&**left)
+                } else if matches!(**left, Expr::Undefined) {
+                    Some(&**right)
+                } else {
+                    None
+                };
+                match (op, tested.and_then(variants::path)) {
+                    (CompareOp::Eq, p) => (p, None),
+                    (CompareOp::Ne, p) => (None, p),
+                    _ => (None, None),
+                }
+            }
+            _ => (None, None),
+        };
+        let then_expected = match expected {
+            Some(expected) => Some(expected),
+            None if matches!(then_expr, Expr::Null | Expr::Undefined) => {
+                if let Expr::LocalGet(id) = else_expr
+                    && let Some(local) = self.locals.get(id)
+                    && let Ok(else_ty) = self.slot_type(ctx, local.slot)
+                {
+                    let inner = optional_value(ctx, else_ty).unwrap_or(else_ty);
+                    let then_absence = if matches!(then_expr, Expr::Null) {
+                        perry_mir::Absence::Null
+                    } else {
+                        perry_mir::Absence::Undefined
+                    };
+                    Some(crate::coerce::admitting(ctx, inner, then_absence))
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
         self.switch_to(then);
         // With an expected type both arms fit it (`cond ? value : undefined`).
         self.variant_condition(condition, true);
-        let then_value = self.expression_with(ctx, then_expr, expected)?;
+        let then_value = self.expression_with(ctx, then_expr, then_expected)?;
+        let then_value = if undef_ne_path.is_some()
+            && undef_ne_path == variants::path(then_expr)
+            && !matches!(else_expr, Expr::Undefined)
+        {
+            self.strip_undefined(ctx, then_value)?
+        } else {
+            then_value
+        };
         let then_value = match expected {
             Some(expected) => self.fit(ctx, then_value, expected)?,
             None => then_value,
@@ -699,6 +756,14 @@ impl<'s> FunctionBuilder<'s> {
             None => then_ty,
         };
         let else_value = self.expression_with(ctx, else_expr, Some(else_expected))?;
+        let else_value = if undef_eq_path.is_some()
+            && undef_eq_path == variants::path(else_expr)
+            && !matches!(then_expr, Expr::Undefined)
+        {
+            self.strip_undefined(ctx, else_value)?
+        } else {
+            else_value
+        };
         let else_end = self.block;
         let ty = match expected {
             Some(expected) => expected,

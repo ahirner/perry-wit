@@ -7,6 +7,9 @@ pub(super) struct Signature {
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
     pub(super) params: Vec<BindingType>,
+    pub(super) base_params: Vec<BindingType>,
+    pub(super) defaults: Vec<Option<Expr>>,
+    pub(super) has_rest: bool,
     pub(super) result: Option<BindingType>,
 }
 
@@ -96,27 +99,34 @@ pub(super) fn build_module(
             ));
         }
 
-        let params = function
-            .params
-            .iter()
-            .map(|param| {
-                if param.default.is_some() || param.is_rest {
-                    return Err(shapes.annotate_local(
-                        anyhow!(
-                            "default and rest parameters are not supported yet: {}",
-                            function.name
-                        ),
-                        param.id,
-                    ));
-                }
-                let carrier = shapes
-                    .value_type(ctx, &param.ty)
-                    .map_err(|error| shapes.annotate_local(error, param.id))
-                    .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
-                let integer = shapes.integer_type(ctx, &param.ty);
-                Ok(BindingType { carrier, integer })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut params = Vec::with_capacity(function.params.len());
+        let mut base_params = Vec::with_capacity(function.params.len());
+        let mut defaults = Vec::with_capacity(function.params.len());
+        let has_rest = function.params.last().is_some_and(|p| p.is_rest);
+        for (idx, param) in function.params.iter().enumerate() {
+            if param.is_rest && idx + 1 != function.params.len() {
+                return Err(shapes.annotate_local(
+                    anyhow!("rest parameter must be last in {}", function.name),
+                    param.id,
+                ));
+            }
+            let base_carrier = shapes
+                .value_type(ctx, &param.ty)
+                .map_err(|error| shapes.annotate_local(error, param.id))
+                .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
+            let integer = shapes.integer_type(ctx, &param.ty);
+            let carrier = if param.default.is_some() && !function.is_exported {
+                crate::coerce::admitting(ctx, base_carrier, perry_mir::Absence::Undefined)
+            } else {
+                base_carrier
+            };
+            params.push(BindingType { carrier, integer });
+            base_params.push(BindingType {
+                carrier: base_carrier,
+                integer,
+            });
+            defaults.push(param.default.clone());
+        }
         let result_carrier = match (&function.return_type, function.is_async) {
             (HirType::Void, false) => Ok(None),
             // An async function settles its promise with its result; `void` settles `undefined`.
@@ -142,6 +152,9 @@ pub(super) fn build_module(
                     && locations.async_init(),
                 name: identifier(&function.name)?,
                 params,
+                base_params,
+                defaults,
+                has_rest,
                 result,
             },
         );
@@ -166,6 +179,9 @@ pub(super) fn build_module(
             is_async: !persistent || locations.async_init(),
             await_initialization: false,
             params: vec![],
+            base_params: vec![],
+            defaults: vec![],
+            has_rest: false,
             result: if persistent && !locations.async_init() {
                 None
             } else {

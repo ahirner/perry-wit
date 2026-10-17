@@ -222,6 +222,30 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.append_value(ctx, &op))
     }
 
+    /// View `value` with `undefined` excluded from its absence states (after a `!== undefined` check).
+    pub(super) fn strip_undefined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        match optional_parts(ctx, ty) {
+            Some((_, perry_mir::Absence::Undefined)) => self.defined(ctx, value),
+            Some((inner, perry_mir::Absence::Both)) => {
+                let target =
+                    perry_mir::OptionalType::get_with(ctx, inner, perry_mir::Absence::Null).into();
+                let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                self.choose(
+                    ctx,
+                    target,
+                    is_null,
+                    |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target))),
+                    |b, ctx| {
+                        let defined = b.defined(ctx, value)?;
+                        b.fit(ctx, defined, target)
+                    },
+                )
+            }
+            _ => Ok(value),
+        }
+    }
+
     /// View `value` as `T | undefined`.
     pub(super) fn optional(&mut self, ctx: &mut Context, value: Value) -> Value {
         if self.is_optional(ctx, value) {

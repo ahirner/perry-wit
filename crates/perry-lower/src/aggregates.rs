@@ -324,4 +324,300 @@ impl<'s> FunctionBuilder<'s> {
             NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
         })
     }
+
+    pub(super) fn peek_record_type(
+        &self,
+        ctx: &Context,
+        expr: &Expr,
+    ) -> Option<TypedHandle<RecordType>> {
+        match expr {
+            Expr::LocalGet(id) => {
+                let local = self.locals.get(id)?;
+                let ty = self.slot_type(ctx, local.slot).ok()?;
+                let inner = optional_value(ctx, ty).unwrap_or(ty);
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } => {
+                let rec = self.peek_record_type(ctx, object)?;
+                let (_, field_ty) = rec.deref(ctx).field(property)?;
+                let inner = optional_value(ctx, field_ty).unwrap_or(field_ty);
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::FuncRef(id) = &**callee
+                    && let Some(sig) = self.signatures.get(id)
+                    && let Some(ret) = sig.result
+                {
+                    let inner = optional_value(ctx, ret.carrier).unwrap_or(ret.carrier);
+                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `{ ...record, key: value }` over closed typed records.
+    pub(super) fn record_object_spread(
+        &mut self,
+        ctx: &mut Context,
+        parts: &'s [(Option<String>, Expr)],
+        first_evaluated: Option<Value>,
+        expected_record: Option<TypedHandle<RecordType>>,
+    ) -> Result<Value> {
+        let fallback_record = expected_record.or_else(|| {
+            first_evaluated
+                .and_then(|v| {
+                    let ty = v.get_type(ctx);
+                    let inner = optional_value(ctx, ty).unwrap_or(ty);
+                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                })
+                .or_else(|| {
+                    parts
+                        .iter()
+                        .find_map(|(k, v)| k.is_none().then(|| self.peek_record_type(ctx, v)).flatten())
+                })
+        });
+        let mut field_values: Vec<(String, Value)> = Vec::new();
+        for (idx, (key, val_expr)) in parts.iter().enumerate() {
+            if let Some(key) = key {
+                let expected_field_ty = expected_record
+                    .and_then(|rec| rec.deref(ctx).field(key).map(|(_, ty)| ty))
+                    .or_else(|| {
+                        if matches!(val_expr, Expr::Null | Expr::Undefined) {
+                            field_values
+                                .iter()
+                                .find(|(k, _)| k == key)
+                                .map(|(_, v)| v.get_type(ctx))
+                                .or_else(|| {
+                                    fallback_record
+                                        .and_then(|rec| rec.deref(ctx).field(key).map(|(_, ty)| ty))
+                                })
+                                .map(|base_ty| {
+                                    let abs = if matches!(val_expr, Expr::Null) {
+                                        perry_mir::Absence::Null
+                                    } else {
+                                        perry_mir::Absence::Undefined
+                                    };
+                                    crate::coerce::admitting(ctx, base_ty, abs)
+                                })
+                        } else {
+                            None
+                        }
+                    });
+                let val = self.expression_with(ctx, val_expr, expected_field_ty)?;
+                let val = match expected_record
+                    .and_then(|rec| rec.deref(ctx).field(key).map(|(_, ty)| ty))
+                {
+                    Some(target_ty) => self.fit(ctx, val, target_ty)?,
+                    None => val,
+                };
+                if let Some((_, existing)) = field_values.iter_mut().find(|(k, _)| k == key) {
+                    let existing_ty = existing.get_type(ctx);
+                    let val_ty = val.get_type(ctx);
+                    if existing_ty == val_ty {
+                        *existing = val;
+                    } else if let Some(states) =
+                        merge_absence(absence(ctx, existing_ty), absence(ctx, val_ty))
+                    {
+                        let inner = optional_value(ctx, val_ty)
+                            .or_else(|| optional_value(ctx, existing_ty))
+                            .unwrap_or(val_ty);
+                        let merged_ty =
+                            perry_mir::OptionalType::get_with(ctx, inner, states).into();
+                        if expected_record.is_none() {
+                            *existing = self.fit(ctx, val, merged_ty)?;
+                        } else {
+                            *existing = val;
+                        }
+                    } else {
+                        *existing = val;
+                    }
+                } else {
+                    field_values.push((key.clone(), val));
+                }
+            } else {
+                let raw_src = if idx == 0
+                    && let Some(first) = first_evaluated
+                {
+                    first
+                } else {
+                    self.expression(ctx, val_expr)?
+                };
+                if matches!(kind(ctx, raw_src), Ok(Kind::Exception)) {
+                    continue;
+                }
+                let src = self.defined(ctx, raw_src)?;
+                let src_rec = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
+                    .context(
+                        "object spread is supported over typed records or JSON values with static keys",
+                    )?;
+                let src_fields: Vec<(String, TypeHandle)> = src_rec
+                    .deref(ctx)
+                    .fields()
+                    .map_err(|_| anyhow!("record without fields"))?
+                    .to_vec();
+                for (field_name, _) in src_fields {
+                    let op = FieldGetOp::new(ctx, src, field_name.clone())?;
+                    let loaded = self.field_read(ctx, &op)?;
+                    let loaded = match expected_record
+                        .and_then(|rec| rec.deref(ctx).field(&field_name).map(|(_, ty)| ty))
+                    {
+                        Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
+                        None => loaded,
+                    };
+                    if let Some((_, existing)) =
+                        field_values.iter_mut().find(|(k, _)| k == &field_name)
+                    {
+                        let loaded_ty = loaded.get_type(ctx);
+                        if absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined()) {
+                            let prev = *existing;
+                            let prev_ty = prev.get_type(ctx);
+                            let target_ty = expected_record
+                                .and_then(|rec| {
+                                    rec.deref(ctx).field(&field_name).map(|(_, ty)| ty)
+                                })
+                                .unwrap_or_else(|| {
+                                    if !absence(ctx, prev_ty)
+                                        .is_some_and(|a| a.admits_undefined())
+                                    {
+                                        prev_ty
+                                    } else {
+                                        loaded_ty
+                                    }
+                                });
+                            let is_undef =
+                                self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
+                            *existing = self.choose(
+                                ctx,
+                                target_ty,
+                                is_undef,
+                                |b, ctx| b.fit(ctx, prev, target_ty),
+                                |b, ctx| {
+                                    let def = b.strip_undefined(ctx, loaded)?;
+                                    b.fit(ctx, def, target_ty)
+                                },
+                            )?;
+                        } else {
+                            *existing = loaded;
+                        }
+                    } else {
+                        field_values.push((field_name, loaded));
+                    }
+                }
+            }
+        }
+        let matching_expected = expected_record.filter(|record| {
+            record.deref(ctx).fields().is_ok_and(|fields| {
+                field_values
+                    .iter()
+                    .all(|(name, _)| fields.iter().any(|(f, _)| f == name))
+                    && fields.iter().all(|(name, ty)| {
+                        field_values.iter().any(|(n, _)| n == name)
+                            || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
+                    })
+            })
+        });
+        let (record, missing) = match matching_expected {
+            Some(record) => {
+                let missing: Vec<(usize, TypeHandle)> = record
+                    .deref(ctx)
+                    .fields()
+                    .map_err(|_| anyhow!("record without fields"))?
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (name, _))| !field_values.iter().any(|(n, _)| n == name))
+                    .map(|(index, (_, ty))| (index, *ty))
+                    .collect();
+                (record, missing)
+            }
+            None => {
+                let fields = field_values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.get_type(ctx)))
+                    .collect();
+                (self.shapes.mir_record(ctx, fields)?, Vec::new())
+            }
+        };
+        let mut positioned = Vec::with_capacity(field_values.len() + missing.len());
+        for (index, ty) in missing {
+            positioned.push((
+                index,
+                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)),
+            ));
+        }
+        for (name, value) in field_values {
+            let (index, field_ty) = record
+                .deref(ctx)
+                .field(&name)
+                .with_context(|| format!("record has no field {name}"))?;
+            let fitted = self.fit(ctx, value, field_ty)?;
+            positioned.push((index, fitted));
+        }
+        positioned.sort_by_key(|(index, _)| *index);
+        let operands = positioned.into_iter().map(|(_, value)| value).collect();
+        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+    }
+
+    /// `const { a, ...rest } = obj`: allocate a record with the remaining fields of `obj`.
+    pub(super) fn object_rest(
+        &mut self,
+        ctx: &mut Context,
+        object: &'s Expr,
+        exclude_keys: &[String],
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let src = self.expression(ctx, object)?;
+        let src = self.defined(ctx, src)?;
+        let src_rec = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
+            .context("object rest destructuring requires a typed record")?;
+        let expected_record = expected
+            .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok());
+        let src_fields: Vec<(String, TypeHandle)> = src_rec
+            .deref(ctx)
+            .fields()
+            .map_err(|_| anyhow!("record without fields"))?
+            .iter()
+            .filter(|(name, _)| !exclude_keys.contains(name))
+            .cloned()
+            .collect();
+        let mut field_values: Vec<(String, Value)> = Vec::with_capacity(src_fields.len());
+        for (field_name, _) in src_fields {
+            let op = FieldGetOp::new(ctx, src, field_name.clone())?;
+            let loaded = self.field_read(ctx, &op)?;
+            let loaded = match expected_record
+                .and_then(|rec| rec.deref(ctx).field(&field_name).map(|(_, ty)| ty))
+            {
+                Some(target_ty) => self.fit(ctx, loaded, target_ty)?,
+                None => loaded,
+            };
+            field_values.push((field_name, loaded));
+        }
+        let record = match expected_record {
+            Some(rec) => rec,
+            None => {
+                let fields = field_values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.get_type(ctx)))
+                    .collect();
+                self.shapes.mir_record(ctx, fields)?
+            }
+        };
+        let mut positioned = Vec::with_capacity(field_values.len());
+        for (name, value) in field_values {
+            let (index, field_ty) = record
+                .deref(ctx)
+                .field(&name)
+                .with_context(|| format!("record has no field {name}"))?;
+            let fitted = self.fit(ctx, value, field_ty)?;
+            positioned.push((index, fitted));
+        }
+        positioned.sort_by_key(|(index, _)| *index);
+        let operands = positioned.into_iter().map(|(_, value)| value).collect();
+        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+    }
 }

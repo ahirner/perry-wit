@@ -159,17 +159,26 @@ impl Shapes<'_> {
     }
 
     fn union_type(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
+        let lookup = (&self.interfaces, &self.type_aliases);
+        let flattened = super::generics::flatten_union_with_lookup(ctx, &lookup, members, 0);
+        let members = flattened.as_slice();
         if members
             .iter()
             .all(|ty| matches!(ty.deref(ctx).kind(), Kind::StringLiteral(_)))
         {
             return Ok(StringType::get(ctx).into());
         }
-        if members.iter().all(|ty| {
-            ty.deref(ctx)
-                .property("ok")
-                .is_some_and(|property| matches!(property.ty.deref(ctx).kind(), Kind::Boolean))
-        }) {
+        if !members.is_empty()
+            && members.iter().all(|ty| {
+                super::generics::resolve_record_properties(ctx, &lookup, *ty, 0).is_some_and(
+                    |props| {
+                        props.iter().any(|(name, prop_ty, _)| {
+                            name == "ok" && matches!(prop_ty.deref(ctx).kind(), Kind::Boolean)
+                        })
+                    },
+                )
+            })
+        {
             return self.result(ctx, members);
         }
         if members.iter().any(|ty| {
@@ -219,8 +228,12 @@ impl Shapes<'_> {
 
     /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
     fn result(&self, ctx: &Context, alternatives: &[ArgumentId]) -> Result<TypeHandle> {
+        let lookup = (&self.interfaces, &self.type_aliases);
         ensure!(
-            alternatives.len() == 2,
+            alternatives.len() == 2
+                || (alternatives.len() == 1
+                    && super::generics::resolve_record_properties(ctx, &lookup, alternatives[0], 0)
+                        .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
             "a tagged result needs exactly two alternatives"
         );
         let mut fields = vec![(
@@ -230,17 +243,18 @@ impl Shapes<'_> {
         for name in ["value", "error"] {
             let mut payload_arg = None;
             for object in alternatives {
-                let (valid_keys, found) = {
-                    let object_ref = object.deref(ctx);
-                    let Kind::Object { properties, .. } = object_ref.kind() else {
-                        bail!("result alternatives only contain ok, value and error");
-                    };
-                    let valid = properties
-                        .iter()
-                        .all(|p| ["ok", "value", "error"].contains(&p.name.as_str()));
-                    let prop = object_ref.property(name).map(|p| p.ty);
-                    (valid, prop)
+                let Some(properties) =
+                    super::generics::resolve_record_properties(ctx, &lookup, *object, 0)
+                else {
+                    bail!("result alternatives only contain ok, value and error");
                 };
+                let valid_keys = properties
+                    .iter()
+                    .all(|(p_name, _, _)| ["ok", "value", "error"].contains(&p_name.as_str()));
+                let found = properties
+                    .iter()
+                    .find(|(p_name, _, _)| p_name == name)
+                    .map(|(_, ty, _)| *ty);
                 ensure!(
                     valid_keys,
                     "result alternatives only contain ok, value and error"
@@ -262,22 +276,28 @@ impl Shapes<'_> {
     }
 
     fn variant(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
+        let lookup = (&self.interfaces, &self.type_aliases);
         let mut cases = Vec::new();
         for member in members {
             let (tag, valid_props, val_arg) = {
-                let member_ref = member.deref(ctx);
-                let Kind::Object { properties, .. } = member_ref.kind() else {
+                let Some(properties) =
+                    super::generics::resolve_record_properties(ctx, &lookup, *member, 0)
+                else {
                     bail!("unions other than tagged object types are not supported yet");
                 };
-                let Some(tag_prop) = member_ref.property("tag") else {
+                let Some((_, tag_ty, _)) =
+                    properties.iter().find(|(p_name, _, _)| p_name == "tag")
+                else {
                     bail!("union members need a literal `tag`");
                 };
-                let tag_ty = tag_prop.ty;
-                let val_arg = member_ref.property("val").map(|p| p.ty);
+                let tag_ty = *tag_ty;
+                let val_arg = properties
+                    .iter()
+                    .find(|(p_name, _, _)| p_name == "val")
+                    .map(|(_, ty, _)| *ty);
                 let valid_props = properties
                     .iter()
-                    .all(|p| p.name == "tag" || p.name == "val");
-                drop(member_ref);
+                    .all(|(p_name, _, _)| p_name == "tag" || p_name == "val");
                 let tag_ref = tag_ty.deref(ctx);
                 let Kind::StringLiteral(tag) = tag_ref.kind() else {
                     bail!("union members need a literal `tag`");

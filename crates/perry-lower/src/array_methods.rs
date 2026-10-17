@@ -241,15 +241,39 @@ impl<'s> FunctionBuilder<'s> {
             !is_async
                 && !is_generator
                 && params.len() <= arguments.len()
-                && params.iter().all(|p| !p.is_rest && p.default.is_none()),
-            "array callbacks must be synchronous with at most three parameters; default and rest parameters are not supported"
+                && params.iter().all(|p| !p.is_rest),
+            "array callbacks must be synchronous with at most three parameters; rest parameters are not supported"
         );
         let saved_locals = self.locals.clone();
         // Guards only grow above this length inside the body; branches truncate back.
         let guards = self.variant_guards.len();
         for (param, &value) in params.iter().zip(arguments) {
-            let slot = self.entry_slot(ctx, value.get_type(ctx));
-            self.store(ctx, slot, value);
+            let init_val = if let Some(default_expr) = &param.default {
+                if self.is_optional(ctx, value) {
+                    let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                    let def_val = self.expression(ctx, default_expr)?;
+                    let target_ty = def_val.get_type(ctx);
+                    self.choose(
+                        ctx,
+                        target_ty,
+                        is_undef,
+                        |b, ctx| {
+                            let d = b.expression_with(ctx, default_expr, Some(target_ty))?;
+                            b.fit(ctx, d, target_ty)
+                        },
+                        |b, ctx| {
+                            let s = b.strip_undefined(ctx, value)?;
+                            b.fit(ctx, s, target_ty)
+                        },
+                    )?
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
+            let slot = self.entry_slot(ctx, init_val.get_type(ctx));
+            self.store(ctx, slot, init_val);
             self.locals.insert(param.id, LocalBinding::plain(slot));
         }
         let finallies = std::mem::take(&mut self.finallies);
@@ -276,6 +300,10 @@ impl<'s> FunctionBuilder<'s> {
             optional,
             empty_returns: Vec::new(),
         });
+        let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
+        let param_defaults: Vec<Option<Expr>> =
+            params.iter().map(|p| p.default.clone()).collect();
+        let body = crate::builder::strip_synthetic_default_guards(body, &param_ids, &param_defaults);
         let mut result = self.statements(ctx, body);
         if result.is_ok() && self.reachable(ctx, self.block) {
             result = self.callback_return(ctx, None);
@@ -676,11 +704,31 @@ impl<'s> FunctionBuilder<'s> {
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
         let (acc_slot, start_step) = if let Some(init_expr) = initial {
-            let init_val = self.expression(ctx, init_expr)?;
+            let expected_acc = if let Expr::Closure { params, .. } = callback {
+                params
+                    .first()
+                    .map(|p| &p.ty)
+                    .filter(|ty| !matches!(ty, HirType::Any | HirType::Unknown))
+                    .and_then(|ty| self.shapes.value_type(ctx, ty).ok())
+            } else {
+                None
+            };
+            let init_val = self.expression_with(ctx, init_expr, expected_acc)?;
             let slot = self.entry_slot(ctx, init_val.get_type(ctx));
             self.store(ctx, slot, init_val);
             (slot, zero)
         } else {
+            let non_empty = self.compare(ctx, CompareKind::Gt, len, zero);
+            let ok_block = self.new_block(ctx, "reduce_non_empty");
+            let err_block = self.new_block(ctx, "reduce_empty_err");
+            self.branch(ctx, non_empty, ok_block, err_block);
+            self.switch_to(err_block);
+            let msg = self.string(ctx, "Reduce of empty array with no initial value");
+            let err = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::TypeError, msg));
+            let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, err));
+            self.propagate(ctx, status);
+            self.after_terminator(ctx);
+            self.switch_to(ok_block);
             let first_idx = if from_right {
                 self.binary(ctx, BinaryKind::Sub, len, one)
             } else {
@@ -712,6 +760,313 @@ impl<'s> FunctionBuilder<'s> {
             Ok(())
         })?;
         self.load(ctx, acc_slot)
+    }
+
+    /// `array.join(separator?)`.
+    pub(super) fn array_join(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        separator: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let sep = match separator {
+            None | Some(Expr::Undefined) => self.string(ctx, ","),
+            Some(sep_expr) => {
+                let val = self.expression(ctx, sep_expr)?;
+                self.display(ctx, val)?
+            }
+        };
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let str_ty = StringType::get(ctx).into();
+        let empty = self.string(ctx, "");
+        let acc_slot = self.entry_slot(ctx, str_ty);
+        self.store(ctx, acc_slot, empty);
+        self.index_loop(ctx, "join", zero, len, |b, ctx, step, next, _| {
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, step, available);
+            let read = b.new_block(ctx, "join_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, step)?;
+            let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
+                let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
+                b.choose_string(
+                    ctx,
+                    undefined,
+                    |b, ctx| Ok(b.string(ctx, "")),
+                    |b, ctx| {
+                        let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, item));
+                        b.choose_string(
+                            ctx,
+                            null,
+                            |b, ctx| Ok(b.string(ctx, "")),
+                            |b, ctx| {
+                                let defined = b.defined(ctx, item)?;
+                                b.display(ctx, defined)
+                            },
+                        )
+                    },
+                )?
+            } else {
+                b.display(ctx, item)?
+            };
+            let gt_zero = b.compare(ctx, CompareKind::Gt, step, zero);
+            let prefix = b.choose(
+                ctx,
+                str_ty,
+                gt_zero,
+                |b, ctx| {
+                    let prev = b.load(ctx, acc_slot)?;
+                    Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prev, sep)))
+                },
+                |b, ctx| b.load(ctx, acc_slot),
+            )?;
+            let next_str = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prefix, elem_str));
+            b.store(ctx, acc_slot, next_str);
+            Ok(())
+        })?;
+        self.load(ctx, acc_slot)
+    }
+
+    fn normalize_slice_bound(
+        &mut self,
+        ctx: &mut Context,
+        bound: Value,
+        len: Value,
+    ) -> Result<Value> {
+        let trunc = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![bound]);
+        let zero = self.number(ctx, 0.0);
+        let is_neg = self.compare(ctx, CompareKind::Lt, trunc, zero);
+        let num_ty = FP64Type::get(ctx).into();
+        self.choose(
+            ctx,
+            num_ty,
+            is_neg,
+            |b, ctx| {
+                let sum = b.binary(ctx, BinaryKind::Add, len, trunc);
+                Ok(b.intrinsic(ctx, Intrinsic::MathMax, vec![sum, zero]))
+            },
+            |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::MathMin, vec![trunc, len])),
+        )
+    }
+
+    /// `array.slice(start?, end?)`.
+    pub(super) fn array_slice(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        start: Option<&'s Expr>,
+        end: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let elem_ty = self.array_element(ctx, array)?;
+        let len = self.array_length(ctx, array);
+        let norm_start = match start {
+            None | Some(Expr::Undefined) => self.number(ctx, 0.0),
+            Some(expr) => {
+                let s = self.number_operand(ctx, expr)?;
+                self.normalize_slice_bound(ctx, s, len)?
+            }
+        };
+        let norm_end = match end {
+            None | Some(Expr::Undefined) => len,
+            Some(expr) => {
+                let e = self.number_operand(ctx, expr)?;
+                self.normalize_slice_bound(ctx, e, len)?
+            }
+        };
+        let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+        self.index_loop(ctx, "slice", norm_start, norm_end, |b, ctx, step, next, _| {
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, step, available);
+            let read = b.new_block(ctx, "slice_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, step)?;
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
+            Ok(())
+        })?;
+        Ok(result)
+    }
+
+    /// `array.reverse()` or `array.toReversed()` when `clone_first`.
+    pub(super) fn array_reverse(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        clone_first: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let elem_ty = self.array_element(ctx, array)?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        if clone_first {
+            let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+            self.index_loop(ctx, "to_reversed", zero, len, |b, ctx, step, next, _| {
+                let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                let idx = b.binary(ctx, BinaryKind::Sub, last, step);
+                let available = b.array_length(ctx, array);
+                let present = b.compare(ctx, CompareKind::Lt, idx, available);
+                let read = b.new_block(ctx, "to_reversed_read");
+                b.branch(ctx, present, read, next);
+                b.switch_to(read);
+                let item = b.element_at(ctx, array, idx)?;
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
+                Ok(())
+            })?;
+            Ok(result)
+        } else {
+            let two = self.number(ctx, 2.0);
+            let half_raw = self.binary(ctx, BinaryKind::Div, len, two);
+            let half = self.intrinsic(ctx, Intrinsic::MathFloor, vec![half_raw]);
+            self.index_loop(ctx, "reverse", zero, half, |b, ctx, step, _, _| {
+                let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                let other_idx = b.binary(ctx, BinaryKind::Sub, last, step);
+                let left = b.element_at(ctx, array, step)?;
+                let right = b.element_at(ctx, array, other_idx)?;
+                b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, step, right));
+                b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, other_idx, left));
+                Ok(())
+            })?;
+            Ok(array)
+        }
+    }
+
+    /// `array.flat(depth?)`.
+    pub(super) fn array_flat(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        depth: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let outer_elem_ty = self.array_element(ctx, array)?;
+        let depth_num = match depth {
+            None | Some(Expr::Undefined) => 1,
+            Some(Expr::Number(n)) if *n <= 0.0 => 0,
+            Some(Expr::Number(n)) if (*n as i32) == 1 => 1,
+            Some(Expr::Integer(n)) if *n <= 0 => 0,
+            Some(Expr::Integer(1)) => 1,
+            _ => bail!("array.flat requires a constant depth of 0 or 1 in typed arrays"),
+        };
+        if depth_num == 0 {
+            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])));
+        }
+        if let Ok(inner_arr_ty) = TypedHandle::<ArrayType>::from_handle(outer_elem_ty, ctx) {
+            let inner_elem_ty = inner_arr_ty.deref(ctx).element();
+            let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, inner_elem_ty, vec![]));
+            let len = self.array_length(ctx, array);
+            let zero = self.number(ctx, 0.0);
+            self.index_loop(ctx, "flat", zero, len, |b, ctx, step, next, _| {
+                let available = b.array_length(ctx, array);
+                let present = b.compare(ctx, CompareKind::Lt, step, available);
+                let read = b.new_block(ctx, "flat_read");
+                b.branch(ctx, present, read, next);
+                b.switch_to(read);
+                let sub = b.element_at(ctx, array, step)?;
+                b.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, result, sub));
+                Ok(())
+            })?;
+            Ok(result)
+        } else {
+            Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])))
+        }
+    }
+
+    /// `array.findLast(callback)` or `array.findLastIndex(callback)` when `index_only`.
+    pub(super) fn array_find_last(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        index_only: bool,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let limit = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        let miss = if index_only {
+            self.number(ctx, -1.0)
+        } else {
+            let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
+            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
+        };
+        let result_ty = miss.get_type(ctx);
+        let result = self.entry_slot(ctx, result_ty);
+        self.store(ctx, result, miss);
+        self.index_loop(ctx, "find_last", zero, limit, |b, ctx, step, next, done| {
+            let last = b.binary(ctx, BinaryKind::Sub, limit, one);
+            let current = b.binary(ctx, BinaryKind::Sub, last, step);
+            let available = b.array_length(ctx, array);
+            let present = b.compare(ctx, CompareKind::Lt, current, available);
+            let read = b.new_block(ctx, "find_last_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
+            let item = b.element_at(ctx, array, current)?;
+            let matched = b.array_callback(ctx, callback, &[item, current, array])?;
+            let keep = b.truthy(ctx, matched)?;
+            let hit = b.new_block(ctx, "find_last_hit");
+            b.branch(ctx, keep, hit, next);
+            b.switch_to(hit);
+            let value = if index_only {
+                current
+            } else {
+                b.fit(ctx, item, result_ty)?
+            };
+            b.store(ctx, result, value);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        self.load(ctx, result)
+    }
+
+    /// `array.at(index?)`.
+    pub(super) fn array_at(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let raw_idx = self.number_or(ctx, index, 0.0)?;
+        let idx = self.intrinsic(ctx, Intrinsic::MathTrunc, vec![raw_idx]);
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
+        let num_ty = FP64Type::get(ctx).into();
+        let resolved_idx = self.choose(
+            ctx,
+            num_ty,
+            is_neg,
+            |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, idx)),
+            |_, _| Ok(idx),
+        )?;
+        let ge_zero = self.compare(ctx, CompareKind::Ge, resolved_idx, zero);
+        let lt_len = self.compare(ctx, CompareKind::Lt, resolved_idx, len);
+        let in_bounds = self.choose(
+            ctx,
+            ge_zero.get_type(ctx),
+            ge_zero,
+            |_, _| Ok(lt_len),
+            |b, ctx| Ok(b.boolean(ctx, false)),
+        )?;
+        let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
+        self.choose(
+            ctx,
+            opt_ty,
+            in_bounds,
+            |b, ctx| {
+                let item = b.element_at(ctx, array, resolved_idx)?;
+                b.fit(ctx, item, opt_ty)
+            },
+            |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+        )
     }
 
     /// `for (i = start; i < limit; i++) body` over `f64` indices. `body` gets `i`, the block

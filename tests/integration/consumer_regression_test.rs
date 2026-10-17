@@ -380,3 +380,242 @@ fn unsupported_iterators_have_direct_diagnostics() {
         );
     }
 }
+
+#[test]
+fn text_pipeline_join_replace_regex_split_and_non_throwing_char_loops() {
+    let source = r#"
+export function charLoop(s: string): number {
+    let count = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '-') count++;
+    }
+    return count;
+}
+
+export function run(): number {
+    const words = '  hello,  world;foo\tbar  '.trim().split(/[,;\s]+/);
+    if (words.join('-') !== 'hello-world-foo-bar') return 1;
+    if (words.join('') !== 'helloworldfoobar') return 2;
+    if (words.join() !== 'hello,world,foo,bar') return 3;
+    const nums: number[] = [1, 2, 3];
+    if (nums.join(':') !== '1:2:3') return 4;
+    const empty: string[] = [];
+    if (empty.join(',') !== '') return 5;
+    const opts: Array<string | null | undefined> = ['a', null, undefined, 'b'];
+    if (opts.join('-') !== 'a---b') return 6;
+
+    if ('a-b-c'.replace('-', '_') !== 'a_b-c') return 7;
+    if ('a-b-c'.replaceAll('-', '_') !== 'a_b_c') return 8;
+    if ('hello   world\tfoo'.replace(/\s+/, ' ') !== 'hello world\tfoo') return 9;
+    if ('hello   world\tfoo'.replace(/\s+/g, ' ') !== 'hello world foo') return 10;
+    if ('hello   world\tfoo'.replaceAll(/\s+/g, '_') !== 'hello_world_foo') return 11;
+    if ('abc'.replace(/b/, '[$&:$`:$\':$$]') !== 'a[b:a:c:$]c') return 12;
+    if ('ab'.replaceAll('', '-') !== '-a-b-') return 13;
+
+    if ('  hi  '.trimStart() !== 'hi  ' || '  hi  '.trimEnd() !== '  hi') return 14;
+    if ('5'.padStart(3, '0') !== '005' || '5'.padEnd(3, '0') !== '500') return 15;
+    if ('abc'.padStart(6, 'xy') !== 'xyxabc' || 'abc'.padEnd(6, 'xy') !== 'abcxyx') return 16;
+    if ('é🙂z'.at(0) !== 'é' || 'é🙂z'.at(-2) !== '🙂' || 'é🙂z'.at(9) !== undefined) return 17;
+
+    let clean = '';
+    for (const ch of 'a-b c') {
+        clean += ch === '-' || ch === ' ' ? '_' : ch;
+    }
+    if (clean !== 'a_b_c') return 18;
+    return charLoop('a-b-c');
+}
+"#;
+    let mut program = Program::checked(source, "text-pipeline.ts");
+    let char_loop = program.call(
+        "charLoop",
+        &[wasmtime::Val::I32(0)],
+    );
+    assert_eq!(
+        char_loop.0.len(),
+        1,
+        "in-bounds character loop must not emit an exception status return"
+    );
+    assert_eq!(program.outcome("run", &[]), (2.0, 0));
+
+    let err = perry_wit::compile_core(
+        "export function run(): string { return 'a'.replaceAll(/a/, 'b'); }",
+        "replace-all-non-global.ts",
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("global"), "{err:#}");
+}
+
+#[test]
+fn typed_record_spread_and_destructuring_across_bindings_loops_and_params() {
+    let source = r#"
+interface Item { id: number; name: string; plu: string; price?: number }
+interface Pair { a: number; b: number; c?: number }
+
+function sumPair({ a, b: second, c = 10 }: Pair): number {
+    return a + second + c;
+}
+
+export function run(): number {
+    const base: Item = { id: 1, name: 'Soup', plu: '100', price: 500 };
+    const updated: Item = { ...base, plu: '200' };
+    if (updated.id !== 1 || updated.name !== 'Soup' || updated.plu !== '200' || updated.price !== 500) return 1;
+    if (base.plu !== '100') return 2;
+
+    const { id, name: label, price = 0, ...rest } = updated;
+    if (id !== 1 || label !== 'Soup' || price !== 500 || rest.plu !== '200') return 3;
+
+    const items: Pair[] = [{ a: 1, b: 2 }, { a: 3, b: 4, c: 5 }];
+    let total = 0;
+    for (const { a, b: beta, c = 10 } of items) {
+        total += a + beta + c;
+    }
+    if (total !== 25) return 4;
+
+    const mapped = items.map(({ a, b, c = 1 }) => a * 10 + b + c);
+    if (mapped[0] !== 13 || mapped[1] !== 39) return 5;
+
+    if (sumPair({ a: 2, b: 3 }) !== 15 || sumPair({ a: 2, b: 3, c: 4 }) !== 9) return 6;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "record-spread-destructure.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn default_and_rest_parameters_on_functions_and_closures() {
+    let source = r#"
+function formatTag(label = 'item', count = 1, suffix: string | null = null): string {
+    return `${label}:${count}:${suffix ?? 'none'}`;
+}
+
+function sumWithBase(base = 10, ...values: number[]): number {
+    return values.reduce((acc, v) => acc + v, base);
+}
+
+export function run(): number {
+    if (formatTag() !== 'item:1:none') return 1;
+    if (formatTag(undefined, 5) !== 'item:5:none') return 2;
+    if (formatTag('box', undefined, 'kg') !== 'box:1:kg') return 3;
+    if (formatTag('box', 2, null) !== 'box:2:none') return 4;
+
+    if (sumWithBase() !== 10) return 5;
+    if (sumWithBase(5, 1, 2, 3) !== 11) return 6;
+
+    const arr: Array<number | undefined> = [1, undefined, 3];
+    const filled = arr.map((x = 9) => x * 2);
+    if (filled[0] !== 2 || filled[1] !== 18 || filled[2] !== 6) return 7;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "default-rest-params.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn temporal_plain_date_subtract_and_compact_helper_footprint() {
+    let source = r#"
+export function run(): number {
+    const leap = Temporal.PlainDate.from('2024-02-29');
+    const prev = leap.subtract({ days: 1 });
+    const next = leap.add({ days: 1 });
+    if (prev.toString() !== '2024-02-28') return 1;
+    if (next.toString() !== '2024-03-01') return 2;
+    if (leap.year !== 2024 || leap.month !== 2 || leap.day !== 29 || leap.dayOfWeek !== 4) return 3;
+
+    const dt = Temporal.PlainDateTime.from('2024-03-01T12:30:00');
+    const dtPrev = dt.subtract({ days: 2 });
+    if (dtPrev.toString() !== '2024-02-28T12:30:00') return 4;
+
+    const inst = Temporal.Instant.from('1970-01-01T00:00:02.500Z');
+    if (inst.epochMilliseconds !== 2500 || inst.toString() !== '1970-01-01T00:00:02.5Z') return 5;
+    if (Temporal.Now.timeZoneId() !== 'UTC') return 6;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "temporal-compact.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+
+    let date_only = perry_wit::compile_core(
+        "export function check(): number { const d = Temporal.PlainDate.from('2024-02-29').subtract({ days: 1 }); return d.day; }",
+        "plain-date-only.ts",
+    )
+    .unwrap();
+    assert!(
+        date_only.len() < 24_576,
+        "PlainDate-only module should remain compact, got {} bytes",
+        date_only.len()
+    );
+}
+
+#[test]
+fn smaller_gaps_inference_logical_values_utility_types_and_collection_methods() {
+    let source = r#"
+type A = { tag: 'a'; val: number };
+type B = { tag: 'b'; val: string };
+type C = { tag: 'c'; val: boolean };
+type AB = A | B;
+type ABC = AB | C;
+type OnlyAB = Exclude<ABC, C>;
+type JustA = Extract<ABC, { tag: 'a' }>;
+type DefiniteString = NonNullable<string | null | undefined>;
+
+function checkVariant(x: ABC): number {
+    if (x.tag === 'a' && x.val > 5) return x.val;
+    if (x.tag !== 'b' || x.val.length === 0) return 0;
+    return x.val.length;
+}
+
+function reduceAndForEach(items: number[]): number {
+    let sum = 0;
+    items.forEach((x, idx) => { sum += x + idx; });
+    const prod = items.reduce((acc, x) => acc * x, 1);
+    const bare = items.reduce((acc, x) => acc + x);
+    return sum + prod + bare;
+}
+
+export function run(): number {
+    const map = new Map<string, { label: string }>();
+    map.set('k', { label: 'found' });
+    const hit = map.get('k')?.label ?? null;
+    const miss = map.get('missing')?.label ?? null;
+    if (hit !== 'found' || miss !== null) return 1;
+
+    const s1: DefiniteString = '' || 'fallback';
+    const s2: DefiniteString = 'primary' || 'fallback';
+    const s3: DefiniteString = 'left' && 'right';
+    const s4: DefiniteString = '' && 'right';
+    if (s1 !== 'fallback' || s2 !== 'primary' || s3 !== 'right' || s4 !== '') return 2;
+
+    const ab: OnlyAB = { tag: 'a', val: 9 };
+    const ja: JustA = { tag: 'a', val: 3 };
+    if (checkVariant(ab) !== 9 || ja.val !== 3 || checkVariant({ tag: 'b', val: 'hi' }) !== 2) return 3;
+
+    const nums: number[] = [2, 3, 4];
+    if (reduceAndForEach(nums) !== (2 + 0 + 3 + 1 + 4 + 2) + 24 + 9) return 4;
+    if (nums.at(-1) !== 4 || nums.at(0) !== 2 || nums.at(5) !== undefined) return 5;
+    if (nums.findLast(x => x < 4) !== 3 || nums.findLastIndex(x => x < 4) !== 1) return 6;
+    if (nums.findLast(x => x > 9) !== undefined || nums.findLastIndex(x => x > 9) !== -1) return 7;
+
+    const rev = nums.toReversed();
+    if (rev.join(',') !== '4,3,2' || nums.join(',') !== '2,3,4') return 8;
+    const copy = nums.slice(1, -1);
+    if (copy.join(',') !== '3') return 9;
+    const mutRev = [1, 2, 3].reverse();
+    if (mutRev.join(',') !== '3,2,1') return 10;
+
+    const nested: number[][] = [[1, 2], [], [3]];
+    if (nested.flat().join(',') !== '1,2,3') return 11;
+
+    const hex = (255).toString(16);
+    const bin = (-10).toString(2);
+    if (hex !== 'ff' || bin !== '-1010') return 12;
+
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "smaller-gaps.ts");
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+

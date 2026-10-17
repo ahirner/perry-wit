@@ -367,15 +367,22 @@ impl<'s> FunctionBuilder<'s> {
         Ok(out)
     }
 
-    pub(super) fn array_for_each(
+    pub(crate) fn array_for_each(
         &mut self,
         ctx: &mut Context,
         arr: Value,
         callback: &'s Expr,
     ) -> Result<Value> {
+        let arr = self.defined(ctx, arr)?;
+        self.array_element(ctx, arr)?;
         let limit = self.array_length(ctx, arr);
         let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "foreach", zero, limit, |b, ctx, idx, _, _| {
+        self.index_loop(ctx, "foreach", zero, limit, |b, ctx, idx, next, _| {
+            let available = b.array_length(ctx, arr);
+            let present = b.compare(ctx, CompareKind::Lt, idx, available);
+            let read = b.new_block(ctx, "foreach_read");
+            b.branch(ctx, present, read, next);
+            b.switch_to(read);
             let item = b.element_at(ctx, arr, idx)?;
             b.array_callback(ctx, callback, &[item, idx, arr])?;
             Ok(())

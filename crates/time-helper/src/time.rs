@@ -6,7 +6,7 @@ mod format;
 #[path = "parse.rs"]
 mod parse;
 
-use ixdtf::records::UtcOffsetRecordOrZ;
+use parse::Offset;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 const NANOS_PER_DAY: i128 = 86_400 * NANOS_PER_SECOND;
@@ -54,11 +54,10 @@ impl Instant {
     /// Calendar and named-zone annotations are outside this supported subset.
     pub fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
-        let date = parsed.date.ok_or(Error::Syntax)?;
         let time = parsed.time.ok_or(Error::Syntax)?;
         let offset = parsed.offset.ok_or(Error::Syntax)?;
-        let local = parse::date_time(date, time)?;
-        Self::from_epoch_nanoseconds(local.position() - parse::offset_nanoseconds(offset)?)
+        let local = parse::date_time(parsed.date, time)?;
+        Self::from_epoch_nanoseconds(local.position() - parse::offset_nanoseconds(offset))
     }
 
     /// UTC interchange: YYYY-MM-DDTHH:mm:ss[.1-9 digits]Z, without leap seconds.
@@ -127,16 +126,10 @@ impl PlainDateTime {
     /// Temporal.PlainDateTime.from: numeric offsets are ignored; Z is rejected.
     pub fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
-        if parsed.offset == Some(UtcOffsetRecordOrZ::Z) {
+        if parsed.offset == Some(Offset::Z) {
             return Err(Error::Syntax);
         }
-        if let Some(offset) = parsed.offset {
-            parse::offset_nanoseconds(offset)?;
-        }
-        parse::date_time(
-            parsed.date.ok_or(Error::Syntax)?,
-            parsed.time.unwrap_or_default(),
-        )
+        parse::date_time(parsed.date, parsed.time.unwrap_or_default())
     }
 
     /// Temporal.PlainDate.from: validates like PlainDateTime, then discards the time.

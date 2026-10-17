@@ -537,6 +537,40 @@ pub(super) fn unresolved_types(
     }
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
+    for function in &mut hir.functions {
+        locals.clear();
+        let mut env = FunctionEnv {
+            ctx,
+            base: &module_env,
+            interfaces: &hir.interfaces,
+            type_aliases: &hir.type_aliases,
+            locals: &mut locals,
+            integer_aliases: &integer_aliases,
+            foreign,
+            imported_types: &imported_types,
+            metadata,
+        };
+        for param in &mut function.params {
+            if matches!(param.ty, HirType::Any | HirType::Unknown) {
+                if let Some(default_expr) = &param.default {
+                    let def_ty = expression(default_expr, &mut env);
+                    if is_resolvable_type(&def_ty) {
+                        param.ty = def_ty;
+                    }
+                } else if param.is_rest {
+                    param.ty = HirType::Array(Box::new(HirType::Number));
+                }
+            } else if let Some(default_expr) = &param.default
+                && matches!(default_expr, Expr::Null)
+                && is_resolvable_type(&param.ty)
+            {
+                param.ty = with_absences(param.ty.clone(), vec![HirType::Null]);
+            }
+            env.locals.insert(param.id, param.ty.clone());
+        }
+    }
+    locals.clear();
+    module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let mut env = FunctionEnv {
             ctx,

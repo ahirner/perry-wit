@@ -396,8 +396,8 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
 fn unsupported_temporal_forms_are_rejected() {
     for (source, message) in [
         (
-            "export function f(): string { return Temporal.Now.instant().toString(); }",
-            "Temporal.Now.instant is not supported",
+            "export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }",
+            "Temporal.ZonedDateTime.from is not supported",
         ),
         (
             "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ months: 1 }).toString(); }",

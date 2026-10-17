@@ -134,22 +134,58 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         for (index, (&param, &binding)) in params.iter().zip(&signature.params).enumerate() {
-            let value = builder.entry.deref(ctx).get_argument(index);
-            let slot = builder.slot(ctx, value.get_type(ctx));
-            builder.store(ctx, slot, value);
-            builder.locals.insert(
-                param,
-                LocalBinding {
-                    slot,
-                    integer: binding.integer,
-                },
-            );
+            let arg_val = builder.entry.deref(ctx).get_argument(index);
+            let base_binding = signature
+                .base_params
+                .get(index)
+                .copied()
+                .unwrap_or(binding);
+            if let Some(Some(default_expr)) = signature.defaults.get(index) {
+                let is_undef = if builder.is_optional(ctx, arg_val) {
+                    builder.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, arg_val))
+                } else {
+                    builder.boolean(ctx, false)
+                };
+                let init_val = builder.choose(
+                    ctx,
+                    base_binding.carrier,
+                    is_undef,
+                    |b, ctx| {
+                        let d = b.expression_with(ctx, default_expr, Some(base_binding.carrier))?;
+                        b.fit_binding(ctx, d, base_binding)
+                    },
+                    |b, ctx| {
+                        let s = b.strip_undefined(ctx, arg_val)?;
+                        b.fit_binding(ctx, s, base_binding)
+                    },
+                )?;
+                let slot = builder.entry_slot(ctx, base_binding.carrier);
+                builder.store(ctx, slot, init_val);
+                builder.locals.insert(
+                    param,
+                    LocalBinding {
+                        slot,
+                        integer: base_binding.integer,
+                    },
+                );
+            } else {
+                let slot = builder.entry_slot(ctx, arg_val.get_type(ctx));
+                builder.store(ctx, slot, arg_val);
+                builder.locals.insert(
+                    param,
+                    LocalBinding {
+                        slot,
+                        integer: binding.integer,
+                    },
+                );
+            }
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
             let await_ = AwaitOp::new(ctx, promise)?;
             builder.append_value(ctx, &await_);
         }
+        let body = strip_synthetic_default_guards(body, params, &signature.defaults);
         builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);
@@ -344,10 +380,6 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn after_terminator(&mut self, ctx: &mut Context) {
         let dead = self.new_block(ctx, "unreachable");
         self.switch_to(dead);
-    }
-
-    pub(super) fn slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        self.emit_value(ctx, |ctx| LocalOp::new(ctx, ty))
     }
 
     pub(super) fn store(&mut self, ctx: &mut Context, slot: Value, value: Value) {
@@ -606,4 +638,42 @@ pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::
     for block in dead {
         BasicBlock::erase(block, ctx);
     }
+}
+
+pub(super) fn strip_synthetic_default_guards<'a>(
+    mut body: &'a [Stmt],
+    params: &[LocalId],
+    defaults: &[Option<Expr>],
+) -> &'a [Stmt] {
+    while let Some(Stmt::If {
+        condition:
+            Expr::Compare {
+                op: CompareOp::Eq,
+                left,
+                right,
+            },
+        then_branch,
+        else_branch: None,
+    }) = body.first()
+    {
+        let param_id = match (&**left, &**right) {
+            (Expr::LocalGet(id), Expr::Undefined) | (Expr::Undefined, Expr::LocalGet(id)) => {
+                Some(*id)
+            }
+            _ => None,
+        };
+        if let Some(id) = param_id
+            && let Some(idx) = params.iter().position(|p| *p == id)
+            && defaults.get(idx).is_some_and(Option::is_some)
+            && matches!(
+                then_branch.as_slice(),
+                [Stmt::Expr(Expr::LocalSet(set_id, _))] if *set_id == id
+            )
+        {
+            body = &body[1..];
+        } else {
+            break;
+        }
+    }
+    body
 }

@@ -10,6 +10,7 @@ pub(crate) struct Iteration {
 
 pub(crate) enum RecordExpr<'a> {
     Value(&'a Expr),
+    RequireObject(&'a Expr),
     Length(&'a Expr),
     Close,
 }
@@ -99,6 +100,7 @@ impl Iteration {
         }
         Some(match runtime(expr)? {
             ("arrayRecordIndex", [value]) => RecordExpr::Value(value),
+            ("requireObjectCoercible", [value, ..]) => RecordExpr::RequireObject(value),
             ("arrayRecordLength", [source]) => RecordExpr::Length(source),
             ("arrayRecordPayload", [_, Expr::LocalSet(_, value), _]) => RecordExpr::Value(value),
             ("arrayRecordClose", _) => RecordExpr::Close,

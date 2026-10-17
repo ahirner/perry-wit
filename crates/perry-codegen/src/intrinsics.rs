@@ -65,6 +65,21 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
+        if intrinsic == Intrinsic::NumberToStringRadix {
+            let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
+            let norm_tag = self.canonical_numeric_tag(ctx, tag);
+            let radix_op = op.deref(ctx).get_operand(1);
+            let radix = self.mapped(ctx, radix_op)?;
+            let value = self.runtime(
+                ctx,
+                Runtime::StdNumberToStringRadix,
+                vec![norm_tag, payload, radix],
+            );
+            let status = self.runtime(ctx, Runtime::Status, vec![]);
+            self.throw_status_if(ctx, status, status);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         let predicate = match intrinsic {
             Intrinsic::NumberIsNaN => Some(NumberPredicate::NaN),
             Intrinsic::NumberIsFinite => Some(NumberPredicate::Finite),
@@ -587,6 +602,7 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::BigIntToString => Runtime::StdBigintToString,
                     Intrinsic::StringFromCodePoint => Runtime::StdStringFromCodePoint,
                     Intrinsic::StringCodePointAt => Runtime::StdStringCodePointAt,
+                    Intrinsic::StringAt => Runtime::StdStringAt,
                     Intrinsic::StringIndex => Runtime::StdStringIndex,
                     Intrinsic::StringSlice => Runtime::StdStringSlice,
                     Intrinsic::StringSubstring => Runtime::StdStringSubstring,
@@ -595,6 +611,12 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::StringStartsWith => Runtime::StdStringStartsWith,
                     Intrinsic::StringEndsWith => Runtime::StdStringEndsWith,
                     Intrinsic::StringTrim => Runtime::StdStringTrim,
+                    Intrinsic::StringTrimStart => Runtime::StdStringTrimStart,
+                    Intrinsic::StringTrimEnd => Runtime::StdStringTrimEnd,
+                    Intrinsic::StringPadStart => Runtime::StdStringPadStart,
+                    Intrinsic::StringPadEnd => Runtime::StdStringPadEnd,
+                    Intrinsic::StringReplace => Runtime::StdStringReplace,
+                    Intrinsic::StringReplaceAll => Runtime::StdStringReplaceAll,
                     Intrinsic::StringSplit => Runtime::StdStringSplit,
                     Intrinsic::StringRepeat => Runtime::StdStringRepeat,
                     Intrinsic::BytesNew => Runtime::StdBytesNew,
@@ -619,6 +641,8 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::UrlAppend => Runtime::WebUrlAppend,
                     Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
                     Intrinsic::RegexSearch => Runtime::StdRegexSearch,
+                    Intrinsic::RegexReplace => Runtime::StdRegexReplace,
+                    Intrinsic::RegexSplit => Runtime::StdRegexSplit,
                     Intrinsic::DecoderValidateLabel => Runtime::StdDecoderValidateLabel,
                     Intrinsic::DecoderNew => Runtime::StdDecoderNew,
                     Intrinsic::TextDecode => Runtime::StdDecoderDecode,

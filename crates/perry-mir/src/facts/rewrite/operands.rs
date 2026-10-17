@@ -233,6 +233,7 @@ fn intrinsic_operand_types(
             }
         }
         crate::intrinsics::Intrinsic::NumberToString
+        | crate::intrinsics::Intrinsic::NumberToStringRadix
         | crate::intrinsics::Intrinsic::NumberIsNaN
         | crate::intrinsics::Intrinsic::NumberIsFinite
         | crate::intrinsics::Intrinsic::NumberIsInteger
