@@ -53,7 +53,7 @@ impl<'s> FunctionBuilder<'s> {
         let arg = |index: usize| args.get(index);
         let method = method.name();
         if let Some(value) = self.collection_method(ctx, receiver, method, args)? {
-            return Ok(value);
+            return Ok(Some(value));
         }
         if kind(ctx, receiver)? == Kind::Array
             && let Some(method) = Method::parse(method)

@@ -118,23 +118,24 @@ pub(super) fn identifier(name: &str) -> Result<Identifier> {
     Identifier::try_from(name.to_string()).map_err(|_| anyhow!("{name} is not a MIR identifier"))
 }
 
-fn record_name(fields: &[&str]) -> String {
-    if fields.is_empty() {
-        "shape_".to_string()
-    } else {
-        format!(
-            "shape_{}",
-            fields
-                .join("_")
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                })
-                .collect::<String>()
-        )
+fn record_name<'a>(prefix: Option<&str>, fields: impl IntoIterator<Item = &'a str>) -> String {
+    let mut name = match prefix {
+        Some(prefix) => format!("{prefix}_shape_"),
+        None => "shape_".to_owned(),
+    };
+    for (index, field) in fields.into_iter().enumerate() {
+        if index > 0 {
+            name.push('_');
+        }
+        name.extend(field.chars().map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        }));
     }
+    name
 }
 
 impl<'h> Shapes<'h> {
@@ -153,7 +154,7 @@ impl<'h> Shapes<'h> {
                     continue;
                 };
                 if import.source == "perry:types"
-                    && let Some(spec) = Self::perry_integer_spec(&format!("perry:types/{imported}"))
+                    && let Some(spec) = Self::perry_integer_spec(imported)
                 {
                     integer_imports.insert(local.as_str(), spec);
                     continue;
@@ -361,7 +362,7 @@ impl<'h> Shapes<'h> {
         ctx: &Context,
         ty: TypeHandle,
     ) -> Option<(&'h str, Vec<ArgumentId>)> {
-        let inner = crate::optional_value(ctx, ty).unwrap_or(ty);
+        let inner = crate::present_type(ctx, ty);
         let (name, args) = self.class_records.borrow().get(&inner)?.clone();
         let (&class_name, _) = self.classes.get_key_value(name.as_str())?;
         Some((class_name, args))
@@ -433,7 +434,10 @@ impl<'h> Shapes<'h> {
     }
 
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        if let Some((width, _)) = Self::perry_integer_spec(name) {
+        if let Some((width, _)) = name
+            .strip_prefix("perry:types/")
+            .and_then(Self::perry_integer_spec)
+        {
             return Ok(if width == 64 {
                 perry_mir::BigIntType::get(ctx).into()
             } else {
@@ -514,7 +518,6 @@ impl<'h> Shapes<'h> {
         mut fields: Vec<(&str, ArgumentId, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
-        let names: Vec<&str> = fields.iter().map(|(name, _, _)| *name).collect();
         if let Some(named) = named {
             let reentry = self.pending.borrow().get(named).cloned();
             match reentry {
@@ -525,10 +528,7 @@ impl<'h> Shapes<'h> {
                 Some(PendingShape::Resolving) => {
                     let mut count = self.reserved.borrow_mut();
                     *count += 1;
-                    let base = match prefix {
-                        Some(p) => format!("{p}_{}", record_name(&names)),
-                        None => record_name(&names),
-                    };
+                    let base = record_name(prefix, fields.iter().map(|(name, _, _)| *name));
                     let reserved = format!("{base}_rec{}", *count);
                     self.pending
                         .borrow_mut()
@@ -584,18 +584,17 @@ impl<'h> Shapes<'h> {
         self.mir_record_prefix(ctx, fields, None, RecordKind::Object)
     }
 
-    pub(super) fn mir_record_kind(
+    pub(super) fn mir_tuple(
         &self,
         ctx: &Context,
         fields: Vec<(String, TypeHandle)>,
-        tuple: bool,
     ) -> Result<TypedHandle<RecordType>> {
-        let kind = if tuple {
-            RecordKind::Tuple
-        } else {
-            RecordKind::Object
-        };
-        self.mir_record_prefix(ctx, fields, tuple.then_some(kind.name()), kind)
+        self.mir_record_prefix(
+            ctx,
+            fields,
+            Some(RecordKind::Tuple.name()),
+            RecordKind::Tuple,
+        )
     }
 
     pub(super) fn mir_record_prefix(
@@ -608,21 +607,15 @@ impl<'h> Shapes<'h> {
         if kind == RecordKind::Object {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }
-        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
-        let base = record_name(&names);
-        let base = match prefix {
-            Some(p) => format!("{p}_{base}"),
-            None => base,
-        };
+        let base = record_name(prefix, fields.iter().map(|(name, _)| name.as_str()));
         // The first name whose definition matches, or which is still free.
         let mut suffix = 1;
         loop {
             let name = if suffix == 1 {
-                base.clone()
+                identifier(&base)?
             } else {
-                format!("{base}_{suffix}")
+                identifier(&format!("{base}_{suffix}"))?
             };
-            let name = identifier(&name)?;
             let record = RecordType::get_kind(ctx, name.clone(), None, kind)
                 .map_err(|e| anyhow!("{}", e.disp(ctx)))?;
             let definition = record.deref(ctx);

@@ -85,13 +85,8 @@ impl HeapFacts {
 }
 
 impl ProgramFacts {
-    pub(crate) fn array_length(
-        &self,
-        ctx: &Context,
-        function: &FuncOp,
-        array: Value,
-    ) -> Option<(u32, u32)> {
-        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+    pub(crate) fn array_length(&self, function: &FuncOp, array: Value) -> Option<(u32, u32)> {
+        let state = &self.states[self.generic[&function.get_operation()]];
         let base = *state.heap_values.get(&array)?;
         let Range::Bounds(length) = self.heap.length(base) else {
             return None;
@@ -106,10 +101,10 @@ impl ProgramFacts {
         array: Value,
         index: Value,
     ) -> bool {
-        let Some((minimum, _)) = self.array_length(ctx, function, array) else {
+        let Some((minimum, _)) = self.array_length(function, array) else {
             return false;
         };
-        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+        let state = &self.states[self.generic[&function.get_operation()]];
         crate::optional::optional_value(ctx, index.get_type(ctx)).is_none()
             && matches!(state.range(index), Range::Bounds(Interval { lower: 0.., upper }) if upper < i128::from(minimum))
     }
@@ -169,23 +164,22 @@ impl Solver {
         Some(cell)
     }
 
-    fn heap_object(&mut self, ctx: &Context, ty: TypeHandle, open: bool) -> usize {
+    fn heap_object(&mut self, ctx: &Context, ty: TypeHandle, open: bool) -> Result<usize> {
         let id = self.analysis.heap.objects.len();
         let ty = payload(ctx, ty);
         let shape = ty.deref(ctx);
         let contents = if let Some(record) = shape.downcast_ref::<RecordType>() {
             Contents::Record(
                 record
-                    .fields()
-                    .expect("resolved record schema")
+                    .fields()?
                     .iter()
                     .map(|&(_, ty)| self.heap_cell(ty, Some(id)))
                     .collect(),
             )
         } else {
-            let array = shape.downcast_ref::<ArrayType>().expect("aggregate schema");
+            let array = TypedHandle::<ArrayType>::from_handle(ty, ctx)?;
             Contents::Array {
-                element: self.heap_cell(array.element(), Some(id)),
+                element: self.heap_cell(array.deref(ctx).element(), Some(id)),
                 length: Range::Bottom,
                 readers: BTreeSet::new(),
             }
@@ -209,32 +203,30 @@ impl Solver {
             self.analysis.heap.summaries.insert(ty, id);
             self.work.enqueue(Work::OpenObject(id));
         }
-        id
+        Ok(id)
     }
 
-    fn heap_summary(&mut self, ctx: &Context, ty: TypeHandle) -> usize {
+    fn heap_summary(&mut self, ctx: &Context, ty: TypeHandle) -> Result<usize> {
         let ty = payload(ctx, ty);
-        self.analysis
-            .heap
-            .summaries
-            .get(&ty)
-            .copied()
-            .unwrap_or_else(|| self.heap_object(ctx, ty, true))
+        match self.analysis.heap.summaries.get(&ty) {
+            Some(&id) => Ok(id),
+            None => self.heap_object(ctx, ty, true),
+        }
     }
 
-    fn heap_allocation(&mut self, ctx: &Context, id: usize, value: Value) -> Option<usize> {
-        let cell = self.heap_value(ctx, id, value)?;
-        Some(
-            self.analysis.heap.cells[cell]
-                .objects
-                .first()
-                .copied()
-                .unwrap_or_else(|| {
-                    let object = self.heap_object(ctx, value.get_type(ctx), false);
-                    self.add_object(ctx, cell, object);
-                    object
-                }),
-        )
+    fn heap_allocation(&mut self, ctx: &Context, id: usize, value: Value) -> Result<Option<usize>> {
+        let Some(cell) = self.heap_value(ctx, id, value) else {
+            return Ok(None);
+        };
+        let object = match self.analysis.heap.cells[cell].objects.first() {
+            Some(&object) => object,
+            None => {
+                let object = self.heap_object(ctx, value.get_type(ctx), false)?;
+                self.add_object(ctx, cell, object)?;
+                object
+            }
+        };
+        Ok(Some(object))
     }
 
     fn heap_changed(&mut self, cell: usize) {
@@ -295,20 +287,20 @@ impl Solver {
         }
     }
 
-    fn add_object(&mut self, ctx: &Context, cell: usize, object: usize) {
+    fn add_object(&mut self, ctx: &Context, cell: usize, object: usize) -> Result<()> {
         self.add_layout_object(cell, object);
         if self.analysis.heap.cells[cell].objects.contains(&object) {
-            return;
+            return Ok(());
         }
         if self.analysis.heap.cells[cell].summarized {
             self.mark_open(object);
-            return;
+            return Ok(());
         }
         self.analysis.heap.cells[cell].objects.insert(object);
         if self.analysis.heap.cells[cell].objects.len() > super::max_origins() {
             // Existing aliases must also lose precision, including newly arriving objects.
             let ty = self.analysis.heap.cells[cell].ty;
-            let summary = self.heap_summary(ctx, ty);
+            let summary = self.heap_summary(ctx, ty)?;
             self.open_aliases(cell, Work::OpenObject(summary));
             let targets = &mut self.analysis.heap.cells[cell];
             targets.objects.clear();
@@ -321,23 +313,25 @@ impl Solver {
             self.reconcile_owner(cell);
         }
         self.heap_changed(cell);
+        Ok(())
     }
 
-    fn copy_aliases(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) {
+    fn copy_aliases(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) -> Result<()> {
         if from == to {
-            return;
+            return Ok(());
         }
         self.analysis.heap.cells[from].readers.insert(reader);
         let mut previous = None;
         while let Some(object) = self.next_object(from, previous) {
             previous = Some(object);
-            self.add_object(ctx, to, object);
+            self.add_object(ctx, to, object)?;
         }
         let mut previous = None;
         while let Some(object) = self.next_layout_object(from, previous) {
             previous = Some(object);
             self.add_layout_object(to, object);
         }
+        Ok(())
     }
 
     pub(super) fn heap_alias(
@@ -348,31 +342,33 @@ impl Solver {
         to_id: usize,
         to: Value,
         reader: Work,
-    ) {
+    ) -> Result<()> {
         if let (Some(from), Some(to)) = (
             self.heap_value(ctx, from_id, from),
             self.heap_value(ctx, to_id, to),
         ) {
-            self.copy_aliases(ctx, from, to, reader);
+            self.copy_aliases(ctx, from, to, reader)?;
         }
+        Ok(())
     }
 
-    pub(super) fn seed_heap_parameters(&mut self, ctx: &Context, id: usize) {
+    pub(super) fn seed_heap_parameters(&mut self, ctx: &Context, id: usize) -> Result<()> {
         let body = &self.analysis.bodies[&self.analysis.keys[id].function];
         if !body.external {
-            return;
+            return Ok(());
         }
         for position in 0..body.parameters.len() {
             let parameter =
                 self.analysis.bodies[&self.analysis.keys[id].function].parameters[position];
             if let Some(cell) = self.heap_value(ctx, id, parameter) {
-                let object = self.heap_summary(ctx, parameter.get_type(ctx));
-                self.add_object(ctx, cell, object);
+                let object = self.heap_summary(ctx, parameter.get_type(ctx))?;
+                self.add_object(ctx, cell, object)?;
             }
         }
+        Ok(())
     }
 
-    pub(super) fn open_object(&mut self, ctx: &Context, object: usize) {
+    pub(super) fn open_object(&mut self, ctx: &Context, object: usize) -> Result<()> {
         self.widen_length(object, Range::of(Some(Integer::U32)));
         for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
@@ -384,10 +380,11 @@ impl Solver {
             self.slot_outcome(cell, Outcomes::unknown(ctx, ty));
             if aggregate(ctx, ty) {
                 self.open_aliases(cell, Work::OpenObject(object));
-                let summary = self.heap_summary(ctx, ty);
-                self.add_object(ctx, cell, summary);
+                let summary = self.heap_summary(ctx, ty)?;
+                self.add_object(ctx, cell, summary)?;
             }
         }
+        Ok(())
     }
 
     fn widen_length(&mut self, object: usize, range: Range) {
@@ -465,15 +462,23 @@ impl Solver {
         }
     }
 
-    fn write_slot(&mut self, ctx: &Context, id: usize, slot: usize, value: Value, reader: Work) {
+    fn write_slot(
+        &mut self,
+        ctx: &Context,
+        id: usize,
+        slot: usize,
+        value: Value,
+        reader: Work,
+    ) -> Result<()> {
         let domain = self.analysis.states[id].fact(value);
         let range = self.analysis.states[id].range(value);
         self.slot_domain(slot, domain);
         self.slot_range(ctx, slot, range);
         self.slot_outcome(slot, self.analysis.states[id].outcome(value));
         if let Some(from) = self.heap_value(ctx, id, value) {
-            self.copy_aliases(ctx, from, slot, reader);
+            self.copy_aliases(ctx, from, slot, reader)?;
         }
+        Ok(())
     }
 
     /// Unifies the layouts of the objects a cell may hold: once one is open every one opens,

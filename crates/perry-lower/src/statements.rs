@@ -406,9 +406,7 @@ impl<'s> FunctionBuilder<'s> {
         let carrier = match (declared, init) {
             (Some(ty), Some(value))
                 if self.shapes.metadata.inferred_bindings.contains(&id)
-                    && (optional_value(ctx, value.get_type(ctx))
-                        .unwrap_or(value.get_type(ctx))
-                        == optional_value(ctx, ty).unwrap_or(ty)
+                    && (present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty)
                         || (ty.deref(ctx).is::<ReaderType>()
                             && kind(ctx, value)? == Kind::ByobReader)) =>
             {

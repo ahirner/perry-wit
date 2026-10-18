@@ -7,6 +7,12 @@ pub(super) enum DisplayMode {
     Console,
 }
 
+pub(super) fn is_integer64(ctx: &Context, ty: TypeHandle) -> bool {
+    ty.deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|integer| integer.width() == 64)
+}
+
 pub(super) fn merge_absence(
     left: Option<perry_mir::Absence>,
     right: Option<perry_mir::Absence>,
@@ -29,7 +35,7 @@ pub(super) fn admitting(
         Some(existing) if existing != state => perry_mir::Absence::Both,
         _ => state,
     };
-    let inner = optional_value(ctx, ty).unwrap_or(ty);
+    let inner = present_type(ctx, ty);
     perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
 
@@ -197,6 +203,16 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    /// Exact integer fields and assignments expose their values as source BigInts.
+    pub(super) fn bigint_view(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if is_integer64(ctx, value.get_type(ctx)) {
+            let bigint = BigIntType::get(ctx).into();
+            self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
+        } else {
+            value
+        }
+    }
+
     pub(super) fn is_optional(&self, ctx: &Context, value: Value) -> bool {
         optional_value(ctx, value.get_type(ctx)).is_some()
     }
@@ -270,7 +286,7 @@ impl<'s> FunctionBuilder<'s> {
         target: TypeHandle,
     ) -> Result<Value> {
         let ty = value.get_type(ctx);
-        let wanted = optional_value(ctx, target).unwrap_or(target);
+        let wanted = present_type(ctx, target);
         if wanted.deref(ctx).is::<perry_mir::NumberStringType>()
             && (ty.deref(ctx).is::<FP64Type>() || ty.deref(ctx).is::<StringType>())
         {
@@ -348,8 +364,8 @@ impl<'s> FunctionBuilder<'s> {
             };
             return Ok(self.intrinsic(ctx, intrinsic, vec![value]));
         }
-        let thrown = optional_value(ctx, ty).unwrap_or(ty);
-        let wanted = optional_value(ctx, target).unwrap_or(target);
+        let thrown = present_type(ctx, ty);
+        let wanted = present_type(ctx, target);
         if thrown.deref(ctx).is::<ExceptionType>() && thrown != wanted {
             // A thrown value (a rejection's `reason`) used as a number or string must be one.
             let intrinsic = if wanted.deref(ctx).is::<FP64Type>() {
@@ -365,21 +381,8 @@ impl<'s> FunctionBuilder<'s> {
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
             return self.fit(ctx, converted, target);
         }
-        if thrown.deref(ctx).is::<perry_mir::BigIntType>()
-            && wanted
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
-        {
-            let defined = self.defined(ctx, value)?;
-            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
-            return self.fit(ctx, casted, target);
-        }
-        if thrown
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|int| int.width() == 64)
-            && wanted.deref(ctx).is::<perry_mir::BigIntType>()
+        if (thrown.deref(ctx).is::<BigIntType>() && is_integer64(ctx, wanted))
+            || (is_integer64(ctx, thrown) && wanted.deref(ctx).is::<BigIntType>())
         {
             let defined = self.defined(ctx, value)?;
             let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
@@ -427,16 +430,14 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             // A value that never materializes takes any type.
             if self.never_values.contains(&value) {
-                return Ok(
-                    if absence(ctx, target).is_some_and(|a| a.admits_undefined()) {
-                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))
-                    } else {
-                        self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
-                    },
-                );
+                return Ok(if admits_undefined(ctx, target) {
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))
+                } else {
+                    self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
+                });
             }
-            let source = optional_value(ctx, ty).unwrap_or(ty);
-            let wanted = optional_value(ctx, target).unwrap_or(target);
+            let source = present_type(ctx, ty);
+            let wanted = present_type(ctx, target);
             if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
                 && let Some((dst_rec, fields)) = record_projection(ctx, source, wanted)
                 && (!fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
@@ -481,9 +482,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut projected = Vec::with_capacity(fields.len());
         for (name, src_ty, dst_ty) in fields {
-            let field = if optional_value(ctx, src_ty).is_some()
-                && absence(ctx, dst_ty).is_some_and(|a| a.admits_undefined())
-            {
+            let field = if optional_value(ctx, src_ty).is_some() && admits_undefined(ctx, dst_ty) {
                 let present = perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())?;
                 let present = self.append_value(ctx, &present);
                 self.choose(
@@ -641,17 +640,7 @@ impl<'s> FunctionBuilder<'s> {
                 )?
             }
             Kind::BigInt => {
-                let value = if value
-                    .get_type(ctx)
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                {
-                    let bigint = perry_mir::BigIntType::get(ctx).into();
-                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
-                } else {
-                    value
-                };
+                let value = self.bigint_view(ctx, value);
                 self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
             }
             Kind::String => value,

@@ -1,8 +1,24 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
+use crate::shapes::DecoderInput;
 use perry_mir::JsonSchema;
 
 impl<'s> FunctionBuilder<'s> {
+    /// Unsupported cursor targets retain the JSON value for later coercion.
+    pub(super) fn parse_json_text(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        match expected
+            .filter(|ty| !ty.deref(ctx).is::<JsonType>() && JsonSchema::supports_cursor(ctx, *ty))
+        {
+            Some(target) => self.parse_cursor(ctx, text, target),
+            None => Ok(self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])),
+        }
+    }
+
     pub(super) fn json_scalar_equal(
         &mut self,
         ctx: &mut Context,
@@ -86,7 +102,6 @@ impl<'s> FunctionBuilder<'s> {
         input: crate::shapes::DecoderInput,
         build: impl FnOnce(&mut Self, &mut Context, Ptr<BasicBlock>) -> Result<Vec<Value>>,
     ) -> Result<Identifier> {
-        use crate::shapes::DecoderInput;
         let key = (target, input);
         if let Some(name) = self.shapes.decoders.borrow().get(&key).cloned() {
             return Ok(name);
@@ -297,7 +312,7 @@ impl<'s> FunctionBuilder<'s> {
         parts: &'s [(Option<String>, Expr)],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let expected_inner = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
+        let expected_inner = expected.map(|ty| present_type(ctx, ty));
         if let Some(ty) = expected_inner
             && !ty.deref(ctx).is::<JsonType>()
             && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)

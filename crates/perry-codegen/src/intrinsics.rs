@@ -7,7 +7,7 @@ use crate::{
     runtime::{Runtime, W},
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use perry_mir::{Intrinsic, NumericType, absence};
+use perry_mir::{CompareKind, Intrinsic, NumericType, absence};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -194,14 +194,8 @@ impl FunctionLowering<'_, '_> {
             }
             Intrinsic::MathMin | Intrinsic::MathMax => {
                 let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
-                    let cmp_op = match (bits == 64, signed) {
-                        (false, false) => NumOpcode::I32LtU,
-                        (false, true) => NumOpcode::I32LtS,
-                        (true, false) => NumOpcode::I64LtU,
-                        (true, true) => NumOpcode::I64LtS,
-                    };
-                    let lt = self.num(ctx, cmp_op, vec![args[0], args[1]]);
+                if crate::numeric::integer(ctx, ty).is_some() {
+                    let lt = self.scalar_comparison(ctx, CompareKind::Lt, ty, args[0], args[1])?;
                     if intrinsic == Intrinsic::MathMin {
                         Some(self.select(ctx, lt, args[0], args[1]))
                     } else {

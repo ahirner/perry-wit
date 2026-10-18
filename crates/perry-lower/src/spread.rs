@@ -64,10 +64,7 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let mut element = expected
-            .and_then(|ty| {
-                TypedHandle::<ArrayType>::from_handle(optional_value(ctx, ty).unwrap_or(ty), ctx)
-                    .ok()
-            })
+            .and_then(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx).ok())
             .map(|array| array.deref(ctx).element());
         let fixed_element = element.is_some();
         if element.is_none() {
@@ -96,7 +93,7 @@ impl<'s> FunctionBuilder<'s> {
                     };
                     crate::coerce::merge_absence(states, state)
                 });
-                let inner = optional_value(ctx, base).unwrap_or(base);
+                let inner = present_type(ctx, base);
                 element = Some(states.map_or(inner, |states| {
                     OptionalType::get_with(ctx, inner, states).into()
                 }));
@@ -126,9 +123,9 @@ impl<'s> FunctionBuilder<'s> {
                 value.get_type(ctx)
             };
             if !fixed_element && let Some(previous) = element {
-                let inner = optional_value(ctx, previous).unwrap_or(previous);
+                let inner = present_type(ctx, previous);
                 ensure!(
-                    optional_value(ctx, source_element).unwrap_or(source_element) == inner,
+                    present_type(ctx, source_element) == inner,
                     "array spreads must have one element type"
                 );
                 let merged = crate::coerce::merge_absence(

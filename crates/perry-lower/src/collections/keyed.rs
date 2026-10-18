@@ -3,6 +3,13 @@
 use super::*;
 use crate::coerce::admitting;
 
+#[derive(Clone, Copy)]
+enum SetSelection {
+    All,
+    PresentIn(Value),
+    AbsentFrom(Value),
+}
+
 impl<'s> FunctionBuilder<'s> {
     /// Run `hit(index, entry)` on the first live entry of `entries` whose key is
     /// SameValueZero-equal to `key`, then leave the scan.
@@ -293,71 +300,41 @@ impl<'s> FunctionBuilder<'s> {
         let other = self.expression(ctx, other_expr)?;
         let other = self.defined(ctx, other)?;
         let out = self.empty_set(ctx, Some(receiver.get_type(ctx)))?;
-        match method {
-            "difference" => {
-                self.live_collection_loop(ctx, "set_diff", receiver, |b, ctx, _, val| {
-                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
-                    let keep = b.not(ctx, in_other);
-                    let add_bb = b.new_block(ctx, "set_diff_add");
-                    let cont_bb = b.new_block(ctx, "set_diff_cont");
-                    b.branch(ctx, keep, add_bb, cont_bb);
-                    b.switch_to(add_bb);
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    b.jump(ctx, cont_bb);
-                    b.switch_to(cont_bb);
-                    Ok(())
-                })?;
-            }
-            "intersection" => {
-                self.live_collection_loop(ctx, "set_inter", receiver, |b, ctx, _, val| {
-                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
-                    let add_bb = b.new_block(ctx, "set_inter_add");
-                    let cont_bb = b.new_block(ctx, "set_inter_cont");
-                    b.branch(ctx, in_other, add_bb, cont_bb);
-                    b.switch_to(add_bb);
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    b.jump(ctx, cont_bb);
-                    b.switch_to(cont_bb);
-                    Ok(())
-                })?;
-            }
-            "union" => {
-                self.live_collection_loop(ctx, "set_union_a", receiver, |b, ctx, _, val| {
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    Ok(())
-                })?;
-                self.live_collection_loop(ctx, "set_union_b", other, |b, ctx, _, val| {
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    Ok(())
-                })?;
-            }
-            "symmetricDifference" => {
-                self.live_collection_loop(ctx, "set_sym_a", receiver, |b, ctx, _, val| {
-                    let in_other = b.set_has(ctx, other, val, elem_ty)?;
-                    let keep = b.not(ctx, in_other);
-                    let add_bb = b.new_block(ctx, "set_sym_a_add");
-                    let cont_bb = b.new_block(ctx, "set_sym_a_cont");
-                    b.branch(ctx, keep, add_bb, cont_bb);
-                    b.switch_to(add_bb);
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    b.jump(ctx, cont_bb);
-                    b.switch_to(cont_bb);
-                    Ok(())
-                })?;
-                self.live_collection_loop(ctx, "set_sym_b", other, |b, ctx, _, val| {
-                    let in_recv = b.set_has(ctx, receiver, val, elem_ty)?;
-                    let keep = b.not(ctx, in_recv);
-                    let add_bb = b.new_block(ctx, "set_sym_b_add");
-                    let cont_bb = b.new_block(ctx, "set_sym_b_cont");
-                    b.branch(ctx, keep, add_bb, cont_bb);
-                    b.switch_to(add_bb);
-                    b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
-                    b.jump(ctx, cont_bb);
-                    b.switch_to(cont_bb);
-                    Ok(())
-                })?;
-            }
+        let (first, second) = match method {
+            "difference" => (SetSelection::AbsentFrom(other), None),
+            "intersection" => (SetSelection::PresentIn(other), None),
+            "union" => (SetSelection::All, Some((other, SetSelection::All))),
+            "symmetricDifference" => (
+                SetSelection::AbsentFrom(other),
+                Some((other, SetSelection::AbsentFrom(receiver))),
+            ),
             _ => bail!("unsupported Set binary op {method}"),
+        };
+        for (source, selection) in std::iter::once((receiver, first)).chain(second) {
+            self.live_collection_loop(ctx, "set_copy", source, |b, ctx, _, val| {
+                let done = match selection {
+                    SetSelection::All => None,
+                    SetSelection::PresentIn(set) | SetSelection::AbsentFrom(set) => {
+                        let present = b.set_has(ctx, set, val, elem_ty)?;
+                        let keep = if matches!(selection, SetSelection::AbsentFrom(_)) {
+                            b.not(ctx, present)
+                        } else {
+                            present
+                        };
+                        let add = b.new_block(ctx, "set_copy_add");
+                        let done = b.new_block(ctx, "set_copy_done");
+                        b.branch(ctx, keep, add, done);
+                        b.switch_to(add);
+                        Some(done)
+                    }
+                };
+                b.set_add(ctx, out, val, elem_ty, tuple_rec)?;
+                if let Some(done) = done {
+                    b.jump(ctx, done);
+                    b.switch_to(done);
+                }
+                Ok(())
+            })?;
         }
         Ok(out)
     }

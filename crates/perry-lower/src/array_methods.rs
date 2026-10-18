@@ -1,6 +1,5 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
-use crate::coerce::merge_absence;
 use perry_mir::{ArrayAtOp, OptionalType};
 
 mod callback;

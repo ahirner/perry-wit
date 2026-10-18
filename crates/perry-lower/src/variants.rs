@@ -92,7 +92,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         value: Value,
     ) -> Result<Value> {
-        let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
+        let ty = present_type(ctx, value.get_type(ctx));
         if !ty.deref(ctx).is::<perry_mir::NumberStringType>() {
             return Ok(value);
         }

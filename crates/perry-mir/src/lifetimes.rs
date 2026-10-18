@@ -44,8 +44,7 @@ fn frame_candidates(
             let payload_bytes: usize = fields
                 .iter()
                 .map(|(_, ty)| {
-                    if crate::optional::optional_value(ctx, *ty)
-                        .unwrap_or(*ty)
+                    if crate::optional::present_type(ctx, *ty)
                         .deref(ctx)
                         .is::<crate::types::NumericType>()
                     {

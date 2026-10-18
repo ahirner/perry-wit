@@ -21,8 +21,7 @@ impl<'s> FunctionBuilder<'s> {
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
         let string = |value: Value| {
-            optional_value(ctx, value.get_type(ctx))
-                .unwrap_or(value.get_type(ctx))
+            present_type(ctx, value.get_type(ctx))
                 .deref(ctx)
                 .is::<StringType>()
         };
@@ -145,8 +144,7 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.equality_result(ctx, equality, equal));
             }
             let union = |value: Value| {
-                optional_value(ctx, value.get_type(ctx))
-                    .unwrap_or(value.get_type(ctx))
+                present_type(ctx, value.get_type(ctx))
                     .deref(ctx)
                     .is::<perry_mir::NumberStringType>()
             };
@@ -165,10 +163,8 @@ impl<'s> FunctionBuilder<'s> {
             }
             if let Some(states) = states {
                 // Strict equality with `undefined` in play: compare as `T | undefined`.
-                let left_inner =
-                    optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
-                let right_inner =
-                    optional_value(ctx, rhs.get_type(ctx)).unwrap_or(rhs.get_type(ctx));
+                let left_inner = present_type(ctx, lhs.get_type(ctx));
+                let right_inner = present_type(ctx, rhs.get_type(ctx));
                 ensure!(
                     left_inner == right_inner,
                     "comparison of different types is not supported"
@@ -371,7 +367,7 @@ impl<'s> FunctionBuilder<'s> {
             ShortCircuit::And => (falsy_block, truthy_block),
         };
         self.switch_to(short_block);
-        let lhs = if op == ShortCircuit::Or && self.is_optional(ctx, lhs) {
+        let lhs = if op == ShortCircuit::Or {
             self.defined(ctx, lhs)?
         } else {
             lhs
@@ -379,7 +375,7 @@ impl<'s> FunctionBuilder<'s> {
         let short_end = self.block;
         self.switch_to(rhs_block);
         let rhs_expected = expected.or_else(|| {
-            let base = optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
+            let base = present_type(ctx, lhs.get_type(ctx));
             Some(match right {
                 Expr::Null => crate::coerce::admitting(ctx, base, perry_mir::Absence::Null),
                 Expr::Undefined => {
@@ -404,7 +400,7 @@ impl<'s> FunctionBuilder<'s> {
             let left_ty = lhs.get_type(ctx);
             let right_ty = rhs.get_type(ctx);
             let inner = match op {
-                ShortCircuit::Or => optional_value(ctx, left_ty).unwrap_or(left_ty),
+                ShortCircuit::Or => present_type(ctx, left_ty),
                 ShortCircuit::And => optional_value(ctx, right_ty)
                     .or_else(|| optional_value(ctx, left_ty))
                     .unwrap_or(right_ty),
@@ -476,11 +472,7 @@ impl<'s> FunctionBuilder<'s> {
         let join = self.new_block(ctx, "coalesce_join");
         self.branch(ctx, nullish, fallback, present);
         self.switch_to(present);
-        let defined_lhs = if self.is_optional(ctx, lhs) {
-            self.defined(ctx, lhs)?
-        } else {
-            lhs
-        };
+        let defined_lhs = self.defined(ctx, lhs)?;
         let present_end = self.block;
         self.switch_to(fallback);
         let rhs_expected = expected.or_else(|| {
@@ -501,7 +493,7 @@ impl<'s> FunctionBuilder<'s> {
                 let left_ty = defined_lhs.get_type(ctx);
                 let right_ty = rhs.get_type(ctx);
                 if let Some(states) = merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)) {
-                    let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
+                    let inner = present_type(ctx, left_ty);
                     perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 } else {
                     left_ty

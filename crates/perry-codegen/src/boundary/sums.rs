@@ -1,6 +1,6 @@
 //! Canonical discriminants and payloads for closed WIT sums.
 use super::*;
-use perry_mir::{absence, optional_value};
+use perry_mir::{absence, optional_value, present_type};
 
 /// A WIT `result` that a source function fills completion-style: a compatible return is
 /// `ok`, a checked throw is `err`.
@@ -376,7 +376,7 @@ impl FunctionLowering<'_, '_> {
         Ok(if matches!(ty.cases()[case], Some(AbiType::Option(_))) {
             field
         } else {
-            optional_value(ctx, field).unwrap_or(field)
+            present_type(ctx, field)
         })
     }
 

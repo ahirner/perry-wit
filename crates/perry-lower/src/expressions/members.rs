@@ -216,19 +216,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(crate) fn field_read(&mut self, ctx: &mut Context, op: &FieldGetOp) -> Result<Value> {
         let loaded = self.append_value(ctx, op);
         let loaded = self.normalize_optional_read(ctx, loaded)?;
-        Ok(
-            if loaded
-                .get_type(ctx)
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
-            {
-                let bigint = BigIntType::get(ctx).into();
-                self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, loaded, bigint))
-            } else {
-                loaded
-            },
-        )
+        Ok(self.bigint_view(ctx, loaded))
     }
 
     /// `object[index]` on arrays, strings, bytes, JSON values and records (literal keys).

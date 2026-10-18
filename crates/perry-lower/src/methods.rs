@@ -66,6 +66,7 @@ macro_rules! arguments {
         }
     };
 }
+pub(super) use arguments;
 
 macro_rules! methods {
     ($builder:ident, $ctx:ident, $receiver:ident;

@@ -41,9 +41,19 @@ pub fn optional_value(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     optional_parts(ctx, ty).map(|(value, _)| value)
 }
 
+/// The payload of an optional type, or `ty` when it has no absence states.
+pub fn present_type(ctx: &Context, ty: TypeHandle) -> TypeHandle {
+    optional_value(ctx, ty).unwrap_or(ty)
+}
+
 /// The absence states (`null`, `undefined` or both) of an optional type, if `ty` is one.
 pub fn absence(ctx: &Context, ty: TypeHandle) -> Option<Absence> {
     optional_parts(ctx, ty).map(|(_, states)| states)
+}
+
+/// Whether `ty` accepts an absent property or an explicit `undefined` value.
+pub fn admits_undefined(ctx: &Context, ty: TypeHandle) -> bool {
+    absence(ctx, ty).is_some_and(|states| states.admits_undefined())
 }
 
 /// The value type and absence states of an optional type, in one lookup.

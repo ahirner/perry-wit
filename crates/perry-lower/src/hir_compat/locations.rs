@@ -1,7 +1,12 @@
 //! Original source coordinates for merged AST and HIR declarations.
+use perry_hir::ir::Expr;
+use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use std::{collections::HashMap, path::PathBuf};
 use swc_common::Span;
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+const OPERATOR: &str = "\0perry_operator:";
 
 #[derive(Clone, Copy)]
 struct FunctionInfo {
@@ -17,10 +22,60 @@ pub(crate) struct Locations<'s> {
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
+    operators: Vec<Span>,
     async_init: bool,
 }
 
 impl<'s> Locations<'s> {
+    /// HIR erases binary spans; preserve the operators rejected by MIR as inert sequences.
+    pub(super) fn preserve_operators(&mut self, module: &mut ast::Module) {
+        struct Preserver<'a>(&'a mut Vec<Span>);
+        impl VisitMut for Preserver<'_> {
+            // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
+            fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
+
+            fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
+                expr.visit_mut_children_with(self);
+                let ast::Expr::Bin(binary) = expr else {
+                    return;
+                };
+                if !matches!(
+                    binary.op,
+                    ast::BinaryOp::Exp
+                        | ast::BinaryOp::BitAnd
+                        | ast::BinaryOp::BitOr
+                        | ast::BinaryOp::BitXor
+                        | ast::BinaryOp::LShift
+                        | ast::BinaryOp::RShift
+                        | ast::BinaryOp::ZeroFillRShift
+                ) {
+                    return;
+                }
+                let span = binary.span;
+                let token = ast::Expr::Lit(ast::Lit::Str(ast::Str {
+                    span,
+                    value: format!("{OPERATOR}{}", self.0.len()).into(),
+                    raw: None,
+                }));
+                self.0.push(span);
+                let original = std::mem::replace(expr, ast::Expr::Invalid(ast::Invalid { span }));
+                *expr = ast::Expr::Seq(ast::SeqExpr {
+                    span,
+                    exprs: vec![Box::new(token), Box::new(original)],
+                });
+            }
+        }
+        module.visit_mut_with(&mut Preserver(&mut self.operators));
+    }
+
+    pub(crate) fn operator_span(&self, parts: &[Expr]) -> Option<Span> {
+        let [Expr::String(token), _] = parts else {
+            return None;
+        };
+        let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
+        self.operators.get(index).copied()
+    }
+
     pub(crate) fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
         self.files.push((file, source, offset));
     }
@@ -109,8 +164,6 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
-        use perry_parser::swc_ecma_ast as ast;
-        use swc_ecma_visit::{Visit, VisitWith};
         struct Collector<'a, 's> {
             locations: &'a mut Locations<'s>,
         }

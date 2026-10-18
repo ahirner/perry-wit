@@ -42,8 +42,8 @@ impl State {
 }
 
 impl ProgramFacts {
-    pub fn may_reject(&self, ctx: &Context, function: &FuncOp, promise: Value) -> bool {
-        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+    pub fn may_reject(&self, function: &FuncOp, promise: Value) -> bool {
+        let state = &self.states[self.generic[&function.get_operation()]];
         state.outcome(promise).may_reject()
     }
 }

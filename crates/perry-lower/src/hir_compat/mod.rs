@@ -48,6 +48,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     })?;
     streams::lower(&mut ast)?;
     methods::preserve_arguments(&mut ast);
+    locations.preserve_operators(&mut ast);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()

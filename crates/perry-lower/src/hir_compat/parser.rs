@@ -1,14 +1,14 @@
 //! Preserve parser diagnostics discarded by the upstream wrapper.
 use anyhow::Result;
 use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
+use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
 
 pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
     let mut cache = Default::default();
-    use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
     let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
         .map_err(|error| {
             // The pinned wrapper discards fatal spans; recover SWC metadata directly.
-            use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
             let lexer = Lexer::new(
                 Syntax::Typescript(TsSyntax::default()),
                 Default::default(),

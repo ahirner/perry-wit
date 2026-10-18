@@ -1,6 +1,6 @@
 //! MIR records of `Map`, `Set`, their live views, dictionaries and pairs.
 use super::*;
-use crate::collections::{CollectionViewKind, EntryKind};
+use crate::collections::{CollectionViewKind, EntryKind, StorageField as Field};
 
 impl Shapes<'_> {
     /// The `tuple` record `[first, second]`: iterated entries and `[key, value]` pairs.
@@ -66,9 +66,9 @@ impl Shapes<'_> {
         self.mir_record_prefix(
             ctx,
             vec![
-                ("_0".to_string(), f64_ty),
-                ("_1".to_string(), f64_ty),
-                ("_2".to_string(), f64_ty),
+                (Field::CursorIndex.name().to_owned(), f64_ty),
+                (Field::CursorSequence.name().to_owned(), f64_ty),
+                (Field::CursorEpoch.name().to_owned(), f64_ty),
             ],
             Some("cursor_tuple"),
             RecordKind::Tuple,
@@ -87,10 +87,10 @@ impl Shapes<'_> {
         self.mir_record_prefix(
             ctx,
             vec![
-                ("_0".to_string(), entries_arr),
-                ("_1".to_string(), f64_ty),
-                ("_2".to_string(), f64_ty),
-                ("_3".to_string(), f64_ty),
+                (Field::BoxEntries.name().to_owned(), entries_arr),
+                (Field::BoxLength.name().to_owned(), f64_ty),
+                (Field::BoxSequence.name().to_owned(), f64_ty),
+                (Field::BoxEpoch.name().to_owned(), f64_ty),
             ],
             Some(kind.box_kind().name()),
             kind.box_kind(),
@@ -108,8 +108,8 @@ impl Shapes<'_> {
         self.mir_record_prefix(
             ctx,
             vec![
-                ("_0".to_string(), box_ty),
-                ("_1".to_string(), cursor_rec.into()),
+                (Field::ViewBox.name().to_owned(), box_ty),
+                (Field::ViewCursor.name().to_owned(), cursor_rec.into()),
             ],
             Some(view.record_kind().name()),
             view.record_kind(),

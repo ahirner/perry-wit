@@ -1,7 +1,115 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
+use crate::{
+    array_methods::{CallbackReturn, insert_before_terminator},
+    builder::LocalBinding,
+    coerce::merge_absence,
+    hir_compat::RuntimeCall,
+};
+use perry_mir::OptionalType;
 
 impl<'s> FunctionBuilder<'s> {
+    /// Complete delayed empty returns once the inlined body's result slot is known.
+    pub(super) fn finish_inline_return(
+        &mut self,
+        ctx: &mut Context,
+        callback: CallbackReturn,
+        is_void: bool,
+    ) -> Result<Option<Value>> {
+        let slot = match callback.slot {
+            Some(slot) => Some(slot),
+            None if is_void || callback.empty_returns.is_empty() => None,
+            None => {
+                let number = FP64Type::get(ctx).into();
+                let ty = OptionalType::get(ctx, number).into();
+                Some(self.entry_slot(ctx, ty))
+            }
+        };
+        if let Some(slot) = slot
+            && !callback.empty_returns.is_empty()
+        {
+            let ty = self.slot_type(ctx, slot)?;
+            for block in callback.empty_returns {
+                let undefined = UndefinedOp::with_type(ctx, ty);
+                let store = StoreOp::new(ctx, slot, undefined.get_result(ctx));
+                insert_before_terminator(
+                    ctx,
+                    block,
+                    [undefined.get_operation(), store.get_operation()],
+                )?;
+            }
+        }
+        self.switch_to(callback.done);
+        Ok(slot)
+    }
+
+    /// Bind a supplied argument, evaluating its default only on the undefined path.
+    pub(super) fn bind_inline_parameter(
+        &mut self,
+        ctx: &mut Context,
+        param: &'s perry_hir::ir::Param,
+        value: Value,
+        expected: Option<TypeHandle>,
+    ) -> Result<()> {
+        let value_type = value.get_type(ctx);
+        let slot = if let Some(default) = &param.default
+            && !matches!(default, Expr::Undefined)
+            && admits_undefined(ctx, value_type)
+        {
+            let is_undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            let then_block = self.new_block(ctx, "default_then");
+            let else_block = self.new_block(ctx, "default_else");
+            let join = self.new_block(ctx, "default_join");
+            self.branch(ctx, is_undefined, then_block, else_block);
+
+            self.switch_to(else_block);
+            let present = self.strip_undefined(ctx, value)?;
+            let else_end = self.block;
+            let present_type = present.get_type(ctx);
+
+            self.switch_to(then_block);
+            let default = self.expression_with(ctx, default, expected.or(Some(present_type)))?;
+            let then_end = self.block;
+            let terminated = self.terminated(ctx);
+            let target = if let Some(expected) = expected {
+                expected
+            } else if !terminated
+                && let Some(states) = merge_absence(
+                    absence(ctx, present_type),
+                    absence(ctx, default.get_type(ctx)),
+                )
+            {
+                let inner = optional_value(ctx, present_type)
+                    .or_else(|| optional_value(ctx, default.get_type(ctx)))
+                    .unwrap_or(present_type);
+                OptionalType::get_with(ctx, inner, states).into()
+            } else {
+                present_type
+            };
+
+            let slot = self.entry_slot(ctx, target);
+            if !terminated {
+                self.switch_to(then_end);
+                let default = self.fit(ctx, default, target)?;
+                self.store(ctx, slot, default);
+                self.jump(ctx, join);
+            }
+            self.switch_to(else_end);
+            let present = self.fit(ctx, present, target)?;
+            self.store(ctx, slot, present);
+            self.jump(ctx, join);
+            self.switch_to(join);
+            slot
+        } else {
+            let target = expected.unwrap_or(value_type);
+            let value = self.fit(ctx, value, target)?;
+            let slot = self.entry_slot(ctx, target);
+            self.store(ctx, slot, value);
+            slot
+        };
+        self.locals.insert(param.id, LocalBinding::plain(slot));
+        Ok(())
+    }
     pub(super) fn call(
         &mut self,
         ctx: &mut Context,
@@ -10,7 +118,6 @@ impl<'s> FunctionBuilder<'s> {
         byte_offset: u32,
     ) -> Result<Option<Value>> {
         if let Some(call) = hir_compat::runtime_call(callee, args) {
-            use hir_compat::RuntimeCall;
             return match call {
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
                     anyhow!("cannot find name '{ident}'"),
@@ -293,7 +400,7 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, arg, Some(carrier))?;
             return self.fit(ctx, value, carrier);
         }
-        if absence(ctx, carrier).is_some_and(|a| a.admits_undefined()) {
+        if admits_undefined(ctx, carrier) {
             return Ok(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, carrier)));
         }
         if let Some(default) = &param.source.default {
@@ -354,14 +461,12 @@ impl<'s> FunctionBuilder<'s> {
                 .to_vec();
             let mut field_vals = Vec::with_capacity(fields.len());
             for (field_name, field_ty) in fields {
-                let can_omit = absence(ctx, field_ty).is_some_and(|a| a.admits_undefined());
+                let can_omit = admits_undefined(ctx, field_ty);
                 let op = FieldGetOp::new(ctx, val, field_name.clone())?;
                 let raw = self.field_read(ctx, &op)?;
                 let cloned = self.clone_structured_value(ctx, raw)?;
                 let cloned_ty = cloned.get_type(ctx);
-                let field_val = if can_omit
-                    && absence(ctx, cloned_ty).is_some_and(|a| a.admits_undefined())
-                {
+                let field_val = if can_omit && admits_undefined(ctx, cloned_ty) {
                     let op = FieldPresentOp::new(ctx, val, field_name)?;
                     let is_present = self.emit_value(ctx, |_| op);
                     self.choose(

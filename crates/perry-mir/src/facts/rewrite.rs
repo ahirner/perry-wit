@@ -355,7 +355,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
             && analysis.states[id].callers.is_empty()
             && analysis
                 .generic
-                .get(&original.get_symbol_name(ctx))
+                .get(&original.get_operation())
                 .is_none_or(|gid| !reachable.contains(gid))
         {
             let orig_name = original.get_symbol_name(ctx);
@@ -581,7 +581,7 @@ fn set_signature(ctx: &mut Context, imp: &Implementation) {
 pub(crate) struct LosslessRepresentationErr(pub String);
 
 fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
-    let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+    let inner = crate::optional::present_type(ctx, ty);
     inner.deref(ctx).is::<pliron::builtin::types::FP64Type>()
 }
 
@@ -646,7 +646,7 @@ pub fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result
 }
 
 fn is_lossless_type(ctx: &Context, ty: TypeHandle) -> bool {
-    let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+    let inner = crate::optional::present_type(ctx, ty);
     inner.deref(ctx).is::<crate::types::NumericType>()
         || Integer::from_type(ctx, inner).is_some_and(|d| d.bits == 64)
 }

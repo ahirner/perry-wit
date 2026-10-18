@@ -534,11 +534,11 @@ impl Solver {
         &self,
         ctx: &Context,
         id: usize,
-        inputs: &[Value],
+        inputs: impl Iterator<Item = Value> + Clone,
         result: Value,
     ) -> Fact {
         let state = &self.analysis.states[id];
-        let facts = || inputs.iter().map(|&value| state.fact(value));
+        let facts = || inputs.clone().map(|value| state.fact(value));
         if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
             return Fact::Integer(integer);
         }
@@ -556,7 +556,7 @@ impl Solver {
         if facts().any(|fact| fact == Fact::Original) {
             return Fact::Original;
         }
-        let negative = inputs.iter().any(|&v| {
+        let negative = inputs.clone().any(|v| {
             matches!(state.fact(v), Fact::Literal { negative: true })
                 || matches!(state.range(v), Range::Bounds(i) if i.lower < 0)
         });

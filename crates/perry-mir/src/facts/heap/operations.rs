@@ -104,13 +104,13 @@ impl OperationKind {
 
 impl Solver {
     /// Join slot `from`'s domain, range, settlement and aliases into slot `to`.
-    fn copy_slot(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) {
+    fn copy_slot(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) -> Result<()> {
         let cell = &self.analysis.heap.cells[from];
         let (domain, range, outcome) = (cell.domain, cell.range, cell.outcome);
         self.slot_domain(to, domain);
         self.slot_range(ctx, to, range);
         self.slot_outcome(to, outcome);
-        self.copy_aliases(ctx, from, to, reader);
+        self.copy_aliases(ctx, from, to, reader)
     }
 
     pub(in crate::facts) fn heap_call(
@@ -120,22 +120,23 @@ impl Solver {
         index: usize,
         child: usize,
         op: Ptr<Operation>,
-    ) {
+    ) -> Result<()> {
         let reader = Work::Operation(id, index);
         for (position, input) in op.deref(ctx).operands().enumerate() {
             let parameter =
                 self.analysis.bodies[&self.analysis.keys[child].function].parameters[position];
             self.range(child, parameter, self.analysis.states[id].range(input));
             self.outcome(child, parameter, self.analysis.states[id].outcome(input));
-            self.heap_alias(ctx, id, input, child, parameter, reader);
+            self.heap_alias(ctx, id, input, child, parameter, reader)?;
         }
         for (position, result) in op.deref(ctx).results().enumerate() {
             if let Some(to) = self.heap_value(ctx, id, result)
                 && let Some(from) = self.analysis.states[child].results[position].heap
             {
-                self.copy_aliases(ctx, from, to, reader);
+                self.copy_aliases(ctx, from, to, reader)?;
             }
         }
+        Ok(())
     }
 
     pub(in crate::facts) fn heap_operation(
@@ -145,13 +146,15 @@ impl Solver {
         index: usize,
         op: Ptr<Operation>,
         kind: OperationKind,
-    ) -> Option<(Fact, Range)> {
+    ) -> Result<Option<(Fact, Range)>> {
         let reader = Work::Operation(id, index);
         let operation = op.deref(ctx);
         match kind {
             OperationKind::Allocate { array } => {
                 let value = operation.get_result(0);
-                let object = self.heap_allocation(ctx, id, value)?;
+                let Some(object) = self.heap_allocation(ctx, id, value)? else {
+                    return Ok(None);
+                };
                 if array {
                     let length = operation.get_num_operands() as i128;
                     self.widen_length(
@@ -165,7 +168,7 @@ impl Solver {
                 for (position, value) in operation.operands().enumerate() {
                     let slot = self.analysis.heap.objects[object].contents.slots()
                         [if array { 0 } else { position }];
-                    self.write_slot(ctx, id, slot, value, reader);
+                    self.write_slot(ctx, id, slot, value, reader)?;
                 }
             }
             OperationKind::Read { .. }
@@ -175,7 +178,9 @@ impl Solver {
                     OperationKind::Read { slot } | OperationKind::Write { slot, .. } => slot,
                     _ => 0,
                 };
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
+                let Some(base) = self.heap_value(ctx, id, operation.get_operand(0)) else {
+                    return Ok(None);
+                };
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let result = if matches!(kind, OperationKind::Read { .. }) {
                     self.heap_value(ctx, id, operation.get_result(0))
@@ -203,7 +208,7 @@ impl Solver {
                     if let OperationKind::Write { value, .. }
                     | OperationKind::ArrayWrite { value, .. } = kind
                     {
-                        self.write_slot(ctx, id, slot, operation.get_operand(value), reader);
+                        self.write_slot(ctx, id, slot, operation.get_operand(value), reader)?;
                     } else {
                         self.analysis.heap.cells[slot].readers.insert(reader);
                         domain = domain.join(self.analysis.heap.cells[slot].domain);
@@ -217,18 +222,22 @@ impl Solver {
                         );
                         outcome = outcome.join(self.analysis.heap.cells[slot].outcome);
                         if let Some(result) = result {
-                            self.copy_aliases(ctx, slot, result, reader);
+                            self.copy_aliases(ctx, slot, result, reader)?;
                         }
                     }
                 }
                 if matches!(kind, OperationKind::Read { .. }) {
                     self.outcome(id, operation.get_result(0), outcome);
                 }
-                return matches!(kind, OperationKind::Read { .. }).then_some((domain, range));
+                return Ok(matches!(kind, OperationKind::Read { .. }).then_some((domain, range)));
             }
             OperationKind::Extend => {
-                let to = self.heap_value(ctx, id, operation.get_operand(0))?;
-                let from = self.heap_value(ctx, id, operation.get_operand(1))?;
+                let Some(to) = self.heap_value(ctx, id, operation.get_operand(0)) else {
+                    return Ok(None);
+                };
+                let Some(from) = self.heap_value(ctx, id, operation.get_operand(1)) else {
+                    return Ok(None);
+                };
                 self.analysis.heap.cells[to].readers.insert(reader);
                 self.analysis.heap.cells[from].readers.insert(reader);
                 let mut slots = Vec::new();
@@ -244,14 +253,16 @@ impl Solver {
                         self.grow_array(object, None, reader);
                         let output = self.analysis.heap.objects[object].contents.slots()[0];
                         slots.push(output);
-                        self.copy_slot(ctx, input, output, reader);
+                        self.copy_slot(ctx, input, output, reader)?;
                     }
                 }
                 self.reconcile_slot_group(ctx, &slots);
             }
             OperationKind::Concat => {
                 let result = operation.get_result(0);
-                let output = self.heap_allocation(ctx, id, result)?;
+                let Some(output) = self.heap_allocation(ctx, id, result)? else {
+                    return Ok(None);
+                };
                 let out_slot = self.analysis.heap.objects[output].contents.slots()[0];
                 let mut slots = vec![out_slot];
                 for input_val in operation.operands() {
@@ -266,7 +277,7 @@ impl Solver {
                         let input = self.analysis.heap.objects[object].contents.slots()[0];
                         self.analysis.heap.cells[input].readers.insert(reader);
                         slots.push(input);
-                        self.copy_slot(ctx, input, out_slot, reader);
+                        self.copy_slot(ctx, input, out_slot, reader)?;
                     }
                 }
                 self.reconcile_slot_group(ctx, &slots);
@@ -274,7 +285,9 @@ impl Solver {
             }
             OperationKind::ConcatSegments => {
                 let result = operation.get_result(0);
-                let output = self.heap_allocation(ctx, id, result)?;
+                let Some(output) = self.heap_allocation(ctx, id, result)? else {
+                    return Ok(None);
+                };
                 let out_slot = self.analysis.heap.objects[output].contents.slots()[0];
                 let segments_val = operation.get_operand(0);
                 let mut slots = vec![out_slot];
@@ -293,7 +306,7 @@ impl Solver {
                             let elem_slot = self.analysis.heap.objects[inner].contents.slots()[0];
                             self.analysis.heap.cells[elem_slot].readers.insert(reader);
                             slots.push(elem_slot);
-                            self.copy_slot(ctx, elem_slot, out_slot, reader);
+                            self.copy_slot(ctx, elem_slot, out_slot, reader)?;
                         }
                     }
                 }
@@ -301,7 +314,9 @@ impl Solver {
                 self.widen_length(output, Range::of(Some(Integer::U32)));
             }
             OperationKind::Truncate => {
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
+                let Some(base) = self.heap_value(ctx, id, operation.get_operand(0)) else {
+                    return Ok(None);
+                };
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
@@ -310,7 +325,9 @@ impl Solver {
                 }
             }
             OperationKind::Length => {
-                let base = self.heap_value(ctx, id, operation.get_operand(0))?;
+                let Some(base) = self.heap_value(ctx, id, operation.get_operand(0)) else {
+                    return Ok(None);
+                };
                 self.analysis.heap.cells[base].readers.insert(reader);
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
@@ -321,16 +338,18 @@ impl Solver {
                         readers.insert(reader);
                     }
                 }
-                return Some((Fact::Original, self.analysis.heap.length(base)));
+                return Ok(Some((Fact::Original, self.analysis.heap.length(base))));
             }
             OperationKind::Combine(kind) => {
-                let input = self.heap_value(ctx, id, operation.get_operand(0))?;
+                let Some(input) = self.heap_value(ctx, id, operation.get_operand(0)) else {
+                    return Ok(None);
+                };
                 self.analysis.heap.cells[input].readers.insert(reader);
                 let result = operation.get_result(0);
                 let output = if kind == Combinator::Race {
                     None
                 } else {
-                    self.heap_allocation(ctx, id, result)
+                    self.heap_allocation(ctx, id, result)?
                 };
                 let mut outcome = if kind == Combinator::Race {
                     Outcomes::Bottom
@@ -363,13 +382,13 @@ impl Solver {
                                 slot,
                                 Outcomes::unknown(ctx, self.analysis.heap.cells[slot].ty),
                             );
-                            self.copy_aliases(ctx, element, slot, reader);
+                            self.copy_aliases(ctx, element, slot, reader)?;
                         } else {
                             domain = domain.join(self.analysis.heap.cells[element].domain);
                             range = range
                                 .join(self.analysis.heap.cells[element].range, domain.integer());
                             if let Some(result) = self.heap_value(ctx, id, result) {
-                                self.copy_aliases(ctx, element, result, reader);
+                                self.copy_aliases(ctx, element, result, reader)?;
                             }
                         }
                     }
@@ -378,11 +397,11 @@ impl Solver {
                     }
                 }
                 self.outcome(id, result, outcome);
-                return (kind == Combinator::Race).then_some((domain, range));
+                return Ok((kind == Combinator::Race).then_some((domain, range)));
             }
             OperationKind::Alias { operand } => {
                 let input = operation.get_operand(operand);
-                self.heap_alias(ctx, id, input, id, operation.get_result(0), reader);
+                self.heap_alias(ctx, id, input, id, operation.get_result(0), reader)?;
                 if promise_payload(ctx, op).is_none()
                     && Operation::get_op::<AwaitOp>(op, ctx).is_none()
                 {
@@ -392,10 +411,10 @@ impl Solver {
                         self.analysis.states[id].outcome(input),
                     );
                 }
-                return Some((
+                return Ok(Some((
                     self.analysis.states[id].fact(input),
                     self.analysis.states[id].range(input),
-                ));
+                )));
             }
             OperationKind::Return => {
                 let is_external = self.analysis.bodies[&self.analysis.keys[id].function].external;
@@ -412,7 +431,7 @@ impl Solver {
                             self.notify_callers(id);
                             to
                         };
-                        self.copy_aliases(ctx, from, to, reader);
+                        self.copy_aliases(ctx, from, to, reader)?;
                     }
                 }
             }
@@ -435,9 +454,11 @@ impl Solver {
             }
             OperationKind::Unknown | OperationKind::Call => {
                 if matches!(kind, OperationKind::Call) {
-                    let callee = crate::calls::callee(ctx, op)?;
+                    let Some(callee) = crate::calls::callee(ctx, op) else {
+                        return Ok(None);
+                    };
                     if self.analysis.bodies.contains_key(&callee) {
-                        return None;
+                        return Ok(None);
                     }
                 }
                 // Unmodelled storage may retain aliases or mutate reachable objects.
@@ -448,13 +469,13 @@ impl Solver {
                 }
                 for value in operation.results() {
                     if let Some(cell) = self.heap_value(ctx, id, value) {
-                        let object = self.heap_summary(ctx, value.get_type(ctx));
-                        self.add_object(ctx, cell, object);
+                        let object = self.heap_summary(ctx, value.get_type(ctx))?;
+                        self.add_object(ctx, cell, object)?;
                     }
                 }
             }
             OperationKind::None => {}
         }
-        None
+        Ok(None)
     }
 }

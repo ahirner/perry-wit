@@ -5,7 +5,7 @@ use perry_hir::ir::{Class, Interface, TypeAlias};
 const RESOLUTION_DEPTH: usize = 32;
 const ARGUMENT_LIMIT: usize = 4096;
 
-pub(crate) trait DeclarationLookup {
+pub(super) trait DeclarationLookup {
     fn interface(&self, name: &str) -> Option<(usize, &Interface)>;
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)>;
     fn class(&self, _name: &str) -> Option<(usize, &Class)> {
@@ -133,6 +133,14 @@ impl<'a> Declaration<'a> {
             bindings.insert(parameter.name.as_str(), argument);
         }
         Ok(bindings)
+    }
+}
+
+fn generic_parts(kind: &Kind) -> Option<(&str, &[ArgumentId])> {
+    match kind {
+        Kind::Named(name) => Some((name, &[])),
+        Kind::Generic { base, arguments } => Some((base, arguments)),
+        _ => None,
     }
 }
 
@@ -760,9 +768,7 @@ fn property_type_depth(
     let target = {
         let sub_ref = substituted.deref(ctx);
         if let Kind::Union(members) = sub_ref.kind() {
-            let members = members.clone();
-            drop(sub_ref);
-            let flattened = flatten_union_with_lookup(ctx, &lookup, &members, depth + 1);
+            let flattened = flatten_union_with_lookup(ctx, &lookup, members, depth + 1);
             let mut defined = flattened
                 .into_iter()
                 .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void));
@@ -775,52 +781,27 @@ fn property_type_depth(
             substituted
         }
     };
-    enum TargetDispatch {
-        Prop(ArgumentId, bool),
-        Generic(String, Vec<ArgumentId>),
-        Named(String),
-    }
-    let dispatch = {
-        let target_ref = target.deref(ctx);
-        match target_ref.kind() {
-            Kind::Object {
-                index_signature, ..
-            } => {
-                if let Some(prop) = target_ref.property(property) {
-                    Some(TargetDispatch::Prop(prop.ty, prop.optional))
-                } else {
-                    index_signature.map(|idx_ty| TargetDispatch::Prop(idx_ty, true))
-                }
-            }
-            Kind::Generic { base, arguments } => {
-                Some(TargetDispatch::Generic(base.clone(), arguments.clone()))
-            }
-            Kind::Named(name) => Some(TargetDispatch::Named(name.clone())),
-            _ => None,
-        }
-    }?;
-    match dispatch {
-        TargetDispatch::Prop(ty, optional) => {
-            Some(optional_property(ty.deref(ctx).to_hir(ctx), optional))
-        }
-        TargetDispatch::Generic(base, type_args) => property_type_depth(
+    let target = target.deref(ctx);
+    if let Kind::Object {
+        index_signature, ..
+    } = target.kind()
+    {
+        let (ty, optional) = match target.property(property) {
+            Some(prop) => (prop.ty, prop.optional),
+            None => ((*index_signature)?, true),
+        };
+        Some(optional_property(ty.deref(ctx).to_hir(ctx), optional))
+    } else {
+        let (base, arguments) = generic_parts(target.kind())?;
+        property_type_depth(
             ctx,
             interfaces,
             type_aliases,
-            &base,
-            &type_args,
+            base,
+            arguments,
             property,
             depth + 1,
-        ),
-        TargetDispatch::Named(name) => property_type_depth(
-            ctx,
-            interfaces,
-            type_aliases,
-            &name,
-            &[],
-            property,
-            depth + 1,
-        ),
+        )
     }
 }
 
@@ -915,69 +896,24 @@ fn dict_entry_types_depth(
         }
         return None;
     }
-    enum DictDispatch {
-        IndexSig(ArgumentId),
-        Named(String),
-        Generic(String, Vec<ArgumentId>),
+    let argument = ty.deref(ctx);
+    if let Kind::Object {
+        index_signature: Some(value),
+        ..
+    } = argument.kind()
+    {
+        return Some((Argument::from_kind(ctx, Kind::String), *value));
     }
-    let dispatch = {
-        let ty_ref = ty.deref(ctx);
-        match ty_ref.kind() {
-            Kind::Generic { base, arguments }
-                if base == "Record"
-                    && arguments.len() == 2
-                    && lookup.interface(base).is_none()
-                    && lookup.type_alias(base).is_none() =>
-            {
-                Some(DictDispatch::IndexSig(arguments[1]))
-            }
-            Kind::Object {
-                index_signature: Some(val_ty),
-                ..
-            } => Some(DictDispatch::IndexSig(*val_ty)),
-            Kind::Named(base) => Some(DictDispatch::Named(base.clone())),
-            Kind::Generic { base, arguments } => {
-                Some(DictDispatch::Generic(base.clone(), arguments.clone()))
-            }
-            _ => None,
-        }
-    }?;
-    match dispatch {
-        DictDispatch::IndexSig(val_ty) => Some((Argument::from_kind(ctx, Kind::String), val_ty)),
-        DictDispatch::Named(base) => {
-            let (_, alias) = lookup.type_alias(&base)?;
-            if !alias.type_params.is_empty() {
-                return dict_entry_types_generic(
-                    ctx,
-                    interfaces,
-                    type_aliases,
-                    &base,
-                    &[],
-                    depth + 1,
-                );
-            }
-            let mut remaining = ARGUMENT_LIMIT;
-            let target =
-                Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining).ok()?;
-            dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth + 1)
-        }
-        DictDispatch::Generic(base, arguments) => {
-            dict_entry_types_generic(ctx, interfaces, type_aliases, &base, &arguments, depth + 1)
-        }
+    let (base, arguments) = generic_parts(argument.kind())?;
+    if base == "Record"
+        && let [_, value] = arguments
+        && lookup.interface(base).is_none()
+        && lookup.type_alias(base).is_none()
+    {
+        return Some((Argument::from_kind(ctx, Kind::String), *value));
     }
-}
-
-fn dict_entry_types_generic(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    base: &str,
-    arguments: &[ArgumentId],
-    depth: usize,
-) -> Option<(ArgumentId, ArgumentId)> {
-    let lookup = (interfaces, type_aliases);
     let target = instantiate_alias(ctx, &lookup, base, arguments)?;
-    dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth)
+    dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth + 1)
 }
 
 pub(crate) fn object_properties(

@@ -172,7 +172,7 @@ pub(crate) fn prove_bounds(
         for op in operations(ctx, &function) {
             if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
                 let array = op.deref(ctx).get_operand(0);
-                if let Some((minimum, maximum)) = numeric.array_length(ctx, &function, array)
+                if let Some((minimum, maximum)) = numeric.array_length(&function, array)
                     && minimum == maximum
                 {
                     let ty = IntegerType::get(ctx, 32, Signedness::Signless);

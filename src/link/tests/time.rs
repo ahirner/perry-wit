@@ -145,7 +145,7 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
 fn parsers_reject_bad_ranges_overlap_and_invalid_text_without_writes() -> Result<()> {
     let mut guest = GuestTime::new()?;
     let sentinel = [0xA5; 16];
-    for name in ["time_instant_parse", "time_utc_parse", "time_plain_parse"] {
+    for name in ["time_instant_parse", "time_plain_parse"] {
         let parse = guest
             .instance
             .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, name)?;
@@ -187,31 +187,6 @@ fn parsers_reject_bad_ranges_overlap_and_invalid_text_without_writes() -> Result
             assert_eq!(guest.bytes(INPUT, source.len()), source);
         }
     }
-    let strict = guest
-        .instance
-        .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, "time_utc_parse")?;
-    for invalid in [
-        "2024-01-01T00:00:00+00:00",
-        "2024-01-01t00:00:00z",
-        "2024-01-01T00:00:60Z",
-    ] {
-        guest
-            .memory
-            .write(&mut guest.store, INPUT as usize, invalid.as_bytes())?;
-        assert_ne!(
-            strict.call(&mut guest.store, (INPUT, invalid.len() as u32, VALUE))? >> 32,
-            0
-        );
-        assert_eq!(guest.bytes(VALUE, 16), sentinel);
-    }
-    let valid = b"2024-01-01T00:00:00.123456789Z";
-    guest
-        .memory
-        .write(&mut guest.store, INPUT as usize, valid)?;
-    assert_eq!(
-        strict.call(&mut guest.store, (INPUT, valid.len() as u32, VALUE))?,
-        16
-    );
     Ok(())
 }
 
@@ -326,7 +301,6 @@ impl GuestTime {
         let core = wat::parse_str(
             r#"(module
             (import "__perry_helper" "time_instant_parse" (func $instant_parse (param i32 i32 i32) (result i64)))
-            (import "__perry_helper" "time_utc_parse" (func $utc_parse (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_instant_from_ms" (func $from_ms (param f64 i32) (result i64)))
             (import "__perry_helper" "time_instant_ms" (func $ms (param i32 i32) (result i64)))
             (import "__perry_helper" "time_instant_format" (func $instant_format (param i32 i32 i32) (result i64)))
@@ -339,7 +313,6 @@ impl GuestTime {
             (memory (export "memory") 8 8)
             (data (i32.const 59000) "keep")
             (export "time_instant_parse" (func $instant_parse))
-            (export "time_utc_parse" (func $utc_parse))
             (export "time_instant_from_ms" (func $from_ms))
             (export "time_instant_ms" (func $ms))
             (export "time_instant_format" (func $instant_format))

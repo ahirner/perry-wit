@@ -31,15 +31,7 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, value, Some(ty))?;
             let value = self.fit(ctx, value, ty)?;
             self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
-            if ty
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| int.width() == 64)
-            {
-                let bigint = BigIntType::get(ctx).into();
-                return Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint)));
-            }
-            return Ok(value);
+            return Ok(self.bigint_view(ctx, value));
         }
         ensure!(
             kind(ctx, array)? == Kind::Array,
@@ -100,15 +92,7 @@ impl<'s> FunctionBuilder<'s> {
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, record, field.to_string(), value)
         });
-        if field_type
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|int| int.width() == 64)
-        {
-            let bigint = BigIntType::get(ctx).into();
-            return Ok(self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint)));
-        }
-        Ok(value)
+        Ok(self.bigint_view(ctx, value))
     }
 
     /// `{ a: …, b: … }`: evaluate fields in source order, allocate in record order.
@@ -120,7 +104,7 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         // A record or variant where `T | undefined` is expected is a `T`.
-        let expected = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
+        let expected = expected.map(|ty| present_type(ctx, ty));
         if let Some(ty) = expected
             && ty.deref(ctx).is::<perry_mir::VariantType>()
         {
@@ -139,10 +123,7 @@ impl<'s> FunctionBuilder<'s> {
                 .fields()
                 .map_err(|_| anyhow!("record without fields"))?
                 .iter()
-                .filter(|(name, ty)| {
-                    !names.contains(&name.as_str())
-                        && !absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
-                })
+                .filter(|(name, ty)| !names.contains(&name.as_str()) && !admits_undefined(ctx, *ty))
                 .map(|(name, _)| name.to_string())
                 .collect();
             if !missing.is_empty() {
@@ -161,8 +142,7 @@ impl<'s> FunctionBuilder<'s> {
                         .iter()
                         .all(|name| fields.iter().any(|(field, _)| field.as_str() == *name))
                         && fields.iter().all(|(name, ty)| {
-                            names.contains(&name.as_str())
-                                || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
+                            names.contains(&name.as_str()) || admits_undefined(ctx, *ty)
                         })
                 })
             });
@@ -254,9 +234,9 @@ impl<'s> FunctionBuilder<'s> {
         items: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let element = match expected.map(|ty| {
-            TypedHandle::<ArrayType>::from_handle(optional_value(ctx, ty).unwrap_or(ty), ctx)
-        }) {
+        let element = match expected
+            .map(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx))
+        {
             Some(Ok(array)) => Some(array.deref(ctx).element()),
             _ => None,
         };
@@ -273,12 +253,12 @@ impl<'s> FunctionBuilder<'s> {
             (Some(element), _) => element,
             (None, Some((first, rest))) => {
                 let first = first.get_type(ctx);
-                let inner = optional_value(ctx, first).unwrap_or(first);
+                let inner = present_type(ctx, first);
                 let mut states = absence(ctx, first);
                 let mut uniform = true;
                 for value in rest {
                     let ty = value.get_type(ctx);
-                    if optional_value(ctx, ty).unwrap_or(ty) != inner {
+                    if present_type(ctx, ty) != inner {
                         uniform = false;
                         break;
                     }
@@ -290,7 +270,7 @@ impl<'s> FunctionBuilder<'s> {
                         .enumerate()
                         .map(|(i, v)| (format!("_{i}"), v.get_type(ctx)))
                         .collect();
-                    let record = self.shapes.mir_record_kind(ctx, fields, true)?;
+                    let record = self.shapes.mir_tuple(ctx, fields)?;
                     return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
                 }
                 states.map_or(inner, |states| {
@@ -304,18 +284,6 @@ impl<'s> FunctionBuilder<'s> {
             .map(|v| self.fit(ctx, v, element))
             .collect::<Result<_>>()?;
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
-    }
-
-    /// `local.push(value)` on an array local.
-    pub(super) fn array_push(
-        &mut self,
-        ctx: &mut Context,
-        array_id: LocalId,
-        value: &'s Expr,
-    ) -> Result<Value> {
-        let slot = self.local(array_id)?;
-        let array = self.load(ctx, slot)?;
-        self.push_values(ctx, array, std::slice::from_ref(value))
     }
 
     /// `array.push(…values)`: every value is evaluated and fitted to the element type before
@@ -357,7 +325,7 @@ impl<'s> FunctionBuilder<'s> {
             Expr::LocalGet(id) => {
                 let local = self.locals.get(id)?;
                 let ty = self.slot_type(ctx, local.slot).ok()?;
-                let inner = optional_value(ctx, ty).unwrap_or(ty);
+                let inner = present_type(ctx, ty);
                 TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
             }
             Expr::PropertyGet {
@@ -365,7 +333,7 @@ impl<'s> FunctionBuilder<'s> {
             } => {
                 let rec = self.peek_record_type(ctx, object)?;
                 let (_, field_ty) = rec.deref(ctx).field(property)?;
-                let inner = optional_value(ctx, field_ty).unwrap_or(field_ty);
+                let inner = present_type(ctx, field_ty);
                 TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
             }
             Expr::Call { callee, .. } => {
@@ -373,7 +341,7 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some(sig) = self.signatures.get(id)
                     && let Some(ret) = sig.result
                 {
-                    let inner = optional_value(ctx, ret.carrier).unwrap_or(ret.carrier);
+                    let inner = present_type(ctx, ret.carrier);
                     TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
                 } else {
                     None
@@ -395,7 +363,7 @@ impl<'s> FunctionBuilder<'s> {
             first_evaluated
                 .and_then(|v| {
                     let ty = v.get_type(ctx);
-                    let inner = optional_value(ctx, ty).unwrap_or(ty);
+                    let inner = present_type(ctx, ty);
                     TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
                 })
                 .or_else(|| {
@@ -499,7 +467,7 @@ impl<'s> FunctionBuilder<'s> {
                     .map_err(|_| anyhow!("record without fields"))?
                     .to_vec();
                 for (field_name, src_field_ty) in src_fields {
-                    let can_omit = absence(ctx, src_field_ty).is_some_and(|a| a.admits_undefined());
+                    let can_omit = admits_undefined(ctx, src_field_ty);
                     let op = FieldGetOp::new(ctx, src, field_name.clone())?;
                     let loaded = self.field_read(ctx, &op)?;
                     let expected_field_ty = expected_record
@@ -530,10 +498,8 @@ impl<'s> FunctionBuilder<'s> {
                                 target_ty,
                                 is_present,
                                 |b, ctx| {
-                                    if !absence(ctx, target_ty)
-                                        .is_some_and(|a| a.admits_undefined())
-                                        && absence(ctx, loaded_ty)
-                                            .is_some_and(|a| a.admits_undefined())
+                                    if !admits_undefined(ctx, target_ty)
+                                        && admits_undefined(ctx, loaded_ty)
                                     {
                                         let is_undef = b
                                             .emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
@@ -566,9 +532,7 @@ impl<'s> FunctionBuilder<'s> {
                             None => loaded,
                         };
                         let loaded_ty = loaded.get_type(ctx);
-                        let val = if can_omit
-                            && absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined())
-                        {
+                        let val = if can_omit && admits_undefined(ctx, loaded_ty) {
                             let op = FieldPresentOp::new(ctx, src, field_name.clone())?;
                             let is_present = self.emit_value(ctx, |_| op);
                             self.choose(
@@ -596,8 +560,7 @@ impl<'s> FunctionBuilder<'s> {
                     .iter()
                     .all(|(name, _)| fields.iter().any(|(f, _)| f == name))
                     && fields.iter().all(|(name, ty)| {
-                        field_values.iter().any(|(n, _)| n == name)
-                            || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
+                        field_values.iter().any(|(n, _)| n == name) || admits_undefined(ctx, *ty)
                     })
             })
         });
@@ -671,7 +634,7 @@ impl<'s> FunctionBuilder<'s> {
         let src_rec = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
             .context("object rest destructuring requires a typed record")?;
         let expected_record = expected
-            .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+            .map(|ty| present_type(ctx, ty))
             .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok());
         let src_fields: Vec<(String, TypeHandle)> = src_rec
             .deref(ctx)
@@ -683,7 +646,7 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         let mut field_values: Vec<(String, Value)> = Vec::with_capacity(src_fields.len());
         for (field_name, src_field_ty) in src_fields {
-            let can_omit = absence(ctx, src_field_ty).is_some_and(|a| a.admits_undefined());
+            let can_omit = admits_undefined(ctx, src_field_ty);
             let op = FieldGetOp::new(ctx, src, field_name.clone())?;
             let loaded = self.field_read(ctx, &op)?;
             let loaded = match expected_record
@@ -693,7 +656,7 @@ impl<'s> FunctionBuilder<'s> {
                 None => loaded,
             };
             let loaded_ty = loaded.get_type(ctx);
-            let val = if can_omit && absence(ctx, loaded_ty).is_some_and(|a| a.admits_undefined()) {
+            let val = if can_omit && admits_undefined(ctx, loaded_ty) {
                 let op = FieldPresentOp::new(ctx, src, field_name.clone())?;
                 let is_present = self.emit_value(ctx, |_| op);
                 self.choose(

@@ -130,63 +130,7 @@ impl<'s> FunctionBuilder<'s> {
         // Guards only grow above this length inside the body; branches truncate back.
         let guards = self.variant_guards.len();
         for (param, &value) in params.iter().zip(arguments) {
-            let val_ty = value.get_type(ctx);
-            if let Some(default_expr) = &param.default
-                && !matches!(default_expr, Expr::Undefined)
-                && absence(ctx, val_ty).is_some_and(|a| a.admits_undefined())
-            {
-                let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                let then_block = self.new_block(ctx, "default_then");
-                let else_block = self.new_block(ctx, "default_else");
-                let join = self.new_block(ctx, "default_join");
-                self.branch(ctx, is_undef, then_block, else_block);
-
-                self.switch_to(else_block);
-                let present_val = self.strip_undefined(ctx, value)?;
-                let else_end = self.block;
-                let present_ty = present_val.get_type(ctx);
-
-                self.switch_to(then_block);
-                let def_val = self.expression_with(ctx, default_expr, Some(present_ty))?;
-                let then_end = self.block;
-                let then_terminated = self.terminated(ctx);
-
-                let target_ty = if !then_terminated {
-                    let def_ty = def_val.get_type(ctx);
-                    if let Some(states) =
-                        merge_absence(absence(ctx, present_ty), absence(ctx, def_ty))
-                    {
-                        let inner = optional_value(ctx, present_ty)
-                            .or_else(|| optional_value(ctx, def_ty))
-                            .unwrap_or(present_ty);
-                        OptionalType::get_with(ctx, inner, states).into()
-                    } else {
-                        present_ty
-                    }
-                } else {
-                    present_ty
-                };
-
-                let slot = self.entry_slot(ctx, target_ty);
-                if !then_terminated {
-                    self.switch_to(then_end);
-                    let fitted_def = self.fit(ctx, def_val, target_ty)?;
-                    self.store(ctx, slot, fitted_def);
-                    self.jump(ctx, join);
-                }
-
-                self.switch_to(else_end);
-                let fitted_present = self.fit(ctx, present_val, target_ty)?;
-                self.store(ctx, slot, fitted_present);
-                self.jump(ctx, join);
-
-                self.switch_to(join);
-                self.locals.insert(param.id, LocalBinding::plain(slot));
-            } else {
-                let slot = self.entry_slot(ctx, val_ty);
-                self.store(ctx, slot, value);
-                self.locals.insert(param.id, LocalBinding::plain(slot));
-            }
+            self.bind_inline_parameter(ctx, param, value, None)?;
         }
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
@@ -228,30 +172,7 @@ impl<'s> FunctionBuilder<'s> {
             .pop()
             .context("array callback frame")?;
         result?;
-        let slot = match callback.slot {
-            Some(slot) => Some(slot),
-            None if callback.empty_returns.is_empty() => None,
-            None => {
-                let number = FP64Type::get(ctx).into();
-                let ty = OptionalType::get(ctx, number).into();
-                Some(self.entry_slot(ctx, ty))
-            }
-        };
-        if let Some(slot) = slot
-            && !callback.empty_returns.is_empty()
-        {
-            let ty = self.slot_type(ctx, slot)?;
-            for block in callback.empty_returns {
-                let undefined = UndefinedOp::with_type(ctx, ty);
-                let store = StoreOp::new(ctx, slot, undefined.get_result(ctx));
-                insert_before_terminator(
-                    ctx,
-                    block,
-                    [undefined.get_operation(), store.get_operation()],
-                )?;
-            }
-        }
-        self.switch_to(done);
+        let slot = self.finish_inline_return(ctx, callback, false)?;
         match slot {
             Some(slot) => self.load(ctx, slot),
             None => {

@@ -8,7 +8,7 @@ use super::*;
 use crate::{exceptions::RaiseOp, foreign::ForeignOp, is_any, locals::StoreOp};
 
 fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
-    let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+    let inner = crate::optional::present_type(ctx, ty);
     let inner_ref = inner.deref(ctx);
     if inner_ref.is::<RecordType>()
         || inner_ref.is::<ArrayType>()
@@ -89,7 +89,7 @@ impl ProgramFacts {
         function: &FuncOp,
         value: Value,
     ) -> bool {
-        let Some(&id) = self.generic.get(&function.get_symbol_name(ctx)) else {
+        let Some(&id) = self.generic.get(&function.get_operation()) else {
             return true;
         };
         let state = &self.states[id];
@@ -110,7 +110,7 @@ impl ProgramFacts {
         consumer_op: Ptr<Operation>,
     ) -> bool {
         let (unwrap_op, intermediate_parse_op) = intermediate_ops;
-        let Some(&id) = self.generic.get(&function.get_symbol_name(ctx)) else {
+        let Some(&id) = self.generic.get(&function.get_operation()) else {
             return true;
         };
         let state = &self.states[id];

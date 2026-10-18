@@ -9,17 +9,42 @@ enum Unit<'s> {
 }
 
 impl<'s> FunctionBuilder<'s> {
-    fn object_literal_pairs(&self, expr: &'s Expr) -> Option<Vec<(&'s str, &'s Expr)>> {
-        match expr {
-            Expr::Object(fields) => Some(fields.iter().map(|(k, v)| (k.as_str(), v)).collect()),
+    fn numeric_fields<const N: usize>(
+        &mut self,
+        ctx: &mut Context,
+        pairs: impl IntoIterator<Item = (&'s str, &'s Expr)>,
+        fields: [(&str, &str); N],
+        unknown: impl Fn(&str) -> Result<()>,
+    ) -> Result<[Option<Value>; N]> {
+        let mut values = [None; N];
+        for (name, expr) in pairs {
+            if let Some(index) = fields.iter().position(|&(field, _)| field == name) {
+                values[index] =
+                    Some(self.typed_operand(ctx, expr, Kind::Number, fields[index].1)?);
+            } else {
+                unknown(name)?;
+            }
+        }
+        Ok(values)
+    }
+
+    fn object_literal_pairs(
+        &self,
+        expr: &'s Expr,
+    ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
+        let (fields, names, args) = match expr {
+            Expr::Object(fields) => (&fields[..], &[][..], &[][..]),
             Expr::New {
                 class_name, args, ..
-            } => {
-                let names = self.shapes.literal_fields(class_name)?;
-                Some(names.iter().copied().zip(args.iter()).collect())
-            }
-            _ => None,
-        }
+            } => (&[][..], self.shapes.literal_fields(class_name)?, &args[..]),
+            _ => return None,
+        };
+        Some(
+            fields
+                .iter()
+                .map(|(name, value)| (name.as_str(), value))
+                .chain(names.iter().copied().zip(args)),
+        )
     }
 
     fn overflow_string_to_constrain(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
@@ -31,6 +56,10 @@ impl<'s> FunctionBuilder<'s> {
             });
         }
         let val = self.typed_operand(ctx, expr, Kind::String, "an overflow string")?;
+        self.overflow_from_value(ctx, val)
+    }
+
+    fn overflow_from_value(&mut self, ctx: &mut Context, val: Value) -> Result<Value> {
         let constrain_str = self.string(ctx, "constrain");
         let is_constrain = self.compare(ctx, CompareKind::Eq, val, constrain_str);
         let f64_ty = FP64Type::get(ctx).into();
@@ -95,26 +124,7 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             raw_ov
         };
-        let constrain_str = self.string(ctx, "constrain");
-        let is_constrain = self.compare(ctx, CompareKind::Eq, ov_val, constrain_str);
-        let f64_ty = FP64Type::get(ctx).into();
-        self.choose(
-            ctx,
-            f64_ty,
-            is_constrain,
-            |b, ctx| Ok(b.number(ctx, 1.0)),
-            |b, ctx| {
-                let reject_str = b.string(ctx, "reject");
-                let is_reject = b.compare(ctx, CompareKind::Eq, ov_val, reject_str);
-                b.choose(
-                    ctx,
-                    f64_ty,
-                    is_reject,
-                    |b, ctx| Ok(b.number(ctx, 0.0)),
-                    |b, ctx| Ok(b.number(ctx, 2.0)),
-                )
-            },
-        )
+        self.overflow_from_value(ctx, ov_val)
     }
 
     fn coerce_plain_date(
@@ -124,24 +134,17 @@ impl<'s> FunctionBuilder<'s> {
         options: Option<&'s Expr>,
     ) -> Result<Value> {
         if let Some(pairs) = self.object_literal_pairs(item) {
-            let mut year = None;
-            let mut month = None;
-            let mut day = None;
-            for (k, v) in pairs {
-                match k {
-                    "year" => {
-                        year = Some(self.typed_operand(ctx, v, Kind::Number, "a year number")?)
-                    }
-                    "month" => {
-                        month = Some(self.typed_operand(ctx, v, Kind::Number, "a month number")?)
-                    }
-                    "day" => {
-                        day = Some(self.typed_operand(ctx, v, Kind::Number, "a day number")?)
-                    }
-                    _ => {}
-                }
-            }
-            let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+            let [Some(year), Some(month), Some(day)] = self.numeric_fields(
+                ctx,
+                pairs,
+                [
+                    ("year", "a year number"),
+                    ("month", "a month number"),
+                    ("day", "a day number"),
+                ],
+                |_| Ok(()),
+            )?
+            else {
                 bail!("Temporal.PlainDate.from fields object requires year, month, and day");
             };
             let constrain = self.overflow_constrain(ctx, options)?;
@@ -580,50 +583,22 @@ impl<'s> FunctionBuilder<'s> {
                     (1..=2).contains(&args.len()),
                     "Temporal {method} takes a duration object and optional options"
                 );
-                let mut years = None;
-                let mut months = None;
-                let mut weeks = None;
-                let mut days = None;
-                if let Some(pairs) = self.object_literal_pairs(&args[0]) {
-                    for (k, v) in pairs {
-                        match k {
-                            "years" => {
-                                years = Some(self.typed_operand(
-                                    ctx,
-                                    v,
-                                    Kind::Number,
-                                    "a number of years",
-                                )?)
-                            }
-                            "months" => {
-                                months = Some(self.typed_operand(
-                                    ctx,
-                                    v,
-                                    Kind::Number,
-                                    "a number of months",
-                                )?)
-                            }
-                            "weeks" => {
-                                weeks = Some(self.typed_operand(
-                                    ctx,
-                                    v,
-                                    Kind::Number,
-                                    "a number of weeks",
-                                )?)
-                            }
-                            "days" => {
-                                days = Some(self.typed_operand(
-                                    ctx,
-                                    v,
-                                    Kind::Number,
-                                    "a number of days",
-                                )?)
-                            }
-                            other => bail!(
-                                "Temporal {method} duration field {other} is not supported; use years, months, weeks, or days"
-                            ),
-                        }
-                    }
+                let [years, months, weeks, days] = if let Some(pairs) =
+                    self.object_literal_pairs(&args[0])
+                {
+                    self.numeric_fields(
+                        ctx,
+                        pairs,
+                        [
+                            ("years", "a number of years"),
+                            ("months", "a number of months"),
+                            ("weeks", "a number of weeks"),
+                            ("days", "a number of days"),
+                        ],
+                        |other| bail!(
+                            "Temporal {method} duration field {other} is not supported; use years, months, weeks, or days"
+                        ),
+                    )?
                 } else {
                     let value = self.expression(ctx, &args[0])?;
                     let rec = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
@@ -658,11 +633,13 @@ impl<'s> FunctionBuilder<'s> {
                         );
                         Ok(Some(field))
                     };
-                    years = read_unit("years")?;
-                    months = read_unit("months")?;
-                    weeks = read_unit("weeks")?;
-                    days = read_unit("days")?;
-                }
+                    [
+                        read_unit("years")?,
+                        read_unit("months")?,
+                        read_unit("weeks")?,
+                        read_unit("days")?,
+                    ]
+                };
                 ensure!(
                     years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
                     "Temporal {method} requires at least one of years, months, weeks, or days"

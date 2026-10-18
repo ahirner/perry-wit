@@ -139,9 +139,7 @@ unsafe fn extract_captures(
     if group_count <= 1 {
         return 0;
     }
-    let fwd_header = unsafe { read_u32(program.add(4)) };
-    let fwd_base = unsafe { program.add((fwd_header & !GLOBAL) as usize) };
-    let nfa_offset = unsafe { read_u32(fwd_base.add(8)) } as usize;
+    let nfa_offset = unsafe { read_u32(forward_base(program).add(8)) } as usize;
     assert!(nfa_offset != 0, "missing regex capture program");
     let bytes = unsafe {
         let base = program.add(nfa_offset);
@@ -179,84 +177,153 @@ unsafe fn extract_captures(
     group_count - 1
 }
 
+/// Start of the forward DFA, whose offset shares the header word with the `g` flag.
+///
+/// # Safety
+/// `program` must be a compiler-generated regex table.
+unsafe fn forward_base(program: *const u8) -> *const u8 {
+    unsafe { program.add((read_u32(program.add(4)) & !GLOBAL) as usize) }
+}
+
+/// # Safety
+/// `program` must be a compiler-generated regex table.
+unsafe fn is_global(program: *const u8) -> bool {
+    (unsafe { read_u32(program.add(4)) } & GLOBAL) != 0
+}
+
+/// One direction of a compiled table: rows are `[flags: u16, next row offset per class: u16...]`.
+#[derive(Clone, Copy)]
+struct Dfa {
+    rows: *const u8,
+    classes: *const u8,
+    end_column: usize,
+}
+
+impl Dfa {
+    /// # Safety
+    /// `base` heads a compiler-generated DFA whose classes and rows sit at the given offsets.
+    unsafe fn new(base: *const u8, classes: usize, rows: usize) -> Self {
+        unsafe {
+            Self {
+                rows: base.add(rows),
+                classes: base.add(classes),
+                end_column: usize::from(read_u16(base)),
+            }
+        }
+    }
+
+    /// # Safety
+    /// `state` is a row of this table.
+    unsafe fn step(self, state: *const u8, byte: u8) -> *const u8 {
+        let class = unsafe { *self.classes.add(usize::from(byte)) };
+        unsafe { self.goto(state, 2 + usize::from(class) * 2) }
+    }
+
+    /// Transition on end of input.
+    ///
+    /// # Safety
+    /// `state` is a row of this table.
+    unsafe fn end(self, state: *const u8) -> *const u8 {
+        unsafe { self.goto(state, self.end_column) }
+    }
+
+    /// # Safety
+    /// `column` of `state` holds a row offset of this table.
+    unsafe fn goto(self, state: *const u8, column: usize) -> *const u8 {
+        unsafe { self.rows.add(usize::from(read_u16(state.add(column)))) }
+    }
+
+    /// # Safety
+    /// `state` is a row of this table.
+    unsafe fn flags(state: *const u8) -> u16 {
+        unsafe { read_u16(state) }
+    }
+}
+
+/// Whether `at` is a UTF-8 scalar boundary (or the end).
+fn scalar_boundary(text: &[u8], at: usize) -> bool {
+    text.get(at).is_none_or(|&b| b & 0xc0 != 0x80)
+}
+
 /// Find the leftmost match start at or after byte offset `pos`.
 ///
 /// # Safety
 /// `program` must be a compiler-generated reverse+forward DFA table.
 unsafe fn match_start(text: &[u8], pos: usize, program: *const u8) -> Option<usize> {
-    if pos > text.len() {
-        return None;
-    }
-    let rev_end_column = unsafe { read_u16(program) } as usize;
-    let rev_rows = unsafe { program.add(REVERSE_ROWS) };
-    let mut state = rev_rows;
+    let tail = text.get(pos..)?;
+    let dfa = unsafe { Dfa::new(program, REVERSE_CLASSES, REVERSE_ROWS) };
+    let mut state = dfa.rows;
     let mut best_start = None;
-    for cursor in (pos..text.len()).rev() {
-        let byte = unsafe { *text.get_unchecked(cursor) };
-        let class = unsafe { *program.add(REVERSE_CLASSES + byte as usize) };
-        let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
-        state = unsafe { rev_rows.add(offset as usize) };
-        if unsafe { read_u16(state) } != 0 && text.get(cursor + 1).is_none_or(|&b| b & 0xc0 != 0x80)
-        {
-            best_start = Some(cursor + 1);
+    for (offset, &byte) in tail.iter().enumerate().rev() {
+        state = unsafe { dfa.step(state, byte) };
+        let cursor = pos + offset + 1;
+        if unsafe { Dfa::flags(state) } != 0 && scalar_boundary(text, cursor) {
+            best_start = Some(cursor);
         }
     }
-    if pos == 0 {
-        let offset = unsafe { read_u16(state.add(rev_end_column)) };
-        state = unsafe { rev_rows.add(offset as usize) };
-        if unsafe { read_u16(state) } != 0 {
-            best_start = Some(0);
-        }
-    } else if let Some(&prev) = text.get(pos - 1) {
-        let class = unsafe { *program.add(REVERSE_CLASSES + prev as usize) };
-        let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
-        state = unsafe { rev_rows.add(offset as usize) };
-        if unsafe { read_u16(state) } != 0 && text.get(pos).is_none_or(|&b| b & 0xc0 != 0x80) {
-            best_start = Some(pos);
-        }
+    // The byte before `pos` (or the start of input) decides whether `pos` itself starts a match.
+    state = match pos.checked_sub(1) {
+        Some(prev) => unsafe { dfa.step(state, text[prev]) },
+        None => unsafe { dfa.end(state) },
+    };
+    if unsafe { Dfa::flags(state) } != 0 && scalar_boundary(text, pos) {
+        best_start = Some(pos);
     }
     best_start
 }
 
 unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usize, usize)> {
     let start = unsafe { match_start(text, pos, program) }?;
-
-    let fwd_header = unsafe { read_u32(program.add(4)) };
-    let fwd_base = unsafe { program.add((fwd_header & !GLOBAL) as usize) };
-    let fwd_end_column = unsafe { read_u16(fwd_base) } as usize;
-    let start_offset = if start == 0 {
-        unsafe { read_u16(fwd_base.add(2)) }
-    } else if text.get(start - 1).is_some_and(|&b| is_word_byte(b)) {
-        unsafe { read_u16(fwd_base.add(4)) }
-    } else {
-        unsafe { read_u16(fwd_base.add(6)) }
+    let base = unsafe { forward_base(program) };
+    let dfa = unsafe { Dfa::new(base, FORWARD_CLASSES, FORWARD_ROWS) };
+    // The header's start-state columns (2: input start, 4: after a word byte, 6: otherwise)
+    // hold row offsets like a row does.
+    let start_column = match start.checked_sub(1) {
+        None => 2,
+        Some(prev) if is_word_byte(text[prev]) => 4,
+        Some(_) => 6,
     };
-    let fwd_rows = unsafe { fwd_base.add(FORWARD_ROWS) };
-    let mut state = unsafe { fwd_rows.add(start_offset as usize) };
+    let mut state = unsafe { dfa.goto(base, start_column) };
     let mut best_end = None;
-    let mut hit_dead = false;
-    for cursor in start..text.len() {
-        let byte = unsafe { *text.get_unchecked(cursor) };
-        let class = unsafe { *fwd_base.add(FORWARD_CLASSES + byte as usize) };
-        let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
-        state = unsafe { fwd_rows.add(offset as usize) };
-        let flags = unsafe { read_u16(state) };
+    for (cursor, &byte) in text.iter().enumerate().skip(start) {
+        state = unsafe { dfa.step(state, byte) };
+        let flags = unsafe { Dfa::flags(state) };
         if flags & 1 != 0 && (cursor == start || byte & 0xc0 != 0x80) {
             best_end = Some(cursor);
         }
         if flags & 2 != 0 {
-            hit_dead = true;
-            break;
+            return Some((start, best_end?));
         }
     }
-    if !hit_dead {
-        let offset = unsafe { read_u16(state.add(fwd_end_column)) };
-        state = unsafe { fwd_rows.add(offset as usize) };
-        if unsafe { read_u16(state) } & 1 != 0 {
-            best_end = Some(text.len());
-        }
+    if unsafe { Dfa::flags(dfa.end(state)) } & 1 != 0 {
+        best_end = Some(text.len());
     }
     Some((start, best_end?))
+}
+
+/// Successive non-overlapping matches, stepping one scalar past empty matches like `lastIndex`.
+///
+/// # Safety
+/// `program` must remain a valid compiler-generated DFA table while iterating.
+unsafe fn matches(text: &[u8], program: *const u8) -> impl Iterator<Item = (usize, usize)> {
+    let mut pos = Some(0);
+    core::iter::from_fn(move || {
+        let (start, end) = unsafe { next_match(text, pos?, program) }?;
+        pos = if end > start {
+            Some(end)
+        } else if end < text.len() {
+            Some(next_scalar_boundary(text, end))
+        } else {
+            None
+        };
+        Some((start, end))
+    })
+}
+
+/// Byte range of capture `group` (1-based); slots store offset + 1 so 0 means unset.
+fn capture(slots: &[u32], group: usize) -> Option<core::ops::Range<usize>> {
+    let (s, e) = (slots[2 * group - 2], slots[2 * group - 1]);
+    (s != 0 && e != 0 && s <= e).then(|| s as usize - 1..e as usize - 1)
 }
 
 fn next_scalar_boundary(text: &[u8], pos: usize) -> usize {
@@ -321,20 +388,16 @@ pub(crate) fn push_substitution(
                     if let Some(&d2_ch @ b'0'..=b'9') = replacement.get(index + 2) {
                         let two = d1 * 10 + (d2_ch - b'0') as usize;
                         if two >= 1 && two <= group_count {
-                            let s = captures[(two - 1) * 2];
-                            let e = captures[(two - 1) * 2 + 1];
-                            if s != 0 && e != 0 && s <= e {
-                                out.extend_from_slice(&text[(s as usize - 1)..(e as usize - 1)]);
+                            if let Some(range) = capture(captures, two) {
+                                out.extend_from_slice(&text[range]);
                             }
                             index += 3;
                             continue;
                         }
                     }
                     if d1 >= 1 && d1 <= group_count {
-                        let s = captures[(d1 - 1) * 2];
-                        let e = captures[(d1 - 1) * 2 + 1];
-                        if s != 0 && e != 0 && s <= e {
-                            out.extend_from_slice(&text[(s as usize - 1)..(e as usize - 1)]);
+                        if let Some(range) = capture(captures, d1) {
+                            out.extend_from_slice(&text[range]);
                         }
                         index += 2;
                     } else {
@@ -378,42 +441,17 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
     replacement: *mut u8,
 ) -> *mut u8 {
     let text = unsafe { runtime::bytes(string) };
-    let Some((first_start, first_end)) = (unsafe { next_match(text, 0, program) }) else {
+    let mut matches = unsafe { matches(text, program) };
+    let Some(first) = matches.next() else {
         return string;
     };
     let rep = unsafe { runtime::bytes(replacement) };
     let needs_captures = rep.contains(&b'$') && unsafe { group_count(program) } > 1;
     let mut cap_slots = [0u32; MAX_SLOTS];
-    let is_global = (unsafe { read_u32(program.add(4)) } >> 31) != 0;
+    let global = unsafe { is_global(program) };
     let mut out = runtime::Buffer::new();
-    out.extend_from_slice(&text[..first_start]);
-    let cap_len = if needs_captures {
-        unsafe { extract_captures(program, text, first_start, first_end, &mut cap_slots) * 2 }
-    } else {
-        0
-    };
-    push_substitution(
-        &mut out,
-        text,
-        first_start,
-        first_end,
-        rep,
-        &cap_slots[..cap_len],
-    );
-    if !is_global {
-        out.extend_from_slice(&text[first_end..]);
-        return unsafe { out.into_string() };
-    }
-    let mut last_end = first_end;
-    let mut pos = if first_end > first_start {
-        first_end
-    } else if first_end < text.len() {
-        next_scalar_boundary(text, first_end)
-    } else {
-        out.extend_from_slice(&text[last_end..]);
-        return unsafe { out.into_string() };
-    };
-    while let Some((start, end)) = unsafe { next_match(text, pos, program) } {
+    let mut last_end = 0;
+    for (start, end) in core::iter::once(first).chain(matches) {
         out.extend_from_slice(&text[last_end..start]);
         let cap_len = if needs_captures {
             unsafe { extract_captures(program, text, start, end, &mut cap_slots) * 2 }
@@ -422,11 +460,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
         };
         push_substitution(&mut out, text, start, end, rep, &cap_slots[..cap_len]);
         last_end = end;
-        if end > start {
-            pos = end;
-        } else if end < text.len() {
-            pos = next_scalar_boundary(text, end);
-        } else {
+        if !global {
             break;
         }
     }
@@ -454,12 +488,9 @@ pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const 
         *first = unsafe { slice_string(string, text.len(), start, end) } as u64;
     }
     for (i, slot) in slots.iter_mut().enumerate().skip(1) {
-        let s = cap_slots[(i - 1) * 2];
-        let e = cap_slots[(i - 1) * 2 + 1];
-        let piece = if s != 0 && e != 0 && s <= e {
-            unsafe { slice_string(string, text.len(), s as usize - 1, e as usize - 1) }
-        } else {
-            runtime::from_static("")
+        let piece = match capture(&cap_slots, i) {
+            Some(range) => unsafe { slice_string(string, text.len(), range.start, range.end) },
+            None => runtime::from_static(""),
         };
         *slot = piece as u64;
     }
@@ -472,35 +503,16 @@ pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const 
 /// `string` is a live immutable string; `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_match(string: *mut u8, program: *const u8) -> *mut u8 {
-    let is_global = (unsafe { read_u32(program.add(4)) } >> 31) != 0;
-    if !is_global {
+    if !unsafe { is_global(program) } {
         return unsafe { std_regex_exec(string, program) };
     }
     let text = unsafe { runtime::bytes(string) };
-    let matches = || {
-        let mut pos = 0usize;
-        let mut finished = false;
-        core::iter::from_fn(move || {
-            if finished {
-                return None;
-            }
-            let (start, end) = unsafe { next_match(text, pos, program) }?;
-            if end > start {
-                pos = end;
-            } else if end < text.len() {
-                pos = next_scalar_boundary(text, end);
-            } else {
-                finished = true;
-            }
-            Some((start, end))
-        })
-    };
-    let count = matches().count();
+    let count = unsafe { matches(text, program) }.count();
     if count == 0 {
         return core::ptr::null_mut();
     }
     let (array, slots) = runtime::array_storage(count);
-    for (slot, (start, end)) in slots.iter_mut().zip(matches()) {
+    for (slot, (start, end)) in slots.iter_mut().zip(unsafe { matches(text, program) }) {
         *slot = unsafe { slice_string(string, text.len(), start, end) } as u64;
     }
     array

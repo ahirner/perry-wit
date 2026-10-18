@@ -42,6 +42,11 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Expr::Sequence(parts) = expr {
             let (last, effects) = parts.split_last().context("empty sequence expression")?;
+            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                return self
+                    .expression_with(ctx, last, expected)
+                    .map_err(|error| self.shapes.metadata.locations.annotate(error, span));
+            }
             for effect in effects {
                 self.effect(ctx, effect)?;
             }
@@ -272,14 +277,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                if let Some(target) = expected.filter(|ty| {
-                    !ty.deref(ctx).is::<JsonType>()
-                        && perry_mir::JsonSchema::supports_cursor(ctx, *ty)
-                }) {
-                    self.parse_cursor(ctx, text, target)?
-                } else {
-                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                }
+                self.parse_json_text(ctx, text, expected)?
             }
             Expr::JsonParseTyped { text, ty, .. } => {
                 let text = self.string_operand(ctx, text)?;
@@ -292,24 +290,10 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     self.shapes.value_type(ctx, ty)?
                 };
-                let decoded = if !target.deref(ctx).is::<JsonType>()
-                    && perry_mir::JsonSchema::supports_cursor(ctx, target)
-                {
-                    self.parse_cursor(ctx, text, target)?
-                } else if target.deref(ctx).is::<JsonType>() {
-                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                } else {
-                    let parsed = self.intrinsic(ctx, Intrinsic::JsonParse, vec![text]);
-                    self.fit(ctx, parsed, target)?
-                };
-                if target
-                    .deref(ctx)
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|int| int.width() == 64)
-                    && expected != Some(target)
-                {
-                    let bigint = BigIntType::get(ctx).into();
-                    self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, decoded, bigint))
+                let parsed = self.parse_json_text(ctx, text, Some(target))?;
+                let decoded = self.fit(ctx, parsed, target)?;
+                if expected != Some(target) {
+                    self.bigint_view(ctx, decoded)
                 } else {
                     decoded
                 }
@@ -330,14 +314,7 @@ impl<'s> FunctionBuilder<'s> {
                     "{JSON_CALLBACKS}"
                 );
                 let text = self.string_operand(ctx, text)?;
-                if let Some(target) = expected.filter(|ty| {
-                    !ty.deref(ctx).is::<JsonType>()
-                        && perry_mir::JsonSchema::supports_cursor(ctx, *ty)
-                }) {
-                    self.parse_cursor(ctx, text, target)?
-                } else {
-                    self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                }
+                self.parse_json_text(ctx, text, expected)?
             }
             Expr::JsonStringifyPretty { .. } => bail!("{JSON_CALLBACKS}"),
             Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
@@ -498,11 +475,8 @@ impl<'s> FunctionBuilder<'s> {
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items)
                 if expected.is_some_and(|ty| {
-                    TypedHandle::<RecordType>::from_handle(
-                        optional_value(ctx, ty).unwrap_or(ty),
-                        ctx,
-                    )
-                    .is_ok_and(|record| record.deref(ctx).is_tuple())
+                    TypedHandle::<RecordType>::from_handle(present_type(ctx, ty), ctx)
+                        .is_ok_and(|record| record.deref(ctx).is_tuple())
                 }) =>
             {
                 let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
@@ -598,7 +572,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayPush {
                 array_id, value, ..
             } => self
-                .array_push(ctx, *array_id, value)
+                .local(*array_id)
+                .and_then(|slot| self.load(ctx, slot))
+                .and_then(|array| {
+                    self.push_values(ctx, array, std::slice::from_ref(value.as_ref()))
+                })
                 .map_err(|error| self.shapes.annotate_local(error, *array_id))?,
             Expr::IndexGet { object, index } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
@@ -786,7 +764,7 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some(local) = self.locals.get(id)
                     && let Ok(else_ty) = self.slot_type(ctx, local.slot)
                 {
-                    let inner = optional_value(ctx, else_ty).unwrap_or(else_ty);
+                    let inner = present_type(ctx, else_ty);
                     let then_absence = if matches!(then_expr, Expr::Null) {
                         perry_mir::Absence::Null
                     } else {
@@ -849,7 +827,7 @@ impl<'s> FunctionBuilder<'s> {
                 if let Some(states) =
                     crate::coerce::merge_absence(absence(ctx, then_ty), absence(ctx, else_ty))
                 {
-                    let inner = optional_value(ctx, then_ty).unwrap_or(then_ty);
+                    let inner = present_type(ctx, then_ty);
                     perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 } else {
                     then_ty

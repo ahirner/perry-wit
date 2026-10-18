@@ -331,7 +331,7 @@ impl ProgramFacts {
         objects: &BTreeSet<usize>,
         visiting: &mut HashSet<TypeHandle>,
     ) -> pliron::result::Result<()> {
-        let ty = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+        let ty = crate::optional::present_type(ctx, ty);
         if objects.is_empty() || !visiting.insert(ty) {
             return Ok(());
         }

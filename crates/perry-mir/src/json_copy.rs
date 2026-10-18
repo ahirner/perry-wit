@@ -26,7 +26,7 @@ use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
 use crate::exceptions::CaughtOp;
 use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
-use crate::optional::{UnwrapOp, absence, optional_value};
+use crate::optional::{UnwrapOp, absence, present_type};
 use crate::types::VariantType;
 
 use self::emit::{build_json_copy_helper, const_i32};
@@ -313,7 +313,7 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     if !seen.insert(ty) {
         return false;
     }
-    let inner = optional_value(ctx, ty).unwrap_or(ty);
+    let inner = present_type(ctx, ty);
     let schema = JsonSchema::of(ctx, inner);
     if let Some(JsonSchema::Record(rec)) = schema {
         let rec = rec.deref(ctx);
@@ -426,8 +426,8 @@ fn schemas_add_fields(
     if !seen.insert((source_ty, target_ty)) {
         return false;
     }
-    let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
-    let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+    let s_inner = present_type(ctx, source_ty);
+    let t_inner = present_type(ctx, target_ty);
     if s_inner == t_inner {
         return false;
     }
@@ -479,16 +479,16 @@ fn schemas_compatible(
     }
 
     if t_abs == Some(Absence::Undefined) {
-        let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+        let t_inner = present_type(ctx, target_ty);
         if s_abs == Some(Absence::Undefined) {
-            let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
+            let s_inner = present_type(ctx, source_ty);
             return schemas_compatible(ctx, s_inner, t_inner, seen);
         }
         return schemas_compatible(ctx, source_ty, t_inner, seen);
     }
 
     if s_abs == Some(Absence::Undefined) {
-        let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
+        let s_inner = present_type(ctx, source_ty);
         return schemas_compatible(ctx, s_inner, target_ty, seen);
     }
 
@@ -496,8 +496,8 @@ fn schemas_compatible(
         return false;
     }
 
-    let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
-    let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+    let s_inner = present_type(ctx, source_ty);
+    let t_inner = present_type(ctx, target_ty);
 
     if absence(ctx, s_inner).is_some() || absence(ctx, t_inner).is_some() {
         return false;
