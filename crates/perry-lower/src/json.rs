@@ -1,5 +1,6 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
+use perry_mir::JsonSchema;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn json_scalar_equal(
@@ -121,18 +122,7 @@ impl<'s> FunctionBuilder<'s> {
             index += 1;
         };
         self.shapes.decoders.borrow_mut().insert(key, name.clone());
-        let signature = Signature {
-            name: name.clone(),
-            is_async: false,
-            await_initialization: false,
-            base_params: params.iter().copied().map(BindingType::plain).collect(),
-            params: params.iter().copied().map(BindingType::plain).collect(),
-            never_params: Vec::new(),
-            defaults: Vec::new(),
-            has_rest: false,
-            result: results.first().copied().map(BindingType::plain),
-            returns_never: false,
-        };
+        let result = results.first().copied().map(BindingType::plain);
         let ty = FunctionType::get(ctx, params, results);
         let function = FuncOp::new(ctx, name.clone(), ty);
         perry_mir::set_json_decoder(
@@ -154,7 +144,8 @@ impl<'s> FunctionBuilder<'s> {
         let mut builder = Self::new(
             ctx,
             &function,
-            &signature,
+            result,
+            false,
             self.signatures,
             self.shapes,
             self.builtins,
@@ -171,7 +162,8 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         target: TypeHandle,
     ) -> Result<Value> {
-        if target.deref(ctx).is::<perry_mir::NumberStringType>() {
+        let schema = JsonSchema::of(ctx, target);
+        if matches!(schema, Some(JsonSchema::NumberString)) {
             let tag = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]);
             let number = self.string(ctx, "number");
             let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
@@ -191,7 +183,7 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(target, ctx) {
+        if let Some(JsonSchema::Variant(variant)) = schema {
             let cases = variant.deref(ctx).cases().to_vec();
             self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
             let tag_key = self.string(ctx, "tag");
@@ -231,7 +223,7 @@ impl<'s> FunctionBuilder<'s> {
             self.switch_to(done);
             return self.load(ctx, result);
         }
-        if let Ok(record) = TypedHandle::<RecordType>::from_handle(target, ctx) {
+        if let Some(JsonSchema::Record(record)) = schema {
             let tuple = record.deref(ctx).is_tuple();
             let fields = record
                 .deref(ctx)
@@ -259,11 +251,15 @@ impl<'s> FunctionBuilder<'s> {
             self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
             return Ok(decoded);
         }
-        if let Some((k_ty, v_ty, tuple_rec)) = crate::collections::dict_entry_types(ctx, target) {
-            return self.decode_dict(ctx, value, k_ty, v_ty, tuple_rec);
+        if let Some(JsonSchema::Dictionary {
+            entry,
+            key,
+            value: element,
+        }) = schema
+        {
+            return self.decode_dict(ctx, value, key, element, entry);
         }
-        if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
-            let element = array_type.deref(ctx).element();
+        if let Some(JsonSchema::Array(element)) = schema {
             let first = self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value]);
             let json = JsonType::get(ctx).into();
             let cursor = self.entry_slot(ctx, json);
@@ -465,45 +461,4 @@ impl<'s> FunctionBuilder<'s> {
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
-}
-
-/// Schemas supported by direct cursor construction with the current runtime layout.
-/// Other schema kinds use checked snapshot conversion.
-pub(super) fn direct_json_schema(ctx: &Context, root: TypeHandle) -> bool {
-    let mut pending = vec![root];
-    let mut visited = std::collections::HashSet::new();
-    while let Some(ty) = pending.pop() {
-        if !visited.insert(ty) {
-            continue;
-        }
-        if crate::collections::dict_entry_types(ctx, ty).is_some()
-            || crate::collections::map_entry_types(ctx, ty).is_some()
-            || crate::collections::set_entry_type(ctx, ty).is_some()
-        {
-            return false;
-        }
-        let ty = ty.deref(ctx);
-        if let Some(record) = ty.downcast_ref::<RecordType>() {
-            let Ok(fields) = record.fields() else {
-                return false;
-            };
-            pending.extend(fields.iter().map(|(_, ty)| *ty));
-        } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
-            pending.push(array.element());
-        } else if let Some(variant) = ty.downcast_ref::<perry_mir::VariantType>() {
-            pending.extend(variant.cases().iter().filter_map(|(_, ty)| *ty));
-        } else if let Some(optional) = ty.downcast_ref::<perry_mir::OptionalType>() {
-            pending.push(optional.value());
-        } else if !(ty.is::<FP64Type>()
-            || ty.is::<StringType>()
-            || ty.is::<JsonType>()
-            || ty.is::<perry_mir::NumberStringType>()
-            || ty
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|int| matches!(int.width(), 1 | 64)))
-        {
-            return false;
-        }
-    }
-    true
 }

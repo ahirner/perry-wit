@@ -17,6 +17,37 @@ pub(super) enum Control<'s> {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Jump {
+    Break,
+    Continue,
+}
+
+impl Control<'_> {
+    pub(super) fn target(&self, jump: Jump, label: Option<&str>) -> Option<Ptr<BasicBlock>> {
+        let (own_label, break_to, continue_to) = match self {
+            Self::Loop {
+                label,
+                break_to,
+                continue_to,
+            } => (*label, *break_to, Some(*continue_to)),
+            Self::Switch { label, break_to } => (*label, *break_to, None),
+            Self::Labeled { label, break_to } => (Some(*label), *break_to, None),
+        };
+        if let Some(label) = label {
+            if own_label != Some(label) {
+                return None;
+            }
+        } else if matches!(self, Self::Labeled { .. }) {
+            return None;
+        }
+        match jump {
+            Jump::Break => Some(break_to),
+            Jump::Continue => continue_to,
+        }
+    }
+}
+
 /// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
 /// status in `status` and branch to `block`.
 #[derive(Clone, Copy)]
@@ -61,10 +92,9 @@ pub(super) struct FunctionBuilder<'s> {
     entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
-    pub(super) locals: HashMap<LocalId, LocalBinding>,
-    pub(super) closures: HashMap<LocalId, &'s Expr>,
+    pub(super) locals: bindings::Bindings<LocalBinding>,
+    pub(super) closures: bindings::Bindings<&'s Expr>,
     pub(super) never_values: HashSet<Value>,
-    pub(super) pending_label: Option<&'s str>,
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
@@ -75,7 +105,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
     pub(super) handlers: Vec<Handler>,
     pub(super) finallies: Vec<Finally<'s>>,
-    pub(super) signatures: &'s HashMap<FuncId, Signature>,
+    pub(super) signatures: &'s HashMap<FuncId, Signature<'s>>,
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
     pub(super) builtins: &'s HashMap<String, Builtin>,
@@ -90,7 +120,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn lower(
         ctx: &mut Context,
         function: &'s Function,
-        signatures: &'s HashMap<FuncId, Signature>,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
@@ -105,30 +135,32 @@ impl<'s> FunctionBuilder<'s> {
         let signature = signatures
             .get(&function.id)
             .with_context(|| format!("no signature for function {}", function.name))?;
-        let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
-        Self::lower_body(
-            ctx,
-            signature,
-            &params,
-            &function.body,
-            signatures,
-            shapes,
-            builtins,
-        )
+        Self::lower_body(ctx, signature, &function.body, signatures, shapes, builtins)
     }
 
     pub(super) fn lower_body(
         ctx: &mut Context,
-        signature: &Signature,
-        params: &[LocalId],
+        signature: &Signature<'s>,
         body: &'s [Stmt],
-        signatures: &'s HashMap<FuncId, Signature>,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
-        let ty = FunctionType::get(ctx, signature.carrier_params(), signature.carrier_results());
+        let ty = FunctionType::get(
+            ctx,
+            signature.params.iter().map(|p| p.binding.carrier).collect(),
+            signature.carrier_results(),
+        );
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
-        let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
+        let mut builder = Self::new(
+            ctx,
+            &func,
+            signature.result,
+            signature.is_async,
+            signatures,
+            shapes,
+            builtins,
+        );
         let mut globals: Vec<_> = shapes
             .globals
             .borrow()
@@ -147,11 +179,12 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        for (index, (&param, &binding)) in params.iter().zip(&signature.params).enumerate() {
+        for (index, param) in signature.params.iter().enumerate() {
             let arg_val = builder.entry.deref(ctx).get_argument(index);
-            let base_binding = signature.base_params.get(index).copied().unwrap_or(binding);
-            let is_never = signature.never_params.get(index).copied().unwrap_or(false);
-            if let Some(Some(default_expr)) = signature.defaults.get(index)
+            let binding = param.binding;
+            let base_binding = param.base;
+            let is_never = matches!(param.source.ty, HirType::Never);
+            if let Some(default_expr) = &param.source.default
                 && !matches!(default_expr, Expr::Undefined)
             {
                 let is_undef = if builder.is_optional(ctx, arg_val) {
@@ -175,7 +208,7 @@ impl<'s> FunctionBuilder<'s> {
                 let slot = builder.entry_slot(ctx, base_binding.carrier);
                 builder.store(ctx, slot, init_val);
                 builder.locals.insert(
-                    param,
+                    param.source.id,
                     LocalBinding {
                         slot,
                         integer: base_binding.integer,
@@ -186,7 +219,7 @@ impl<'s> FunctionBuilder<'s> {
                 let slot = builder.entry_slot(ctx, arg_val.get_type(ctx));
                 builder.store(ctx, slot, arg_val);
                 builder.locals.insert(
-                    param,
+                    param.source.id,
                     LocalBinding {
                         slot,
                         integer: binding.integer,
@@ -209,7 +242,10 @@ impl<'s> FunctionBuilder<'s> {
                 builder.binding(ctx, id, &field.ty, field.init.as_ref())?;
             }
         }
-        let body = strip_synthetic_default_guards(body, params, &signature.defaults);
+        let body = hir_compat::strip_synthetic_default_guards(
+            body,
+            signature.params.iter().map(|p| p.source),
+        );
         builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);
@@ -222,8 +258,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn new(
         ctx: &Context,
         func: &FuncOp,
-        signature: &Signature,
-        signatures: &'s HashMap<FuncId, Signature>,
+        result: Option<BindingType>,
+        is_async: bool,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Self {
@@ -234,10 +271,9 @@ impl<'s> FunctionBuilder<'s> {
             entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
-            locals: HashMap::new(),
-            closures: HashMap::new(),
+            locals: bindings::Bindings::default(),
+            closures: bindings::Bindings::default(),
             never_values: HashSet::new(),
-            pending_label: None,
             global_slots: HashSet::new(),
             iteration: hir_compat::Iteration::default(),
             variant_guards: Vec::new(),
@@ -248,8 +284,8 @@ impl<'s> FunctionBuilder<'s> {
             signatures,
             shapes,
             builtins,
-            result: signature.result,
-            is_async: signature.is_async,
+            result,
+            is_async,
             labels: 0,
             rest_excluded_keys: &[],
             this_slot: None,
@@ -671,42 +707,4 @@ pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::
     for block in dead {
         BasicBlock::erase(block, ctx);
     }
-}
-
-pub(super) fn strip_synthetic_default_guards<'a>(
-    mut body: &'a [Stmt],
-    params: &[LocalId],
-    defaults: &[Option<Expr>],
-) -> &'a [Stmt] {
-    while let Some(Stmt::If {
-        condition:
-            Expr::Compare {
-                op: CompareOp::Eq,
-                left,
-                right,
-            },
-        then_branch,
-        else_branch: None,
-    }) = body.first()
-    {
-        let param_id = match (&**left, &**right) {
-            (Expr::LocalGet(id), Expr::Undefined) | (Expr::Undefined, Expr::LocalGet(id)) => {
-                Some(*id)
-            }
-            _ => None,
-        };
-        if let Some(id) = param_id
-            && let Some(idx) = params.iter().position(|p| *p == id)
-            && defaults.get(idx).is_some_and(Option::is_some)
-            && matches!(
-                then_branch.as_slice(),
-                [Stmt::Expr(Expr::LocalSet(set_id, _))] if *set_id == id
-            )
-        {
-            body = &body[1..];
-        } else {
-            break;
-        }
-    }
-    body
 }

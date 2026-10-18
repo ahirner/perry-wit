@@ -14,6 +14,7 @@ pub(crate) struct Locations<'s> {
     files: Vec<(PathBuf, &'s str, u32)>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, Span>,
+    members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     async_init: bool,
@@ -59,6 +60,13 @@ impl<'s> Locations<'s> {
             )
         });
         self.annotate(error, span)
+    }
+
+    pub(crate) fn annotate_member(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+        match self.members.get(&byte_offset) {
+            Some(&span) => self.annotate(error, span),
+            None => self.annotate_call(error, byte_offset),
+        }
     }
 
     pub(crate) fn annotate_type(&self, error: anyhow::Error, name: &str) -> anyhow::Error {
@@ -143,6 +151,10 @@ impl<'s> Locations<'s> {
                     self.locations.calls.insert(call.span.lo.0, call.span);
                 }
                 call.visit_children_with(self);
+            }
+            fn visit_member_expr(&mut self, member: &ast::MemberExpr) {
+                self.locations.members.insert(member.span.lo.0, member.span);
+                member.visit_children_with(self);
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
                 if new_expr.span.lo.0 != 0 {

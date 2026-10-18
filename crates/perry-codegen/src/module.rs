@@ -2,7 +2,7 @@
 //! functions, drivers and boundary glue are emitted, and the raw (test) export wrappers.
 use crate::{
     DATA_BASE, Exports, HELPER_MODULE,
-    analysis::reachable_functions,
+    analysis::{ModuleAnalyses, module_analyses, reachable_functions},
     async_split, boundary,
     function::FunctionLowering,
     host::Host,
@@ -26,8 +26,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    printable::Printable,
-    r#type::{TypeHandle, TypedHandle},
+    r#type::{TypeHandle, Typed, TypedHandle},
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -114,7 +113,6 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) async_functions: Vec<Identifier>,
     /// Resume handlers registered by runtime frame constructors during lowering.
     pub(crate) runtime_frames: BTreeMap<u32, Runtime>,
-    pub(crate) shapes: HashMap<String, i32>,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
     /// Whether any async library export reports uncaught rejections to stderr.
@@ -135,6 +133,7 @@ pub(crate) struct ModuleState<'e> {
     /// Generated `JSON.stringify` serializers by MIR type.
     pub(crate) native_descriptors: HashMap<TypeHandle, u32>,
     pub(crate) json_serializers: HashMap<TypeHandle, Identifier>,
+    pub(crate) json_fields: HashMap<TypeHandle, (u32, usize)>,
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
     pub(crate) collectible: bool,
@@ -182,18 +181,10 @@ pub(crate) fn lower(
         .filter(|f| perry_mir::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
-    analyses
-        .get_analysis::<perry_mir::ProgramFacts>(mir.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
-    analyses
-        .get_analysis::<perry_mir::LiveValues>(mir.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
-    let effects = analyses
-        .try_get_analysis::<perry_mir::ProgramFacts>(mir.get_operation())
-        .expect("runtime effects");
-    let live = analyses
-        .try_get_analysis::<perry_mir::LiveValues>(mir.get_operation())
-        .expect("liveness");
+    let ModuleAnalyses {
+        facts: effects,
+        live,
+    } = module_analyses(ctx, mir, analyses)?;
     let resource_keys = boundary::used_keys(ctx, &functions);
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
     let memory_checks = matches!(
@@ -239,7 +230,6 @@ pub(crate) fn lower(
         foreign_transfers: Vec::new(),
         async_functions,
         runtime_frames: BTreeMap::new(),
-        shapes: HashMap::new(),
         uses_io: false,
         reports_rejection: false,
         uses_fs: false,
@@ -248,15 +238,28 @@ pub(crate) fn lower(
         uses_json_bodies: false,
         uses_http_server: false,
         json_serializers: HashMap::new(),
+        json_fields: HashMap::new(),
         native_descriptors: HashMap::new(),
         retains_json: functions.iter().any(|function| {
             crate::analysis::function_ops(ctx, function)
                 .into_iter()
                 .any(|op| {
+                    if Operation::is_op::<perry_mir::FieldSetOp>(op, ctx)
+                        && perry_mir::absence(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
+                            .is_some_and(|absence| absence.admits_undefined())
+                    {
+                        return true;
+                    }
                     Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
                         matches!(
                             op.intrinsic(ctx),
-                            perry_mir::Intrinsic::JsonRetain | perry_mir::Intrinsic::JsonResidue
+                            perry_mir::Intrinsic::JsonRetain
+                                | perry_mir::Intrinsic::JsonResidue
+                                | perry_mir::Intrinsic::JsonCursorRecord
+                                | perry_mir::Intrinsic::JsonSpread
+                                | perry_mir::Intrinsic::JsonOrderCopy
+                                | perry_mir::Intrinsic::JsonInsert
+                                | perry_mir::Intrinsic::JsonExclude
                         )
                     })
                 })
@@ -265,7 +268,7 @@ pub(crate) fn lower(
         collectible: !resource_keys.is_empty()
             || matches!(exports, Exports::RawChecked)
             || memory_checks
-            || memory::needs_collector(ctx, &functions, &effects),
+            || memory::needs_collector(ctx, &functions, &effects)?,
         memory_checks,
         program_facts: &effects,
         live: &live,
@@ -397,11 +400,7 @@ fn bind_exports(
                 export.function
             )
         })?;
-        let effects = &state
-            .program_facts
-            .effects(&function.get_symbol_name(ctx))
-            .expect("function effects")
-            .effects;
+        let effects = &state.program_facts.function_summary(ctx, function)?.effects;
         if export.is_async()
             && stderr
             && ((effects.host_work

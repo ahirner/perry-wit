@@ -20,7 +20,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PERRY_HELPER_TARGET_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
 
-    for helper in ["search", "text", "fetch", "json", "time", "number"] {
+    for helper in ["text", "fetch", "json", "time", "number"] {
         compile_cargo_helper(
             &manifest_dir,
             &out_dir,

@@ -114,6 +114,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround, named groups, and inline flags are unsupported")),
         (regex("/(a)\\1/"), format!("{REGEX_CONST}Unsupported regex escape: \\1")),
         (regex("/(a)(b)(c)(d)(e)(f)(g)(h)(i)/"), format!("{REGEX_CONST}Regex has 9 capture groups; at most 8 are supported")),
+        (regex("/(a{300})/"), format!("{REGEX_CONST}Regex capture program exceeds 256 states")),
         (regex("(input === 'x' ? /a/g : /a/)"), format!("case.ts:1:55: UnsupportedExpression: regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag{IN_TEST}")),
         (regex("/\\uD800/u"), format!("{REGEX_CONST}Unpaired surrogate in regex escape")),
         (regex("new RegExp(input)"), format!("case.ts:1:55: UnsupportedExpression: RegExp construction is unsupported; use a bounded regex literal{IN_TEST}")),
@@ -122,11 +123,11 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: UnsupportedExpression: generator function count is not supported yet".into()),
         ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), format!("case.ts:1:48: UnsupportedExpression: MIR backend does not support unresolved generic type WeakMap{IN_RUN}")),
         ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), format!("case.ts:2:10: UnsupportedExpression: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly{IN_RUN}")),
-        ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), format!("case.ts:1:8: UnsupportedExpression: property byteLength is not supported on string yet{IN_RUN}")),
+        ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), format!("case.ts:2:10: UnsupportedExpression: property byteLength is not supported on string yet{IN_RUN}")),
         ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), format!("case.ts:1:8: UnsupportedExpression: operator Pow on bigint and bigint is not supported yet{IN_RUN}")),
         ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), format!("case.ts:1:38: UnsupportedExpression: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now{IN_F}")),
         ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), format!("case.ts:1:47: UnsupportedExpression: Temporal add duration field hours is not supported; use years, months, weeks, or days{IN_F}")),
-        ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), format!("case.ts:1:8: UnsupportedExpression: property hour is not supported on Temporal.PlainDate yet{IN_F}")),
+        ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), format!("case.ts:1:47: UnsupportedExpression: property hour is not supported on Temporal.PlainDate yet{IN_F}")),
     ];
     let mismatches: Vec<String> = cases
         .iter()

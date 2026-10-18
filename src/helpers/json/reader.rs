@@ -1,5 +1,6 @@
 //! Shared UTF-8 JSON lexical operations; storage and schema construction stay in destinations.
 use super::Error;
+use perry_abi::number::{DecimalLiteral, DecimalSyntax, scan_decimal};
 
 pub(super) struct Reader<'a> {
     pub(super) input: &'a str,
@@ -21,66 +22,33 @@ impl<'a> Reader<'a> {
         self.scan_number::<false>().map(|_| ())
     }
     pub(super) fn numeric(&mut self) -> Result<f64, Error> {
-        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
-        Ok(decimal.finish(&self.input.as_bytes()[start..end], negative, exponent))
+        let (literal, negative) = self.scan_number::<true>()?;
+        Ok(literal
+            .decimal
+            .finish(literal.mantissa, negative, literal.exponent))
     }
     #[cfg(target_arch = "wasm32")]
     pub(super) fn signed_integer(&mut self) -> Result<Option<i64>, Error> {
-        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
-        Ok(decimal.finish_i64(&self.input.as_bytes()[start..end], negative, exponent))
+        let (literal, negative) = self.scan_number::<true>()?;
+        Ok(literal
+            .decimal
+            .finish_i64(literal.mantissa, negative, literal.exponent))
     }
     #[cfg(target_arch = "wasm32")]
     pub(super) fn unsigned_integer(&mut self) -> Result<Option<u64>, Error> {
-        let (decimal, start, end, negative, exponent) = self.scan_number::<true>()?;
-        Ok(decimal.finish_u64(&self.input.as_bytes()[start..end], negative, exponent))
+        let (literal, negative) = self.scan_number::<true>()?;
+        Ok(literal
+            .decimal
+            .finish_u64(literal.mantissa, negative, literal.exponent))
     }
-    fn scan_number<const CONVERT: bool>(
-        &mut self,
-    ) -> Result<(super::number::Decimal, usize, usize, bool, i64), Error> {
+    fn scan_number<const CONVERT: bool>(&mut self) -> Result<(DecimalLiteral<'a>, bool), Error> {
         let negative = self.peek() == Some(b'-');
-        if negative {
-            self.position += 1;
-        }
+        self.position += usize::from(negative);
         let start = self.position;
-        let mut decimal = super::number::Decimal::default();
-        if self.peek() == Some(b'0') {
-            self.position += 1;
-            if CONVERT {
-                decimal.digit(b'0', false);
-            }
-        } else {
-            self.digits(|byte| {
-                if CONVERT {
-                    decimal.digit(byte, false)
-                }
-            })?;
-        }
-        if self.peek() == Some(b'.') {
-            self.position += 1;
-            self.digits(|byte| {
-                if CONVERT {
-                    decimal.digit(byte, true)
-                }
-            })?;
-        }
-        let end = self.position;
-        let mut exponent = 0i64;
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.position += 1;
-            let negative = self.peek() == Some(b'-');
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.position += 1;
-            }
-            self.digits(|byte| {
-                if CONVERT {
-                    exponent = (exponent * 10 + i64::from(byte - b'0')).min(1 << 40)
-                }
-            })?;
-            if negative {
-                exponent = -exponent;
-            }
-        }
-        Ok((decimal, start, end, negative, exponent))
+        let literal = scan_decimal::<CONVERT>(&self.input.as_bytes()[start..], DecimalSyntax::Json)
+            .map_err(|offset| Error::Syntax(start + offset))?;
+        self.position += literal.consumed;
+        Ok((literal, negative))
     }
 
     pub(super) fn string<const COUNT: bool>(
@@ -188,18 +156,6 @@ impl<'a> Reader<'a> {
             value = value * 16 + digit;
         }
         Ok(value)
-    }
-
-    fn digits(&mut self, mut digit: impl FnMut(u8)) -> Result<(), Error> {
-        let start = self.position;
-        while let Some(byte @ b'0'..=b'9') = self.peek() {
-            digit(byte);
-            self.position += 1;
-        }
-        if self.position == start {
-            return Err(Error::Syntax(start));
-        }
-        Ok(())
     }
 
     pub(super) fn keyword(&mut self, keyword: &[u8]) -> Result<(), Error> {

@@ -4,7 +4,7 @@ use crate::{
     array_methods::{
         CallbackReturn, EMPTY_RETURN, FALLTHROUGH, completions, insert_before_terminator,
     },
-    builder::{LocalBinding, strip_synthetic_default_guards},
+    builder::LocalBinding,
     coerce::merge_absence,
     shapes::{Argument, ArgumentId, Kind as ArgKind},
 };
@@ -104,7 +104,21 @@ impl<'s> FunctionBuilder<'s> {
             };
             init_operands.push(val);
         }
-        let instance = self.emit_value(ctx, |ctx| AllocOp::new(ctx, rec, init_operands));
+        let mut order = Vec::with_capacity(field_defs.len());
+        for field in &class.fields {
+            let (index, _) = rec
+                .deref(ctx)
+                .field(&field.name)
+                .with_context(|| format!("missing field {} on {class_name}", field.name))?;
+            if !order.contains(&(index as u32)) {
+                order.push(index as u32);
+            }
+        }
+        let instance = self.emit_value(ctx, |ctx| {
+            let alloc = AllocOp::new(ctx, rec, init_operands);
+            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
+            alloc
+        });
         let this_slot = self.entry_slot(ctx, rec_ty);
         self.store(ctx, this_slot, instance);
         self.construct_class_instance(
@@ -442,9 +456,9 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
 
-        let saved_locals = self.locals.clone();
-        let saved_closures = self.closures.clone();
-        let saved_this = self.this_slot.clone();
+        let saved_locals = self.locals.scope();
+        let saved_closures = self.closures.scope();
+        let saved_this = self.this_slot.take();
         let guards = self.variant_guards.len();
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
@@ -579,10 +593,7 @@ impl<'s> FunctionBuilder<'s> {
             optional,
             empty_returns: Vec::new(),
         });
-        let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
-        let param_defaults: Vec<Option<Expr>> =
-            func.params.iter().map(|p| p.default.clone()).collect();
-        let body = strip_synthetic_default_guards(&func.body, &param_ids, &param_defaults);
+        let body = hir_compat::strip_synthetic_default_guards(&func.body, func.params.iter());
         let mut result = self.statements(ctx, body);
         if result.is_ok() && self.reachable(ctx, self.block) {
             if is_void {
@@ -591,8 +602,8 @@ impl<'s> FunctionBuilder<'s> {
                 result = self.callback_return(ctx, None);
             }
         }
-        self.locals = saved_locals;
-        self.closures = saved_closures;
+        self.locals.restore(saved_locals);
+        self.closures.restore(saved_closures);
         self.this_slot = saved_this;
         self.variant_guards.truncate(guards);
         self.finallies = finallies;

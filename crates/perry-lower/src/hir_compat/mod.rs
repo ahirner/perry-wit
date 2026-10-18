@@ -8,6 +8,8 @@ mod calls;
 mod constructors;
 pub(crate) use calls::{RuntimeCall, runtime_call};
 mod decoder;
+mod defaults;
+pub(super) use defaults::strip_synthetic_default_guards;
 pub(crate) mod locations;
 mod methods;
 mod parser;

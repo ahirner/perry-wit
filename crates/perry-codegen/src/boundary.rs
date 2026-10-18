@@ -606,7 +606,18 @@ impl FunctionLowering<'_, '_> {
         let byte_size = Self::record_size(ctx, record)?;
         let size = self.i32_const(ctx, byte_size as i32);
         let object = self.record_storage(ctx, record.into(), size)?;
-        self.record_header(ctx, object, record);
+        let order = values
+            .iter()
+            .map(|(name, _)| {
+                record
+                    .deref(ctx)
+                    .field(name)
+                    .map(|(index, _)| index as u32)
+                    .ok_or_else(|| anyhow!("record has no field {name}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let order = self.record_order(ctx, record, Some(&order))?;
+        self.record_header(ctx, object, order);
         for (field, value) in values {
             let (offset, field_mir) = Self::record_type_field_slot(ctx, record, field)?;
             let source_mir = scalar_mir_type(ctx, field_mir);

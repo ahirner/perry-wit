@@ -103,12 +103,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
     ) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
         let throws = state.may_throw(&symbol);
-        let may_collect = state
-            .program_facts
-            .effects(&symbol)
-            .expect("function effects")
-            .effects
-            .may_collect;
+        let effects = state.program_facts.function_summary(ctx, mir)?.effects;
         let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
             .map_err(|_| anyhow!("function type"))?;
         let (mir_params, mir_results) = {
@@ -126,16 +121,10 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         let entry = function.get_entry_block(ctx);
         let mut lowering = FunctionLowering::glue(state, ctx, &function);
         lowering.throws = throws;
-        lowering.atomic_construction = lowering
-            .state
-            .program_facts
-            .effects(&mir.get_symbol_name(ctx))
-            .expect("function effects")
-            .effects
-            .atomic_construction;
+        lowering.atomic_construction = effects.atomic_construction;
         lowering.results = results;
         lowering.map_blocks(ctx, mir, Some(entry))?;
-        if may_collect {
+        if effects.may_collect {
             lowering.enter_roots(ctx);
         }
         lowering.prepare_frame_storage(ctx, mir)?;

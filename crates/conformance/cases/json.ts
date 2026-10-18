@@ -234,6 +234,12 @@ console.log("values-entries", pointValues.length, pointValues[0], pointEntries.l
 
 // Nested collections, fresh iterators, Set spread and keys that resemble internal metadata.
 const nestedSets = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
+const entryPairs: [string, number][] = [["value", 3]];
+const widenedMap = new Map<string, number | undefined>(entryPairs);
+const widenedDict: Record<string, number | undefined> = Object.fromEntries(entryPairs);
+widenedMap.set("empty", undefined);
+widenedDict.empty = undefined;
+console.log("widened-entries", widenedMap.get("value"), widenedMap.has("empty"), widenedDict.value, "empty" in widenedDict);
 const identitySet = new Set<number>([1]);
 const spreadSet = [...new Set([4, 5])];
 const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
@@ -259,7 +265,44 @@ for (const x of [0, 1, -0.5, 2.5, -2.5, 7, NaN]) {
   try {
     new Date(NaN).toISOString();
   } catch (e) {}
-  // Closed-record keys serialize sorted, not in literal order, so only the length is compared.
-  console.log("escapes", text.length, identity(parsed.text.length), parsed.list[1], JSON.parse([JSON.stringify({ text: "漢" })][0]).text, malformed, before + identity(value.n));
+  console.log("escapes", text, identity(parsed.text.length), parsed.list[1], JSON.parse([JSON.stringify({ text: "漢" })][0]).text, malformed, before + identity(value.n));
 }
+
+interface Ordered { z?: number; a?: number; m?: number }
+const firstOrder: Ordered = { z: 1, a: 2, m: 3 };
+const secondOrder: Ordered = { m: 3, a: 2, z: 1 };
+console.log("literal-order", JSON.stringify(firstOrder), JSON.stringify(secondOrder));
+delete firstOrder.a;
+firstOrder.a = 4;
+console.log("reinsert-order", JSON.stringify(firstOrder));
+const copiedOrder: Ordered = JSON.parse(JSON.stringify(firstOrder));
+console.log("copy-order", JSON.stringify(copiedOrder));
+const undefinedOrder: Ordered = { z: undefined, a: 1, m: 2 };
+const normalizedOrder: Ordered = JSON.parse(JSON.stringify(undefinedOrder));
+normalizedOrder.z = 3;
+console.log("normalized-order", JSON.stringify(normalizedOrder));
+const parsedOrder: Ordered = JSON.parse('{"extra":1,"m":2,"z":3,"middle":4,"m":5,"a":6}');
+parsedOrder.z = undefined;
+parsedOrder.z = 7;
+console.log("parsed-order", JSON.stringify(parsedOrder));
+console.log("spread-order", JSON.stringify({ before: 0, ...parsedOrder, a: 8, after: 9 }));
+const { m: removedOrder, ...restOrder } = parsedOrder;
+console.log("rest-order", removedOrder, JSON.stringify(restOrder));
+console.log("numeric-order", JSON.stringify({ z: 1, "10": 10, a: 2, "2": 2, "01": 3 }));
+const largeOrder = { z: 1, y: 2, x: 3, w: 4, v: 5, u: 6, t: 7, s: 8, r: 9 };
+console.log("large-order", JSON.stringify(largeOrder));
+interface LargeOrder { z?: number; y?: number; x?: number; w?: number; v?: number; u?: number; t?: number; s?: number; r?: number }
+const emptyOrder: LargeOrder = JSON.parse('{}');
+console.log("empty-order", JSON.stringify(emptyOrder));
+emptyOrder.r = 9;
+emptyOrder.z = 1;
+console.log("grown-order", JSON.stringify(emptyOrder));
+const largeCopy: LargeOrder = JSON.parse(JSON.stringify(largeOrder));
+console.log("large-copy-order", JSON.stringify(largeCopy));
+class OrderedClass {
+  z: number = 3;
+  a: number = 1;
+  m: number = 2;
+}
+console.log("class-order", JSON.stringify(new OrderedClass()));
 

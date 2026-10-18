@@ -1,7 +1,8 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use perry_mir::{AsyncCallOp, CallOp, is_exported};
+use anyhow::{Context as _, Result, anyhow};
+use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
@@ -9,10 +10,44 @@ use pliron::{
     },
     context::{Context, Ptr},
     linked_list::ContainsLinkedList,
+    op::Op,
     operation::Operation,
+    pass::AnalysisManager,
+    printable::Printable,
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::Ref,
+    collections::{HashMap, HashSet},
+};
+
+/// Borrow both analyses after computing them, so computing one cannot invalidate the borrow of the other.
+pub(super) struct ModuleAnalyses<'a> {
+    pub(super) facts: Ref<'a, ProgramFacts>,
+    pub(super) live: Ref<'a, LiveValues>,
+}
+
+pub(super) fn module_analyses<'a>(
+    ctx: &Context,
+    module: &ModuleOp,
+    analyses: &'a mut AnalysisManager,
+) -> Result<ModuleAnalyses<'a>> {
+    let op = module.get_operation();
+    analyses
+        .get_analysis::<ProgramFacts>(op, ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    analyses
+        .get_analysis::<LiveValues>(op, ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    Ok(ModuleAnalyses {
+        facts: analyses
+            .try_get_analysis::<ProgramFacts>(op)
+            .context("computed program facts are missing")?,
+        live: analyses
+            .try_get_analysis::<LiveValues>(op)
+            .context("computed liveness is missing")?,
+    })
+}
 
 pub(crate) fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
     module

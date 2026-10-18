@@ -190,7 +190,7 @@ impl Solver {
                 readers: BTreeSet::new(),
             }
         };
-        let slots: Vec<usize> = contents.slots().to_vec();
+        let slots = contents.slots().len();
         self.analysis.heap.objects.push(Object {
             ty,
             contents,
@@ -198,7 +198,8 @@ impl Solver {
             containers: BTreeSet::new(),
         });
         self.work.objects.push(false);
-        for slot in slots {
+        for index in 0..slots {
+            let slot = self.analysis.heap.objects[id].contents.slots()[index];
             if payload(ctx, self.analysis.heap.cells[slot].ty) == ty {
                 self.add_layout_object(slot, id);
             }
@@ -512,9 +513,9 @@ impl Solver {
         let mut visited: BTreeSet<usize> = objects.iter().copied().collect();
         let mut pending = objects.clone();
         while let Some(object) = pending.pop() {
-            // Copied: linking a slot mutates the heap.
-            let slots = self.analysis.heap.objects[object].contents.slots().to_vec();
-            for slot in slots {
+            // Linking changes facts and container membership, not an object's slots.
+            for index in 0..self.analysis.heap.objects[object].contents.slots().len() {
+                let slot = self.analysis.heap.objects[object].contents.slots()[index];
                 let slot_ty = payload(ctx, self.analysis.heap.cells[slot].ty);
                 for &ancestor in &ancestors {
                     if self.analysis.heap.objects[ancestor].ty == slot_ty {
@@ -546,25 +547,22 @@ impl Solver {
 
     pub(super) fn reconcile_slot_group(&mut self, ctx: &Context, slots: &[usize]) {
         let cells = &self.analysis.heap.cells;
-        let lossless = |slot: usize| cells[slot].domain.needs_lossless_64();
-        let narrow: Vec<usize> = if slots.iter().any(|&slot| lossless(slot)) {
-            slots
-                .iter()
-                .copied()
-                .filter(|&slot| !lossless(slot))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let lossless = slots
+            .iter()
+            .any(|&slot| cells[slot].domain.needs_lossless_64());
         let summarized = slots.iter().any(|&slot| cells[slot].summarized);
         let children: BTreeSet<usize> = slots
             .iter()
             .flat_map(|&slot| cells[slot].layout_objects.iter().copied())
             .collect();
         // Once any slot of the group is lossless, every slot widens to agree.
-        for slot in narrow {
-            self.slot_domain(slot, Fact::Numeric);
-            self.slot_range(ctx, slot, Range::Unknown);
+        if lossless {
+            for &slot in slots {
+                if !self.analysis.heap.cells[slot].domain.needs_lossless_64() {
+                    self.slot_domain(slot, Fact::Numeric);
+                    self.slot_range(ctx, slot, Range::Unknown);
+                }
+            }
         }
         if summarized {
             for &child in &children {

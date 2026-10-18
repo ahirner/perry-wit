@@ -113,6 +113,15 @@ pub enum ErrorKind {
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct ReuseOperands(pub Vec<u32>);
 
+/// Property insertion order, independent of the record's physical field layout.
+#[pliron_attr(
+    name = "perry.field_order",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub struct FieldOrder(pub Vec<u32>);
+
 /// An exact signed/unsigned integer or the bit pattern of an IEEE double.
 #[pliron_attr(name = "perry.numeric_constant", format, verifier = "succ")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

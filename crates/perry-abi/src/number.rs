@@ -10,6 +10,13 @@
 
 use crate::layout::numeric::Tag;
 
+mod big;
+mod decimal;
+#[cfg(test)]
+mod tests;
+pub use big::Big;
+pub use decimal::{DecimalLiteral, DecimalSyntax, scan_decimal, split_sign};
+
 /// Maximum significant digits kept exactly; further digits only mark the value as above.
 const KEPT_DIGITS: usize = 780;
 /// 32-bit limbs: `10^780 · 2^1100 · 5^310` and `2^1100 · 5^1104 · 2^54` both fit.
@@ -31,7 +38,7 @@ pub struct Decimal {
 }
 
 impl Decimal {
-    pub fn digit(&mut self, byte: u8, fractional: bool) {
+    fn digit(&mut self, byte: u8, fractional: bool) {
         self.fraction_digits += i64::from(fractional);
         if self.count == 0 && byte == b'0' {
             return;
@@ -86,31 +93,19 @@ impl Decimal {
         }
         let mag = self.finish_u64(mantissa, false, exponent)?;
         if negative {
-            if mag == (i64::MAX as u64) + 1 {
-                Some(i64::MIN)
-            } else if mag <= i64::MAX as u64 {
-                Some(-(mag as i64))
-            } else {
-                None
-            }
-        } else if mag <= i64::MAX as u64 {
-            Some(mag as i64)
+            i64::MIN.checked_add_unsigned((1u64 << 63).checked_sub(mag)?)
         } else {
-            None
+            i64::try_from(mag).ok()
         }
     }
 }
 
 /// The exponent part (`e+12`), saturated far outside the double range.
-pub fn parse_exponent(part: &[u8]) -> i64 {
+fn parse_exponent(part: &[u8]) -> i64 {
     let Some((_, rest)) = part.split_first() else {
         return 0;
     };
-    let (negative, rest) = match rest.first() {
-        Some(b'-') => (true, &rest[1..]),
-        Some(b'+') => (false, &rest[1..]),
-        _ => (false, rest),
-    };
+    let (negative, rest) = split_sign(rest);
     let mut value = 0i64;
     for &digit in rest {
         value = (value * 10 + i64::from(digit - b'0')).min(1 << 40);
@@ -221,7 +216,7 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
     let kept = significant.min(KEPT_DIGITS);
     let sticky = digits.iter().skip(kept).any(|digit| digit != 0);
     let exponent10 = exponent10 + (significant - kept) as i32;
-    let mut value = Big::zero();
+    let mut value = Big::<LIMBS>::zero();
     let mut chunk = 0u32;
     let mut chunk_scale = 1u32;
     for digit in digits.iter().take(kept) {
@@ -260,7 +255,7 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
         let common = left_shift.min(right_shift);
         left.shl((left_shift - common) as u32);
         right.shl((right_shift - common) as u32);
-        match left.cmp(&right) {
+        match left.compare(&right) {
             core::cmp::Ordering::Equal if sticky => core::cmp::Ordering::Greater,
             order => order,
         }
@@ -289,102 +284,7 @@ fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate
     f64::from_bits(bits)
 }
 
-/// A fixed-capacity unsigned big integer (little-endian 32-bit limbs).
-#[derive(Clone)]
-struct Big {
-    limbs: [u32; LIMBS],
-    len: usize,
-}
-
-impl Big {
-    fn zero() -> Self {
-        Big {
-            limbs: [0; LIMBS],
-            len: 0,
-        }
-    }
-
-    fn from_u64(value: u64) -> Self {
-        let mut big = Big::zero();
-        if value != 0 {
-            big.limbs[0] = value as u32;
-            big.len = 1;
-            if value >> 32 != 0 {
-                big.limbs[1] = (value >> 32) as u32;
-                big.len = 2;
-            }
-        }
-        big
-    }
-
-    /// `self × factor + addend`.
-    fn mul_add(&mut self, factor: u32, addend: u32) {
-        let mut carry = u64::from(addend);
-        for limb in &mut self.limbs[..self.len] {
-            let product = u64::from(*limb) * u64::from(factor) + carry;
-            *limb = product as u32;
-            carry = product >> 32;
-        }
-        if carry != 0 && self.len < LIMBS {
-            self.limbs[self.len] = carry as u32;
-            self.len += 1;
-        }
-    }
-
-    fn mul_pow5(&mut self, mut power: u32) {
-        const POW5_13: u32 = 1_220_703_125;
-        while power >= 13 {
-            self.mul_add(POW5_13, 0);
-            power -= 13;
-        }
-        self.mul_add(5u32.pow(power), 0);
-    }
-
-    fn shl(&mut self, bits: u32) {
-        if self.len == 0 {
-            return;
-        }
-        let (words, bits) = ((bits / 32) as usize, bits % 32);
-        let previous_len = self.len;
-        let len = (previous_len + words + 1).min(LIMBS);
-        for limb in &mut self.limbs[previous_len..len] {
-            *limb = 0;
-        }
-        self.len = len;
-        for index in (0..len).rev() {
-            let source = index as isize - words as isize;
-            let high = if source >= 0 && (source as usize) < previous_len {
-                self.limbs[source as usize]
-            } else {
-                0
-            };
-            let low = if source >= 1 && (source as usize - 1) < previous_len {
-                self.limbs[source as usize - 1]
-            } else {
-                0
-            };
-            self.limbs[index] = if bits == 0 {
-                high
-            } else {
-                (high << bits) | (low >> (32 - bits))
-            };
-        }
-        while self.len > 0 && self.limbs[self.len - 1] == 0 {
-            self.len -= 1;
-        }
-    }
-
-    fn cmp(&self, other: &Big) -> core::cmp::Ordering {
-        self.len.cmp(&other.len).then_with(|| {
-            self.limbs[..self.len]
-                .iter()
-                .rev()
-                .cmp(other.limbs[..other.len].iter().rev())
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Number {
     Float(f64),
     Signed(i64),
@@ -392,6 +292,15 @@ pub enum Number {
 }
 
 impl Number {
+    /// Explicit numeric conversion may round exact integer payloads.
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Self::Float(value) => value,
+            Self::Signed(value) => value as f64,
+            Self::Unsigned(value) => value as f64,
+        }
+    }
+
     pub fn to_int32(self) -> i32 {
         match self {
             Number::Signed(value) => value as i32,
@@ -441,17 +350,6 @@ impl Number {
     }
 }
 
-impl PartialEq for Number {
-    fn eq(&self, other: &Self) -> bool {
-        match (*self, *other) {
-            (Self::Float(left), Self::Float(right)) => left == right,
-            (Self::Signed(left), Self::Signed(right)) => left == right,
-            (Self::Unsigned(left), Self::Unsigned(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-
 /// ECMAScript WhiteSpace and LineTerminator code points.
 pub fn space(scalar: char) -> bool {
     matches!(
@@ -467,7 +365,7 @@ pub fn space(scalar: char) -> bool {
     )
 }
 
-fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
+pub fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
     let digit = match byte {
         b'0'..=b'9' => u32::from(byte - b'0'),
         b'a'..=b'z' => u32::from(byte - b'a') + 10,
@@ -477,14 +375,35 @@ fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
     (digit < radix).then_some(digit)
 }
 
+/// Format any 64-bit magnitude; 66 bytes accommodate a sign and all binary digits.
+pub fn format_integer(magnitude: u64, negative: bool, radix: u32, digits: &mut [u8; 66]) -> &[u8] {
+    assert!((2..=36).contains(&radix), "invalid radix");
+    let mut magnitude = magnitude;
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        let digit = (magnitude % u64::from(radix)) as u8;
+        digits[at] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        };
+        magnitude /= u64::from(radix);
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        at -= 1;
+        digits[at] = b'-';
+    }
+    &digits[at..]
+}
+
 /// ECMAScript `parseInt(string, radix)` under the 64-bit exact integer contract.
 pub fn parse_integer(input: &str, radix: Number) -> Number {
     let trimmed = input.trim_start_matches(space).as_bytes();
-    let (negative, mut rest) = match trimmed.first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
+    let (negative, mut rest) = split_sign(trimmed);
     let r = radix.to_int32();
     let (radix, strip_prefix) = if r == 0 {
         (10u32, true)

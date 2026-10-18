@@ -1,20 +1,15 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use crate::sdk::{qualified_type_name, to_camel_case, to_pascal_case};
-use anyhow::{Result, ensure};
+use crate::sdk::{NamedType, canonical_type, to_camel_case, to_pascal_case};
+use anyhow::{Context, Result, ensure};
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
 use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
 use std::collections::{BTreeMap, HashMap};
-use wit_parser::{Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem};
+use wit_parser::{Resolve, TypeDefKind, TypeId, WorldId, WorldItem};
 
-pub(super) fn canonical(resolve: &Resolve, mut id: TypeId) -> TypeId {
-    while let TypeDefKind::Type(Type::Id(next)) = resolve.types[id].kind {
-        id = next;
-    }
-    id
-}
-
-pub(super) fn source_type(resolve: &Resolve, id: TypeId) -> HirType {
-    HirType::Named(qualified_type_name(resolve, canonical(resolve, id)))
+pub(super) fn source_type(resolve: &Resolve, id: TypeId) -> Option<HirType> {
+    Some(HirType::Named(
+        NamedType::get(resolve, canonical_type(resolve, id))?.qualified(),
+    ))
 }
 
 pub(super) fn definitions(
@@ -37,7 +32,7 @@ pub(super) fn definitions(
                 if !matches!(resolve.types[*id].kind, TypeDefKind::Resource) {
                     continue;
                 }
-                let key = canonical(resolve, *id).index() as u32;
+                let key = canonical_type(resolve, *id).index() as u32;
                 ensure!(
                     !definitions.contains_key(&key),
                     "resource {module}#{name} is declared on both sides of this world; import and export resource identities are distinct, so use an exported interface that aliases the imported resource or separate resource interfaces"
@@ -51,7 +46,8 @@ pub(super) fn definitions(
                         exported,
                     },
                 );
-                let resource = source_type(resolve, *id);
+                let resource =
+                    source_type(resolve, *id).context("resource has no WIT declaration name")?;
                 let suffix = to_pascal_case(name);
                 let mut helpers = vec![(
                     format!("drop{suffix}"),

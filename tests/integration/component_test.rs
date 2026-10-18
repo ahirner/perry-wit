@@ -615,7 +615,7 @@ export function decode(text: string): string {
     )?;
     let good = r#"{"rows":[{"count":1,"label":"é","active":true}],"title":"ok"}"#;
     let got = component.call("decode", &[Val::String(good.into())])?;
-    assert_eq!(got, Val::Result(Ok(Some(Box::new(Val::String(r#"{"rows":[{"active":true,"count":99,"label":"é"}],"title":"ok"}:{"rows":[{"active":true,"count":1,"label":"é"}],"title":"ok"}"#.into()))))));
+    assert_eq!(got, Val::Result(Ok(Some(Box::new(Val::String(r#"{"rows":[{"count":99,"label":"é","active":true}],"title":"ok"}:{"rows":[{"count":1,"label":"é","active":true}],"title":"ok"}"#.into()))))));
     for invalid in [
         "null",
         "[]",

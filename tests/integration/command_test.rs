@@ -205,7 +205,7 @@ try { const required: number = data.flag; console.log(required); } catch (e) { c
     assert!(run.ok, "{}\nstdout:\n{}", run.stderr, run.stdout);
     assert_eq!(
         run.stdout,
-        "null undefined number:4\nnull undefined string:yes\nnull null null object object object\nfalse false false\nstring:yes null undefined\nnull undefined number:4\n{\"flag\":null,\"number\":null,\"text\":null}\nundefined required\nnative required\nnull required\nmissing required\nboolean required\n"
+        "null undefined number:4\nnull undefined string:yes\nnull null null object object object\nfalse false false\nstring:yes null undefined\nnull undefined number:4\n{\"number\":null,\"text\":null,\"flag\":null}\nundefined required\nnative required\nnull required\nmissing required\nboolean required\n"
     );
     Ok(())
 }

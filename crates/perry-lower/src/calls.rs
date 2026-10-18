@@ -245,114 +245,96 @@ impl<'s> FunctionBuilder<'s> {
             .signatures
             .get(id)
             .context("call to an unknown function")?;
-        let name = &signature.name;
-        let params = &signature.params;
-        let mut values = Vec::with_capacity(params.len());
-        if signature.has_rest {
-            let fixed_len = params.len().saturating_sub(1);
-            for (i, param) in params.iter().take(fixed_len).enumerate() {
-                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
-                if let Some(arg) = args.get(i) {
-                    if is_never {
-                        let value = self.expression_with(ctx, arg, None)?;
-                        let fitted = if value.get_type(ctx) == param.carrier {
-                            value
-                        } else {
-                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
-                        };
-                        values.push(fitted);
-                    } else {
-                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
-                        values.push(self.fit(ctx, value, param.carrier)?);
-                    }
-                } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
-                    values
-                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
-                } else if let Some(Some(def)) = signature.defaults.get(i) {
-                    let value = self.expression_with(ctx, def, Some(param.carrier))?;
-                    values.push(self.fit(ctx, value, param.carrier)?);
-                } else {
-                    bail!(
-                        "call to {name} with {} arguments, expected at least {}",
-                        args.len(),
-                        fixed_len
-                    );
-                }
-            }
-            let rest_param = &params[fixed_len];
-            let rest_arr_ty = TypedHandle::<ArrayType>::from_handle(rest_param.carrier, ctx)
-                .context("rest parameter must have an array type")?;
-            let elem_ty = rest_arr_ty.deref(ctx).element();
-            let rest_args = args.get(fixed_len..).unwrap_or(&[]);
-            let mut rest_vals = Vec::with_capacity(rest_args.len());
-            for arg in rest_args {
-                let v = self.expression_with(ctx, arg, Some(elem_ty))?;
-                rest_vals.push(self.fit(ctx, v, elem_ty)?);
-            }
-            let rest_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, rest_vals));
-            values.push(rest_arr);
-        } else {
-            ensure!(
-                args.len() <= params.len(),
-                "call to {name} with {} arguments, expected {}",
-                args.len(),
-                params.len()
+        let (fixed, rest) = signature.parameters();
+        ensure!(
+            rest.is_some() || args.len() <= fixed.len(),
+            "call to {} with {} arguments, expected {}",
+            signature.name,
+            args.len(),
+            fixed.len()
+        );
+        let mut values = Vec::with_capacity(signature.params.len());
+        for (i, param) in fixed.iter().enumerate() {
+            values.push(
+                self.bind_fixed_arg(ctx, param, args.get(i))
+                    .with_context(|| format!("argument {} of {}", i + 1, signature.name))?,
             );
-            for (i, param) in params.iter().enumerate() {
-                let is_never = signature.never_params.get(i).copied().unwrap_or(false);
-                if let Some(arg) = args.get(i) {
-                    if is_never {
-                        let value = self.expression_with(ctx, arg, None)?;
-                        let fitted = if value.get_type(ctx) == param.carrier {
-                            value
-                        } else {
-                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, param.carrier))
-                        };
-                        values.push(fitted);
-                    } else {
-                        let value = self.expression_with(ctx, arg, Some(param.carrier))?;
-                        values.push(self.fit(ctx, value, param.carrier)?);
-                    }
-                } else if absence(ctx, param.carrier).is_some_and(|a| a.admits_undefined()) {
-                    values
-                        .push(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, param.carrier)));
-                } else if let Some(Some(def)) = signature.defaults.get(i) {
-                    let value = self.expression_with(ctx, def, Some(param.carrier))?;
-                    values.push(self.fit(ctx, value, param.carrier)?);
+        }
+        if let Some(rest) = rest {
+            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx)
+                .context("rest parameter must have an array type")?;
+            let element = array.deref(ctx).element();
+            let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
+            for arg in args.iter().skip(fixed.len()) {
+                let value = self.expression_with(ctx, arg, Some(element))?;
+                items.push(self.fit(ctx, value, element)?);
+            }
+            values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
+        }
+        self.emit_signature_call(ctx, signature, values)
+    }
+
+    pub(super) fn bind_fixed_arg(
+        &mut self,
+        ctx: &mut Context,
+        param: &program::ParamSig<'s>,
+        arg: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let carrier = param.binding.carrier;
+        if let Some(arg) = arg {
+            if matches!(param.source.ty, HirType::Never) {
+                let value = self.expression(ctx, arg)?;
+                return Ok(if value.get_type(ctx) == carrier {
+                    value
                 } else {
-                    bail!(
-                        "call to {name} with {} arguments, expected {}",
-                        args.len(),
-                        params.len()
-                    );
-                }
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier))
+                });
             }
+            let value = self.expression_with(ctx, arg, Some(carrier))?;
+            return self.fit(ctx, value, carrier);
         }
+        if absence(ctx, carrier).is_some_and(|a| a.admits_undefined()) {
+            return Ok(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, carrier)));
+        }
+        if let Some(default) = &param.source.default {
+            let value = self.expression_with(ctx, default, Some(carrier))?;
+            return self.fit(ctx, value, carrier);
+        }
+        bail!("missing required argument")
+    }
+
+    pub(super) fn emit_signature_call(
+        &mut self,
+        ctx: &mut Context,
+        signature: &Signature<'s>,
+        values: Vec<Value>,
+    ) -> Result<Option<Value>> {
         if signature.is_async {
-            let Some(result) = signature.result else {
-                bail!("async function {name} settles one result");
-            };
-            let promise = self.emit_value(ctx, |ctx| {
-                AsyncCallOp::new(ctx, name.clone(), values, result.carrier)
-            });
-            return Ok(Some(promise));
+            let result = signature
+                .result
+                .context("async function must settle one result")?;
+            return Ok(Some(self.emit_value(ctx, |ctx| {
+                AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
+            })));
         }
-        let op = CallOp::new(ctx, name.clone(), values, signature.carrier_results());
+        let op = CallOp::new(
+            ctx,
+            signature.name.clone(),
+            values,
+            signature.carrier_results(),
+        );
         self.append(ctx, &op);
-        let result = {
-            let operation = op.get_operation().deref(ctx);
-            (operation.get_num_results() == 1).then(|| operation.get_result(0))
+        let Some(result_ty) = signature.result else {
+            return Ok(None);
         };
-        if let (Some(mut value), Some(result_ty)) = (result, signature.result) {
-            if let Some(int_ty) = result_ty.integer {
-                value = self.wrap_integer(ctx, value, int_ty, result_ty.carrier);
-            }
-            if signature.returns_never {
-                self.never_values.insert(value);
-            }
-            return Ok(Some(value));
+        let mut value = op.get_operation().deref(ctx).get_result(0);
+        if let Some(int_ty) = result_ty.integer {
+            value = self.wrap_integer(ctx, value, int_ty, result_ty.carrier);
         }
-        Ok(result)
+        if signature.returns_never {
+            self.never_values.insert(value);
+        }
+        Ok(Some(value))
     }
 
     pub(super) fn clone_structured_value(
@@ -394,7 +376,11 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 field_vals.push(field_val);
             }
-            let allocated = self.emit_value(ctx, |ctx| AllocOp::new(ctx, rec, field_vals));
+            let allocated = self.emit_value(ctx, |ctx| {
+                let alloc = AllocOp::new(ctx, rec, field_vals);
+                alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
+                alloc
+            });
             self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![allocated, val]);
             return Ok(allocated);
         }

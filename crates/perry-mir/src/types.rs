@@ -16,6 +16,39 @@ use pliron::{
 };
 use thiserror::Error;
 
+macro_rules! record_kinds {
+    ($($kind:ident => $name:literal),+ $(,)?) => {
+        /// Logical record role, preserved when numeric storage is specialized.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum RecordKind { $($kind),+ }
+
+        impl RecordKind {
+            pub fn name(self) -> &'static str {
+                match self { $(Self::$kind => $name),+ }
+            }
+
+            fn parse(name: &str) -> Option<Self> {
+                match name { $($name => Some(Self::$kind),)+ _ => None }
+            }
+        }
+    };
+}
+
+record_kinds! {
+    Object => "object",
+    Tuple => "tuple",
+    DictionaryEntry => "dict_tuple",
+    MapEntry => "map_tuple",
+    SetEntry => "set_tuple",
+    Map => "map_box",
+    Set => "set_box",
+    MapKeys => "map_keys_box",
+    MapValues => "map_values_box",
+    MapEntries => "map_entries_box",
+    SetValues => "set_values_box",
+    SetEntries => "set_entries_box",
+}
+
 /// Whether a value can retain native storage; unknown dialect types are conservative.
 pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
     if let Some(inner) = crate::optional::optional_value(ctx, ty) {
@@ -37,18 +70,19 @@ pub struct NumericType;
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record
 /// without fields first and supply them on a later [RecordType::get].
-/// Field order is the source declaration order, which fixes evaluation and enumeration order;
-/// physical layout is decided by a later pass (P3.6), not by this type.
+/// Fields define storage order; source evaluation order is retained by the allocating operations.
 #[pliron_type(name = "perry.record")]
 #[derive(Debug)]
 pub struct RecordType {
     name: Identifier,
     fields: Option<Vec<(String, TypeHandle)>>,
-    tuple: bool,
+    kind: RecordKind,
 }
 
 #[derive(Debug, Error)]
 enum RecordErr {
+    #[error("unknown record kind {0}")]
+    UnknownKind(String),
     #[error("record {0} already exists with different fields")]
     Mismatch(String),
     #[error("record {0} has duplicate field {1}")]
@@ -65,22 +99,15 @@ impl RecordType {
         name: Identifier,
         fields: Option<Vec<(String, TypeHandle)>>,
     ) -> Result<TypedHandle<Self>> {
-        Self::get_kind(ctx, name, fields, false)
+        Self::get_kind(ctx, name, fields, RecordKind::Object)
     }
 
-    pub fn get_tuple(
+    /// Define or reserve a record, retaining its logical role across layout transformations.
+    pub fn get_kind(
         ctx: &Context,
         name: Identifier,
         fields: Option<Vec<(String, TypeHandle)>>,
-    ) -> Result<TypedHandle<Self>> {
-        Self::get_kind(ctx, name, fields, true)
-    }
-
-    fn get_kind(
-        ctx: &Context,
-        name: Identifier,
-        fields: Option<Vec<(String, TypeHandle)>>,
-        tuple: bool,
+        kind: RecordKind,
     ) -> Result<TypedHandle<Self>> {
         if let Some(fields) = &fields {
             for (index, (field, _)) in fields.iter().enumerate() {
@@ -96,7 +123,7 @@ impl RecordType {
             RecordType {
                 name,
                 fields: None,
-                tuple,
+                kind,
             },
             ctx,
         );
@@ -107,11 +134,14 @@ impl RecordType {
                 .downcast_mut::<RecordType>()
                 .expect("the handle was instantiated from a RecordType just above");
             match &record.fields {
-                Some(existing) if *existing != fields || record.tuple != tuple => {
+                Some(existing) if *existing != fields || record.kind != kind => {
                     input_err_noloc!(RecordErr::Mismatch(record.name.to_string()))?
                 }
                 Some(_) => {}
-                None => record.fields = Some(fields),
+                None => {
+                    record.fields = Some(fields);
+                    record.kind = kind;
+                }
             }
         }
         Ok(handle)
@@ -122,7 +152,11 @@ impl RecordType {
     }
 
     pub fn is_tuple(&self) -> bool {
-        self.tuple
+        self.kind != RecordKind::Object
+    }
+
+    pub fn kind(&self) -> RecordKind {
+        self.kind
     }
 
     pub fn fields(&self) -> Result<&[(String, TypeHandle)]> {
@@ -199,8 +233,11 @@ impl Printable for RecordType {
         }
         let result = (|| {
             write!(f, "<{}", self.name)?;
+            if !matches!(self.kind, RecordKind::Object | RecordKind::Tuple) {
+                write!(f, " {}", self.kind.name())?;
+            }
             if let Some(fields) = &self.fields {
-                write!(f, " {}", if self.tuple { '[' } else { '{' })?;
+                write!(f, " {}", if self.is_tuple() { '[' } else { '{' })?;
                 for (index, (name, ty)) in fields.iter().enumerate() {
                     if index > 0 {
                         write!(f, ",")?;
@@ -212,7 +249,7 @@ impl Printable for RecordType {
                     }
                     write!(f, ": {}", ty.print(ctx, state))?;
                 }
-                write!(f, " {}", if self.tuple { ']' } else { '}' })?;
+                write!(f, " {}", if self.is_tuple() { ']' } else { '}' })?;
             }
             write!(f, ">")
         })();
@@ -244,11 +281,24 @@ impl Parsable for RecordType {
         let mut parser = between(
             token('<'),
             token('>'),
-            spaced((location(), Identifier::parser(()))).and(spaced(optional(fields))),
+            spaced((location(), Identifier::parser(())))
+                .and(spaced(optional(Identifier::parser(()))))
+                .and(spaced(optional(fields))),
         );
-        let ((loc, name), fields) = parser.parse_stream(state_stream).into_result()?.0;
+        let (((loc, name), kind), fields) = parser.parse_stream(state_stream).into_result()?.0;
         let (fields, tuple) = fields.map_or((None, false), |(fields, tuple)| (Some(fields), tuple));
-        RecordType::get_kind(state_stream.state.ctx, name, fields, tuple)
+        let kind = match kind {
+            Some(kind) => match RecordKind::parse(kind.as_ref()) {
+                Some(kind) => Ok(kind),
+                None => input_err_noloc!(RecordErr::UnknownKind(kind.to_string())),
+            },
+            None => Ok(if tuple {
+                RecordKind::Tuple
+            } else {
+                RecordKind::Object
+            }),
+        };
+        kind.and_then(|kind| RecordType::get_kind(state_stream.state.ctx, name, fields, kind))
             .map_err(|mut error| {
                 error.set_loc(loc);
                 error

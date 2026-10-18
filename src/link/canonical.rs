@@ -1,8 +1,9 @@
 //! Allocator roots required by canonical lowering, independent of runtime implementation.
+use crate::abi::world_functions;
 use std::collections::BTreeSet;
 use wit_parser::{
     Function, FutureIntrinsic, LiftLowerAbi, ManglingAndAbi, Resolve, StreamIntrinsic, Type,
-    TypeDefKind, WasmImport, WorldId, WorldItem, WorldKey,
+    TypeDefKind, WasmImport, WorldId, WorldKey,
 };
 
 #[derive(Default)]
@@ -18,18 +19,13 @@ impl Requirements {
             (false, &resolve.worlds[world].imports),
             (true, &resolve.worlds[world].exports),
         ] {
-            for (key, item) in items {
-                match item {
-                    WorldItem::Function(function) => {
-                        requirements.function(resolve, None, function, exported)
-                    }
-                    WorldItem::Interface { id, .. } => {
-                        for function in resolve.interfaces[*id].functions.values() {
-                            requirements.function(resolve, Some(key), function, exported);
-                        }
-                    }
-                    WorldItem::Type { .. } => {}
-                }
+            for entry in world_functions(resolve, items.iter()) {
+                requirements.function(
+                    resolve,
+                    entry.interface.map(|_| entry.key),
+                    entry.function,
+                    exported,
+                );
             }
         }
         requirements

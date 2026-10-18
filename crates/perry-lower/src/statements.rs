@@ -1,5 +1,6 @@
 //! Statements: bindings, `return`, `throw`, jumps and expression statements.
 use super::*;
+use crate::{builder::Jump, control_flow::LoopCondition};
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
@@ -62,10 +63,12 @@ impl<'s> FunctionBuilder<'s> {
                             })
                             .unwrap_or(&[]);
                     }
-                    let res = self.statement(ctx, first).map_err(|error| match first {
-                        Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
-                        _ => error,
-                    });
+                    let res = self
+                        .statement(ctx, first, None)
+                        .map_err(|error| match first {
+                            Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
+                            _ => error,
+                        });
                     self.rest_excluded_keys = prev_rest_keys;
                     res?;
                     tail
@@ -75,7 +78,12 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    pub(super) fn statement(&mut self, ctx: &mut Context, statement: &'s Stmt) -> Result<()> {
+    pub(super) fn statement(
+        &mut self,
+        ctx: &mut Context,
+        statement: &'s Stmt,
+        label: Option<&'s str>,
+    ) -> Result<()> {
         match statement {
             Stmt::If {
                 condition,
@@ -196,12 +204,22 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 self.switch_to(join);
             }
-            Stmt::While { condition, body } => {
-                self.loop_(ctx, None, Some(condition), None, body, false)?
-            }
-            Stmt::DoWhile { body, condition } => {
-                self.loop_(ctx, None, Some(condition), None, body, true)?
-            }
+            Stmt::While { condition, body } => self.loop_(
+                ctx,
+                None,
+                LoopCondition::Before(Some(condition)),
+                None,
+                body,
+                label,
+            )?,
+            Stmt::DoWhile { body, condition } => self.loop_(
+                ctx,
+                None,
+                LoopCondition::After(condition),
+                None,
+                body,
+                label,
+            )?,
             Stmt::For {
                 init,
                 condition,
@@ -210,32 +228,40 @@ impl<'s> FunctionBuilder<'s> {
             } => self.loop_(
                 ctx,
                 init.as_deref(),
-                condition.as_ref(),
+                LoopCondition::Before(condition.as_ref()),
                 update.as_ref(),
                 body,
-                false,
+                label,
             )?,
             Stmt::Switch {
                 discriminant,
                 cases,
-            } => self.switch(ctx, discriminant, cases)?,
-            Stmt::Break | Stmt::Continue => {
+            } => self.switch(ctx, discriminant, cases, label)?,
+            Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {
+                let (jump, label) = match statement {
+                    Stmt::LabeledBreak(label) => (Jump::Break, Some(label.as_str())),
+                    Stmt::LabeledContinue(label) => (Jump::Continue, Some(label.as_str())),
+                    Stmt::Break => (Jump::Break, None),
+                    _ => (Jump::Continue, None),
+                };
                 let (index, target) = self
                     .controls
                     .iter()
                     .enumerate()
                     .rev()
-                    .find_map(|(index, control)| match (statement, control) {
-                        (
-                            Stmt::Break,
-                            Control::Loop { break_to, .. } | Control::Switch { break_to, .. },
-                        ) => Some((index, *break_to)),
-                        (Stmt::Continue, Control::Loop { continue_to, .. }) => {
-                            Some((index, *continue_to))
-                        }
-                        _ => None,
+                    .find_map(|(index, control)| {
+                        control.target(jump, label).map(|target| (index, target))
                     })
-                    .context("break/continue has no enclosing target")?;
+                    .with_context(|| match label {
+                        Some(label) => format!(
+                            "{} {label} has no enclosing target",
+                            match jump {
+                                Jump::Break => "break",
+                                Jump::Continue => "continue",
+                            }
+                        ),
+                        None => "break/continue has no enclosing target".into(),
+                    })?;
                 self.run_finallies(ctx, |f| f.controls > index)?;
                 self.jump(ctx, target);
                 self.after_terminator(ctx);
@@ -248,65 +274,19 @@ impl<'s> FunctionBuilder<'s> {
                         | Stmt::DoWhile { .. }
                         | Stmt::Switch { .. }
                 ) {
-                    self.pending_label = Some(label.as_str());
-                    self.statement(ctx, body)?;
+                    self.statement(ctx, body, Some(label))?;
                 } else {
                     let exit = self.new_block(ctx, "labeled_exit");
                     self.controls.push(Control::Labeled {
                         label: label.as_str(),
                         break_to: exit,
                     });
-                    let res = self.statement(ctx, body);
+                    let res = self.statement(ctx, body, None);
                     self.controls.pop();
                     res?;
                     self.jump(ctx, exit);
                     self.switch_to(exit);
                 }
-            }
-            Stmt::LabeledBreak(target_label) => {
-                let (index, target) = self
-                    .controls
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, control)| match control {
-                        Control::Loop {
-                            label: Some(l),
-                            break_to,
-                            ..
-                        }
-                        | Control::Switch {
-                            label: Some(l),
-                            break_to,
-                        } if *l == target_label.as_str() => Some((index, *break_to)),
-                        Control::Labeled { label, break_to } if *label == target_label.as_str() => {
-                            Some((index, *break_to))
-                        }
-                        _ => None,
-                    })
-                    .with_context(|| format!("break {target_label} has no enclosing target"))?;
-                self.run_finallies(ctx, |f| f.controls > index)?;
-                self.jump(ctx, target);
-                self.after_terminator(ctx);
-            }
-            Stmt::LabeledContinue(target_label) => {
-                let (index, target) = self
-                    .controls
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, control)| match control {
-                        Control::Loop {
-                            label: Some(l),
-                            continue_to,
-                            ..
-                        } if *l == target_label.as_str() => Some((index, *continue_to)),
-                        _ => None,
-                    })
-                    .with_context(|| format!("continue {target_label} has no enclosing target"))?;
-                self.run_finallies(ctx, |f| f.controls > index)?;
-                self.jump(ctx, target);
-                self.after_terminator(ctx);
             }
             Stmt::Throw(value) => {
                 let value = self.expression(ctx, value)?;

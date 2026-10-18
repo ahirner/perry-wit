@@ -219,7 +219,7 @@ impl Pass for PromoteArguments {
     ) -> Result<PassResult> {
         let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         let mut result = PassResult::default();
-        result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects);
+        result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects)?;
         result.set_preserved::<crate::facts::ProgramFacts>();
         Ok(result)
     }

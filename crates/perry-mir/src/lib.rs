@@ -39,6 +39,7 @@ mod heap;
 mod integers;
 mod intrinsics;
 mod json_copy;
+mod json_schema;
 mod lifetimes;
 mod liveness;
 mod locals;
@@ -126,7 +127,7 @@ where
 }
 
 pub use attrs::{
-    Absence, BinaryKind, CompareKind, ErrorKind, JsonDecoderKind, NumericConstant, Tier,
+    Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, JsonDecoderKind, NumericConstant, Tier,
 };
 pub use calls::{
     AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async,
@@ -139,7 +140,7 @@ pub use collections::{
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{set_source_span, source_span};
-pub use effects::{Allocation, allocates, allocation};
+pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{
     CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp, RethrowOp,
     set_exit_only,
@@ -156,6 +157,7 @@ pub use intrinsics::{
     Combinator, Intrinsic, IntrinsicOp, JsonCursorKeyOp, JsonStringifyOp, PromiseCombinatorOp,
     PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
 };
+pub use json_schema::JsonSchema;
 pub use liveness::{LiveAfter, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};
 pub use optional::{
@@ -169,9 +171,9 @@ pub use types::{
     AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
     DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonCursorType,
     JsonType, NumberStringType, NumericType, OptionalType, PlainDateTimeType, PlainDateType,
-    PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RegexType, RequestType,
-    ResourceType, ResponseType, SearchParamsType, SettledType, SlotType, StatsType, StringType,
-    TransferType, UrlType, VariantType, WritableType, WriterType,
+    PromiseType, ReadResultType, ReadableType, ReaderType, RecordKind, RecordType, RegexType,
+    RequestType, ResourceType, ResponseType, SearchParamsType, SettledType, SlotType, StatsType,
+    StringType, TransferType, UrlType, VariantType, WritableType, WriterType,
 };
 pub use variants::{VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, variant_cases};
 pub use views::{AggregateViewOp, can_widen};

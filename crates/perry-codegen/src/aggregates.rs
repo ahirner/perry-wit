@@ -1,7 +1,7 @@
 //! Records, arrays and variants: allocation, field and element access.
 use crate::{
     function::FunctionLowering,
-    repr::{Carriers, Repr, optional_inner, repr, slot_kind},
+    repr::{Carriers, Repr, optional_inner, repr, slot_kind, slot_size},
     runtime::Runtime,
     values::is_numeric_type,
 };
@@ -23,13 +23,16 @@ use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
     /// The runtime's element-kind flag for arrays of `element` (`layout::*_ELEMENTS`).
-    pub(crate) fn array_element_kind(ctx: &Context, element: TypeHandle) -> Result<u32> {
+    pub(crate) fn array_element_kind(
+        ctx: &Context,
+        element: TypeHandle,
+    ) -> Result<layout::Elements> {
         if is_numeric_type(ctx, element) {
-            Ok(layout::NUMERIC_ELEMENTS)
+            Ok(layout::Elements::Numeric)
         } else if repr(ctx, element)? == Repr::Ref {
-            Ok(layout::REFERENCE_ELEMENTS)
+            Ok(layout::Elements::References)
         } else {
-            Ok(layout::SCALAR_ELEMENTS)
+            Ok(layout::Elements::Scalar)
         }
     }
 
@@ -168,7 +171,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(true);
         }
-        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
+        if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
                 .map_err(|_| anyhow!("expected a record"))?;
@@ -190,13 +193,17 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            self.record_header(ctx, object, record);
+            let order = {
+                let order = allocation.get_attr_perry_field_order(ctx);
+                self.record_order(ctx, record, order.as_ref().map(|order| order.0.as_slice()))?
+            };
+            self.record_header(ctx, object, order);
             let mut offset = record::HEADER;
             for (index, ty) in fields.into_iter().enumerate() {
                 let operand = op.deref(ctx).get_operand(index);
                 let value = self.mapped_value(ctx, operand)?;
                 self.store_slot_value(ctx, object, offset, ty, value)?;
-                offset += record_slot(ctx, ty);
+                offset += slot_size(ctx, ty);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -234,6 +241,20 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let value = self.mapped_value(ctx, val_opd)?;
+            if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let key = self.state.data.string(&set.field(ctx));
+                let key = self.i32_const(ctx, key as i32);
+                let omitted = self.is_omitted_value(ctx, value, ty)?;
+                let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdJsonRecordField,
+                    vec![object, table, count, key, present],
+                );
+            }
             self.store_slot_value(ctx, object, offset, ty, value)?;
             return Ok(true);
         }
@@ -249,7 +270,7 @@ impl FunctionLowering<'_, '_> {
                     slots.push(self.mapped_value(ctx, operand)?);
                 }
                 let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-                let stride = array_slot(ctx, element);
+                let stride = slot_size(ctx, element);
                 for (index, slot) in slots.into_iter().enumerate() {
                     self.store_slot_value(ctx, data, stride * index as u32, element, slot)?;
                 }
@@ -412,7 +433,7 @@ impl FunctionLowering<'_, '_> {
         index: Value,
         element: TypeHandle,
     ) -> Value {
-        let shift = self.i32_const(ctx, array_slot(ctx, element).trailing_zeros() as i32);
+        let shift = self.i32_const(ctx, slot_size(ctx, element).trailing_zeros() as i32);
         let offset = self.num(ctx, NumOpcode::I32Shl, vec![index, shift]);
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
@@ -436,7 +457,7 @@ impl FunctionLowering<'_, '_> {
         if self.state.collectible {
             let references = self.i32_const(ctx, elem_kind as i32);
             self.runtime_void(ctx, Runtime::ArrayGrowCollectible, vec![array, references]);
-        } else if elem_kind == layout::NUMERIC_ELEMENTS {
+        } else if elem_kind == layout::Elements::Numeric {
             let references = self.i32_const(ctx, elem_kind as i32);
             self.runtime_void(ctx, Runtime::ArrayGrowTyped, vec![array, references]);
         } else {
@@ -482,40 +503,36 @@ impl FunctionLowering<'_, '_> {
         Self::record_type_field_slot(ctx, record, field)
     }
 
-    /// Initialize the header of fresh record storage: the id of shape `record` and, when the
-    /// module retains parsed JSON, an empty source word.
-    pub(crate) fn record_header(
+    /// Encode static insertion order before emitting operations into the context.
+    pub(crate) fn record_order(
         &mut self,
-        ctx: &mut Context,
-        object: Value,
+        ctx: &Context,
         record: TypedHandle<RecordType>,
-    ) {
-        let shape = {
-            let record = record.deref(ctx);
-            let name: &str = record.name().as_ref();
-            if let Some(&shape) = self.state.shapes.get(name) {
-                shape
-            } else {
-                let next_shape = self.state.shapes.len() as i32 + 1;
-                self.state.shapes.insert(name.to_string(), next_shape);
-                next_shape
+        order: Option<&[u32]>,
+    ) -> Result<u32> {
+        let count = record.deref(ctx).fields()?.len();
+        let length = order.map_or(count, <[_]>::len);
+        let fields = (0..length).map(|index| order.map_or(index as u32, |order| order[index]));
+        Ok(if count <= perry_abi::json::PACKED_FIELDS {
+            fields.fold(0, perry_abi::json::append_field)
+        } else {
+            let mut bytes = Vec::with_capacity(4 * (length + 1));
+            bytes.extend_from_slice(&(length as u32).to_le_bytes());
+            for field in fields {
+                bytes.extend_from_slice(&field.to_le_bytes());
             }
-        };
+            self.state.data.append(4, &bytes)
+        })
+    }
+
+    /// Initialize insertion order and, when needed, the retained JSON graph.
+    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, order: u32) {
         if self.state.retains_json {
             let zero = self.i32_const(ctx, 0);
             self.store(ctx, MemKind::I32, object, record::JSON, zero);
         }
-        let shape = self.i32_const(ctx, shape);
-        self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
-    }
-}
-
-/// Bytes a record field of type `ty` occupies: numeric alternatives keep a tag and a payload.
-pub(crate) fn record_slot(ctx: &Context, ty: TypeHandle) -> u32 {
-    if is_numeric_type(ctx, ty) {
-        record::NUMERIC_SLOT
-    } else {
-        record::SLOT
+        let order = self.i32_const(ctx, order as i32);
+        self.store(ctx, MemKind::I32, object, record::ORDER, order);
     }
 }
 
@@ -524,15 +541,6 @@ fn record_offset(ctx: &Context, preceding: &[(String, TypeHandle)]) -> u32 {
     record::HEADER
         + preceding
             .iter()
-            .map(|(_, ty)| record_slot(ctx, *ty))
+            .map(|(_, ty)| slot_size(ctx, *ty))
             .sum::<u32>()
-}
-
-/// Bytes an array element of type `ty` occupies; always a power of two.
-fn array_slot(ctx: &Context, ty: TypeHandle) -> u32 {
-    if is_numeric_type(ctx, ty) {
-        layout::NUMERIC_SLOT
-    } else {
-        layout::SLOT
-    }
 }

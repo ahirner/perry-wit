@@ -51,6 +51,12 @@ function captures(): void {
   const allNums = "a12b34c56".match(/\d+/g);
   console.log("exec", rx.test("AbC-42"), rx.test("AbC-xx"), m === null ? "none" : m.join("|"), rx.exec("nope") === null);
   console.log("match", matched === null ? "none" : matched.join("|"), allNums === null ? "none" : allNums.join(","));
+  const branches = /((?:ab|a)+?)(b?)$/.exec("aab");
+  const empty = /^(a*)(b?)$/.exec("");
+  const boundary = /\b(\w+)\b/.exec("!word!");
+  const unicode = /(é|漢)+/u.exec("é漢");
+  const slots = /(a)(b)(c)(d)(e)(f)(g)(h?)/.exec("abcdefg");
+  console.log("capture-paths", branches === null ? "none" : branches.join("|"), empty === null ? "none" : empty.join("|"), boundary === null ? "none" : boundary.join("|"), unicode === null ? "none" : unicode.join("|"), slots === null ? "none" : slots.join("|"));
 }
 captures();
 

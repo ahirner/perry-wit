@@ -12,6 +12,7 @@
 //! Unsupported constructs are rejected with a diagnostic.
 mod aggregates;
 mod array_methods;
+mod bindings;
 mod builder;
 mod builtins;
 mod calls;
@@ -28,6 +29,7 @@ mod host;
 mod infer;
 mod json;
 mod json_cursor;
+mod methods;
 mod modules;
 mod operators;
 mod program;

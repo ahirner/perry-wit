@@ -9,6 +9,15 @@ use super::{
 use arrayvec::ArrayVec;
 use core::mem::offset_of;
 use perry_abi as runtime;
+use perry_abi::json::{
+    KEY, METADATA, PACKED_FIELDS, append_field, field_index, field_name, kind, link_child,
+};
+
+struct Container {
+    delimiter: u8,
+    order: u32,
+    graph: *mut u8,
+}
 
 #[repr(C)]
 struct Cursor {
@@ -17,7 +26,7 @@ struct Cursor {
     position: usize,
     key: Option<Text<'static>>,
     residue: Residue,
-    containers: ArrayVec<u8, { MAX_DEPTH + 1 }>,
+    containers: ArrayVec<Container, { MAX_DEPTH + 1 }>,
     error: Option<Error>,
     scalar_failed: bool,
 }
@@ -57,6 +66,16 @@ impl Cursor {
             }
         }
     }
+    /// Integer conversion failures are consumed separately from latched syntax failures.
+    fn integer<T: Default>(
+        &mut self,
+        parse: impl FnOnce(&mut Reader<'static>) -> Result<Option<T>, Error>,
+    ) -> T {
+        self.scalar_depth();
+        let integer = self.read_token(Some(T::default()), parse);
+        self.scalar_failed = integer.is_none();
+        integer.unwrap_or_default()
+    }
     fn value(&mut self) -> *mut u8 {
         if self.error.is_some() {
             return core::ptr::null_mut();
@@ -81,9 +100,6 @@ impl Cursor {
 }
 unsafe fn cursor<'a>(value: u32) -> &'a mut Cursor {
     unsafe { &mut *(value as usize as *mut Cursor) }
-}
-fn word(value: *mut u8, offset: usize) -> u32 {
-    unsafe { value.add(offset).cast::<u32>().read() }
 }
 fn set_word(value: *mut u8, offset: usize, data: u32) {
     unsafe { value.add(offset).cast::<u32>().write(data) }
@@ -124,7 +140,7 @@ pub(crate) unsafe extern "C" fn json_cursor_byte(value: u32) -> u32 {
         return u32::from(
             c.containers
                 .last()
-                .map_or(0, |byte| if *byte == b'{' { b'}' } else { b']' }),
+                .map_or(0, |frame| if frame.delimiter == b'{' { b'}' } else { b']' }),
         );
     }
     c.read_token(0, |r| {
@@ -142,11 +158,21 @@ pub(crate) unsafe extern "C" fn json_cursor_consume(value: u32, byte: u32) {
     c.read_token((), |r| r.expect(byte));
     match byte {
         b'{' | b'[' => {
-            if c.containers.try_push(byte).is_err() {
+            if c.containers
+                .try_push(Container {
+                    delimiter: byte,
+                    order: 0,
+                    graph: core::ptr::null_mut(),
+                })
+                .is_err()
+            {
                 c.fail(Error::Depth(c.position));
             }
         }
-        b'}' | b']' if c.containers.pop() != Some(if byte == b'}' { b'{' } else { b'[' }) => {
+        b'}' | b']'
+            if c.containers.pop().map(|frame| frame.delimiter)
+                != Some(if byte == b'}' { b'{' } else { b'[' }) =>
+        {
             c.fail(Error::Syntax(c.position));
         }
         _ => {}
@@ -160,27 +186,15 @@ pub(crate) unsafe extern "C" fn json_cursor_number(value: u32) -> f64 {
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_i64(value: u32) -> i64 {
-    let c = unsafe { cursor(value) };
-    c.scalar_depth();
-    c.scalar_failed = false;
-    if let Some(int) = c.read_token(Some(0), Reader::signed_integer) {
-        int
-    } else {
-        c.scalar_failed = true;
-        0
-    }
+    unsafe { cursor(value) }.integer(Reader::signed_integer)
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_u64(value: u32) -> u64 {
-    let c = unsafe { cursor(value) };
-    c.scalar_depth();
-    c.scalar_failed = false;
-    if let Some(int) = c.read_token(Some(0), Reader::unsigned_integer) {
-        int
-    } else {
-        c.scalar_failed = true;
-        0
-    }
+    unsafe { cursor(value) }.integer(Reader::unsigned_integer)
+}
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_failed(value: u32) -> u32 {
+    u32::from(core::mem::take(&mut unsafe { cursor(value) }.scalar_failed))
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_boolean(value: u32) -> u32 {
@@ -199,7 +213,12 @@ pub(crate) unsafe extern "C" fn json_cursor_string(value: u32) -> u32 {
     c.read_token(0, |r| Ok(pool::text::<true>(r)?.decoded() as usize as u32))
 }
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn json_cursor_key(value: u32, table: *const u32, count: u32) -> u32 {
+pub(crate) unsafe extern "C" fn json_cursor_key(
+    value: u32,
+    table: *const u32,
+    count: u32,
+    ordered: u32,
+) -> u32 {
     let c = unsafe { cursor(value) };
     c.key = c.read_token(None, |r| {
         r.whitespace();
@@ -211,19 +230,65 @@ pub(crate) unsafe extern "C" fn json_cursor_key(value: u32, table: *const u32, c
     let Some(key) = c.key else {
         return count;
     };
-    let names = unsafe { core::slice::from_raw_parts(table, count as usize * 2) }
-        .as_chunks::<2>()
-        .0;
-    let compare = |entry: &[u32; 2]| {
-        key.compare(unsafe { runtime::bytes(entry[0] as usize as *mut u8) })
-            .reverse()
-    };
-    let index = if count < 16 {
-        names.iter().position(|entry| compare(entry).is_eq())
-    } else {
-        names.binary_search_by(compare).ok()
-    };
-    index.map_or(count, |i| names[i][1])
+    let index = unsafe { field_index(table, count, |bytes| key.compare(bytes)) };
+    if ordered != 0 {
+        let frame = c.containers.last_mut().expect("record key inside object");
+        if frame.graph.is_null() && count as usize <= PACKED_FIELDS && index < count {
+            frame.order = append_field(frame.order, index);
+        } else {
+            if frame.graph.is_null() {
+                frame.graph = pool::json_node(kind::OBJECT, &mut c.residue);
+                while frame.order != 0 {
+                    let field = (frame.order & 15) - 1;
+                    let name = pool::json_node(kind::STRING, &mut c.residue);
+                    let bytes = unsafe { runtime::bytes(field_name(table, count, field)) };
+                    set_word(name, 8, bytes.as_ptr() as usize as u32);
+                    set_word(name, 12, bytes.len() as u32);
+                    set_word(name, 16, runtime::scalars_length(bytes));
+                    let item = pool::json_node(kind::UNDEFINED, &mut c.residue);
+                    set_word(item, KEY, name as usize as u32);
+                    unsafe { link_child(frame.graph, item) };
+                    frame.order >>= 4;
+                }
+            }
+            if index < count {
+                let name = pool::json_text(key, &mut c.residue);
+                let item = pool::json_node(kind::UNDEFINED, &mut c.residue);
+                set_word(item, KEY, name as usize as u32);
+                unsafe { link_child(frame.graph, item) };
+            }
+        }
+    }
+    index
+}
+
+/// Consume an undeclared record member into its frame's ordered graph.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_extra(value: u32) {
+    let graph = unsafe { cursor(value) }
+        .containers
+        .last()
+        .expect("record frame")
+        .graph;
+    let graph = unsafe { json_cursor_member(value, graph) };
+    unsafe { cursor(value) }
+        .containers
+        .last_mut()
+        .expect("record frame")
+        .graph = graph as usize as *mut u8;
+}
+
+/// Transfer metadata before the closing brace pops this record's frame.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_cursor_record(value: u32, native: *mut u8) {
+    let c = unsafe { cursor(value) };
+    let frame = c.containers.last_mut().expect("record frame");
+    set_word(native, runtime::layout::record::ORDER as usize, frame.order);
+    set_word(
+        native,
+        runtime::layout::record::JSON as usize,
+        frame.graph as usize as u32,
+    );
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_value(value: u32) -> u32 {
@@ -249,18 +314,14 @@ pub(crate) unsafe extern "C" fn json_cursor_member(value: u32, graph: *mut u8) -
         return graph as usize as u32;
     }
     let key = pool::json_text(key.expect("successful current member key"), &mut c.residue);
-    set_word(item, 24, key as usize as u32);
+    set_word(item, KEY, key as usize as u32);
     let graph = if graph.is_null() {
-        pool::json_node(6, &mut c.residue)
+        pool::json_node(kind::OBJECT, &mut c.residue)
     } else {
         graph
     };
-    match word(graph, 8) {
-        0 => set_word(graph, 16, item as usize as u32),
-        last => set_word(last as usize as *mut u8, 4, item as usize as u32),
-    }
-    set_word(graph, 8, item as usize as u32);
-    set_word(graph, 20, word(graph, 20) + 1);
+    // The cursor owns this unpublished graph and parsed member.
+    unsafe { link_child(graph, item) };
     graph as usize as u32
 }
 #[unsafe(no_mangle)]
@@ -295,26 +356,19 @@ pub(crate) unsafe extern "C" fn json_cursor_tail(value: u32, graph: *mut u8, sta
         return graph as usize as u32;
     }
     let graph = if graph.is_null() {
-        let g = pool::json_node(5, &mut c.residue);
-        set_word(g, 28, start);
+        let g = pool::json_node(kind::ARRAY, &mut c.residue);
+        set_word(g, METADATA, start);
         g
     } else {
         graph
     };
-    match word(graph, 8) {
-        0 => set_word(graph, 16, item as usize as u32),
-        last => set_word(last as usize as *mut u8, 4, item as usize as u32),
-    }
-    set_word(graph, 8, item as usize as u32);
-    set_word(graph, 20, word(graph, 20) + 1);
+    // The cursor owns this unpublished graph and parsed element.
+    unsafe { link_child(graph, item) };
     graph as usize as u32
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_seek(value: u32, position: u32) -> u32 {
     let c = unsafe { cursor(value) };
-    if position == u32::MAX - 1 {
-        return u32::from(core::mem::replace(&mut c.scalar_failed, false));
-    }
     let old = c.position as u32;
     if position != u32::MAX {
         c.position = position as usize;

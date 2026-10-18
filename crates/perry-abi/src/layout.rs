@@ -1,10 +1,13 @@
 //! Wasm32 aggregate layouts shared by generated code and linked helpers.
+#[path = "layout/time.rs"]
+pub mod time;
+
 pub mod record {
-    pub const SHAPE: u32 = 0;
+    pub const ORDER: u32 = 0;
     pub const JSON: u32 = 4;
     pub const HEADER: u32 = 8;
-    pub const SLOT: u32 = 8;
-    pub const NUMERIC_SLOT: u32 = 16;
+    pub const SLOT: u32 = super::array::SLOT;
+    pub const NUMERIC_SLOT: u32 = super::array::NUMERIC_SLOT;
 
     pub const fn field(index: usize) -> u32 {
         HEADER + SLOT * index as u32
@@ -20,6 +23,44 @@ pub mod array {
     pub const SCALAR_ELEMENTS: u32 = 0;
     pub const REFERENCE_ELEMENTS: u32 = 1;
     pub const NUMERIC_ELEMENTS: u32 = 2;
+
+    /// The element representation of an array, decoded from the `references` flag compiled code
+    /// passes (`*_ELEMENTS`).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[repr(u32)]
+    pub enum Elements {
+        /// Opaque 8-byte slots: `f64`, booleans or fixed-width integers.
+        Scalar = SCALAR_ELEMENTS,
+        /// 8-byte slots holding a reference in the low half, traced precisely.
+        References = REFERENCE_ELEMENTS,
+        /// Opaque 16-byte slots holding a numeric tag and payload.
+        Numeric = NUMERIC_ELEMENTS,
+    }
+
+    impl Elements {
+        /// Decode the ABI flag; any other value is a compiler bug, so it traps.
+        pub fn decode(references: u32) -> Self {
+            match references {
+                SCALAR_ELEMENTS => Self::Scalar,
+                REFERENCE_ELEMENTS => Self::References,
+                NUMERIC_ELEMENTS => Self::Numeric,
+                _ => panic!("invalid array element kind"),
+            }
+        }
+
+        /// Bytes per element slot.
+        pub fn stride(self) -> u32 {
+            match self {
+                Self::Scalar | Self::References => SLOT,
+                Self::Numeric => NUMERIC_SLOT,
+            }
+        }
+
+        /// `u64` words per element slot.
+        pub fn words(self) -> usize {
+            (self.stride() / SLOT) as usize
+        }
+    }
 }
 
 pub mod variant {
@@ -130,11 +171,8 @@ pub mod descriptor {
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 }
 
-/// Compiled regex limits shared by the compiler and the `perry-std` matcher.
-pub mod regex {
-    /// Explicit capture groups the matcher tracks; the compiler rejects patterns with more.
-    pub const MAX_CAPTURES: usize = 8;
-}
+#[path = "layout/regex.rs"]
+pub mod regex;
 
 pub mod numeric {
     pub const FLOAT: i32 = 0;

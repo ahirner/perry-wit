@@ -130,42 +130,9 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
                             || call.args.iter().any(|argument| argument.spread.is_some())))
                 {
                     method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
-                } else if matches!(
-                    method.sym.as_ref(),
-                    "forEach"
-                        | "reduce"
-                        | "reduceRight"
-                        | "join"
-                        | "slice"
-                        | "reverse"
-                        | "toReversed"
-                        | "flat"
-                        | "findLast"
-                        | "findLastIndex"
-                        | "at"
-                        | "pop"
-                        | "padStart"
-                        | "padEnd"
-                        | "trimStart"
-                        | "trimLeft"
-                        | "trimEnd"
-                        | "trimRight"
-                        | "replace"
-                        | "replaceAll"
-                        | "split"
-                        | "exec"
-                        | "match"
-                        | "lastIndexOf"
-                        | "with"
-                        | "normalize"
-                        | "difference"
-                        | "union"
-                        | "intersection"
-                        | "symmetricDifference"
-                        | "isSubsetOf"
-                        | "isSupersetOf"
-                        | "isDisjointFrom"
-                ) || (method.sym.as_ref() == "toString" && !call.args.is_empty())
+                } else if crate::methods::Method::parse(method.sym.as_ref())
+                    .is_some_and(|method| method.preserve())
+                    || (method.sym.as_ref() == "toString" && !call.args.is_empty())
                 {
                     method.sym = format!("{METHOD_PREFIX}{}", method.sym).into();
                 }

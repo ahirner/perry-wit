@@ -21,6 +21,42 @@ use pliron::{
 };
 use pliron_wasm::attrs::NumOpcode;
 
+#[derive(Clone, Copy)]
+enum AbsentKind {
+    Undefined,
+    Omitted,
+    Null,
+}
+
+enum Sentinel {
+    FloatBits(u64),
+    Word(i32),
+}
+
+impl AbsentKind {
+    fn tag(self) -> i32 {
+        match self {
+            Self::Undefined => numeric::UNDEFINED,
+            Self::Omitted => numeric::OMITTED,
+            Self::Null => numeric::NULL,
+        }
+    }
+
+    fn sentinel(self, repr: Repr) -> Result<Sentinel> {
+        let (float, boolean, reference) = match self {
+            Self::Undefined => (UNDEFINED_BITS, UNDEFINED_BOOL, 0),
+            Self::Omitted => (OMITTED_BITS, OMITTED_BOOL, OMITTED_REF),
+            Self::Null => (0x7ff0_0000_0000_0002, 3, 1),
+        };
+        Ok(match repr {
+            Repr::F64 => Sentinel::FloatBits(float),
+            Repr::Bool => Sentinel::Word(boolean),
+            Repr::Ref => Sentinel::Word(reference),
+            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+        })
+    }
+}
+
 impl FunctionLowering<'_, '_> {
     /// Lower an optional-value op; `false` if `op` is none.
     pub(crate) fn optional_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<bool> {
@@ -126,33 +162,30 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: TypeHandle,
     ) -> Result<Carriers<Value>> {
-        self.absent_value(ctx, ty, numeric::UNDEFINED, Self::undefined)
+        self.absent_value(ctx, ty, AbsentKind::Undefined)
     }
 
     fn omitted_value(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Carriers<Value>> {
-        self.absent_value(ctx, ty, numeric::OMITTED, Self::omitted)
+        self.absent_value(ctx, ty, AbsentKind::Omitted)
     }
 
     fn null_value(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Carriers<Value>> {
-        self.absent_value(ctx, ty, numeric::NULL, Self::null)
+        self.absent_value(ctx, ty, AbsentKind::Null)
     }
 
-    /// An absent value of `ty`: the tag `numeric_tag` for numeric alternatives, otherwise the
-    /// `scalar` sentinel.
     fn absent_value(
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
-        numeric_tag: i32,
-        scalar: fn(&mut Self, &mut Context, TypeHandle) -> Result<Value>,
+        kind: AbsentKind,
     ) -> Result<Carriers<Value>> {
         if is_numeric_type(ctx, ty) {
             Ok(Carriers::Numeric {
-                tag: self.i32_const(ctx, numeric_tag),
+                tag: self.i32_const(ctx, kind.tag()),
                 payload: self.i64_const(ctx, 0),
             })
         } else {
-            scalar(self, ctx, ty).map(Carriers::Scalar)
+            self.absent_scalar(ctx, ty, kind).map(Carriers::Scalar)
         }
     }
 
@@ -206,16 +239,7 @@ impl FunctionLowering<'_, '_> {
                 Ok(self.num(ctx, NumOpcode::I32Eq, vec![tag, null_tag]))
             }
             (Carriers::Scalar(value), false) => self.is_undefined(ctx, value, ty),
-            (Carriers::Scalar(value), true) => {
-                let sentinel = self.null(ctx, ty)?;
-                Ok(if repr(ctx, ty)? == Repr::F64 {
-                    let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
-                    let sentinel = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![sentinel]);
-                    self.num(ctx, NumOpcode::I64Eq, vec![bits, sentinel])
-                } else {
-                    self.num(ctx, NumOpcode::I32Eq, vec![value, sentinel])
-                })
-            }
+            (Carriers::Scalar(value), true) => self.is_sentinel(ctx, value, ty, AbsentKind::Null),
         }
     }
 
@@ -260,27 +284,50 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    pub(crate) fn undefined(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
-        Ok(match repr(ctx, inner)? {
-            Repr::F64 => {
-                let bits = self.i64_const(ctx, UNDEFINED_BITS);
+    pub(crate) fn undefined(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {
+        self.absent_scalar(ctx, ty, AbsentKind::Undefined)
+    }
+
+    pub(crate) fn omitted(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {
+        self.absent_scalar(ctx, ty, AbsentKind::Omitted)
+    }
+
+    pub(crate) fn null(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {
+        self.absent_scalar(ctx, ty, AbsentKind::Null)
+    }
+
+    fn absent_scalar(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        kind: AbsentKind,
+    ) -> Result<Value> {
+        Ok(match kind.sentinel(repr(ctx, ty)?)? {
+            Sentinel::FloatBits(bits) => {
+                let bits = self.i64_const(ctx, bits);
                 self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
             }
-            Repr::Bool => self.i32_const(ctx, UNDEFINED_BOOL),
-            Repr::Ref => self.i32_const(ctx, 0),
-            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+            Sentinel::Word(word) => self.i32_const(ctx, word),
         })
     }
 
-    pub(crate) fn omitted(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
-        Ok(match repr(ctx, inner)? {
-            Repr::F64 => {
-                let bits = self.i64_const(ctx, OMITTED_BITS);
-                self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
+    fn is_sentinel(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        ty: TypeHandle,
+        kind: AbsentKind,
+    ) -> Result<Value> {
+        Ok(match kind.sentinel(repr(ctx, ty)?)? {
+            Sentinel::FloatBits(bits) => {
+                let value = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+                let sentinel = self.i64_const(ctx, bits);
+                self.num(ctx, NumOpcode::I64Eq, vec![value, sentinel])
             }
-            Repr::Bool => self.i32_const(ctx, OMITTED_BOOL),
-            Repr::Ref => self.i32_const(ctx, OMITTED_REF),
-            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+            Sentinel::Word(word) => {
+                let sentinel = self.i32_const(ctx, word);
+                self.num(ctx, NumOpcode::I32Eq, vec![value, sentinel])
+            }
         })
     }
 
@@ -288,62 +335,23 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         value: Value,
-        inner: TypeHandle,
+        ty: TypeHandle,
     ) -> Result<Value> {
-        if !absence(ctx, inner).is_some_and(|a| a.admits_undefined()) {
+        if !absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
             return Ok(self.i32_const(ctx, 0));
         }
-        Ok(match repr(ctx, inner)? {
-            Repr::F64 => {
-                let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
-                let omitted = self.i64_const(ctx, OMITTED_BITS);
-                self.num(ctx, NumOpcode::I64Eq, vec![bits, omitted])
-            }
-            Repr::Bool => {
-                let omitted = self.i32_const(ctx, OMITTED_BOOL);
-                self.num(ctx, NumOpcode::I32Eq, vec![value, omitted])
-            }
-            Repr::Ref => {
-                let omitted = self.i32_const(ctx, OMITTED_REF);
-                self.num(ctx, NumOpcode::I32Eq, vec![value, omitted])
-            }
-            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
-        })
+        self.is_sentinel(ctx, value, ty, AbsentKind::Omitted)
     }
 
     pub(crate) fn is_undefined(
         &mut self,
         ctx: &mut Context,
         value: Value,
-        inner: TypeHandle,
+        ty: TypeHandle,
     ) -> Result<Value> {
-        let explicit = match repr(ctx, inner)? {
-            Repr::F64 => {
-                let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
-                let undefined = self.i64_const(ctx, UNDEFINED_BITS);
-                self.num(ctx, NumOpcode::I64Eq, vec![bits, undefined])
-            }
-            Repr::Bool => {
-                let undefined = self.i32_const(ctx, UNDEFINED_BOOL);
-                self.num(ctx, NumOpcode::I32Eq, vec![value, undefined])
-            }
-            Repr::Ref => self.num(ctx, NumOpcode::I32Eqz, vec![value]),
-            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
-        };
-        let omitted = self.is_omitted(ctx, value, inner)?;
+        let explicit = self.is_sentinel(ctx, value, ty, AbsentKind::Undefined)?;
+        let omitted = self.is_omitted(ctx, value, ty)?;
         Ok(self.num(ctx, NumOpcode::I32Or, vec![explicit, omitted]))
-    }
-
-    pub(crate) fn null(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {
-        Ok(match repr(ctx, ty)? {
-            Repr::F64 => {
-                let bits = self.i64_const(ctx, 0x7ff0_0000_0000_0002);
-                self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
-            }
-            Repr::Bool => self.i32_const(ctx, 3),
-            Repr::Ref => self.i32_const(ctx, 1),
-            Repr::I32 | Repr::I64 => bail!("nullable fixed-width integer has no representation"),
-        })
     }
 
     /// [`Self::absence_test_value`] for a scalar representation.

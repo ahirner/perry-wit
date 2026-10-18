@@ -1,8 +1,7 @@
 use anyhow::Result;
 use wasmtime::{Engine, Instance, Memory, Module, Store};
 
-use crate::link;
-use link::libraries;
+use crate::link::{self, libraries};
 
 const INPUT: u32 = 262_144;
 const VALUE: u32 = 327_680;
@@ -20,7 +19,7 @@ fn linked_time_and_json_share_memory_and_keep_exact_immutable_values() -> Result
         .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, "time_instant_format")?;
     let milliseconds = guest
         .instance
-        .get_typed_func::<u32, f64>(&mut guest.store, "time_instant_ms")?;
+        .get_typed_func::<(u32, u32), u64>(&mut guest.store, "time_instant_ms")?;
     let json = guest
         .instance
         .get_typed_func::<(u32, u32), u64>(&mut guest.store, "json_measure")?;
@@ -60,7 +59,8 @@ fn linked_time_and_json_share_memory_and_keep_exact_immutable_values() -> Result
                 16
             );
             assert_eq!(guest.bytes(VALUE, 16), nanos.to_le_bytes());
-            assert_eq!(milliseconds.call(&mut guest.store, VALUE)?, millis);
+            let result = milliseconds.call(&mut guest.store, (VALUE, OUTPUT))?;
+            assert_eq!(guest.number(result), millis);
             assert_eq!(
                 format.call(&mut guest.store, (VALUE, OUTPUT, 40))?,
                 expected.len() as u64
@@ -97,7 +97,7 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
         .get_typed_func::<(u32, f64, u32), u64>(&mut guest.store, "time_plain_add_days")?;
     let part = guest
         .instance
-        .get_typed_func::<(u32, u32), f64>(&mut guest.store, "time_plain_part")?;
+        .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, "time_plain_part")?;
     let format = guest
         .instance
         .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, "time_plain_format")?;
@@ -115,10 +115,8 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
         .into_iter()
         .enumerate()
     {
-        assert_eq!(
-            part.call(&mut guest.store, (VALUE + 16, index as u32))?,
-            expected
-        );
+        let result = part.call(&mut guest.store, (VALUE + 16, index as u32, OUTPUT))?;
+        assert_eq!(guest.number(result), expected);
     }
     let expected = b"2024-03-01T23:58:57.123456789";
     assert_eq!(
@@ -135,8 +133,11 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
         );
         assert_eq!(guest.bytes(VALUE + 16, 16), unchanged);
     }
-    assert_eq!(part.call(&mut guest.store, (VALUE, 9))?, 3.0);
-    assert!(part.call(&mut guest.store, (VALUE, 10))?.is_nan());
+    let result = part.call(&mut guest.store, (VALUE, 9, OUTPUT))?;
+    assert_eq!(guest.number(result), 3.0);
+    let unchanged = guest.bytes(OUTPUT, 8).to_vec();
+    assert_eq!(part.call(&mut guest.store, (VALUE, 10, OUTPUT))?, 2 << 32);
+    assert_eq!(guest.bytes(OUTPUT, 8), unchanged);
     Ok(())
 }
 
@@ -222,10 +223,16 @@ fn accessors_and_formatters_validate_storage_and_capacity_before_writing() -> Re
         .get_typed_func::<(f64, u32), u64>(&mut guest.store, "time_instant_from_ms")?;
     let milliseconds = guest
         .instance
-        .get_typed_func::<u32, f64>(&mut guest.store, "time_instant_ms")?;
+        .get_typed_func::<(u32, u32), u64>(&mut guest.store, "time_instant_ms")?;
     let part = guest
         .instance
-        .get_typed_func::<(u32, u32), f64>(&mut guest.store, "time_plain_part")?;
+        .get_typed_func::<(u32, u32, u32), u64>(&mut guest.store, "time_plain_part")?;
+    let until = guest
+        .instance
+        .get_typed_func::<(u32, u32, u32, u32, u32), u64>(
+            &mut guest.store,
+            "time_plain_until_part",
+        )?;
     let sentinel = [0xA5; 40];
     guest
         .memory
@@ -261,8 +268,34 @@ fn accessors_and_formatters_validate_storage_and_capacity_before_writing() -> Re
         assert_eq!(guest.bytes(OUTPUT, 40), sentinel);
     }
     for pointer in [0, MEMORY_END - 15, u32::MAX, VALUE] {
-        assert!(milliseconds.call(&mut guest.store, pointer)?.is_nan());
-        assert!(part.call(&mut guest.store, (pointer, 0))?.is_nan());
+        let status = if pointer == VALUE { 2 } else { 6 } << 32;
+        assert_eq!(
+            milliseconds.call(&mut guest.store, (pointer, OUTPUT))?,
+            status
+        );
+        assert_eq!(part.call(&mut guest.store, (pointer, 0, OUTPUT))?, status);
+        for (a, b) in [(pointer, VALUE), (VALUE, pointer)] {
+            assert_eq!(until.call(&mut guest.store, (a, b, 2, 0, OUTPUT))?, status);
+        }
+        assert_eq!(guest.bytes(OUTPUT, 40), sentinel);
+    }
+    guest
+        .memory
+        .write(&mut guest.store, VALUE as usize, &[0; 32])?;
+    for output in [0, MEMORY_END - 7, VALUE, VALUE + 15, VALUE + 16] {
+        assert_eq!(
+            until.call(&mut guest.store, (VALUE, VALUE + 16, 2, 0, output))?,
+            6 << 32
+        );
+        assert_eq!(guest.bytes(OUTPUT, 40), sentinel);
+        assert_eq!(guest.bytes(VALUE, 32), [0; 32]);
+    }
+    for (unit, field) in [(4, 0), (2, 4), (u32::MAX, 0), (2, u32::MAX)] {
+        assert_eq!(
+            until.call(&mut guest.store, (VALUE, VALUE + 16, unit, field, OUTPUT))?,
+            2 << 32
+        );
+        assert_eq!(guest.bytes(OUTPUT, 40), sentinel);
     }
     for value in [
         f64::NAN,
@@ -275,7 +308,8 @@ fn accessors_and_formatters_validate_storage_and_capacity_before_writing() -> Re
         assert_eq!(guest.bytes(OUTPUT, 40), sentinel);
     }
     assert_eq!(from_ms.call(&mut guest.store, (-1.0, VALUE))?, 16);
-    assert_eq!(milliseconds.call(&mut guest.store, VALUE)?, -1.0);
+    let result = milliseconds.call(&mut guest.store, (VALUE, OUTPUT))?;
+    assert_eq!(guest.number(result), -1.0);
     assert_eq!(guest.bytes(VALUE, 16), (-1_000_000i128).to_le_bytes());
     assert_eq!(guest.memory.size(&guest.store), 8);
     Ok(())
@@ -294,11 +328,12 @@ impl GuestTime {
             (import "__perry_helper" "time_instant_parse" (func $instant_parse (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_utc_parse" (func $utc_parse (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_instant_from_ms" (func $from_ms (param f64 i32) (result i64)))
-            (import "__perry_helper" "time_instant_ms" (func $ms (param i32) (result f64)))
+            (import "__perry_helper" "time_instant_ms" (func $ms (param i32 i32) (result i64)))
             (import "__perry_helper" "time_instant_format" (func $instant_format (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_plain_parse" (func $plain_parse (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_plain_add_days" (func $add (param i32 f64 i32) (result i64)))
-            (import "__perry_helper" "time_plain_part" (func $part (param i32 i32) (result f64)))
+            (import "__perry_helper" "time_plain_part" (func $part (param i32 i32 i32) (result i64)))
+            (import "__perry_helper" "time_plain_until_part" (func $until (param i32 i32 i32 i32 i32) (result i64)))
             (import "__perry_helper" "time_plain_format" (func $plain_format (param i32 i32 i32) (result i64)))
             (import "__perry_helper" "json_measure" (func $json (param i32 i32) (result i64)))
             (memory (export "memory") 8 8)
@@ -311,6 +346,7 @@ impl GuestTime {
             (export "time_plain_parse" (func $plain_parse))
             (export "time_plain_add_days" (func $add))
             (export "time_plain_part" (func $part))
+            (export "time_plain_until_part" (func $until))
             (export "time_plain_format" (func $plain_format))
             (export "json_measure" (func $json)))"#,
         )?;
@@ -326,6 +362,11 @@ impl GuestTime {
             instance,
             memory,
         })
+    }
+
+    fn number(&self, status: u64) -> f64 {
+        assert_eq!(status, 8, "scalar codec failed");
+        f64::from_le_bytes(self.bytes(OUTPUT, 8).try_into().unwrap())
     }
 
     fn bytes(&self, pointer: u32, length: usize) -> &[u8] {

@@ -1,6 +1,7 @@
 //! UTF-8 string methods indexed by Unicode scalar values.
 mod normalize;
 use crate::runtime::{bytes, from_static, scalars_length};
+use perry_abi::number::{DecimalSyntax, ascii_digit, scan_decimal, split_sign};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.
 pub(crate) fn integer(value: f64) -> i64 {
@@ -691,66 +692,11 @@ pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     crate::runtime::from_bytes(scalar.encode_utf8(&mut bytes).as_bytes())
 }
 
-fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
-    let digit = match byte {
-        b'0'..=b'9' => u32::from(byte - b'0'),
-        b'a'..=b'z' => u32::from(byte - b'a') + 10,
-        b'A'..=b'Z' => u32::from(byte - b'A') + 10,
-        _ => return None,
-    };
-    (digit < radix).then_some(digit)
-}
-
-fn parse_decimal_prefix(rest: &[u8]) -> Option<(&[u8], perry_abi::number::Decimal, i64, usize)> {
-    let mut at = 0;
-    let mut fractional = false;
-    let mut digits = 0usize;
-    let mut decimal = perry_abi::number::Decimal::default();
-    while at < rest.len() {
-        match rest[at] {
-            b'0'..=b'9' => {
-                decimal.digit(rest[at], fractional);
-                digits += 1;
-                at += 1;
-            }
-            b'.' if !fractional => {
-                fractional = true;
-                at += 1;
-            }
-            _ => break,
-        }
-    }
-    if digits == 0 {
-        return None;
-    }
-    let mantissa_end = at;
-    let mut exponent = 0i64;
-    if matches!(rest.get(at), Some(b'e' | b'E')) {
-        let mut exp_at = at + 1;
-        if matches!(rest.get(exp_at), Some(b'+' | b'-')) {
-            exp_at += 1;
-        }
-        let exp_digits_start = exp_at;
-        while matches!(rest.get(exp_at), Some(b'0'..=b'9')) {
-            exp_at += 1;
-        }
-        if exp_at > exp_digits_start {
-            exponent = perry_abi::number::parse_exponent(&rest[at..exp_at]);
-            at = exp_at;
-        }
-    }
-    Some((&rest[..mantissa_end], decimal, exponent, at))
-}
-
 /// ECMAScript `parseFloat(string)`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
     let trimmed = trim_start_bytes(unsafe { crate::runtime::bytes(string) });
-    let (negative, rest) = match trimmed.first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
+    let (negative, rest) = split_sign(trimmed);
     if rest.starts_with(b"Infinity") {
         return if negative {
             f64::NEG_INFINITY
@@ -758,10 +704,12 @@ pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
             f64::INFINITY
         };
     }
-    let Some((mantissa, decimal, exponent, _)) = parse_decimal_prefix(rest) else {
+    let Ok(literal) = scan_decimal::<true>(rest, DecimalSyntax::Prefix) else {
         return f64::NAN;
     };
-    decimal.finish(mantissa, negative, exponent)
+    literal
+        .decimal
+        .finish(literal.mantissa, negative, literal.exponent)
 }
 
 /// ECMAScript `StringToNumber` (`Number(string)`).
@@ -789,11 +737,7 @@ pub(crate) extern "C" fn std_string_to_number(string: *mut u8) -> f64 {
             return value;
         }
     }
-    let (negative, rest) = match trimmed.first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
+    let (negative, rest) = split_sign(trimmed);
     if rest == b"Infinity" {
         return if negative {
             f64::NEG_INFINITY
@@ -801,13 +745,15 @@ pub(crate) extern "C" fn std_string_to_number(string: *mut u8) -> f64 {
             f64::INFINITY
         };
     }
-    let Some((mantissa, decimal, exponent, consumed)) = parse_decimal_prefix(rest) else {
+    let Ok(literal) = scan_decimal::<true>(rest, DecimalSyntax::Prefix) else {
         return f64::NAN;
     };
-    if consumed != rest.len() {
+    if literal.consumed != rest.len() {
         return f64::NAN;
     }
-    decimal.finish(mantissa, negative, exponent)
+    literal
+        .decimal
+        .finish(literal.mantissa, negative, literal.exponent)
 }
 
 #[cfg(test)]

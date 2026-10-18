@@ -85,17 +85,15 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// Insert or overwrite `(key, val)` in a `Map<K, V>` or `Record<K, V>`.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn kv_set(
         &mut self,
         ctx: &mut Context,
         coll: Value,
         key: Value,
         val: Value,
-        k_ty: TypeHandle,
-        v_ty: TypeHandle,
-        tuple_rec: TypedHandle<RecordType>,
     ) -> Result<Value> {
+        let (k_ty, v_ty, tuple_rec) = kv_entry_types(ctx, coll.get_type(ctx))
+            .context("key-value insertion requires a Map, dictionary or entry array")?;
         let arr = self.collection_entries_array(ctx, coll)?;
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
@@ -447,7 +445,7 @@ impl<'s> FunctionBuilder<'s> {
 
             b.switch_to(new_bb);
             let fresh_arr = b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![elem]));
-            b.kv_set(ctx, out_map, key, fresh_arr, k_ty, group_arr_ty, tuple_rec)?;
+            b.kv_set(ctx, out_map, key, fresh_arr)?;
             b.jump(ctx, done_bb);
 
             b.switch_to(push_bb);

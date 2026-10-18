@@ -141,7 +141,7 @@ export function duplicates():number {
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok"}}');return 8;} catch(e) {}
  const row:Row = JSON.parse('{"name":false,"inner":{"n":false},"name":"é🙂","inner":{"n":3}}');
  if(row.name.length !== 2 || row.inner.n !== 3 || row.extra !== undefined) return 9;
- if(JSON.stringify(row)!=='{"inner":{"n":3},"name":"é🙂"}')return 10;
+ if(JSON.stringify(row)!=='{"name":"é🙂","inner":{"n":3}}')return 10;
  try {const bad:Row = JSON.parse('{"name":"ok","inner":{"n":1},"name":false}'); return 11;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":false,"inner":{},"ignored":[1,]}'); return 12;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":"ok","inner":null}'); return 13;} catch(e) {}
@@ -210,8 +210,7 @@ export function limits():number {{
     }
 }
 
-/// Typed values serialize their declared fields from current storage, then the members,
-/// elements and tag payloads they were parsed with but do not declare.
+/// Typed values overlay current storage on retained members in their insertion order.
 #[test]
 fn typed_stringify_keeps_undeclared_members_and_mutations() {
     let source = r#"
@@ -223,7 +222,7 @@ interface Document {one:Part; two:Part}
 let saved:Document|undefined;
 export function members():number {
  const row:Row = JSON.parse('{ "extra": {"z":1,"2":2,"1":1,"z":3}, "name":"old", "inner":{"n":2,"other":"\\u0061"}, "values":[1,2], "name":"new", "numeric":-0, "overflow":1e400 }');
- if (JSON.stringify(row) !== '{"inner":{"n":2,"other":"a"},"name":"new","values":[1,2],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 1;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"new","inner":{"n":2,"other":"a"},"values":[1,2],"numeric":0,"overflow":null}') return 1;
  const alias = row.inner;
  alias.n = 4;
  row.values.push(3);
@@ -231,9 +230,9 @@ export function members():number {
  row.name = 'changed';
  row.another = 8;
  row.added = 7;
- if (JSON.stringify(row) !== '{"added":7,"another":8,"inner":{"n":4,"other":"a"},"name":"changed","values":[5,2,3],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 2;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"changed","inner":{"n":4,"other":"a"},"values":[5,2,3],"numeric":0,"overflow":null,"another":8,"added":7}') return 2;
  row.another = undefined;
- if (JSON.stringify(row) !== '{"added":7,"inner":{"n":4,"other":"a"},"name":"changed","values":[5,2,3],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 3;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"changed","inner":{"n":4,"other":"a"},"values":[5,2,3],"numeric":0,"overflow":null,"added":7}') return 3;
  row.inner = {n:9};
  if (JSON.stringify(row.inner) !== '{"n":9}' || JSON.stringify(alias) !== '{"n":4,"other":"a"}') return 4;
  const optional:{n?:number}=JSON.parse('{"n":1,"unknown":false,"unknown":{"escaped":"\\u00e9"}}');
@@ -308,7 +307,7 @@ export async function run(n:number):Promise<number> {
   try {JSON.parse('{"bad":[1,]}');}catch(e){}
   if(temporary.n!==3)return 2;
  }
- if(JSON.stringify(row)!=='{"n":1,"name":"Café 🙂","extra":true}' || saved.n!==n)return 3;
+ if(JSON.stringify(row)!=='{"name":"Café 🙂","n":1,"extra":true}' || saved.n!==n)return 3;
  return row.name.length+rowView.length;
 }
 export function scalar(n:number):number {
@@ -424,8 +423,15 @@ export function writes(n:number):number {{
  const before=JSON.stringify(item);
  if(before!==JSON.stringify(item))return -1;
  for(let i=0;i<n;i++){{item.count++;item.added='yes';}}
- if(JSON.stringify(item)!=='{{"added":"yes","count":'+String(n+1)+',"label":"é🙂","unknown":{{"1":1,"2":2}}}}')return -2;
+ if(JSON.stringify(item)!=='{{"count":'+String(n+1)+',"unknown":{{"1":1,"2":2}},"label":"é🙂","added":"yes"}}')return -2;
  return item.count;
+}}
+export function churn(n:number):number {{
+ const item:Item=JSON.parse('{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}');
+ const copy={{...item}};
+ for(let i=0;i<n;i++){{delete item.added;item.added=item.label;}}
+ if(JSON.stringify(copy)!=='{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}')return -1;
+ return item.count+(item.added===item.label?1:0);
 }}
 export function numbers(n:number):number {{
  const values:number[]=[];
@@ -463,6 +469,11 @@ export function retained():number {{return saved==={quoted} && label==='é🙂'?
     );
     program.stress_collection(true);
     assert_eq!(program.number("writes", 100.0), 101.0);
+    assert_eq!(program.number("churn", 8192.0), 2.0);
+    assert!(
+        program.memory_bytes() <= 1024 * 1024,
+        "property-order churn must remain collectible"
+    );
     assert_eq!(program.call("quote", &[]).0[0].unwrap_f64(), 1.0);
     assert_eq!(program.number("numbers", 1024.0), 1024.0);
     assert_eq!(program.call("retained", &[]).0[0].unwrap_f64(), 1.0);

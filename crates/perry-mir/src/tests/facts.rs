@@ -1,4 +1,5 @@
 use super::*;
+use crate::{RecordType, heap::AllocOp};
 
 /// The returned value of a single-return function.
 fn returned(ctx: &Context, function: &FuncOp, index: usize) -> Value {
@@ -541,6 +542,14 @@ builtin.module @lossless_check { ^module():
     verify_lossless_module(module, ctx, &facts)?;
 
     let spec_fn = function(ctx, module, "run");
+    let layout = first::<AllocOp>(ctx, &spec_fn)
+        .deref(ctx)
+        .get_result(0)
+        .get_type(ctx);
+    let layout_name = TypedHandle::<RecordType>::from_handle(layout, ctx)?
+        .deref(ctx)
+        .name()
+        .clone();
     let fp64: TypeHandle = FP64Type::get(ctx).into();
 
     // 1. A ParseInt result and 2. a FieldGetOp of a Fact::Numeric field degraded back to f64
@@ -564,5 +573,15 @@ builtin.module @lossless_check { ^module():
     let degraded_sig = FunctionType::get(ctx, arg_types, vec![orig_ret_ty]);
     spec_fn.set_attr_builtin_func_type(ctx, TypeAttr::new(degraded_sig.into()));
     assert!(verify_lossless_module(module, ctx, &facts).is_err());
+
+    // A pre-existing incompatible layout must report a type error, including recursive reservations.
+    let ctx = &mut Context::new();
+    let module = parse(ctx, text);
+    set_exported(ctx, &function(ctx, module, "run"));
+    RecordType::get(ctx, layout_name, Some(Vec::new()))?;
+    let result = Specialize.run(module, ctx, &mut AnalysisManager::default());
+    assert!(
+        matches!(result, Err(error) if error.to_string().contains("already exists with different fields"))
+    );
     Ok(())
 }

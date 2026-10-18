@@ -26,7 +26,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         names: &[&str],
         args: &'s [Expr],
-        k_ty: TypeHandle,
         v_ty: TypeHandle,
         tuple_rec: TypedHandle<RecordType>,
     ) -> Result<Value> {
@@ -34,7 +33,7 @@ impl<'s> FunctionBuilder<'s> {
         for (name, val_expr) in names.iter().zip(args) {
             let k = self.string(ctx, name);
             let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
-            self.kv_set(ctx, dict, k, v, k_ty, v_ty, tuple_rec)?;
+            self.kv_set(ctx, dict, k, v)?;
         }
         Ok(dict)
     }
@@ -47,9 +46,10 @@ impl<'s> FunctionBuilder<'s> {
         key: Value,
         rec_handle: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let (fields, uniform_ty) = record_uniform_field_type(ctx, rec_handle).context(
+        let uniform_ty = record_uniform_field_type(ctx, rec_handle).context(
             "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>",
         )?;
+        let fields = rec_handle.deref(ctx).fields()?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
         for (name, _) in fields.into_iter().rev() {
@@ -64,143 +64,89 @@ impl<'s> FunctionBuilder<'s> {
         Ok(acc)
     }
 
-    /// `Object.keys(obj)` and `for (const k in obj)`.
-    pub(crate) fn object_keys(&mut self, ctx: &mut Context, obj_expr: &'s Expr) -> Result<Value> {
-        let obj = self.expression(ctx, obj_expr)?;
-        let obj = self.defined(ctx, obj)?;
-        let ty = obj.get_type(ctx);
-        if dict_entry_types(ctx, ty).is_some() {
-            return self.kv_keys(ctx, obj);
-        }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-            let fields = rec
-                .deref(ctx)
-                .fields()
-                .map_err(|_| anyhow!("record without fields"))?
-                .to_vec();
-            let str_ty: TypeHandle = StringType::get(ctx).into();
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, str_ty, vec![]));
-            for (name, field_ty) in fields {
-                let name_val = self.string(ctx, &name);
-                self.when_present(ctx, "obj_key", obj, name, field_ty, |b, ctx| {
-                    b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, name_val));
-                    Ok(())
-                })?;
-            }
-            return Ok(out);
-        }
-        if let Some(json) = self.json_operand(ctx, obj)? {
-            return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
-        }
-        bail!("Object.keys requires a Record, interface/object shape, or JSON value")
-    }
-
-    /// Run `body` for field `name` of `obj` unless it is an omitted optional field.
-    fn when_present(
-        &mut self,
-        ctx: &mut Context,
-        label: &str,
-        obj: Value,
-        name: String,
-        field_ty: TypeHandle,
-        body: impl FnOnce(&mut Self, &mut Context) -> Result<()>,
-    ) -> Result<()> {
-        if !admits_omission(ctx, field_ty) {
-            return body(self, ctx);
-        }
-        let op = FieldPresentOp::new(ctx, obj, name)?;
-        let present = self.append_value(ctx, &op);
-        let keep_bb = self.new_block(ctx, &format!("{label}_keep"));
-        let after_bb = self.new_block(ctx, &format!("{label}_after"));
-        self.branch(ctx, present, keep_bb, after_bb);
-        self.switch_to(keep_bb);
-        body(self, ctx)?;
-        self.jump(ctx, after_bb);
-        self.switch_to(after_bb);
-        Ok(())
-    }
-
-    /// The value of field `name` of `obj`, read as `elem_ty`; omitted fields read `undefined`.
-    fn field_value(
-        &mut self,
-        ctx: &mut Context,
-        obj: Value,
-        name: String,
-        field_ty: TypeHandle,
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let op = FieldGetOp::new(ctx, obj, name)?;
-        let val = self.append_value(ctx, &op);
-        let val = if admits_omission(ctx, field_ty) {
-            self.normalize_optional_read(ctx, val)?
-        } else {
-            val
-        };
-        self.fit(ctx, val, elem_ty)
-    }
-
-    /// `Object.values(obj)`.
-    pub(crate) fn object_values(&mut self, ctx: &mut Context, obj_expr: &'s Expr) -> Result<Value> {
-        let obj = self.expression(ctx, obj_expr)?;
-        let obj = self.defined(ctx, obj)?;
-        let ty = obj.get_type(ctx);
-        if dict_entry_types(ctx, ty).is_some() {
-            return self.kv_values(ctx, obj);
-        }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-            let (fields, elem_ty) = record_uniform_field_type(ctx, rec).context(
-                "Object.values on a closed record requires all fields to share a uniform value type",
-            )?;
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-            for (name, field_ty) in fields {
-                self.when_present(ctx, "obj_val", obj, name.clone(), field_ty, |b, ctx| {
-                    let fitted = b.field_value(ctx, obj, name, field_ty, elem_ty)?;
-                    b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, fitted));
-                    Ok(())
-                })?;
-            }
-            return Ok(out);
-        }
-        bail!("Object.values requires a Record<K, V> or uniform record shape")
-    }
-
-    /// `Object.entries(obj)`.
-    pub(crate) fn object_entries(
+    /// Closed-record enumeration shares presence checks and value normalization.
+    pub(super) fn object_members(
         &mut self,
         ctx: &mut Context,
         obj_expr: &'s Expr,
+        method: IteratorMethod,
     ) -> Result<Value> {
         let obj = self.expression(ctx, obj_expr)?;
         let obj = self.defined(ctx, obj)?;
         let ty = obj.get_type(ctx);
         if dict_entry_types(ctx, ty).is_some() {
-            return self.kv_entries(ctx, obj);
+            return self.collection_iterator(ctx, obj, method);
         }
         if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-            let (fields, elem_ty) = record_uniform_field_type(ctx, rec).context(
-                "Object.entries on a closed record requires all fields to share a uniform value type",
-            )?;
             let str_ty: TypeHandle = StringType::get(ctx).into();
-            let tuple_rec = self.shapes.pair_type(ctx, str_ty, elem_ty)?;
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+            let elem_ty = if method == IteratorMethod::Keys {
+                str_ty
+            } else {
+                record_uniform_field_type(ctx, rec).with_context(|| format!(
+                    "Object.{} on a closed record requires all fields to share a uniform value type",
+                    method.name(),
+                ))?
+            };
+            let pair = if method == IteratorMethod::Entries {
+                Some(self.shapes.pair_type(ctx, str_ty, elem_ty)?)
+            } else {
+                None
+            };
+            let output_ty = pair.map_or(elem_ty, Into::into);
+            let fields = rec.deref(ctx).fields()?.to_vec();
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, vec![]));
             for (name, field_ty) in fields {
-                let name_val = self.string(ctx, &name);
-                self.when_present(ctx, "obj_ent", obj, name.clone(), field_ty, |b, ctx| {
-                    let fitted = b.field_value(ctx, obj, name, field_ty, elem_ty)?;
-                    let pair = b.emit_value(ctx, |ctx| {
-                        AllocOp::new(ctx, tuple_rec, vec![name_val, fitted])
-                    });
-                    b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, pair));
-                    Ok(())
-                })?;
+                let after = if admits_omission(ctx, field_ty) {
+                    let op = FieldPresentOp::new(ctx, obj, name.clone())?;
+                    let present = self.append_value(ctx, &op);
+                    let keep = self.new_block(ctx, "obj_member_keep");
+                    let after = self.new_block(ctx, "obj_member_after");
+                    self.branch(ctx, present, keep, after);
+                    self.switch_to(keep);
+                    Some(after)
+                } else {
+                    None
+                };
+                let value = if method == IteratorMethod::Keys {
+                    self.string(ctx, &name)
+                } else {
+                    let entry = pair.map(|pair| (pair, self.string(ctx, &name)));
+                    let op = FieldGetOp::new(ctx, obj, name)?;
+                    let value = self.append_value(ctx, &op);
+                    let value = if admits_omission(ctx, field_ty) {
+                        self.normalize_optional_read(ctx, value)?
+                    } else {
+                        value
+                    };
+                    let value = self.fit(ctx, value, elem_ty)?;
+                    if let Some((pair, key)) = entry {
+                        self.emit_value(ctx, |ctx| AllocOp::new(ctx, pair, vec![key, value]))
+                    } else {
+                        value
+                    }
+                };
+                self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, value));
+                if let Some(after) = after {
+                    self.jump(ctx, after);
+                    self.switch_to(after);
+                }
             }
             return Ok(out);
         }
-        bail!("Object.entries requires a Record<K, V> or uniform record shape")
+        if method == IteratorMethod::Keys {
+            if let Some(json) = self.json_operand(ctx, obj)? {
+                return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
+            }
+            bail!("Object.keys requires a Record, interface/object shape, or JSON value");
+        }
+        bail!(
+            "Object.{} requires a Record<K, V> or uniform record shape",
+            method.name()
+        )
     }
 
     /// `Object.fromEntries(entries)`.
-    pub(crate) fn object_from_entries(
+    pub(super) fn object_from_entries(
         &mut self,
         ctx: &mut Context,
         entries_expr: &'s Expr,
@@ -217,19 +163,20 @@ impl<'s> FunctionBuilder<'s> {
                 ctx,
                 vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
                 Some("dict_tuple"),
+                RecordKind::DictionaryEntry,
             )?,
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
         self.live_collection_loop(ctx, "from_entries", entries_val, |b, ctx, _, entry| {
             let (k, v) = b.entry_fields(ctx, entry)?;
-            b.kv_set(ctx, dict, k, v, k_ty, v_ty, dict_tuple)?;
+            b.kv_set(ctx, dict, k, v)?;
             Ok(())
         })?;
         Ok(dict)
     }
 
     /// `Object.is(a, b)` — SameValue equality (`NaN` equals `NaN`, `+0` does not equal `-0`).
-    pub(crate) fn object_is(
+    pub(super) fn object_is(
         &mut self,
         ctx: &mut Context,
         left: &'s Expr,
@@ -270,7 +217,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `Array.isArray(val)`.
-    pub(crate) fn array_is_array(
+    pub(super) fn array_is_array(
         &mut self,
         ctx: &mut Context,
         val_expr: &'s Expr,
@@ -340,7 +287,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
-    pub(crate) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
+    pub(super) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
         match inner {
             Expr::IndexGet { object, index } => {
                 let obj = self.expression(ctx, object)?;

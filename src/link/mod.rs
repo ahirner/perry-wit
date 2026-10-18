@@ -20,6 +20,8 @@ use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator
 pub(crate) mod canonical;
 mod data_relocations;
 pub(crate) mod libraries;
+#[cfg(test)]
+mod tests;
 mod type_compaction;
 
 use libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
@@ -74,8 +76,8 @@ impl StreamAnchor {
 }
 
 /// [link_helpers_with] without byte streams (helper tests link core modules directly).
-#[allow(dead_code)] // Used by the helper tests, which include this module.
-pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
+#[cfg(test)]
+fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
