@@ -1,5 +1,5 @@
 //! Exact signed-magnitude integers for WIT's 64-bit transport domain.
-use crate::types::BigIntType;
+use crate::{NewOp, types::BigIntType};
 use pliron::{
     builtin::{
         attributes::StringAttr,
@@ -7,10 +7,8 @@ use pliron::{
     },
     common_traits::Verify,
     context::Context,
-    derive::{op_interface_impl, pliron_op},
+    derive::pliron_op,
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::Typed,
     verify_err,
@@ -26,14 +24,7 @@ impl BigIntConstOp {
     pub fn new(ctx: &mut Context, magnitude: u64) -> Self {
         let ty = BigIntType::get(ctx).into();
         let op = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         };
         op.set_attr_perry_integer_value(ctx, StringAttr::new(magnitude.to_string()));
         op
@@ -66,9 +57,4 @@ impl Verify for BigIntConstOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for BigIntConstOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; BigIntConstOp);

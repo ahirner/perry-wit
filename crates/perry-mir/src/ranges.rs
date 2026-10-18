@@ -27,7 +27,7 @@ use crate::{
     calls::{AsyncCallOp, AwaitOp, CallOp},
     collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, StringLenOp},
     control::CondBrOp,
-    intrinsics::{Intrinsic, IntrinsicOp},
+    intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
     scalar::{CompareOp, NumericCastOp},
 };
@@ -86,10 +86,6 @@ impl Length {
     }
 }
 
-fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
-    Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
-}
-
 /// Recognize array/string lengths converted to numbers and byte-view lengths.
 fn length(ctx: &Context, value: Value) -> Option<Length> {
     let op = value.defining_op()?;
@@ -109,10 +105,7 @@ fn length(ctx: &Context, value: Value) -> Option<Length> {
 
 /// Operations during which a view may be detached: calls, awaits and BYOB reads.
 fn may_detach(ctx: &Context, op: Ptr<Operation>) -> bool {
-    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-        || Operation::get_op::<CallOp>(op, ctx).is_some()
-        || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-        || Operation::get_op::<AwaitOp>(op, ctx).is_some()
+    crate::is_any::<(crate::foreign::ForeignOp, CallOp, AsyncCallOp, AwaitOp)>(ctx, op)
         || intrinsic(ctx, op) == Some(Intrinsic::ReaderReadByob)
 }
 
@@ -150,16 +143,10 @@ impl Function {
         avoid: Ptr<BasicBlock>,
         edges: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
     ) -> HashSet<Ptr<BasicBlock>> {
-        let mut seen = HashSet::from([from]);
-        let mut work = vec![from];
-        while let Some(block) = work.pop() {
-            for &next in edges.get(&block).into_iter().flatten() {
-                if next != avoid && seen.insert(next) {
-                    work.push(next);
-                }
-            }
-        }
-        seen
+        crate::reachable([from], move |block| {
+            let next = edges.get(&block).into_iter().flatten().copied();
+            next.filter(move |&next| next != avoid)
+        })
     }
 }
 
@@ -325,7 +312,7 @@ fn stays_attached(ctx: &Context, info: &Function, fact: &Fact, block: Ptr<BasicB
         after = op.deref(ctx).get_next();
     }
     // Paths from the branch's target to the read that do not redefine the index.
-    let Some(defined) = fact.index.get_defining_block(ctx) else {
+    let Some(defined) = fact.index.get_parent_block(ctx) else {
         return false;
     };
     let forward = info.reach(fact.target, defined, &info.successors);

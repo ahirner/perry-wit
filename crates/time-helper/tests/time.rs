@@ -212,6 +212,14 @@ fn plain_calendar_days_keep_time_fields_and_have_no_time_zone() {
     ] {
         assert!(PlainDateTime::parse(input.as_bytes()).is_err(), "{input}");
     }
+    // A month step past the representable range has passed the end date too.
+    let near_max = PlainDateTime::parse(b"+275760-08-20").unwrap();
+    let max = PlainDateTime::parse(b"+275760-09-13").unwrap();
+    assert_eq!(near_max.until_months_and_days(max), (0, 24));
+    let leap = PlainDateTime::parse(b"2024-02-29").unwrap();
+    let end = PlainDateTime::parse(b"2024-05-31").unwrap();
+    assert_eq!(leap.until_months_and_days(end), (3, 2));
+    assert_eq!(end.until_months_and_days(leap), (-3, 0));
 }
 
 #[test]

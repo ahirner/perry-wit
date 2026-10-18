@@ -28,7 +28,10 @@ use pliron::{
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::{
+    cell::Cell,
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+};
 
 mod domains;
 mod heap;
@@ -36,7 +39,7 @@ mod rewrite;
 mod transfer;
 use domains::{
     Fact, Integer, Interval, Range, ResultDomain, arithmetic_range, comparison_domain,
-    constant_range, literal,
+    constant_range, integer_arithmetic, literal,
 };
 pub(crate) use rewrite::Specialize;
 pub use rewrite::{verify_lossless_module, verify_lossless_operations};
@@ -71,6 +74,47 @@ pub fn wit_signature(ctx: &Context, function: &FuncOp) -> Option<TypeHandle> {
         .map(|attr| attr.get_type(ctx))
 }
 
+/// The attached WIT signature as the function type `set_wit_signature` stores.
+fn wit_function_type(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Result<Option<TypedHandle<FunctionType>>> {
+    wit_signature(ctx, function)
+        .map(|signature| TypedHandle::<FunctionType>::from_handle(signature, ctx))
+        .transpose()
+}
+
+/// The integer domains of `signature`'s arguments and results (`None` where not an integer).
+fn integer_signature(
+    ctx: &Context,
+    signature: TypedHandle<FunctionType>,
+) -> (Vec<Option<Integer>>, Vec<Option<Integer>>) {
+    let signature = signature.deref(ctx);
+    let integers = |types: Vec<TypeHandle>| {
+        types
+            .into_iter()
+            .map(|ty| Integer::from_type(ctx, ty))
+            .collect()
+    };
+    (
+        integers(signature.arg_types()),
+        integers(signature.res_types()),
+    )
+}
+
+/// The declared WIT integer domain at `position`, if the signature has one there.
+fn declared(domains: &[Option<Integer>], position: usize) -> Option<Integer> {
+    domains.get(position).copied().flatten()
+}
+
+/// Functions the host or the runtime enters: exports, the module initializer and `main`.
+fn is_entry(ctx: &Context, function: &FuncOp) -> bool {
+    let name = function.get_symbol_name(ctx);
+    crate::calls::is_exported(ctx, function)
+        || name.as_ref() == crate::globals::INITIALIZER
+        || name.as_ref() == "perry_main"
+}
+
 /// Implementation selected for a constrained boundary, or the original function.
 pub fn specialized_implementation(ctx: &Context, function: &FuncOp) -> Identifier {
     function
@@ -90,6 +134,24 @@ struct Key {
     results: Vec<ResultDomain>,
     /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
     specialize: bool,
+}
+
+impl Key {
+    /// The context of `function` for integer argument and result domains, no numeric arguments.
+    fn new(
+        function: Identifier,
+        args: Vec<Option<Integer>>,
+        results: Vec<Option<Integer>>,
+        specialize: bool,
+    ) -> Self {
+        Self {
+            function,
+            numeric_args: vec![false; args.len()],
+            args,
+            results: results.into_iter().map(ResultDomain::from).collect(),
+            specialize,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,13 +187,9 @@ impl Body {
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
         let mut returns = Vec::new();
-        let mut has_integer_constraints = !crate::calls::is_exported(ctx, &function)
-            && function
-                .get_operation()
-                .deref(ctx)
-                .attributes
-                .0
-                .contains_key(&WIT_SIGNATURE);
+        let signature = wit_function_type(ctx, &function)?;
+        let exported = crate::calls::is_exported(ctx, &function);
+        let mut has_integer_constraints = !exported && signature.is_some();
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
             constraints.push(Constraint::Op {
@@ -145,9 +203,8 @@ impl Body {
                 && ((Operation::get_op::<NumericCastOp>(op, ctx).is_some()
                     && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
                         .is_some())
-                    || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some_and(
-                        |op| op.intrinsic(ctx) == Some(crate::intrinsics::Intrinsic::ParseInt),
-                    )
+                    || crate::intrinsics::intrinsic_of(ctx, op)
+                        == Some(crate::intrinsics::Intrinsic::ParseInt)
                     || op
                         .deref(ctx)
                         .operands()
@@ -176,40 +233,18 @@ impl Body {
                 }
             }
         }
-        let signature = function
-            .get_operation()
-            .deref(ctx)
-            .attributes
-            .get::<TypeAttr>(&WIT_SIGNATURE)
-            .and_then(|attr| {
-                TypedHandle::<FunctionType>::from_handle(attr.get_type(ctx), ctx).ok()
-            });
-        let declared_args = match signature {
-            Some(sig) => sig
-                .deref(ctx)
-                .arg_types()
-                .iter()
-                .map(|&ty| Integer::from_type(ctx, ty))
-                .collect(),
-            None => vec![None; fn_ty.deref(ctx).arg_types().len()],
-        };
-        let declared_results = match signature {
-            Some(sig) => sig
-                .deref(ctx)
-                .res_types()
-                .iter()
-                .map(|&ty| Integer::from_type(ctx, ty))
-                .collect(),
-            None => vec![None; fn_ty.deref(ctx).res_types().len()],
+        let (declared_args, declared_results) = match signature {
+            Some(signature) => integer_signature(ctx, signature),
+            None => {
+                let ty = fn_ty.deref(ctx);
+                (
+                    vec![None; ty.arg_types().len()],
+                    vec![None; ty.res_types().len()],
+                )
+            }
         };
         Ok(Self {
-            external: crate::calls::is_exported(ctx, &function)
-                || function
-                    .get_operation()
-                    .deref(ctx)
-                    .attributes
-                    .0
-                    .contains_key(&WIT_SIGNATURE),
+            external: exported || signature.is_some(),
             function,
             signature: fn_ty,
             effects,
@@ -231,41 +266,39 @@ impl Body {
 /// Specialized contexts per function before further keys share one summary context, so a
 /// function has one generic context and at most `MAX_PRECISE_CONTEXTS + 1` specialized ones.
 const MAX_PRECISE_CONTEXTS: usize = 32;
-pub(super) const DEFAULT_MAX_ORIGINS: usize = 32;
+/// Allocation sites an alias set holds before it collapses to a typed summary.
+const MAX_ORIGINS: usize = 32;
 
 std::thread_local! {
-    static FACT_LIMITS: std::cell::Cell<(usize, usize)> = const {
-        std::cell::Cell::new((DEFAULT_MAX_ORIGINS, MAX_PRECISE_CONTEXTS))
+    static FACT_LIMITS: Cell<(usize, usize)> = const {
+        Cell::new((MAX_ORIGINS, MAX_PRECISE_CONTEXTS))
     };
 }
 
-pub(super) fn max_origins() -> usize {
-    FACT_LIMITS.with(|c| c.get().0)
+fn max_origins() -> usize {
+    FACT_LIMITS.get().0
 }
 
-pub(super) fn max_precise_contexts() -> usize {
-    FACT_LIMITS.with(|c| c.get().1)
+fn max_precise_contexts() -> usize {
+    FACT_LIMITS.get().1
 }
 
 /// Temporarily overrides `(MAX_ORIGINS, MAX_PRECISE_CONTEXTS)` on the current thread
 /// for metamorphic testing of precision summarization vs. exact specialization.
+#[doc(hidden)]
 pub fn with_fact_limits<R>(
     max_origins: usize,
     max_precise_contexts: usize,
     f: impl FnOnce() -> R,
 ) -> R {
-    struct Guard(usize, usize);
-    impl Drop for Guard {
+    /// Restores the previous limits however `f` exits.
+    struct Restore((usize, usize));
+    impl Drop for Restore {
         fn drop(&mut self) {
-            FACT_LIMITS.with(|c| c.set((self.0, self.1)));
+            FACT_LIMITS.set(self.0);
         }
     }
-    let prev = FACT_LIMITS.with(|c| {
-        let prev = c.get();
-        c.set((max_origins, max_precise_contexts));
-        prev
-    });
-    let _guard = Guard(prev.0, prev.1);
+    let _restore = Restore(FACT_LIMITS.replace((max_origins, max_precise_contexts)));
     f()
 }
 
@@ -322,13 +355,13 @@ pub struct ProgramFacts {
     states: Vec<State>,
     roots: Vec<(FuncOp, usize)>,
     generic: HashMap<Identifier, usize>,
-    pub constraint_visits: usize,
+    pub(crate) constraint_visits: usize,
     /// Alias sets collapsed to a typed summary after exceeding 32 allocation sites.
-    pub summarized_heap_sets: usize,
+    pub(crate) summarized_heap_sets: usize,
     /// Specialized call contexts collapsed to a summary context after exceeding 32 precise contexts per function.
-    pub summarized_contexts: usize,
+    pub(crate) summarized_contexts: usize,
     /// Value or result intervals widened to domain bounds after expanding more than once.
-    pub range_widenings: usize,
+    range_widenings: usize,
     heap: heap::HeapFacts,
 }
 
@@ -381,25 +414,24 @@ struct Worklist {
 }
 
 impl Worklist {
-    fn enqueue(&mut self, item: Work) {
-        let queued = match item {
+    /// Whether `item` is pending.
+    fn queued(&mut self, item: Work) -> &mut bool {
+        match item {
             Work::Operation(context, index) => &mut self.operations[context][index],
             Work::OpenObject(object) => &mut self.objects[object],
             Work::ReconcileCell(cell) => &mut self.cells[cell],
-        };
-        if !*queued {
-            *queued = true;
+        }
+    }
+
+    fn enqueue(&mut self, item: Work) {
+        if !std::mem::replace(self.queued(item), true) {
             self.pending.push_back(item);
         }
     }
 
     fn pop(&mut self) -> Option<Work> {
         let item = self.pending.pop_front()?;
-        match item {
-            Work::Operation(context, index) => self.operations[context][index] = false,
-            Work::OpenObject(object) => self.objects[object] = false,
-            Work::ReconcileCell(cell) => self.cells[cell] = false,
-        }
+        *self.queued(item) = false;
         Some(item)
     }
 }
@@ -425,33 +457,25 @@ impl Solver {
         let mut args = vec![None; key.args.len()];
         let mut numeric_args = vec![false; key.args.len()];
         for (idx, param) in body.parameters.iter().enumerate() {
-            if let Some(declared) = body.declared_args.get(idx).copied().flatten() {
-                args[idx] = Some(declared);
-            } else {
-                let p_ty = param.get_type(ctx);
-                let inner_ty = crate::optional::optional_value(ctx, p_ty).unwrap_or(p_ty);
-                if let Some(int_dom) = Integer::from_type(ctx, p_ty) {
-                    args[idx] = Some(int_dom);
-                } else if !is_async && inner_ty.deref(ctx).is::<pliron::builtin::types::FP64Type>()
-                {
-                    numeric_args[idx] = true;
-                }
-            }
+            let ty = param.get_type(ctx);
+            args[idx] = declared(&body.declared_args, idx).or_else(|| Integer::from_type(ctx, ty));
+            // Unconstrained numbers stay lossless unless an async payload keeps its carrier.
+            let number = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+            numeric_args[idx] = args[idx].is_none()
+                && !is_async
+                && number.deref(ctx).is::<pliron::builtin::types::FP64Type>();
         }
         let res_types = body.signature.deref(ctx).res_types();
         let results = (0..key.results.len())
             .map(|idx| {
-                if let Some(declared) = body.declared_results.get(idx).copied().flatten() {
-                    ResultDomain::Integer(declared)
-                } else if let Some(&r_ty) = res_types.get(idx)
-                    && let Some(int_dom) = Integer::from_type(ctx, r_ty)
-                {
-                    ResultDomain::Integer(int_dom)
-                } else if is_async {
+                let integer = declared(&body.declared_results, idx)
+                    .or_else(|| Integer::from_type(ctx, *res_types.get(idx)?));
+                let unknown = if is_async {
                     ResultDomain::Original
                 } else {
                     ResultDomain::Inferred
-                }
+                };
+                integer.map_or(unknown, ResultDomain::Integer)
             })
             .collect();
         Key {
@@ -667,33 +691,11 @@ impl Analysis for ProgramFacts {
             .values()
             .any(|body| body.has_integer_constraints);
         for function in functions {
-            let ty = solver.analysis.bodies[&function.get_symbol_name(ctx)].signature;
-            let args: Vec<_> = ty
-                .deref(ctx)
-                .arg_types()
-                .iter()
-                .map(|&ty| Integer::from_type(ctx, ty))
-                .collect();
-            let numeric_args = vec![false; args.len()];
-            let generic = solver.context(
-                ctx,
-                Key {
-                    function: function.get_symbol_name(ctx),
-                    args,
-                    numeric_args,
-                    results: ty
-                        .deref(ctx)
-                        .res_types()
-                        .iter()
-                        .map(|&ty| Integer::from_type(ctx, ty).into())
-                        .collect(),
-                    specialize: false,
-                },
-            );
-            solver
-                .analysis
-                .generic
-                .insert(function.get_symbol_name(ctx), generic);
+            let name = function.get_symbol_name(ctx);
+            let ty = solver.analysis.bodies[&name].signature;
+            let (args, results) = integer_signature(ctx, ty);
+            let generic = solver.context(ctx, Key::new(name.clone(), args, results, false));
+            solver.analysis.generic.insert(name.clone(), generic);
             if function
                 .get_operation()
                 .deref(ctx)
@@ -703,64 +705,25 @@ impl Analysis for ProgramFacts {
             {
                 continue;
             }
-            let signature = function
-                .get_operation()
-                .deref(ctx)
-                .attributes
-                .get::<TypeAttr>(&WIT_SIGNATURE)
-                .map(|attr| attr.get_type(ctx));
-            let is_root = signature.is_some()
-                || (has_integer_constraints
-                    && (crate::calls::is_exported(ctx, &function)
-                        || function.get_symbol_name(ctx).as_ref() == crate::globals::INITIALIZER
-                        || function.get_symbol_name(ctx).as_ref() == "perry_main"));
-            if !is_root {
+            let signature = wit_function_type(ctx, &function)?;
+            if signature.is_none() && !(has_integer_constraints && is_entry(ctx, &function)) {
                 continue;
             }
-            let (args, results): (Vec<_>, Vec<_>) = if let Some(signature) = signature {
-                let signature = TypedHandle::<FunctionType>::from_handle(signature, ctx)?;
-                (
-                    signature
-                        .deref(ctx)
-                        .arg_types()
-                        .iter()
-                        .map(|&ty| Integer::from_type(ctx, ty))
-                        .collect(),
-                    signature
-                        .deref(ctx)
-                        .res_types()
-                        .iter()
-                        .map(|&ty| Integer::from_type(ctx, ty).into())
-                        .collect(),
-                )
+            let key = if let Some(signature) = signature {
+                let (args, results) = integer_signature(ctx, signature);
+                Key::new(name, args, results, true)
             } else {
-                (
-                    ty.deref(ctx)
-                        .arg_types()
-                        .iter()
-                        .map(|&ty| Integer::from_type(ctx, ty))
-                        .collect(),
-                    ty.deref(ctx)
-                        .res_types()
-                        .iter()
-                        .map(|&ty| {
-                            Integer::from_type(ctx, ty)
-                                .map_or(ResultDomain::Original, ResultDomain::Integer)
-                        })
-                        .collect(),
-                )
+                // Unconstrained entry results keep their representation.
+                let (args, results) = integer_signature(ctx, ty);
+                let mut key = Key::new(name, args, results, true);
+                for result in &mut key.results {
+                    if *result == ResultDomain::Inferred {
+                        *result = ResultDomain::Original;
+                    }
+                }
+                key
             };
-            let numeric_args = vec![false; args.len()];
-            let id = solver.context(
-                ctx,
-                Key {
-                    function: function.get_symbol_name(ctx),
-                    args,
-                    numeric_args,
-                    results,
-                    specialize: true,
-                },
-            );
+            let id = solver.context(ctx, key);
             solver.analysis.roots.push((function, id));
         }
         loop {
@@ -789,10 +752,7 @@ impl Analysis for ProgramFacts {
                                 .get_type(ctx)
                                 .deref(ctx)
                                 .is::<crate::types::BigIntType>()
-                                .then_some(Integer {
-                                    bits: 64,
-                                    signed: true,
-                                })
+                                .then_some(Integer::I64)
                         });
                     if let Some(integer) = default_int {
                         solver.require(id, value, Some(integer));

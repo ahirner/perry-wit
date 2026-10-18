@@ -124,15 +124,13 @@ try {
       result = { value: response.status, trace: Array.from(response.body) };
     } else {
       result = await guest.run(input);
+      // Mirrors the worker: a list is [value, ...trace]; other record fields follow the trace.
       if (Array.isArray(result)) {
         result = { value: result[0], trace: result.slice(1) };
-      } else if (result && typeof result === 'object' && 'head' in result && 'tail' in result) {
-        result = { value: result.value, trace: [...result.trace, result.head + 0.0, result.tail + 0.0] };
-      } else if (result && typeof result === 'object' && 'maybe' in result) {
-        result = {
-          value: result.value,
-          trace: [...result.trace, result.maybe == null ? -66.0 : result.maybe + 0.0],
-        };
+      } else {
+        const { value, trace, ...extras } = result;
+        const lifted = Object.values(extras).map(v => (v == null ? -66.0 : v + 0.0));
+        result = { value, trace: [...trace, ...lifted] };
       }
     }
     observations.push({ value: number(result.value), trace: result.trace.map(number) });

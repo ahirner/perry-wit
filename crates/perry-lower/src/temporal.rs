@@ -1,6 +1,12 @@
 //! ISO Temporal factories, calendar accessors and day/calendar arithmetic.
 use super::*;
 
+/// The `largestUnit` of `until`/`since`: a literal decided while lowering, or a runtime string.
+enum Unit<'s> {
+    Static(&'s str),
+    Dynamic(Value),
+}
+
 impl<'s> FunctionBuilder<'s> {
     fn object_literal_pairs(&self, expr: &'s Expr) -> Option<Vec<(&'s str, &'s Expr)>> {
         match expr {
@@ -340,21 +346,19 @@ impl<'s> FunctionBuilder<'s> {
         end: Value,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        let mut static_unit: Option<&str> = Some("day");
-        let mut dynamic_unit: Option<Value> = None;
+        let mut unit = Unit::Static("day");
         if let Some(opt) = options
             && !matches!(opt, Expr::Undefined)
         {
             if let Expr::String(s) = opt {
-                static_unit = Some(s.as_str());
+                unit = Unit::Static(s.as_str());
             } else if let Some(pairs) = self.object_literal_pairs(opt) {
                 if let Some((_, lu_expr)) = pairs.into_iter().find(|(k, _)| *k == "largestUnit") {
                     match lu_expr {
                         Expr::Undefined => {}
-                        Expr::String(s) => static_unit = Some(s.as_str()),
+                        Expr::String(s) => unit = Unit::Static(s.as_str()),
                         other => {
-                            static_unit = None;
-                            dynamic_unit = Some(self.typed_operand(
+                            unit = Unit::Dynamic(self.typed_operand(
                                 ctx,
                                 other,
                                 Kind::String,
@@ -367,16 +371,14 @@ impl<'s> FunctionBuilder<'s> {
                 let opt_val = self.expression(ctx, opt)?;
                 let opt_val = self.defined(ctx, opt_val)?;
                 if kind(ctx, opt_val)? == Kind::String {
-                    static_unit = None;
-                    dynamic_unit = Some(opt_val);
+                    unit = Unit::Dynamic(opt_val);
                 } else {
                     let rec = TypedHandle::<RecordType>::from_handle(opt_val.get_type(ctx), ctx)
                         .context("Temporal until/since options must be an object or string")?;
                     if rec.deref(ctx).field("largestUnit").is_some() {
                         let op = FieldGetOp::new(ctx, opt_val, String::from("largestUnit"))?;
                         let raw_lu = self.field_read(ctx, &op)?;
-                        static_unit = None;
-                        dynamic_unit = Some(if self.is_optional(ctx, raw_lu) {
+                        unit = Unit::Dynamic(if self.is_optional(ctx, raw_lu) {
                             let is_undef =
                                 self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, raw_lu));
                             let str_ty = StringType::get(ctx).into();
@@ -417,8 +419,8 @@ impl<'s> FunctionBuilder<'s> {
                 )
             },
         )?;
-        let (years, months, weeks, days) = if let Some(unit_name) = static_unit {
-            match unit_name {
+        let (years, months, weeks, days) = match unit {
+            Unit::Static(unit_name) => match unit_name {
                 "day" | "days" | "auto" => (zero, zero, zero, diff),
                 "week" | "weeks" => {
                     let seven = self.number(ctx, 7.0);
@@ -450,125 +452,140 @@ impl<'s> FunctionBuilder<'s> {
                     (y, m, zero, d)
                 }
                 other => bail!("unsupported Temporal largestUnit {other:?}"),
-            }
-        } else {
-            let lu = dynamic_unit.expect("dynamic largestUnit");
-            let is_year = {
-                let s1 = self.string(ctx, "year");
-                let s2 = self.string(ctx, "years");
-                let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
-                let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
-                self.choose(
+            },
+            Unit::Dynamic(lu) => {
+                let is_year = {
+                    let s1 = self.string(ctx, "year");
+                    let s2 = self.string(ctx, "years");
+                    let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
+                    let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
+                    self.choose(
+                        ctx,
+                        IntegerType::get(ctx, 1, Signedness::Signless).into(),
+                        c1,
+                        |b, ctx| Ok(b.boolean(ctx, true)),
+                        |_, _| Ok(c2),
+                    )?
+                };
+                let is_month = {
+                    let s1 = self.string(ctx, "month");
+                    let s2 = self.string(ctx, "months");
+                    let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
+                    let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
+                    self.choose(
+                        ctx,
+                        IntegerType::get(ctx, 1, Signedness::Signless).into(),
+                        c1,
+                        |b, ctx| Ok(b.boolean(ctx, true)),
+                        |_, _| Ok(c2),
+                    )?
+                };
+                let is_week = {
+                    let s1 = self.string(ctx, "week");
+                    let s2 = self.string(ctx, "weeks");
+                    let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
+                    let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
+                    self.choose(
+                        ctx,
+                        IntegerType::get(ctx, 1, Signedness::Signless).into(),
+                        c1,
+                        |b, ctx| Ok(b.boolean(ctx, true)),
+                        |_, _| Ok(c2),
+                    )?
+                };
+                let u = self.choose(
+                    ctx,
+                    f64_ty,
+                    is_year,
+                    |b, ctx| Ok(b.number(ctx, 3.0)),
+                    |b, ctx| {
+                        b.choose(
+                            ctx,
+                            f64_ty,
+                            is_month,
+                            |b, ctx| Ok(b.number(ctx, 2.0)),
+                            |b, ctx| Ok(b.number(ctx, 0.0)),
+                        )
+                    },
+                )?;
+                let is_cal = self.choose(
                     ctx,
                     IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                    c1,
+                    is_year,
                     |b, ctx| Ok(b.boolean(ctx, true)),
-                    |_, _| Ok(c2),
-                )?
-            };
-            let is_month = {
-                let s1 = self.string(ctx, "month");
-                let s2 = self.string(ctx, "months");
-                let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
-                let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
-                self.choose(
-                    ctx,
-                    IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                    c1,
-                    |b, ctx| Ok(b.boolean(ctx, true)),
-                    |_, _| Ok(c2),
-                )?
-            };
-            let is_week = {
-                let s1 = self.string(ctx, "week");
-                let s2 = self.string(ctx, "weeks");
-                let c1 = self.compare(ctx, CompareKind::Eq, lu, s1);
-                let c2 = self.compare(ctx, CompareKind::Eq, lu, s2);
-                self.choose(
-                    ctx,
-                    IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                    c1,
-                    |b, ctx| Ok(b.boolean(ctx, true)),
-                    |_, _| Ok(c2),
-                )?
-            };
-            let u = self.choose(
-                ctx,
-                f64_ty,
-                is_year,
-                |b, ctx| Ok(b.number(ctx, 3.0)),
-                |b, ctx| {
-                    b.choose(
+                    |_, _| Ok(is_month),
+                )?;
+                let p0 = self.number(ctx, 0.0);
+                let p1 = self.number(ctx, 1.0);
+                let p3 = self.number(ctx, 3.0);
+                let y =
+                    self.choose(
                         ctx,
                         f64_ty,
-                        is_month,
-                        |b, ctx| Ok(b.number(ctx, 2.0)),
-                        |b, ctx| Ok(b.number(ctx, 0.0)),
-                    )
-                },
-            )?;
-            let is_cal = self.choose(
-                ctx,
-                IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                is_year,
-                |b, ctx| Ok(b.boolean(ctx, true)),
-                |_, _| Ok(is_month),
-            )?;
-            let p0 = self.number(ctx, 0.0);
-            let p1 = self.number(ctx, 1.0);
-            let p3 = self.number(ctx, 3.0);
-            let y = self.choose(
-                ctx,
-                f64_ty,
-                is_cal,
-                |b, ctx| {
-                    Ok(b.intrinsic(ctx, Intrinsic::PlainDateUntilPart, vec![start, end, u, p0]))
-                },
-                |_, _| Ok(zero),
-            )?;
-            let m = self.choose(
-                ctx,
-                f64_ty,
-                is_cal,
-                |b, ctx| {
-                    Ok(b.intrinsic(ctx, Intrinsic::PlainDateUntilPart, vec![start, end, u, p1]))
-                },
-                |_, _| Ok(zero),
-            )?;
-            let w = self.choose(
-                ctx,
-                f64_ty,
-                is_week,
-                |b, ctx| {
-                    let seven = b.number(ctx, 7.0);
-                    let quot = b.binary(ctx, BinaryKind::Div, diff, seven);
-                    let raw_w = b.intrinsic(ctx, Intrinsic::MathTrunc, vec![quot]);
-                    Ok(b.binary(ctx, BinaryKind::Add, raw_w, zero))
-                },
-                |_, _| Ok(zero),
-            )?;
-            let d = self.choose(
-                ctx,
-                f64_ty,
-                is_cal,
-                |b, ctx| {
-                    Ok(b.intrinsic(ctx, Intrinsic::PlainDateUntilPart, vec![start, end, u, p3]))
-                },
-                |b, ctx| {
-                    b.choose(
-                        ctx,
-                        f64_ty,
-                        is_week,
+                        is_cal,
                         |b, ctx| {
-                            let seven = b.number(ctx, 7.0);
-                            let raw_d = b.binary(ctx, BinaryKind::Rem, diff, seven);
-                            Ok(b.binary(ctx, BinaryKind::Add, raw_d, zero))
+                            Ok(b.intrinsic(
+                                ctx,
+                                Intrinsic::PlainDateUntilPart,
+                                vec![start, end, u, p0],
+                            ))
                         },
-                        |_, _| Ok(diff),
-                    )
-                },
-            )?;
-            (y, m, w, d)
+                        |_, _| Ok(zero),
+                    )?;
+                let m =
+                    self.choose(
+                        ctx,
+                        f64_ty,
+                        is_cal,
+                        |b, ctx| {
+                            Ok(b.intrinsic(
+                                ctx,
+                                Intrinsic::PlainDateUntilPart,
+                                vec![start, end, u, p1],
+                            ))
+                        },
+                        |_, _| Ok(zero),
+                    )?;
+                let w = self.choose(
+                    ctx,
+                    f64_ty,
+                    is_week,
+                    |b, ctx| {
+                        let seven = b.number(ctx, 7.0);
+                        let quot = b.binary(ctx, BinaryKind::Div, diff, seven);
+                        let raw_w = b.intrinsic(ctx, Intrinsic::MathTrunc, vec![quot]);
+                        Ok(b.binary(ctx, BinaryKind::Add, raw_w, zero))
+                    },
+                    |_, _| Ok(zero),
+                )?;
+                let d =
+                    self.choose(
+                        ctx,
+                        f64_ty,
+                        is_cal,
+                        |b, ctx| {
+                            Ok(b.intrinsic(
+                                ctx,
+                                Intrinsic::PlainDateUntilPart,
+                                vec![start, end, u, p3],
+                            ))
+                        },
+                        |b, ctx| {
+                            b.choose(
+                                ctx,
+                                f64_ty,
+                                is_week,
+                                |b, ctx| {
+                                    let seven = b.number(ctx, 7.0);
+                                    let raw_d = b.binary(ctx, BinaryKind::Rem, diff, seven);
+                                    Ok(b.binary(ctx, BinaryKind::Add, raw_d, zero))
+                                },
+                                |_, _| Ok(diff),
+                            )
+                        },
+                    )?;
+                (y, m, w, d)
+            }
         };
         let bool_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let record = self.shapes.mir_record(

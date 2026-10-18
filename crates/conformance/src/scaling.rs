@@ -74,6 +74,25 @@ export function run(x: number): { value: number; trace: number[] } {
 }
 "#;
 
+const COLLECTION_CHURN: &str = r#"
+export function run(x: number): { value: number; trace: number[] } {
+  const s = new Set<number>([0]);
+  const m = new Map<number, number>([[0, 0]]);
+  for (let i = 0; i < x; i++) {
+    s.values();
+    m.values();
+    for (const _v of s.values()) break;
+    for (const _v of s) break;
+    for (const _e of m) break;
+    s.add(i + 1);
+    s.delete(i + 1);
+    m.set(i + 1, i);
+    m.delete(i + 1);
+  }
+  return { value: s.size + m.size, trace: [] };
+}
+"#;
+
 fn case(workload: &str, base: u32) -> Case {
     Case::Scaling {
         source: workload.into(),
@@ -104,6 +123,11 @@ pub(crate) fn contracts() -> Vec<Contract> {
             "wasi.execution.scaling.string_append",
             STRING_APPEND,
             "Appending one character n times costs at most n·log n guest fuel",
+        ),
+        (
+            "wasi.execution.scaling.collection_churn",
+            COLLECTION_CHURN,
+            "Abandoned Set/Map iterators and insert-delete churn cost O(n) guest fuel",
         ),
     ]
     .into_iter()

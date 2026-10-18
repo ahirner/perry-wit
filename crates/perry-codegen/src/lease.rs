@@ -42,7 +42,7 @@ use std::collections::HashSet;
 const CLASSES: [&[Intrinsic]; 2] = [&[Intrinsic::ReaderRead], &[Intrinsic::WriterWrite]];
 
 fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
-    Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
+    Operation::get_op::<IntrinsicOp>(op, ctx).map(|i| i.intrinsic(ctx))
 }
 
 /// The leased operations of `function`.

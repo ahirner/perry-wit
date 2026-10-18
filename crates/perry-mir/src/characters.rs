@@ -117,7 +117,7 @@ pub(crate) struct ScalarizeCharacters {
 
 impl ScalarizeCharacters {
     fn matched_scalar_op(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
-        let kind = match Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))? {
+        let kind = match crate::intrinsics::intrinsic_of(ctx, op)? {
             Intrinsic::StringCharAt => Intrinsic::StringScalarAt,
             Intrinsic::StringCharAtIndex => Intrinsic::StringScalarAtIndex,
             _ => return None,

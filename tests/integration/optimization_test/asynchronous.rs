@@ -1,41 +1,13 @@
 use super::compile;
+use crate::wasi_host::{self, Host};
 use anyhow::Result;
-use wasmtime::{
-    Store,
-    component::{Component, Instance, Linker, ResourceTable},
-};
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime::{Store, component::Instance};
 
-struct WasiHost {
-    ctx: WasiCtx,
-    table: ResourceTable,
+async fn instantiate_async(bytes: &[u8]) -> Result<(Store<Host>, Instance)> {
+    wasi_host::instantiate(&crate::engine::async_engine()?, bytes, Host::default()).await
 }
 
-impl WasiView for WasiHost {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-async fn instantiate_async(bytes: &[u8]) -> Result<(Store<WasiHost>, Instance)> {
-    let engine = crate::engine::async_engine()?;
-    let component = Component::new(&engine, bytes)?;
-    let mut store = Store::new(
-        &engine,
-        WasiHost {
-            ctx: WasiCtx::builder().build(),
-            table: ResourceTable::new(),
-        },
-    );
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    Ok((store, instance))
-}
-
+/// Exact integers survive promise frames, result slots and host timer suspensions.
 #[tokio::test(flavor = "current_thread")]
 async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
     use wasmtime::component::Val;
@@ -72,6 +44,9 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
             ),
             format!(
                 "export async function run(a:{source_type},b:{source_type}):Promise<{source_type}> {{ return await Promise.resolve(a+b); }}"
+            ),
+            format!(
+                "import {{ setTimeout }} from 'node:timers/promises'; async function add(a:{source_type},b:{source_type}):Promise<{source_type}> {{ const saved = await setTimeout(1,a); await setTimeout(1); return saved+b; }} export async function run(a:{source_type},b:{source_type}):Promise<{source_type}> {{ return await add(a,b); }}"
             ),
         ] {
             let compiled = compile(

@@ -50,7 +50,7 @@ perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
 perry-runtime = { path = "crates/perry-runtime" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97", default-features = false }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "435536c8611af34c48c8f73d78e77894a05d103d", default-features = false }
 serde = "1.0"
 serde_json = "1.0"
 tempfile = "3.27.0"

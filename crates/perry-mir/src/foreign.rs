@@ -1,13 +1,14 @@
 //! Statically bound component imports and their canonical transfer lifetime.
-use crate::types::{PromiseType, TransferType};
+use crate::{
+    NewOp,
+    types::{PromiseType, TransferType},
+};
 use pliron::{
     builtin::attributes::StringAttr,
     common_traits::Verify,
     context::Context,
     derive::{op_interface_impl, pliron_attr, pliron_op},
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
@@ -36,7 +37,7 @@ impl ForeignOp {
         results: Vec<TypeHandle>,
     ) -> Self {
         let op = Self {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
+            op: Self::new_op(ctx, results, args),
         };
         op.set_attr_perry_foreign_binding(ctx, StringAttr::new(binding.to_owned()));
         op.set_attr_perry_foreign_phase(ctx, phase);
@@ -95,12 +96,7 @@ impl Verify for ForeignOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ForeignOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
-    }
-}
+side_effects!(true; ForeignOp);
 
 #[op_interface_impl]
 impl crate::exceptions::MayThrowInterface for ForeignOp {

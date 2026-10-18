@@ -1,5 +1,9 @@
 //! Classification of MIR operations by their heap effect, and their transfer over `HeapFacts`.
 use super::*;
+use crate::{
+    is_any,
+    optional::{IsNullOp, IsUndefinedOp, NullOp, OmittedOp, ToNumberOp, UndefinedOp},
+};
 
 #[derive(Clone, Copy)]
 pub(in crate::facts) enum OperationKind {
@@ -23,120 +27,90 @@ pub(in crate::facts) enum OperationKind {
 
 impl OperationKind {
     pub(in crate::facts) fn classify(ctx: &Context, op: Ptr<Operation>) -> Self {
-        if Operation::get_op::<crate::optional::UndefinedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::OmittedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::NullOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::heap::FieldPresentOp>(op, ctx).is_some()
-        {
-            return Self::None;
-        }
-        if Operation::get_op::<WrapOp>(op, ctx).is_some()
-            || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-            || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
-            || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-        {
-            return Self::Alias { operand: 0 };
-        }
-        if let Some(operand) = promise_payload(ctx, op) {
-            return Self::Alias { operand };
-        }
         let operation = op.deref(ctx);
-        if !operation
-            .operands()
-            .chain(operation.results())
-            .any(|value| aggregate(ctx, value.get_type(ctx)))
-        {
-            return Self::None;
-        }
-        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
-            return Self::Allocate { array: false };
-        }
-        if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
-            return Self::Allocate { array: true };
-        }
-        if let Some(combine) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
-            return Self::Combine(combine.combinator(ctx));
-        }
+        let touches_aggregate = || {
+            let mut values = operation.operands().chain(operation.results());
+            values.any(|value| aggregate(ctx, value.get_type(ctx)))
+        };
         let field = Operation::get_op::<FieldGetOp>(op, ctx)
             .map(|op| (op.field(ctx), true))
             .or_else(|| Operation::get_op::<FieldSetOp>(op, ctx).map(|op| (op.field(ctx), false)));
-        if let Some((field, read)) = field {
-            let ty = operation.get_operand(0).get_type(ctx).deref(ctx);
-            let Some(slot) = ty
+        if is_any::<(UndefinedOp, OmittedOp, NullOp, crate::heap::FieldPresentOp)>(ctx, op) {
+            Self::None
+        } else if is_any::<(WrapOp, UnwrapOp, OptionalCastOp, ToNumberOp, AwaitOp)>(ctx, op) {
+            Self::Alias { operand: 0 }
+        } else if let Some(operand) = promise_payload(ctx, op) {
+            Self::Alias { operand }
+        } else if !touches_aggregate() {
+            Self::None
+        } else if Operation::is_op::<AllocOp>(op, ctx) {
+            Self::Allocate { array: false }
+        } else if Operation::is_op::<ArrayNewOp>(op, ctx) {
+            Self::Allocate { array: true }
+        } else if let Some(combine) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
+            Self::Combine(combine.combinator(ctx))
+        } else if let Some((field, read)) = field {
+            let record = operation.get_operand(0).get_type(ctx);
+            let record = record.deref(ctx);
+            let slot = record
                 .downcast_ref::<RecordType>()
-                .and_then(|rec| rec.fields().ok())
-                .and_then(|fields| fields.iter().position(|(name, _)| *name == field))
-            else {
-                return Self::Unknown;
-            };
-            return if read {
-                Self::Read { slot }
-            } else {
-                Self::Write { slot, value: 1 }
-            };
-        }
-        if Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
-            || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
-        {
-            return Self::Read { slot: 0 };
-        }
-        if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-            return Self::ArrayWrite {
+                .and_then(|rec| rec.field(&field));
+            match slot {
+                Some((slot, _)) if read => Self::Read { slot },
+                Some((slot, _)) => Self::Write { slot, value: 1 },
+                None => Self::Unknown,
+            }
+        } else if is_any::<(ArrayGetOp, ArrayAtOp)>(ctx, op) {
+            Self::Read { slot: 0 }
+        } else if Operation::is_op::<ArraySetOp>(op, ctx) {
+            Self::ArrayWrite {
                 index: Some(1),
                 value: 2,
-            };
-        }
-        if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
-            return Self::ArrayWrite {
+            }
+        } else if Operation::is_op::<ArrayPushOp>(op, ctx) {
+            Self::ArrayWrite {
                 index: None,
                 value: 1,
-            };
-        }
-        if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
-            return Self::Length;
-        }
-        if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
-            return Self::Extend;
-        }
-        if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
-            return Self::Truncate;
-        }
-        if Operation::get_op::<ConcatOp>(op, ctx).is_some()
-            || Operation::get_op::<ConcatReuseOp>(op, ctx).is_some()
+            }
+        } else if Operation::is_op::<ArrayLenOp>(op, ctx) {
+            Self::Length
+        } else if Operation::is_op::<ArrayExtendOp>(op, ctx) {
+            Self::Extend
+        } else if Operation::is_op::<ArrayTruncateOp>(op, ctx) {
+            Self::Truncate
+        } else if is_any::<(ConcatOp, ConcatReuseOp)>(ctx, op) {
+            Self::Concat
+        } else if Operation::is_op::<ConcatSegmentsOp>(op, ctx) {
+            Self::ConcatSegments
+        } else if Operation::is_op::<ReturnOp>(op, ctx) {
+            Self::Return
+        } else if is_any::<(CallOp, AsyncCallOp)>(ctx, op) {
+            Self::Call
+        } else if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
+            || is_any::<(IsUndefinedOp, IsNullOp, crate::intrinsics::JsonStringifyOp)>(ctx, op)
         {
-            return Self::Concat;
-        }
-        if Operation::get_op::<ConcatSegmentsOp>(op, ctx).is_some() {
-            return Self::ConcatSegments;
-        }
-        if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
-            return Self::Return;
-        }
-        if Operation::get_op::<CallOp>(op, ctx).is_some()
-            || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-        {
-            return Self::Call;
-        }
-        if op_cast::<dyn BranchOpInterface>(&*Operation::get_op_dyn(op, ctx)).is_some()
-            || Operation::get_op::<crate::optional::IsUndefinedOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::optional::IsNullOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::intrinsics::JsonStringifyOp>(op, ctx).is_some()
-        {
-            return Self::None;
-        }
-        if let Some(intr) = Operation::get_op::<crate::IntrinsicOp>(op, ctx) {
-            match intr.intrinsic(ctx) {
-                Some(crate::Intrinsic::JsonSpread) => return Self::JsonSpread,
-                Some(crate::Intrinsic::JsonExclude) => return Self::None,
-                _ => {}
+            Self::None
+        } else {
+            match crate::intrinsics::intrinsic_of(ctx, op) {
+                Some(crate::Intrinsic::JsonSpread) => Self::JsonSpread,
+                Some(crate::Intrinsic::JsonExclude) => Self::None,
+                _ => Self::Unknown,
             }
         }
-        Self::Unknown
     }
 }
 
 impl Solver {
+    /// Join slot `from`'s domain, range, settlement and aliases into slot `to`.
+    fn copy_slot(&mut self, ctx: &Context, from: usize, to: usize, reader: Work) {
+        let cell = &self.analysis.heap.cells[from];
+        let (domain, range, outcome) = (cell.domain, cell.range, cell.outcome);
+        self.slot_domain(to, domain);
+        self.slot_range(ctx, to, range);
+        self.slot_outcome(to, outcome);
+        self.copy_aliases(ctx, from, to, reader);
+    }
+
     pub(in crate::facts) fn heap_call(
         &mut self,
         ctx: &Context,
@@ -268,10 +242,7 @@ impl Solver {
                         self.grow_array(object, None, reader);
                         let output = self.analysis.heap.objects[object].contents.slots()[0];
                         slots.push(output);
-                        self.slot_domain(output, self.analysis.heap.cells[input].domain);
-                        self.slot_range(ctx, output, self.analysis.heap.cells[input].range);
-                        self.slot_outcome(output, self.analysis.heap.cells[input].outcome);
-                        self.copy_aliases(ctx, input, output, reader);
+                        self.copy_slot(ctx, input, output, reader);
                     }
                 }
                 self.reconcile_slot_group(ctx, &slots);
@@ -293,20 +264,11 @@ impl Solver {
                         let input = self.analysis.heap.objects[object].contents.slots()[0];
                         self.analysis.heap.cells[input].readers.insert(reader);
                         slots.push(input);
-                        self.slot_domain(out_slot, self.analysis.heap.cells[input].domain);
-                        self.slot_range(ctx, out_slot, self.analysis.heap.cells[input].range);
-                        self.slot_outcome(out_slot, self.analysis.heap.cells[input].outcome);
-                        self.copy_aliases(ctx, input, out_slot, reader);
+                        self.copy_slot(ctx, input, out_slot, reader);
                     }
                 }
                 self.reconcile_slot_group(ctx, &slots);
-                self.widen_length(
-                    output,
-                    Range::Bounds(Interval {
-                        lower: 0,
-                        upper: u32::MAX.into(),
-                    }),
-                );
+                self.widen_length(output, Range::of(Some(Integer::U32)));
             }
             OperationKind::ConcatSegments => {
                 let result = operation.get_result(0);
@@ -329,28 +291,12 @@ impl Solver {
                             let elem_slot = self.analysis.heap.objects[inner].contents.slots()[0];
                             self.analysis.heap.cells[elem_slot].readers.insert(reader);
                             slots.push(elem_slot);
-                            self.slot_domain(out_slot, self.analysis.heap.cells[elem_slot].domain);
-                            self.slot_range(
-                                ctx,
-                                out_slot,
-                                self.analysis.heap.cells[elem_slot].range,
-                            );
-                            self.slot_outcome(
-                                out_slot,
-                                self.analysis.heap.cells[elem_slot].outcome,
-                            );
-                            self.copy_aliases(ctx, elem_slot, out_slot, reader);
+                            self.copy_slot(ctx, elem_slot, out_slot, reader);
                         }
                     }
                 }
                 self.reconcile_slot_group(ctx, &slots);
-                self.widen_length(
-                    output,
-                    Range::Bounds(Interval {
-                        lower: 0,
-                        upper: u32::MAX.into(),
-                    }),
-                );
+                self.widen_length(output, Range::of(Some(Integer::U32)));
             }
             OperationKind::Truncate => {
                 let base = self.heap_value(ctx, id, operation.get_operand(0))?;
@@ -358,13 +304,7 @@ impl Solver {
                 let mut previous = None;
                 while let Some(object) = self.next_object(base, previous) {
                     previous = Some(object);
-                    self.widen_length(
-                        object,
-                        Range::Bounds(Interval {
-                            lower: 0,
-                            upper: u32::MAX.into(),
-                        }),
-                    );
+                    self.widen_length(object, Range::of(Some(Integer::U32)));
                 }
             }
             OperationKind::Length => {
@@ -465,7 +405,7 @@ impl Solver {
                         let to = if let Some(to) = self.analysis.states[id].results[position].heap {
                             to
                         } else {
-                            let to = self.heap_cell(value.get_type(ctx));
+                            let to = self.heap_cell(value.get_type(ctx), None);
                             self.analysis.states[id].results[position].heap = Some(to);
                             self.notify_callers(id);
                             to
@@ -493,11 +433,7 @@ impl Solver {
             }
             OperationKind::Unknown | OperationKind::Call => {
                 if matches!(kind, OperationKind::Call) {
-                    let callee = Operation::get_op::<CallOp>(op, ctx)
-                        .map(|call| call.callee(ctx))
-                        .or_else(|| {
-                            Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx))
-                        })?;
+                    let callee = crate::calls::callee(ctx, op)?;
                     if self.analysis.bodies.contains_key(&callee) {
                         return None;
                     }

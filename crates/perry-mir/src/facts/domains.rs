@@ -1,15 +1,19 @@
 //! Numeric domains and range operations used by the compositional solver.
 use super::{Solver, State};
-use crate::{attrs::BinaryKind, integers::BigIntConstOp};
+use crate::{
+    attrs::{BinaryKind, NumericConstant},
+    integers::BigIntConstOp,
+};
 use pliron::{
     builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr},
+        attributes::IntegerAttr,
         ops::ConstantOp,
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
     operation::Operation,
-    r#type::{TypeHandle, Typed},
+    r#type::{TypeHandle, Typed, TypedHandle},
+    utils::apint::{APInt, bw},
     value::Value,
 };
 
@@ -20,6 +24,23 @@ pub(super) struct Integer {
 }
 
 impl Integer {
+    pub(super) const U8: Self = Self {
+        bits: 8,
+        signed: false,
+    };
+    pub(super) const U32: Self = Self {
+        bits: 32,
+        signed: false,
+    };
+    pub(super) const I32: Self = Self {
+        bits: 32,
+        signed: true,
+    };
+    pub(super) const I64: Self = Self {
+        bits: 64,
+        signed: true,
+    };
+
     pub(super) fn bounds(self) -> Interval {
         if self.signed {
             Interval {
@@ -44,16 +65,23 @@ impl Integer {
     }
 
     pub(super) fn ty(self, ctx: &Context) -> TypeHandle {
-        IntegerType::get(
-            ctx,
-            self.bits,
-            if self.signed {
-                Signedness::Signed
-            } else {
-                Signedness::Unsigned
-            },
-        )
-        .into()
+        self.integer_type(ctx).into()
+    }
+
+    pub(super) fn integer_type(self, ctx: &Context) -> TypedHandle<IntegerType> {
+        let signedness = if self.signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        };
+        IntegerType::get(ctx, self.bits, signedness)
+    }
+
+    /// The constant of this domain holding the two's-complement `bits`.
+    pub(super) fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp {
+        let ty = self.integer_type(ctx);
+        let value = APInt::from_u64(bits, bw(self.bits as usize));
+        ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, value)))
     }
 
     pub(super) fn common(self, other: Self) -> Self {
@@ -122,7 +150,45 @@ pub(super) enum Range {
     Unknown,
 }
 
+impl Interval {
+    /// `Math.abs` over the interval.
+    pub(super) fn abs(self) -> Self {
+        let (lower, upper) = (self.lower.abs(), self.upper.abs());
+        Self {
+            lower: if self.lower <= 0 && self.upper >= 0 {
+                0
+            } else {
+                lower.min(upper)
+            },
+            upper: lower.max(upper),
+        }
+    }
+
+    /// `Math.min` (`max: false`) or `Math.max` of values from both intervals.
+    pub(super) fn extreme(self, other: Self, max: bool) -> Self {
+        let pick = |a: i128, b: i128| if max { a.max(b) } else { a.min(b) };
+        Self {
+            lower: pick(self.lower, other.lower),
+            upper: pick(self.upper, other.upper),
+        }
+    }
+}
+
 impl Range {
+    /// The bounds of `domain`, or no bound without one.
+    pub(super) fn of(domain: Option<Integer>) -> Self {
+        domain.map_or(Self::Unknown, |domain| Self::Bounds(domain.bounds()))
+    }
+
+    /// `interval`, widened to the bounds of `domain` when it does not fit there.
+    pub(super) fn clamp(interval: Interval, domain: Option<Integer>) -> Self {
+        Self::Bounds(
+            domain
+                .filter(|&domain| !interval.fits(domain))
+                .map_or(interval, Integer::bounds),
+        )
+    }
+
     pub(super) fn join(self, other: Self, domain: Option<Integer>) -> Self {
         self.join_step(other, domain, true).0
     }
@@ -280,8 +346,7 @@ pub(super) enum ConstParsedInt {
 }
 
 pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<ConstParsedInt> {
-    let intrinsic = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx)?;
-    if intrinsic.intrinsic(ctx) != Some(crate::intrinsics::Intrinsic::ParseInt) {
+    if crate::intrinsics::intrinsic_of(ctx, op) != Some(crate::intrinsics::Intrinsic::ParseInt) {
         return None;
     }
     let operation = op.deref(ctx);
@@ -292,24 +357,7 @@ pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<Cons
     let radix_op = operation.get_operand(1).defining_op()?;
     let radix_const = Operation::get_op::<ConstantOp>(radix_op, ctx)?;
     let radix_attr = radix_const.get_attr_builtin_constant_value(ctx)?;
-    let radix = if let Some(float) = radix_attr.downcast_ref::<FPDoubleAttr>() {
-        perry_abi::number::Number::Float(f64::from(float.clone()))
-    } else if let Some(integer) = radix_attr.downcast_ref::<IntegerAttr>() {
-        if integer.get_type().deref(ctx).signedness() == Signedness::Unsigned {
-            perry_abi::number::Number::Unsigned(integer.value().to_u64())
-        } else {
-            perry_abi::number::Number::Signed(integer.value().to_i64())
-        }
-    } else {
-        let numeric = radix_attr.downcast_ref::<crate::attrs::NumericConstant>()?;
-        match *numeric {
-            crate::attrs::NumericConstant::Signed(v) => perry_abi::number::Number::Signed(v),
-            crate::attrs::NumericConstant::Unsigned(v) => perry_abi::number::Number::Unsigned(v),
-            crate::attrs::NumericConstant::Float(bits) => {
-                perry_abi::number::Number::Float(f64::from_bits(bits))
-            }
-        }
-    };
+    let radix = NumericConstant::of(ctx, &**radix_attr)?.number();
     match perry_abi::number::parse_integer(text, radix) {
         perry_abi::number::Number::Signed(value) => {
             let magnitude = value.unsigned_abs();
@@ -317,10 +365,7 @@ pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<Cons
                 magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
             Some(ConstParsedInt::Integer {
                 bits: value as u64,
-                domain: Integer {
-                    bits: 64,
-                    signed: true,
-                },
+                domain: Integer::I64,
                 interval: Interval {
                     lower: value as i128,
                     upper: value as i128,
@@ -354,32 +399,13 @@ pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interv
     let value = if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         constant.magnitude(ctx)? as i128
     } else {
-        let constant = Operation::get_op::<ConstantOp>(op, ctx)?;
-        let attr = constant.get_attr_builtin_constant_value(ctx)?;
-        if let Some(integer) = attr.downcast_ref::<IntegerAttr>() {
-            if integer.get_type().deref(ctx).signedness() == Signedness::Unsigned {
-                integer.value().to_u64() as i128
-            } else {
-                integer.value().to_i64() as i128
+        match constant(ctx, op)? {
+            NumericConstant::Signed(value) => value as i128,
+            NumericConstant::Unsigned(value) => value as i128,
+            NumericConstant::Float(bits) => {
+                let value = f64::from_bits(bits);
+                (value.is_finite() && value.fract() == 0.0).then_some(value as i128)?
             }
-        } else if let Some(numeric) = attr.downcast_ref::<crate::attrs::NumericConstant>() {
-            match *numeric {
-                crate::attrs::NumericConstant::Signed(v) => v as i128,
-                crate::attrs::NumericConstant::Unsigned(v) => v as i128,
-                crate::attrs::NumericConstant::Float(bits) => {
-                    let value = f64::from_bits(bits);
-                    if !value.is_finite() || value.fract() != 0.0 {
-                        return None;
-                    }
-                    value as i128
-                }
-            }
-        } else {
-            let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
-            if !value.is_finite() || value.fract() != 0.0 {
-                return None;
-            }
-            value as i128
         }
     };
     Some(Interval {
@@ -397,7 +423,7 @@ pub(super) fn arithmetic_range(
     let (a, b) = match (lhs, rhs) {
         (Range::Bottom, _) | (_, Range::Bottom) => return Range::Bottom,
         (Range::Bounds(a), Range::Bounds(b)) => (a, b),
-        _ => return domain.map_or(Range::Unknown, |domain| Range::Bounds(domain.bounds())),
+        _ => return Range::of(domain),
     };
     let interval = match kind {
         _ if domain.is_none()
@@ -424,7 +450,7 @@ pub(super) fn arithmetic_range(
                 a.upper.checked_mul(b.lower),
                 a.upper.checked_mul(b.upper),
             ] else {
-                return domain.map_or(Range::Unknown, |domain| Range::Bounds(domain.bounds()));
+                return Range::of(domain);
             };
             Interval {
                 lower: ll.min(lu).min(ul).min(uu),
@@ -433,11 +459,21 @@ pub(super) fn arithmetic_range(
         }
         _ => return Range::Unknown,
     };
-    Range::Bounds(
-        domain
-            .filter(|&domain| !interval.fits(domain))
-            .map_or(interval, Integer::bounds),
-    )
+    Range::clamp(interval, domain)
+}
+
+/// The kind of `op` when it is integer-domain arithmetic: `+`, `-`, `*`, or BigInt `/` and `%`.
+pub(super) fn integer_arithmetic(ctx: &Context, op: Ptr<Operation>) -> Option<BinaryKind> {
+    let kind = Operation::get_op::<crate::scalar::BinaryOp>(op, ctx)?.kind(ctx);
+    let bigint = || {
+        op.deref(ctx)
+            .get_result(0)
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::types::BigIntType>()
+    };
+    (matches!(kind, BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul) || bigint())
+        .then_some(kind)
 }
 
 pub(super) fn comparison_domain(state: &State, inputs: &[Value]) -> Option<Integer> {
@@ -467,30 +503,30 @@ pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
     if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         return constant.magnitude(ctx);
     }
-    let constant = Operation::get_op::<ConstantOp>(op, ctx)?;
-    let attr = constant.get_attr_builtin_constant_value(ctx)?;
-    if let Some(numeric) = attr.downcast_ref::<crate::attrs::NumericConstant>() {
-        return match *numeric {
-            crate::attrs::NumericConstant::Signed(v) => Some(v as u64),
-            crate::attrs::NumericConstant::Unsigned(v) => Some(v),
-            crate::attrs::NumericConstant::Float(bits) => {
-                let value = f64::from_bits(bits);
-                (value.is_finite()
-                    && value.fract() == 0.0
-                    && !(value == 0.0 && value.is_sign_negative())
-                    && value >= i64::MIN as f64
-                    && value < 18446744073709551616.0)
-                    .then_some(value as i128 as u64)
-            }
-        };
+    // Integer-typed constants already have their domain; they are not literals.
+    let attr = Operation::get_op::<ConstantOp>(op, ctx)?.get_attr_builtin_constant_value(ctx)?;
+    if attr.is::<IntegerAttr>() {
+        return None;
     }
-    let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
-    (value.is_finite()
-        && value.fract() == 0.0
-        && !(value == 0.0 && value.is_sign_negative())
-        && value >= i64::MIN as f64
-        && value < 18446744073709551616.0)
-        .then_some(value as i128 as u64)
+    match NumericConstant::of(ctx, &**attr)? {
+        NumericConstant::Signed(value) => Some(value as u64),
+        NumericConstant::Unsigned(value) => Some(value),
+        NumericConstant::Float(bits) => {
+            let value = f64::from_bits(bits);
+            (value.is_finite()
+                && value.fract() == 0.0
+                && !(value == 0.0 && value.is_sign_negative())
+                && value >= i64::MIN as f64
+                && value < 18446744073709551616.0)
+                .then_some(value as i128 as u64)
+        }
+    }
+}
+
+/// The value of a `builtin.constant` op.
+fn constant(ctx: &Context, op: Ptr<Operation>) -> Option<NumericConstant> {
+    let attr = Operation::get_op::<ConstantOp>(op, ctx)?.get_attr_builtin_constant_value(ctx)?;
+    NumericConstant::of(ctx, &**attr)
 }
 
 impl Solver {

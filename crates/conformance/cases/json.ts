@@ -6,6 +6,10 @@ interface Item {
   n: number;
   opt?: number;
 }
+interface Loose {
+  n: number;
+  extra: unknown;
+}
 
 const globalItem: Item = { n: 1 };
 function mutateGlobal(): void {
@@ -44,8 +48,9 @@ function checkJsonAndPresence(): string {
 
   const trickyFloat = 14257184145526768;
   const floatFormatted = JSON.stringify(trickyFloat) === "14257184145526768" ? 1 : 0;
+  const loose: Loose = JSON.parse('{"n":3}');
 
-  return `${localParsed.n}:${globalParsed.n}:${disjointParsed.n + disjointOther.n}:${absentIn}:${explicitIn}:${absentKeys}:${explicitKeys}:${JSON.stringify(explicitUndef)}:${perry_json_parse_user(localText)}:${perry_json_copy_0(3)}:${floatFormatted}:${presentOpt.opt ?? 0}`;
+  return `${JSON.stringify(loose)}:${localParsed.n}:${globalParsed.n}:${disjointParsed.n + disjointOther.n}:${absentIn}:${explicitIn}:${absentKeys}:${explicitKeys}:${JSON.stringify(explicitUndef)}:${perry_json_parse_user(localText)}:${perry_json_copy_0(3)}:${floatFormatted}:${presentOpt.opt ?? 0}`;
 }
 
 function clearMap(m: Map<string, number>): void {
@@ -169,4 +174,92 @@ function checkArraysAndNumerics(miss: boolean): string {
 console.log(
   `${output}|${checkJsonAndPresence()}|${checkCollections()}|${checkArraysAndNumerics(true)}`,
 );
+
+// Checked tuples are arrays and keep numeric element order.
+interface Rule {
+  filter: Array<[string, string]>;
+}
+const rules: Rule[] = JSON.parse('[{"filter":[["MenuRowName","Lunch"],["showInMenu","true"]]}]');
+const wide: [number, number, number, number, number, number, number, number, number, number, number] =
+  JSON.parse("[0,1,2,3,4,5,6,7,8,9,10]");
+const numbered: { _0: number; _1: number } = { _0: 1, _1: 2 };
+console.log("tuples", rules[0].filter[0][1], JSON.stringify(rules), JSON.stringify(wide), JSON.stringify(numbered));
+
+// Scalar equality never coerces between JSON types.
+function matches(text: string, expected: string | null | undefined): boolean {
+  return JSON.parse(text).value === expected;
+}
+const scalars = JSON.parse('[1,"1",true,false,0,{},[]]');
+console.log("scalar-equality", matches('{"value":"yes"}', "yes"), matches('{"value":1}', "1"), matches('{"value":null}', null), matches("{}", undefined), matches("{}", null), matches('{"value":null}', undefined));
+console.log("scalar-values", scalars[0] === 1, scalars[1] === 1, scalars[2] === true, scalars[3] === 0, scalars[4] === false, scalars[5] === true, scalars[6] === 0, "1" === scalars[1]);
+
+// Quoted closed-record field names survive checked conversion.
+interface Days {
+  "0"?: number[];
+  "a-b": number;
+  "": string;
+  "漢": number;
+}
+const days: Days = JSON.parse('{"0":[7],"a-b":11,"":"yes","漢":13}');
+const daysCopy: Days = JSON.parse(JSON.stringify(days));
+console.log("quoted-fields", daysCopy["0"]?.[0], daysCopy["a-b"], daysCopy[""], daysCopy["漢"]);
+
+// Spread and rest keep undeclared extras of checked records.
+interface OrderRow {
+  Order: number;
+}
+const orderRows: OrderRow[] = JSON.parse('[{"Order":1,"Extra":"keep","Components":[{"x":1}]}]');
+// @ts-expect-error `Components` is an undeclared extra of the parsed value.
+const { Components, ...orderRest } = orderRows[0];
+console.log("extras", JSON.stringify({ ...orderRows[0], Components: undefined }), JSON.stringify(orderRest), JSON.stringify({ ...orderRows[0], Order: 2, Components: undefined }));
+
+// Copied `undefined` stays present; omitted and JSON-missing fields stay absent.
+interface Point {
+  x?: number;
+  y?: number;
+}
+const omittedSource: Point = {};
+const copiedAbsent: Point = { x: omittedSource.x };
+const heapSource: Point = {};
+const heapKeys = Object.keys(heapSource).length;
+const heapCopy: Point = { x: heapSource.x };
+const assignedPoint: Point = { x: 1 };
+assignedPoint.x = omittedSource.x;
+const jsonMissing: Point = JSON.parse("{}");
+const explicitPoint: Point = { x: undefined };
+const pointValues = Object.values(explicitPoint);
+const pointEntries = Object.entries(explicitPoint);
+console.log("copied-presence", "x" in copiedAbsent, copiedAbsent.x, Object.keys(copiedAbsent).length, heapKeys, Object.keys(heapCopy).length, Object.keys(assignedPoint).length, "x" in jsonMissing);
+console.log("values-entries", pointValues.length, pointValues[0], pointEntries.length, pointEntries[0][0], pointEntries[0][1]);
+
+// Nested collections, fresh iterators, Set spread and keys that resemble internal metadata.
+const nestedSets = new Map<string, Set<number>>([["key", new Set<number>([3, 4])]]);
+const identitySet = new Set<number>([1]);
+const spreadSet = [...new Set([4, 5])];
+const nulSet = new Set(["\u0000perry_set_type_args", "__perry_set_type_args", "s"]);
+console.log("nested-set", nestedSets.get("key")?.has(4), nestedSets.get("key")?.size);
+console.log("iterator-identity", (identitySet.values() as unknown) !== (identitySet.values() as unknown), spreadSet.join(","));
+console.log("metadata-keys", nulSet.size, nulSet.has("\u0000perry_set_type_args"), nulSet.has("__perry_set_type_args"));
+
+// Escapes, nested reads, malformed input and recovery after failures.
+function identity(value: number): number {
+  return value;
+}
+for (const x of [0, 1, -0.5, 2.5, -2.5, 7, NaN]) {
+  const text = JSON.stringify({ text: 'a"\n\u0001é', value: x, list: [1, x, -0], flag: true });
+  const parsed = JSON.parse(text);
+  let malformed = "parsed";
+  try {
+    JSON.parse("{" + x);
+  } catch (e) {
+    malformed = "rejected";
+  }
+  const value = JSON.parse('{"n":7}');
+  const before: number = value.n;
+  try {
+    new Date(NaN).toISOString();
+  } catch (e) {}
+  // Closed-record keys serialize sorted, not in literal order, so only the length is compared.
+  console.log("escapes", text.length, identity(parsed.text.length), parsed.list[1], JSON.parse([JSON.stringify({ text: "漢" })][0]).text, malformed, before + identity(value.n));
+}
 

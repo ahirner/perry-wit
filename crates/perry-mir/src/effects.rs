@@ -1,12 +1,19 @@
 //! Runtime capabilities and local effect constraints for ProgramFacts.
 use crate::{
-    calls::{AsyncCallOp, CallOp, TimerOp, is_async},
-    collections::{ArrayExtendOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ConcatOp},
-    exceptions::{CatchOp, ErrorNewOp, RaiseOp},
+    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, callee, is_async},
+    collections::{
+        ArrayExtendOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp, ConcatOp,
+        ConcatReuseOp, ConcatSegmentsOp, NativeJsonOp, StringConstOp,
+    },
+    exceptions::{CatchOp, ErrorNewOp, ExceptionMessageOp, RaiseOp},
+    foreign::ForeignOp,
     heap::{AllocOp, FieldSetOp},
     intrinsics::{
-        IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp,
+        JsonStringifyOp, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, intrinsic_of,
     },
+    is_any,
+    locals::StoreOp,
+    variants::VariantNewOp,
 };
 use pliron::{
     builtin::{
@@ -14,8 +21,7 @@ use pliron::{
         ops::FuncOp,
     },
     context::{Context, Ptr},
-    graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order},
-    identifier::Identifier,
+    graph::traversals::region::sccs_in_topological_order,
     linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
@@ -165,48 +171,43 @@ pub enum Allocation {
 
 /// Allocation includes hidden temporaries and exception construction inside helpers.
 pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
-    if Operation::get_op::<crate::collections::NativeJsonOp>(op, ctx).is_some() {
-        return Allocation::Atomic;
-    }
-    if Operation::get_op::<crate::collections::ConcatSegmentsOp>(op, ctx).is_some() {
-        return Allocation::Atomic;
-    }
-    if Operation::get_op::<crate::scalar::NumericCastOp>(op, ctx).is_some()
-        && op
-            .deref(ctx)
-            .get_result(0)
-            .get_type(ctx)
-            .deref(ctx)
-            .is::<crate::types::BigIntType>()
+    let bigint_cast = || {
+        Operation::is_op::<crate::scalar::NumericCastOp>(op, ctx)
+            && op
+                .deref(ctx)
+                .get_result(0)
+                .get_type(ctx)
+                .deref(ctx)
+                .is::<crate::types::BigIntType>()
+    };
+    if let Some(intrinsic) = intrinsic_of(ctx, op) {
+        intrinsic.allocation()
+    } else if bigint_cast()
+        || is_any::<(
+            NativeJsonOp,
+            ConcatSegmentsOp,
+            AllocOp,
+            ArrayNewOp,
+            ArrayPushOp,
+        )>(ctx, op)
+        || is_any::<(
+            ArrayExtendOp,
+            ArraySetOp,
+            VariantNewOp,
+            ConcatOp,
+            ConcatReuseOp,
+        )>(ctx, op)
     {
-        return Allocation::Atomic;
-    }
-    if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
-        return intrinsic
-            .intrinsic(ctx)
-            .map_or(Allocation::Conservative, |intrinsic| intrinsic.allocation());
-    }
-    if Operation::get_op::<AllocOp>(op, ctx).is_some()
-        || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
-        || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-        || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-        || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some()
-        || Operation::get_op::<ConcatOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::collections::ConcatReuseOp>(op, ctx).is_some()
-    {
-        return Allocation::Atomic;
-    }
-    if Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-        || Operation::get_op::<TimerOp>(op, ctx).is_some()
-        || Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some()
-        || Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some()
-        || Operation::get_op::<PromiseCombinatorOp>(op, ctx).is_some()
-        || Operation::get_op::<JsonStringifyOp>(op, ctx).is_some()
-        || Operation::get_op::<ErrorNewOp>(op, ctx).is_some()
-        || Operation::get_op::<RaiseOp>(op, ctx).is_some()
-        || Operation::get_op::<CatchOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::exceptions::ExceptionMessageOp>(op, ctx).is_some()
+        Allocation::Atomic
+    } else if is_any::<(ForeignOp, TimerOp, PromiseResolvedOp, PromiseRejectedOp)>(ctx, op)
+        || is_any::<(
+            PromiseCombinatorOp,
+            JsonStringifyOp,
+            ErrorNewOp,
+            RaiseOp,
+            CatchOp,
+        )>(ctx, op)
+        || Operation::is_op::<ExceptionMessageOp>(op, ctx)
     {
         Allocation::Conservative
     } else {
@@ -216,48 +217,6 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
 
 pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
     allocation(ctx, op) != Allocation::None
-}
-
-fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
-    Operation::get_op::<CallOp>(op, ctx)
-        .map(|c| c.callee(ctx))
-        .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)))
-}
-
-struct CallGraph<'a> {
-    callees: &'a [Vec<usize>],
-    callers: &'a [Vec<usize>],
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FunctionIndex(usize);
-
-impl HasLabel<()> for FunctionIndex {
-    fn label(&self, _: &()) -> String {
-        self.0.to_string()
-    }
-}
-
-impl ControlFlowGraph<()> for CallGraph<'_> {
-    type Node = FunctionIndex;
-    fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.callees[node.0].len()
-    }
-    fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.callees[node.0][index])
-    }
-    fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.callers[node.0].len()
-    }
-    fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.callers[node.0][index])
-    }
-    fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
-        (!self.callees.is_empty()).then_some(FunctionIndex(0))
-    }
-    fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
-        Box::new((0..self.callees.len()).map(FunctionIndex))
-    }
 }
 
 /// Classify each operation once; caller-dependent propagation belongs to ProgramFacts.
@@ -282,7 +241,6 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
         })
         .collect();
     let mut callees = vec![Vec::new(); functions.len()];
-    let mut callers = vec![Vec::new(); functions.len()];
     for (index, function) in functions.iter().enumerate() {
         let atomic = local[index].effects.atomic_construction;
         if atomic && local[index].asynchronous {
@@ -308,61 +266,57 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     local[index].handled.insert(op);
                 }
                 let allocation = allocation(ctx, op);
+                let intrinsic = intrinsic_of(ctx, op);
+                let call = Operation::is_op::<CallOp>(op, ctx);
+                let async_call = Operation::is_op::<AsyncCallOp>(op, ctx);
+                let wait = Operation::is_op::<AwaitOp>(op, ctx);
+                let foreign = Operation::is_op::<ForeignOp>(op, ctx);
                 if atomic {
                     let closed = callee.is_none()
                         || target.is_some_and(|i| local[i].effects.atomic_construction);
-                    let unsafe_effect = allocation == Allocation::Conservative
-                        || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-                        || Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some()
-                        || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
+                    let unsafe_effect =
+                        allocation == Allocation::Conservative || async_call || wait || foreign;
                     if !closed || unsafe_effect {
+                        let operation = intrinsic.map_or_else(
+                            || Operation::get_opid(op, ctx).to_string(),
+                            |i| i.name().to_owned(),
+                        );
                         return pliron::verify_err!(
                             Operation::get_op_dyn(op, ctx).loc(ctx),
                             AtomicConstructionError {
                                 function: names[index].to_string(),
-                                operation: Operation::get_op::<IntrinsicOp>(op, ctx)
-                                    .and_then(|i| i.intrinsic(ctx))
-                                    .map_or_else(
-                                        || Operation::get_op_dyn(op, ctx).get_opid().to_string(),
-                                        |i| i.name().to_owned()
-                                    )
+                                operation
                             }
                         );
                     }
                 }
-                let writes_record = Operation::get_op::<FieldSetOp>(op, ctx).is_some();
+                let writes_record = Operation::is_op::<FieldSetOp>(op, ctx);
                 effects.writes_record |= writes_record;
                 effects.writes_state |= writes_record
-                    || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::collections::ArrayTruncateOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
-                effects.task_state |=
-                    op.deref(ctx)
+                    || foreign
+                    || is_any::<(
+                        ArraySetOp,
+                        ArrayPushOp,
+                        ArrayExtendOp,
+                        ArrayTruncateOp,
+                        StoreOp,
+                    )>(ctx, op);
+                let operation = op.deref(ctx);
+                effects.task_state |= intrinsic.is_some_and(|i| !i.pure())
+                    || operation
                         .operands()
-                        .chain(op.deref(ctx).results())
+                        .chain(operation.results())
                         .any(|value| {
                             crate::types::is_reference(ctx, value.get_type(ctx))
-                                && value.defining_op().is_none_or(|def| {
-                                    Operation::get_op::<crate::collections::StringConstOp>(def, ctx)
-                                        .is_none()
-                                })
-                        })
-                        || Operation::get_op::<IntrinsicOp>(op, ctx)
-                            .is_some_and(|i| i.intrinsic(ctx).is_none_or(|i| !i.pure()));
-                if Operation::get_op::<CallOp>(op, ctx).is_none()
-                    && Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_none()
-                    && crate::intrinsics::may_throw(ctx, op)
-                {
+                                && value
+                                    .defining_op()
+                                    .is_none_or(|def| !Operation::is_op::<StringConstOp>(def, ctx))
+                        });
+                if !call && !wait && crate::intrinsics::may_throw(ctx, op) {
                     effects.failure = local[index].fail(effects.failure, op, true);
                 }
-                effects.unhandled_await |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
-                    .is_some()
-                    && !local[index].handled.contains(&op);
-                let allocates = allocation != Allocation::None
-                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                effects.unhandled_await |= wait && !local[index].handled.contains(&op);
+                let allocates = allocation != Allocation::None || async_call;
                 effects.allocates |= allocates;
                 if cyclic_blocks.contains(&block) {
                     effects.repeated_allocations |= allocates;
@@ -371,40 +325,37 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                     }
                 }
                 effects.may_collect |= !atomic && allocation != Allocation::None;
-                effects.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
-                    .is_some()
-                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
-                effects.may_reenter |=
-                    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
-                effects.host_work |= Operation::get_op::<TimerOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some()
-                        && op.deref(ctx).results().any(|value| {
+                effects.may_suspend |= wait || async_call;
+                effects.may_reenter |= foreign;
+                effects.host_work |= foreign
+                    || Operation::is_op::<TimerOp>(op, ctx)
+                    || intrinsic.is_some()
+                        && operation.results().any(|value| {
                             value
                                 .get_type(ctx)
                                 .deref(ctx)
                                 .is::<crate::types::PromiseType>()
                         });
-                effects.unknown_helper_bound |=
-                    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-                        || Operation::get_op::<IntrinsicOp>(op, ctx)
-                            .and_then(|i| i.intrinsic(ctx))
-                            .is_some_and(|i| i.allocation() == Allocation::Conservative)
-                        || Operation::get_op::<JsonStringifyOp>(op, ctx).is_some();
+                effects.unknown_helper_bound |= foreign
+                    || intrinsic.is_some_and(|i| i.allocation() == Allocation::Conservative)
+                    || Operation::is_op::<JsonStringifyOp>(op, ctx);
                 if let Some(target) = target {
                     callees[index].push(target);
-                    callers[target].push(index);
                 } else if callee.is_some() {
-                    effects.allocates = true;
-                    effects.may_collect = true;
-                    effects.may_suspend = true;
-                    effects.may_reenter = true;
-                    effects.host_work = true;
-                    effects.writes_record = true;
-                    effects.writes_state = true;
-                    effects.task_state = true;
-                    effects.unknown_helper_bound = true;
-                    if Operation::get_op::<CallOp>(op, ctx).is_some() {
+                    // An unknown callee may do anything but break atomic construction.
+                    effects = Effects {
+                        allocates: true,
+                        may_collect: true,
+                        may_suspend: true,
+                        may_reenter: true,
+                        host_work: true,
+                        writes_record: true,
+                        writes_state: true,
+                        task_state: true,
+                        unknown_helper_bound: true,
+                        ..effects
+                    };
+                    if call {
                         effects.failure = local[index].fail(effects.failure, op, true);
                     }
                 }
@@ -415,16 +366,12 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
         effects.may_collect |= effects.may_suspend || effects.may_reenter;
         local[index].effects = effects;
     }
-    let graph = CallGraph {
-        callees: &callees,
-        callers: &callers,
-    };
-    for component in sccs_in_topological_order(&(), &graph) {
-        if component.is_cyclic {
-            for node in component.nodes {
-                local[node.0].recursive = true;
-                local[node.0].effects.repeated_allocations |= local[node.0].effects.allocates;
-            }
+    // A function on a call cycle reaches itself; each recursive invocation allocates again.
+    for (index, local) in local.iter_mut().enumerate() {
+        let callees_of = |function: usize| callees[function].iter().copied();
+        if crate::reachable(callees_of(index), callees_of).contains(&index) {
+            local.recursive = true;
+            local.effects.repeated_allocations |= local.effects.allocates;
         }
     }
     Ok(local)

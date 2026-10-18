@@ -1150,7 +1150,7 @@ impl<'s> FunctionBuilder<'s> {
                 let one = b.number(ctx, 1.0);
                 let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
                 let item = b.element_at(ctx, array, last_idx)?;
-                let u32_ty = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+                let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
                 let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
                 b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, array, new_len));
                 b.fit(ctx, item, opt_ty)
@@ -1306,8 +1306,9 @@ impl<'s> FunctionBuilder<'s> {
                 .map(|a| a.deref(ctx).element());
             let prepare = self.block;
             return self.index_loop(ctx, "array_from_len", zero, len, |b, ctx, idx, _, _| {
-                let f64_ty = FP64Type::get(ctx).into();
-                let undef = b.emit_value(ctx, |ctx| UndefinedOp::new(ctx, f64_ty));
+                // Array-likes read as `undefined` elements.
+                let void = crate::coerce::void_type(ctx);
+                let undef = b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, void));
                 let item = if let Some(cb) = map_fn {
                     let mapped = b.array_callback(ctx, cb, &[undef, idx])?;
                     match expected_elem {

@@ -3,11 +3,11 @@ mod math;
 
 use crate::{
     function::FunctionLowering,
-    repr::{Carriers, i32_type, wasm_type},
+    repr::{Carriers, Repr, i32_type, repr, wasm_type},
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
 use pliron::{
@@ -654,6 +654,8 @@ impl FunctionLowering<'_, '_> {
         join.deref(ctx).get_argument(0)
     }
 
+    /// Compare two scalars of MIR type `ty`: floats and integers by value, references (and
+    /// optional references) by address, which only answers identity.
     pub(super) fn scalar_comparison(
         &mut self,
         ctx: &mut Context,
@@ -661,8 +663,8 @@ impl FunctionLowering<'_, '_> {
         ty: TypeHandle,
         left: Value,
         right: Value,
-    ) -> Value {
-        if left.get_type(ctx).deref(ctx).is::<FP64Type>() {
+    ) -> Result<Value> {
+        Ok(if left.get_type(ctx).deref(ctx).is::<FP64Type>() {
             let opcode = match kind {
                 CompareKind::Lt => NumOpcode::F64Lt,
                 CompareKind::Le => NumOpcode::F64Le,
@@ -673,7 +675,19 @@ impl FunctionLowering<'_, '_> {
             };
             self.num(ctx, opcode, vec![left, right])
         } else {
-            let (bits, signed) = integer(ctx, ty).unwrap_or((32, true));
+            let scalar = crate::repr::optional_inner(ctx, ty).unwrap_or(ty);
+            let (bits, signed) = match integer(ctx, scalar) {
+                Some(integer) => integer,
+                None => {
+                    ensure!(
+                        repr(ctx, scalar)? == Repr::Ref
+                            && matches!(kind, CompareKind::Eq | CompareKind::Ne),
+                        "comparison {kind:?} is not supported on {}",
+                        ty.disp(ctx)
+                    );
+                    (32, false)
+                }
+            };
             let opcode = match (kind, bits == 64, signed) {
                 (CompareKind::Lt, false, true) => NumOpcode::I32LtS,
                 (CompareKind::Le, false, true) => NumOpcode::I32LeS,
@@ -697,7 +711,7 @@ impl FunctionLowering<'_, '_> {
                 (CompareKind::Ne, true, _) => NumOpcode::I64Ne,
             };
             self.num(ctx, opcode, vec![left, right])
-        }
+        })
     }
 
     pub(super) fn numeric_comparison(
@@ -755,7 +769,7 @@ impl FunctionLowering<'_, '_> {
         let an = self.numeric_negative(ctx, at, ap);
         let bn = self.numeric_negative(ctx, bt, bp);
         let integer = IntegerType::get(ctx, 64, Signedness::Unsigned).into();
-        let same_sign = self.scalar_comparison(ctx, kind, integer, ap, bp);
+        let same_sign = self.scalar_comparison(ctx, kind, integer, ap, bp)?;
         let different_sign = self.num(ctx, NumOpcode::I32Xor, vec![an, bn]);
         let sign_result = match kind {
             CompareKind::Eq => self.i32_const(ctx, 0),
@@ -774,7 +788,7 @@ impl FunctionLowering<'_, '_> {
         let a = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![ap]);
         let b = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bp]);
         let float_type = FP64Type::get(ctx).into();
-        let result = self.scalar_comparison(ctx, kind, float_type, a, b);
+        let result = self.scalar_comparison(ctx, kind, float_type, a, b)?;
         self.br(ctx, done, vec![result]);
         self.block = mixed;
         let integer = self.select(ctx, af, bp, ap);

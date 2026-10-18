@@ -2,16 +2,54 @@ mod effects;
 mod facts;
 mod optimization;
 
+use crate::{
+    attrs::{BinaryKind, CompareKind},
+    calls::{AwaitOp, set_async, set_atomic_construction, set_exported},
+    collections::{ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp},
+    control::ReturnOp,
+    effects::Failure,
+    exceptions::MayThrowInterface,
+    facts::{
+        ProgramFacts, Specialize, constrain_signature, specialized_implementation,
+        verify_lossless_module, with_fact_limits,
+    },
+    heap::FieldGetOp,
+    intrinsics::{Combinator, IntrinsicOp, PromiseCombinatorOp},
+    liveness::LiveValues,
+    pipeline::canonicalize,
+    scalar::{BinaryOp, CompareOp},
+};
 use pliron::{
+    analyses::liveness::{Liveness, LivenessTq},
+    attribute::AttrObj,
+    builtin::{
+        attr_interfaces::TypedAttrInterface,
+        attributes::{FPDoubleAttr, IntegerAttr, TypeAttr},
+        op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
+        ops::{ConstantOp, FuncOp},
+        type_interfaces::FunctionTypeInterface,
+        types::{FP64Type, FunctionType, IntegerType, Signedness},
+    },
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    graph::{
+        dominance::DomInfo,
+        walkers::{IRNode, WALKCONFIG_PREORDER_FORWARD, uninterruptible::immutable::walk_op},
+    },
+    irbuild::{IRStatus, inserter::OpInsertionPoint, match_rewrite::PassWrapper},
     irfmt::parsers::spaced,
+    linked_list::ContainsLinkedList,
+    op::{Op, op_cast},
     operation::{Operation, verify_operation},
-    opts::dce::dce,
+    opts::{constants::ConstFoldInterface, dce::dce, mem2reg::mem2reg},
     parsable::parse_from_str,
+    pass::{Analysis, AnalysisManager, Pass, PassResult, Passes},
     printable::Printable,
     result::Result,
+    r#type::{TypeHandle, Typed, TypedHandle},
+    utils::apint::{APInt, bw},
+    value::Value,
 };
+use std::{collections::BTreeSet, fmt::Write};
 
 /// The temporary-record workload of `wasi.execution.scaling.temporary_records`, as the HIR→MIR
 /// builder (P2.2) is expected to emit it: `make` inlined, tier not yet classified.
@@ -51,6 +89,44 @@ fn parse(ctx: &mut Context, input: &str) -> Ptr<Operation> {
 
 fn print(ctx: &Context, op: Ptr<Operation>) -> String {
     Operation::get_op_dyn(op, ctx).disp(ctx).to_string()
+}
+
+/// The function called `name` in `module`.
+fn function(ctx: &Context, module: Ptr<Operation>, name: &str) -> FuncOp {
+    crate::aggregates::functions(module, ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == name)
+        .unwrap_or_else(|| panic!("no function {name}"))
+}
+
+/// The first operation of kind `O` in `function`.
+fn first<O: Op>(ctx: &Context, function: &FuncOp) -> Ptr<Operation> {
+    crate::aggregates::operations(ctx, function)
+        .into_iter()
+        .find(|&op| Operation::get_op::<O>(op, ctx).is_some())
+        .unwrap_or_else(|| panic!("no {}", O::get_opid_static()))
+}
+
+/// Freshly computed program facts, bypassing any analysis cache.
+fn facts(ctx: &Context, module: Ptr<Operation>) -> Result<ProgramFacts> {
+    ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())
+}
+
+/// The value SCCP folds `op(lhs, rhs)` to.
+fn fold<O: ConstFoldInterface>(
+    ctx: &mut Context,
+    op: impl FnOnce(&mut Context, Value, Value) -> O,
+    lhs: impl TypedAttrInterface + Clone,
+    rhs: impl TypedAttrInterface + Clone,
+) -> AttrObj {
+    let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
+    let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
+    op(ctx, a, b)
+        .check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))])
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("constant operands fold")
 }
 
 /// Normalize printer artifacts that depend on parse order: location references (` !N`, which
@@ -192,15 +268,10 @@ builtin.module @m {
             && printed.contains("next: perry.record <Node> }>"),
         "{printed}"
     );
-    let function = crate::aggregates::functions(module, ctx)[0];
-    crate::calls::set_exported(ctx, &function);
-    let mut analyses = pliron::pass::AnalysisManager::default();
-    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(module, ctx)?;
-    let returned = crate::aggregates::operations(ctx, &function)
-        .into_iter()
-        .find(|&op| Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some())
-        .unwrap();
-    assert!(!facts.is_count(ctx, &function, returned.deref(ctx).get_operand(0)));
+    let f = function(ctx, module, "f");
+    set_exported(ctx, &f);
+    let returned = first::<ReturnOp>(ctx, &f);
+    assert!(!facts(ctx, module)?.is_count(ctx, &f, returned.deref(ctx).get_operand(0)));
     Ok(())
 }
 
@@ -377,13 +448,6 @@ fn optional_reads_coerce_and_unwrap() {
 
 #[test]
 fn may_throw_marks_calls_unwraps_and_writes() {
-    use crate::exceptions::MayThrowInterface;
-    use pliron::{
-        graph::walkers::{
-            IRNode, WALKCONFIG_PREORDER_FORWARD, uninterruptible::immutable::walk_op,
-        },
-        op::op_cast,
-    };
     let ctx = &mut Context::new();
     let module = parse(
         ctx,

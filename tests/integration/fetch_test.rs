@@ -1,16 +1,10 @@
 //! `fetch` over `wasi:http/client`: request method, headers and body reach the server; the
 //! response's status, headers and body read back through `text()`, `bytes()`, `json()` and
 //! readers.
+use crate::wasi_host::{self, Host};
+use crate::{engine::async_engine, http_fixture};
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
-use wasmtime::{
-    Store,
-    component::{Linker, ResourceTable},
-};
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
-
-use crate::{engine::async_engine, http_fixture};
 
 const WIT: &str = r#"
 package test:fetch;
@@ -52,31 +46,6 @@ export async function run(url: string): Promise<string> {
 }
 "#;
 
-struct Host {
-    ctx: WasiCtx,
-    http: WasiHttpCtx,
-    table: ResourceTable,
-}
-
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: Default::default(),
-        }
-    }
-}
-
 /// Compile `source`, call its `run(url)` export against `server` and return the result.
 async fn run(
     source: &str,
@@ -88,37 +57,16 @@ async fn run(
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("fetch"))?;
     let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
-    let mut has_json_parser = false;
-    for payload in wasmparser::Parser::new(0).parse_all(&compiled.core) {
-        if let wasmparser::Payload::CustomSection(section) = payload?
-            && section.name() == "name"
-        {
-            for subsection in wasmparser::NameSectionReader::new(section.data_reader()) {
-                if let wasmparser::Name::Function(names) = subsection? {
-                    for entry in names {
-                        has_json_parser |=
-                            matches!(entry?.name, "json_measure" | "json_populate_measured");
-                    }
-                }
-            }
-        }
-    }
+    let has_json_parser = crate::world::function_names(&compiled.core)?
+        .into_iter()
+        .any(|name| matches!(name, "json_measure" | "json_populate_measured"));
     assert_eq!(has_json_parser, expects_json_parser);
-    let engine = async_engine()?;
-    let component =
-        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-        },
-    );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        Host::default(),
+    )
+    .await?;
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
     let url = format!("http://{}", server.address);
     let (text,) = run.call_async(&mut store, (&url,)).await?;

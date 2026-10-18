@@ -244,17 +244,26 @@ impl PlainDateTime {
         let (y1, m1, _) = self.date();
         let (y2, m2, _) = other.date();
         let mut months = (y2 - y1) * 12 + (i32::from(m2) - i32::from(m1));
-        let advance = |m: i32| -> i32 {
+        // The day `m` months on, unless it passes `other`. Both ends are representable, so an
+        // advance beyond the representable range has passed `other` too.
+        let landing = |m: i32| {
             self.add_calendar(0, i64::from(m), 0, 0, true)
-                .map_or(other.day, |d| d.day)
+                .ok()
+                .map(|date| date.day)
+                .filter(|&day| (other.day - day) * sign >= 0)
         };
-        while (other.day - advance(months)) * sign < 0 {
-            months -= sign;
-        }
-        while (other.day - advance(months + sign)) * sign >= 0 {
+        // Zero months lands on `self`, which never passes `other`.
+        let mut day = loop {
+            match landing(months) {
+                Some(day) => break day,
+                None => months -= sign,
+            }
+        };
+        while let Some(next) = landing(months + sign) {
             months += sign;
+            day = next;
         }
-        (months, other.day - advance(months))
+        (months, other.day - day)
     }
 
     pub fn date(self) -> (i32, u8, u8) {

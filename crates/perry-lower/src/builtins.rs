@@ -235,7 +235,7 @@ impl<'s> FunctionBuilder<'s> {
                         self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
                     }
                     Kind::Regex => {
-                        if method == "replaceAll" && !Self::regex_has_global(ctx, search_val) {
+                        if method == "replaceAll" && !Self::regex_global(ctx, search_val)? {
                             bail!(
                                 "String.prototype.replaceAll called with a non-global RegExp argument"
                             );
@@ -251,7 +251,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Regex, "test") => {
                 ensure!(
-                    !Self::regex_has_global(ctx, receiver),
+                    !Self::regex_global(ctx, receiver)?,
                     "Regex search supports only the u and s flags"
                 );
                 let [text] = args else {
@@ -280,7 +280,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
                 ensure!(
-                    !Self::regex_has_global(ctx, regex),
+                    !Self::regex_global(ctx, regex)?,
                     "Regex search supports only the u and s flags"
                 );
                 self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
@@ -489,23 +489,45 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
-    pub(super) fn regex_has_global(ctx: &Context, regex: Value) -> bool {
-        let Some(op) = regex.defining_op() else {
-            return false;
-        };
+    /// Whether `regex` has the `g` flag. Global and non-global regexes behave differently for
+    /// every caller, so a regex whose flags are not statically one or the other is rejected.
+    fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
+        Self::static_regex_global(ctx, regex, &mut Vec::new()).context(
+            "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag",
+        )
+    }
+
+    /// The `g` flag shared by every literal `regex` can hold, or `None`. A local qualifies only
+    /// while its slot is just loaded and stored to; `seen` holds the slots being resolved, so a
+    /// self-assignment is rejected instead of recursing forever.
+    fn static_regex_global(ctx: &Context, regex: Value, seen: &mut Vec<Value>) -> Option<bool> {
+        let op = regex.defining_op()?;
         if let Some(const_op) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
-            return const_op.flags(ctx).contains('g');
+            return Some(const_op.flags(ctx).contains('g'));
         }
-        if Operation::get_op::<perry_mir::LoadOp>(op, ctx).is_some() {
-            let slot = op.deref(ctx).get_operand(0);
-            return slot.uses(ctx).iter().any(|u| {
-                let user = u.user_op();
-                Operation::get_op::<perry_mir::StoreOp>(user, ctx).is_some()
-                    && user.deref(ctx).get_operand(0) == slot
-                    && Self::regex_has_global(ctx, user.deref(ctx).get_operand(1))
-            });
+        Operation::get_op::<perry_mir::LoadOp>(op, ctx)?;
+        let slot = op.deref(ctx).get_operand(0);
+        if seen.contains(&slot) {
+            return None;
         }
-        false
+        seen.push(slot);
+        let mut global = None;
+        for user in slot.uses(ctx).iter().map(|u| u.user_op()) {
+            if Operation::get_op::<perry_mir::LoadOp>(user, ctx).is_some() {
+                continue;
+            }
+            Operation::get_op::<perry_mir::StoreOp>(user, ctx)?;
+            let user = user.deref(ctx);
+            if user.get_operand(0) != slot {
+                return None;
+            }
+            let stored = Self::static_regex_global(ctx, user.get_operand(1), seen)?;
+            if global.is_some_and(|global| global != stored) {
+                return None;
+            }
+            global = Some(stored);
+        }
+        global
     }
 
     /// `JSON.stringify(value)`.

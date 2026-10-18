@@ -2,7 +2,7 @@
 //!
 //! Allocations carry a [Tier]; field reads and writes are typed against the record's shape.
 //! Escape analysis, SROA and tier classification (P3.3, P3.4, P3.7) rewrite these ops.
-use crate::{attrs::Tier, types::RecordType};
+use crate::{NewOp, attrs::Tier, types::RecordType};
 use pliron::{
     builtin::{
         attributes::StringAttr,
@@ -10,10 +10,8 @@ use pliron::{
     },
     common_traits::Verify,
     context::Context,
-    derive::{op_interface_impl, pliron_op},
+    derive::pliron_op,
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -62,14 +60,7 @@ pub struct AllocOp;
 impl AllocOp {
     pub fn new(ctx: &mut Context, record: TypedHandle<RecordType>, fields: Vec<Value>) -> Self {
         let op = AllocOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![record.into()],
-                fields,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![record.into()], fields),
         };
         op.set_attr_perry_tier(ctx, Tier::Unassigned);
         op
@@ -119,12 +110,7 @@ impl Verify for AllocOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for AllocOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; AllocOp, FieldGetOp, FieldPresentOp);
 
 /// The record type of `reference` and the type of its `field`, or a verification error.
 fn field_type(
@@ -159,14 +145,7 @@ impl FieldGetOp {
     pub fn new(ctx: &mut Context, reference: Value, field: String) -> Result<Self> {
         let ty = field_type(ctx, reference, &field, "perry.field_get")?;
         let op = FieldGetOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![reference],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![reference]),
         };
         op.set_attr_perry_get_field(ctx, StringAttr::new(field));
         Ok(op)
@@ -198,13 +177,6 @@ impl Verify for FieldGetOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for FieldGetOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Test whether one field of a record is present (not omitted).
 #[pliron_op(
     name = "perry.field_present",
@@ -224,14 +196,7 @@ impl FieldPresentOp {
         )
         .into();
         let op = FieldPresentOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![bool_ty],
-                vec![reference],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![bool_ty], vec![reference]),
         };
         op.set_attr_perry_present_field(ctx, StringAttr::new(field));
         Ok(op)
@@ -263,13 +228,6 @@ impl Verify for FieldPresentOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for FieldPresentOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Write one field of a record.
 #[pliron_op(
     name = "perry.field_set",
@@ -282,14 +240,7 @@ pub struct FieldSetOp;
 impl FieldSetOp {
     pub fn new(ctx: &mut Context, reference: Value, field: String, value: Value) -> Self {
         let op = FieldSetOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![reference, value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![reference, value]),
         };
         op.set_attr_perry_set_field(ctx, StringAttr::new(field));
         op

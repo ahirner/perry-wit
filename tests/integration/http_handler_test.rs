@@ -6,38 +6,12 @@ use http_body_util::{BodyExt, Full};
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
     AsContextMut, Store,
-    component::{Accessor, Component, Linker, ResourceTable},
+    component::{Accessor, Component},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p3::{Request, bindings::Service, bindings::http::types::ErrorCode};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 use crate::engine::async_engine;
-
-struct Host {
-    ctx: WasiCtx,
-    http: WasiHttpCtx,
-    table: ResourceTable,
-}
-
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: Default::default(),
-        }
-    }
-}
+use crate::wasi_host::{self, Host};
 
 const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
@@ -115,18 +89,9 @@ async fn handlers_serve_exchanges_and_report_exceptions() -> Result<()> {
     let compiled = compile_for_world(SOURCE, "handler.ts", &resolve, world, true)?;
     let engine = async_engine()?;
     let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-        },
-    );
-    let service = Service::instantiate_async(&mut store, &component, &linker).await?;
+    let mut store = wasi_host::store(&engine, Host::default());
+    let service =
+        Service::instantiate_async(&mut store, &component, &wasi_host::linker(&engine)?).await?;
 
     // A large body, request headers seen in order, and the request's parts.
     let large: Vec<u8> = (0..1_048_576u32).map(|i| (i * 7) as u8).collect();

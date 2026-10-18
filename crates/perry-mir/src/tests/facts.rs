@@ -1,9 +1,14 @@
 use super::*;
 
+/// The returned value of a single-return function.
+fn returned(ctx: &Context, function: &FuncOp, index: usize) -> Value {
+    first::<ReturnOp>(ctx, function)
+        .deref(ctx)
+        .get_operand(index)
+}
+
 #[test]
 fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
-    use crate::facts::ProgramFacts;
-    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
     let mut visits = Vec::new();
     for calls in [32, 128] {
         let ctx = &mut Context::new();
@@ -20,7 +25,6 @@ fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
         "#,
         );
         for index in 0..calls {
-            use std::fmt::Write;
             writeln!(
                 text,
                 "value{index} = perry.call count (cell, text) : builtin.integer i32;"
@@ -30,17 +34,8 @@ fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
         text.push_str(&format!("perry.return value{} }} }}", calls - 1));
         let root = parse(ctx, &text);
         verify_operation(root, ctx)?;
-        let run = crate::aggregates::functions(root, ctx)
-            .into_iter()
-            .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
-            .unwrap();
-        let returned = run
-            .get_entry_block(ctx)
-            .deref(ctx)
-            .get_terminator(ctx)
-            .unwrap()
-            .deref(ctx)
-            .get_operand(0);
+        let run = function(ctx, root, "run");
+        let returned = returned(ctx, &run, 0);
         let mut analyses = AnalysisManager::default();
         let identity = {
             let facts = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
@@ -60,8 +55,6 @@ fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
 
 #[test]
 fn aggregate_facts_follow_calls_elements_and_aliased_writes() -> Result<()> {
-    use crate::facts::ProgramFacts;
-    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
     let fixture = r#"
 builtin.module @aggregate_facts {
   ^module():
@@ -133,17 +126,10 @@ builtin.module @aggregate_facts {
             }
             let module = parse(ctx, &input);
             verify_operation(module, ctx)?;
-            let run = crate::aggregates::functions(module, ctx)
-                .into_iter()
-                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
-                .unwrap();
-            crate::calls::set_exported(ctx, &run);
-            let mut analyses = AnalysisManager::default();
-            let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
-            let returned = crate::aggregates::operations(ctx, &run)
-                .into_iter()
-                .find(|&op| Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some())
-                .unwrap();
+            let run = function(ctx, module, "run");
+            set_exported(ctx, &run);
+            let facts = facts(ctx, module)?;
+            let returned = first::<ReturnOp>(ctx, &run);
             for (value, expected) in returned.deref(ctx).operands().zip(expected) {
                 assert_eq!(facts.is_count(ctx, &run, value), expected, "{mutation}");
             }
@@ -154,11 +140,6 @@ builtin.module @aggregate_facts {
 
 #[test]
 fn array_lengths_follow_aliases_calls_and_growth() -> Result<()> {
-    use crate::facts::ProgramFacts;
-    use pliron::{
-        builtin::op_interfaces::SymbolOpInterface,
-        pass::{Analysis, AnalysisManager},
-    };
     let fixture = r#"
 builtin.module @lengths { ^module():
   builtin.func @identity: builtin.function <(perry.array <builtin.fp64>, builtin.integer i1) -> (perry.array <builtin.fp64>)> {
@@ -209,34 +190,23 @@ builtin.module @lengths { ^module():
             &fixture.replace("MUTATE", if mutation == "extend" { "" } else { mutation }),
         );
         if mutation == "extend" {
-            use pliron::op::Op;
-            let write = crate::aggregates::functions(module, ctx)
-                .into_iter()
-                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("write"))
-                .unwrap();
-            let entry = write.get_entry_block(ctx);
+            let entry = function(ctx, module, "write").get_entry_block(ctx);
             let alias = entry.deref(ctx).get_argument(0);
             let end = entry.deref(ctx).get_terminator(ctx).unwrap();
-            crate::collections::ArrayExtendOp::new(ctx, alias, alias)
+            ArrayExtendOp::new(ctx, alias, alias)
                 .get_operation()
                 .insert_before(ctx, end);
         }
         verify_operation(module, ctx)?;
-        let run = crate::aggregates::functions(module, ctx)
-            .into_iter()
-            .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
-            .unwrap();
-        crate::calls::set_exported(ctx, &run);
-        let read = crate::aggregates::operations(ctx, &run)
-            .into_iter()
-            .find(|&op| Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some())
-            .unwrap();
+        let run = function(ctx, module, "run");
+        set_exported(ctx, &run);
+        let read = first::<ArrayGetOp>(ctx, &run);
         let array = read.deref(ctx).get_operand(0);
         let index = read.deref(ctx).get_operand(1);
         let mut analyses = AnalysisManager::default();
         {
             let cached = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
-            let fresh = ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())?;
+            let fresh = facts(ctx, module)?;
             for facts in [&*cached, &fresh] {
                 assert_eq!(
                     facts.array_length(ctx, &run, array),
@@ -250,14 +220,14 @@ builtin.module @lengths { ^module():
                 );
             }
         }
-        crate::pipeline::canonicalize(module, ctx)?;
+        canonicalize(module, ctx)?;
         let operations = crate::aggregates::operations(ctx, &run);
         let checked = operations
             .iter()
-            .any(|&op| Operation::get_op::<crate::collections::ArrayGetOp>(op, ctx).is_some());
+            .any(|&op| Operation::get_op::<ArrayGetOp>(op, ctx).is_some());
         let length = operations
             .iter()
-            .any(|&op| Operation::get_op::<crate::collections::ArrayLenOp>(op, ctx).is_some());
+            .any(|&op| Operation::get_op::<ArrayLenOp>(op, ctx).is_some());
         assert!(!checked, "{mutation}");
         // An unused native view is eliminated before the fresh facts query.
         assert_eq!(
@@ -271,11 +241,6 @@ builtin.module @lengths { ^module():
 
 #[test]
 fn promise_outcomes_follow_aggregate_aliases_and_recursive_calls() -> Result<()> {
-    use crate::{effects::Failure, facts::ProgramFacts};
-    use pliron::{
-        builtin::op_interfaces::SymbolOpInterface,
-        pass::{Analysis, AnalysisManager},
-    };
     let fixture = r#"
 builtin.module @outcomes { ^module():
   builtin.func @identity: builtin.function <(perry.promise <builtin.fp64>, builtin.integer i1) -> (perry.promise <builtin.fp64>)> {
@@ -330,38 +295,27 @@ builtin.module @outcomes { ^module():
                 },
             );
             let root = parse(ctx, &text);
-            let run = crate::aggregates::functions(root, ctx)
-                .into_iter()
-                .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
-                .unwrap();
-            crate::calls::set_async(ctx, &run);
-            crate::calls::set_exported(ctx, &run);
+            let run = function(ctx, root, "run");
+            set_async(ctx, &run);
+            set_exported(ctx, &run);
             verify_operation(root, ctx)?;
-            let pending = crate::aggregates::operations(ctx, &run)
-                .into_iter()
-                .find(|&op| Operation::get_op::<crate::calls::AwaitOp>(op, ctx).is_some())
-                .unwrap()
-                .deref(ctx)
-                .get_operand(0);
+            let pending = first::<AwaitOp>(ctx, &run).deref(ctx).get_operand(0);
             let mut analyses = AnalysisManager::default();
             let cached = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
-            let fresh = ProgramFacts::compute(root, ctx, &mut AnalysisManager::default())?;
+            let fresh = facts(ctx, root)?;
+            let expected = if rejects {
+                Failure::Rejects { escapes: !handled }
+            } else {
+                Failure::None
+            };
             for facts in [&*cached, &fresh] {
                 assert_eq!(facts.may_reject(ctx, &run, pending), rejects, "{mutation}");
-                let expected = if rejects {
-                    Failure::Rejects { escapes: !handled }
-                } else {
-                    Failure::None
-                };
-                assert_eq!(
-                    facts
-                        .effects(&pliron::ident!("run"))
-                        .unwrap()
-                        .effects
-                        .failure,
-                    expected,
-                    "{mutation}"
-                );
+                let failure = facts
+                    .effects(&pliron::ident!("run"))
+                    .unwrap()
+                    .effects
+                    .failure;
+                assert_eq!(failure, expected, "{mutation}");
             }
         }
     }
@@ -370,11 +324,6 @@ builtin.module @outcomes { ^module():
 
 #[test]
 fn combinator_outcomes_join_inputs_without_mutating_them() -> Result<()> {
-    use crate::{
-        facts::ProgramFacts,
-        intrinsics::{Combinator, PromiseCombinatorOp},
-    };
-    use pliron::{builtin::op_interfaces::OneResultInterface, op::Op, pass::AnalysisManager};
     for kind in [Combinator::All, Combinator::Race, Combinator::AllSettled] {
         for rejected in [false, true] {
             let ctx = &mut Context::new();
@@ -390,24 +339,18 @@ fn combinator_outcomes_join_inputs_without_mutating_them() -> Result<()> {
                 if rejected { "rejected" } else { "resolved" }
             );
             let root = parse(ctx, &text);
-            let run = crate::aggregates::functions(root, ctx)[0];
-            crate::calls::set_async(ctx, &run);
-            crate::calls::set_exported(ctx, &run);
-            let ops = crate::aggregates::operations(ctx, &run);
-            let array = ops
-                .iter()
-                .find_map(|&op| Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx))
-                .unwrap()
-                .get_result(ctx);
-            let end = *ops.last().unwrap();
+            let run = function(ctx, root, "run");
+            set_async(ctx, &run);
+            set_exported(ctx, &run);
+            let array = first::<ArrayNewOp>(ctx, &run).deref(ctx).get_result(0);
+            let end = first::<ReturnOp>(ctx, &run);
             let group = PromiseCombinatorOp::new(ctx, kind, array).unwrap();
             group.get_operation().insert_before(ctx, end);
             let pending = group.get_result(ctx);
-            let wait = crate::calls::AwaitOp::new(ctx, pending)?;
+            let wait = AwaitOp::new(ctx, pending)?;
             wait.get_operation().insert_before(ctx, end);
             verify_operation(root, ctx)?;
-            let mut analyses = AnalysisManager::default();
-            let facts = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+            let facts = facts(ctx, root)?;
             assert_eq!(
                 facts.may_reject(ctx, &run, pending),
                 rejected && kind != Combinator::AllSettled
@@ -420,9 +363,6 @@ fn combinator_outcomes_join_inputs_without_mutating_them() -> Result<()> {
 
 #[test]
 fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
-    use crate::facts::ProgramFacts;
-    use pliron::{builtin::op_interfaces::SymbolOpInterface, pass::AnalysisManager};
-    use std::fmt::Write;
     let mut visits = Vec::new();
     for size in [8, 32, 128, 512] {
         let ctx = &mut Context::new();
@@ -442,28 +382,14 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
         );
         let module = parse(ctx, &text);
         verify_operation(module, ctx)?;
-        let run = crate::aggregates::functions(module, ctx)
-            .into_iter()
-            .next()
-            .unwrap();
-        assert_eq!(run.get_symbol_name(ctx), pliron::ident!("run"));
-        let mut analyses = AnalysisManager::default();
-        let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
-        let array = crate::aggregates::operations(ctx, &run)
-            .into_iter()
-            .find(|&op| Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx).is_some())
-            .unwrap()
-            .deref(ctx)
-            .get_result(0);
+        let run = function(ctx, module, "run");
+        let facts = facts(ctx, module)?;
+        let array = first::<ArrayNewOp>(ctx, &run).deref(ctx).get_result(0);
         assert_eq!(facts.array_length(ctx, &run, array), Some((1, u32::MAX)));
-        let returned = run
-            .get_entry_block(ctx)
-            .deref(ctx)
-            .get_terminator(ctx)
-            .unwrap()
-            .deref(ctx)
-            .get_operand(0);
-        assert_eq!(facts.is_count(ctx, &run, returned), size <= 32);
+        assert_eq!(
+            facts.is_count(ctx, &run, returned(ctx, &run, 0)),
+            size <= 32
+        );
         assert_eq!(facts.summarized_heap_sets > 0, size > 32);
         visits.push(facts.constraint_visits);
     }
@@ -473,17 +399,10 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
     Ok(())
 }
 
+/// Precise per-arity context accounting; integration tests only check that summarized
+/// compilation stays sound.
 #[test]
 fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()> {
-    use crate::facts::{ProgramFacts, with_fact_limits};
-    use pliron::{
-        builtin::{
-            op_interfaces::SymbolOpInterface,
-            types::{FP64Type, IntegerType, Signedness},
-        },
-        pass::AnalysisManager,
-    };
-    use std::fmt::Write;
     // Every u8/f64 mix of two parameters: 4 distinct contexts, twice the precise budget of 2.
     let arity = 2;
     let ctx = &mut Context::new();
@@ -510,46 +429,88 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
     text.push('}');
     let module = parse(ctx, &text);
     verify_operation(module, ctx)?;
-    for func in crate::aggregates::functions(module, ctx) {
-        let sym = func.get_symbol_name(ctx);
-        if let Some(rest) = sym.as_ref().strip_prefix('e')
-            && let Ok(mask) = rest.parse::<usize>()
-        {
-            crate::calls::set_exported(ctx, &func);
-            let args = (0..arity)
-                .map(|bit| {
-                    if (mask & (1 << bit)) != 0 {
-                        IntegerType::get(ctx, 8, Signedness::Unsigned).into()
-                    } else {
-                        FP64Type::get(ctx).into()
-                    }
-                })
-                .collect();
-            let results = vec![FP64Type::get(ctx).into()];
-            crate::facts::constrain_signature(ctx, &func, args, results);
-        }
+    for mask in 0..combos {
+        let entry = function(ctx, module, &format!("e{mask}"));
+        set_exported(ctx, &entry);
+        let args = (0..arity)
+            .map(|bit| {
+                if (mask & (1 << bit)) != 0 {
+                    IntegerType::get(ctx, 8, Signedness::Unsigned).into()
+                } else {
+                    FP64Type::get(ctx).into()
+                }
+            })
+            .collect();
+        let results = vec![FP64Type::get(ctx).into()];
+        constrain_signature(ctx, &entry, args, results);
     }
-    let mut analyses = AnalysisManager::default();
-    let facts = with_fact_limits(2, 2, || analyses.get_analysis::<ProgramFacts>(module, ctx))?;
+    let facts = with_fact_limits(2, 2, || facts(ctx, module))?;
     // One generic context, 2 precise ones and one shared summary.
     assert_eq!(facts.context_counts(&pliron::ident!("helper")), (1, 3));
     assert_eq!(facts.summarized_contexts, combos - 2);
     Ok(())
 }
 
+/// A recursive helper returning `(status, x / 2, x + x)` to a `u8 -> (bool, f64, u32)` export:
+/// each call result takes its own domain instead of one shared representation.
+#[test]
+fn specialization_keeps_each_call_result_independent() -> Result<()> {
+    let ctx = &mut Context::new();
+    let root = parse(
+        ctx,
+        r#"builtin.module @multiple_results { ^module():
+            builtin.func @helper: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
+              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
+                perry.cond_br if recurse ^recursive() else ^base()
+              ^recursive():
+                no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+                status, fraction, sum = perry.call helper (x, no) : builtin.integer i1, builtin.fp64, builtin.fp64;
+                perry.br ^done(status, fraction, sum)
+              ^base():
+                yes = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1;
+                two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+                half = perry.binary Div x, two : builtin.fp64;
+                doubled = perry.binary Add x, x : builtin.fp64;
+                perry.br ^done(yes, half, doubled)
+              ^done(ok: builtin.integer i1, divided: builtin.fp64, added: builtin.fp64):
+                perry.return ok, divided, added
+            };
+            builtin.func @run: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
+              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
+                status, fraction, sum = perry.call helper (x, recurse) : builtin.integer i1, builtin.fp64, builtin.fp64;
+                perry.return status, fraction, sum
+            }
+        }"#,
+    );
+    let run = function(ctx, root, "run");
+    let boolean: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
+    let byte = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+    let wide: TypeHandle = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
+    let float: TypeHandle = FP64Type::get(ctx).into();
+    constrain_signature(ctx, &run, vec![byte, boolean], vec![boolean, float, wide]);
+    set_exported(ctx, &run);
+    canonicalize(root, ctx)?;
+    let results = |ctx: &Context, name: &str| -> Result<Vec<TypeHandle>> {
+        let f = function(ctx, root, name);
+        Ok(
+            TypedHandle::<FunctionType>::from_handle(f.get_type(ctx), ctx)?
+                .deref(ctx)
+                .res_types(),
+        )
+    };
+    let implementation = specialized_implementation(ctx, &run);
+    assert_ne!(implementation, pliron::ident!("run"));
+    assert_eq!(
+        results(ctx, implementation.as_ref())?,
+        [boolean, float, wide]
+    );
+    // The unconstrained export keeps number semantics for every result.
+    assert_eq!(results(ctx, "run")?, [boolean, float, float]);
+    Ok(())
+}
+
 #[test]
 fn lossless_representation_verifier_rejects_precision_degradation() -> Result<()> {
-    use crate::facts::{ProgramFacts, Specialize, verify_lossless_module};
-    use pliron::{
-        builtin::{
-            attributes::TypeAttr,
-            op_interfaces::SymbolOpInterface,
-            type_interfaces::FunctionTypeInterface,
-            types::{FP64Type, FunctionType},
-        },
-        pass::{AnalysisManager, Pass},
-        r#type::{TypeHandle, Typed, TypedHandle},
-    };
     let ctx = &mut Context::new();
     let text = r#"
 builtin.module @lossless_check { ^module():
@@ -566,8 +527,8 @@ builtin.module @lossless_check { ^module():
 }
 "#;
     let module = parse(ctx, text);
-    let run = crate::aggregates::functions(module, ctx)[0];
-    crate::calls::set_exported(ctx, &run);
+    let run = function(ctx, module, "run");
+    set_exported(ctx, &run);
     let orig_ret_ty = TypedHandle::<FunctionType>::from_handle(run.get_type(ctx), ctx)?
         .deref(ctx)
         .res_types()[0];
@@ -579,37 +540,22 @@ builtin.module @lossless_check { ^module():
     let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
     verify_lossless_module(module, ctx, &facts)?;
 
-    let spec_fn = crate::aggregates::functions(module, ctx)
-        .into_iter()
-        .find(|f| f.get_symbol_name(ctx) == pliron::ident!("run"))
-        .unwrap();
+    let spec_fn = function(ctx, module, "run");
     let fp64: TypeHandle = FP64Type::get(ctx).into();
 
-    // 1. Degrading a ParseInt SSA result back to f64 must fail lossless verification.
-    let parse_res = crate::aggregates::operations(ctx, &spec_fn)
-        .into_iter()
-        .find(|&op| Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some())
-        .unwrap()
-        .deref(ctx)
-        .get_result(0);
-    let saved_parse_ty = parse_res.get_type(ctx);
-    parse_res.set_type(ctx, fp64);
-    assert!(verify_lossless_module(module, ctx, &facts).is_err());
-    parse_res.set_type(ctx, saved_parse_ty);
-    verify_lossless_module(module, ctx, &facts)?;
-
-    // 2. Degrading a FieldGetOp of a Fact::Numeric field back to f64 must fail verification.
-    let fg_res = crate::aggregates::operations(ctx, &spec_fn)
-        .into_iter()
-        .find(|&op| Operation::get_op::<crate::heap::FieldGetOp>(op, ctx).is_some())
-        .unwrap()
-        .deref(ctx)
-        .get_result(0);
-    let saved_fg_ty = fg_res.get_type(ctx);
-    fg_res.set_type(ctx, fp64);
-    assert!(verify_lossless_module(module, ctx, &facts).is_err());
-    fg_res.set_type(ctx, saved_fg_ty);
-    verify_lossless_module(module, ctx, &facts)?;
+    // 1. A ParseInt result and 2. a FieldGetOp of a Fact::Numeric field degraded back to f64
+    // must fail lossless verification.
+    for degraded in [
+        first::<IntrinsicOp>(ctx, &spec_fn),
+        first::<FieldGetOp>(ctx, &spec_fn),
+    ] {
+        let result = degraded.deref(ctx).get_result(0);
+        let saved = result.get_type(ctx);
+        result.set_type(ctx, fp64);
+        assert!(verify_lossless_module(module, ctx, &facts).is_err());
+        result.set_type(ctx, saved);
+        verify_lossless_module(module, ctx, &facts)?;
+    }
 
     // 3. Degrading the aggregate return layout back to the unspecialized f64-field record must fail.
     let arg_types = TypedHandle::<FunctionType>::from_handle(spec_fn.get_type(ctx), ctx)?

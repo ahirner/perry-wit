@@ -42,7 +42,7 @@ impl Constructors {
                 .get_mut(index)
                 .with_context(|| format!("no constructor was preserved as {:?}", alias.name))?;
             let HirType::Generic { type_args, .. } = alias.ty else {
-                continue;
+                bail!("the type arguments of a Map or Set constructor did not survive as generics");
             };
             match entry {
                 ConstructorTypes::Map(types) => {
@@ -125,7 +125,10 @@ pub(super) fn preserve(
             };
             let args = new.args.get_or_insert_default();
             if args.len() > 1 || args.iter().any(|arg| arg.spread.is_some()) {
-                self.error = Some(anyhow!("{} takes at most one iterable argument", ident.sym));
+                // Keep the first error; later ones may be its consequences.
+                self.error.get_or_insert_with(|| {
+                    anyhow!("{} takes at most one iterable argument", ident.sym)
+                });
                 return;
             }
             let token = format!("{CONSTRUCTOR}{}", self.registry.0.len());

@@ -86,7 +86,9 @@ impl IrPotential {
     }
 }
 
-fn run_to_fixpoint(
+/// Run `passes` until a round changes nothing; returns the number of rounds. Test and debug
+/// builds assert that every changing round strictly lowers the [IrPotential].
+pub(crate) fn run_to_fixpoint(
     passes: &mut Passes,
     root: Ptr<Operation>,
     ctx: &mut Context,
@@ -267,69 +269,5 @@ impl Pass for Transform {
         let mut result = PassResult::default();
         result.ir_changed = (self.1)(root, ctx)?;
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pliron::{irfmt::parsers::spaced, parsable::parse_from_str};
-
-    fn parse(ctx: &mut Context, src: &str) -> Ptr<Operation> {
-        parse_from_str(spaced(Operation::top_level_parser()), ctx, src).unwrap()
-    }
-
-    #[test]
-    fn cleanup_rounds_strictly_decrease_ir_potential() -> Result<()> {
-        let ctx = &mut Context::new();
-        let root = parse(
-            ctx,
-            r#"
-            builtin.module @cascade {
-              ^module():
-                builtin.func @run: builtin.function <() -> (builtin.fp64)> {
-                  ^entry():
-                    two = builtin.constant <builtin.double 2.0> : builtin.fp64;
-                    four = builtin.constant <builtin.double 4.0> : builtin.fp64;
-                    p = perry.alloc Unassigned (two, four) : perry.record <Pair { a: builtin.fp64, b: builtin.fp64 }>;
-                    a = perry.field_get p."a" : builtin.fp64;
-                    b = perry.field_get p."b" : builtin.fp64;
-                    take = perry.compare Lt a, b : builtin.integer i1;
-                    perry.cond_br if take ^yes(b) else ^no(a)
-                  ^yes(ans: builtin.fp64):
-                    perry.return ans
-                  ^no(fallback: builtin.fp64):
-                    perry.return fallback
-                }
-            }
-            "#,
-        );
-        let before = IrPotential::measure(root, ctx);
-        canonicalize(root, ctx)?;
-        let after = IrPotential::measure(root, ctx);
-        assert!(after < before, "{before:?} -> {after:?}");
-        assert!(optimization_statistics(root, ctx).cleanup_rounds >= 3);
-        Ok(())
-    }
-
-    #[test]
-    #[should_panic(expected = "non-monotonic cleanup round")]
-    fn fixpoint_rejects_non_monotonic_pass() {
-        let ctx = &mut Context::new();
-        let root = parse(
-            ctx,
-            r#"
-            builtin.module @oscillate {
-              ^module():
-                builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
-                  ^entry(x: builtin.fp64):
-                    perry.return x
-                }
-            }
-            "#,
-        );
-        let mut passes = Passes::default();
-        passes.add_pass(Transform("bogus-change", |_, _| Ok(IRStatus::Changed)));
-        let _ = run_to_fixpoint(&mut passes, root, ctx, &mut AnalysisManager::default());
     }
 }

@@ -380,13 +380,7 @@ impl FunctionLowering<'_, '_> {
                 let item = b.load(ctx, kind, slot, 0);
                 let key = b.load(ctx, k_kind, item, record::HEADER);
                 let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
-                let present = match optional_inner(ctx, v_ty) {
-                    Some(_) => {
-                        let undefined = b.absence_test_value(ctx, val, v_ty, false)?;
-                        Some(b.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
-                    }
-                    None => None,
-                };
+                let present = b.json_member_present(ctx, val, v_ty)?;
                 let member = b.new_block(ctx, vec![]);
                 let next = b.new_block(ctx, vec![]);
                 match present {
@@ -492,13 +486,7 @@ impl FunctionLowering<'_, '_> {
             let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
             offset += record_slot(ctx, field_ty);
             let key = self.state.data.string(&json_key(key));
-            let present = match optional_inner(ctx, field_ty) {
-                Some(_) => {
-                    let undefined = self.absence_test_value(ctx, slot, field_ty, false)?;
-                    Some(self.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
-                }
-                None => None,
-            };
+            let present = self.json_member_present(ctx, slot, field_ty)?;
             let member = self.new_block(ctx, vec![]);
             let next = self.new_block(ctx, vec![]);
             match present {
@@ -513,6 +501,25 @@ impl FunctionLowering<'_, '_> {
             self.block = next;
         }
         Ok(())
+    }
+
+    /// Whether an object member of type `ty` is written: `undefined` members are omitted.
+    /// `None` when the type cannot hold `undefined`.
+    fn json_member_present(
+        &mut self,
+        ctx: &mut Context,
+        value: Carriers<Value>,
+        ty: TypeHandle,
+    ) -> Result<Option<Value>> {
+        Ok(if optional_inner(ctx, ty).is_some() {
+            let undefined = self.absence_test_value(ctx, value, ty, false)?;
+            Some(self.num(ctx, NumOpcode::I32Eqz, vec![undefined]))
+        } else if ty.deref(ctx).is::<JsonType>() {
+            // JSON `undefined` is the null address.
+            Some(value.scalar()?)
+        } else {
+            None
+        })
     }
 
     pub(super) fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {

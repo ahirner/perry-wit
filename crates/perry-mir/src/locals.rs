@@ -3,7 +3,7 @@
 //! The HIR→MIR builder (P2.2) emits one `perry.local` per mutable binding and plain loads and
 //! stores, so it never constructs SSA joins, loop-carried block parameters or await
 //! continuations itself; that hand-rolled machinery in the legacy `ssa.rs` goes away.
-use crate::types::SlotType;
+use crate::{NewOp, types::SlotType};
 use pliron::{
     builtin::op_interfaces::{
         NOpdsInterface, NResultsInterface, OneOpdInterface, OneResultInterface,
@@ -13,12 +13,8 @@ use pliron::{
     derive::{op_interface_impl, pliron_op},
     irbuild::{inserter::Inserter, rewriter::Rewriter},
     op::Op,
-    operation::Operation,
-    opts::{
-        dce::SideEffects,
-        mem2reg::{
-            AllocInfo, PromotableAllocationInterface, PromotableOpInterface, PromotableOpKind,
-        },
+    opts::mem2reg::{
+        AllocInfo, PromotableAllocationInterface, PromotableOpInterface, PromotableOpKind,
     },
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
@@ -56,24 +52,12 @@ pub struct UndefOp;
 impl UndefOp {
     pub fn new(ctx: &mut Context, ty: TypeHandle) -> Self {
         UndefOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         }
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for UndefOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; UndefOp, LoadOp);
 
 /// Storage for one mutable local binding.
 #[pliron_op(
@@ -87,14 +71,7 @@ impl LocalOp {
     pub fn new(ctx: &mut Context, value: TypeHandle) -> Self {
         let slot = SlotType::get(ctx, value).into();
         LocalOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![slot],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![slot], vec![]),
         }
     }
 }
@@ -151,14 +128,7 @@ impl LoadOp {
     pub fn new(ctx: &mut Context, slot: Value) -> Result<Self> {
         let ty = slot_value(ctx, slot, "perry.load")?;
         Ok(LoadOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![slot],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![slot]),
         })
     }
 
@@ -173,13 +143,6 @@ impl Verify for LoadOp {
             verify_err!(self.loc(ctx), LocalErr::Type("perry.load"))?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for LoadOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
     }
 }
 
@@ -221,14 +184,7 @@ pub struct StoreOp;
 impl StoreOp {
     pub fn new(ctx: &mut Context, slot: Value, value: Value) -> Self {
         StoreOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![slot, value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![slot, value]),
         }
     }
 

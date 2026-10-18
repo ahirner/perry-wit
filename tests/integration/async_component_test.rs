@@ -4,12 +4,12 @@
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Engine, Store,
-    component::{Component, ComponentType, Instance, Lift, Linker, ResourceTable},
+    Store,
+    component::{ComponentType, Instance, Lift},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::engine::async_engine;
+use crate::wasi_host::{self, Host};
 
 const WIT: &str = r#"
 package test:timers;
@@ -188,37 +188,6 @@ struct Observation {
     trace: Vec<f64>,
 }
 
-struct Host {
-    ctx: WasiCtx,
-    table: ResourceTable,
-    peak: usize,
-}
-
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl wasmtime::ResourceLimiter for Host {
-    fn memory_growing(
-        &mut self,
-        _: usize,
-        desired: usize,
-        _: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.peak = self.peak.max(desired);
-        Ok(true)
-    }
-
-    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        Ok(true)
-    }
-}
-
 fn compile(check_memory: bool) -> Result<Vec<u8>> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), WIT)?;
@@ -237,68 +206,9 @@ fn compile(check_memory: bool) -> Result<Vec<u8>> {
     Ok(compiled.component.unwrap().stripped)
 }
 
-fn store(engine: &Engine) -> Store<Host> {
-    let mut store = Store::new(
-        engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            table: ResourceTable::new(),
-            peak: 0,
-        },
-    );
-    store.limiter(|host| host);
-    store
-}
-
 /// The timers world instantiated in a fresh store, optionally with memory checks.
 async fn instantiate(check_memory: bool) -> Result<(Store<Host>, Instance)> {
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compile(check_memory)?)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    Ok((store, instance))
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn exact_integers_survive_timer_payloads_and_host_suspension() -> Result<()> {
-    use perry_wit::api::{Program, Wit};
-    let source = br#"
-import { setTimeout } from 'node:timers/promises';
-async function add(a:bigint,b:bigint):Promise<bigint> {
-  const saved = await setTimeout(1,a);
-  await setTimeout(1);
-  return saved+b;
-}
-export async function run(a:bigint,b:bigint):Promise<bigint> { return await add(a,b); }
-"#;
-    let wit = b"package test:integer-suspension; world test { include wasi:cli/imports@0.3.0; export run: async func(a:u64,b:u64)->u64; }";
-    let compiled = perry_wit::api::compile(
-        &Program {
-            source: source.as_slice().into(),
-            ..Default::default()
-        },
-        &Wit {
-            application: wit.as_slice().into(),
-            dependencies: vec![],
-        },
-        &Default::default(),
-    )?;
-    let engine = async_engine()?;
-    let component = Component::new(&engine, &compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(u64, u64), (u64,)>(&mut store, "run")?;
-    for (a, b) in [(u64::MAX, 1), (9_007_199_254_740_993, 2)] {
-        assert_eq!(
-            run.call_async(&mut store, (a, b)).await?,
-            (a.wrapping_add(b),)
-        );
-    }
-    Ok(())
+    wasi_host::instantiate(&async_engine()?, &compile(check_memory)?, Host::default()).await
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -61,25 +61,8 @@ impl LibraryId {
             | "str_join_total_len"
             | "str_join" => Self::Text,
             entry if entry.starts_with("json_") => Self::Json,
-            "time_date_iso"
-            | "time_date_parse"
-            | "time_date_part"
-            | "time_date_utc"
-            | "time_date_set"
-            | "time_instant_parse"
-            | "time_utc_parse"
-            | "time_instant_from_ms"
-            | "time_instant_ms"
-            | "time_instant_format"
-            | "time_plain_parse"
-            | "time_plain_date_parse"
-            | "time_plain_add_days"
-            | "time_plain_part"
-            | "time_plain_format"
-            | "time_plain_date_format"
-            | "time_plain_date_from_fields"
-            | "time_plain_date_until_days"
-            | "time_plain_date_compare" => Self::Time,
+            // The time helper exports every `time_` entry, so new ones cannot drift out of a list.
+            entry if entry.starts_with("time_") => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
     }

@@ -39,7 +39,9 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
             !wasm.has_start,
             "constant helper initialization must be resolved before instantiation"
         );
-        assert!(!wasm.function_names.contains(&"__wasm_apply_data_relocs"));
+        assert!(
+            !crate::world::function_names(&compiled.core)?.contains(&"__wasm_apply_data_relocs")
+        );
         assert!(wasm.exports.contains(&"memory"), "{source}");
         assert!(wasm.exports.contains(&"cabi_post_run"), "{source}");
         assert!(!wasm.exports.contains(&"cabi_realloc"), "{source}");
@@ -54,15 +56,11 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
 
 #[test]
 fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("unused.wit", "package test:unused; world test { import label: func() -> string; export run: func(a:f64)->f64; }")?;
-    let world = resolve.select_world(&[package], Some("test"))?;
-    let compiled = perry_wit::compile_for_world(
-        "export function run(a:number):number { return String(a).length; }",
+    let compiled = crate::world::compile(
+        "package test:unused; world test { import label: func() -> string; export run: func(a:f64)->f64; }",
+        "test",
         "unused.ts",
-        &resolve,
-        world,
-        true,
+        "export function run(a:number):number { return String(a).length; }",
     )?;
     assert!(
         !inspect_wasm(&compiled.core)?

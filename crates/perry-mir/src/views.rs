@@ -1,13 +1,14 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
-use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType};
+use crate::{
+    NewOp,
+    types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType},
+};
 use pliron::{
     builtin::op_interfaces::{OneOpdInterface, OneResultInterface},
     common_traits::Verify,
     context::Context,
-    derive::{op_interface_impl, pliron_op},
+    derive::pliron_op,
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
@@ -92,14 +93,7 @@ pub struct AggregateViewOp;
 impl AggregateViewOp {
     pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![target],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![target], vec![value]),
         }
     }
 }
@@ -121,9 +115,4 @@ impl Verify for AggregateViewOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for AggregateViewOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; AggregateViewOp);

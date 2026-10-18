@@ -242,12 +242,11 @@ impl Instance {
     }
 
     fn compile(wit: &str, source: &str) -> Result<Self> {
-        let mut resolve = wit_parser::Resolve::default();
-        let package = resolve.push_str("boundary.wit", wit)?;
-        let world = resolve.select_world(&[package], Some("boundary"))?;
-        let compiled = compile_for_world(source, "boundary.ts", &resolve, world, true)?;
         let engine = Engine::default();
-        let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+        let component = Component::new(
+            &engine,
+            crate::world::component(wit, "boundary", "boundary.ts", source)?,
+        )?;
         let mut store = Store::new(&engine, Peak::default());
         store.limiter(|peak| peak);
         let instance = Linker::new(&engine).instantiate(&mut store, &component)?;

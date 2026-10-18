@@ -577,6 +577,46 @@ export function run(n: number): number {{ let sum = 0; {calls} return sum; }}
     );
 }
 
+/// Projections through resolved generic shapes and in-bounds character loops cannot throw, so
+/// their exports carry no exception status result.
+#[test]
+fn proven_non_throwing_exports_have_no_status_result() {
+    for (export, source) in [
+        (
+            "run",
+            r#"
+interface Item { n:number }
+interface Pair<Item,Other=Item> { a:Item; b:Other }
+interface Page<T> {items:T[];next:string|null}
+interface Base<T> {value:T}
+interface Entry<T=string> extends Base<T> {}
+type Box<T> = {item:T};
+interface Link<T> {value:T;next:Link<T>|null}
+function size(page:Page<Entry>) {const items = page.items; const first = items[0]; return first.value.length;}
+function unbox(box:Box<number>):number {return box.item;}
+export function run():number {
+ const value:Pair<string,Item> = {a:'x',b:{n:17}};
+ const defaults:Pair<string> = {a:'a',b:'bc'};
+ const page:Page<Entry> = {items:[{value:'hello'}],next:null};
+ const link:Link<number> = {value:3,next:null};
+ return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
+}
+"#,
+        ),
+        (
+            "charLoop",
+            "export function charLoop(s: string): number { let count = 0; for (let i = 0; i < s.length; i++) { if (s[i] === '-') count++; } return count; }",
+        ),
+    ] {
+        let mut program = Program::new(source);
+        let function = program
+            .instance
+            .get_func(&mut program.store, export)
+            .expect("export");
+        assert_eq!(function.ty(&program.store).results().len(), 1, "{source}");
+    }
+}
+
 #[test]
 fn range_proofs_keep_optional_elements_and_invalid_joined_indices() {
     let mut program = Program::new(

@@ -49,14 +49,7 @@ impl PromiseCombinatorOp {
         };
         let result = PromiseType::get(ctx, settled).into();
         let op = PromiseCombinatorOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![promises],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![promises]),
         };
         op.set_attr_perry_combinator(ctx, combinator);
         Some(op)
@@ -85,7 +78,8 @@ impl Verify for PromiseCombinatorOp {
 #[pliron_op(
     name = "perry.promise_resolved",
     format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
+    verifier = "succ"
 )]
 pub struct PromiseResolvedOp;
 
@@ -94,14 +88,7 @@ impl PromiseResolvedOp {
         let ty = value.get_type(ctx);
         let result = crate::types::PromiseType::get(ctx, ty).into();
         PromiseResolvedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![value]),
         }
     }
 }
@@ -111,7 +98,8 @@ impl PromiseResolvedOp {
 #[pliron_op(
     name = "perry.promise_rejected",
     format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
+    verifier = "succ"
 )]
 pub struct PromiseRejectedOp;
 
@@ -119,27 +107,8 @@ impl PromiseRejectedOp {
     pub fn new(ctx: &mut Context, reason: Value, settled: pliron::r#type::TypeHandle) -> Self {
         let result = crate::types::PromiseType::get(ctx, settled).into();
         PromiseRejectedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![reason],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![reason]),
         }
-    }
-}
-
-impl Verify for PromiseRejectedOp {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Verify for PromiseResolvedOp {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -186,14 +155,7 @@ impl SettledFieldOp {
             }
         };
         let op = SettledFieldOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![settled],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![settled]),
         };
         op.set_attr_perry_settled_field(ctx, field);
         Some(op)
@@ -214,9 +176,4 @@ impl Verify for SettledFieldOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for SettledFieldOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; SettledFieldOp);

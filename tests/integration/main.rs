@@ -15,19 +15,18 @@ mod http_fixture;
 mod link;
 #[path = "../support/output_capture.rs"]
 mod output_capture;
+#[path = "../support/wasi_host.rs"]
+mod wasi_host;
 #[path = "../support/world.rs"]
 mod world;
 
 mod async_component_test;
-mod builtins_test;
 mod byob_test;
 mod cancellation_test;
 mod command_test;
 mod component_budget_test;
 mod component_test;
-mod consumer_regression_test;
 mod content_api_test;
-mod date_test;
 mod decoder_test;
 mod diagnostics_test;
 mod examples_test;
@@ -46,10 +45,8 @@ mod mir_collection_test;
 mod mir_string_test;
 mod module_test;
 mod optimization_test;
-mod regex_test;
 mod resource_test;
 mod runtime_error_test;
-mod sdk_regression_test;
 mod sdk_test;
 mod stream_test;
 mod time_helper_test;

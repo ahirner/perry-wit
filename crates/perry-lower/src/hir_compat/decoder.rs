@@ -15,8 +15,10 @@ pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxConte
             new.visit_mut_children_with(self);
             if matches!(&*new.callee, ast::Expr::Ident(name) if name.sym == "TextDecoder" && name.ctxt == self.unresolved)
             {
-                let result = normalize_constructor(new);
-                if let Err(error) = result {
+                // Keep the first error; later ones may be its consequences.
+                if let Err(error) = normalize_constructor(new)
+                    && self.error.is_none()
+                {
                     self.error = Some(error);
                 }
             }

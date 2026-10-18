@@ -30,6 +30,52 @@ fn append_op(ctx: &mut Context, block: Ptr<BasicBlock>, op: &dyn Op) {
     op.get_operation().insert_at_back(block, ctx);
 }
 
+/// End `block` with a branch on `cond` to two new blocks, placed after it, that both continue
+/// in a third new block taking one `merge_ty` argument; returns `(if_true, if_false, merge)`.
+fn diamond(
+    ctx: &mut Context,
+    block: Ptr<BasicBlock>,
+    cond: Value,
+    merge_ty: TypeHandle,
+) -> (Ptr<BasicBlock>, Ptr<BasicBlock>, Ptr<BasicBlock>) {
+    let if_true = BasicBlock::new(ctx, None, vec![]);
+    let if_false = BasicBlock::new(ctx, None, vec![]);
+    let merge = BasicBlock::new(ctx, None, vec![merge_ty]);
+    if_true.insert_after(ctx, block);
+    if_false.insert_after(ctx, if_true);
+    merge.insert_after(ctx, if_false);
+    let br = CondBrOp::new(ctx, cond, if_true, vec![], if_false, vec![]);
+    append_op(ctx, block, &br);
+    (if_true, if_false, merge)
+}
+
+/// End `block` with a branch to `merge` passing `value`.
+fn branch(ctx: &mut Context, block: Ptr<BasicBlock>, merge: Ptr<BasicBlock>, value: Value) {
+    let br = BrOp::new(ctx, merge, vec![value]);
+    append_op(ctx, block, &br);
+}
+
+/// `value` wrapped into `target_ty` when the target is optional (`wrap`), at the end of `block`.
+fn wrap_if(
+    ctx: &mut Context,
+    block: Ptr<BasicBlock>,
+    value: Value,
+    target_ty: TypeHandle,
+    wrap: bool,
+) -> Value {
+    if !wrap {
+        return value;
+    }
+    let wrapped = WrapOp::with_type(ctx, value, target_ty);
+    append_op(ctx, block, &wrapped);
+    wrapped.get_result(ctx)
+}
+
+/// `block`'s only argument, as the value of a [diamond]'s merge.
+fn merged(ctx: &Context, block: Ptr<BasicBlock>) -> (Ptr<BasicBlock>, Value) {
+    (block, block.deref(ctx).get_argument(0))
+}
+
 pub(super) fn build_json_copy_helper(
     ctx: &mut Context,
     module: ModuleOp,
@@ -66,24 +112,15 @@ fn emit_normalize_value(
         let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
         if s_abs == Some(Absence::Undefined) {
             let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
-            let absent_block = BasicBlock::new(ctx, None, vec![]);
-            let present_block = BasicBlock::new(ctx, None, vec![]);
-            let merge_block = BasicBlock::new(ctx, None, vec![target_ty]);
-            absent_block.insert_after(ctx, block);
-            present_block.insert_after(ctx, absent_block);
-            merge_block.insert_after(ctx, present_block);
-
             let is_undef = IsUndefinedOp::new(ctx, source);
             append_op(ctx, block, &is_undef);
-            let cond = is_undef.get_result(ctx);
-            let br = CondBrOp::new(ctx, cond, absent_block, vec![], present_block, vec![]);
-            append_op(ctx, block, &br);
+            let (absent_block, present_block, merge_block) =
+                diamond(ctx, block, is_undef.get_result(ctx), target_ty);
 
             if pos == CopyPosition::RecordField {
                 let omitted = OmittedOp::with_type(ctx, target_ty);
                 append_op(ctx, absent_block, &omitted);
-                let br_absent = BrOp::new(ctx, merge_block, vec![omitted.get_result(ctx)]);
-                append_op(ctx, absent_block, &br_absent);
+                branch(ctx, absent_block, merge_block, omitted.get_result(ctx));
             } else {
                 emit_throw_type_error(
                     ctx,
@@ -97,31 +134,22 @@ fn emit_normalize_value(
             let s_unwrapped = unwrap.get_result(ctx);
             let (present_end, inner_norm) =
                 emit_normalize_value(ctx, present_block, s_unwrapped, s_inner, t_inner, pos)?;
-            let wrapped = WrapOp::with_type(ctx, inner_norm, target_ty);
-            append_op(ctx, present_end, &wrapped);
-            let br_present = BrOp::new(ctx, merge_block, vec![wrapped.get_result(ctx)]);
-            append_op(ctx, present_end, &br_present);
-
-            return Ok((merge_block, merge_block.deref(ctx).get_argument(0)));
+            let wrapped = wrap_if(ctx, present_end, inner_norm, target_ty, true);
+            branch(ctx, present_end, merge_block, wrapped);
+            return Ok(merged(ctx, merge_block));
         }
 
         let (end_block, inner_norm) =
             emit_normalize_value(ctx, block, source, source_ty, t_inner, pos)?;
-        let wrapped = WrapOp::with_type(ctx, inner_norm, target_ty);
-        append_op(ctx, end_block, &wrapped);
-        return Ok((end_block, wrapped.get_result(ctx)));
+        return Ok((
+            end_block,
+            wrap_if(ctx, end_block, inner_norm, target_ty, true),
+        ));
     }
 
     // Case 2: Source has an outer optional/nullable wrapper (`Absence::Undefined` or `Absence::Null`).
     if let Some(s_kind) = s_abs {
         let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
-        let absent_block = BasicBlock::new(ctx, None, vec![]);
-        let present_block = BasicBlock::new(ctx, None, vec![]);
-        let merge_block = BasicBlock::new(ctx, None, vec![target_ty]);
-        absent_block.insert_after(ctx, block);
-        present_block.insert_after(ctx, absent_block);
-        merge_block.insert_after(ctx, present_block);
-
         let is_absent = match s_kind {
             Absence::Undefined | Absence::Both => {
                 let op = IsUndefinedOp::new(ctx, source);
@@ -134,8 +162,7 @@ fn emit_normalize_value(
                 op.get_result(ctx)
             }
         };
-        let br = CondBrOp::new(ctx, is_absent, absent_block, vec![], present_block, vec![]);
-        append_op(ctx, block, &br);
+        let (absent_block, present_block, merge_block) = diamond(ctx, block, is_absent, target_ty);
 
         let absent_becomes_null = match s_kind {
             Absence::Null => t_abs == Some(Absence::Null),
@@ -145,8 +172,7 @@ fn emit_normalize_value(
         if absent_becomes_null {
             let null_op = NullOp::new(ctx, target_ty);
             append_op(ctx, absent_block, &null_op);
-            let br_absent = BrOp::new(ctx, merge_block, vec![null_op.get_result(ctx)]);
-            append_op(ctx, absent_block, &br_absent);
+            branch(ctx, absent_block, merge_block, null_op.get_result(ctx));
         } else {
             emit_throw_type_error(ctx, absent_block, "unexpected absent value in JSON copy");
         }
@@ -158,59 +184,34 @@ fn emit_normalize_value(
         // `s_unwrapped` is `NaN` or `Infinity`, the `FloatType` handler can still produce `null`.
         let (present_end, present_norm) =
             emit_normalize_value(ctx, present_block, s_unwrapped, s_inner, target_ty, pos)?;
-        let br_present = BrOp::new(ctx, merge_block, vec![present_norm]);
-        append_op(ctx, present_end, &br_present);
-
-        return Ok((merge_block, merge_block.deref(ctx).get_argument(0)));
+        branch(ctx, present_end, merge_block, present_norm);
+        return Ok(merged(ctx, merge_block));
     }
 
     let s_inner = source_ty;
     let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+    let wrap = t_abs.is_some();
 
     // Scalar: FP64Type (`f64`)
     if s_inner.deref(ctx).is::<FP64Type>() && t_inner.deref(ctx).is::<FP64Type>() {
         let is_finite = IntrinsicOp::new(ctx, Intrinsic::NumberIsFinite, vec![source]);
         append_op(ctx, block, &is_finite);
         let is_finite_val = is_finite.get_operation().deref(ctx).get_result(0);
-
-        let finite_block = BasicBlock::new(ctx, None, vec![]);
-        let non_finite_block = BasicBlock::new(ctx, None, vec![]);
-        let merge_block = BasicBlock::new(ctx, None, vec![target_ty]);
-        finite_block.insert_after(ctx, block);
-        non_finite_block.insert_after(ctx, finite_block);
-        merge_block.insert_after(ctx, non_finite_block);
-
-        let br = CondBrOp::new(
-            ctx,
-            is_finite_val,
-            finite_block,
-            vec![],
-            non_finite_block,
-            vec![],
-        );
-        append_op(ctx, block, &br);
+        let (finite_block, non_finite_block, merge_block) =
+            diamond(ctx, block, is_finite_val, target_ty);
 
         // Canonicalize `-0.0` to `+0.0` via `source + 0.0`.
         let pos_zero = const_f64(ctx, 0.0);
         append_op(ctx, finite_block, &pos_zero);
         let add_zero = BinaryOp::new(ctx, BinaryKind::Add, source, pos_zero.get_result(ctx));
         append_op(ctx, finite_block, &add_zero);
-        let normalized = add_zero.get_result(ctx);
-        let finite_out = if t_abs.is_some() {
-            let wrap = WrapOp::with_type(ctx, normalized, target_ty);
-            append_op(ctx, finite_block, &wrap);
-            wrap.get_result(ctx)
-        } else {
-            normalized
-        };
-        let br_finite = BrOp::new(ctx, merge_block, vec![finite_out]);
-        append_op(ctx, finite_block, &br_finite);
+        let finite_out = wrap_if(ctx, finite_block, add_zero.get_result(ctx), target_ty, wrap);
+        branch(ctx, finite_block, merge_block, finite_out);
 
         if t_abs == Some(Absence::Null) {
             let null_op = NullOp::new(ctx, target_ty);
             append_op(ctx, non_finite_block, &null_op);
-            let br_nf = BrOp::new(ctx, merge_block, vec![null_op.get_result(ctx)]);
-            append_op(ctx, non_finite_block, &br_nf);
+            branch(ctx, non_finite_block, merge_block, null_op.get_result(ctx));
         } else {
             emit_throw_type_error(
                 ctx,
@@ -218,20 +219,12 @@ fn emit_normalize_value(
                 "non-finite number is not valid for non-nullable target schema",
             );
         }
-
-        return Ok((merge_block, merge_block.deref(ctx).get_argument(0)));
+        return Ok(merged(ctx, merge_block));
     }
 
     // Scalar: Integer or String
     if is_supported_scalar(ctx, s_inner) && s_inner == t_inner {
-        let out = if t_abs.is_some() {
-            let wrap = WrapOp::with_type(ctx, source, target_ty);
-            append_op(ctx, block, &wrap);
-            wrap.get_result(ctx)
-        } else {
-            source
-        };
-        return Ok((block, out));
+        return Ok((block, wrap_if(ctx, block, source, target_ty, wrap)));
     }
 
     // RecordType (both records and tuples): allocate a fresh Record of `t_inner` and normalize/project fields
@@ -260,17 +253,17 @@ fn emit_normalize_value(
         let mut cur_block = block;
         let mut field_vals = Vec::with_capacity(t_fields.len());
 
-        for (t_name, t_fty) in &t_fields {
-            if let Some((_, s_fty)) = s_fields.iter().find(|(s_name, _)| s_name == t_name) {
-                let get = FieldGetOp::new(ctx, source, t_name.clone())?;
+        for (t_name, t_fty) in t_fields {
+            if let Some((_, s_fty)) = s_fields.iter().find(|(s_name, _)| *s_name == t_name) {
+                let get = FieldGetOp::new(ctx, source, t_name)?;
                 append_op(ctx, cur_block, &get);
                 let raw_val = get.get_result(ctx);
                 let (next_block, norm_val) =
-                    emit_normalize_value(ctx, cur_block, raw_val, *s_fty, *t_fty, child_pos)?;
+                    emit_normalize_value(ctx, cur_block, raw_val, *s_fty, t_fty, child_pos)?;
                 cur_block = next_block;
                 field_vals.push(norm_val);
             } else {
-                let omitted = OmittedOp::with_type(ctx, *t_fty);
+                let omitted = OmittedOp::with_type(ctx, t_fty);
                 append_op(ctx, cur_block, &omitted);
                 field_vals.push(omitted.get_result(ctx));
             }
@@ -279,14 +272,7 @@ fn emit_normalize_value(
         let t_rec_handle = TypedHandle::<RecordType>::from_handle(t_inner, ctx)?;
         let alloc = AllocOp::new(ctx, t_rec_handle, field_vals);
         append_op(ctx, cur_block, &alloc);
-        let rec_val = alloc.get_result(ctx);
-        let out = if t_abs.is_some() {
-            let wrap = WrapOp::with_type(ctx, rec_val, target_ty);
-            append_op(ctx, cur_block, &wrap);
-            wrap.get_result(ctx)
-        } else {
-            rec_val
-        };
+        let out = wrap_if(ctx, cur_block, alloc.get_result(ctx), target_ty, wrap);
         return Ok((cur_block, out));
     }
 
@@ -294,14 +280,10 @@ fn emit_normalize_value(
     let arr_elems = {
         let s_obj = s_inner.deref(ctx);
         let t_obj = t_inner.deref(ctx);
-        if let (Some(s_arr), Some(t_arr)) = (
-            s_obj.downcast_ref::<ArrayType>(),
-            t_obj.downcast_ref::<ArrayType>(),
-        ) {
-            Some((s_arr.element(), t_arr.element()))
-        } else {
-            None
-        }
+        s_obj
+            .downcast_ref::<ArrayType>()
+            .zip(t_obj.downcast_ref::<ArrayType>())
+            .map(|(s_arr, t_arr)| (s_arr.element(), t_arr.element()))
     };
     if let Some((s_elem_ty, t_elem_ty)) = arr_elems {
         let len_op = ArrayLenOp::new(ctx, source);
@@ -323,9 +305,7 @@ fn emit_normalize_value(
         header_block.insert_after(ctx, block);
         body_block.insert_after(ctx, header_block);
         exit_block.insert_after(ctx, body_block);
-
-        let br_init = BrOp::new(ctx, header_block, vec![idx0]);
-        append_op(ctx, block, &br_init);
+        branch(ctx, block, header_block, idx0);
 
         let idx_arg = header_block.deref(ctx).get_argument(0);
         let cmp = CompareOp::new(ctx, CompareKind::Lt, idx_arg, len_val);
@@ -357,16 +337,9 @@ fn emit_normalize_value(
         append_op(ctx, body_end, &one);
         let next_idx = BinaryOp::new(ctx, BinaryKind::Add, idx_arg, one.get_result(ctx));
         append_op(ctx, body_end, &next_idx);
-        let br_back = BrOp::new(ctx, header_block, vec![next_idx.get_result(ctx)]);
-        append_op(ctx, body_end, &br_back);
+        branch(ctx, body_end, header_block, next_idx.get_result(ctx));
 
-        let out = if t_abs.is_some() {
-            let wrap = WrapOp::with_type(ctx, init_arr, target_ty);
-            append_op(ctx, exit_block, &wrap);
-            wrap.get_result(ctx)
-        } else {
-            init_arr
-        };
+        let out = wrap_if(ctx, exit_block, init_arr, target_ty, wrap);
         return Ok((exit_block, out));
     }
 
@@ -388,18 +361,18 @@ fn emit_normalize_value(
         merge_block.insert_after(ctx, block);
 
         let mut cur_check_block = block;
-        for (idx, (case_name, payload_ty)) in cases.iter().enumerate() {
-            let is_last = idx + 1 == cases.len();
+        let count = cases.len();
+        for (idx, (case_name, payload_ty)) in cases.into_iter().enumerate() {
             let case_block = BasicBlock::new(ctx, None, vec![]);
             case_block.insert_before(ctx, merge_block);
 
-            if is_last {
+            if idx + 1 == count {
                 let br = BrOp::new(ctx, case_block, vec![]);
                 append_op(ctx, cur_check_block, &br);
             } else {
                 let next_check_block = BasicBlock::new(ctx, None, vec![]);
                 next_check_block.insert_before(ctx, merge_block);
-                let tag_const = StringConstOp::new(ctx, case_name);
+                let tag_const = StringConstOp::new(ctx, &case_name);
                 append_op(ctx, cur_check_block, &tag_const);
                 let cmp = CompareOp::new(ctx, CompareKind::Eq, tag_val, tag_const.get_result(ctx));
                 append_op(ctx, cur_check_block, &cmp);
@@ -415,39 +388,28 @@ fn emit_normalize_value(
                 cur_check_block = next_check_block;
             }
 
-            let (case_end, new_var_val) = if let Some(pty) = payload_ty {
-                let payload_op = VariantPayloadOp::new(ctx, source, *pty);
+            let (case_end, payload) = if let Some(pty) = payload_ty {
+                let payload_op = VariantPayloadOp::new(ctx, source, pty);
                 append_op(ctx, case_block, &payload_op);
                 let raw_payload = payload_op.get_result(ctx);
                 let (norm_end, norm_payload) = emit_normalize_value(
                     ctx,
                     case_block,
                     raw_payload,
-                    *pty,
-                    *pty,
+                    pty,
+                    pty,
                     CopyPosition::RecordField,
                 )?;
-                let vnew = VariantNewOp::new(ctx, t_inner, case_name, Some(norm_payload));
-                append_op(ctx, norm_end, &vnew);
-                (norm_end, vnew.get_result(ctx))
+                (norm_end, Some(norm_payload))
             } else {
-                let vnew = VariantNewOp::new(ctx, t_inner, case_name, None);
-                append_op(ctx, case_block, &vnew);
-                (case_block, vnew.get_result(ctx))
+                (case_block, None)
             };
-
-            let out = if t_abs.is_some() {
-                let wrap = WrapOp::with_type(ctx, new_var_val, target_ty);
-                append_op(ctx, case_end, &wrap);
-                wrap.get_result(ctx)
-            } else {
-                new_var_val
-            };
-            let br_merge = BrOp::new(ctx, merge_block, vec![out]);
-            append_op(ctx, case_end, &br_merge);
+            let vnew = VariantNewOp::new(ctx, t_inner, &case_name, payload);
+            append_op(ctx, case_end, &vnew);
+            let out = wrap_if(ctx, case_end, vnew.get_result(ctx), target_ty, wrap);
+            branch(ctx, case_end, merge_block, out);
         }
-
-        return Ok((merge_block, merge_block.deref(ctx).get_argument(0)));
+        return Ok(merged(ctx, merge_block));
     }
 
     Ok((block, source))

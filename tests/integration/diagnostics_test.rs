@@ -88,6 +88,59 @@ fn parse_and_required_field_errors_have_typed_codes() {
     }
 }
 
+/// Unsupported source forms are rejected with their exact message.
+#[test]
+fn unsupported_forms_have_exact_diagnostics() {
+    let regex = |expression: &str| {
+        format!(
+            "export function test(input: string): boolean {{ return ({expression}).test(input); }}"
+        )
+    };
+    let iteration = |expression: &str| {
+        format!("export function run():number {{for(const value of {expression}){{}} return 0;}}")
+    };
+    const IN_RUN: &str = "\n  lowering function run";
+    const IN_F: &str = "\n  lowering function f";
+    const IN_TEST: &str = "\n  lowering function test";
+    const REGEX_CONST: &str =
+        "CodegenFailure: lowering function test to wasm\n  lowering perry.regex_const\n  ";
+    let cases = [
+        (iteration("new Headers()"), format!("case.ts:1:8: UnsupportedExpression: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator{IN_RUN}")),
+        (iteration("new URLSearchParams()"), format!("case.ts:1:8: UnsupportedExpression: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported{IN_RUN}")),
+        ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), format!("case.ts:1:40: UnsupportedExpression: String.prototype.replaceAll called with a non-global RegExp argument{IN_RUN}")),
+        ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "UnsupportedExpression: class B extends A: class inheritance is not supported yet".into()),
+        (regex("/a/g"), format!("case.ts:1:55: UnsupportedExpression: Regex search supports only the u and s flags{IN_TEST}")),
+        (regex("/\\u{61}/"), format!("{REGEX_CONST}Braced Unicode regex escapes require the u flag")),
+        (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround, named groups, and inline flags are unsupported")),
+        (regex("/(a)\\1/"), format!("{REGEX_CONST}Unsupported regex escape: \\1")),
+        (regex("/(a)(b)(c)(d)(e)(f)(g)(h)(i)/"), format!("{REGEX_CONST}Regex has 9 capture groups; at most 8 are supported")),
+        (regex("(input === 'x' ? /a/g : /a/)"), format!("case.ts:1:55: UnsupportedExpression: regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag{IN_TEST}")),
+        (regex("/\\uD800/u"), format!("{REGEX_CONST}Unpaired surrogate in regex escape")),
+        (regex("new RegExp(input)"), format!("case.ts:1:55: UnsupportedExpression: RegExp construction is unsupported; use a bounded regex literal{IN_TEST}")),
+        ("export function test(): boolean { return /a/ === /a/; }".into(), format!("case.ts:1:8: UnsupportedExpression: regex object identity is outside the literal matching profile{IN_TEST}")),
+        ("export function run(x: number): number { return x ** 2; }".into(), format!("case.ts:1:8: UnsupportedOperator: MIR backend does not support operator Pow yet{IN_RUN}")),
+        ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: UnsupportedExpression: generator function count is not supported yet".into()),
+        ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), format!("case.ts:1:48: UnsupportedExpression: MIR backend does not support unresolved generic type WeakMap{IN_RUN}")),
+        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), format!("case.ts:2:10: UnsupportedExpression: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly{IN_RUN}")),
+        ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), format!("case.ts:1:8: UnsupportedExpression: property byteLength is not supported on string yet{IN_RUN}")),
+        ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), format!("case.ts:1:8: UnsupportedExpression: operator Pow on bigint and bigint is not supported yet{IN_RUN}")),
+        ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), format!("case.ts:1:38: UnsupportedExpression: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now{IN_F}")),
+        ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), format!("case.ts:1:47: UnsupportedExpression: Temporal add duration field hours is not supported; use years, months, weeks, or days{IN_F}")),
+        ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), format!("case.ts:1:8: UnsupportedExpression: property hour is not supported on Temporal.PlainDate yet{IN_F}")),
+    ];
+    let mismatches: Vec<String> = cases
+        .iter()
+        .filter_map(|(source, expected)| {
+            let actual = match perry_wit::compile_core(source, "case.ts") {
+                Ok(_) => "<compiled>".to_owned(),
+                Err(error) => format!("{error:#}"),
+            };
+            (actual != *expected).then(|| format!("{source}\n  => {actual:?}"))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 #[test]
 fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() {
     let bare_wit = Wit {

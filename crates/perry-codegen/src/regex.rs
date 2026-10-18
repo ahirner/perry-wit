@@ -1,6 +1,7 @@
 //! Bounded literal regexes compiled into immutable reverse and forward DFA tables.
 mod syntax;
 use anyhow::{Context, Result, bail, ensure};
+use perry_abi::layout::regex::MAX_CAPTURES;
 use regex_automata::{
     Anchored, Input, MatchKind,
     dfa::{Automaton, StartKind, dense},
@@ -16,8 +17,14 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
         .configure(thompson::Config::new().nfa_size_limit(Some(1024 * 1024)))
         .build(&pattern)
         .context("Unsupported or oversized literal regex")?;
-    let group_count = u16::try_from(nfa.group_info().all_group_len())
-        .context("Regex has too many capture groups")?;
+    // Group 0 is the whole match; the matcher tracks `MAX_CAPTURES` explicit groups after it.
+    let groups = nfa.group_info().all_group_len();
+    ensure!(
+        groups <= 1 + MAX_CAPTURES,
+        "Regex has {} capture groups; at most {MAX_CAPTURES} are supported",
+        groups - 1
+    );
+    let group_count = u16::try_from(groups)?;
 
     // Search only needs the leftmost start. An overlapping reverse DFA reports
     // all possible starts; the final report is the earliest, independent of greed.
@@ -263,7 +270,7 @@ fn compile_nfa(nfa: &thompson::NFA) -> Result<Vec<u8>> {
             }
             State::Capture { next, slot, .. } => {
                 body.push(5);
-                body.push(u8::try_from(slot.as_usize()).unwrap_or(u8::MAX));
+                body.push(u8::try_from(slot.as_usize())?);
                 body.extend(u16::try_from(next.as_usize())?.to_le_bytes());
             }
             State::Match { .. } => body.push(6),
