@@ -60,8 +60,8 @@ use perry_mir::{
     ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType, RethrowOp,
     ReturnOp, SettledField, SettledFieldOp, SettledType, StatsType, StoreOp, StringConstOp,
     StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
-    WrapOp, WritableType, WriterType, absence, may_throw, optional_parts, optional_value,
-    set_async,
+    WrapOp, WritableType, WriterType, absence, admits_undefined, may_throw, optional_parts,
+    optional_value, present_type, set_async,
 };
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
@@ -107,7 +107,7 @@ pub mod hir {
 use builder::{
     Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding, remove_unreachable,
 };
-use coerce::{Kind, kind, void_type};
+use coerce::{Kind, is_integer64, kind, void_type};
 use program::{Builtin, Signature};
 
 /// The function holding a module's top-level statements, if it has any.

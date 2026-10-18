@@ -344,7 +344,7 @@ impl FunctionLowering<'_, '_> {
         if self
             .state
             .program_facts
-            .may_reject(ctx, &function, op.deref(ctx).get_operand(0))
+            .may_reject(&function, op.deref(ctx).get_operand(0))
         {
             let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
             let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);

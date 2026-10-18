@@ -48,7 +48,7 @@ pub(super) fn rewrite_implementation(
             original,
             op,
             &mut expected,
-        );
+        )?;
         coerce_operands(ctx, rewriter, analysis, state, original, op, &expected);
     }
     Ok(())
@@ -256,7 +256,7 @@ fn operand_types(
     original: Ptr<Operation>,
     op: Ptr<Operation>,
     expected: &mut Vec<TypeHandle>,
-) {
+) -> Result<()> {
     let operand_ty = |ctx: &Context, index: usize| op.deref(ctx).get_operand(index).get_type(ctx);
     let result_ty = |ctx: &Context| op.deref(ctx).get_result(0).get_type(ctx);
     if let Some(&child) = state.calls.get(&original) {
@@ -284,16 +284,14 @@ fn operand_types(
         }
     } else if Operation::get_op::<AwaitOp>(original, ctx).is_some() {
         let promise = operand_ty(ctx, 0);
-        let payload = TypedHandle::<PromiseType>::from_handle(promise, ctx)
-            .expect("await promise")
+        let payload = TypedHandle::<PromiseType>::from_handle(promise, ctx)?
             .deref(ctx)
             .value();
         let result = op.deref(ctx).get_result(0);
         result.set_type(ctx, payload);
         expected[0] = promise;
     } else if let Some(index) = promise_payload(ctx, original) {
-        expected[index] = TypedHandle::<PromiseType>::from_handle(result_ty(ctx), ctx)
-            .expect("promise")
+        expected[index] = TypedHandle::<PromiseType>::from_handle(result_ty(ctx), ctx)?
             .deref(ctx)
             .value();
     } else if Operation::get_op::<crate::heap::AllocOp>(original, ctx).is_some() {
@@ -393,7 +391,7 @@ fn operand_types(
         } else {
             let (l_ty, r_ty) = (operand_ty(ctx, 0), operand_ty(ctx, 1));
             let is_num = |t: TypeHandle| {
-                let inner = crate::optional::optional_value(ctx, t).unwrap_or(t);
+                let inner = crate::optional::present_type(ctx, t);
                 inner.deref(ctx).is::<crate::types::NumericType>()
                     || Integer::from_type(ctx, inner).is_some_and(|int| int.bits == 64)
             };
@@ -431,6 +429,7 @@ fn operand_types(
             }
         }
     }
+    Ok(())
 }
 
 fn array_element(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {

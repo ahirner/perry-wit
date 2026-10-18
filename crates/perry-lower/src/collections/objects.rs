@@ -10,9 +10,7 @@ impl<'s> FunctionBuilder<'s> {
         val: Value,
     ) -> Result<Value> {
         let ty = val.get_type(ctx);
-        if optional_value(ctx, ty).is_some()
-            && absence(ctx, ty).is_some_and(|a| a.admits_undefined())
-        {
+        if optional_value(ctx, ty).is_some() && admits_undefined(ctx, ty) {
             let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
             let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
             return self.choose(ctx, ty, is_undef, |_, _| Ok(undef), |_, _| Ok(val));
@@ -96,7 +94,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec.deref(ctx).fields()?.to_vec();
             let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, vec![]));
             for (name, field_ty) in fields {
-                let after = if admits_omission(ctx, field_ty) {
+                let after = if admits_undefined(ctx, field_ty) {
                     let op = FieldPresentOp::new(ctx, obj, name.clone())?;
                     let present = self.append_value(ctx, &op);
                     let keep = self.new_block(ctx, "obj_member_keep");
@@ -113,7 +111,7 @@ impl<'s> FunctionBuilder<'s> {
                     let entry = pair.map(|pair| (pair, self.string(ctx, &name)));
                     let op = FieldGetOp::new(ctx, obj, name)?;
                     let value = self.append_value(ctx, &op);
-                    let value = if admits_omission(ctx, field_ty) {
+                    let value = if admits_undefined(ctx, field_ty) {
                         self.normalize_optional_read(ctx, value)?
                     } else {
                         value
@@ -224,7 +222,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let val = self.expression(ctx, val_expr)?;
         let ty = val.get_type(ctx);
-        let inner = optional_value(ctx, ty).unwrap_or(ty);
+        let inner = present_type(ctx, ty);
         let is_plain_array = inner.deref(ctx).is::<ArrayType>()
             && map_entry_types(ctx, inner).is_none()
             && dict_entry_types(ctx, inner).is_none()
@@ -271,7 +269,7 @@ impl<'s> FunctionBuilder<'s> {
                     bool_ty,
                     eq,
                     |b, ctx| {
-                        if admits_omission(ctx, field_ty) {
+                        if admits_undefined(ctx, field_ty) {
                             let op = FieldPresentOp::new(ctx, obj, name)?;
                             Ok(b.append_value(ctx, &op))
                         } else {
@@ -314,7 +312,7 @@ impl<'s> FunctionBuilder<'s> {
                     .ok()
                     .and_then(|rec| rec.deref(ctx).field(property).map(|(_, t)| t));
                 if let Some(field_ty) = opt_field
-                    && admits_omission(ctx, field_ty)
+                    && admits_undefined(ctx, field_ty)
                 {
                     let omitted = self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, field_ty));
                     self.emit(ctx, |ctx| {
@@ -329,9 +327,4 @@ impl<'s> FunctionBuilder<'s> {
             _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
         }
     }
-}
-
-/// Whether a record field of type `ty` may be omitted (an optional admitting `undefined`).
-fn admits_omission(ctx: &Context, ty: TypeHandle) -> bool {
-    optional_value(ctx, ty).is_some() && absence(ctx, ty).is_some_and(|a| a.admits_undefined())
 }

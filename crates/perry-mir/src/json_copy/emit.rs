@@ -19,7 +19,7 @@ use crate::exceptions::{ErrorNewOp, RaiseOp, RethrowOp};
 use crate::heap::{AllocOp, FieldGetOp};
 use crate::intrinsics::{Intrinsic, IntrinsicOp};
 use crate::optional::{
-    IsNullOp, IsUndefinedOp, NullOp, OmittedOp, UnwrapOp, WrapOp, absence, optional_value,
+    IsNullOp, IsUndefinedOp, NullOp, OmittedOp, UnwrapOp, WrapOp, absence, present_type,
 };
 use crate::scalar::{BinaryOp, CompareOp};
 use crate::variants::{VariantNewOp, VariantPayloadOp, VariantTagOp};
@@ -109,9 +109,9 @@ fn emit_normalize_value(
 
     // Case 1: Target outer wrapper is `OptionalType(t_inner, Absence::Undefined)`.
     if t_abs == Some(Absence::Undefined) {
-        let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+        let t_inner = present_type(ctx, target_ty);
         if s_abs == Some(Absence::Undefined) {
-            let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
+            let s_inner = present_type(ctx, source_ty);
             let is_undef = IsUndefinedOp::new(ctx, source);
             append_op(ctx, block, &is_undef);
             let (absent_block, present_block, merge_block) =
@@ -149,7 +149,7 @@ fn emit_normalize_value(
 
     // Case 2: Source has an outer optional/nullable wrapper (`Absence::Undefined` or `Absence::Null`).
     if let Some(s_kind) = s_abs {
-        let s_inner = optional_value(ctx, source_ty).unwrap_or(source_ty);
+        let s_inner = present_type(ctx, source_ty);
         let is_absent = match s_kind {
             Absence::Undefined | Absence::Both => {
                 let op = IsUndefinedOp::new(ctx, source);
@@ -189,7 +189,7 @@ fn emit_normalize_value(
     }
 
     let s_inner = source_ty;
-    let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
+    let t_inner = present_type(ctx, target_ty);
     let wrap = t_abs.is_some();
     let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
 

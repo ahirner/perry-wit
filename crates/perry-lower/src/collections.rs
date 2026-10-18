@@ -6,12 +6,39 @@
 //! retaining cursor lists or compaction histories.
 
 use super::*;
+use crate::hir_compat::Constructor;
 use perry_mir::{OptionalType, RecordKind};
 
 mod keyed;
+mod methods;
 mod objects;
 mod storage;
+use methods::{MapCall, SetCall};
 pub(super) use storage::LiveCursor;
+
+/// Stable tuple slots shared by collection construction and live iteration.
+pub(super) enum StorageField {
+    BoxEntries,
+    BoxLength,
+    BoxSequence,
+    BoxEpoch,
+    ViewBox,
+    ViewCursor,
+    CursorIndex,
+    CursorSequence,
+    CursorEpoch,
+}
+
+impl StorageField {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::BoxEntries | Self::ViewBox | Self::CursorIndex => "_0",
+            Self::BoxLength | Self::ViewCursor | Self::CursorSequence => "_1",
+            Self::BoxSequence | Self::CursorEpoch => "_2",
+            Self::BoxEpoch => "_3",
+        }
+    }
+}
 
 /// The entry records of a live `Map` or `Set`, which carry a liveness flag for tombstones.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,7 +186,7 @@ fn record_of_kind(
     ty: TypeHandle,
     kind: RecordKind,
 ) -> Option<TypedHandle<RecordType>> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let ty = present_type(ctx, ty);
     let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
     (rec.deref(ctx).kind() == kind).then_some(rec)
 }
@@ -192,7 +219,7 @@ pub(super) fn tuple_kv_types(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let ty = present_type(ctx, ty);
     let arr = TypedHandle::<ArrayType>::from_handle(ty, ctx).ok()?;
     let elem = arr.deref(ctx).element();
     let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
@@ -216,7 +243,7 @@ pub(super) fn map_entry_types(
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
     if let Some(box_rec) = map_box_record(ctx, ty) {
-        let (_, entries_ty) = box_rec.deref(ctx).field("_0")?;
+        let (_, entries_ty) = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?;
         return tuple_kv_types(ctx, entries_ty);
     }
     let (k, v, rec) = tuple_kv_types(ctx, ty)?;
@@ -249,7 +276,7 @@ pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHa
         return Some((k, v));
     }
     if let Some((view_kind, view_rec)) = collection_view_record(ctx, ty) {
-        let (_, inner_box) = view_rec.deref(ctx).field("_0")?;
+        let (_, inner_box) = view_rec.deref(ctx).field(StorageField::ViewBox.name())?;
         return match view_kind {
             CollectionViewKind::MapEntries => {
                 let (k, v, _) = map_entry_types(ctx, inner_box)?;
@@ -262,7 +289,7 @@ pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHa
             _ => None,
         };
     }
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let ty = present_type(ctx, ty);
     if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx)
         && let Ok(elem_arr) = TypedHandle::<ArrayType>::from_handle(arr.deref(ctx).element(), ctx)
     {
@@ -277,9 +304,9 @@ pub(super) fn set_entry_type(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypedHandle<RecordType>)> {
-    let ty = optional_value(ctx, ty).unwrap_or(ty);
+    let ty = present_type(ctx, ty);
     let entries_ty = if let Some(box_rec) = set_box_record(ctx, ty) {
-        box_rec.deref(ctx).field("_0")?.1
+        box_rec.deref(ctx).field(StorageField::BoxEntries.name())?.1
     } else {
         ty
     };
@@ -308,10 +335,10 @@ fn record_uniform_field_type(ctx: &Context, rec: TypedHandle<RecordType>) -> Opt
     if fields.is_empty() {
         return None;
     }
-    let first_ty = optional_value(ctx, fields[0].1).unwrap_or(fields[0].1);
+    let first_ty = present_type(ctx, fields[0].1);
     let all_same = fields
         .iter()
-        .all(|(_, ty)| optional_value(ctx, *ty).unwrap_or(*ty) == first_ty);
+        .all(|(_, ty)| present_type(ctx, *ty) == first_ty);
     if !all_same {
         return None;
     }
@@ -331,7 +358,6 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
         if let Some(constructor) = self.shapes.metadata.constructors.get(expr) {
-            use hir_compat::Constructor;
             return match constructor {
                 Constructor::Map { types, init } => {
                     let expected = match types {
@@ -357,44 +383,23 @@ impl<'s> FunctionBuilder<'s> {
                 }
             };
         }
+        let map_call = match expr {
+            Expr::MapGet { map, key } => Some((map, MapCall::Get(key))),
+            Expr::MapSet { map, key, value } => Some((map, MapCall::Set(key, value))),
+            Expr::MapHas { map, key } => Some((map, MapCall::Has(key))),
+            Expr::MapDelete { map, key } => Some((map, MapCall::Delete(key))),
+            _ => None,
+        };
+        if let Some((map, call)) = map_call {
+            let receiver = self.expression(ctx, map)?;
+            let receiver = self.defined(ctx, receiver)?;
+            return call.lower(self, ctx, receiver).map(Some);
+        }
         match expr {
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
                 Ok(Some(self.collection_size(ctx, m)?))
-            }
-            Expr::MapGet { map, key } => {
-                let m = self.expression(ctx, map)?;
-                let m = self.defined(ctx, m)?;
-                let (k_ty, v_ty, _) = kv_entry_types(ctx, m.get_type(ctx))
-                    .context("Map.get receiver must be a Map")?;
-                let k = self.expression_with(ctx, key, Some(k_ty))?;
-                Ok(Some(self.kv_get(ctx, m, k, k_ty, v_ty)?))
-            }
-            Expr::MapSet { map, key, value } => {
-                let m = self.expression(ctx, map)?;
-                let m = self.defined(ctx, m)?;
-                let (k_ty, v_ty, _) = kv_entry_types(ctx, m.get_type(ctx))
-                    .context("Map.set receiver must be a Map")?;
-                let k = self.expression_with(ctx, key, Some(k_ty))?;
-                let v = self.expression_with(ctx, value, Some(v_ty))?;
-                Ok(Some(self.kv_set(ctx, m, k, v)?))
-            }
-            Expr::MapHas { map, key } => {
-                let m = self.expression(ctx, map)?;
-                let m = self.defined(ctx, m)?;
-                let (k_ty, _, _) = kv_entry_types(ctx, m.get_type(ctx))
-                    .context("Map.has receiver must be a Map")?;
-                let k = self.expression_with(ctx, key, Some(k_ty))?;
-                Ok(Some(self.kv_has(ctx, m, k, k_ty)?))
-            }
-            Expr::MapDelete { map, key } => {
-                let m = self.expression(ctx, map)?;
-                let m = self.defined(ctx, m)?;
-                let (k_ty, _, _) = kv_entry_types(ctx, m.get_type(ctx))
-                    .context("Map.delete receiver must be a Map")?;
-                let k = self.expression_with(ctx, key, Some(k_ty))?;
-                Ok(Some(self.kv_delete(ctx, m, k, k_ty)?))
             }
             Expr::MapClear(map) | Expr::SetClear(map) => {
                 let m = self.expression(ctx, map)?;
@@ -419,28 +424,19 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::SetAdd { set_id, value } => {
                 let slot = self.local(*set_id)?;
-                let s = self.load(ctx, slot)?;
-                let s = self.defined(ctx, s)?;
-                let (elem_ty, tuple_rec) = set_entry_type(ctx, s.get_type(ctx))
-                    .context("Set.add receiver must be a Set")?;
-                let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                Ok(Some(self.set_add(ctx, s, v, elem_ty, tuple_rec)?))
+                let receiver = self.load(ctx, slot)?;
+                let receiver = self.defined(ctx, receiver)?;
+                SetCall::Add(value).lower(self, ctx, receiver).map(Some)
             }
-            Expr::SetHas { set, value } => {
-                let s = self.expression(ctx, set)?;
-                let s = self.defined(ctx, s)?;
-                let (elem_ty, _) = set_entry_type(ctx, s.get_type(ctx))
-                    .context("Set.has receiver must be a Set")?;
-                let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                Ok(Some(self.set_has(ctx, s, v, elem_ty)?))
-            }
-            Expr::SetDelete { set, value } => {
-                let s = self.expression(ctx, set)?;
-                let s = self.defined(ctx, s)?;
-                let (elem_ty, _) = set_entry_type(ctx, s.get_type(ctx))
-                    .context("Set.delete receiver must be a Set")?;
-                let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                Ok(Some(self.set_delete(ctx, s, v, elem_ty)?))
+            Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+                let receiver = self.expression(ctx, set)?;
+                let receiver = self.defined(ctx, receiver)?;
+                let call = if matches!(expr, Expr::SetHas { .. }) {
+                    SetCall::Has(value)
+                } else {
+                    SetCall::Delete(value)
+                };
+                call.lower(self, ctx, receiver).map(Some)
             }
             Expr::ObjectKeys(obj) if matches!(**obj, Expr::ProcessEnv) => {
                 Ok(Some(self.intrinsic(ctx, Intrinsic::EnvKeys, vec![])))
@@ -495,7 +491,7 @@ impl<'s> FunctionBuilder<'s> {
         receiver: Value,
         method: &str,
         args: &'s [Expr],
-    ) -> Result<Option<Option<Value>>> {
+    ) -> Result<Option<Value>> {
         let recv_ty = receiver.get_type(ctx);
         if let Some(iterator) = IteratorMethod::parse(method) {
             let collection = if map_entry_types(ctx, recv_ty).is_some() {
@@ -511,106 +507,19 @@ impl<'s> FunctionBuilder<'s> {
             };
             if let Some(collection) = collection {
                 ensure!(args.is_empty(), "{collection}.{method} takes no arguments");
-                return Ok(Some(Some(
-                    self.collection_iterator(ctx, receiver, iterator)?,
-                )));
+                return self.collection_iterator(ctx, receiver, iterator).map(Some);
             }
         }
 
-        if let Some((k_ty, v_ty, _)) = map_entry_types(ctx, recv_ty) {
-            let res = match method {
-                "get" => {
-                    let [key] = args else {
-                        bail!("Map.get requires one key argument");
-                    };
-                    let k = self.expression_with(ctx, key, Some(k_ty))?;
-                    Some(self.kv_get(ctx, receiver, k, k_ty, v_ty)?)
-                }
-                "set" => {
-                    let [key, value] = args else {
-                        bail!("Map.set requires key and value arguments");
-                    };
-                    let k = self.expression_with(ctx, key, Some(k_ty))?;
-                    let v = self.expression_with(ctx, value, Some(v_ty))?;
-                    Some(self.kv_set(ctx, receiver, k, v)?)
-                }
-                "has" => {
-                    let [key] = args else {
-                        bail!("Map.has requires one key argument");
-                    };
-                    let k = self.expression_with(ctx, key, Some(k_ty))?;
-                    Some(self.kv_has(ctx, receiver, k, k_ty)?)
-                }
-                "delete" => {
-                    let [key] = args else {
-                        bail!("Map.delete requires one key argument");
-                    };
-                    let k = self.expression_with(ctx, key, Some(k_ty))?;
-                    Some(self.kv_delete(ctx, receiver, k, k_ty)?)
-                }
-                "clear" => {
-                    ensure!(args.is_empty(), "Map.clear takes no arguments");
-                    Some(self.collection_clear(ctx, receiver)?)
-                }
-                "forEach" => {
-                    let [callback] = args else {
-                        bail!("Map.forEach requires one callback argument");
-                    };
-                    Some(self.map_for_each(ctx, receiver, callback)?)
-                }
-                _ => return Ok(None),
-            };
-            return Ok(Some(res));
+        if map_entry_types(ctx, recv_ty).is_some() {
+            return MapCall::parse(method, args)?
+                .map(|call| call.lower(self, ctx, receiver))
+                .transpose();
         }
-
-        if let Some((elem_ty, tuple_rec)) = set_entry_type(ctx, recv_ty) {
-            let res = match method {
-                "add" => {
-                    let [value] = args else {
-                        bail!("Set.add requires one value argument");
-                    };
-                    let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                    Some(self.set_add(ctx, receiver, v, elem_ty, tuple_rec)?)
-                }
-                "has" => {
-                    let [value] = args else {
-                        bail!("Set.has requires one value argument");
-                    };
-                    let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                    Some(self.set_has(ctx, receiver, v, elem_ty)?)
-                }
-                "delete" => {
-                    let [value] = args else {
-                        bail!("Set.delete requires one value argument");
-                    };
-                    let v = self.expression_with(ctx, value, Some(elem_ty))?;
-                    Some(self.set_delete(ctx, receiver, v, elem_ty)?)
-                }
-                "clear" => {
-                    ensure!(args.is_empty(), "Set.clear takes no arguments");
-                    Some(self.collection_clear(ctx, receiver)?)
-                }
-                "forEach" => {
-                    let [callback] = args else {
-                        bail!("Set.forEach requires one callback argument");
-                    };
-                    Some(self.set_for_each(ctx, receiver, callback)?)
-                }
-                "difference" | "union" | "intersection" | "symmetricDifference" => {
-                    let [other] = args else {
-                        bail!("Set.{method} requires one Set argument");
-                    };
-                    Some(self.set_binary_op(ctx, receiver, other, elem_ty, tuple_rec, method)?)
-                }
-                "isSubsetOf" | "isSupersetOf" | "isDisjointFrom" => {
-                    let [other] = args else {
-                        bail!("Set.{method} requires one Set argument");
-                    };
-                    Some(self.set_relation_op(ctx, receiver, other, elem_ty, method)?)
-                }
-                _ => return Ok(None),
-            };
-            return Ok(Some(res));
+        if set_entry_type(ctx, recv_ty).is_some() {
+            return SetCall::parse(method, args)?
+                .map(|call| call.lower(self, ctx, receiver))
+                .transpose();
         }
 
         Ok(None)
@@ -652,7 +561,7 @@ impl<'s> FunctionBuilder<'s> {
         let Some(expected) = expected else {
             bail!("an empty Map requires a type annotation (e.g. Map<K, V>)");
         };
-        let expected = optional_value(ctx, expected).unwrap_or(expected);
+        let expected = present_type(ctx, expected);
         let (_, _, tuple_rec) =
             kv_entry_types(ctx, expected).context("expected a Map<K, V> type")?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
@@ -693,7 +602,7 @@ impl<'s> FunctionBuilder<'s> {
         let Some(expected) = expected else {
             bail!("an empty Set requires a type annotation (e.g. Set<T>)");
         };
-        let expected = optional_value(ctx, expected).unwrap_or(expected);
+        let expected = present_type(ctx, expected);
         let (_, tuple_rec) = set_entry_type(ctx, expected).context("expected a Set<T> type")?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }

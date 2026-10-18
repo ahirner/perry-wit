@@ -332,7 +332,7 @@ impl<'s> FunctionBuilder<'s> {
             .map(|r| {
                 let ty = r.carrier;
                 match optional_value(ctx, ty) {
-                    Some(_) if absence(ctx, ty).is_some_and(|states| states.admits_undefined()) => {
+                    Some(_) if admits_undefined(ctx, ty) => {
                         self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
                     }
                     _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
@@ -476,8 +476,7 @@ impl<'s> FunctionBuilder<'s> {
         let def_op = value.defining_op()?;
         Operation::get_op::<NumericCastOp>(def_op, ctx)?;
         let src = def_op.deref(ctx).get_operand(0);
-        let int_ty = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok()?;
-        (int_ty.deref(ctx).width() == 64).then_some(src)
+        is_integer64(ctx, src.get_type(ctx)).then_some(src)
     }
 
     pub(super) fn load_local(&mut self, ctx: &mut Context, id: LocalId) -> Result<Value> {

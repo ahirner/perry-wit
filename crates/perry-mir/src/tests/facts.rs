@@ -136,6 +136,32 @@ builtin.module @aggregate_facts {
             }
         }
     }
+    for ty in [
+        "perry.record <Opaque>",
+        "perry.array <perry.record <Opaque>>",
+    ] {
+        let ctx = &mut Context::new();
+        let module = parse(
+            ctx,
+            &format!(
+                r#"
+builtin.module @opaque {{ ^module():
+  builtin.func @run: builtin.function <({ty}) -> ({ty})> {{
+    ^entry(value: {ty}): perry.return value
+  }}
+}}
+"#
+            ),
+        );
+        verify_operation(module, ctx)?;
+        set_exported(ctx, &function(ctx, module, "run"));
+        let mut analyses = AnalysisManager::default();
+        let Err(error) = analyses.get_analysis::<ProgramFacts>(module, ctx) else {
+            panic!("accepted unresolved heap schema {ty}");
+        };
+        assert!(error.to_string().contains("Opaque"), "{error}");
+        assert!(analyses.try_get_analysis::<ProgramFacts>(module).is_none());
+    }
     Ok(())
 }
 
@@ -210,7 +236,7 @@ builtin.module @lengths { ^module():
             let fresh = facts(ctx, module)?;
             for facts in [&*cached, &fresh] {
                 assert_eq!(
-                    facts.array_length(ctx, &run, array),
+                    facts.array_length(&run, array),
                     Some(expected),
                     "{mutation}"
                 );
@@ -310,7 +336,7 @@ builtin.module @outcomes { ^module():
                 Failure::None
             };
             for facts in [&*cached, &fresh] {
-                assert_eq!(facts.may_reject(ctx, &run, pending), rejects, "{mutation}");
+                assert_eq!(facts.may_reject(&run, pending), rejects, "{mutation}");
                 let failure = facts
                     .effects(&pliron::ident!("run"))
                     .unwrap()
@@ -353,10 +379,10 @@ fn combinator_outcomes_join_inputs_without_mutating_them() -> Result<()> {
             verify_operation(root, ctx)?;
             let facts = facts(ctx, root)?;
             assert_eq!(
-                facts.may_reject(ctx, &run, pending),
+                facts.may_reject(&run, pending),
                 rejected && kind != Combinator::AllSettled
             );
-            assert_eq!(facts.array_length(ctx, &run, array), Some((1, 1)));
+            assert_eq!(facts.array_length(&run, array), Some((1, 1)));
         }
     }
     Ok(())
@@ -386,7 +412,7 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
         let run = function(ctx, module, "run");
         let facts = facts(ctx, module)?;
         let array = first::<ArrayNewOp>(ctx, &run).deref(ctx).get_result(0);
-        assert_eq!(facts.array_length(ctx, &run, array), Some((1, u32::MAX)));
+        assert_eq!(facts.array_length(&run, array), Some((1, u32::MAX)));
         assert_eq!(
             facts.is_count(ctx, &run, returned(ctx, &run, 0)),
             size <= 32

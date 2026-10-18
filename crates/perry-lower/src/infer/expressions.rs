@@ -432,14 +432,14 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 if let Some(key) = key {
                     let val_ty = expression(val_expr, env);
                     if matches!(val_expr, Expr::Null | Expr::Undefined)
-                        && let Some(existing) = props.get(key)
+                        && let Some(existing) = props.remove(key)
                     {
                         let abs = if matches!(val_expr, Expr::Null) {
                             HirType::Null
                         } else {
                             HirType::Void
                         };
-                        let widened = with_absences(existing.ty.clone(), vec![abs]);
+                        let widened = with_absences(existing.ty, vec![abs]);
                         props.insert(
                             key.clone(),
                             perry_hir::types::PropertyInfo {
@@ -485,50 +485,30 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     });
                     if let Some(resolved) = resolved_props {
                         for (name, prop_ty, opt) in resolved {
-                            if matches!(prop_ty, HirType::Null | HirType::Void)
-                                && let Some(existing) = props.get(&name)
-                            {
-                                let abs = if matches!(prop_ty, HirType::Null) {
-                                    HirType::Null
-                                } else {
-                                    HirType::Void
-                                };
-                                let widened = with_absences(existing.ty.clone(), vec![abs]);
-                                props.insert(
-                                    name,
-                                    perry_hir::types::PropertyInfo {
-                                        ty: widened,
-                                        optional: existing.optional,
-                                        readonly: false,
-                                    },
-                                );
-                            } else if opt && let Some(existing) = props.get(&name) {
-                                let (inner, prop_abs) = strip_nullish(prop_ty);
-                                let (_, mut existing_abs) = strip_nullish(existing.ty.clone());
-                                for abs in prop_abs {
-                                    if !existing_abs.contains(&abs) {
-                                        existing_abs.push(abs);
-                                    }
+                            let (ty, optional) = match (prop_ty, props.remove(&name)) {
+                                (abs @ (HirType::Null | HirType::Void), Some(existing)) => {
+                                    (with_absences(existing.ty, vec![abs]), existing.optional)
                                 }
-                                let merged = with_absences(inner, existing_abs);
-                                props.insert(
-                                    name,
-                                    perry_hir::types::PropertyInfo {
-                                        ty: merged,
-                                        optional: existing.optional,
-                                        readonly: false,
-                                    },
-                                );
-                            } else {
-                                props.insert(
-                                    name,
-                                    perry_hir::types::PropertyInfo {
-                                        ty: prop_ty,
-                                        optional: opt,
-                                        readonly: false,
-                                    },
-                                );
-                            }
+                                (ty, Some(existing)) if opt => {
+                                    let (inner, prop_abs) = strip_nullish(ty);
+                                    let (_, mut existing_abs) = strip_nullish(existing.ty);
+                                    for abs in prop_abs {
+                                        if !existing_abs.contains(&abs) {
+                                            existing_abs.push(abs);
+                                        }
+                                    }
+                                    (with_absences(inner, existing_abs), existing.optional)
+                                }
+                                (ty, _) => (ty, opt),
+                            };
+                            props.insert(
+                                name,
+                                perry_hir::types::PropertyInfo {
+                                    ty,
+                                    optional,
+                                    readonly: false,
+                                },
+                            );
                         }
                     } else {
                         all_spreads_typed = false;
@@ -538,12 +518,12 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             if !all_spreads_typed || props.is_empty() {
                 perry_hir::infer_expr_type(expr, env)
             } else {
-                if let Some(named) = single_spread_named
+                if let Some(named) = single_spread_named.map(HirType::Named)
                     && let Some(orig) = shapes::generics::object_properties(
                         env.ctx,
                         env.interfaces,
                         env.type_aliases,
-                        &HirType::Named(named.clone()),
+                        &named,
                     )
                     && orig.len() == props.len()
                     && orig.iter().all(|(k, t, opt)| {
@@ -552,7 +532,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                             .is_some_and(|p| &p.ty == t && p.optional == *opt)
                     })
                 {
-                    HirType::Named(named)
+                    named
                 } else {
                     HirType::Object(perry_hir::types::ObjectType {
                         name: None,

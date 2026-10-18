@@ -20,6 +20,7 @@ use pliron::{
     identifier::Identifier,
     op::op_cast,
     operation::Operation,
+    result::Result,
     r#type::Typed,
     value::Value,
 };
@@ -75,7 +76,7 @@ impl Solver {
             self.escape(id, operation.get_operand(stored));
         }
         if let Some(callee) = crate::calls::callee(ctx, op) {
-            if let Some(&child) = self.analysis.generic.get(&callee) {
+            if let Some(child) = self.analysis.generic_context(&callee) {
                 self.analysis.states[child].callers.insert((id, index));
                 let current = self.analysis.states[id].summary.effects;
                 let effects = self.analysis.bodies[&self.analysis.keys[id].function]
@@ -201,7 +202,7 @@ impl Solver {
         ranges: [Range; 2],
         result: Value,
     ) {
-        let mut fact = self.arithmetic(ctx, id, inputs, result);
+        let mut fact = self.arithmetic(ctx, id, inputs.iter().copied(), result);
         let [lhs, rhs] = ranges;
         let range = arithmetic_range(kind, lhs, rhs, fact.integer());
         if let Fact::Literal { negative } = &mut fact {
@@ -223,11 +224,11 @@ impl Solver {
     ) -> Option<(Fact, Range)> {
         let operation = op.deref(ctx);
         let result = operation.get_result(0);
-        let inputs: Vec<Value> = operation.operands().collect();
+        let inputs = operation.operands();
         let range = |solver: &Self, input: Value| solver.analysis.states[id].range(input);
         Some(match contract {
             BuiltinContract::Round => {
-                let input = inputs[0];
+                let input = operation.get_operand(0);
                 let state = &self.analysis.states[id];
                 let fact = match (state.fact(input), state.required.get(&result)) {
                     (Fact::Integer(integer), _) | (_, Some(&integer)) => Fact::Integer(integer),
@@ -243,31 +244,28 @@ impl Solver {
             BuiltinContract::Abs | BuiltinContract::Min | BuiltinContract::Max => {
                 let required = self.analysis.states[id].required.get(&result).copied();
                 let constrained = self.analysis.states[id].is_constrained(result);
-                for &input in &inputs {
+                for input in inputs.clone() {
                     self.require(id, input, required);
                 }
-                for &input in &inputs {
+                for input in inputs.clone() {
                     self.constrain(id, input, constrained);
                 }
-                let fact = self.arithmetic(ctx, id, &inputs, result);
-                let ranges: Vec<Range> = inputs.iter().map(|&input| range(self, input)).collect();
-                let bounds: Option<Vec<Interval>> = ranges
-                    .iter()
-                    .map(|range| match *range {
-                        Range::Bounds(interval) => Some(interval),
-                        _ => None,
-                    })
-                    .collect();
+                let fact = self.arithmetic(ctx, id, inputs.clone(), result);
                 let max = contract == BuiltinContract::Max;
-                let range = match bounds
-                    .and_then(|bounds| bounds.into_iter().reduce(|a, b| a.extreme(b, max)))
-                {
-                    _ if ranges.contains(&Range::Bottom) => Range::Bottom,
-                    Some(interval) if contract == BuiltinContract::Abs => {
+                let range = inputs
+                    .map(|input| range(self, input))
+                    .reduce(|a, b| match (a, b) {
+                        (Range::Bottom, _) | (_, Range::Bottom) => Range::Bottom,
+                        (Range::Bounds(a), Range::Bounds(b)) => Range::Bounds(a.extreme(b, max)),
+                        _ => Range::Unknown,
+                    });
+                let range = match range {
+                    Some(Range::Bottom) => Range::Bottom,
+                    Some(Range::Bounds(interval)) if contract == BuiltinContract::Abs => {
                         Range::clamp(interval.abs(), fact.integer())
                     }
-                    Some(interval) => Range::clamp(interval, fact.integer()),
-                    None => Range::of(fact.integer()),
+                    Some(Range::Bounds(interval)) => Range::clamp(interval, fact.integer()),
+                    None | Some(Range::Unknown) => Range::of(fact.integer()),
                 };
                 (fact, range)
             }
@@ -405,12 +403,12 @@ impl Solver {
         }
     }
 
-    pub(super) fn process(&mut self, ctx: &Context, id: usize, index: usize) {
+    pub(super) fn process(&mut self, ctx: &Context, id: usize, index: usize) -> Result<()> {
         let constraint = self.analysis.bodies[&self.analysis.keys[id].function].constraints[index];
         let (op, heap) = match constraint {
             Constraint::Edge { from, to } => {
                 self.outcome(id, to, self.analysis.states[id].outcome(from));
-                self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index));
+                self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index))?;
                 self.propagate_origins(id, from, to);
                 if from.get_type(ctx).deref(ctx).is::<PromiseType>()
                     && (self.analysis.states[id].original_payloads.contains(&from)
@@ -425,12 +423,12 @@ impl Solver {
                 let fact = self.analysis.states[id].fact(from);
                 self.fact(id, to, fact);
                 self.range(id, to, self.analysis.states[id].range(from));
-                return;
+                return Ok(());
             }
             Constraint::Op { op, heap } => (op, heap),
         };
         self.operation_effects(ctx, id, index, op);
-        let heap_facts = self.heap_operation(ctx, id, index, op, heap);
+        let heap_facts = self.heap_operation(ctx, id, index, op, heap)?;
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if Operation::get_op::<AwaitOp>(op, ctx).is_none()
@@ -464,7 +462,7 @@ impl Solver {
                 self.fact(id, promise, self.analysis.states[id].fact(value));
             }
             self.range(id, promise, self.analysis.states[id].range(value));
-            return;
+            return Ok(());
         }
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
             let promise = operation.get_operand(0);
@@ -482,7 +480,7 @@ impl Solver {
             }
             self.fact(id, result, fact);
             self.range(id, result, self.analysis.states[id].range(promise));
-            return;
+            return Ok(());
         }
         if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
             let mut changed = false;
@@ -535,23 +533,23 @@ impl Solver {
             if changed {
                 self.notify_callers(id);
             }
-            return;
+            return Ok(());
         }
         let asynchronous = Operation::get_op::<AsyncCallOp>(op, ctx);
         if let Some(callee) = crate::calls::callee(ctx, op) {
             if !self.analysis.keys[id].specialize
-                && let Some(&child) = self.analysis.generic.get(&callee)
+                && let Some(child) = self.analysis.generic_context(&callee)
             {
                 self.analysis.states[child].callers.insert((id, index));
-                self.heap_call(ctx, id, index, child, op);
+                self.heap_call(ctx, id, index, child, op)?;
                 self.call_results(ctx, id, child, op, asynchronous.is_some());
-                return;
+                return Ok(());
             }
             if operation
                 .operands()
                 .any(|value| self.analysis.states[id].fact(value) == Fact::Bottom)
             {
-                return;
+                return Ok(());
             }
             if self.analysis.bodies.contains_key(&callee) {
                 let preserve_result = asynchronous.is_some()
@@ -559,14 +557,14 @@ impl Solver {
                         .original_payloads
                         .contains(&operation.get_result(0));
                 let key = self.call_key(ctx, id, op, &callee, preserve_result);
-                let child = self.context(ctx, key);
+                let child = self.context(ctx, key)?;
                 if let Some(prev) = self.analysis.states[id].calls.insert(op, child)
                     && prev != child
                 {
                     self.analysis.states[prev].callers.remove(&(id, index));
                 }
                 self.analysis.states[child].callers.insert((id, index));
-                self.heap_call(ctx, id, index, child, op);
+                self.heap_call(ctx, id, index, child, op)?;
                 let mut call_constrained = false;
                 for (position, value) in operation.results().enumerate() {
                     let is_cons = !preserve_result
@@ -597,7 +595,7 @@ impl Solver {
                     self.constrain(id, input, is_cons);
                 }
                 self.call_results(ctx, id, child, op, asynchronous.is_some());
-                return;
+                return Ok(());
             }
         }
         if let Some(kind) = integer_arithmetic(ctx, op) {
@@ -637,7 +635,7 @@ impl Solver {
             {
                 self.width_defaults.push((id, index, result));
             }
-            return;
+            return Ok(());
         }
         if let Some(binary) = Operation::get_op::<BinaryOp>(op, ctx)
             && binary.kind(ctx) == BinaryKind::Rem
@@ -661,7 +659,7 @@ impl Solver {
             );
             self.fact(id, result, fact);
             self.range(id, result, range);
-            return;
+            return Ok(());
         }
         if intrinsic_of(ctx, op) == Some(Intrinsic::BigIntNegate) {
             let (input, result) = (operation.get_operand(0), operation.get_result(0));
@@ -669,7 +667,7 @@ impl Solver {
             let zero = Range::Bounds(Interval { lower: 0, upper: 0 });
             let ranges = [zero, self.analysis.states[id].range(input)];
             self.arithmetic_result(ctx, id, BinaryKind::Sub, &[input], ranges, result);
-            return;
+            return Ok(());
         }
         if let Some(intrinsic) = intrinsic_of(ctx, op)
             && let Some(contract) = intrinsic.numeric_contract()
@@ -679,7 +677,7 @@ impl Solver {
             self.outcome(id, result, Outcomes::unknown(ctx, result.get_type(ctx)));
             self.fact(id, result, fact);
             self.range(id, result, range);
-            return;
+            return Ok(());
         }
         if Operation::get_op::<CompareOp>(op, ctx).is_some()
             && let Some(domain) = comparison_domain(
@@ -712,12 +710,12 @@ impl Solver {
                     _ => Range::Bounds(integer.bounds()),
                 };
                 self.range(id, result, range);
-                return;
+                return Ok(());
             }
             if let Some(integer) = Integer::from_type(ctx, operand.get_type(ctx)) {
                 self.fact(id, result, Fact::Integer(integer));
                 self.range(id, result, self.analysis.states[id].range(operand));
-                return;
+                return Ok(());
             }
         }
         for result in operation.results() {
@@ -762,5 +760,6 @@ impl Solver {
             };
             self.range(id, result, range);
         }
+        Ok(())
     }
 }

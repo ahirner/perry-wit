@@ -1,5 +1,6 @@
 //! Live collection storage: boxes, views, cursors, tombstones, compaction and live iteration.
 
+use super::StorageField as Field;
 use super::*;
 
 /// The entry and payload fields cleared when a live collection member is deleted.
@@ -45,8 +46,7 @@ impl LiveCursor {
         };
         Ok(Some(
             if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
-                let op = FieldGetOp::new(ctx, coll, "_1".to_string())?;
-                let cursor = b.append_value(ctx, &op);
+                let cursor = b.storage_field(ctx, coll, Field::ViewCursor)?;
                 let live = Self::View {
                     box_val,
                     cursor,
@@ -90,17 +90,10 @@ impl LiveCursor {
         let seq = b.append_value(ctx, &seq_op);
         let one = b.number(ctx, 1.0);
         let next_seq = b.binary(ctx, BinaryKind::Add, seq, one);
-        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let epoch = b.append_value(ctx, &epoch_op);
-        b.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_0".to_string(), next)
-        });
-        b.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_1".to_string(), next_seq)
-        });
-        b.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_2".to_string(), epoch)
-        });
+        let epoch = b.storage_field(ctx, box_val, Field::BoxEpoch)?;
+        b.set_storage_field(ctx, cursor, Field::CursorIndex, next);
+        b.set_storage_field(ctx, cursor, Field::CursorSequence, next_seq);
+        b.set_storage_field(ctx, cursor, Field::CursorEpoch, epoch);
         Ok(())
     }
 
@@ -124,12 +117,8 @@ impl LiveCursor {
         match self {
             Self::View { cursor, .. } => {
                 let inf = b.number(ctx, f64::INFINITY);
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, cursor, "_0".to_string(), inf)
-                });
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, cursor, "_1".to_string(), inf)
-                });
+                b.set_storage_field(ctx, cursor, Field::CursorIndex, inf);
+                b.set_storage_field(ctx, cursor, Field::CursorSequence, inf);
                 Ok(())
             }
             Self::Loop { .. } => Ok(()),
@@ -138,6 +127,17 @@ impl LiveCursor {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    fn storage_field(&mut self, ctx: &mut Context, record: Value, field: Field) -> Result<Value> {
+        let op = FieldGetOp::new(ctx, record, field.name().to_owned())?;
+        Ok(self.append_value(ctx, &op))
+    }
+
+    fn set_storage_field(&mut self, ctx: &mut Context, record: Value, field: Field, value: Value) {
+        self.emit(ctx, |ctx| {
+            FieldSetOp::new(ctx, record, field.name().to_owned(), value)
+        });
+    }
+
     /// A new, empty `kind` box over `entry` records.
     pub(super) fn alloc_collection_box(
         &mut self,
@@ -180,8 +180,7 @@ impl<'s> FunctionBuilder<'s> {
         if map_box_record(ctx, ty).is_some() || set_box_record(ctx, ty).is_some() {
             Ok(Some(val))
         } else if collection_view_record(ctx, ty).is_some() {
-            let op = FieldGetOp::new(ctx, val, "_0".to_string())?;
-            Ok(Some(self.append_value(ctx, &op)))
+            Ok(Some(self.storage_field(ctx, val, Field::ViewBox)?))
         } else {
             Ok(None)
         }
@@ -194,10 +193,7 @@ impl<'s> FunctionBuilder<'s> {
         val: Value,
     ) -> Result<Value> {
         match self.collection_underlying_box(ctx, val)? {
-            Some(box_val) => {
-                let op = FieldGetOp::new(ctx, box_val, "_0".to_string())?;
-                Ok(self.append_value(ctx, &op))
-            }
+            Some(box_val) => self.storage_field(ctx, box_val, Field::BoxEntries),
             None => Ok(val),
         }
     }
@@ -219,7 +215,7 @@ impl<'s> FunctionBuilder<'s> {
         val: Value,
         idx: Value,
     ) -> Result<Value> {
-        let ty = optional_value(ctx, val.get_type(ctx)).unwrap_or(val.get_type(ctx));
+        let ty = present_type(ctx, val.get_type(ctx));
         let entries = self.collection_entries_array(ctx, val)?;
         let entry = self.element_at(ctx, entries, idx)?;
         let yielded = match collection_view_record(ctx, ty) {
@@ -283,7 +279,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         ty: TypeHandle,
     ) -> Result<TypeHandle> {
-        let ty = optional_value(ctx, ty).unwrap_or(ty);
+        let ty = present_type(ctx, ty);
         if let Some((elem_ty, _)) = set_entry_type(ctx, ty) {
             return Ok(elem_ty);
         }
@@ -346,13 +342,10 @@ impl<'s> FunctionBuilder<'s> {
         let Some(box_val) = owner else {
             return Ok(self.number(ctx, 0.0));
         };
-        let seq_op = FieldGetOp::new(ctx, box_val, "_2".to_string())?;
-        let seq = self.append_value(ctx, &seq_op);
+        let seq = self.storage_field(ctx, box_val, Field::BoxSequence)?;
         let one = self.number(ctx, 1.0);
         let next_seq = self.binary(ctx, BinaryKind::Add, seq, one);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, box_val, "_2".to_string(), next_seq)
-        });
+        self.set_storage_field(ctx, box_val, Field::BoxSequence, next_seq);
         Ok(seq)
     }
 
@@ -363,8 +356,7 @@ impl<'s> FunctionBuilder<'s> {
         idx: Value,
     ) -> Result<Value> {
         let zero = self.number(ctx, 0.0);
-        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let epoch = self.append_value(ctx, &epoch_op);
+        let epoch = self.storage_field(ctx, box_val, Field::BoxEpoch)?;
         let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
         Ok(self.emit_value(ctx, |ctx| {
             AllocOp::new(ctx, cursor_rec, vec![idx, zero, epoch])
@@ -378,8 +370,7 @@ impl<'s> FunctionBuilder<'s> {
         cursor: Value,
         kind: EntryKind,
     ) -> Result<Value> {
-        let idx_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
-        let idx = self.append_value(ctx, &idx_op);
+        let idx = self.storage_field(ctx, cursor, Field::CursorIndex)?;
         let inf = self.number(ctx, f64::INFINITY);
         let active = self.compare(ctx, CompareKind::Lt, idx, inf);
         let active_bb = self.new_block(ctx, "sync_cursor_active");
@@ -388,18 +379,14 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, active, active_bb, done_bb);
 
         self.switch_to(active_bb);
-        let cur_epoch_op = FieldGetOp::new(ctx, cursor, "_2".to_string())?;
-        let cur_epoch = self.append_value(ctx, &cur_epoch_op);
-        let box_epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let box_epoch = self.append_value(ctx, &box_epoch_op);
+        let cur_epoch = self.storage_field(ctx, cursor, Field::CursorEpoch)?;
+        let box_epoch = self.storage_field(ctx, box_val, Field::BoxEpoch)?;
         let same_epoch = self.compare(ctx, CompareKind::Eq, cur_epoch, box_epoch);
         self.branch(ctx, same_epoch, done_bb, resync_bb);
 
         self.switch_to(resync_bb);
-        let min_seq_op = FieldGetOp::new(ctx, cursor, "_1".to_string())?;
-        let min_seq = self.append_value(ctx, &min_seq_op);
-        let entries_op = FieldGetOp::new(ctx, box_val, "_0".to_string())?;
-        let entries = self.append_value(ctx, &entries_op);
+        let min_seq = self.storage_field(ctx, cursor, Field::CursorSequence)?;
+        let entries = self.storage_field(ctx, box_val, Field::BoxEntries)?;
         let len = self.array_length(ctx, entries);
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
@@ -426,27 +413,19 @@ impl<'s> FunctionBuilder<'s> {
             },
         )?;
         let new_idx = self.load(ctx, new_idx_slot)?;
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_0".to_string(), new_idx)
-        });
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, cursor, "_2".to_string(), box_epoch)
-        });
+        self.set_storage_field(ctx, cursor, Field::CursorIndex, new_idx);
+        self.set_storage_field(ctx, cursor, Field::CursorEpoch, box_epoch);
         self.jump(ctx, done_bb);
 
         self.switch_to(done_bb);
-        let final_op = FieldGetOp::new(ctx, cursor, "_0".to_string())?;
-        Ok(self.append_value(ctx, &final_op))
+        self.storage_field(ctx, cursor, Field::CursorIndex)
     }
 
     fn bump_box_epoch(&mut self, ctx: &mut Context, box_val: Value) -> Result<()> {
-        let epoch_op = FieldGetOp::new(ctx, box_val, "_3".to_string())?;
-        let epoch = self.append_value(ctx, &epoch_op);
+        let epoch = self.storage_field(ctx, box_val, Field::BoxEpoch)?;
         let one = self.number(ctx, 1.0);
         let next_epoch = self.binary(ctx, BinaryKind::Add, epoch, one);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, box_val, "_3".to_string(), next_epoch)
-        });
+        self.set_storage_field(ctx, box_val, Field::BoxEpoch, next_epoch);
         Ok(())
     }
 
@@ -500,27 +479,24 @@ impl<'s> FunctionBuilder<'s> {
         box_val: Value,
         kind: BinaryKind,
     ) -> Result<Value> {
-        let sz_op = FieldGetOp::new(ctx, box_val, "_1".to_string())?;
-        let sz = self.append_value(ctx, &sz_op);
+        let sz = self.storage_field(ctx, box_val, Field::BoxLength)?;
         let one = self.number(ctx, 1.0);
         let next_sz = self.binary(ctx, kind, sz, one);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, box_val, "_1".to_string(), next_sz)
-        });
+        self.set_storage_field(ctx, box_val, Field::BoxLength, next_sz);
         Ok(next_sz)
     }
 
     /// A reference-free placeholder of `ty`; `None` for types holding nothing to release.
     fn zero_value_for_type(&mut self, ctx: &mut Context, ty: TypeHandle) -> Option<Value> {
-        let inner = optional_value(ctx, ty).unwrap_or(ty);
+        let inner = present_type(ctx, ty);
         if inner.deref(ctx).is::<FP64Type>()
             || inner.deref(ctx).is::<IntegerType>()
             || inner.deref(ctx).is::<BigIntType>()
         {
             return None;
         }
-        if optional_value(ctx, ty).is_some() {
-            if absence(ctx, ty).is_some_and(|a| !a.admits_undefined()) {
+        if let Some(states) = absence(ctx, ty) {
+            if !states.admits_undefined() {
                 return Some(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)));
             }
             return Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)));
@@ -627,8 +603,7 @@ impl<'s> FunctionBuilder<'s> {
     /// `size`: a box's live count, otherwise a count of live entries.
     pub(crate) fn collection_size(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
         if let Some(box_val) = self.collection_underlying_box(ctx, arr)? {
-            let op = FieldGetOp::new(ctx, box_val, "_1".to_string())?;
-            return Ok(self.append_value(ctx, &op));
+            return self.storage_field(ctx, box_val, Field::BoxLength);
         }
         let num_ty = FP64Type::get(ctx).into();
         let count_slot = self.entry_slot(ctx, num_ty);
@@ -652,9 +627,7 @@ impl<'s> FunctionBuilder<'s> {
             let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
             let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
             self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
-            self.emit(ctx, |ctx| {
-                FieldSetOp::new(ctx, box_val, "_1".to_string(), zero)
-            });
+            self.set_storage_field(ctx, box_val, Field::BoxLength, zero);
             self.bump_box_epoch(ctx, box_val)?;
         } else {
             let kind = TypedHandle::<ArrayType>::from_handle(coll.get_type(ctx), ctx)

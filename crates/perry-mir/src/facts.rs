@@ -375,7 +375,7 @@ pub struct ProgramFacts {
     keys: Vec<Key>,
     states: Vec<State>,
     roots: Vec<(FuncOp, usize)>,
-    generic: HashMap<Identifier, usize>,
+    generic: HashMap<Ptr<Operation>, usize>,
     pub(crate) constraint_visits: usize,
     /// Alias sets collapsed to a typed summary after exceeding 32 allocation sites.
     pub(crate) summarized_heap_sets: usize,
@@ -391,10 +391,14 @@ pub struct ProgramFacts {
 struct MissingEffects(Identifier);
 
 impl ProgramFacts {
+    fn generic_context(&self, name: &Identifier) -> Option<usize> {
+        let function = self.bodies.get(name)?.function.get_operation();
+        self.generic.get(&function).copied()
+    }
+
     pub fn effects(&self, function: &Identifier) -> Option<&crate::effects::Summary> {
-        self.generic
-            .get(function)
-            .map(|&id| &self.states[id].summary)
+        self.generic_context(function)
+            .map(|id| &self.states[id].summary)
     }
 
     /// A resolved function must have been included in this analysis.
@@ -403,16 +407,20 @@ impl ProgramFacts {
         ctx: &Context,
         function: &FuncOp,
     ) -> Result<&crate::effects::Summary> {
-        let name = function.get_symbol_name(ctx);
-        self.effects(&name).map_or_else(
-            || pliron::input_err!(function.loc(ctx).clone(), MissingEffects(name)),
-            Ok,
+        self.generic.get(&function.get_operation()).map_or_else(
+            || {
+                pliron::input_err!(
+                    function.loc(ctx).clone(),
+                    MissingEffects(function.get_symbol_name(ctx))
+                )
+            },
+            |&id| Ok(&self.states[id].summary),
         )
     }
 
     /// Non-negative integral values, including loop-carried counts after range widening.
     pub(crate) fn is_count(&self, ctx: &Context, function: &FuncOp, value: Value) -> bool {
-        let state = &self.states[self.generic[&function.get_symbol_name(ctx)]];
+        let state = &self.states[self.generic[&function.get_operation()]];
         crate::optional::optional_value(ctx, value.get_type(ctx)).is_none()
             && matches!(
                 state.range(value),
@@ -504,7 +512,7 @@ impl Solver {
                     return ArgumentDomain::Integer(integer);
                 }
                 // Unconstrained numbers stay lossless unless an async payload keeps its carrier.
-                let number = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+                let number = crate::optional::present_type(ctx, ty);
                 if !is_async && number.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
                     ArgumentDomain::Numeric
                 } else {
@@ -533,15 +541,15 @@ impl Solver {
         }
     }
 
-    fn context(&mut self, ctx: &Context, key: Key) -> usize {
+    fn context(&mut self, ctx: &Context, key: Key) -> Result<usize> {
         if let Some(&id) = self.contexts.get(&key) {
-            return id;
+            return Ok(id);
         }
         if key.specialize {
             if let Some(&id) = self.summary_contexts.get(&key.function) {
                 self.analysis.summarized_contexts += 1;
                 self.contexts.insert(key, id);
-                return id;
+                return Ok(id);
             }
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
             if *count >= max_precise_contexts() {
@@ -550,22 +558,22 @@ impl Solver {
                 let id = if let Some(&id) = self.contexts.get(&summary) {
                     id
                 } else {
-                    let id = self.allocate_context(ctx, summary.clone());
+                    let id = self.allocate_context(ctx, summary.clone())?;
                     self.contexts.insert(summary, id);
                     id
                 };
                 self.summary_contexts.insert(key.function.clone(), id);
                 self.contexts.insert(key, id);
-                return id;
+                return Ok(id);
             }
             *count += 1;
         }
-        let id = self.allocate_context(ctx, key.clone());
+        let id = self.allocate_context(ctx, key.clone())?;
         self.contexts.insert(key, id);
-        id
+        Ok(id)
     }
 
-    fn allocate_context(&mut self, ctx: &Context, key: Key) -> usize {
+    fn allocate_context(&mut self, ctx: &Context, key: Key) -> Result<usize> {
         let id = self.analysis.keys.len();
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
@@ -640,10 +648,10 @@ impl Solver {
         for constraint in 0..constraints {
             self.work.enqueue(Work::Operation(id, constraint));
         }
-        self.seed_heap_parameters(ctx, id);
+        self.seed_heap_parameters(ctx, id)?;
         // The signature is fixed for this context, even when requirements propagate
         // through the parameter: conversions belong at its uses, not at its entry.
-        id
+        Ok(id)
     }
 
     fn changed(&mut self, id: usize, value: Value) {
@@ -738,8 +746,11 @@ impl Analysis for ProgramFacts {
             let name = function.get_symbol_name(ctx);
             let ty = solver.analysis.bodies[&name].signature;
             let (args, results) = integer_signature(ctx, ty);
-            let generic = solver.context(ctx, Key::new(name.clone(), args, results, false));
-            solver.analysis.generic.insert(name.clone(), generic);
+            let generic = solver.context(ctx, Key::new(name.clone(), args, results, false))?;
+            solver
+                .analysis
+                .generic
+                .insert(function.get_operation(), generic);
             if function
                 .get_operation()
                 .deref(ctx)
@@ -767,15 +778,15 @@ impl Analysis for ProgramFacts {
                 }
                 key
             };
-            let id = solver.context(ctx, key);
+            let id = solver.context(ctx, key)?;
             solver.analysis.roots.push((function, id));
         }
         loop {
             while let Some(item) = solver.work.pop() {
                 solver.analysis.constraint_visits += 1;
                 match item {
-                    Work::Operation(id, index) => solver.process(ctx, id, index),
-                    Work::OpenObject(object) => solver.open_object(ctx, object),
+                    Work::Operation(id, index) => solver.process(ctx, id, index)?,
+                    Work::OpenObject(object) => solver.open_object(ctx, object)?,
                     Work::ReconcileCell(cell) => solver.reconcile_cell(ctx, cell),
                 }
             }

@@ -2,7 +2,31 @@
 use super::*;
 use perry_mir::{JsonCursorKeyOp, JsonSchema};
 
+enum VariantValue {
+    Missing,
+    Deferred,
+    Decoded(usize),
+}
+
+struct VariantPayload {
+    ty: TypeHandle,
+    slot: Value,
+}
+
 impl<'s> FunctionBuilder<'s> {
+    fn cursor_variant_state(&mut self, ctx: &mut Context, state: VariantValue) -> Result<Value> {
+        let code = match state {
+            VariantValue::Missing => u32::MAX,
+            VariantValue::Deferred => u32::MAX - 1,
+            VariantValue::Decoded(index) => {
+                let code = u32::try_from(index).context("too many JSON variant cases")?;
+                ensure!(code < u32::MAX - 1, "too many JSON variant cases");
+                code
+            }
+        };
+        Ok(self.cursor_index(ctx, code))
+    }
+
     fn cursor_index(&mut self, ctx: &mut Context, n: u32) -> Value {
         let ty = IntegerType::get(ctx, 32, Signedness::Signless);
         let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(n), bw(32)));
@@ -243,7 +267,7 @@ impl<'s> FunctionBuilder<'s> {
     /// Types admitting `undefined` take it (`omitted` for record fields, so `in` sees no key),
     /// `unknown` members take JSON `undefined` as JS property access would, others fail.
     fn cursor_absent(&mut self, ctx: &mut Context, ty: TypeHandle, omitted: bool) -> (Value, bool) {
-        if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+        if admits_undefined(ctx, ty) {
             let value = if omitted {
                 self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
             } else {
@@ -401,11 +425,16 @@ impl<'s> FunctionBuilder<'s> {
         cursor: Value,
         record: TypedHandle<RecordType>,
     ) -> Result<(Value, Value)> {
-        let fields = record.deref(ctx).fields()?.to_vec();
+        let fields: Vec<_> = record
+            .deref(ctx)
+            .fields()?
+            .iter()
+            .map(|(_, ty)| *ty)
+            .collect();
         let mut values = Vec::with_capacity(fields.len());
         let mut failed = self.boolean(ctx, false);
         self.cursor_consume(ctx, cursor, b'[');
-        for (_, ty) in &fields {
+        for ty in &fields {
             let byte = self.intrinsic(ctx, Intrinsic::JsonCursorByte, vec![cursor]);
             let end = self.cursor_is(ctx, byte, b']');
             let (v, e) = self.cursor_choice(
@@ -485,7 +514,7 @@ impl<'s> FunctionBuilder<'s> {
         self.store(ctx, tag_failed, yes);
 
         let val_case = self.entry_slot(ctx, index_ty);
-        let missing_case = self.cursor_index(ctx, u32::MAX);
+        let missing_case = self.cursor_variant_state(ctx, VariantValue::Missing)?;
         self.store(ctx, val_case, missing_case);
 
         let val_failed = self.entry_slot(ctx, boolean);
@@ -500,17 +529,18 @@ impl<'s> FunctionBuilder<'s> {
         let empty = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
         self.store(ctx, residue, empty);
 
-        let mut payload_slots = Vec::with_capacity(cases.len());
-        for (_, payload) in &cases {
-            if let Some(payload_ty) = *payload {
-                let slot = self.entry_slot(ctx, payload_ty);
-                let undef = self.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty));
-                self.store(ctx, slot, undef);
-                payload_slots.push(Some(slot));
-            } else {
-                payload_slots.push(None);
-            }
-        }
+        let cases: Vec<_> = cases
+            .into_iter()
+            .map(|(name, payload)| {
+                let payload = payload.map(|ty| {
+                    let slot = self.entry_slot(ctx, ty);
+                    let undef = self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty));
+                    self.store(ctx, slot, undef);
+                    VariantPayload { ty, slot }
+                });
+                (name, payload)
+            })
+            .collect();
 
         self.cursor_consume(ctx, cursor, b'{');
         let header = self.new_block(ctx, "json_variant_members");
@@ -548,7 +578,11 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(dispatch_val);
         let current_tag = self.load(ctx, tag_slot)?;
         for (case_i, (name, payload)) in cases.iter().enumerate() {
-            let Some(payload_ty) = *payload else {
+            let Some(VariantPayload {
+                ty: payload_ty,
+                slot,
+            }) = *payload
+            else {
                 continue;
             };
             let expected = self.string(ctx, name);
@@ -558,11 +592,9 @@ impl<'s> FunctionBuilder<'s> {
             self.branch(ctx, matched, hit, miss);
             self.switch_to(hit);
             let (v, e) = self.cursor_value(ctx, cursor, payload_ty)?;
-            if let Some(slot) = payload_slots[case_i] {
-                self.store(ctx, slot, v);
-            }
+            self.store(ctx, slot, v);
             self.store(ctx, val_failed, e);
-            let idx = self.cursor_index(ctx, case_i as u32);
+            let idx = self.cursor_variant_state(ctx, VariantValue::Decoded(case_i))?;
             self.store(ctx, val_case, idx);
             self.jump(ctx, step);
             self.switch_to(miss);
@@ -573,7 +605,7 @@ impl<'s> FunctionBuilder<'s> {
         let graph = self.load(ctx, residue)?;
         let graph = self.intrinsic(ctx, Intrinsic::JsonCursorMember, vec![cursor, graph]);
         self.store(ctx, residue, graph);
-        let deferred_marker = self.cursor_index(ctx, u32::MAX - 1);
+        let deferred_marker = self.cursor_variant_state(ctx, VariantValue::Deferred)?;
         self.store(ctx, val_case, deferred_marker);
         self.jump(ctx, step);
 
@@ -626,23 +658,22 @@ impl<'s> FunctionBuilder<'s> {
                     self.store(ctx, failed_slot, ok);
                     self.jump(ctx, finish);
                 }
-                Some(payload_ty) => {
-                    let idx = self.cursor_index(ctx, case_i as u32);
+                Some(VariantPayload {
+                    ty: payload_ty,
+                    slot,
+                }) => {
+                    let idx = self.cursor_variant_state(ctx, VariantValue::Decoded(case_i))?;
                     let already = self.compare(ctx, CompareKind::Eq, vc, idx);
-                    let slot = payload_slots[case_i];
                     let (payload_val, payload_err) = self.cursor_choice(
                         ctx,
                         payload_ty,
                         already,
                         |b, ctx| {
-                            let v = match slot {
-                                Some(slot) => b.load(ctx, slot)?,
-                                None => b.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty)),
-                            };
+                            let v = b.load(ctx, slot)?;
                             Ok((v, b.load(ctx, val_failed)?))
                         },
                         |b, ctx| {
-                            let missing_idx = b.cursor_index(ctx, u32::MAX);
+                            let missing_idx = b.cursor_variant_state(ctx, VariantValue::Missing)?;
                             let is_missing = b.compare(ctx, CompareKind::Eq, vc, missing_idx);
                             b.cursor_choice(
                                 ctx,

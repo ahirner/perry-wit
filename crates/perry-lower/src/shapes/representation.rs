@@ -122,7 +122,7 @@ impl Shapes<'_> {
                         Ok((format!("_{index}"), ty))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(self.mir_record_kind(ctx, fields, true)?.into())
+                Ok(self.mir_tuple(ctx, fields)?.into())
             }
             Kind::Object {
                 properties,
@@ -341,26 +341,18 @@ impl Shapes<'_> {
         }
     }
 
-    pub(crate) fn perry_integer_spec(name: &str) -> Option<(u32, Signedness)> {
+    pub(super) fn perry_integer_spec(name: &str) -> Option<(u32, Signedness)> {
         Some(match name {
-            "perry:types/u8" => (8, Signedness::Unsigned),
-            "perry:types/s8" => (8, Signedness::Signed),
-            "perry:types/u16" => (16, Signedness::Unsigned),
-            "perry:types/s16" => (16, Signedness::Signed),
-            "perry:types/u32" => (32, Signedness::Unsigned),
-            "perry:types/s32" => (32, Signedness::Signed),
-            "perry:types/u64" => (64, Signedness::Unsigned),
-            "perry:types/s64" => (64, Signedness::Signed),
+            "u8" => (8, Signedness::Unsigned),
+            "s8" => (8, Signedness::Signed),
+            "u16" => (16, Signedness::Unsigned),
+            "s16" => (16, Signedness::Signed),
+            "u32" => (32, Signedness::Unsigned),
+            "s32" => (32, Signedness::Signed),
+            "u64" => (64, Signedness::Unsigned),
+            "s64" => (64, Signedness::Signed),
             _ => return None,
         })
-    }
-
-    pub(crate) fn perry_integer_type(
-        ctx: &Context,
-        name: &str,
-    ) -> Option<TypedHandle<IntegerType>> {
-        let (bits, signedness) = Self::perry_integer_spec(name)?;
-        Some(IntegerType::get(ctx, bits, signedness))
     }
 
     pub(super) fn source_integer_type(
@@ -368,12 +360,12 @@ impl Shapes<'_> {
         ctx: &Context,
         ty: ArgumentId,
     ) -> Option<TypedHandle<IntegerType>> {
-        let name = match ty.deref(ctx).kind() {
-            Kind::Named(name) => name.clone(),
-            _ => return None,
+        let argument = ty.deref(ctx);
+        let Kind::Named(name) = argument.kind() else {
+            return None;
         };
         let mut seen = HashSet::new();
-        self.integer_type_by_name(ctx, &name, &mut seen)
+        self.integer_type_by_name(ctx, name, &mut seen)
     }
 
     pub(crate) fn integer_type(
@@ -394,8 +386,11 @@ impl Shapes<'_> {
         name: &'a str,
         seen: &mut HashSet<&'a str>,
     ) -> Option<TypedHandle<IntegerType>> {
-        if let Some(int_ty) = Self::perry_integer_type(ctx, name) {
-            return Some(int_ty);
+        if let Some((width, signedness)) = name
+            .strip_prefix("perry:types/")
+            .and_then(Self::perry_integer_spec)
+        {
+            return Some(IntegerType::get(ctx, width, signedness));
         }
         if !seen.insert(name) {
             return None;

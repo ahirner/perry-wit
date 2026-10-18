@@ -1,14 +1,22 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
 use crate::{
-    array_methods::{
-        CallbackReturn, EMPTY_RETURN, FALLTHROUGH, completions, insert_before_terminator,
-    },
+    array_methods::{CallbackReturn, EMPTY_RETURN, FALLTHROUGH, completions},
     builder::LocalBinding,
-    coerce::merge_absence,
     shapes::{Argument, ArgumentId, Kind as ArgKind},
 };
 use perry_mir::OptionalType;
+
+enum ClassArguments<'a, 's> {
+    Expressions(&'s [Expr]),
+    Evaluated(&'a [Value]),
+}
+
+enum ClassReceiver {
+    Static,
+    Instance(Value),
+    Constructor(Value),
+}
 
 impl<'s> FunctionBuilder<'s> {
     /// `new ClassName<type_args>(args)` for a user-defined class.
@@ -40,7 +48,7 @@ impl<'s> FunctionBuilder<'s> {
             (ty, effective)
         } else if class.type_params.is_empty() {
             (self.shapes.named(ctx, class_name)?, Vec::new())
-        } else if let Some(exp) = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+        } else if let Some(exp) = expected.map(|ty| present_type(ctx, ty))
             && let Some((c, mapped)) = self.shapes.class_of_type(ctx, exp)
             && c == class_name
         {
@@ -95,7 +103,7 @@ impl<'s> FunctionBuilder<'s> {
             .to_vec();
         let mut init_operands = Vec::with_capacity(field_defs.len());
         for (field, field_ty) in &field_defs {
-            let val = if absence(ctx, *field_ty).is_some_and(|a| a.admits_undefined()) {
+            let val = if admits_undefined(ctx, *field_ty) {
                 self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, *field_ty))
             } else if absence(ctx, *field_ty).is_some_and(|a| a.admits_null()) {
                 self.emit_value(ctx, |ctx| NullOp::new(ctx, *field_ty))
@@ -125,8 +133,10 @@ impl<'s> FunctionBuilder<'s> {
             ctx,
             class_name,
             &effective_args,
-            args,
-            pre_evaluated.as_deref(),
+            match pre_evaluated.as_deref() {
+                Some(values) => ClassArguments::Evaluated(values),
+                None => ClassArguments::Expressions(args),
+            },
             this_slot,
         )?;
         self.load(ctx, this_slot)
@@ -160,13 +170,12 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
-    pub(super) fn construct_class_instance(
+    fn construct_class_instance(
         &mut self,
         ctx: &mut Context,
         class_name: &'s str,
         type_args: &[ArgumentId],
-        args: &'s [Expr],
-        pre_evaluated: Option<&[Value]>,
+        args: ClassArguments<'_, 's>,
         this_slot: Value,
     ) -> Result<()> {
         let (&class_name, &(_, class)) = self
@@ -182,9 +191,7 @@ impl<'s> FunctionBuilder<'s> {
                 type_args,
                 ctor,
                 args,
-                pre_evaluated,
-                Some(this_slot),
-                true,
+                ClassReceiver::Constructor(this_slot),
             )?;
         }
         Ok(())
@@ -248,7 +255,14 @@ impl<'s> FunctionBuilder<'s> {
             .shapes
             .class_static_method(class_name, method)
             .with_context(|| format!("static method {class_name}.{method} not found"))?;
-        self.inline_class_callable(ctx, owner_class, &[], func, args, None, None, false)
+        self.inline_class_callable(
+            ctx,
+            owner_class,
+            &[],
+            func,
+            ClassArguments::Expressions(args),
+            ClassReceiver::Static,
+        )
     }
 
     pub(super) fn class_static_field_get(
@@ -294,10 +308,8 @@ impl<'s> FunctionBuilder<'s> {
             owner_class,
             type_args,
             func,
-            args,
-            None,
-            Some(slot),
-            false,
+            ClassArguments::Expressions(args),
+            ClassReceiver::Instance(slot),
         )
     }
 
@@ -316,10 +328,8 @@ impl<'s> FunctionBuilder<'s> {
             owner_class,
             type_args,
             getter,
-            &[],
-            None,
-            Some(slot),
-            false,
+            ClassArguments::Expressions(&[]),
+            ClassReceiver::Instance(slot),
         )?
         .context("class getter produced no value")
     }
@@ -367,25 +377,20 @@ impl<'s> FunctionBuilder<'s> {
             owner_class,
             type_args,
             setter,
-            &[],
-            Some(std::slice::from_ref(&val)),
-            Some(slot),
-            false,
+            ClassArguments::Evaluated(std::slice::from_ref(&val)),
+            ClassReceiver::Instance(slot),
         )?;
         Ok(val)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn inline_class_callable(
+    fn inline_class_callable(
         &mut self,
         ctx: &mut Context,
         owner_class: &'s str,
         type_args: &[ArgumentId],
         func: &'s Function,
-        args: &'s [Expr],
-        pre_evaluated: Option<&[Value]>,
-        this_slot: Option<Value>,
-        is_constructor: bool,
+        args: ClassArguments<'_, 's>,
+        receiver: ClassReceiver,
     ) -> Result<Option<Value>> {
         ensure!(
             !func.is_async && !func.is_generator,
@@ -408,18 +413,21 @@ impl<'s> FunctionBuilder<'s> {
                     .deref(ctx)
                     .element();
                 let mut elems = Vec::new();
-                if let Some(pre) = pre_evaluated {
-                    for &v in pre.iter().skip(i) {
-                        elems.push(self.fit(ctx, v, elem_ty)?);
+                match args {
+                    ClassArguments::Evaluated(values) => {
+                        for &v in values.iter().skip(i) {
+                            elems.push(self.fit(ctx, v, elem_ty)?);
+                        }
                     }
-                } else {
-                    for arg in args.iter().skip(i) {
-                        let v = self.expression_with(ctx, arg, Some(elem_ty))?;
-                        elems.push(self.fit(ctx, v, elem_ty)?);
+                    ClassArguments::Expressions(expressions) => {
+                        for arg in expressions.iter().skip(i) {
+                            let v = self.expression_with(ctx, arg, Some(elem_ty))?;
+                            elems.push(self.fit(ctx, v, elem_ty)?);
+                        }
                     }
                 }
                 let arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, elems));
-                evaluated_args.push(EvalArg::Rest(arr));
+                evaluated_args.push((Some(rest_ty), EvalArg::Rest(arr)));
                 break;
             }
             let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) {
@@ -430,24 +438,21 @@ impl<'s> FunctionBuilder<'s> {
                         .class_value_type(ctx, owner_class, type_args, &param.ty)?,
                 )
             };
-            if let Some(pre) = pre_evaluated {
-                match pre.get(i).copied() {
-                    Some(v) => evaluated_args.push(EvalArg::Present(v)),
-                    None => evaluated_args.push(EvalArg::Omitted),
-                }
-            } else if let Some(arg_expr) = args.get(i) {
-                if matches!(arg_expr, Expr::Undefined) && param.default.is_some() {
-                    evaluated_args.push(EvalArg::Omitted);
-                } else {
-                    let v = self.expression_with(ctx, arg_expr, param_ty)?;
-                    evaluated_args.push(EvalArg::Present(v));
-                }
-            } else {
-                evaluated_args.push(EvalArg::Omitted);
-            }
+            let evaluated = match args {
+                ClassArguments::Evaluated(values) => values
+                    .get(i)
+                    .copied()
+                    .map_or(EvalArg::Omitted, EvalArg::Present),
+                ClassArguments::Expressions(expressions) => match expressions.get(i) {
+                    Some(Expr::Undefined) if param.default.is_some() => EvalArg::Omitted,
+                    Some(expr) => EvalArg::Present(self.expression_with(ctx, expr, param_ty)?),
+                    None => EvalArg::Omitted,
+                },
+            };
+            evaluated_args.push((param_ty, evaluated));
         }
         // Any excess arguments beyond declared params are still evaluated for side effects.
-        if pre_evaluated.is_none()
+        if let ClassArguments::Expressions(args) = args
             && !func.params.iter().any(|p| p.is_rest)
             && args.len() > func.params.len()
         {
@@ -462,17 +467,14 @@ impl<'s> FunctionBuilder<'s> {
         let guards = self.variant_guards.len();
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
-        self.this_slot = this_slot.map(|s| (s, owner_class, type_args.to_vec()));
+        self.this_slot = match receiver {
+            ClassReceiver::Static => None,
+            ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => {
+                Some((slot, owner_class, type_args.to_vec()))
+            }
+        };
 
-        for (param, eval_arg) in func.params.iter().zip(evaluated_args) {
-            let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) {
-                None
-            } else {
-                Some(
-                    self.shapes
-                        .class_value_type(ctx, owner_class, type_args, &param.ty)?,
-                )
-            };
+        for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
             match eval_arg {
                 EvalArg::Rest(arr) => {
                     let slot = self.entry_slot(ctx, arr.get_type(ctx));
@@ -487,7 +489,7 @@ impl<'s> FunctionBuilder<'s> {
                             None => def_val,
                         }
                     } else if let Some(ty) = param_ty {
-                        let ty = if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                        let ty = if admits_undefined(ctx, ty) {
                             ty
                         } else {
                             OptionalType::get(ctx, ty).into()
@@ -503,74 +505,14 @@ impl<'s> FunctionBuilder<'s> {
                     self.locals.insert(param.id, LocalBinding::plain(slot));
                 }
                 EvalArg::Present(value) => {
-                    let val_ty = value.get_type(ctx);
-                    if let Some(default_expr) = &param.default
-                        && !matches!(default_expr, Expr::Undefined)
-                        && absence(ctx, val_ty).is_some_and(|a| a.admits_undefined())
-                    {
-                        let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                        let then_block = self.new_block(ctx, "class_def_then");
-                        let else_block = self.new_block(ctx, "class_def_else");
-                        let join = self.new_block(ctx, "class_def_join");
-                        self.branch(ctx, is_undef, then_block, else_block);
-
-                        self.switch_to(else_block);
-                        let present_val = self.strip_undefined(ctx, value)?;
-                        let else_end = self.block;
-                        let present_ty = present_val.get_type(ctx);
-
-                        self.switch_to(then_block);
-                        let def_val =
-                            self.expression_with(ctx, default_expr, param_ty.or(Some(present_ty)))?;
-                        let then_end = self.block;
-                        let then_terminated = self.terminated(ctx);
-
-                        let target_ty = if let Some(pt) = param_ty {
-                            pt
-                        } else if !then_terminated {
-                            let def_ty = def_val.get_type(ctx);
-                            if let Some(states) =
-                                merge_absence(absence(ctx, present_ty), absence(ctx, def_ty))
-                            {
-                                let inner = optional_value(ctx, present_ty)
-                                    .or_else(|| optional_value(ctx, def_ty))
-                                    .unwrap_or(present_ty);
-                                OptionalType::get_with(ctx, inner, states).into()
-                            } else {
-                                present_ty
-                            }
-                        } else {
-                            present_ty
-                        };
-
-                        let slot = self.entry_slot(ctx, target_ty);
-                        if !then_terminated {
-                            self.switch_to(then_end);
-                            let fitted_def = self.fit(ctx, def_val, target_ty)?;
-                            self.store(ctx, slot, fitted_def);
-                            self.jump(ctx, join);
-                        }
-
-                        self.switch_to(else_end);
-                        let fitted_present = self.fit(ctx, present_val, target_ty)?;
-                        self.store(ctx, slot, fitted_present);
-                        self.jump(ctx, join);
-
-                        self.switch_to(join);
-                        self.locals.insert(param.id, LocalBinding::plain(slot));
-                    } else {
-                        let target_ty = param_ty.unwrap_or(val_ty);
-                        let fitted = self.fit(ctx, value, target_ty)?;
-                        let slot = self.entry_slot(ctx, target_ty);
-                        self.store(ctx, slot, fitted);
-                        self.locals.insert(param.id, LocalBinding::plain(slot));
-                    }
+                    self.bind_inline_parameter(ctx, param, value, param_ty)?;
                 }
             }
         }
 
         let done = self.new_block(ctx, "class_call_done");
-        let is_void = is_constructor || matches!(func.return_type, HirType::Void);
+        let is_void = matches!(receiver, ClassReceiver::Constructor(_))
+            || matches!(func.return_type, HirType::Void);
         let optional = !is_void && (completions(&func.body) & (FALLTHROUGH | EMPTY_RETURN) != 0);
         let declared = if !is_void && !matches!(func.return_type, HirType::Any | HirType::Unknown) {
             self.shapes
@@ -580,7 +522,7 @@ impl<'s> FunctionBuilder<'s> {
             None
         };
         let slot = declared.map(|ty| {
-            let ty = if optional && absence(ctx, ty).is_none_or(|a| !a.admits_undefined()) {
+            let ty = if optional && !admits_undefined(ctx, ty) {
                 OptionalType::get(ctx, ty).into()
             } else {
                 ty
@@ -613,32 +555,9 @@ impl<'s> FunctionBuilder<'s> {
             .pop()
             .context("class callable return frame")?;
         result?;
-        let slot = match callback.slot {
-            Some(slot) => Some(slot),
-            None if is_void || callback.empty_returns.is_empty() => None,
-            None => {
-                let number = FP64Type::get(ctx).into();
-                let ty = OptionalType::get(ctx, number).into();
-                Some(self.entry_slot(ctx, ty))
-            }
-        };
-        if let Some(slot) = slot
-            && !callback.empty_returns.is_empty()
-        {
-            let ty = self.slot_type(ctx, slot)?;
-            for block in callback.empty_returns {
-                let undefined = UndefinedOp::with_type(ctx, ty);
-                let store = StoreOp::new(ctx, slot, undefined.get_result(ctx));
-                insert_before_terminator(
-                    ctx,
-                    block,
-                    [undefined.get_operation(), store.get_operation()],
-                )?;
-            }
-        }
-        self.switch_to(done);
-        if is_constructor {
-            return this_slot.map(|s| self.load(ctx, s)).transpose();
+        let slot = self.finish_inline_return(ctx, callback, is_void)?;
+        if let ClassReceiver::Constructor(slot) = receiver {
+            return self.load(ctx, slot).map(Some);
         }
         match slot {
             Some(slot) => self.load(ctx, slot).map(Some),

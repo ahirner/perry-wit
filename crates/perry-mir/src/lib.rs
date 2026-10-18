@@ -162,7 +162,8 @@ pub use liveness::{LiveAfter, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};
 pub use optional::{
     IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
-    UndefinedOp, UnwrapOp, WrapOp, absence, optional_parts, optional_value,
+    UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, optional_parts, optional_value,
+    present_type,
 };
 pub use pipeline::{canonicalize, optimization_statistics};
 pub use regex::RegexConstOp;
