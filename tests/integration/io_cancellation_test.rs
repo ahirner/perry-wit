@@ -1,47 +1,18 @@
 //! Native filesystem operations retain their arguments and result storage across callbacks.
 use anyhow::Result;
 use perry_wit::{compiler::compile_for_world_with_memory_checks, component::wit::resolve_wit};
-use wasmtime::{
-    ResourceLimiter, Store,
-    component::{Component, Linker, ResourceTable},
-};
-use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
+use wasmtime::component::Component;
+use wasmtime_wasi::{FsPerms, WasiCtx};
 
 use std::sync::atomic::Ordering;
 #[path = "../support/cancellable_output.rs"]
 mod cancellable_output;
 use crate::cancellation;
 use crate::engine::async_engine;
+use crate::wasi_host::{self, Host};
 #[path = "../support/filesystem_transfers.rs"]
 mod transfers;
 
-struct Host {
-    ctx: WasiCtx,
-    table: ResourceTable,
-    peak: usize,
-}
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-impl ResourceLimiter for Host {
-    fn memory_growing(
-        &mut self,
-        _: usize,
-        desired: usize,
-        _: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.peak = self.peak.max(desired);
-        Ok(true)
-    }
-    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        Ok(true)
-    }
-}
 fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
     let directory = tempfile::tempdir()?;
     std::fs::write(
@@ -133,17 +104,8 @@ async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> R
             let ctx = WasiCtx::builder()
                 .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
                 .build();
-            let mut store = Store::new(
-                &engine,
-                Host {
-                    ctx,
-                    table: ResourceTable::new(),
-                    peak: 0,
-                },
-            );
-            store.limiter(|host| host);
-            let mut linker = Linker::new(&engine);
-            wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+            let mut store = wasi_host::store(&engine, Host::new(ctx));
+            let mut linker = wasi_host::linker(&engine)?;
             let observations = transfers::install(&mut linker, kind, behavior)?;
             let instance = linker.instantiate_async(&mut store, &component).await?;
             let mut peak = 0;
@@ -244,22 +206,13 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
         wasmparser::Validator::new().validate_all(&caller)?;
         let component = Component::new(&engine, caller)?;
         for block_at in [BlockAt::Write, BlockAt::Completion] {
-            let mut linker = Linker::new(&engine);
-            wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+            let mut linker = wasi_host::linker(&engine)?;
             let observations = cancellable_output::install(
                 &mut linker,
                 &format!("wasi:cli/{channel}@0.3.0"),
                 block_at,
             )?;
-            let mut store = Store::new(
-                &engine,
-                Host {
-                    ctx: WasiCtx::builder().build(),
-                    table: ResourceTable::new(),
-                    peak: 0,
-                },
-            );
-            store.limiter(|host| host);
+            let mut store = wasi_host::store(&engine, Host::default());
             let instance = linker.instantiate_async(&mut store, &component).await?;
             let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
             let mut peak = 0;
@@ -349,8 +302,7 @@ async fn metadata_results_release_unused_payloads_and_cancelled_borrows() -> Res
         )?;
         let active = Arc::new(AtomicUsize::new(0));
         let tracked = active.clone();
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+        let mut linker = wasi_host::linker(&engine)?;
         linker.allow_shadowing(true);
         linker
             .instance("wasi:filesystem/types@0.3.0")?
@@ -386,15 +338,7 @@ async fn metadata_results_release_unused_payloads_and_cancelled_borrows() -> Res
         let ctx = WasiCtx::builder()
             .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
             .build();
-        let mut store = Store::new(
-            &engine,
-            Host {
-                ctx,
-                table: ResourceTable::new(),
-                peak: 0,
-            },
-        );
-        store.limiter(|host| host);
+        let mut store = wasi_host::store(&engine, Host::new(ctx));
         let instance = linker.instantiate_async(&mut store, &component).await?;
         let mut peak = 0;
         for round in 0..12 {

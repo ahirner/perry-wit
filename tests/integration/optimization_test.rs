@@ -1,33 +1,13 @@
 //! Binary structure and behavior of optimized WIT-constrained programs.
+use crate::world::compile_signature as compile;
 use anyhow::Result;
-use wasmparser::{KnownCustom, Name, Operator, Parser, Payload};
+use wasmparser::{Operator, Parser, Payload};
 
 mod asynchronous;
 mod boundaries;
-mod collections;
 mod constraints;
 mod integers;
-
-/// Compiles `source` against a one-export world whose `run` has `signature`.
-fn compile(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
-    let stderr = if signature.starts_with("async ") {
-        "import wasi:cli/stderr@0.3.0;"
-    } else {
-        ""
-    };
-    let (resolve, package) = perry_wit::component::wit::resolve_source(
-        "optimization.wit",
-        &format!("package test:optimization; world test {{ {stderr} export run: {signature}; }}"),
-    )?;
-    let world = resolve.select_world(&[package], Some("test"))?;
-    Ok(perry_wit::compile_for_world(
-        source,
-        "optimization.ts",
-        &resolve,
-        world,
-        true,
-    )?)
-}
+mod json_copy;
 
 /// Decoded sections and instruction bodies of a core Wasm module for structural assertions.
 struct WasmSummary<'a> {
@@ -37,7 +17,6 @@ struct WasmSummary<'a> {
     has_start: bool,
     has_name_section: bool,
     exports: Vec<&'a str>,
-    function_names: Vec<&'a str>,
     bodies: Vec<Vec<Operator<'a>>>,
 }
 
@@ -55,7 +34,6 @@ fn inspect_wasm(core: &[u8]) -> Result<WasmSummary<'_>> {
         has_start: false,
         has_name_section: false,
         exports: Vec::new(),
-        function_names: Vec::new(),
         bodies: Vec::new(),
     };
     for payload in Parser::new(0).parse_all(core) {
@@ -78,15 +56,6 @@ fn inspect_wasm(core: &[u8]) -> Result<WasmSummary<'_>> {
             }
             Payload::CustomSection(section) => {
                 summary.has_name_section |= section.name() == "name";
-                if let KnownCustom::Name(subsections) = section.as_known() {
-                    for subsection in subsections {
-                        if let Name::Function(entries) = subsection? {
-                            for entry in entries {
-                                summary.function_names.push(entry?.name);
-                            }
-                        }
-                    }
-                }
             }
             _ => {}
         }

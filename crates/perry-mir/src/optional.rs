@@ -6,6 +6,7 @@
 //! is typed `T` (parameter, return, field, element) unwraps and throws a catchable `TypeError`
 //! on `undefined`, as does property access on `undefined`.
 use crate::{
+    NewOp,
     attrs::{Absence, ErrorKind},
     exceptions::MayThrowInterface,
     scalar::is_bool,
@@ -20,8 +21,6 @@ use pliron::{
     context::Context,
     derive::{op_interface_impl, pliron_op},
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -61,6 +60,20 @@ fn operand(op: &dyn Op, ctx: &Context) -> Value {
     op.get_operation().deref(ctx).get_operand(0)
 }
 
+/// Fails verification of `op`, named `name`, unless its result type is `ok`.
+fn check(ctx: &Context, op: &dyn Op, ok: bool, name: &'static str) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        verify_err!(op.loc(ctx), OptionalErr::Result(name))
+    }
+}
+
+/// The absence states of `op`'s optional result type.
+fn result_absence(ctx: &Context, op: &dyn Op) -> Option<Absence> {
+    absence(ctx, op.get_operation().deref(ctx).get_type(0))
+}
+
 fn inner(ctx: &Context, value: Value, op: &'static str) -> Result<TypeHandle> {
     match optional_value(ctx, value.get_type(ctx)) {
         Some(ty) => Ok(ty),
@@ -69,17 +82,6 @@ fn inner(ctx: &Context, value: Value, op: &'static str) -> Result<TypeHandle> {
             OptionalErr::NotOptional(op)
         ),
     }
-}
-
-macro_rules! pure {
-    ($($op:ty),*) => {$(
-        #[op_interface_impl]
-        impl SideEffects for $op {
-            fn has_side_effects(&self, _ctx: &Context) -> bool {
-                false
-            }
-        }
-    )*};
 }
 
 /// The `undefined` value of an optional type.
@@ -98,25 +100,15 @@ impl UndefinedOp {
 
     pub fn with_type(ctx: &mut Context, ty: TypeHandle) -> Self {
         UndefinedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         }
     }
 }
 
 impl Verify for UndefinedOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_undefined)
-        {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.undefined"))?
-        }
-        Ok(())
+        let admits = result_absence(ctx, self).is_some_and(Absence::admits_undefined);
+        check(ctx, self, admits, "perry.undefined")
     }
 }
 
@@ -131,25 +123,15 @@ pub struct OmittedOp;
 impl OmittedOp {
     pub fn with_type(ctx: &mut Context, ty: TypeHandle) -> Self {
         OmittedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         }
     }
 }
 
 impl Verify for OmittedOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_undefined)
-        {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.omitted"))?
-        }
-        Ok(())
+        let admits = result_absence(ctx, self).is_some_and(Absence::admits_undefined);
+        check(ctx, self, admits, "perry.omitted")
     }
 }
 
@@ -169,14 +151,7 @@ impl WrapOp {
 
     pub fn with_type(ctx: &mut Context, value: Value, ty: TypeHandle) -> Self {
         WrapOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -184,10 +159,8 @@ impl WrapOp {
 impl Verify for WrapOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let value = operand(self, ctx).get_type(ctx);
-        if optional_value(ctx, self.get_result(ctx).get_type(ctx)) != Some(value) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.wrap"))?
-        }
-        Ok(())
+        let wraps = optional_value(ctx, self.get_result(ctx).get_type(ctx)) == Some(value);
+        check(ctx, self, wraps, "perry.wrap")
     }
 }
 
@@ -203,14 +176,7 @@ impl IsUndefinedOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         IsUndefinedOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -218,10 +184,12 @@ impl IsUndefinedOp {
 impl Verify for IsUndefinedOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         inner(ctx, operand(self, ctx), "perry.is_undefined")?;
-        if !is_bool(ctx, self.get_result(ctx)) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.is_undefined"))?
-        }
-        Ok(())
+        check(
+            ctx,
+            self,
+            is_bool(ctx, self.get_result(ctx)),
+            "perry.is_undefined",
+        )
     }
 }
 
@@ -238,14 +206,7 @@ impl ToNumberOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = FP64Type::get(ctx).into();
         ToNumberOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -256,10 +217,8 @@ impl Verify for ToNumberOp {
         let numeric: TypeHandle = crate::types::NumericType::get(ctx).into();
         let inner_ty = inner(ctx, operand(self, ctx), "perry.to_number")?;
         let res_ty = self.get_result(ctx).get_type(ctx);
-        if (inner_ty != number && inner_ty != numeric) || res_ty != inner_ty {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.to_number"))?
-        }
-        Ok(())
+        let ok = (inner_ty == number || inner_ty == numeric) && res_ty == inner_ty;
+        check(ctx, self, ok, "perry.to_number")
     }
 }
 
@@ -275,14 +234,7 @@ impl ToStringOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = StringType::get(ctx).into();
         ToStringOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -290,23 +242,13 @@ impl ToStringOp {
 impl Verify for ToStringOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let string: TypeHandle = StringType::get(ctx).into();
-        if inner(ctx, operand(self, ctx), "perry.to_string")? != string
-            || self.get_result(ctx).get_type(ctx) != string
-        {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.to_string"))?
-        }
-        Ok(())
+        let ok = inner(ctx, operand(self, ctx), "perry.to_string")? == string
+            && self.get_result(ctx).get_type(ctx) == string;
+        check(ctx, self, ok, "perry.to_string")
     }
 }
 
-pure!(
-    UndefinedOp,
-    OmittedOp,
-    WrapOp,
-    IsUndefinedOp,
-    ToNumberOp,
-    ToStringOp
-);
+side_effects!(false; UndefinedOp, OmittedOp, WrapOp, IsUndefinedOp, ToNumberOp, ToStringOp, NullOp, IsNullOp);
 
 /// The explicit `null` value of a nullable type.
 #[pliron_op(
@@ -319,24 +261,15 @@ pub struct NullOp;
 impl NullOp {
     pub fn new(ctx: &mut Context, ty: TypeHandle) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         }
     }
 }
 
 impl Verify for NullOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_null) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.null"))?
-        }
-        Ok(())
+        let admits = result_absence(ctx, self).is_some_and(Absence::admits_null);
+        check(ctx, self, admits, "perry.null")
     }
 }
 
@@ -352,14 +285,7 @@ impl IsNullOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -367,14 +293,14 @@ impl IsNullOp {
 impl Verify for IsNullOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         inner(ctx, operand(self, ctx), "perry.is_null")?;
-        if !is_bool(ctx, self.get_result(ctx)) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.is_null"))?
-        }
-        Ok(())
+        check(
+            ctx,
+            self,
+            is_bool(ctx, self.get_result(ctx)),
+            "perry.is_null",
+        )
     }
 }
-
-pure!(NullOp, IsNullOp);
 
 /// Change admitted absence states, checking any states excluded by the target type.
 #[pliron_op(
@@ -387,14 +313,7 @@ pub struct OptionalCastOp;
 impl OptionalCastOp {
     pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![target],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![target], vec![value]),
         }
     }
 }
@@ -402,10 +321,8 @@ impl OptionalCastOp {
 impl Verify for OptionalCastOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let source = inner(ctx, operand(self, ctx), "perry.optional_cast")?;
-        if optional_value(ctx, self.get_result(ctx).get_type(ctx)) != Some(source) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.optional_cast"))?
-        }
-        Ok(())
+        let casts = optional_value(ctx, self.get_result(ctx).get_type(ctx)) == Some(source);
+        check(ctx, self, casts, "perry.optional_cast")
     }
 }
 
@@ -429,24 +346,20 @@ impl UnwrapOp {
     pub fn new(ctx: &mut Context, value: Value) -> Result<Self> {
         let ty = inner(ctx, value, "perry.unwrap")?;
         Ok(UnwrapOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         })
     }
 }
 
 impl Verify for UnwrapOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if inner(ctx, operand(self, ctx), "perry.unwrap")? != self.get_result(ctx).get_type(ctx) {
-            verify_err!(self.loc(ctx), OptionalErr::Result("perry.unwrap"))?
-        }
-        Ok(())
+        let value = inner(ctx, operand(self, ctx), "perry.unwrap")?;
+        check(
+            ctx,
+            self,
+            value == self.get_result(ctx).get_type(ctx),
+            "perry.unwrap",
+        )
     }
 }
 

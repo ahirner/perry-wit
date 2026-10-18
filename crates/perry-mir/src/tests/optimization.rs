@@ -1,51 +1,39 @@
 use super::*;
 
+/// An edge passing `x` as a block argument to one successor while the other reads it directly.
+const LIVE_EDGES: &str = r#"
+builtin.module @live { ^module():
+  builtin.func @run: builtin.function <(builtin.integer i1, builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
+    ^entry(flag: builtin.integer i1, x: builtin.fp64, y: builtin.fp64):
+      perry.cond_br if flag ^left(x) else ^right()
+    ^left(argument: builtin.fp64):
+      sum = perry.binary Add argument, y : builtin.fp64;
+      perry.return sum
+    ^right():
+      perry.return x
+  }
+}
+"#;
+
+/// Live-in sets per block; live-after sets are checked against pliron below.
 #[test]
 fn shared_liveness_distinguishes_edges_and_block_definitions() -> Result<()> {
-    use pliron::{
-        builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList,
-        pass::AnalysisManager,
-    };
     let ctx = &mut Context::new();
-    let root = parse(
-        ctx,
-        r#"
-        builtin.module @live { ^module():
-          builtin.func @run: builtin.function <(builtin.integer i1, builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
-            ^entry(flag: builtin.integer i1, x: builtin.fp64, y: builtin.fp64):
-              perry.cond_br if flag ^left(x) else ^right()
-            ^left(argument: builtin.fp64):
-              sum = perry.binary Add argument, y : builtin.fp64;
-              perry.return sum
-            ^right():
-              perry.return x
-          }
-        }
-    "#,
-    );
+    let root = parse(ctx, LIVE_EDGES);
     verify_operation(root, ctx)?;
-    let function = crate::aggregates::functions(root, ctx)[0];
-    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
+    let blocks: Vec<_> = function(ctx, root, "run")
+        .get_region(ctx)
+        .deref(ctx)
+        .iter(ctx)
+        .collect();
     let args: Vec<_> = blocks[0].deref(ctx).arguments().collect();
-    let branch = blocks[0].deref(ctx).get_terminator(ctx).unwrap();
-    let addition = blocks[1].deref(ctx).iter(ctx).next().unwrap();
     let argument = blocks[1].deref(ctx).get_argument(0);
-    let sum = addition.deref(ctx).get_result(0);
     let mut analyses = AnalysisManager::default();
-    let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
-    assert!(live.after(branch).contains(&args[1]));
-    assert!(live.after(branch).contains(&args[2]));
-    assert!(!live.after(branch).contains(&args[0]));
+    let live = analyses.get_analysis::<LiveValues>(root, ctx)?;
     assert!(!live.on_entry(blocks[1], args[1]));
     assert!(live.on_entry(blocks[1], args[2]));
     assert!(!live.on_entry(blocks[1], argument));
     assert!(live.on_entry(blocks[2], args[1]));
-    assert_eq!(
-        live.after(addition)
-            .values()
-            .collect::<std::collections::HashSet<_>>(),
-        std::collections::HashSet::from([sum])
-    );
     Ok(())
 }
 
@@ -125,8 +113,7 @@ fn mem2reg_turns_slots_into_block_arguments() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, SLOTTED_LOOP);
     verify_operation(module, ctx)?;
-    let status =
-        pliron::opts::mem2reg::mem2reg(module, ctx, &mut pliron::pass::AnalysisManager::default())?;
+    let status = mem2reg(module, ctx, &mut AnalysisManager::default())?;
     assert_eq!(status, IRStatus::Changed);
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
@@ -149,7 +136,7 @@ fn mem2reg_turns_slots_into_block_arguments() -> Result<()> {
 fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, TEMPORARY_RECORDS);
-    crate::pipeline::canonicalize(module, ctx)?;
+    canonicalize(module, ctx)?;
     let printed = print(ctx, module);
     assert!(!printed.contains("perry.alloc"), "{printed}");
     assert!(!printed.contains("perry.field_get"), "{printed}");
@@ -159,10 +146,6 @@ fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
 
 #[test]
 fn append_rewriting_expands_each_site_once_and_keeps_fallbacks() -> Result<()> {
-    use pliron::{
-        irbuild::match_rewrite::PassWrapper,
-        pass::{AnalysisManager, Pass},
-    };
     let ctx = &mut Context::new();
     let module = parse(
         ctx,
@@ -227,7 +210,7 @@ builtin.module @optional {
 }
 "#,
     );
-    crate::pipeline::canonicalize(module, ctx)?;
+    canonicalize(module, ctx)?;
     let printed = print(ctx, module);
     for removed in ["perry.wrap", "perry.unwrap", "perry.to_number"] {
         assert!(!printed.contains(removed), "{removed} survived:\n{printed}");
@@ -264,7 +247,7 @@ builtin.module @constants {
 
 "#,
     );
-    crate::pipeline::canonicalize(module, ctx)?;
+    canonicalize(module, ctx)?;
     let printed = print(ctx, module);
     for removed in [
         "perry.binary",
@@ -307,7 +290,7 @@ builtin.module @loop {
 }
 "#,
     );
-    crate::pipeline::canonicalize(module, ctx)?;
+    canonicalize(module, ctx)?;
     let printed = print(ctx, module);
     assert!(
         printed.contains("perry.cond_br"),
@@ -325,19 +308,10 @@ builtin.module @loop {
     Ok(())
 }
 
+/// Integer folds wrap at every width and signedness; float folds keep IEEE special values; every
+/// ordered or equality comparison with NaN except `!=` folds to false.
 #[test]
-fn sccp_folds_wrapping_integer_constants_at_each_width() {
-    use crate::{attrs::BinaryKind, scalar::BinaryOp};
-    use pliron::{
-        builtin::{
-            attributes::IntegerAttr,
-            op_interfaces::OneResultInterface,
-            ops::ConstantOp,
-            types::{IntegerType, Signedness},
-        },
-        opts::constants::ConstFoldInterface,
-        utils::apint::{APInt, bw},
-    };
+fn sccp_folds_scalar_constants() {
     let ctx = &mut Context::new();
     for width in [8, 16, 32, 64] {
         for signedness in [Signedness::Signed, Signedness::Unsigned] {
@@ -347,67 +321,43 @@ fn sccp_folds_wrapping_integer_constants_at_each_width() {
             } else {
                 (1u64 << width) - 1
             };
+            let int = |value| IntegerAttr::new(ty, APInt::from_u64(value, bw(width as usize)));
             for (kind, lhs, rhs, expected) in [
                 (BinaryKind::Add, max, 1, 0),
                 (BinaryKind::Sub, 0, 1, max),
                 (BinaryKind::Mul, max, 2, max - 1),
             ] {
-                let lhs = IntegerAttr::new(ty, APInt::from_u64(lhs, bw(width as usize)));
-                let rhs = IntegerAttr::new(ty, APInt::from_u64(rhs, bw(width as usize)));
-                let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
-                let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
-                let op = BinaryOp::new(ctx, kind, a, b);
-                let folded = op.check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))]);
-                let attr = folded[0]
-                    .as_ref()
-                    .unwrap()
-                    .downcast_ref::<IntegerAttr>()
-                    .unwrap();
+                let folded = fold(
+                    ctx,
+                    |ctx, a, b| BinaryOp::new(ctx, kind, a, b),
+                    int(lhs),
+                    int(rhs),
+                );
                 assert_eq!(
-                    attr.value().to_u64(),
+                    folded
+                        .downcast_ref::<IntegerAttr>()
+                        .unwrap()
+                        .value()
+                        .to_u64(),
                     expected,
                     "{kind:?} {signedness:?}{width}"
                 );
             }
         }
     }
-}
-
-#[test]
-fn sccp_preserves_floating_point_special_values() {
-    use crate::{
-        attrs::{BinaryKind, CompareKind},
-        scalar::{BinaryOp, CompareOp},
-    };
-    use pliron::{
-        builtin::{
-            attributes::{FPDoubleAttr, IntegerAttr},
-            op_interfaces::OneResultInterface,
-            ops::ConstantOp,
-        },
-        opts::constants::ConstFoldInterface,
-    };
-    let ctx = &mut Context::new();
     for (kind, lhs, rhs, expected) in [
         (BinaryKind::Mul, -0.0, 2.0, -0.0),
         (BinaryKind::Div, 1.0, 0.0, f64::INFINITY),
         (BinaryKind::Rem, -5.0, 2.0, -1.0),
     ] {
-        let lhs = FPDoubleAttr::from(lhs);
-        let rhs = FPDoubleAttr::from(rhs);
-        let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
-        let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
-        let op = BinaryOp::new(ctx, kind, a, b);
-        let folded = op.check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))]);
-        let value = f64::from(
-            folded[0]
-                .as_ref()
-                .unwrap()
-                .downcast_ref::<FPDoubleAttr>()
-                .unwrap()
-                .clone(),
+        let folded = fold(
+            ctx,
+            |ctx, a, b| BinaryOp::new(ctx, kind, a, b),
+            FPDoubleAttr::from(lhs),
+            FPDoubleAttr::from(rhs),
         );
-        assert_eq!(value.to_bits(), expected.to_bits());
+        let value = f64::from(folded.downcast_ref::<FPDoubleAttr>().unwrap().clone());
+        assert_eq!(value.to_bits(), expected.to_bits(), "{kind:?}");
     }
     for kind in [
         CompareKind::Lt,
@@ -418,62 +368,119 @@ fn sccp_preserves_floating_point_special_values() {
         CompareKind::Ne,
     ] {
         let nan = FPDoubleAttr::from(f64::NAN);
-        let a = ConstantOp::new(ctx, Box::new(nan.clone())).get_result(ctx);
-        let op = CompareOp::new(ctx, kind, a, a);
-        let folded = op.check_fold(ctx, &[Some(Box::new(nan.clone())), Some(Box::new(nan))]);
-        let value = folded[0]
-            .as_ref()
-            .unwrap()
-            .downcast_ref::<IntegerAttr>()
-            .unwrap()
-            .value();
-        assert_eq!(!value.is_zero(), kind == CompareKind::Ne);
+        let folded = fold(
+            ctx,
+            |ctx, a, b| CompareOp::new(ctx, kind, a, b),
+            nan.clone(),
+            nan,
+        );
+        let value = folded.downcast_ref::<IntegerAttr>().unwrap().value();
+        assert_eq!(!value.is_zero(), kind == CompareKind::Ne, "{kind:?}");
     }
 }
 
 #[test]
 fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
-    use pliron::{
-        analyses::liveness::{Liveness, LivenessTq},
-        builtin::op_interfaces::OneRegionInterface,
-        graph::dominance::DomInfo,
-        irbuild::inserter::OpInsertionPoint,
-        linked_list::ContainsLinkedList,
-        pass::AnalysisManager,
-    };
-    let ctx = &mut Context::new();
-    let root = parse(ctx, TEMPORARY_RECORDS);
-    let mut analyses = AnalysisManager::default();
-    analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
-    let intervals = analyses
-        .try_get_analysis::<crate::liveness::LiveValues>(root)
-        .unwrap();
-    let mut upstream = analyses
-        .try_get_analysis_mut::<Liveness<LivenessTq>>(root)
-        .unwrap();
-    let mut dominance = analyses.try_get_analysis_mut::<DomInfo>(root).unwrap();
-    for function in crate::aggregates::functions(root, ctx) {
-        let mut values = Vec::new();
-        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            values.extend(block.deref(ctx).arguments());
-            for op in block.deref(ctx).iter(ctx) {
-                values.extend(op.deref(ctx).results());
+    for fixture in [TEMPORARY_RECORDS, LIVE_EDGES] {
+        let ctx = &mut Context::new();
+        let root = parse(ctx, fixture);
+        let mut analyses = AnalysisManager::default();
+        analyses.get_analysis::<LiveValues>(root, ctx)?;
+        let intervals = analyses.try_get_analysis::<LiveValues>(root).unwrap();
+        let mut upstream = analyses
+            .try_get_analysis_mut::<Liveness<LivenessTq>>(root)
+            .unwrap();
+        let mut dominance = analyses.try_get_analysis_mut::<DomInfo>(root).unwrap();
+        for function in crate::aggregates::functions(root, ctx) {
+            let mut values = Vec::new();
+            for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+                values.extend(block.deref(ctx).arguments());
+                for op in block.deref(ctx).iter(ctx) {
+                    values.extend(op.deref(ctx).results());
+                }
             }
-        }
-        for op in crate::aggregates::operations(ctx, &function) {
-            for &value in &values {
-                assert_eq!(
-                    intervals.after(op).contains(&value),
-                    upstream.is_live_at_point(
-                        ctx,
-                        &mut dominance,
-                        value,
-                        OpInsertionPoint::AfterOperation(op)
-                    ),
-                    "{value:?} after {op:?}"
-                );
+            for op in crate::aggregates::operations(ctx, &function) {
+                for &value in &values {
+                    assert_eq!(
+                        intervals.after(op).contains(&value),
+                        upstream.is_live_at_point(
+                            ctx,
+                            &mut dominance,
+                            value,
+                            OpInsertionPoint::AfterOperation(op)
+                        ),
+                        "{value:?} after {op:?}"
+                    );
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Cleanup reaches a fixed point over several rounds; `run_to_fixpoint` asserts in test builds
+/// that every changing round strictly lowers the IR potential.
+#[test]
+fn cleanup_rounds_strictly_decrease_ir_potential() -> Result<()> {
+    let ctx = &mut Context::new();
+    let root = parse(
+        ctx,
+        r#"
+builtin.module @cascade {
+  ^module():
+    builtin.func @run: builtin.function <() -> (builtin.fp64)> {
+      ^entry():
+        two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+        four = builtin.constant <builtin.double 4.0> : builtin.fp64;
+        p = perry.alloc Unassigned (two, four) : perry.record <Pair { a: builtin.fp64, b: builtin.fp64 }>;
+        a = perry.field_get p."a" : builtin.fp64;
+        b = perry.field_get p."b" : builtin.fp64;
+        take = perry.compare Lt a, b : builtin.integer i1;
+        perry.cond_br if take ^yes(b) else ^no(a)
+      ^yes(ans: builtin.fp64):
+        perry.return ans
+      ^no(fallback: builtin.fp64):
+        perry.return fallback
+    }
+}
+"#,
+    );
+    canonicalize(root, ctx)?;
+    let printed = print(ctx, root);
+    for removed in ["perry.alloc", "perry.compare", "perry.cond_br"] {
+        assert!(!printed.contains(removed), "{removed} survived:\n{printed}");
+    }
+    assert!(crate::pipeline::optimization_statistics(root, ctx).cleanup_rounds >= 3);
+    Ok(())
+}
+
+/// A pass that claims a change without changing the IR.
+struct ClaimsChange;
+
+impl Pass for ClaimsChange {
+    fn name(&self) -> &str {
+        "claims-change"
+    }
+
+    fn run(
+        &mut self,
+        _: Ptr<Operation>,
+        _: &mut Context,
+        _: &mut AnalysisManager,
+    ) -> Result<PassResult> {
+        let mut result = PassResult::default();
+        result.ir_changed = IRStatus::Changed;
+        Ok(result)
+    }
+}
+
+#[test]
+#[should_panic(expected = "non-monotonic cleanup round")]
+fn fixpoint_rejects_non_monotonic_pass() {
+    let ctx = &mut Context::new();
+    let root = parse(ctx, &single_block(""));
+    let mut passes = Passes::default();
+    passes.add_pass(ClaimsChange);
+    let _ =
+        crate::pipeline::run_to_fixpoint(&mut passes, root, ctx, &mut AnalysisManager::default());
 }

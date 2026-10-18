@@ -242,7 +242,7 @@ impl FunctionLowering<'_, '_> {
                 };
                 self.num(ctx, opcode, vec![order, zero])
             } else {
-                self.scalar_comparison(ctx, kind, mir_ty, operands[0], operands[1])
+                self.scalar_comparison(ctx, kind, mir_ty, operands[0], operands[1])?
             };
             self.define(ctx, op, value);
             return Ok(());
@@ -482,10 +482,7 @@ impl FunctionLowering<'_, '_> {
             return self.json_stringify(ctx, op);
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
-            let intrinsic = intrinsic
-                .intrinsic(ctx)
-                .ok_or_else(|| anyhow!("unknown MIR intrinsic"))?;
-            return self.intrinsic(ctx, op, intrinsic);
+            return self.intrinsic(ctx, op, intrinsic.intrinsic(ctx));
         }
         if Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some() {
             let exception = self.thrown(ctx, op)?;

@@ -216,10 +216,7 @@ impl ConstFoldInterface for CompareOp {
                     _ => None,
                 };
                 if let Some(result) = result {
-                    return vec![Some(Box::new(IntegerAttr::new(
-                        IntegerType::get(ctx, 1, Signedness::Signless),
-                        APInt::from_u64(u64::from(result), bw(1)),
-                    )))];
+                    return vec![Some(boolean(ctx, result))];
                 }
             }
         }
@@ -262,10 +259,7 @@ impl ConstFoldInterface for CompareOp {
                 CompareKind::Eq => ordering == Some(Equal),
                 CompareKind::Ne => ordering != Some(Equal),
             };
-            Some(Box::new(IntegerAttr::new(
-                IntegerType::get(ctx, 1, Signedness::Signless),
-                APInt::from_u64(u64::from(result), bw(1)),
-            )) as AttrObj)
+            Some(boolean(ctx, result))
         })();
         vec![folded]
     }
@@ -278,6 +272,15 @@ impl ConstFoldInterface for CompareOp {
     ) -> IRStatus {
         self.fold_with_materialization(ctx, operands, rewriter)
     }
+}
+
+/// The folded `i1` of a comparison.
+fn boolean(ctx: &Context, value: bool) -> AttrObj {
+    let ty = IntegerType::get(ctx, 1, Signedness::Signless);
+    Box::new(IntegerAttr::new(
+        ty,
+        APInt::from_u64(u64::from(value), bw(1)),
+    ))
 }
 
 #[op_interface_impl]

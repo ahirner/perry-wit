@@ -11,13 +11,12 @@ use std::{
 use wasmtime::error::Context as _;
 use wasmtime::{
     Engine, Store,
-    component::{Component, ComponentType, Lift, Linker, ResourceTable},
+    component::{Component, ComponentType, Lift, Linker},
 };
-use wasmtime_wasi_http::{
-    Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-};
+use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 
 use crate::engine::async_engine;
+use crate::wasi_host::{self, Host};
 
 #[derive(Default)]
 struct Documents {
@@ -98,19 +97,12 @@ async fn detached_fetch_is_cancelled_before_task_boundary_failure() -> Result<()
         world,
         true,
     )?;
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-            documents: Documents::default(),
-        },
-    );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        Host::default().with_hooks(Documents::default()),
+    )
+    .await?;
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -121,28 +113,13 @@ async fn detached_fetch_is_cancelled_before_task_boundary_failure() -> Result<()
         result.is_err(),
         "unresolved detached fetch must fail the task"
     );
-    assert_eq!(store.data().documents.started.load(Ordering::SeqCst), 1);
-    assert_eq!(store.data().documents.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(store.data().hooks.started.load(Ordering::SeqCst), 1);
+    assert_eq!(store.data().hooks.cancelled.load(Ordering::SeqCst), 1);
     assert!(
         store.data().table.is_empty(),
         "cancelled request leaked host handles"
     );
     Ok(())
-}
-
-struct Host {
-    http: WasiHttpCtx,
-    table: ResourceTable,
-    documents: Documents,
-}
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: &mut self.documents,
-        }
-    }
 }
 
 #[derive(ComponentType, Lift, Debug)]
@@ -164,19 +141,12 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
         world,
         true,
     )?;
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-            documents: Documents::default(),
-        },
-    );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        Host::default().with_hooks(Documents::default()),
+    )
+    .await?;
     let run = instance
         .get_typed_func::<(&str, &str), (Result<String, MergeError>,)>(&mut store, "merge-docs")?;
     let (result,) = tokio::time::timeout(
@@ -198,13 +168,13 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
         serde_json::Map<String, serde_json::Value>,
     >(include_str!("../../examples/merge_docs/doc2.json"))?);
     assert_eq!(actual, serde_json::Value::Object(expected));
-    assert_eq!(store.data().documents.started.load(Ordering::SeqCst), 2);
+    assert_eq!(store.data().hooks.started.load(Ordering::SeqCst), 2);
     assert!(
         store.data().table.is_empty(),
         "successful merge leaked host resources"
     );
-    store.data_mut().documents.invalid = true;
-    store.data().documents.started.store(0, Ordering::SeqCst);
+    store.data_mut().hooks.invalid = true;
+    store.data().hooks.started.store(0, Ordering::SeqCst);
     let (result,) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run.call_async(
@@ -224,9 +194,9 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
         store.data().table.is_empty(),
         "failed merge leaked host resources"
     );
-    store.data_mut().documents.invalid = false;
-    store.data_mut().documents.http_error = true;
-    store.data().documents.started.store(0, Ordering::SeqCst);
+    store.data_mut().hooks.invalid = false;
+    store.data_mut().hooks.http_error = true;
+    store.data().hooks.started.store(0, Ordering::SeqCst);
     let (result,) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run.call_async(
@@ -241,15 +211,15 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
     .context("HTTP failure merge")?;
     assert!(result.unwrap_err().message.contains("503"));
     assert!(store.data().table.is_empty());
-    store.data().documents.started.store(0, Ordering::SeqCst);
+    store.data().hooks.started.store(0, Ordering::SeqCst);
     let (result,) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run.call_async(&mut store, ("not a URL", "https://example.test/pending")),
     )
     .await??;
     assert_eq!(result.unwrap_err().name, "TypeError");
-    assert_eq!(store.data().documents.started.load(Ordering::SeqCst), 1);
-    assert_eq!(store.data().documents.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(store.data().hooks.started.load(Ordering::SeqCst), 1);
+    assert_eq!(store.data().hooks.cancelled.load(Ordering::SeqCst), 1);
     assert!(
         store.data().table.is_empty(),
         "losing fetch leaked host resources"

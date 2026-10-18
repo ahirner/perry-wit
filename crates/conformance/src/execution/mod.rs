@@ -35,6 +35,30 @@ impl Default for Limits {
         }
     }
 }
+/// The fact-analysis precision a generated case compiles under. The oracle ignores it, so each
+/// setting is checked against the same expected observations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactLimits {
+    #[default]
+    Default,
+    /// One origin and one precise context: every aggregate value is summarized.
+    Summarized,
+    /// Two origins and two precise contexts: summarization sets in after a few origins.
+    Narrow,
+}
+
+impl FactLimits {
+    /// Run `compile` under these limits.
+    fn apply<R>(self, compile: impl FnOnce() -> R) -> R {
+        match self {
+            Self::Default => compile(),
+            Self::Summarized => perry_mir::with_fact_limits(1, 1, compile),
+            Self::Narrow => perry_mir::with_fact_limits(2, 2, compile),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Observation {
     pub(crate) value: String,
@@ -403,7 +427,7 @@ impl Executor {
                         "--noEmit",
                         "--strict",
                         "--target",
-                        "es2023",
+                        "esnext",
                         "--module",
                         "esnext",
                         "--skipLibCheck",
@@ -429,11 +453,16 @@ impl Executor {
             Outcome::Command(command(
                 Command::new("node")
                     .args([
-                        "--disable-warning=ExperimentalWarning",
-                        "--experimental-strip-types",
+                        // Runtime warnings are not program output.
+                        "--no-warnings",
+                        "--harmony-temporal",
+                        // Parameter properties need transformation, not just stripping.
+                        "--experimental-transform-types",
                     ])
                     .arg(&path)
-                    .env("PERRY_CONFORMANCE", ENV_FIXTURE),
+                    .env("PERRY_CONFORMANCE", ENV_FIXTURE)
+                    // WASI exposes no zone, so components observe UTC.
+                    .env("TZ", "UTC"),
                 directory,
                 Duration::from_secs(self.limits.timeout_seconds),
             )?)

@@ -1,5 +1,8 @@
 //! Scalar arithmetic and comparison.
-use crate::attrs::{BinaryKind, CompareKind};
+use crate::{
+    NewOp,
+    attrs::{BinaryKind, CompareKind},
+};
 use pliron::{
     builtin::{
         op_interfaces::{
@@ -10,10 +13,8 @@ use pliron::{
     },
     common_traits::Verify,
     context::Context,
-    derive::{op_interface_impl, pliron_op},
+    derive::pliron_op,
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
@@ -43,14 +44,7 @@ impl BinaryOp {
     pub fn new(ctx: &mut Context, kind: BinaryKind, lhs: Value, rhs: Value) -> Self {
         let ty = lhs.get_type(ctx);
         let op = BinaryOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![lhs, rhs],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![lhs, rhs]),
         };
         op.set_attr_perry_binary_kind(ctx, kind);
         op
@@ -85,12 +79,7 @@ impl BinaryOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for BinaryOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; BinaryOp, CompareOp, NumericCastOp);
 
 /// Comparison of two operands of one type, producing an `i1`.
 ///
@@ -108,14 +97,7 @@ impl CompareOp {
     pub fn new(ctx: &mut Context, kind: CompareKind, lhs: Value, rhs: Value) -> Self {
         let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let op = CompareOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i1],
-                vec![lhs, rhs],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![i1], vec![lhs, rhs]),
         };
         op.set_attr_perry_compare_kind(ctx, kind);
         op
@@ -136,13 +118,6 @@ impl Verify for CompareOp {
             verify_err!(self.loc(ctx), CompareResultErr)?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for CompareOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
     }
 }
 
@@ -168,14 +143,7 @@ pub struct NumericCastOp;
 impl NumericCastOp {
     pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![target],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![target], vec![value]),
         }
     }
 }
@@ -220,12 +188,5 @@ impl Verify for NumericCastOp {
             }
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for NumericCastOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
     }
 }

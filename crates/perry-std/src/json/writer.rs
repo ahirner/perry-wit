@@ -260,15 +260,18 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
     }
 }
 
-/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output; `undefined` writes
-/// nothing, so callers check it first).
+/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output). `undefined` (the null
+/// address) writes `null` as an array element does; callers omit it as an object member or at
+/// the top level.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     let w = writer(w);
-    if w.failed || value.is_null() {
+    if w.failed {
         return;
     }
-    if !value_text(&mut w.text, value, w.depth) {
+    if value.is_null() {
+        w.text.extend_from_slice(b"null");
+    } else if !value_text(&mut w.text, value, w.depth) {
         w.failed = true;
     }
 }

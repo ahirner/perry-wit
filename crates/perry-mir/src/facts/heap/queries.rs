@@ -1,7 +1,11 @@
 //! Alias, JSON-residue, and intervening-mutation queries over converged `HeapFacts`.
-use pliron::linked_list::{ContainsLinkedList, LinkedList};
+use pliron::{
+    basic_block::BasicBlock,
+    linked_list::{ContainsLinkedList, LinkedList},
+};
 
 use super::*;
+use crate::{exceptions::RaiseOp, foreign::ForeignOp, is_any, locals::StoreOp};
 
 fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
@@ -22,82 +26,58 @@ fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     false
 }
 
+/// The heap cell `value` names, looking through single-operand wrappers, and whether it may
+/// instead hold an untracked aggregate. `visited` ends a wrapper cycle (possible only in
+/// unreachable code) as untracked rather than looping.
 fn root_heap_cells(ctx: &Context, state: &State, value: Value) -> (Vec<usize>, bool) {
-    let mut cells = Vec::new();
-    let mut untracked = false;
+    let mut visited = HashSet::new();
     let mut current = value;
-    for _ in 0..16 {
+    loop {
         if let Some(&cell) = state.heap_values.get(&current) {
-            cells.push(cell);
-            break;
+            return (vec![cell], false);
         }
-        let Some(op) = current.defining_op() else {
-            if type_may_contain_heap_aggregate(ctx, current.get_type(ctx)) {
-                untracked = true;
+        let wrapper = current.defining_op().filter(|&op| {
+            (Operation::get_op::<WrapOp>(op, ctx).is_some()
+                || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
+                || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
+                || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some())
+                && op.deref(ctx).get_num_operands() == 1
+                && visited.insert(op)
+        });
+        match wrapper {
+            Some(op) => current = op.deref(ctx).get_operand(0),
+            None => {
+                let untracked = type_may_contain_heap_aggregate(ctx, current.get_type(ctx));
+                return (Vec::new(), untracked);
             }
-            break;
-        };
-        if (Operation::get_op::<WrapOp>(op, ctx).is_some()
-            || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-            || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
-            || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some())
-            && op.deref(ctx).get_num_operands() == 1
-        {
-            current = op.deref(ctx).get_operand(0);
-            continue;
         }
-        if type_may_contain_heap_aggregate(ctx, current.get_type(ctx)) {
-            untracked = true;
-        }
-        break;
     }
-    (cells, untracked)
 }
 
+/// The objects reachable from `root_cells`, and whether any of them may hold unmodelled
+/// contents: an untracked root, an empty or summarized cell, or an open object.
 fn collect_reachable_heap(
     heap: &HeapFacts,
     root_cells: &[usize],
     untracked: bool,
 ) -> (BTreeSet<usize>, bool) {
-    let mut visited_cells = HashSet::new();
-    let mut reachable_objects = BTreeSet::new();
-    let mut open_or_summarized = untracked;
-    for &cell_id in root_cells {
-        if heap
-            .cells
-            .get(cell_id)
-            .is_none_or(|cell| cell.objects.is_empty())
-        {
-            open_or_summarized = true;
-        }
-    }
-    let mut work: VecDeque<usize> = root_cells.iter().copied().collect();
-    while let Some(cell_id) = work.pop_front() {
-        if !visited_cells.insert(cell_id) {
-            continue;
-        }
-        let Some(cell) = heap.cells.get(cell_id) else {
-            open_or_summarized = true;
-            continue;
-        };
-        if cell.summarized {
-            open_or_summarized = true;
-        }
-        for &obj_id in &cell.objects {
-            reachable_objects.insert(obj_id);
-            let Some(obj) = heap.objects.get(obj_id) else {
-                open_or_summarized = true;
-                continue;
-            };
-            if obj.open {
-                open_or_summarized = true;
-            }
-            for &slot_cell in obj.contents.slots() {
-                work.push_back(slot_cell);
-            }
-        }
-    }
-    (reachable_objects, open_or_summarized)
+    let cells = crate::reachable(root_cells.iter().copied(), move |cell| {
+        heap.cells[cell]
+            .objects
+            .iter()
+            .flat_map(move |&object| heap.objects[object].contents.slots().iter().copied())
+    });
+    let objects: BTreeSet<usize> = cells
+        .iter()
+        .flat_map(|&cell| heap.cells[cell].objects.iter().copied())
+        .collect();
+    let open = untracked
+        || root_cells
+            .iter()
+            .any(|&cell| heap.cells[cell].objects.is_empty())
+        || cells.iter().any(|&cell| heap.cells[cell].summarized)
+        || objects.iter().any(|&object| heap.objects[object].open);
+    (objects, open)
 }
 
 impl ProgramFacts {
@@ -138,6 +118,12 @@ impl ProgramFacts {
         let (reachable_objects, open_or_summarized) =
             collect_reachable_heap(&self.heap, &root_cells, untracked);
         let has_heap = !reachable_objects.is_empty() || open_or_summarized;
+        // Whether `value` may share an object with the source, or both are open.
+        let aliases = |value: Value| {
+            let (cells, untracked) = root_heap_cells(ctx, state, value);
+            let (objects, open) = collect_reachable_heap(&self.heap, &cells, untracked);
+            !reachable_objects.is_disjoint(&objects) || open_or_summarized && open
+        };
 
         let Some(stringify_block) = stringify_op.deref(ctx).get_parent_block() else {
             return true;
@@ -162,29 +148,18 @@ impl ProgramFacts {
                 return true;
             }
         } else {
-            let mut forward = HashSet::new();
-            let mut queue = VecDeque::new();
-            if let Some(term) = stringify_block.deref(ctx).get_tail() {
-                for idx in 0..term.deref(ctx).get_num_successors() {
-                    let succ = term.deref(ctx).get_successor(idx);
-                    if forward.insert(succ) {
-                        queue.push_back(succ);
-                    }
-                }
-            }
-            while let Some(block) = queue.pop_front() {
+            let successors = |block: Ptr<BasicBlock>| -> Vec<Ptr<BasicBlock>> {
+                let terminator = block.deref(ctx).get_tail();
+                terminator.map_or_else(Vec::new, |term| term.deref(ctx).successors().collect())
+            };
+            // Blocks on paths from the stringify towards the consumer, which ends them.
+            let forward = crate::reachable(successors(stringify_block), |block| {
                 if block == consumer_block {
-                    continue;
+                    Vec::new()
+                } else {
+                    successors(block)
                 }
-                if let Some(term) = block.deref(ctx).get_tail() {
-                    for idx in 0..term.deref(ctx).get_num_successors() {
-                        let succ = term.deref(ctx).get_successor(idx);
-                        if forward.insert(succ) {
-                            queue.push_back(succ);
-                        }
-                    }
-                }
-            }
+            });
             if !forward.contains(&consumer_block) {
                 return true;
             }
@@ -235,68 +210,35 @@ impl ProgramFacts {
                 continue;
             }
 
-            if has_heap {
-                if Operation::get_op::<FieldSetOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-                    || Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some()
+            let mutates = || {
+                if is_any::<(
+                    FieldSetOp,
+                    ArraySetOp,
+                    ArrayPushOp,
+                    ArrayExtendOp,
+                    ArrayTruncateOp,
+                )>(ctx, op)
                 {
-                    let target = op.deref(ctx).get_operand(0);
-                    let (target_cells, target_untracked) = root_heap_cells(ctx, state, target);
-                    let (target_objs, target_open) =
-                        collect_reachable_heap(&self.heap, &target_cells, target_untracked);
-                    if !reachable_objects.is_disjoint(&target_objs)
-                        || (open_or_summarized && target_open)
-                    {
-                        return true;
-                    }
-                } else if open_or_summarized
-                    && Operation::get_op::<crate::locals::StoreOp>(op, ctx).is_some()
-                {
-                    return true;
-                } else if Operation::get_op::<CallOp>(op, ctx).is_some()
-                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-                {
-                    let mut arg_aliases = false;
-                    for operand in op.deref(ctx).operands() {
-                        let (arg_cells, arg_untracked) = root_heap_cells(ctx, state, operand);
-                        let (arg_objs, arg_open) =
-                            collect_reachable_heap(&self.heap, &arg_cells, arg_untracked);
-                        if !reachable_objects.is_disjoint(&arg_objs)
-                            || (open_or_summarized && arg_open)
-                        {
-                            arg_aliases = true;
-                            break;
-                        }
-                    }
-                    if arg_aliases {
-                        return true;
-                    }
-                    if open_or_summarized {
-                        let callee = Operation::get_op::<CallOp>(op, ctx)
-                            .map(|c| c.callee(ctx))
-                            .or_else(|| {
-                                Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx))
-                            });
-                        if callee.is_none_or(|c| {
-                            self.effects(&c)
-                                .is_none_or(|summary| summary.effects.may_mutate_state())
-                        }) {
-                            return true;
-                        }
-                    }
+                    aliases(op.deref(ctx).get_operand(0))
+                } else if Operation::is_op::<StoreOp>(op, ctx) {
+                    open_or_summarized
+                } else if is_any::<(CallOp, AsyncCallOp)>(ctx, op) {
+                    op.deref(ctx).operands().any(aliases)
+                        || open_or_summarized
+                            && crate::calls::callee(ctx, op).is_none_or(|callee| {
+                                self.effects(&callee)
+                                    .is_none_or(|summary| summary.effects.may_mutate_state())
+                            })
+                } else {
+                    false
                 }
-            }
-
-            if (unwrap_may_throw || seen_intermediate_parse)
-                && (Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-                    || Operation::get_op::<CallOp>(op, ctx).is_some()
-                    || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-                    || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-                    || Operation::get_op::<TimerOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::exceptions::RaiseOp>(op, ctx).is_some()
-                    || Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx).is_some())
+            };
+            // Moving a throwing source past another exception source reorders exceptions.
+            let reorders = || {
+                is_any::<(ForeignOp, CallOp, AsyncCallOp, AwaitOp, TimerOp, RaiseOp)>(ctx, op)
+                    || Operation::is_op::<crate::intrinsics::IntrinsicOp>(op, ctx)
+            };
+            if has_heap && mutates() || (unwrap_may_throw || seen_intermediate_parse) && reorders()
             {
                 return true;
             }

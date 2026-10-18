@@ -123,25 +123,52 @@ pub enum NumericConstant {
 }
 
 impl NumericConstant {
-    pub(crate) fn from_scalar(ctx: &Context, attr: &dyn Attribute) -> Option<Self> {
-        if let Some(integer) = attr.downcast_ref::<IntegerAttr>() {
-            return Some(
+    /// The exact value of a constant attribute: an integer by its type's signedness (signless
+    /// as signed), a double by its bits, or a numeric constant itself.
+    pub(crate) fn of(ctx: &Context, attr: &dyn Attribute) -> Option<Self> {
+        if let Some(&number) = attr.downcast_ref::<Self>() {
+            Some(number)
+        } else if let Some(integer) = attr.downcast_ref::<IntegerAttr>() {
+            Some(
                 if integer.get_type().deref(ctx).signedness() == Signedness::Unsigned {
                     Self::Unsigned(integer.value().to_u64())
                 } else {
                     Self::Signed(integer.value().to_i64())
                 },
-            );
+            )
+        } else {
+            let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
+            Some(Self::Float(value.to_bits()))
         }
-        let value = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
-        if value.is_finite()
-            && value.fract() == 0.0
-            && !(value == 0.0 && value.is_sign_negative())
-            && (-9007199254740992.0..=9007199254740992.0).contains(&value)
-        {
-            return Some(Self::Signed(value as i64));
+    }
+
+    /// An integer or double scalar as a numeric constant; a double holding a safe integer
+    /// (other than `-0`) becomes that integer.
+    pub(crate) fn from_scalar(ctx: &Context, attr: &dyn Attribute) -> Option<Self> {
+        Some(match Self::of(ctx, attr)? {
+            Self::Float(bits) => {
+                let value = f64::from_bits(bits);
+                let safe = value.is_finite()
+                    && value.fract() == 0.0
+                    && !(value == 0.0 && value.is_sign_negative())
+                    && (-9007199254740992.0..=9007199254740992.0).contains(&value);
+                if safe {
+                    Self::Signed(value as i64)
+                } else {
+                    Self::Float(bits)
+                }
+            }
+            integer => integer,
+        })
+    }
+
+    /// The value as the ABI's number.
+    pub(crate) fn number(self) -> perry_abi::number::Number {
+        match self {
+            Self::Signed(value) => perry_abi::number::Number::Signed(value),
+            Self::Unsigned(value) => perry_abi::number::Number::Unsigned(value),
+            Self::Float(bits) => perry_abi::number::Number::Float(f64::from_bits(bits)),
         }
-        Some(Self::Float(value.to_bits()))
     }
 
     pub(crate) fn scalar(self, ctx: &Context) -> AttrObj {

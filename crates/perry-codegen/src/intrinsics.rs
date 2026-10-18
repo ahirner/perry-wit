@@ -231,7 +231,6 @@ impl FunctionLowering<'_, '_> {
                 let rounded = self.select(ctx, up, next, floor);
                 Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
             }
-            Intrinsic::ParseInt => Some(self.runtime(ctx, Runtime::StdParseInt, args)),
             Intrinsic::ParseFloat => Some(self.runtime(ctx, Runtime::StdParseFloat, args)),
             Intrinsic::StringToNumber => Some(self.runtime(ctx, Runtime::StdStringToNumber, args)),
             Intrinsic::NumberIsNaN => {

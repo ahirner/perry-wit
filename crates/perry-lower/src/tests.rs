@@ -24,16 +24,6 @@ fn lowered(source: &str) -> String {
     printed
 }
 
-fn rejected(source: &str) -> String {
-    let ctx = &mut Context::new();
-    format!(
-        "{:#}",
-        lower_without_foreign(ctx, source, "case.ts")
-            .err()
-            .expect("rejection")
-    )
-}
-
 #[test]
 fn scalar_loop_becomes_ssa() {
     let printed = lowered(
@@ -105,45 +95,9 @@ export function run(x: number): number {
     );
 }
 
+/// Diagnostic messages are tabled in the integration `diagnostics_test`; this pins the spans.
 #[test]
-fn unsupported_forms_are_rejected_with_diagnostics() {
-    for (source, expected) in [
-        (
-            "export function run(x: number): number { return x ** 2; }",
-            "operator Pow",
-        ),
-        (
-            "function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }",
-            "generator function",
-        ),
-        (
-            "export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }",
-            "MIR backend does not support",
-        ),
-        (
-            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
-            "cannot find name 'a'",
-        ),
-        (
-            "export function run(cb: number): number {\n  return (cb as any)(1);\n}",
-            "indirect calls through local or parameter bindings are not supported yet",
-        ),
-        (
-            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
-            "method toFixed is not supported on number yet",
-        ),
-        (
-            "export function run(s: string): number {\n  return (s as any).byteLength;\n}",
-            "property byteLength is not supported on string yet",
-        ),
-        (
-            "export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}",
-            "operator Pow on bigint and bigint is not supported yet",
-        ),
-    ] {
-        let error = rejected(source);
-        assert!(error.contains(expected), "{source}: {error}");
-    }
+fn unsupported_forms_are_rejected_with_located_diagnostics() {
     let ctx = &mut Context::new();
     let err = lower_without_foreign(
         ctx,
@@ -389,28 +343,6 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
     assert!(printed.contains("perry.call save"), "{printed}");
     assert!(printed.contains("perry.alloc Frame"), "{printed}");
     assert!(printed.contains("perry.alloc Instance"), "{printed}");
-}
-
-/// Temporal factories and options outside the supported ISO subset are rejected.
-#[test]
-fn unsupported_temporal_forms_are_rejected() {
-    for (source, message) in [
-        (
-            "export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }",
-            "Temporal.ZonedDateTime.from is not supported",
-        ),
-        (
-            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }",
-            "duration field hours is not supported",
-        ),
-        (
-            "export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }",
-            "property hour",
-        ),
-    ] {
-        let error = rejected(source);
-        assert!(error.contains(message), "{source}: {error}");
-    }
 }
 
 #[test]

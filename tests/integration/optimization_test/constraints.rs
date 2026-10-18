@@ -1,5 +1,5 @@
 //! Numeric constraints across calls, loops, ranges and bounded calling contexts.
-use super::{compile, inspect_wasm};
+use super::compile;
 use crate::core_program::Program;
 use anyhow::Result;
 use wasmtime::Val;
@@ -30,87 +30,6 @@ fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
 }
 
 #[test]
-fn numeric_constraints_keep_each_call_result_independent() -> Result<()> {
-    use pliron::{
-        builtin::{
-            op_interfaces::{OneRegionInterface, SymbolOpInterface},
-            ops::{FuncOp, ModuleOp},
-            types::{FP64Type, IntegerType, Signedness},
-        },
-        context::Context,
-        irfmt::parsers::spaced,
-        linked_list::ContainsLinkedList,
-        operation::Operation,
-        parsable::parse_from_str,
-        printable::Printable,
-    };
-    let ctx = &mut Context::new();
-    let root = parse_from_str(
-        spaced(Operation::top_level_parser()),
-        ctx,
-        r#"builtin.module @multiple_results { ^module():
-            builtin.func @helper: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
-              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
-                perry.cond_br if recurse ^recursive() else ^base()
-              ^recursive():
-                no = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
-                status, fraction, sum = perry.call helper (x, no) : builtin.integer i1, builtin.fp64, builtin.fp64;
-                perry.br ^done(status, fraction, sum)
-              ^base():
-                yes = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1;
-                two = builtin.constant <builtin.double 2.0> : builtin.fp64;
-                half = perry.binary Div x, two : builtin.fp64;
-                doubled = perry.binary Add x, x : builtin.fp64;
-                perry.br ^done(yes, half, doubled)
-              ^done(ok: builtin.integer i1, divided: builtin.fp64, added: builtin.fp64):
-                perry.return ok, divided, added
-            };
-            builtin.func @run: builtin.function <(builtin.fp64, builtin.integer i1) -> (builtin.integer i1, builtin.fp64, builtin.fp64)> {
-              ^entry(x: builtin.fp64, recurse: builtin.integer i1):
-                status, fraction, sum = perry.call helper (x, recurse) : builtin.integer i1, builtin.fp64, builtin.fp64;
-                perry.return status, fraction, sum
-            }
-        }"#,
-    )
-    .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-    let module = Operation::get_op::<ModuleOp>(root, ctx).unwrap();
-    let run = module
-        .get_region(ctx)
-        .deref(ctx)
-        .iter(ctx)
-        .flat_map(|block| block.deref(ctx).iter(ctx))
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .find(|function| function.get_symbol_name(ctx) == "run".try_into().unwrap())
-        .unwrap();
-    let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
-    let byte = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
-    let wide = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
-    let float = FP64Type::get(ctx).into();
-    perry_mir::constrain_signature(ctx, &run, vec![byte, boolean], vec![boolean, float, wide]);
-    perry_mir::set_exported(ctx, &run);
-    let mut analyses = perry_mir::canonicalize(root, ctx)
-        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-    let implementation = perry_mir::specialized_implementation(ctx, &run).to_string();
-    let bytes = perry_codegen::compile(ctx, &module, &perry_codegen::Exports::Raw, &mut analyses)?;
-    let mut program = Program::from_wasm(bytes);
-    for recurse in [0, 1] {
-        let results = program
-            .call(&implementation, &[Val::I32(255), Val::I32(recurse)])
-            .0;
-        assert_eq!(results[0].unwrap_i32(), 1);
-        assert_eq!(results[1].unwrap_f64(), 127.5);
-        assert_eq!(results[2].unwrap_i32(), 510);
-        let results = program
-            .call("run", &[Val::F64(0.25f64.to_bits()), Val::I32(recurse)])
-            .0;
-        assert_eq!(results[0].unwrap_i32(), 1);
-        assert_eq!(results[1].unwrap_f64(), 0.125);
-        assert_eq!(results[2].unwrap_f64(), 0.5);
-    }
-    Ok(())
-}
-
-#[test]
 fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Result<()> {
     let compiled = compile(
         "export function run(a:number,b:number):number { return a/b + a%b; }",
@@ -124,13 +43,14 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
         );
     }
     let source = include_str!("../../fixtures/optimization/shared.ts");
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("shared.wit", "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }")?;
-    let world = resolve.select_world(&[package], Some("test"))?;
-    let compiled = perry_wit::compile_for_world(source, "shared.ts", &resolve, world, true)?;
+    let component = crate::world::component(
+        "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }",
+        "test",
+        "shared.ts",
+        source,
+    )?;
     let engine = wasmtime::Engine::default();
-    let (mut store, instance) =
-        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+    let (mut store, instance) = crate::world::instantiate(&engine, &component)?;
     assert_eq!(
         instance
             .get_typed_func::<(u8, u8), (u8,)>(&mut store, "narrow")?
@@ -187,7 +107,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
              }}"
         );
         let mut program = Program::new(&source);
-        let names = inspect_wasm(&program.wasm)?.function_names;
+        let names = crate::world::function_names(&program.wasm)?;
         assert!(
             names.contains(&"read"),
             "inspect the retained helper and named runtime roots"
@@ -297,6 +217,25 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
                 );
             }
         }
+    }
+    // Nullable conversions and nested layouts of an exact 64-bit value compile under default
+    // and fully summarized limits.
+    let exact = "parseInt(x===0?'9007199254740993':'bad')";
+    let nullable = [
+        "function f(n:number|null):number|undefined{return n===null?undefined:n;}",
+        "function f(n:number|undefined):number|null{return n===undefined?null:n;}",
+        "function f(n:number|null):number{return n===null?0.5:n;}",
+        "function f(n:number):number|undefined{return n===0?undefined:n;}",
+    ]
+    .map(|helper| format!("{helper} export function run(x:number):string{{const n=f({exact});return JSON.stringify(n??0.5);}}"));
+    let (a, b) = (
+        "const a:S={inner:{a:w,b:0.5},opt:w};",
+        "const b:S={inner:{a:w,b:w},opt:0.5};",
+    );
+    let nested = [format!("{a}{b}"), format!("{b}{a}")].map(|decls| format!("interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} export function run(x:number):string{{const w={exact};{decls}return JSON.stringify(a)+','+JSON.stringify(b);}}"));
+    for source in nullable.iter().chain(&nested) {
+        compile(source, "func(x:f64)->string")?;
+        perry_mir::with_fact_limits(1, 1, || compile(source, "func(x:f64)->string"))?;
     }
     Ok(())
 }

@@ -1,5 +1,6 @@
 //! Construction and checked payload access for closed tagged unions.
 use crate::{
+    NewOp,
     attrs::ErrorKind,
     exceptions::MayThrowInterface,
     optional::{absence, optional_value},
@@ -14,8 +15,6 @@ use pliron::{
     context::Context,
     derive::{op_interface_impl, pliron_op},
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
@@ -50,14 +49,7 @@ pub struct VariantNewOp;
 impl VariantNewOp {
     pub fn new(ctx: &mut Context, ty: TypeHandle, tag: &str, payload: Option<Value>) -> Self {
         let op = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                payload.into_iter().collect(),
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], payload.into_iter().collect()),
         };
         op.set_attr_perry_variant_tag(ctx, StringAttr::from(tag));
         op
@@ -86,12 +78,8 @@ impl Verify for VariantNewOp {
         Ok(())
     }
 }
-#[op_interface_impl]
-impl SideEffects for VariantNewOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; VariantNewOp, VariantTagOp);
+side_effects!(true; VariantPayloadOp);
 
 #[pliron_op(name = "perry.variant_tag", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
 pub struct VariantTagOp;
@@ -99,14 +87,7 @@ impl VariantTagOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = StringType::get(ctx).into();
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![value]),
         }
     }
 }
@@ -124,13 +105,6 @@ impl Verify for VariantTagOp {
         Ok(())
     }
 }
-#[op_interface_impl]
-impl SideEffects for VariantTagOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
-
 pub fn admits_payload(ctx: &Context, result: TypeHandle, payload: Option<TypeHandle>) -> bool {
     match payload {
         Some(payload) => result == payload || optional_value(ctx, result) == Some(payload),
@@ -143,14 +117,7 @@ pub struct VariantPayloadOp;
 impl VariantPayloadOp {
     pub fn new(ctx: &mut Context, value: Value, result: TypeHandle) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![value]),
         }
     }
 }
@@ -164,12 +131,6 @@ impl Verify for VariantPayloadOp {
             verify_err!(self.loc(ctx), InvalidVariant)?;
         }
         Ok(())
-    }
-}
-#[op_interface_impl]
-impl SideEffects for VariantPayloadOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
     }
 }
 #[op_interface_impl]

@@ -2,6 +2,7 @@ wasi.execution.scaling.retained_records
 wasi.execution.scaling.number_push
 wasi.execution.scaling.temporary_records
 wasi.execution.scaling.string_append
+wasi.execution.scaling.collection_churn
 web.console.routing
 web.performance.monotonic
 node.process.exit_status
@@ -21,6 +22,12 @@ node.timers.promises.value
 node.timers.promises.observers
 node.timers.promises.lifecycle
 ecma.json.command
+ecma.command.arrays
+ecma.command.text
+ecma.command.records
+ecma.command.numbers
+ecma.command.temporal
+ecma.command.web
 ecma.promise.all
 ecma.date.clock
 web.crypto.random

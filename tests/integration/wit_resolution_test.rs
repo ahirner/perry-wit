@@ -59,3 +59,34 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
         1
     );
 }
+
+/// Local source types win over SDK name matches, and same-named records of different WIT
+/// interfaces resolve in their own modules.
+#[test]
+fn source_and_interface_types_resolve_in_their_own_modules() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("domain.ts"),
+        "export interface Options { label: string }",
+    )?;
+    let main = directory
+        .path()
+        .join("main.ts")
+        .to_string_lossy()
+        .into_owned();
+    for (wit, path, source) in [
+        (
+            "package test:local; world run {record options {count:u32} export run:func(value:options)->u32;}",
+            main.as_str(),
+            "import type { Options } from './domain.ts'; import type { Options as WitOptions } from './types/world'; function size(value:Options):number{return value.label.length;} export function run(value:WitOptions):number{return size({label:'abc'}) + value.count;}",
+        ),
+        (
+            "package test:scoped; interface left {record options {count:u32}} interface right {record options {label:string}} world run {use left.{options as left-options}; use right.{options as right-options}; export run:func(left:left-options,right:right-options)->u32;}",
+            "scoped.ts",
+            "import type { Options as Left } from 'test:scoped/left'; import type { Options as Right } from 'test:scoped/right'; export function run(left:Left,right:Right):number {return left.count + right.label.length;}",
+        ),
+    ] {
+        crate::world::compile(wit, "run", path, source)?;
+    }
+    Ok(())
+}

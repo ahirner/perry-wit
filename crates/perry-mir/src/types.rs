@@ -9,7 +9,6 @@ use pliron::{
     identifier::Identifier,
     input_err_noloc,
     irfmt::parsers::{delimited_list_parser, location, spaced, type_parser},
-    location::Located,
     parsable::{IntoParseResult, Parsable, ParseResult, StateStream},
     printable::{self, Printable},
     result::Result,

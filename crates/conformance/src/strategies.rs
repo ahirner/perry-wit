@@ -1,6 +1,17 @@
 //! Input domains are pure strategies; rejection by the compiler is never a filter.
-use crate::program::{Binary, Condition, Math, Number, Text};
+use crate::{
+    execution::FactLimits,
+    program::{Binary, Condition, Math, Number, Text},
+};
 use proptest::prelude::*;
+
+pub(crate) fn fact_limits() -> impl Strategy<Value = FactLimits> {
+    prop_oneof![
+        Just(FactLimits::Default),
+        Just(FactLimits::Summarized),
+        Just(FactLimits::Narrow),
+    ]
+}
 
 pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
     let leaf = prop_oneof![

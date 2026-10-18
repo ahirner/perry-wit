@@ -20,96 +20,54 @@ impl ProgramFacts {
         }
         let state = &self.states[id];
         if let Some(op) = value.defining_op() {
-            if let Some(fg) = Operation::get_op::<FieldGetOp>(op, ctx) {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let field_name = fg.field(ctx);
-                let field_ty = base_spec
+            // A projection of a specialized base takes the projected specialized type.
+            let base = || self.specialized_value_type(ctx, id, op.deref(ctx).get_operand(0));
+            let changed = |projected: TypeHandle| (projected != ty).then_some(projected);
+            if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
+                let record = base()?;
+                let field = record
                     .deref(ctx)
                     .downcast_ref::<RecordType>()?
-                    .fields()
-                    .ok()?
-                    .iter()
-                    .find(|(n, _)| *n == field_name)?
-                    .1;
-                return (field_ty != ty).then_some(field_ty);
+                    .field(&get.field(ctx));
+                return changed(field?.1);
             }
-            if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
-                return (elem_ty != ty).then_some(elem_ty);
+            if crate::is_any::<(ArrayAtOp, ArrayGetOp)>(ctx, op) {
+                let element = base()?.deref(ctx).downcast_ref::<ArrayType>()?.element();
+                return changed(if Operation::is_op::<ArrayGetOp>(op, ctx) {
+                    crate::types::OptionalType::get(ctx, element).into()
+                } else {
+                    element
+                });
             }
-            if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
-                let base = op.deref(ctx).get_operand(0);
-                let base_spec = self.specialized_value_type(ctx, id, base)?;
-                let elem_ty = base_spec.deref(ctx).downcast_ref::<ArrayType>()?.element();
-                let opt_ty: TypeHandle = crate::types::OptionalType::get(ctx, elem_ty).into();
-                return (opt_ty != ty).then_some(opt_ty);
-            }
-            if Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::optional::ToNumberOp>(op, ctx).is_some()
+            if crate::is_any::<(UnwrapOp, crate::optional::ToNumberOp)>(ctx, op)
+                && let Some(optional) = base()
             {
-                let base = op.deref(ctx).get_operand(0);
-                if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
-                    let inner_ty = crate::optional::optional_value(ctx, base_spec)?;
-                    return (inner_ty != ty).then_some(inner_ty);
-                }
+                return changed(crate::optional::optional_value(ctx, optional)?);
             }
-            if Operation::get_op::<WrapOp>(op, ctx).is_some()
-                || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
+            if crate::is_any::<(WrapOp, OptionalCastOp)>(ctx, op)
+                && let Some(payload) = base()
             {
-                let base = op.deref(ctx).get_operand(0);
-                if let Some(base_spec) = self.specialized_value_type(ctx, id, base) {
-                    let payload_spec = if Operation::get_op::<OptionalCastOp>(op, ctx).is_some() {
-                        crate::optional::optional_value(ctx, base_spec)?
-                    } else {
-                        base_spec
-                    };
-                    let absence = ty
-                        .deref(ctx)
-                        .downcast_ref::<crate::types::OptionalType>()?
-                        .absence();
-                    let opt_ty: TypeHandle =
-                        crate::types::OptionalType::get_with(ctx, payload_spec, absence).into();
-                    return (opt_ty != ty).then_some(opt_ty);
-                }
+                let payload = if Operation::is_op::<OptionalCastOp>(op, ctx) {
+                    crate::optional::optional_value(ctx, payload)?
+                } else {
+                    payload
+                };
+                let absence = crate::optional::absence(ctx, ty)?;
+                return changed(crate::types::OptionalType::get_with(ctx, payload, absence).into());
             }
-            if Operation::get_op::<crate::locals::LoadOp>(op, ctx).is_some()
-                || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-            {
+            if crate::is_any::<(crate::locals::LoadOp, AwaitOp)>(ctx, op) {
                 return None;
             }
-            if let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(op, ctx) {
-                let ok = match intrinsic.intrinsic(ctx) {
-                    Some(
-                        crate::intrinsics::Intrinsic::BigIntNegate
-                        | crate::intrinsics::Intrinsic::BytesAt
-                        | crate::intrinsics::Intrinsic::ParseInt,
-                    ) => true,
-                    Some(
-                        crate::intrinsics::Intrinsic::MathFloor
-                        | crate::intrinsics::Intrinsic::MathCeil
-                        | crate::intrinsics::Intrinsic::MathTrunc
-                        | crate::intrinsics::Intrinsic::MathRound
-                        | crate::intrinsics::Intrinsic::MathAbs,
-                    ) => {
-                        let arg = op.deref(ctx).get_operand(0);
-                        state.representation(arg).is_some() || state.fact(arg) == Fact::Numeric
-                    }
-                    Some(
-                        crate::intrinsics::Intrinsic::MathMin
-                        | crate::intrinsics::Intrinsic::MathMax,
-                    ) => {
-                        let lhs = op.deref(ctx).get_operand(0);
-                        let rhs = op.deref(ctx).get_operand(1);
-                        (state.representation(lhs).is_some() && state.representation(rhs).is_some())
-                            || state.fact(lhs) == Fact::Numeric
-                            || state.fact(rhs) == Fact::Numeric
-                    }
-                    _ => false,
-                };
-                if !ok {
+            if let Some(intrinsic) = crate::intrinsics::intrinsic_of(ctx, op) {
+                let integral = super::super::rewrite::integral_intrinsic(ctx, op, intrinsic, |v| {
+                    state.representation(v).is_some()
+                });
+                let numeric = intrinsic.preserves_integers()
+                    && op
+                        .deref(ctx)
+                        .operands()
+                        .any(|v| state.fact(v) == Fact::Numeric);
+                if !integral && !numeric {
                     return None;
                 }
             }
@@ -150,9 +108,8 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> Option<TypeHandle> {
-        let c = &self.heap.cells[cell];
-        let mut visiting = HashMap::new();
-        let (t, real) = self.specialized_type_inner(ctx, ty, &c.layout_objects, &mut visiting)?;
+        let objects = &self.heap.cells[cell].layout_objects;
+        let (t, real) = self.specialized_type_inner(ctx, ty, objects, &mut HashMap::new())?;
         real.then_some(t)
     }
 
@@ -169,138 +126,85 @@ impl ProgramFacts {
         if let Some(&target) = visiting.get(&ty) {
             return Some((target, true));
         }
-        if let Some((inner_ty, absence)) = {
-            let deref = ty.deref(ctx);
-            deref
-                .downcast_ref::<crate::types::OptionalType>()
-                .map(|opt| (opt.value(), opt.absence()))
-        } {
-            let (new_inner, real) =
-                self.specialized_type_inner(ctx, inner_ty, objects, visiting)?;
+        if let Some((inner, absence)) = crate::optional::optional_parts(ctx, ty) {
+            let (inner, real) = self.specialized_type_inner(ctx, inner, objects, visiting)?;
             return Some((
-                crate::types::OptionalType::get_with(ctx, new_inner, absence).into(),
+                crate::types::OptionalType::get_with(ctx, inner, absence).into(),
                 real,
             ));
         }
         if objects.is_empty() {
             return None;
         }
-        let array_elem = ty
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .map(|a| a.element());
-        if let Some(elem_ty) = array_elem {
-            let mut element_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
-                    return None;
-                };
-                element_slots.push(*element);
-            }
-            let all_numeric = element_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && let Some(new_elem) = numeric_type_for(ctx, elem_ty) {
-                return Some((ArrayType::get(ctx, new_elem).into(), true));
-            }
-            if aggregate(ctx, elem_ty) {
-                let mut elem_objects = BTreeSet::new();
-                for &s in &element_slots {
-                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                if let Some((new_elem, real)) =
-                    self.specialized_type_inner(ctx, elem_ty, &elem_objects, visiting)
-                {
-                    return Some((ArrayType::get(ctx, new_elem).into(), real));
-                }
-            }
-            return None;
-        }
-        // Field types are copied out: instantiating types while the record is borrowed would
-        // re-borrow the type storage mutably.
-        let (is_tuple, fields) = {
-            let deref = ty.deref(ctx);
-            let rec = deref.downcast_ref::<RecordType>()?;
-            (rec.is_tuple(), rec.fields().ok()?.to_vec())
-        };
-        let (layout_key, _) = self.layout_key(ctx, ty, objects, &mut Vec::new())?;
-        let record_name = layout_key.record_identifier();
-        let is_rec = is_recursive_type(ctx, ty, &mut HashSet::new());
-        if is_rec {
-            let reserved_handle: TypeHandle = if is_tuple {
-                RecordType::get_tuple(ctx, record_name.clone(), None)
-                    .expect("recursive tuple layout reservation must succeed")
-                    .into()
-            } else {
-                RecordType::get(ctx, record_name.clone(), None)
-                    .expect("recursive record layout reservation must succeed")
-                    .into()
-            };
-            visiting.insert(ty, reserved_handle);
-        }
-        let mut real_change = false;
-        let mut spec_fields = Vec::with_capacity(fields.len());
-        for (idx, (fname, fty)) in fields.into_iter().enumerate() {
-            let mut field_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    if is_rec {
-                        visiting.remove(&ty);
+        match Layout::of(ctx, ty)? {
+            Layout::Array(element) => {
+                let (element, real) = match self.heap.step(ctx, objects, None, element)? {
+                    Step::Numeric(element) => (element, true),
+                    Step::Nested(nested) => {
+                        self.specialized_type_inner(ctx, element, &nested, visiting)?
                     }
-                    return None;
+                    Step::Keep => return None,
                 };
-                let Some(&s) = slots.get(idx) else {
-                    if is_rec {
-                        visiting.remove(&ty);
-                    }
-                    return None;
+                Some((ArrayType::get(ctx, element).into(), real))
+            }
+            Layout::Record { tuple, fields, .. } => {
+                let (key, _) = self.layout_key(ctx, ty, objects, &mut Vec::new())?;
+                let name = key.record_identifier();
+                let get = |ctx: &Context, fields: Option<Vec<(String, TypeHandle)>>| {
+                    let record = if tuple {
+                        RecordType::get_tuple(ctx, name.clone(), fields)
+                    } else {
+                        RecordType::get(ctx, name.clone(), fields)
+                    };
+                    record.expect("a specialized layout is consistent with its reservation")
                 };
-                field_slots.push(s);
-            }
-            let all_numeric = field_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && let Some(new_fty) = numeric_type_for(ctx, fty) {
-                spec_fields.push((fname, new_fty));
-                real_change = true;
-            } else if aggregate(ctx, fty) {
-                let mut field_objects = BTreeSet::new();
-                for &s in &field_slots {
-                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                // A recursive record reserves its name, so its own fields can refer to it.
+                let recursive = is_recursive_type(ctx, ty, &mut HashSet::new());
+                if recursive {
+                    visiting.insert(ty, get(ctx, None).into());
                 }
-                if let Some((new_fty, sub_real)) =
-                    self.specialized_type_inner(ctx, fty, &field_objects, visiting)
-                {
-                    spec_fields.push((fname, new_fty));
-                    if sub_real {
-                        real_change = true;
-                    }
-                } else {
-                    spec_fields.push((fname, fty));
+                let fields = self.specialized_fields(ctx, fields, objects, visiting);
+                if recursive {
+                    visiting.remove(&ty);
                 }
-            } else {
-                spec_fields.push((fname, fty));
+                Some((get(ctx, Some(fields?)).into(), true))
             }
         }
-        if !real_change {
-            if is_rec {
-                visiting.remove(&ty);
-            }
-            return None;
-        }
-        let handle = if is_tuple {
-            RecordType::get_tuple(ctx, record_name, Some(spec_fields))
-                .expect("specialized tuple layout must be consistent")
-        } else {
-            RecordType::get(ctx, record_name, Some(spec_fields))
-                .expect("specialized record layout must be consistent")
-        };
-        if is_rec {
-            visiting.remove(&ty);
-        }
-        Some((handle.into(), true))
     }
 
+    /// The fields of a record layout that `objects` share, with at least one specialized.
+    fn specialized_fields(
+        &self,
+        ctx: &Context,
+        fields: Vec<(String, TypeHandle)>,
+        objects: &BTreeSet<usize>,
+        visiting: &mut HashMap<TypeHandle, TypeHandle>,
+    ) -> Option<Vec<(String, TypeHandle)>> {
+        let mut real_change = false;
+        let mut specialized = Vec::with_capacity(fields.len());
+        for (index, (name, ty)) in fields.into_iter().enumerate() {
+            let ty = match self.heap.step(ctx, objects, Some(index), ty)? {
+                Step::Numeric(numeric) => {
+                    real_change = true;
+                    numeric
+                }
+                Step::Nested(nested) => {
+                    match self.specialized_type_inner(ctx, ty, &nested, visiting) {
+                        Some((nested, real)) => {
+                            real_change |= real;
+                            nested
+                        }
+                        None => ty,
+                    }
+                }
+                Step::Keep => ty,
+            };
+            specialized.push((name, ty));
+        }
+        real_change.then_some(specialized)
+    }
+
+    /// Whether some slot group `objects` share under `ty` specializes to a numeric carrier.
     fn has_numeric_specialization(
         &self,
         ctx: &Context,
@@ -311,94 +215,34 @@ impl ProgramFacts {
         if objects.is_empty() {
             return false;
         }
-        if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
-            return self.has_numeric_specialization(ctx, opt.value(), objects, visiting);
-        }
-        if let Some(promise) = ty.deref(ctx).downcast_ref::<crate::types::PromiseType>() {
-            return self.has_numeric_specialization(ctx, promise.value(), objects, visiting);
+        if let Some(inner) = payload_step(ctx, ty) {
+            return self.has_numeric_specialization(ctx, inner, objects, visiting);
         }
         if !visiting.insert(ty) {
             return false;
         }
-        let array_elem = ty
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .map(|a| a.element());
-        if let Some(elem_ty) = array_elem {
-            let mut element_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
-                    visiting.remove(&ty);
-                    return false;
+        let found = Layout::of(ctx, ty).is_some_and(|layout| {
+            for (field, _, child) in layout.children() {
+                let numeric = match self.heap.step(ctx, objects, field, child) {
+                    None => return false,
+                    Some(Step::Numeric(_)) => true,
+                    Some(Step::Nested(nested)) => {
+                        self.has_numeric_specialization(ctx, child, &nested, visiting)
+                    }
+                    Some(Step::Keep) => false,
                 };
-                element_slots.push(*element);
-            }
-            let all_numeric = element_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
-                visiting.remove(&ty);
-                return true;
-            }
-            if aggregate(ctx, elem_ty) {
-                let mut elem_objects = BTreeSet::new();
-                for &s in &element_slots {
-                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                let res = self.has_numeric_specialization(ctx, elem_ty, &elem_objects, visiting);
-                visiting.remove(&ty);
-                return res;
-            }
-            visiting.remove(&ty);
-            return false;
-        }
-        let fields = {
-            let deref = ty.deref(ctx);
-            let Some(rec) = deref.downcast_ref::<RecordType>() else {
-                visiting.remove(&ty);
-                return false;
-            };
-            let Ok(fields) = rec.fields() else {
-                visiting.remove(&ty);
-                return false;
-            };
-            fields.to_vec()
-        };
-        for (idx, (_fname, fty)) in fields.into_iter().enumerate() {
-            let mut field_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    visiting.remove(&ty);
-                    return false;
-                };
-                let Some(&s) = slots.get(idx) else {
-                    visiting.remove(&ty);
-                    return false;
-                };
-                field_slots.push(s);
-            }
-            let all_numeric = field_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && numeric_type_for(ctx, fty).is_some() {
-                visiting.remove(&ty);
-                return true;
-            }
-            if aggregate(ctx, fty) {
-                let mut field_objects = BTreeSet::new();
-                for &s in &field_slots {
-                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                if self.has_numeric_specialization(ctx, fty, &field_objects, visiting) {
-                    visiting.remove(&ty);
+                if numeric {
                     return true;
                 }
             }
-        }
+            false
+        });
         visiting.remove(&ty);
-        false
+        found
     }
 
+    /// The structural key of the layout `objects` share under `ty`, relative to the records on
+    /// the `visiting` path, and whether it specializes anything.
     fn layout_key(
         &self,
         ctx: &Context,
@@ -414,114 +258,76 @@ impl ProgramFacts {
             let real = self.has_numeric_specialization(ctx, ty, objects, &mut HashSet::new());
             return Some((LayoutKey::SelfRef(depth), real));
         }
-        if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>() {
-            let (inner, absence) = (opt.value(), opt.absence());
-            let (inner_key, real) = self.layout_key(ctx, inner, objects, visiting)?;
-            return Some((
-                LayoutKey::Optional {
-                    absence: absence as u8,
-                    inner: Box::new(inner_key),
-                },
-                real,
-            ));
+        if let Some((inner, absence)) = crate::optional::optional_parts(ctx, ty) {
+            let (inner, real) = self.layout_key(ctx, inner, objects, visiting)?;
+            let absence = absence as u8;
+            let inner = Box::new(inner);
+            return Some((LayoutKey::Optional { absence, inner }, real));
         }
-        if let Some(promise) = ty.deref(ctx).downcast_ref::<crate::types::PromiseType>() {
-            let inner = promise.value();
-            let (inner_key, real) = self.layout_key(ctx, inner, objects, visiting)?;
-            return Some((LayoutKey::Promise(Box::new(inner_key)), real));
+        if let Some(inner) = payload_step(ctx, ty) {
+            let (inner, real) = self.layout_key(ctx, inner, objects, visiting)?;
+            return Some((LayoutKey::Promise(Box::new(inner)), real));
         }
-        let array_elem = ty
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .map(|a| a.element());
-        if let Some(elem_ty) = array_elem {
-            let mut element_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
-                    return None;
+        match Layout::of(ctx, ty)? {
+            Layout::Array(element) => {
+                let (key, real) = match self.heap.step(ctx, objects, None, element)? {
+                    Step::Numeric(_) => (LayoutKey::Numeric, true),
+                    Step::Nested(nested) => self.layout_key(ctx, element, &nested, visiting)?,
+                    Step::Keep => return None,
                 };
-                element_slots.push(*element);
+                Some((LayoutKey::Array(Box::new(key)), real))
             }
-            let all_numeric = element_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && numeric_type_for(ctx, elem_ty).is_some() {
-                return Some((LayoutKey::Array(Box::new(LayoutKey::Numeric)), true));
+            Layout::Record {
+                name: base_name,
+                tuple: is_tuple,
+                fields,
+            } => {
+                visiting.push(ty);
+                let fields = self.layout_key_fields(ctx, &fields, objects, visiting);
+                visiting.pop();
+                let specialized_fields = fields?;
+                let key = LayoutKey::Record {
+                    base_name,
+                    is_tuple,
+                    specialized_fields,
+                };
+                Some((key, true))
             }
-            if aggregate(ctx, elem_ty) {
-                let mut elem_objects = BTreeSet::new();
-                for &s in &element_slots {
-                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
-                }
-                if let Some((sub_key, real)) =
-                    self.layout_key(ctx, elem_ty, &elem_objects, visiting)
-                {
-                    return Some((LayoutKey::Array(Box::new(sub_key)), real));
-                }
-            }
-            return None;
         }
-        let (rec_name, is_tuple, fields) = {
-            let deref = ty.deref(ctx);
-            let rec = deref.downcast_ref::<RecordType>()?;
-            (
-                rec.name().clone(),
-                rec.is_tuple(),
-                rec.fields().ok()?.to_vec(),
-            )
-        };
-        visiting.push(ty);
+    }
+
+    /// The keys of the specialized fields of a record layout, if at least one changes.
+    fn layout_key_fields(
+        &self,
+        ctx: &Context,
+        fields: &[(String, TypeHandle)],
+        objects: &BTreeSet<usize>,
+        visiting: &mut Vec<TypeHandle>,
+    ) -> Option<Vec<(usize, LayoutKey)>> {
         let mut real_change = false;
-        let mut specialized_fields = Vec::new();
-        for (idx, (_fname, fty)) in fields.into_iter().enumerate() {
-            let mut field_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    visiting.pop();
-                    return None;
-                };
-                let Some(&s) = slots.get(idx) else {
-                    visiting.pop();
-                    return None;
-                };
-                field_slots.push(s);
-            }
-            let all_numeric = field_slots
-                .iter()
-                .all(|&s| self.heap.cells[s].domain.needs_lossless_64());
-            if all_numeric && numeric_type_for(ctx, fty).is_some() {
-                specialized_fields.push((idx, LayoutKey::Numeric));
-                real_change = true;
-            } else if aggregate(ctx, fty) {
-                let mut field_objects = BTreeSet::new();
-                for &s in &field_slots {
-                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+        let mut specialized = Vec::new();
+        for (index, &(_, ty)) in fields.iter().enumerate() {
+            match self.heap.step(ctx, objects, Some(index), ty)? {
+                Step::Numeric(_) => {
+                    specialized.push((index, LayoutKey::Numeric));
+                    real_change = true;
                 }
-                if let Some((sub_key, sub_real)) =
-                    self.layout_key(ctx, fty, &field_objects, visiting)
-                {
-                    specialized_fields.push((idx, sub_key));
-                    if sub_real {
-                        real_change = true;
+                Step::Nested(nested) => {
+                    if let Some((key, real)) = self.layout_key(ctx, ty, &nested, visiting) {
+                        specialized.push((index, key));
+                        real_change |= real;
                     }
                 }
+                Step::Keep => {}
             }
         }
-        visiting.pop();
-        real_change.then_some((
-            LayoutKey::Record {
-                base_name: rec_name,
-                is_tuple,
-                specialized_fields,
-            },
-            true,
-        ))
+        real_change.then_some(specialized)
     }
 
     pub(in crate::facts) fn verify_cell_layout_lossless(
         &self,
         ctx: &Context,
-        loc: pliron::location::Location,
+        loc: &pliron::location::Location,
         ty: TypeHandle,
         cell: usize,
     ) -> pliron::result::Result<()> {
@@ -534,117 +340,150 @@ impl ProgramFacts {
         )
     }
 
+    /// Fails when a slot group that needs a lossless carrier is still typed `f64` in `ty`.
     fn verify_objects_layout_lossless(
         &self,
         ctx: &Context,
-        loc: pliron::location::Location,
+        loc: &pliron::location::Location,
         ty: TypeHandle,
         objects: &BTreeSet<usize>,
         visiting: &mut HashSet<TypeHandle>,
     ) -> pliron::result::Result<()> {
-        use crate::facts::rewrite::LosslessRepresentationErr;
-        use pliron::verify_err;
         let ty = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
         if objects.is_empty() || !visiting.insert(ty) {
             return Ok(());
         }
-        let array_elem = ty
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .map(|a| a.element());
-        if let Some(elem_ty) = array_elem {
-            let mut element_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Array { element, .. } = &self.heap.objects[o].contents else {
-                    visiting.remove(&ty);
+        let verified = Layout::of(ctx, ty).map_or(Ok(()), |layout| {
+            for (field, name, child) in layout.children() {
+                // A shape the objects do not share specializes nothing.
+                let Some(slots) = self.heap.slots(objects, field) else {
                     return Ok(());
                 };
-                element_slots.push(*element);
-            }
-            let requires_lossless = element_slots.iter().any(|&s| {
-                self.heap.cells[s].domain == Fact::Numeric
-                    || self.heap.cells[s]
-                        .domain
-                        .integer()
-                        .is_some_and(|d| d.bits == 64)
-            });
-            if requires_lossless && numeric_type_for(ctx, elem_ty).is_some() {
-                visiting.remove(&ty);
-                return verify_err!(
-                    loc,
-                    LosslessRepresentationErr(
-                        "array element with Fact::Numeric has f64 carrier".into()
-                    )
-                );
-            }
-            if aggregate(ctx, elem_ty) {
-                let mut elem_objects = BTreeSet::new();
-                for &s in &element_slots {
-                    elem_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                if slots
+                    .iter()
+                    .any(|&slot| self.heap.cells[slot].domain.needs_lossless_64())
+                    && numeric_type_for(ctx, child).is_some()
+                {
+                    let message = name.map_or_else(
+                        || "array element with Fact::Numeric has f64 carrier".to_string(),
+                        |name| format!("record field `{name}` with Fact::Numeric has f64 carrier"),
+                    );
+                    return pliron::verify_err!(
+                        loc.clone(),
+                        crate::facts::rewrite::LosslessRepresentationErr(message)
+                    );
                 }
-                self.verify_objects_layout_lossless(ctx, loc, elem_ty, &elem_objects, visiting)?;
-            }
-            visiting.remove(&ty);
-            return Ok(());
-        }
-        let fields = {
-            let deref = ty.deref(ctx);
-            let Some(rec) = deref.downcast_ref::<RecordType>() else {
-                visiting.remove(&ty);
-                return Ok(());
-            };
-            let Ok(fields) = rec.fields() else {
-                visiting.remove(&ty);
-                return Ok(());
-            };
-            fields.to_vec()
-        };
-        for (idx, (fname, fty)) in fields.into_iter().enumerate() {
-            let mut field_slots = Vec::with_capacity(objects.len());
-            for &o in objects {
-                let Contents::Record(slots) = &self.heap.objects[o].contents else {
-                    visiting.remove(&ty);
-                    return Ok(());
-                };
-                let Some(&s) = slots.get(idx) else {
-                    visiting.remove(&ty);
-                    return Ok(());
-                };
-                field_slots.push(s);
-            }
-            let requires_lossless = field_slots.iter().any(|&s| {
-                self.heap.cells[s].domain == Fact::Numeric
-                    || self.heap.cells[s]
-                        .domain
-                        .integer()
-                        .is_some_and(|d| d.bits == 64)
-            });
-            if requires_lossless && numeric_type_for(ctx, fty).is_some() {
-                visiting.remove(&ty);
-                return verify_err!(
-                    loc,
-                    LosslessRepresentationErr(format!(
-                        "record field `{fname}` with Fact::Numeric has f64 carrier"
-                    ))
-                );
-            }
-            if aggregate(ctx, fty) {
-                let mut field_objects = BTreeSet::new();
-                for &s in &field_slots {
-                    field_objects.extend(self.heap.cells[s].layout_objects.iter().copied());
+                if aggregate(ctx, child) {
+                    let nested = self.heap.layout_objects(&slots);
+                    self.verify_objects_layout_lossless(ctx, loc, child, &nested, visiting)?;
                 }
-                self.verify_objects_layout_lossless(
-                    ctx,
-                    loc.clone(),
-                    fty,
-                    &field_objects,
-                    visiting,
-                )?;
             }
-        }
+            Ok(())
+        });
         visiting.remove(&ty);
-        Ok(())
+        verified
     }
+}
+
+/// The array or record shape of an aggregate type, copied out of the type storage because
+/// specializing instantiates types while it is walked.
+enum Layout {
+    Array(TypeHandle),
+    Record {
+        name: Identifier,
+        tuple: bool,
+        fields: Vec<(String, TypeHandle)>,
+    },
+}
+
+impl Layout {
+    /// `None` for other types and for opaque records, which have nothing to specialize.
+    fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+        let ty = ty.deref(ctx);
+        if let Some(array) = ty.downcast_ref::<ArrayType>() {
+            return Some(Self::Array(array.element()));
+        }
+        let record = ty.downcast_ref::<RecordType>()?;
+        Some(Self::Record {
+            name: record.name().clone(),
+            tuple: record.is_tuple(),
+            fields: record.fields().ok()?.to_vec(),
+        })
+    }
+
+    /// `(field index, field name, type)` of each child; an array's one child is its element.
+    fn children(&self) -> Vec<(Option<usize>, Option<&str>, TypeHandle)> {
+        match self {
+            Self::Array(element) => vec![(None, None, *element)],
+            Self::Record { fields, .. } => fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, ty))| (Some(index), Some(name.as_str()), *ty))
+                .collect(),
+        }
+    }
+}
+
+/// How the slots holding one child of every object in a group specialize.
+enum Step {
+    /// Every slot needs a lossless carrier and the child is an `f64` one: its numeric type.
+    Numeric(TypeHandle),
+    /// The child is an aggregate, decided by the objects its slots may hold.
+    Nested(BTreeSet<usize>),
+    Keep,
+}
+
+impl HeapFacts {
+    /// The slot each of `objects` holds at record `field` (array elements for `None`), or
+    /// `None` when an object has another shape.
+    fn slots(&self, objects: &BTreeSet<usize>, field: Option<usize>) -> Option<Vec<usize>> {
+        objects
+            .iter()
+            .map(|&object| match (&self.objects[object].contents, field) {
+                (Contents::Array { element, .. }, None) => Some(*element),
+                (Contents::Record(slots), Some(index)) => slots.get(index).copied(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The objects any of `slots` may lay out.
+    fn layout_objects(&self, slots: &[usize]) -> BTreeSet<usize> {
+        slots
+            .iter()
+            .flat_map(|&slot| self.cells[slot].layout_objects.iter().copied())
+            .collect()
+    }
+
+    /// How child `field` of type `ty` specializes across `objects`; `None` for a shape mismatch.
+    fn step(
+        &self,
+        ctx: &Context,
+        objects: &BTreeSet<usize>,
+        field: Option<usize>,
+        ty: TypeHandle,
+    ) -> Option<Step> {
+        let slots = self.slots(objects, field)?;
+        let lossless = slots
+            .iter()
+            .all(|&slot| self.cells[slot].domain.needs_lossless_64());
+        Some(match numeric_type_for(ctx, ty) {
+            Some(numeric) if lossless => Step::Numeric(numeric),
+            _ if aggregate(ctx, ty) => Step::Nested(self.layout_objects(&slots)),
+            _ => Step::Keep,
+        })
+    }
+}
+
+/// The payload of an optional or promise type, which share their payload's layout.
+fn payload_step(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
+    let ty = ty.deref(ctx);
+    ty.downcast_ref::<crate::types::OptionalType>()
+        .map(|optional| optional.value())
+        .or_else(|| {
+            ty.downcast_ref::<PromiseType>()
+                .map(|promise| promise.value())
+        })
 }
 
 /// Canonical structural key for a specialized aggregate layout.
@@ -723,25 +562,13 @@ fn write_ident(out: &mut String, ident: &str) {
 
 /// The numeric representation of an `f64` (or optional `f64`) slot type.
 fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    if ty.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
-        return Some(crate::types::NumericType::get(ctx).into());
+    let is_number = |ty: TypeHandle| ty.deref(ctx).is::<pliron::builtin::types::FP64Type>();
+    let numeric = crate::types::NumericType::get(ctx).into();
+    if is_number(ty) {
+        return Some(numeric);
     }
-    if let Some(opt) = ty.deref(ctx).downcast_ref::<crate::types::OptionalType>()
-        && opt
-            .value()
-            .deref(ctx)
-            .is::<pliron::builtin::types::FP64Type>()
-    {
-        return Some(
-            crate::types::OptionalType::get_with(
-                ctx,
-                crate::types::NumericType::get(ctx).into(),
-                opt.absence(),
-            )
-            .into(),
-        );
-    }
-    None
+    let (value, absence) = crate::optional::optional_parts(ctx, ty)?;
+    is_number(value).then(|| crate::types::OptionalType::get_with(ctx, numeric, absence).into())
 }
 
 /// Whether `ty` reaches a record already on the `visiting` path.

@@ -404,6 +404,10 @@ pub(crate) extern "C" fn std_parse_int(
     radix_bits: u64,
     output: *mut u64,
 ) -> i32 {
+    // Compiled code only emits tags it defines; an unknown one is a compiler bug.
+    let Ok(radix_tag) = numeric::Tag::try_from(radix_tag) else {
+        panic!("invalid numeric tag")
+    };
     let radix = Number::from_numeric(radix_tag, radix_bits);
     let (tag, bits) = parse_integer(view(string).text, radix).into_numeric();
     unsafe { *output = bits };

@@ -894,15 +894,19 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             _ => perry_hir::infer_expr_type(expr, env),
         },
         Expr::IndexGet { object, index } => match strip_nullish(expression(object, env)).0 {
-            HirType::Tuple(items) => match index.as_ref() {
-                Expr::Number(n) if *n >= 0.0 => {
-                    items.into_iter().nth(*n as usize).unwrap_or(HirType::Any)
+            HirType::Tuple(items) => {
+                // Only an array index names a tuple position; `t[1.5]` is a dynamic key.
+                let position = match index.as_ref() {
+                    Expr::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
+                    Expr::Integer(n) => usize::try_from(*n).ok(),
+                    _ => None,
+                };
+                match position {
+                    // Reading past the end yields `undefined`.
+                    Some(position) => items.into_iter().nth(position).unwrap_or(HirType::Void),
+                    None => perry_hir::infer_expr_type(expr, env),
                 }
-                Expr::Integer(n) if *n >= 0 => {
-                    items.into_iter().nth(*n as usize).unwrap_or(HirType::Any)
-                }
-                _ => perry_hir::infer_expr_type(expr, env),
-            },
+            }
             other => match shapes::generics::iterated_element(other) {
                 Ok(element) => element,
                 Err(other) => {

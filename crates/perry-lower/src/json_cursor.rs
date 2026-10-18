@@ -260,6 +260,24 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| Ok(b.cursor_bad(ctx, cursor, ty)),
         )
     }
+    /// The value of a member missing from the input and whether its absence fails decoding.
+    /// Types admitting `undefined` take it (`omitted` for record fields, so `in` sees no key),
+    /// `unknown` members take JSON `undefined` as JS property access would, others fail.
+    fn cursor_absent(&mut self, ctx: &mut Context, ty: TypeHandle, omitted: bool) -> (Value, bool) {
+        if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+            let value = if omitted {
+                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
+            } else {
+                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+            };
+            (value, false)
+        } else if ty.deref(ctx).is::<JsonType>() {
+            (self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]), false)
+        } else {
+            (self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)), true)
+        }
+    }
+
     fn cursor_dispatch(
         &mut self,
         ctx: &mut Context,
@@ -296,19 +314,11 @@ impl<'s> FunctionBuilder<'s> {
         let mut failures = Vec::with_capacity(fields.len());
         for (_, field) in &fields {
             let slot = self.entry_slot(ctx, *field);
-            let absent = if absence(ctx, *field).is_some_and(|a| a.admits_undefined()) {
-                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, *field))
-            } else {
-                self.emit_value(ctx, |ctx| UndefOp::new(ctx, *field))
-            };
+            let (absent, missing) = self.cursor_absent(ctx, *field, true);
             self.store(ctx, slot, absent);
             values.push(slot);
             let e = self.entry_slot(ctx, boolean);
-            let missing = self.boolean(
-                ctx,
-                !absence(ctx, *field).is_some_and(|a| a.admits_undefined())
-                    && !field.deref(ctx).is::<JsonType>(),
-            );
+            let missing = self.boolean(ctx, missing);
             self.store(ctx, e, missing);
             failures.push(e);
         }
@@ -431,17 +441,8 @@ impl<'s> FunctionBuilder<'s> {
                 *ty,
                 end,
                 |b, ctx| {
-                    let v = if absence(ctx, *ty).is_some_and(|a| a.admits_undefined()) {
-                        b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *ty))
-                    } else {
-                        b.emit_value(ctx, |ctx| UndefOp::new(ctx, *ty))
-                    };
-                    let e = b.boolean(
-                        ctx,
-                        !absence(ctx, *ty).is_some_and(|a| a.admits_undefined())
-                            && !ty.deref(ctx).is::<JsonType>(),
-                    );
-                    Ok((v, e))
+                    let (v, failed) = b.cursor_absent(ctx, *ty, false);
+                    Ok((v, b.boolean(ctx, failed)))
                 },
                 |b, ctx| {
                     let pair = b.cursor_value(ctx, cursor, *ty)?;
@@ -676,25 +677,8 @@ impl<'s> FunctionBuilder<'s> {
                                 payload_ty,
                                 is_missing,
                                 |b, ctx| {
-                                    if absence(ctx, payload_ty)
-                                        .is_some_and(|a| a.admits_undefined())
-                                    {
-                                        let undef = b.emit_value(ctx, |ctx| {
-                                            UndefinedOp::with_type(ctx, payload_ty)
-                                        });
-                                        let ok = b.boolean(ctx, false);
-                                        Ok((undef, ok))
-                                    } else if payload_ty.deref(ctx).is::<JsonType>() {
-                                        let undef =
-                                            b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
-                                        let ok = b.boolean(ctx, false);
-                                        Ok((undef, ok))
-                                    } else {
-                                        let undef =
-                                            b.emit_value(ctx, |ctx| UndefOp::new(ctx, payload_ty));
-                                        let err = b.boolean(ctx, true);
-                                        Ok((undef, err))
-                                    }
+                                    let (v, failed) = b.cursor_absent(ctx, payload_ty, false);
+                                    Ok((v, b.boolean(ctx, failed)))
                                 },
                                 |b, ctx| {
                                     let pos = b.load(ctx, deferred_pos)?;

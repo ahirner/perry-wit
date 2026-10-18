@@ -428,6 +428,7 @@ impl<'s> FunctionBuilder<'s> {
                                     fallback_record
                                         .and_then(|rec| rec.deref(ctx).field(key).map(|(_, ty)| ty))
                                 })
+                                // Without a known field type the literal takes its own type.
                                 .map(|base_ty| {
                                     let abs = if matches!(val_expr, Expr::Null) {
                                         perry_mir::Absence::Null
@@ -435,21 +436,6 @@ impl<'s> FunctionBuilder<'s> {
                                         perry_mir::Absence::Undefined
                                     };
                                     crate::coerce::admitting(ctx, base_ty, abs)
-                                })
-                                .or_else(|| {
-                                    let abs = if matches!(val_expr, Expr::Null) {
-                                        perry_mir::Absence::Null
-                                    } else {
-                                        perry_mir::Absence::Undefined
-                                    };
-                                    Some(
-                                        perry_mir::OptionalType::get_with(
-                                            ctx,
-                                            FP64Type::get(ctx).into(),
-                                            abs,
-                                        )
-                                        .into(),
-                                    )
                                 })
                         } else {
                             None

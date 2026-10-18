@@ -1,14 +1,14 @@
 //! The isolated worker process: compiles one case and runs the component under wasmtime.
-use super::{Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
+use super::{FactLimits, Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
 use crate::{
     fetch::FetchCase, handler::HandlerCase, program::ENV_FIXTURE, registry::Case,
     streams::StreamCase,
 };
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use http_body_util::{BodyExt, Full};
 use perry_wit::{CompileOptions, compile_for_world, compile_typescript};
 use std::{env, fs, path::Path, process::Command, sync::Arc, time::Duration};
-use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader};
+use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader, Val};
 use wasmtime::{AsContextMut, Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -122,7 +122,7 @@ fn execute_function(
     fault: Option<Fault>,
 ) -> Result<Outcome> {
     if let Case::Aggregate(agg) = case
-        && let Err(error) = fs::write(directory.join("world.wit"), agg.wit_world())
+        && let Err(error) = fs::write(directory.join("world.wit"), agg.wit_signature.wit_world())
     {
         return Ok(Outcome::Compile(error.to_string()));
     }
@@ -168,31 +168,15 @@ fn execute_function(
                 .map_err(anyhow::Error::from)
         }
     };
-    let compiled = match if matches!(case, Case::Aggregate(agg) if agg.overflow_origins) {
-        perry_mir::with_fact_limits(2, 2, compile_one)
-    } else {
-        compile_one()
-    } {
+    // Generated cases carry the precision they compile under; the oracle checks every setting.
+    let fact_limits = match case {
+        Case::Aggregate(agg) => agg.fact_limits,
+        Case::Collection(coll) => coll.fact_limits,
+        _ => FactLimits::Default,
+    };
+    let compiled = match fact_limits.apply(compile_one) {
         Ok(compiled) => compiled,
         Err(error) => return Ok(Outcome::Compile(format!("{error:#}"))),
-    };
-    let summarized_bytes = if fault.is_none() {
-        let summarized = match perry_mir::with_fact_limits(1, 1, compile_one) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                return Ok(Outcome::Compile(format!(
-                    "forced summarization compilation failed: {error:#}"
-                )));
-            }
-        };
-        Some(
-            summarized
-                .component
-                .context("summarized component compilation produced no component")?
-                .bytes,
-        )
-    } else {
-        None
     };
     let mut config = Config::new();
     config
@@ -207,9 +191,6 @@ fn execute_function(
         .context("component compilation produced no component")?
         .bytes;
     let component_bytes = bytes.len();
-    let need_summarized_run = summarized_bytes.as_ref().is_some_and(|sum_bytes| {
-        sum_bytes != &bytes || matches!(case, Case::Aggregate(_) | Case::Collection(_))
-    });
     let component = match Component::new(&engine, bytes) {
         Ok(component) => component,
         Err(error) => return Ok(Outcome::Validate(format!("{error:#}"))),
@@ -228,47 +209,6 @@ fn execute_function(
         }
         Err(error) => return Ok(Outcome::Execute(format!("{error:#}"))),
     };
-    if need_summarized_run && let Some(sum_bytes) = summarized_bytes {
-        let sum_component = match Component::new(&engine, sum_bytes) {
-            Ok(component) => component,
-            Err(error) => {
-                return Ok(Outcome::Validate(format!(
-                    "forced summarization component failed validation: {error:#}"
-                )));
-            }
-        };
-        let sum_run = match runtime.block_on(observations(
-            &engine,
-            &sum_component,
-            directory,
-            limits,
-            fault,
-            case,
-        )) {
-            Ok(run) => run,
-            Err(error)
-                if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
-            {
-                return Ok(Outcome::Fuel(format!(
-                    "forced summarization exhausted fuel: {error:#}"
-                )));
-            }
-            Err(error) => {
-                return Ok(Outcome::Execute(format!(
-                    "forced summarization execution failed: {error:#}"
-                )));
-            }
-        };
-        if sum_run.observations != run.observations
-            || sum_run.stdout != run.stdout
-            || sum_run.stderr != run.stderr
-        {
-            return Ok(Outcome::Execute(
-                "forced summarization (MAX_ORIGINS=1, MAX_PRECISE_CONTEXTS=1) changed component observations"
-                    .into(),
-            ));
-        }
-    }
     let Run {
         observations,
         fuel_used,
@@ -294,46 +234,6 @@ struct GuestObservation {
 
 impl From<GuestObservation> for Observation {
     fn from(guest: GuestObservation) -> Self {
-        Self {
-            value: number(guest.value),
-            trace: guest.trace.into_iter().map(number).collect(),
-        }
-    }
-}
-
-#[derive(wasmtime::component::ComponentType, wasmtime::component::Lift)]
-#[component(record)]
-struct GuestMultiObservation {
-    value: f64,
-    head: f64,
-    tail: f64,
-    trace: Vec<f64>,
-}
-
-impl From<GuestMultiObservation> for Observation {
-    fn from(mut guest: GuestMultiObservation) -> Self {
-        guest.trace.push(guest.head + 0.0);
-        guest.trace.push(guest.tail + 0.0);
-        Self {
-            value: number(guest.value),
-            trace: guest.trace.into_iter().map(number).collect(),
-        }
-    }
-}
-
-#[derive(wasmtime::component::ComponentType, wasmtime::component::Lift)]
-#[component(record)]
-struct GuestOptionObservation {
-    value: f64,
-    maybe: Option<f64>,
-    trace: Vec<f64>,
-}
-
-impl From<GuestOptionObservation> for Observation {
-    fn from(mut guest: GuestOptionObservation) -> Self {
-        guest
-            .trace
-            .push(guest.maybe.map(|v| v + 0.0).unwrap_or(-66.0));
         Self {
             value: number(guest.value),
             trace: guest.trace.into_iter().map(number).collect(),
@@ -448,7 +348,7 @@ async fn observations(
         match case {
             Case::Stream(case) => stream_calls(&mut store, &instance, case, fuel).await?,
             Case::Fetch(case) => fetch_calls(&mut store, &instance, case, fuel).await?,
-            _ => number_calls(&mut store, &instance, artifacts, fault, fuel, case).await?,
+            _ => number_calls(&mut store, &instance, artifacts, fault, fuel).await?,
         }
     };
     Ok(Run {
@@ -605,105 +505,71 @@ async fn number_calls(
     artifacts: &Path,
     fault: Option<Fault>,
     fuel: u64,
-    case: &Case,
 ) -> Result<Calls> {
-    use crate::aggregates::WitSignature;
-    let sig = match case {
-        Case::Aggregate(agg) => agg.wit_signature,
-        _ => WitSignature::ObservationRecord,
-    };
+    let run = instance
+        .get_func(&mut *store, "run")
+        .context("component does not export run")?;
     let inputs: Vec<String> = serde_json::from_slice(&fs::read(artifacts.join("inputs.json"))?)?;
     let mut calls = Calls::default();
-    match sig {
-        WitSignature::ObservationRecord => {
-            let run = instance
-                .get_typed_func::<(f64,), (Result<GuestObservation, ()>,)>(&mut *store, "run")?;
-            for encoded in inputs {
-                let input = decode_input(&encoded)?;
-                store.set_fuel(fuel)?;
-                let (value,) = run
-                    .call_async(&mut *store, (input,))
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .with_context(|| format!("input {input:?}"))?;
-                if fault == Some(Fault::Resource) {
-                    store.data_mut().table.push(())?;
-                }
-                calls.1.push(settle(store, fuel, "run")?);
-                calls.0.push(
-                    value
-                        .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
-                        .into(),
-                );
-            }
+    for encoded in inputs {
+        let input = decode_input(&encoded)?;
+        store.set_fuel(fuel)?;
+        let mut result = [Val::Bool(false)];
+        run.call_async(&mut *store, &[Val::Float64(input)], &mut result)
+            .await
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("input {input:?}"))?;
+        if fault == Some(Fault::Resource) {
+            store.data_mut().table.push(())?;
         }
-        WitSignature::MultiFieldRecord => {
-            let run = instance.get_typed_func::<(f64,), (Result<GuestMultiObservation, ()>,)>(
-                &mut *store,
-                "run",
-            )?;
-            for encoded in inputs {
-                let input = decode_input(&encoded)?;
-                store.set_fuel(fuel)?;
-                let (value,) = run
-                    .call_async(&mut *store, (input,))
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .with_context(|| format!("input {input:?}"))?;
-                calls.1.push(settle(store, fuel, "run")?);
-                calls.0.push(
-                    value
-                        .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
-                        .into(),
-                );
-            }
-        }
-        WitSignature::OptionRecord => {
-            let run = instance.get_typed_func::<(f64,), (Result<GuestOptionObservation, ()>,)>(
-                &mut *store,
-                "run",
-            )?;
-            for encoded in inputs {
-                let input = decode_input(&encoded)?;
-                store.set_fuel(fuel)?;
-                let (value,) = run
-                    .call_async(&mut *store, (input,))
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .with_context(|| format!("input {input:?}"))?;
-                calls.1.push(settle(store, fuel, "run")?);
-                calls.0.push(
-                    value
-                        .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
-                        .into(),
-                );
-            }
-        }
-        WitSignature::DirectList => {
-            let run =
-                instance.get_typed_func::<(f64,), (Result<Vec<f64>, ()>,)>(&mut *store, "run")?;
-            for encoded in inputs {
-                let input = decode_input(&encoded)?;
-                store.set_fuel(fuel)?;
-                let (value,) = run
-                    .call_async(&mut *store, (input,))
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .with_context(|| format!("input {input:?}"))?;
-                calls.1.push(settle(store, fuel, "run")?);
-                let list = value
-                    .map_err(|()| anyhow!("case failed through its declared WIT result error"))?;
-                let (first, rest) = list
-                    .split_first()
-                    .ok_or_else(|| anyhow!("direct list return was empty"))?;
-                calls.0.push(Observation {
-                    value: number(*first),
-                    trace: rest.iter().copied().map(number).collect(),
-                });
-            }
-        }
+        calls.1.push(settle(store, fuel, "run")?);
+        let [result] = result;
+        calls.0.push(lifted_observation(result)?);
     }
     Ok(calls)
+}
+
+/// Reads `run`'s `result<..>` like the Node oracle: a list is `[value, ...trace]`; a record
+/// contributes `value`, then `trace` followed by its other fields in order (`none` as -66).
+fn lifted_observation(result: Val) -> Result<Observation> {
+    let Val::Result(Ok(Some(payload))) = result else {
+        bail!("case failed through its declared WIT result error: {result:?}")
+    };
+    let (value, trace) = match *payload {
+        Val::List(items) => {
+            let mut items = items.into_iter().map(float);
+            let value = items.next().context("direct list return was empty")??;
+            (value, items.collect::<Result<Vec<_>>>()?)
+        }
+        Val::Record(fields) => {
+            let (mut value, mut trace, mut extras) = (None, Vec::new(), Vec::new());
+            for (name, field) in fields {
+                match (name.as_str(), field) {
+                    ("value", field) => value = Some(float(field)?),
+                    ("trace", Val::List(items)) => {
+                        trace = items.into_iter().map(float).collect::<Result<_>>()?;
+                    }
+                    (_, Val::Option(None)) => extras.push(-66.0),
+                    (_, Val::Option(Some(field))) => extras.push(float(*field)? + 0.0),
+                    (_, field) => extras.push(float(field)? + 0.0),
+                }
+            }
+            trace.extend(extras);
+            (value.context("observation record lacks value")?, trace)
+        }
+        other => bail!("unexpected observation {other:?}"),
+    };
+    Ok(Observation {
+        value: number(value),
+        trace: trace.into_iter().map(number).collect(),
+    })
+}
+
+fn float(value: Val) -> Result<f64> {
+    match value {
+        Val::Float64(value) => Ok(value),
+        other => bail!("expected an f64 observation, got {other:?}"),
+    }
 }
 
 fn decode_input(encoded: &str) -> Result<f64> {

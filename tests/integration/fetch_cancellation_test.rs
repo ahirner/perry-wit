@@ -12,17 +12,12 @@ use std::{
     },
     task::{Context, Poll},
 };
-use wasmtime::{
-    ResourceLimiter, Store,
-    component::{Component, Linker, ResourceTable},
-};
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{
-    Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-};
+use wasmtime::component::Component;
+use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 
 use crate::cancellation;
 use crate::engine::async_engine;
+use crate::wasi_host::{self, Host};
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
@@ -115,44 +110,6 @@ impl WasiHttpHooks for Fixture {
         })
     }
 }
-struct Host {
-    wasi: WasiCtx,
-    http: WasiHttpCtx,
-    table: ResourceTable,
-    fixture: Fixture,
-    peak: usize,
-}
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: &mut self.fixture,
-        }
-    }
-}
-impl ResourceLimiter for Host {
-    fn memory_growing(
-        &mut self,
-        _: usize,
-        desired: usize,
-        _: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.peak = self.peak.max(desired);
-        Ok(desired <= 512 * 1024)
-    }
-    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        Ok(true)
-    }
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
@@ -174,30 +131,21 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
     )?;
     for phase in [Phase::Request, Phase::Body] {
         let observations = Arc::new(Observations::default());
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        let mut linker = wasi_host::linker(&engine)?;
         let readiness = observations.clone();
         linker.instance("test:control/cancellation")?.func_wrap(
             "ready",
-            move |_: wasmtime::StoreContextMut<'_, Host>, (): ()| {
+            move |_: wasmtime::StoreContextMut<'_, Host<Fixture>>, (): ()| {
                 Ok((readiness.ready.load(Ordering::SeqCst),))
             },
         )?;
-        let mut store = Store::new(
-            &engine,
-            Host {
-                wasi: WasiCtx::builder().build(),
-                http: WasiHttpCtx::new(),
-                table: ResourceTable::new(),
-                fixture: Fixture {
-                    phase,
-                    observations: observations.clone(),
-                },
-                peak: 0,
-            },
-        );
-        store.limiter(|host| host);
+        let host = Host::default()
+            .with_hooks(Fixture {
+                phase,
+                observations: observations.clone(),
+            })
+            .with_memory_limit(512 * 1024);
+        let mut store = wasi_host::store(&engine, host);
         let instance = linker.instantiate_async(&mut store, &component).await?;
         let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
         let mut peak = 0;

@@ -8,6 +8,7 @@ pub mod runner;
 pub mod transitions;
 
 mod capabilities;
+mod emit;
 mod fetch;
 mod handler;
 mod scaling;

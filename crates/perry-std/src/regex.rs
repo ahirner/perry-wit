@@ -1,5 +1,6 @@
 //! Statically checked reverse and anchored-forward DFA execution with optional NFA captures.
 use crate::runtime;
+use perry_abi::layout::regex::MAX_CAPTURES;
 
 #[inline(always)]
 unsafe fn read_u16(ptr: *const u8) -> u16 {
@@ -41,7 +42,18 @@ fn look_matches(code: u8, text: &[u8], cursor: usize) -> bool {
 }
 
 const MAX_THREADS: usize = 24;
-const MAX_SLOTS: usize = 16;
+const MAX_SLOTS: usize = 2 * MAX_CAPTURES;
+
+/// The group count of `program`, whole match included. The compiler rejects patterns with more
+/// than `MAX_CAPTURES` explicit groups, so a larger count is a corrupt table.
+///
+/// # Safety
+/// `program` must be a compiler-generated regex table.
+unsafe fn group_count(program: *const u8) -> usize {
+    let count = unsafe { read_u16(program.add(2)) } as usize;
+    assert!((1..=1 + MAX_CAPTURES).contains(&count), "regex group count");
+    count
+}
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn eps_closure(
@@ -143,7 +155,7 @@ unsafe fn extract_captures(
     matched_slots: &mut [u32; MAX_SLOTS],
 ) -> usize {
     *matched_slots = [0u32; MAX_SLOTS];
-    let group_count = (unsafe { read_u16(program.add(2)) } as usize).min(1 + MAX_SLOTS / 2);
+    let group_count = unsafe { group_count(program) };
     if group_count <= 1 {
         return 0;
     }
@@ -470,7 +482,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
         return string;
     };
     let rep = unsafe { runtime::bytes(replacement) };
-    let needs_captures = rep.contains(&b'$') && unsafe { read_u16(program.add(2)) } > 1;
+    let needs_captures = rep.contains(&b'$') && unsafe { group_count(program) } > 1;
     let mut cap_slots = [0u32; MAX_SLOTS];
     let is_global = (unsafe { read_u32(program.add(4)) } >> 31) != 0;
     let mut out = runtime::Buffer::new();
@@ -532,7 +544,7 @@ pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const 
     let Some((start, end)) = (unsafe { next_match(text, 0, program) }) else {
         return core::ptr::null_mut();
     };
-    let group_count = (unsafe { read_u16(program.add(2)) } as usize).clamp(1, 1 + MAX_SLOTS / 2);
+    let group_count = unsafe { group_count(program) };
     let mut cap_slots = [0u32; MAX_SLOTS];
     if group_count > 1 {
         unsafe { extract_captures(program, text, start, end, &mut cap_slots) };

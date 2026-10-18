@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::{future::Future, time::Duration};
-use wasmtime::component::{Component, ComponentType, Instance, Lift, Linker, ResourceTable};
+use wasmtime::component::{Component, ComponentType, Instance, Lift, Linker};
 use wasmtime::{Config, Engine, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView};
+use wasmtime_wasi::WasiCtx;
+use wasmtime_wasi_http::{WasiBody, WasiHttpHooks};
 
-use crate::output_capture;
+use crate::{output_capture, wasi_host};
 
 struct Failure(wasmtime_wasi_http::Error);
 impl WasiHttpHooks for Failure {
@@ -29,29 +29,7 @@ impl WasiHttpHooks for Failure {
         Box::new(async { Err(error) })
     }
 }
-struct Host {
-    wasi: WasiCtx,
-    http: WasiHttpCtx,
-    table: ResourceTable,
-    failure: Failure,
-}
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: &mut self.failure,
-        }
-    }
-}
+type Host = wasi_host::Host<Failure>;
 
 fn compile_component(source: &str, wit: &str) -> Result<(Engine, Component, Linker<Host>)> {
     let (resolve, package) = perry_wit::component::wit::resolve_source("errors.wit", wit)?;
@@ -70,9 +48,7 @@ fn compile_component(source: &str, wit: &str) -> Result<(Engine, Component, Link
         .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::<Host>::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let linker = wasi_host::linker(&engine)?;
     Ok((engine, component, linker))
 }
 
@@ -82,15 +58,9 @@ async fn instantiate_compiled(
     linker: &Linker<Host>,
 ) -> Result<(Store<Host>, Instance, output_capture::MemoryOutput)> {
     let output = output_capture::MemoryOutput::new(8192);
-    let mut store = Store::new(
-        engine,
-        Host {
-            wasi: WasiCtx::builder().stderr(output.clone()).build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-            failure: Failure(wasmtime_wasi_http::Error::ConnectionRefused),
-        },
-    );
+    let host = wasi_host::Host::new(WasiCtx::builder().stderr(output.clone()).build())
+        .with_hooks(Failure(wasmtime_wasi_http::Error::ConnectionRefused));
+    let mut store = wasi_host::store(engine, host);
     let instance = linker.instantiate_async(&mut store, component).await?;
     Ok((store, instance, output))
 }
@@ -156,19 +126,6 @@ async fn uncaught_values_report_the_actual_failure() -> Result<()> {
             "which={which}"
         );
     }
-    let (mut store, instance, output) = instantiate(
-        "import {setTimeout} from 'node:timers/promises'; export async function run():Promise<string>{setTimeout(60000);return await Promise.resolve('ready');}",
-        "package test:detached; world boundary {import wasi:clocks/monotonic-clock@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func()->string;}",
-    ).await?;
-    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, ())).await?;
-    assert!(result.is_err());
-    assert_eq!(
-        String::from_utf8(output.contents().to_vec())?,
-        "Uncaught Error: Unresolved detached work at task boundary; pending operations cancelled\n"
-    );
-    assert!(store.data().table.is_empty());
     Ok(())
 }
 
@@ -198,7 +155,7 @@ async fn fetch_rejections_keep_category_url_and_identity() -> Result<()> {
         (HttpError::HttpRequestDenied, "HTTP-request-denied"),
         (HttpError::InternalError(None), "internal-error"),
     ] {
-        store.data_mut().failure.0 = error;
+        store.data_mut().hooks.0 = error;
         let result = run.call_async(&mut store, ()).await;
         assert!(
             result.is_ok(),

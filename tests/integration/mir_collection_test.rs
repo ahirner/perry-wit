@@ -756,3 +756,135 @@ export async function run(n: number): Promise<number> {
         );
     }
 }
+
+/// Abandoned iterators and insert/delete churn reuse memory; fuel scaling is the
+/// `wasi.execution.scaling.collection_churn` conformance contract.
+#[test]
+fn collection_churn_reuses_memory() {
+    let mut churn = Program::new(
+        r#"
+export function run(n: number): number {
+    const s = new Set<number>([0]);
+    const m = new Map<number, number>([[0, 0]]);
+    for (let i = 0; i < n; i = i + 1) {
+        s.values();
+        m.values();
+        for (const _v of s.values()) break;
+        for (const _v of s) break;
+        for (const _e of m) break;
+        s.add(i + 1);
+        s.delete(i + 1);
+        m.set(i + 1, i);
+        m.delete(i + 1);
+    }
+    return s.size + m.size;
+}
+"#,
+    );
+    assert_eq!(churn.number("run", 128.0), 2.0);
+    let warmed = churn.memory_bytes();
+    for n in [512.0, 65536.0] {
+        assert_eq!(churn.number("run", n), 2.0);
+        assert_eq!(churn.memory_bytes(), warmed, "churn of {n} grew memory");
+    }
+    assert!(warmed <= 65536, "expected one 64 KiB page, got {warmed}");
+}
+
+/// Inline and named callbacks see `(item, index, array)` over the original length, propagate
+/// exceptions, run `finally`, return through `switch` and endless loops (an empty return is
+/// `undefined`), and `for...of` visits elements pushed during iteration and string scalars;
+/// all under forced collection with poisoning.
+#[test]
+fn array_callbacks_and_iteration_survive_forced_collection() {
+    let source = r#"
+function twice(n:number):number {return n*2;}
+function nothing(n:number):void {}
+function missingDefault():number {throw new Error('missing');}
+function refill(values:number[]):number {values.push(1,2);return 8;}
+export function callbacks():number {
+ let calls=0;
+ const numbers:number[]=[1,2,3];
+ const mapped=numbers.map((n,i,a)=>{calls++;if(i===0)a.push(4);return n+i;});
+ const doubled=mapped.filter(n=>n>1).map(twice);
+ if(calls!==3 || mapped.length!==3 || doubled[0]!==6 || doubled[1]!==10)return 1;
+ const values:number[]=[1,2];
+ let trace=0;
+ try {values.map((n,i,a)=>{trace=trace*10+n;if(i===1)throw new Error('stop');a[1]=4;return n;});return 2;}
+ catch(e){if(e.message!=='stop')return 3;}
+ const finished=values.map(n=>{try {return n*2;}finally {trace++;}});
+ if(trace!==16 || finished[1]!==8)return 4;
+ const wrapped=values.map(n=>n+(trace as number));
+ if(wrapped[0]!==17 || wrapped[1]!==20)return 7;
+ const small:number[]=[1,2,3];
+ const cases:number[]=small.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
+ const loops:number[]=small.map(n=>{while(true){return n*2;}});
+ const empty=small.map(n=>{switch(n){case 1:return;default:return n;}});
+ const overridden=small.map(n=>{try{return;}finally{return n;}});
+ const ignored=small.map(n=>{return n;return;});
+ if(cases[0]+cases[1]+cases[2]+loops[2]!==18 || empty[0]!==undefined || empty[1]!==2 || overridden[0]!==1 || ignored[0]!==1)return 5;
+ const optional=small.map(n=>{if(n===1)return 'yes';});
+ const bare=small.map(n=>{if(n===1)return;return 'value';});
+ if(optional[0]!=='yes' || optional[1]!==undefined || bare[0]!==undefined || bare[1]!=='value')return 6;
+ return small.filter(nothing).length;
+}
+export function iteration():number {
+ const values:number[]=[1,2];
+ let visits=0;
+ for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
+ let text='';
+ for(const word of 'c,d'.split(',')){text+=word;}
+ const [first, , missing = visits + 4] = values;
+ const [label, count] = ['ok', 3] as [string, number];
+ if(first!==1 || missing!==3 || label!=='ok' || count!==3)return 2;
+ const [, absent = 7] = [5];
+ if(absent!==7)return 3;
+ let thrown=0;
+ try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
+ if(thrown!==1)return 4;
+ const exhausted:number[]=[];
+ const [filled=refill(exhausted), stillMissing=9]=exhausted;
+ if(filled!==8 || stillMissing!==9)return 5;
+ for(const scalar of 'é🙂a'){text+=scalar+':';}
+ return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
+}
+"#;
+    let mut program = Program::checked(source, "array-callbacks.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("callbacks", &[]), (0.0, 0));
+    assert_eq!(program.call("iteration", &[]).0[0].unwrap_f64(), 0.0);
+}
+
+/// Dynamic JSON lookups through computed keys, spread copies and scalar string indexing release
+/// everything they allocate, under forced collection.
+#[test]
+fn json_pointer_lookup_releases_its_storage() {
+    let source = r#"
+interface Options { extra?: Array<[string, { jsonText: string }]> }
+function length(options: Options): number {
+    const extra = options.extra;
+    if (extra === undefined) return -1;
+    return extra[0][0].length + extra[0][1].jsonText.length;
+}
+export function run(): number {
+    const raw = JSON.parse('{"2":2,"0":1,"a":[{"":9}],"0":3}');
+    const keys = Object.keys(raw);
+    if (keys[0] !== '0' || keys[1] !== '2' || keys[2] !== 'a') return -2;
+    const a = raw[keys[2]];
+    const first = a['0'];
+    const encoded = JSON.stringify(raw);
+    if (encoded !== '{"0":3,"2":2,"a":[{"":9}]}') return -6;
+    if (JSON.stringify({ ...raw }) !== encoded) return -7;
+    if (a['00'] !== undefined) return -3;
+    const text = 'é🙂';
+    if (text[-1] !== undefined || text[2] !== undefined || text[0.5] !== undefined) return -4;
+    if (text[1] !== '🙂') return -5;
+    return raw[0] + first[''] + a['length'] + length({extra: [['status', {jsonText: 'ok'}]]});
+}
+"#;
+    let mut program = Program::checked(source, "json-pointer-lookup.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("run", &[]), (21.0, 0));
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}

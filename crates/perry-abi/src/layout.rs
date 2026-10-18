@@ -130,6 +130,12 @@ pub mod descriptor {
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 }
 
+/// Compiled regex limits shared by the compiler and the `perry-std` matcher.
+pub mod regex {
+    /// Explicit capture groups the matcher tracks; the compiler rejects patterns with more.
+    pub const MAX_CAPTURES: usize = 8;
+}
+
 pub mod numeric {
     pub const FLOAT: i32 = 0;
     pub const SIGNED: i32 = 1;
@@ -145,4 +151,49 @@ pub mod numeric {
     pub const S32: i32 = 11;
     pub const U64: i32 = 12;
     pub const S64: i32 = 13;
+
+    /// A decoded numeric tag. Compiled code passes tags as raw `i32`, so helpers decode them
+    /// once with `TryFrom` and then match exhaustively instead of guessing on unknown values.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Tag {
+        Float,
+        Signed,
+        Unsigned,
+        Undefined,
+        Null,
+        Omitted,
+        U8,
+        S8,
+        U16,
+        S16,
+        U32,
+        S32,
+        U64,
+        S64,
+    }
+
+    impl TryFrom<i32> for Tag {
+        /// The rejected raw tag.
+        type Error = i32;
+
+        fn try_from(tag: i32) -> Result<Self, i32> {
+            Ok(match tag {
+                FLOAT => Self::Float,
+                SIGNED => Self::Signed,
+                UNSIGNED => Self::Unsigned,
+                UNDEFINED => Self::Undefined,
+                NULL => Self::Null,
+                OMITTED => Self::Omitted,
+                U8 => Self::U8,
+                S8 => Self::S8,
+                U16 => Self::U16,
+                S16 => Self::S16,
+                U32 => Self::U32,
+                S32 => Self::S32,
+                U64 => Self::U64,
+                S64 => Self::S64,
+                other => return Err(other),
+            })
+        }
+    }
 }

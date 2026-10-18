@@ -419,78 +419,7 @@ impl<'s> FunctionBuilder<'s> {
                 perry_mir::AggregateViewOp::new(ctx, value, target)
             }))
         } else {
-            let source = optional_value(ctx, ty).unwrap_or(ty);
-            let wanted = optional_value(ctx, target).unwrap_or(target);
-            if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
-                && let Ok(src_rec) = TypedHandle::<RecordType>::from_handle(source, ctx)
-                && let Ok(dst_rec) = TypedHandle::<RecordType>::from_handle(wanted, ctx)
-                && !src_rec.deref(ctx).is_tuple()
-                && !dst_rec.deref(ctx).is_tuple()
-            {
-                let src_fields = src_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
-                let dst_fields = dst_rec.deref(ctx).fields().ok().map(<[_]>::to_vec);
-                if let (Some(src_fields), Some(dst_fields)) = (src_fields, dst_fields)
-                    && (!dst_fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
-                    && dst_fields
-                        .iter()
-                        .all(|(name, _)| src_fields.iter().any(|(s, _)| s == name))
-                {
-                    let rec_val = if ty == source {
-                        value
-                    } else {
-                        self.defined(ctx, value)?
-                    };
-                    let mut projected_fields = Vec::with_capacity(dst_fields.len());
-                    let mut ok = true;
-                    for (name, dst_field_ty) in dst_fields {
-                        let (_, src_field_ty) = src_fields
-                            .iter()
-                            .find(|(s, _)| s == &name)
-                            .expect("checked field existence");
-                        let field_res = if optional_value(ctx, *src_field_ty).is_some()
-                            && absence(ctx, dst_field_ty).is_some_and(|a| a.admits_undefined())
-                        {
-                            let present = self.emit_value(ctx, |ctx| {
-                                perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())
-                                    .expect("field present")
-                            });
-                            let field_name = name.clone();
-                            self.choose(
-                                ctx,
-                                dst_field_ty,
-                                present,
-                                |b, ctx| {
-                                    let op = FieldGetOp::new(ctx, rec_val, field_name.clone())?;
-                                    let raw = b.field_read(ctx, &op)?;
-                                    b.fit(ctx, raw, dst_field_ty)
-                                },
-                                |b, ctx| {
-                                    Ok(b.emit_value(ctx, |ctx| {
-                                        perry_mir::OmittedOp::with_type(ctx, dst_field_ty)
-                                    }))
-                                },
-                            )
-                        } else {
-                            let op = FieldGetOp::new(ctx, rec_val, name)?;
-                            let raw = self.field_read(ctx, &op)?;
-                            self.fit(ctx, raw, dst_field_ty)
-                        };
-                        match field_res {
-                            Ok(v) => projected_fields.push(v),
-                            Err(_) => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        let projected = self
-                            .emit_value(ctx, |ctx| AllocOp::new(ctx, dst_rec, projected_fields));
-                        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
-                        return self.fit(ctx, projected, target);
-                    }
-                }
-            }
+            // A value that never materializes takes any type.
             if self.never_values.contains(&value) {
                 return Ok(
                     if absence(ctx, target).is_some_and(|a| a.admits_undefined()) {
@@ -499,6 +428,14 @@ impl<'s> FunctionBuilder<'s> {
                         self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
                     },
                 );
+            }
+            let source = optional_value(ctx, ty).unwrap_or(ty);
+            let wanted = optional_value(ctx, target).unwrap_or(target);
+            if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
+                && let Some((dst_rec, fields)) = record_projection(ctx, source, wanted)
+                && (!fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
+            {
+                return self.project_record(ctx, value, ty == source, dst_rec, fields, target);
             }
             let code =
                 if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
@@ -518,6 +455,56 @@ impl<'s> FunctionBuilder<'s> {
             )
             .into())
         }
+    }
+
+    /// Build a `dst_rec` from the matching fields of record `value` (already defined when
+    /// `defined`); members outside the target's declaration carry over as JSON extras.
+    fn project_record(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        defined: bool,
+        dst_rec: TypedHandle<RecordType>,
+        fields: Vec<ProjectedField>,
+        target: TypeHandle,
+    ) -> Result<Value> {
+        let rec_val = if defined {
+            value
+        } else {
+            self.defined(ctx, value)?
+        };
+        let mut projected = Vec::with_capacity(fields.len());
+        for (name, src_ty, dst_ty) in fields {
+            let field = if optional_value(ctx, src_ty).is_some()
+                && absence(ctx, dst_ty).is_some_and(|a| a.admits_undefined())
+            {
+                let present = perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())?;
+                let present = self.append_value(ctx, &present);
+                self.choose(
+                    ctx,
+                    dst_ty,
+                    present,
+                    |b, ctx| {
+                        let op = FieldGetOp::new(ctx, rec_val, name.clone())?;
+                        let raw = b.field_read(ctx, &op)?;
+                        b.fit(ctx, raw, dst_ty)
+                    },
+                    |b, ctx| {
+                        Ok(b.emit_value(ctx, |ctx| perry_mir::OmittedOp::with_type(ctx, dst_ty)))
+                    },
+                )
+            } else {
+                let op = FieldGetOp::new(ctx, rec_val, name.clone())?;
+                let raw = self.field_read(ctx, &op)?;
+                self.fit(ctx, raw, dst_ty)
+            };
+            projected.push(field.with_context(|| {
+                format!("record field {name} cannot become {}", dst_ty.disp(ctx))
+            })?);
+        }
+        let projected = self.emit_value(ctx, |ctx| AllocOp::new(ctx, dst_rec, projected));
+        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
+        self.fit(ctx, projected, target)
     }
 
     /// An expression that must be a string (`undefined` throws `TypeError`).
@@ -701,6 +688,35 @@ impl<'s> FunctionBuilder<'s> {
 }
 
 /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
+/// A target record field: its name, its type in the source record and in the target.
+type ProjectedField = (String, TypeHandle, TypeHandle);
+
+/// The target record of a projection from record `source` to record `wanted` and each of its
+/// fields, when both are named records and the source has every target field.
+fn record_projection(
+    ctx: &Context,
+    source: TypeHandle,
+    wanted: TypeHandle,
+) -> Option<(TypedHandle<RecordType>, Vec<ProjectedField>)> {
+    let src_rec = TypedHandle::<RecordType>::from_handle(source, ctx).ok()?;
+    let dst_rec = TypedHandle::<RecordType>::from_handle(wanted, ctx).ok()?;
+    let (src, dst) = (src_rec.deref(ctx), dst_rec.deref(ctx));
+    if src.is_tuple() || dst.is_tuple() {
+        return None;
+    }
+    let src_fields = src.fields().ok()?;
+    let fields = dst
+        .fields()
+        .ok()?
+        .iter()
+        .map(|(name, dst_ty)| {
+            let (_, src_ty) = src_fields.iter().find(|(s, _)| s == name)?;
+            Some((name.clone(), *src_ty, *dst_ty))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((dst_rec, fields))
+}
+
 pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
     let number = FP64Type::get(ctx).into();
     perry_mir::OptionalType::get(ctx, number).into()

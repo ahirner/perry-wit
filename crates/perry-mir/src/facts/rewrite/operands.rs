@@ -1,5 +1,13 @@
 //! Retyping one cloned implementation: value types, scalar replacements and operand casts.
 use super::*;
+use crate::{
+    collections::{
+        ArrayExtendOp, ArrayLenOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp, ConcatOp,
+        ConcatReuseOp, ConcatSegmentsOp,
+    },
+    heap::FieldPresentOp,
+    optional::{IsNullOp, IsUndefinedOp},
+};
 
 /// Rewrites the clone of `implementation` from the facts of its primary context.
 pub(super) fn rewrite_implementation(
@@ -93,23 +101,12 @@ fn replace_with_scalar(
         && let Some(domain) = state.representation(value)
         && let Some(bits) = literal(ctx, original)
     {
-        let ty =
-            TypedHandle::<IntegerType>::from_handle(domain.ty(ctx), ctx).expect("integer type");
-        let constant = ConstantOp::new(
-            ctx,
-            Box::new(IntegerAttr::new(
-                ty,
-                APInt::from_u64(bits, bw(domain.bits as usize)),
-            )),
-        )
-        .get_operation();
+        let constant = domain.constant(ctx, bits).get_operation();
         rewriter.insert_operation(ctx, constant);
         rewriter.replace_operation(ctx, op, constant);
         return true;
     }
-    let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(original, ctx)
-        .and_then(|op| op.intrinsic(ctx))
-    else {
+    let Some(intrinsic) = crate::intrinsics::intrinsic_of(ctx, original) else {
         return false;
     };
     let first_arg = op.deref(ctx).operands().next();
@@ -117,14 +114,8 @@ fn replace_with_scalar(
     if let Some((value, orig_arg)) = first_arg.zip(orig_arg)
         && (Integer::from_type(ctx, value.get_type(ctx)).is_some()
             || state.representation(orig_arg).is_some())
-        && matches!(
-            intrinsic,
-            crate::intrinsics::Intrinsic::BigIntToNumber
-                | crate::intrinsics::Intrinsic::MathFloor
-                | crate::intrinsics::Intrinsic::MathCeil
-                | crate::intrinsics::Intrinsic::MathTrunc
-                | crate::intrinsics::Intrinsic::MathRound
-        )
+        && (intrinsic == crate::intrinsics::Intrinsic::BigIntToNumber
+            || intrinsic.numeric_contract() == Some(crate::intrinsics::BuiltinContract::Round))
         && (intrinsic == crate::intrinsics::Intrinsic::BigIntToNumber
             || Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx)).is_some())
     {
@@ -138,20 +129,13 @@ fn replace_with_scalar(
         && let Some(value) = first_arg
         && let Some(domain) = state.representation(result.expect("intrinsic result"))
     {
-        let ty =
-            TypedHandle::<IntegerType>::from_handle(domain.ty(ctx), ctx).expect("integer type");
-        let zero = ConstantOp::new(
-            ctx,
-            Box::new(IntegerAttr::new(
-                ty,
-                APInt::from_u64(0, bw(domain.bits as usize)),
-            )),
-        );
+        let ty = domain.ty(ctx);
+        let zero = domain.constant(ctx, 0);
         rewriter.insert_operation(ctx, zero.get_operation());
-        let value = if value.get_type(ctx) == ty.into() {
+        let value = if value.get_type(ctx) == ty {
             value
         } else {
-            let cast = NumericCastOp::new(ctx, value, ty.into());
+            let cast = NumericCastOp::new(ctx, value, ty);
             rewriter.insert_operation(ctx, cast.get_operation());
             cast.get_result(ctx)
         };
@@ -220,13 +204,19 @@ fn intrinsic_operand_types(
     op: Ptr<Operation>,
     expected: &mut [TypeHandle],
 ) {
-    let Some(intrinsic) = Operation::get_op::<crate::intrinsics::IntrinsicOp>(original, ctx)
-        .and_then(|op| op.intrinsic(ctx))
-    else {
+    let Some(intrinsic) = crate::intrinsics::intrinsic_of(ctx, original) else {
         return;
     };
     let res_ty = || op.deref(ctx).get_result(0).get_type(ctx);
     match intrinsic {
+        _ if intrinsic.preserves_integers() => {
+            let res_ty = res_ty();
+            if Integer::from_type(ctx, res_ty).is_some()
+                || res_ty.deref(ctx).is::<crate::types::NumericType>()
+            {
+                expected.fill(res_ty);
+            }
+        }
         crate::intrinsics::Intrinsic::ParseInt => {
             if res_ty().deref(ctx).is::<crate::types::NumericType>() {
                 expected[1] = crate::types::NumericType::get(ctx).into();
@@ -243,20 +233,6 @@ fn intrinsic_operand_types(
                 || Integer::from_type(ctx, arg_ty).is_some()
             {
                 expected[0] = arg_ty;
-            }
-        }
-        crate::intrinsics::Intrinsic::MathFloor
-        | crate::intrinsics::Intrinsic::MathCeil
-        | crate::intrinsics::Intrinsic::MathTrunc
-        | crate::intrinsics::Intrinsic::MathRound
-        | crate::intrinsics::Intrinsic::MathAbs
-        | crate::intrinsics::Intrinsic::MathMin
-        | crate::intrinsics::Intrinsic::MathMax => {
-            let res_ty = res_ty();
-            if Integer::from_type(ctx, res_ty).is_some()
-                || res_ty.deref(ctx).is::<crate::types::NumericType>()
-            {
-                expected.fill(res_ty);
             }
         }
         _ => {}
@@ -323,21 +299,19 @@ fn operand_types(
                 *slot = fty;
             }
         }
-    } else if Operation::get_op::<crate::heap::FieldGetOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::heap::FieldPresentOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ArrayGetOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ArrayAtOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ArrayLenOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ArrayTruncateOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::optional::IsUndefinedOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::optional::IsNullOp>(original, ctx).is_some()
-        || Operation::get_op::<NumericCastOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::intrinsics::JsonStringifyOp>(original, ctx).is_some()
+    } else if crate::is_any::<(
+        FieldGetOp,
+        FieldPresentOp,
+        ArrayGetOp,
+        ArrayAtOp,
+        ArrayLenOp,
+    )>(ctx, original)
+        || crate::is_any::<(ArrayTruncateOp, IsUndefinedOp, IsNullOp, NumericCastOp)>(ctx, original)
+        || Operation::is_op::<crate::intrinsics::JsonStringifyOp>(original, ctx)
     {
+        // The first operand keeps its retyped type.
         expected[0] = operand_ty(ctx, 0);
-    } else if Operation::get_op::<crate::optional::UnwrapOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::optional::ToNumberOp>(original, ctx).is_some()
-    {
+    } else if crate::is_any::<(UnwrapOp, ToNumberOp)>(ctx, original) {
         let orig_arg_ty = original.deref(ctx).get_operand(0).get_type(ctx);
         expected[0] = if let Some(absence) = crate::optional::absence(ctx, orig_arg_ty) {
             crate::types::OptionalType::get_with(ctx, result_ty(ctx), absence).into()
@@ -370,9 +344,7 @@ fn operand_types(
         if let Some(elem_ty) = array_element(ctx, result_ty(ctx)) {
             expected.fill(elem_ty);
         }
-    } else if Operation::get_op::<crate::collections::ArrayPushOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ArraySetOp>(original, ctx).is_some()
-    {
+    } else if crate::is_any::<(ArrayPushOp, ArraySetOp)>(ctx, original) {
         // The stored element is the last operand: `push(array, value)`, `set(array, index, value)`.
         let base_ty = operand_ty(ctx, 0);
         expected[0] = base_ty;
@@ -381,11 +353,9 @@ fn operand_types(
         {
             *value = elem_ty;
         }
-    } else if Operation::get_op::<crate::collections::ArrayExtendOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ConcatOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ConcatReuseOp>(original, ctx).is_some()
-        || Operation::get_op::<crate::collections::ConcatSegmentsOp>(original, ctx).is_some()
-    {
+    } else if crate::is_any::<(ArrayExtendOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp)>(
+        ctx, original,
+    ) {
         for (index, slot) in expected.iter_mut().enumerate() {
             *slot = operand_ty(ctx, index);
         }

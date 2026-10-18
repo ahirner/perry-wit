@@ -8,6 +8,8 @@
 //! big integer. Digits after the 780th only decide ties: a midpoint has at most 767
 //! significant digits, so they act as one sticky digit.
 
+use crate::layout::numeric::Tag;
+
 /// Maximum significant digits kept exactly; further digits only mark the value as above.
 const KEPT_DIGITS: usize = 780;
 /// 32-bit limbs: `10^780 · 2^1100 · 5^310` and `2^1100 · 5^1104 · 2^54` both fit.
@@ -418,13 +420,15 @@ impl Number {
         }
     }
 
-    pub fn from_numeric(tag: i32, bits: u64) -> Self {
+    /// The number a tagged payload carries. Fixed-width payloads arrive sign- or zero-extended
+    /// to 64 bits, so they share the exact 64-bit representations.
+    pub fn from_numeric(tag: Tag, bits: u64) -> Self {
         match tag {
-            crate::layout::numeric::SIGNED => Self::Signed(bits as i64),
-            crate::layout::numeric::UNSIGNED => Self::Unsigned(bits),
-            crate::layout::numeric::NULL => Self::Float(0.0),
-            crate::layout::numeric::UNDEFINED => Self::Float(f64::NAN),
-            _ => Self::Float(f64::from_bits(bits)),
+            Tag::Signed | Tag::S8 | Tag::S16 | Tag::S32 | Tag::S64 => Self::Signed(bits as i64),
+            Tag::Unsigned | Tag::U8 | Tag::U16 | Tag::U32 | Tag::U64 => Self::Unsigned(bits),
+            Tag::Null => Self::Float(0.0),
+            Tag::Undefined | Tag::Omitted => Self::Float(f64::NAN),
+            Tag::Float => Self::Float(f64::from_bits(bits)),
         }
     }
 

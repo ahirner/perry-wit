@@ -4,6 +4,7 @@
 //! subset rule R8: reads miss with `undefined`, writes past `length` throw `RangeError`.
 //! P3.5 narrows indices to `i32` and removes checks where ranges are proven.
 use crate::{
+    NewOp,
     attrs::{ErrorKind, ReuseOperands, Tier},
     exceptions::MayThrowInterface,
     types::{ArrayType, OptionalType, StringType},
@@ -21,8 +22,6 @@ use pliron::{
     context::Context,
     derive::{op_interface_impl, pliron_op},
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -47,7 +46,7 @@ enum CollectionErr {
 }
 
 /// Signless `i32`, the type of lengths and indices.
-pub(crate) fn index_type(ctx: &mut Context) -> TypeHandle {
+pub(crate) fn index_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }
 
@@ -98,14 +97,7 @@ impl ArrayNewOp {
     pub fn new(ctx: &mut Context, element: TypeHandle, items: Vec<Value>) -> Self {
         let ty = ArrayType::get(ctx, element).into();
         let op = ArrayNewOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                items,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], items),
         };
         op.set_attr_perry_array_tier(ctx, Tier::Unassigned);
         op
@@ -123,12 +115,19 @@ impl Verify for ArrayNewOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ArrayNewOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(
+    false;
+    ArrayNewOp,
+    ArrayLenOp,
+    ArrayGetOp,
+    ArrayAtOp,
+    StringConstOp,
+    NativeJsonOp,
+    ConcatSegmentsOp,
+    ConcatOp,
+    StringLenOp
+);
+side_effects!(true; ArrayExtendOp, ArrayTruncateOp, ConcatReuseOp);
 
 /// Number of elements.
 #[pliron_op(
@@ -142,14 +141,7 @@ impl ArrayLenOp {
     pub fn new(ctx: &mut Context, array: Value) -> Self {
         let ty = index_type(ctx);
         ArrayLenOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![array],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![array]),
         }
     }
 }
@@ -165,13 +157,6 @@ impl Verify for ArrayLenOp {
             verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_len"))?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for ArrayLenOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
     }
 }
 
@@ -191,14 +176,7 @@ impl ArrayGetOp {
         let element = element(ctx, array, "perry.array_get")?;
         let ty = OptionalType::get(ctx, element).into();
         Ok(ArrayGetOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![array, index],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![array, index]),
         })
     }
 }
@@ -219,13 +197,6 @@ impl Verify for ArrayGetOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ArrayGetOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Read an element at an `i32` index proven in `[0, length)` (P3.5, `perry_mir::ranges`):
 /// the plain element, with no check. Only the range pass creates it.
 #[pliron_op(
@@ -239,14 +210,7 @@ impl ArrayAtOp {
     pub fn new(ctx: &mut Context, array: Value, index: Value) -> Result<Self> {
         let element = element(ctx, array, "perry.array_at")?;
         Ok(ArrayAtOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![element],
-                vec![array, index],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![element], vec![array, index]),
         })
     }
 }
@@ -265,13 +229,6 @@ impl Verify for ArrayAtOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ArrayAtOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Write an element at an index in `[0, length]`; writing at `length` appends.
 /// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
 #[pliron_op(
@@ -284,14 +241,7 @@ pub struct ArraySetOp;
 impl ArraySetOp {
     pub fn new(ctx: &mut Context, array: Value, index: Value, value: Value) -> Self {
         ArraySetOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![array, index, value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![array, index, value]),
         }
     }
 }
@@ -327,14 +277,7 @@ pub struct ArrayPushOp;
 impl ArrayPushOp {
     pub fn new(ctx: &mut Context, array: Value, value: Value) -> Self {
         ArrayPushOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![array, value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![array, value]),
         }
     }
 }
@@ -362,14 +305,7 @@ impl StringConstOp {
     pub fn new(ctx: &mut Context, text: &str) -> Self {
         let ty = StringType::get(ctx).into();
         let op = StringConstOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![]),
         };
         op.set_attr_perry_string_value(ctx, StringAttr::new(text.into()));
         op
@@ -388,27 +324,13 @@ impl Verify for StringConstOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for StringConstOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Extend a mutable array with a snapshot of another array's slots.
 #[pliron_op(name = "perry.array_extend", format = "$0 `, ` $1", interfaces = [NOpdsInterface<2>, NResultsInterface<0>, SameOperandsType])]
 pub struct ArrayExtendOp;
 impl ArrayExtendOp {
     pub fn new(ctx: &mut Context, target: Value, source: Value) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![target, source],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![target, source]),
         }
     }
 }
@@ -422,13 +344,6 @@ impl Verify for ArrayExtendOp {
         Ok(())
     }
 }
-#[op_interface_impl]
-impl SideEffects for ArrayExtendOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
-    }
-}
-
 /// Shrink an array's length in-place without reallocating.
 #[pliron_op(
     name = "perry.array_truncate",
@@ -440,14 +355,7 @@ pub struct ArrayTruncateOp;
 impl ArrayTruncateOp {
     pub fn new(ctx: &mut Context, array: Value, new_len: Value) -> Self {
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![array, new_len],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![array, new_len]),
         }
     }
 }
@@ -463,13 +371,6 @@ impl Verify for ArrayTruncateOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ArrayTruncateOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
-    }
-}
-
 /// A dynamic view of a native aggregate, retaining its mutable identity and typed layout.
 #[pliron_op(name = "perry.json_native", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
 pub struct NativeJsonOp;
@@ -477,14 +378,7 @@ impl NativeJsonOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let json = crate::types::JsonType::get(ctx).into();
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![json],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![json], vec![value]),
         }
     }
 }
@@ -496,13 +390,6 @@ impl Verify for NativeJsonOp {
         Ok(())
     }
 }
-#[op_interface_impl]
-impl SideEffects for NativeJsonOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
-
 /// Dynamic argument spreads normalize to a sequence of typed dense segments.
 #[pliron_op(name = "perry.concat_segments", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
 pub struct ConcatSegmentsOp;
@@ -510,14 +397,7 @@ impl ConcatSegmentsOp {
     pub fn new(ctx: &mut Context, sources: Value) -> Self {
         let ty = element(ctx, sources, "perry.concat_segments").expect("typed segment array");
         Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![sources],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![sources]),
         }
     }
 }
@@ -533,13 +413,6 @@ impl Verify for ConcatSegmentsOp {
         Ok(())
     }
 }
-#[op_interface_impl]
-impl SideEffects for ConcatSegmentsOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}
-
 /// Combine strings or dense arrays in operand order.
 #[pliron_op(
     name = "perry.concat",
@@ -561,14 +434,7 @@ impl ConcatOp {
     pub fn from_sources(ctx: &mut Context, sources: Vec<Value>) -> Self {
         let ty = sources[0].get_type(ctx);
         ConcatOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                sources,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], sources),
         }
     }
 }
@@ -583,13 +449,6 @@ impl Verify for ConcatOp {
             verify_err!(self.loc(ctx), CollectionErr::Sequence("perry.concat"))?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for ConcatOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
     }
 }
 
@@ -615,14 +474,7 @@ impl ConcatReuseOp {
     ) -> Self {
         let ty = sources[0].get_type(ctx);
         let operation = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                sources,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], sources),
         };
         operation.set_attr_perry_concat_reuse(ctx, reuse);
         operation
@@ -658,13 +510,6 @@ impl Verify for ConcatReuseOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ConcatReuseOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        true
-    }
-}
-
 /// Length in Unicode scalar values (Perry rejects UTF-16 code-unit operations).
 #[pliron_op(
     name = "perry.string_len",
@@ -677,14 +522,7 @@ impl StringLenOp {
     pub fn new(ctx: &mut Context, text: Value) -> Self {
         let ty = index_type(ctx);
         StringLenOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![text],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![text]),
         }
     }
 }
@@ -699,12 +537,5 @@ impl Verify for StringLenOp {
             verify_err!(self.loc(ctx), CollectionErr::Index("perry.string_len"))?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for StringLenOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
     }
 }

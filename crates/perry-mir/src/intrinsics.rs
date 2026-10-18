@@ -6,6 +6,7 @@
 //! imports what it needs. Some services throw ([Intrinsic::throws]); they implement
 //! [MayThrowInterface] through [may_throw].
 use crate::{
+    NewOp,
     attrs::ErrorKind,
     exceptions::MayThrowInterface,
     types::{
@@ -27,7 +28,7 @@ use pliron::{
     operation::Operation,
     opts::dce::SideEffects,
     result::Result,
-    r#type::{TypeHandle, Typed},
+    r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
     verify_err,
 };
@@ -98,28 +99,27 @@ enum Ty {
 }
 
 impl Ty {
-    fn get(self, ctx: &mut Context) -> TypeHandle {
-        let string: TypeHandle = StringType::get(ctx).into();
-        let number: TypeHandle = FP64Type::get(ctx).into();
+    fn get(self, ctx: &Context) -> TypeHandle {
+        let optional = |value: Ty| OptionalType::get(ctx, value.get(ctx)).into();
+        let nullable = |value: Ty| {
+            OptionalType::get_with(ctx, value.get(ctx), crate::attrs::Absence::Null).into()
+        };
+        let array = |element: Ty| ArrayType::get(ctx, element.get(ctx)).into();
+        let promise = |value: Ty| PromiseType::get(ctx, value.get(ctx)).into();
         match self {
             Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
             Ty::Index | Ty::Scalar => crate::collections::index_type(ctx),
             Ty::I64 => IntegerType::get(ctx, 64, Signedness::Signed).into(),
             Ty::U64 => IntegerType::get(ctx, 64, Signedness::Unsigned).into(),
-            Ty::Number => number,
+            Ty::Number => FP64Type::get(ctx).into(),
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
-            Ty::String => string,
-            Ty::OptString => OptionalType::get(ctx, string).into(),
-            Ty::NullString => {
-                OptionalType::get_with(ctx, string, crate::attrs::Absence::Null).into()
-            }
-            Ty::OptNumber => OptionalType::get(ctx, number).into(),
-            Ty::StringArray => ArrayType::get(ctx, string).into(),
-            Ty::NullStringArray => {
-                let array = ArrayType::get(ctx, string).into();
-                OptionalType::get_with(ctx, array, crate::attrs::Absence::Null).into()
-            }
-            Ty::NumberArray => ArrayType::get(ctx, number).into(),
+            Ty::String => StringType::get(ctx).into(),
+            Ty::OptString => optional(Ty::String),
+            Ty::NullString => nullable(Ty::String),
+            Ty::OptNumber => optional(Ty::Number),
+            Ty::StringArray => array(Ty::String),
+            Ty::NullStringArray => nullable(Ty::StringArray),
+            Ty::NumberArray => array(Ty::Number),
             Ty::Bytes => BytesType::get(ctx).into(),
             Ty::ByteBuffer => crate::types::ByteBufferType::get(ctx).into(),
             Ty::ByobReader => crate::types::ByobReaderType::get(ctx).into(),
@@ -133,10 +133,7 @@ impl Ty {
             Ty::Date => DateType::get(ctx).into(),
             Ty::Exception => ExceptionType::get(ctx).into(),
             Ty::Stats => StatsType::get(ctx).into(),
-            Ty::OptBytes => {
-                let bytes = BytesType::get(ctx).into();
-                OptionalType::get(ctx, bytes).into()
-            }
+            Ty::OptBytes => optional(Ty::Bytes),
             Ty::Headers => HeadersType::get(ctx).into(),
             Ty::Response => ResponseType::get(ctx).into(),
             Ty::Request => RequestType::get(ctx).into(),
@@ -150,142 +147,39 @@ impl Ty {
             Ty::Instant => InstantType::get(ctx).into(),
             Ty::PlainDate => PlainDateType::get(ctx).into(),
             Ty::PlainDateTime => PlainDateTimeType::get(ctx).into(),
-            Ty::PromiseReadResult => {
-                let result = ReadResultType::get(ctx).into();
-                PromiseType::get(ctx, result).into()
-            }
-            Ty::NullReadable => {
-                let stream = ReadableType::get(ctx).into();
-                OptionalType::get_with(ctx, stream, crate::attrs::Absence::Null).into()
-            }
-            Ty::PromiseResponse => {
-                let response = ResponseType::get(ctx).into();
-                PromiseType::get(ctx, response).into()
-            }
-            Ty::PromiseString => PromiseType::get(ctx, string).into(),
-            Ty::PromiseBytes => {
-                let bytes = BytesType::get(ctx).into();
-                PromiseType::get(ctx, bytes).into()
-            }
-            Ty::PromiseJson => {
-                let json = JsonType::get(ctx).into();
-                PromiseType::get(ctx, json).into()
-            }
-            Ty::PromiseStats => {
-                let stats = StatsType::get(ctx).into();
-                PromiseType::get(ctx, stats).into()
-            }
-            Ty::PromiseStringArray => {
-                let array = ArrayType::get(ctx, string).into();
-                PromiseType::get(ctx, array).into()
-            }
-            Ty::PromiseVoid => {
-                let undefined = OptionalType::get(ctx, number).into();
-                PromiseType::get(ctx, undefined).into()
-            }
+            Ty::PromiseReadResult => promise(Ty::ReadResult),
+            Ty::NullReadable => nullable(Ty::Readable),
+            Ty::PromiseResponse => promise(Ty::Response),
+            Ty::PromiseString => promise(Ty::String),
+            Ty::PromiseBytes => promise(Ty::Bytes),
+            Ty::PromiseJson => promise(Ty::Json),
+            Ty::PromiseStats => promise(Ty::Stats),
+            Ty::PromiseStringArray => promise(Ty::StringArray),
+            Ty::PromiseVoid => promise(Ty::OptNumber),
         }
     }
 
+    /// Whether `ty` is this kind: the type [Ty::get] builds, except that indices and booleans
+    /// admit any signedness, readers include BYOB readers, and optional numbers and bytes
+    /// (also the `undefined` a `Promise<void>` settles) admit any absence.
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
-        let deref = ty.deref(ctx);
-        let optional_of = |is: &dyn Fn(TypeHandle) -> bool| {
-            deref
-                .downcast_ref::<OptionalType>()
-                .is_some_and(|o| is(o.value()))
+        let width = || {
+            let ty = ty.deref(ctx);
+            ty.downcast_ref::<IntegerType>()
+                .map(|integer| integer.width())
         };
-        let array_of = |is: &dyn Fn(TypeHandle) -> bool| {
-            deref
-                .downcast_ref::<ArrayType>()
-                .is_some_and(|a| is(a.element()))
+        let optional_of = |ty: TypeHandle, value: Ty| {
+            crate::optional::optional_value(ctx, ty) == Some(value.get(ctx))
         };
-        let promise_of = |is: &dyn Fn(TypeHandle) -> bool| {
-            deref
-                .downcast_ref::<PromiseType>()
-                .is_some_and(|p| is(p.value()))
-        };
-        let string = |t: TypeHandle| t.deref(ctx).is::<StringType>();
-        let number = |t: TypeHandle| t.deref(ctx).is::<FP64Type>();
         match self {
-            Ty::BigInt => deref.is::<crate::types::BigIntType>(),
-            Ty::Index | Ty::Scalar => deref
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 32),
-            Ty::I64 => deref
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 64 && i.is_signed()),
-            Ty::U64 => deref
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 64 && i.is_unsigned()),
-            Ty::Number => deref.is::<FP64Type>(),
-            Ty::Bool => deref
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|i| i.width() == 1),
-            Ty::String => deref.is::<StringType>(),
-            Ty::OptString => {
-                optional_of(&string)
-                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Undefined)
-            }
-            Ty::NullString => {
-                optional_of(&string)
-                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
-            }
-            Ty::OptNumber => optional_of(&number),
-            Ty::StringArray => array_of(&string),
-            Ty::NullStringArray => {
-                optional_of(&|t| {
-                    t.deref(ctx)
-                        .downcast_ref::<ArrayType>()
-                        .is_some_and(|a| string(a.element()))
-                }) && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
-            }
-            Ty::NumberArray => array_of(&number),
-            Ty::Bytes => deref.is::<BytesType>(),
-            Ty::ByteBuffer => deref.is::<crate::types::ByteBufferType>(),
-            Ty::ByobReader => deref.is::<crate::types::ByobReaderType>(),
-            Ty::ByteInput => deref.is::<crate::types::ByteInputType>(),
-            Ty::Url => deref.is::<crate::types::UrlType>(),
-            Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
-            Ty::Json => deref.is::<JsonType>(),
-            Ty::JsonCursor => deref.is::<crate::types::JsonCursorType>(),
-            Ty::Regex => deref.is::<crate::types::RegexType>(),
-            Ty::Decoder => deref.is::<crate::types::DecoderType>(),
-            Ty::Date => deref.is::<DateType>(),
-            Ty::Exception => deref.is::<ExceptionType>(),
-            Ty::Stats => deref.is::<StatsType>(),
-            Ty::OptBytes => optional_of(&|t| t.deref(ctx).is::<BytesType>()),
-            Ty::Headers => deref.is::<HeadersType>(),
-            Ty::Response => deref.is::<ResponseType>(),
-            Ty::Request => deref.is::<RequestType>(),
-            Ty::Writable => deref.is::<WritableType>(),
-            Ty::Writer => deref.is::<WriterType>(),
-            Ty::Readable => deref.is::<ReadableType>(),
-            Ty::Reader => deref.is::<ReaderType>() || deref.is::<crate::types::ByobReaderType>(),
-            Ty::ReadResult => deref.is::<ReadResultType>(),
-            Ty::Incoming => deref.is::<IncomingType>(),
-            Ty::Abort => deref.is::<AbortType>(),
-            Ty::Instant => deref.is::<InstantType>(),
-            Ty::PlainDate => deref.is::<PlainDateType>(),
-            Ty::PlainDateTime => deref.is::<PlainDateTimeType>(),
-            Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
-            Ty::NullReadable => {
-                optional_of(&|t| t.deref(ctx).is::<ReadableType>())
-                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
-            }
-            Ty::PromiseResponse => promise_of(&|t| t.deref(ctx).is::<ResponseType>()),
-            Ty::PromiseString => promise_of(&string),
-            Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
-            Ty::PromiseJson => promise_of(&|t| t.deref(ctx).is::<JsonType>()),
-            Ty::PromiseStats => promise_of(&|t| t.deref(ctx).is::<StatsType>()),
-            Ty::PromiseStringArray => promise_of(&|t| {
-                t.deref(ctx)
-                    .downcast_ref::<ArrayType>()
-                    .is_some_and(|a| string(a.element()))
-            }),
-            Ty::PromiseVoid => promise_of(&|t| {
-                t.deref(ctx)
-                    .downcast_ref::<OptionalType>()
-                    .is_some_and(|o| number(o.value()))
-            }),
+            Ty::Index | Ty::Scalar => width() == Some(32),
+            Ty::Bool => width() == Some(1),
+            Ty::Reader => ty == self.get(ctx) || ty == Ty::ByobReader.get(ctx),
+            Ty::OptNumber => optional_of(ty, Ty::Number),
+            Ty::OptBytes => optional_of(ty, Ty::Bytes),
+            Ty::PromiseVoid => TypedHandle::<PromiseType>::from_handle(ty, ctx)
+                .is_ok_and(|promise| optional_of(promise.deref(ctx).value(), Ty::Number)),
+            _ => ty == self.get(ctx),
         }
     }
 }
@@ -326,8 +220,44 @@ macro_rules! operand {
     };
 }
 
+/// The [Flag] an `intrinsics!` flag name denotes; an unknown name does not compile.
+macro_rules! flag {
+    (throws) => {
+        Flag::Throws
+    };
+    (pure) => {
+        Flag::Pure
+    };
+    (atomic) => {
+        Flag::Atomic
+    };
+    (noalloc) => {
+        Flag::NoAlloc
+    };
+}
+
+/// The optional [BuiltinContract] of an `intrinsics!` entry.
+macro_rules! contract {
+    () => {
+        None
+    };
+    ($contract:ident) => {
+        Some(BuiltinContract::$contract)
+    };
+}
+
+/// Contract flags of a service; see the [Intrinsic] queries that read them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flag {
+    Throws,
+    Pure,
+    Atomic,
+    NoAlloc,
+}
+
+/// Each entry: `Variant = "name" (operands) -> (results), flags… [=> numeric contract];`.
 macro_rules! intrinsics {
-    ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
+    ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)* $(=> $contract:ident)?;)*) => {
         /// The services; see each name for the API it implements.
         #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -349,9 +279,16 @@ macro_rules! intrinsics {
                 }
             }
 
-            fn flags(self) -> &'static [&'static str] {
+            fn flags(self) -> &'static [Flag] {
                 match self {
-                    $(Intrinsic::$variant => &[$(stringify!($flag)),*],)*
+                    $(Intrinsic::$variant => &[$(flag!($flag)),*],)*
+                }
+            }
+
+            /// Semantic numeric contract used by `facts` for range and integer domain propagation.
+            pub(crate) fn numeric_contract(self) -> Option<BuiltinContract> {
+                match self {
+                    $(Intrinsic::$variant => contract!($($contract)?),)*
                 }
             }
         }
@@ -365,28 +302,28 @@ intrinsics! {
     BigIntToString = "bigint_to_string" (BigInt) -> (String), pure, atomic;
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
-    NumberToString = "number_to_string" (Number) -> (String), pure, atomic;
-    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws, atomic;
+    NumberToString = "number_to_string" (Number) -> (String), pure, atomic => NumberOnly;
+    NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws, atomic => NumberOnly;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
     PerformanceNow = "performance_now" () -> (Number), noalloc;
     DateNow = "date_now" () -> (Number), noalloc;
     ExitCodeSet = "exit_code_set" (Number) -> (), noalloc;
-    MathFloor = "math_floor" (Number) -> (Number), pure, noalloc;
-    MathCeil = "math_ceil" (Number) -> (Number), pure, noalloc;
-    MathTrunc = "math_trunc" (Number) -> (Number), pure, noalloc;
-    MathAbs = "math_abs" (Number) -> (Number), pure, noalloc;
-    MathRound = "math_round" (Number) -> (Number), pure, noalloc;
-    MathSqrt = "math_sqrt" (Number) -> (Number), pure, noalloc;
-    MathMin = "math_min" (Number, Number) -> (Number), pure, noalloc;
-    MathMax = "math_max" (Number, Number) -> (Number), pure, noalloc;
-    ParseInt = "parse_int" (String, Number) -> (Number), pure, noalloc;
-    ParseFloat = "parse_float" (String) -> (Number), pure, noalloc;
-    StringToNumber = "string_to_number" (String) -> (Number), pure, noalloc;
-    NumberIsNaN = "number_is_nan" (Number) -> (Bool), pure, noalloc;
-    NumberIsFinite = "number_is_finite" (Number) -> (Bool), pure, noalloc;
-    NumberIsInteger = "number_is_integer" (Number) -> (Bool), pure, noalloc;
-    NumberIsSafeInteger = "number_is_safe_integer" (Number) -> (Bool), pure, noalloc;
+    MathFloor = "math_floor" (Number) -> (Number), pure, noalloc => Round;
+    MathCeil = "math_ceil" (Number) -> (Number), pure, noalloc => Round;
+    MathTrunc = "math_trunc" (Number) -> (Number), pure, noalloc => Round;
+    MathAbs = "math_abs" (Number) -> (Number), pure, noalloc => Abs;
+    MathRound = "math_round" (Number) -> (Number), pure, noalloc => Round;
+    MathSqrt = "math_sqrt" (Number) -> (Number), pure, noalloc => NumberOnly;
+    MathMin = "math_min" (Number, Number) -> (Number), pure, noalloc => Min;
+    MathMax = "math_max" (Number, Number) -> (Number), pure, noalloc => Max;
+    ParseInt = "parse_int" (String, Number) -> (Number), pure, noalloc => NumberOnly;
+    ParseFloat = "parse_float" (String) -> (Number), pure, noalloc => NumberOnly;
+    StringToNumber = "string_to_number" (String) -> (Number), pure, noalloc => NumberOnly;
+    NumberIsNaN = "number_is_nan" (Number) -> (Bool), pure, noalloc => Predicate;
+    NumberIsFinite = "number_is_finite" (Number) -> (Bool), pure, noalloc => Predicate;
+    NumberIsInteger = "number_is_integer" (Number) -> (Bool), pure, noalloc => Predicate;
+    NumberIsSafeInteger = "number_is_safe_integer" (Number) -> (Bool), pure, noalloc => Predicate;
     DateFromTime = "date_from_time" (Number) -> (Date);
     DateTime = "date_time" (Date) -> (Number), noalloc;
     DateParse = "date_parse" (String) -> (Number), pure, noalloc;
@@ -430,13 +367,13 @@ intrinsics! {
     BytesFromArray = "bytes_from_array" (NumberArray) -> (Bytes);
     BytesCopy = "bytes_copy" (Bytes) -> (Bytes), throws;
     BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), pure, noalloc;
-    BytesOffset = "bytes_offset" (Bytes) -> (Number), noalloc;
-    BufferLength = "buffer_length" (ByteBuffer) -> (Number), noalloc;
+    BytesOffset = "bytes_offset" (Bytes) -> (Number), noalloc => UnsignedCount;
+    BufferLength = "buffer_length" (ByteBuffer) -> (Number), noalloc => UnsignedCount;
     BytesFromBuffer = "bytes_from_buffer" (ByteBuffer) -> (Bytes), throws;
-    BytesAt = "bytes_at" (Bytes, Index) -> (Number), pure, noalloc;
-    BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber), noalloc;
+    BytesAt = "bytes_at" (Bytes, Index) -> (Number), pure, noalloc => ByteValue;
+    BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber), noalloc => ByteValue;
     BytesSet = "bytes_set" (Bytes, Number, Number) -> (), noalloc;
-    BytesLength = "bytes_length" (Bytes) -> (Number), noalloc;
+    BytesLength = "bytes_length" (Bytes) -> (Number), noalloc => UnsignedCount;
     BytesSubarray = "bytes_subarray" (Bytes, Number, Number) -> (Bytes), throws;
     BytesSlice = "bytes_slice" (Bytes, Number, Number) -> (Bytes), throws;
     BytesSetFrom = "bytes_set_from" (Bytes, Bytes, Number) -> (), throws;
@@ -627,9 +564,9 @@ impl Intrinsic {
     /// Allocation and internal safe-point contract, including hidden temporaries.
     /// Unclassified helpers remain conservative.
     pub(crate) fn allocation(self) -> crate::effects::Allocation {
-        if self.flags().contains(&"noalloc") {
+        if self.flags().contains(&Flag::NoAlloc) {
             crate::effects::Allocation::None
-        } else if self.flags().contains(&"atomic") {
+        } else if self.flags().contains(&Flag::Atomic) {
             crate::effects::Allocation::Atomic
         } else {
             crate::effects::Allocation::Conservative
@@ -638,12 +575,12 @@ impl Intrinsic {
 
     /// Pure services can be removed when unused.
     pub(crate) fn pure(self) -> bool {
-        self.flags().contains(&"pure")
+        self.flags().contains(&Flag::Pure)
     }
 
     /// Whether the service may throw (as an ECMAScript exception).
     pub fn throws(self) -> bool {
-        self.flags().contains(&"throws")
+        self.flags().contains(&Flag::Throws)
     }
 
     /// Whether the service produces a value (all services have at most one result).
@@ -651,31 +588,18 @@ impl Intrinsic {
         !self.types().1.is_empty()
     }
 
-    /// Semantic numeric contract used by `facts` for range and integer domain propagation.
-    pub(crate) fn numeric_contract(self) -> Option<BuiltinContract> {
-        match self {
-            Self::MathFloor | Self::MathCeil | Self::MathTrunc | Self::MathRound => {
-                Some(BuiltinContract::Round)
-            }
-            Self::MathAbs => Some(BuiltinContract::Abs),
-            Self::MathMin => Some(BuiltinContract::Min),
-            Self::MathMax => Some(BuiltinContract::Max),
-            Self::BytesLength | Self::BufferLength | Self::BytesOffset => {
-                Some(BuiltinContract::UnsignedCount)
-            }
-            Self::BytesAt | Self::BytesGet => Some(BuiltinContract::ByteValue),
-            Self::MathSqrt
-            | Self::ParseInt
-            | Self::ParseFloat
-            | Self::StringToNumber
-            | Self::NumberToString
-            | Self::NumberToStringRadix => Some(BuiltinContract::NumberOnly),
-            Self::NumberIsNaN
-            | Self::NumberIsFinite
-            | Self::NumberIsInteger
-            | Self::NumberIsSafeInteger => Some(BuiltinContract::Predicate),
-            _ => None,
-        }
+    /// `Math.floor`, `ceil`, `trunc`, `round`, `abs`, `min` and `max`: an integer (or lossless
+    /// numeric) operand type carries over to the result.
+    pub(crate) fn preserves_integers(self) -> bool {
+        matches!(
+            self.numeric_contract(),
+            Some(
+                BuiltinContract::Round
+                    | BuiltinContract::Abs
+                    | BuiltinContract::Min
+                    | BuiltinContract::Max
+            )
+        )
     }
 }
 
@@ -700,11 +624,16 @@ pub(crate) enum BuiltinContract {
     Predicate,
 }
 
+/// The service `op` calls, if it is a `perry.intrinsic`.
+pub(crate) fn intrinsic_of(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
+    Operation::get_op::<IntrinsicOp>(op, ctx).map(|op| op.intrinsic(ctx))
+}
+
 /// Whether `op` may throw: it implements [MayThrowInterface], and for intrinsics the service
 /// throws.
 pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
     if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
-        return intrinsic.intrinsic(ctx).is_some_and(Intrinsic::throws);
+        return intrinsic.intrinsic(ctx).throws();
     }
     op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref()).is_some()
 }
@@ -734,20 +663,24 @@ impl IntrinsicOp {
             .map(|ty| ty.get(ctx))
             .collect::<Vec<_>>();
         let op = IntrinsicOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
+            op: Self::new_op(ctx, results, args),
         };
         op.set_attr_perry_intrinsic(ctx, intrinsic);
         op
     }
 
-    pub fn intrinsic(&self, ctx: &Context) -> Option<Intrinsic> {
-        self.get_attr_perry_intrinsic(ctx).map(|i| *i)
+    /// The service; the verifier rejects an op without one.
+    pub fn intrinsic(&self, ctx: &Context) -> Intrinsic {
+        // pliron models every attribute as optional; construction always sets this one.
+        *self
+            .get_attr_perry_intrinsic(ctx)
+            .expect("verified perry.intrinsic has its service")
     }
 }
 
 impl Verify for IntrinsicOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let Some(intrinsic) = self.intrinsic(ctx) else {
+        let Some(intrinsic) = self.get_attr_perry_intrinsic(ctx).map(|i| *i) else {
             return verify_err!(self.loc(ctx), IntrinsicErr::Missing);
         };
         let op = self.get_operation().deref(ctx);
@@ -760,13 +693,7 @@ impl Verify for IntrinsicOp {
         let results_fit = results.len() == outs.len()
             && results.iter().zip(outs).all(|(t, e)| e.matches(ctx, *t));
         let specialized_int_fit = match intrinsic {
-            Intrinsic::MathFloor
-            | Intrinsic::MathCeil
-            | Intrinsic::MathTrunc
-            | Intrinsic::MathRound
-            | Intrinsic::MathAbs
-            | Intrinsic::MathMin
-            | Intrinsic::MathMax => {
+            _ if intrinsic.preserves_integers() => {
                 operands.len() == ins.len()
                     && results.len() == 1
                     && (results[0].deref(ctx).is::<IntegerType>()
@@ -820,7 +747,7 @@ impl Verify for IntrinsicOp {
 #[op_interface_impl]
 impl SideEffects for IntrinsicOp {
     fn has_side_effects(&self, ctx: &Context) -> bool {
-        !self.intrinsic(ctx).is_some_and(Intrinsic::pure)
+        !self.intrinsic(ctx).pure()
     }
 }
 
@@ -856,14 +783,7 @@ impl JsonStringifyOp {
             string
         };
         JsonStringifyOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![result], vec![value]),
         }
     }
 }
@@ -879,12 +799,7 @@ impl Verify for JsonStringifyOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for JsonStringifyOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        true
-    }
-}
+side_effects!(true; JsonStringifyOp, JsonCursorKeyOp);
 
 #[op_interface_impl]
 impl MayThrowInterface for JsonStringifyOp {
@@ -905,14 +820,7 @@ impl JsonCursorKeyOp {
     pub fn new(ctx: &mut Context, cursor: Value, record: TypeHandle) -> Self {
         let index = crate::collections::index_type(ctx);
         let op = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![index],
-                vec![cursor],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![index], vec![cursor]),
         };
         op.set_attr_perry_json_record(ctx, pliron::builtin::attributes::TypeAttr::new(record));
         op
@@ -938,11 +846,5 @@ impl Verify for JsonCursorKeyOp {
             )?
         }
         Ok(())
-    }
-}
-#[op_interface_impl]
-impl SideEffects for JsonCursorKeyOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
     }
 }

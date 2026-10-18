@@ -47,7 +47,7 @@ fn reuse_candidates(
             ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp,
         },
         control::ReturnOp,
-        intrinsics::{Intrinsic, IntrinsicOp},
+        intrinsics::Intrinsic,
         scalar::CompareOp,
         types::{ArrayType, StringType},
     };
@@ -80,23 +80,21 @@ fn reuse_candidates(
             || Operation::get_op::<StringLenOp>(op, ctx).is_some()
             || Operation::get_op::<CompareOp>(op, ctx).is_some()
             || Operation::get_op::<ReturnOp>(op, ctx).is_some()
-            || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                matches!(
-                    op.intrinsic(ctx),
-                    Some(
-                        Intrinsic::StringCharAt
-                            | Intrinsic::StringCharAtIndex
-                            | Intrinsic::StringIndex
-                            | Intrinsic::StringCodePointAt
-                            | Intrinsic::StringSlice
-                            | Intrinsic::StringSubstring
-                            | Intrinsic::StringIndexOf
-                            | Intrinsic::StringLastIndexOf
-                            | Intrinsic::StringStartsWith
-                            | Intrinsic::StringEndsWith
-                    )
+            || matches!(
+                crate::intrinsics::intrinsic_of(ctx, op),
+                Some(
+                    Intrinsic::StringCharAt
+                        | Intrinsic::StringCharAtIndex
+                        | Intrinsic::StringIndex
+                        | Intrinsic::StringCodePointAt
+                        | Intrinsic::StringSlice
+                        | Intrinsic::StringSubstring
+                        | Intrinsic::StringIndexOf
+                        | Intrinsic::StringLastIndexOf
+                        | Intrinsic::StringStartsWith
+                        | Intrinsic::StringEndsWith
                 )
-            })
+            )
     };
     let cfgs: Vec<FunctionCfg> = functions(root, ctx)
         .into_iter()
@@ -180,17 +178,15 @@ fn reuse_candidates(
                     || is_concat(ctx, op)
                     || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
                     || Operation::get_op::<crate::collections::ConcatSegmentsOp>(op, ctx).is_some()
-                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                        matches!(
-                            op.intrinsic(ctx),
-                            Some(
-                                Intrinsic::StringCharAt
-                                    | Intrinsic::StringCharAtIndex
-                                    | Intrinsic::StringSlice
-                                    | Intrinsic::StringSubstring
-                            )
+                    || matches!(
+                        crate::intrinsics::intrinsic_of(ctx, op),
+                        Some(
+                            Intrinsic::StringCharAt
+                                | Intrinsic::StringCharAtIndex
+                                | Intrinsic::StringSlice
+                                | Intrinsic::StringSubstring
                         )
-                    })
+                    )
             };
             for &block in &cfg.blocks {
                 for argument in block.deref(ctx).arguments() {

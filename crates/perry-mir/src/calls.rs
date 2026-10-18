@@ -2,7 +2,7 @@
 //!
 //! Perry has no first-class functions in MIR (subset rule R5): every callee is a symbol,
 //! which keeps escape summaries and inlining (P3.2, P3.3) exact.
-use crate::types::PromiseType;
+use crate::{NewOp, types::PromiseType};
 use pliron::{
     builtin::{
         attributes::IdentifierAttr,
@@ -17,7 +17,6 @@ use pliron::{
     identifier::Identifier,
     op::{Op, op_cast},
     operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -58,6 +57,13 @@ fn callee_signature(
     verify_err!(loc, CallErr::Unknown(callee.to_string()))
 }
 
+/// The function `op` calls, synchronously or asynchronously; every MIR callee is a symbol.
+pub(crate) fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
+    Operation::get_op::<CallOp>(op, ctx)
+        .map(|call| call.callee(ctx))
+        .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx)))
+}
+
 fn operand_types(ctx: &Context, op: Ptr<Operation>) -> Vec<TypeHandle> {
     op.deref(ctx).operands().map(|v| v.get_type(ctx)).collect()
 }
@@ -82,7 +88,7 @@ impl CallOp {
         results: Vec<TypeHandle>,
     ) -> Self {
         let op = CallOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
+            op: Self::new_op(ctx, results, args),
         };
         op.set_attr_perry_callee(ctx, IdentifierAttr::new(callee));
         op
@@ -121,14 +127,7 @@ impl AsyncCallOp {
     pub fn new(ctx: &mut Context, callee: Identifier, args: Vec<Value>, value: TypeHandle) -> Self {
         let promise = PromiseType::get(ctx, value).into();
         let op = AsyncCallOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![promise],
-                args,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![promise], args),
         };
         op.set_attr_perry_async_callee(ctx, IdentifierAttr::new(callee));
         op
@@ -172,14 +171,7 @@ impl AwaitOp {
             .deref(ctx)
             .value();
         Ok(AwaitOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![value],
-                vec![promise],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![value], vec![promise]),
         })
     }
 }
@@ -198,12 +190,7 @@ impl Verify for AwaitOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for AwaitOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        true
-    }
-}
+side_effects!(true; AwaitOp);
 
 #[op_interface_impl]
 impl crate::exceptions::MayThrowInterface for CallOp {
@@ -331,14 +318,7 @@ impl TimerOp {
         let mut operands = vec![delay, value];
         operands.extend(signal);
         TimerOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![promise],
-                operands,
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![promise], operands),
         }
     }
 }

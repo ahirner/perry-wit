@@ -127,17 +127,20 @@ fn payload(ctx: &Context, mut ty: TypeHandle) -> TypeHandle {
     }
 }
 
+/// The first element of `set` after `previous`, or its first.
+fn after(set: &BTreeSet<usize>, previous: Option<usize>) -> Option<usize> {
+    let start = previous.map_or(Unbounded, Excluded);
+    set.range((start, Unbounded)).next().copied()
+}
+
 pub(super) fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     let ty = payload(ctx, ty).deref(ctx);
     ty.is::<RecordType>() || ty.is::<ArrayType>()
 }
 
 impl Solver {
-    fn heap_cell(&mut self, ty: TypeHandle) -> usize {
-        self.heap_cell_with_owner(ty, None)
-    }
-
-    fn heap_cell_with_owner(&mut self, ty: TypeHandle, owner: Option<usize>) -> usize {
+    /// A new cell of type `ty`: a slot of object `owner`, or an SSA value or result.
+    fn heap_cell(&mut self, ty: TypeHandle, owner: Option<usize>) -> usize {
         let id = self.analysis.heap.cells.len();
         self.analysis.heap.cells.push(Cell {
             ty,
@@ -161,7 +164,7 @@ impl Solver {
         if let Some(&cell) = self.analysis.states[id].heap_values.get(&value) {
             return Some(cell);
         }
-        let cell = self.heap_cell(value.get_type(ctx));
+        let cell = self.heap_cell(value.get_type(ctx), None);
         self.analysis.states[id].heap_values.insert(value, cell);
         Some(cell)
     }
@@ -176,13 +179,13 @@ impl Solver {
                     .fields()
                     .expect("resolved record schema")
                     .iter()
-                    .map(|&(_, ty)| self.heap_cell_with_owner(ty, Some(id)))
+                    .map(|&(_, ty)| self.heap_cell(ty, Some(id)))
                     .collect(),
             )
         } else {
             let array = shape.downcast_ref::<ArrayType>().expect("aggregate schema");
             Contents::Array {
-                element: self.heap_cell_with_owner(array.element(), Some(id)),
+                element: self.heap_cell(array.element(), Some(id)),
                 length: Range::Bottom,
                 readers: BTreeSet::new(),
             }
@@ -239,20 +242,15 @@ impl Solver {
         }
     }
 
+    /// The object after `previous` that `cell` may hold; iterating by position lets the
+    /// visitor grow the set.
     fn next_object(&self, cell: usize, previous: Option<usize>) -> Option<usize> {
-        self.analysis.heap.cells[cell]
-            .objects
-            .range((previous.map_or(Unbounded, Excluded), Unbounded))
-            .next()
-            .copied()
+        after(&self.analysis.heap.cells[cell].objects, previous)
     }
 
+    /// As [Self::next_object], over the objects whose layout `cell` shares.
     fn next_layout_object(&self, cell: usize, previous: Option<usize>) -> Option<usize> {
-        self.analysis.heap.cells[cell]
-            .layout_objects
-            .range((previous.map_or(Unbounded, Excluded), Unbounded))
-            .next()
-            .copied()
+        after(&self.analysis.heap.cells[cell].layout_objects, previous)
     }
 
     /// Opens `object` once: its slots become unknown and every cell holding it is reconciled.
@@ -374,16 +372,7 @@ impl Solver {
     }
 
     pub(super) fn open_object(&mut self, ctx: &Context, object: usize) {
-        self.widen_length(
-            object,
-            Range::Bounds(
-                Integer {
-                    bits: 32,
-                    signed: false,
-                }
-                .bounds(),
-            ),
-        );
+        self.widen_length(object, Range::of(Some(Integer::U32)));
         for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
             let ty = self.analysis.heap.cells[cell].ty;
@@ -407,13 +396,7 @@ impl Solver {
         else {
             return;
         };
-        let joined = length.join(
-            range,
-            Some(Integer {
-                bits: 32,
-                signed: false,
-            }),
-        );
+        let joined = length.join(range, Some(Integer::U32));
         if joined != *length {
             *length = joined;
             for &reader in readers.iter() {
@@ -514,51 +497,32 @@ impl Solver {
                 self.mark_open(obj);
             }
         }
-        let mut ancestors = BTreeSet::new();
-        let mut worklist = Vec::new();
-        for &obj in &objects {
-            if ancestors.insert(obj) {
-                worklist.push(obj);
-            }
-        }
-        if let Some(owner) = self.analysis.heap.cells[cell].owner
-            && ancestors.insert(owner)
-        {
-            worklist.push(owner);
-        }
-        while let Some(anc) = worklist.pop() {
-            for &container_cell in &self.analysis.heap.objects[anc].containers {
-                if let Some(owner) = self.analysis.heap.cells[container_cell].owner
-                    && ancestors.insert(owner)
-                {
-                    worklist.push(owner);
-                }
-            }
-        }
-        if !ancestors.is_empty() {
-            let mut visited_objs: BTreeSet<usize> = objects.iter().copied().collect();
-            let mut obj_queue: Vec<usize> = objects.clone();
-            while let Some(obj) = obj_queue.pop() {
-                let child_slots: Vec<usize> =
-                    self.analysis.heap.objects[obj].contents.slots().to_vec();
-                for child_slot in child_slots {
-                    let slot_ty = payload(ctx, self.analysis.heap.cells[child_slot].ty);
-                    for &anc in &ancestors {
-                        if self.analysis.heap.objects[anc].ty == slot_ty {
-                            self.add_layout_object(child_slot, anc);
-                        }
-                    }
-                    let nested: Vec<usize> = self.analysis.heap.cells[child_slot]
-                        .layout_objects
-                        .iter()
-                        .copied()
-                        .collect();
-                    for nested_obj in nested {
-                        if visited_objs.insert(nested_obj) {
-                            obj_queue.push(nested_obj);
-                        }
+        // The objects and, transitively, the owners of every cell that may hold one of them.
+        let heap = &self.analysis.heap;
+        let roots = objects.iter().copied().chain(heap.cells[cell].owner);
+        let ancestors: BTreeSet<usize> = crate::reachable(roots, |object| {
+            heap.objects[object]
+                .containers
+                .iter()
+                .filter_map(|&container| heap.cells[container].owner)
+        })
+        .into_iter()
+        .collect();
+        // Nested slots of a recursive layout may hold their ancestors: link them, then descend.
+        let mut visited: BTreeSet<usize> = objects.iter().copied().collect();
+        let mut pending = objects.clone();
+        while let Some(object) = pending.pop() {
+            // Copied: linking a slot mutates the heap.
+            let slots = self.analysis.heap.objects[object].contents.slots().to_vec();
+            for slot in slots {
+                let slot_ty = payload(ctx, self.analysis.heap.cells[slot].ty);
+                for &ancestor in &ancestors {
+                    if self.analysis.heap.objects[ancestor].ty == slot_ty {
+                        self.add_layout_object(slot, ancestor);
                     }
                 }
+                let nested = &self.analysis.heap.cells[slot].layout_objects;
+                pending.extend(nested.iter().filter(|&&nested| visited.insert(nested)));
             }
         }
         if objects.len() <= 1 {
@@ -568,60 +532,48 @@ impl Solver {
             .contents
             .slots()
             .len();
-        for slot_idx in 0..slot_count {
-            let mut slots = Vec::with_capacity(objects.len());
-            for &obj in &objects {
-                if let Some(&slot) = self.analysis.heap.objects[obj]
-                    .contents
-                    .slots()
-                    .get(slot_idx)
-                {
-                    slots.push(slot);
-                }
-            }
+        for index in 0..slot_count {
+            let slots: Vec<usize> = objects
+                .iter()
+                .filter_map(|&object| {
+                    let contents = &self.analysis.heap.objects[object].contents;
+                    contents.slots().get(index).copied()
+                })
+                .collect();
             self.reconcile_slot_group(ctx, &slots);
         }
     }
 
     pub(super) fn reconcile_slot_group(&mut self, ctx: &Context, slots: &[usize]) {
-        if slots.is_empty() {
-            return;
+        let cells = &self.analysis.heap.cells;
+        let lossless = |slot: usize| cells[slot].domain.needs_lossless_64();
+        let narrow: Vec<usize> = if slots.iter().any(|&slot| lossless(slot)) {
+            slots
+                .iter()
+                .copied()
+                .filter(|&slot| !lossless(slot))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let summarized = slots.iter().any(|&slot| cells[slot].summarized);
+        let children: BTreeSet<usize> = slots
+            .iter()
+            .flat_map(|&slot| cells[slot].layout_objects.iter().copied())
+            .collect();
+        // Once any slot of the group is lossless, every slot widens to agree.
+        for slot in narrow {
+            self.slot_domain(slot, Fact::Numeric);
+            self.slot_range(ctx, slot, Range::Unknown);
         }
-        let mut has_numeric = false;
-        let mut has_summarized = false;
-        let mut child_objects = BTreeSet::new();
-        for &slot in slots {
-            if self.analysis.heap.cells[slot].domain.needs_lossless_64() {
-                has_numeric = true;
-            }
-            if self.analysis.heap.cells[slot].summarized {
-                has_summarized = true;
-            }
-            child_objects.extend(
-                self.analysis.heap.cells[slot]
-                    .layout_objects
-                    .iter()
-                    .copied(),
-            );
-        }
-        if has_numeric {
-            for &slot in slots {
-                if !self.analysis.heap.cells[slot].domain.needs_lossless_64() {
-                    self.slot_domain(slot, Fact::Numeric);
-                    self.slot_range(ctx, slot, Range::Unknown);
-                }
-            }
-        }
-        if has_summarized {
-            for &child in &child_objects {
+        if summarized {
+            for &child in &children {
                 self.mark_open(child);
             }
         }
-        if !child_objects.is_empty() {
-            for &slot in slots {
-                for &child in &child_objects {
-                    self.add_layout_object(slot, child);
-                }
+        for &slot in slots {
+            for &child in &children {
+                self.add_layout_object(slot, child);
             }
         }
     }

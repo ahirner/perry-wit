@@ -254,13 +254,10 @@ pub(crate) fn lower(
                 .into_iter()
                 .any(|op| {
                     Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
-                        op.intrinsic(ctx).is_some_and(|i| {
-                            matches!(
-                                i,
-                                perry_mir::Intrinsic::JsonRetain
-                                    | perry_mir::Intrinsic::JsonResidue
-                            )
-                        })
+                        matches!(
+                            op.intrinsic(ctx),
+                            perry_mir::Intrinsic::JsonRetain | perry_mir::Intrinsic::JsonResidue
+                        )
                     })
                 })
         }),

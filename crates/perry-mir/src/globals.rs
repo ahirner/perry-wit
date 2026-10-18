@@ -1,5 +1,5 @@
 //! Typed module cells. Local slots promote to SSA; module cells persist across export calls.
-use crate::types::SlotType;
+use crate::{NewOp, types::SlotType};
 use pliron::{
     builtin::{
         attributes::IdentifierAttr,
@@ -10,8 +10,6 @@ use pliron::{
     derive::{op_interface_impl, pliron_op},
     identifier::Identifier,
     op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
@@ -32,14 +30,7 @@ impl GlobalOp {
     pub fn new(ctx: &mut Context, name: Identifier, value: TypeHandle) -> Self {
         let slot = SlotType::get(ctx, value).into();
         let op = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![slot],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![slot], vec![]),
         };
         op.set_attr_perry_global(ctx, IdentifierAttr::new(name));
         op
@@ -59,12 +50,7 @@ impl Verify for GlobalOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for GlobalOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+side_effects!(false; GlobalOp);
 
 /// Checked load; reading a module binding before its initializer ran raises a TypeError.
 #[pliron_op(name = "perry.global_load", format = "$0 ` : ` type($0)", interfaces = [NOpdsInterface<1>, OneResultInterface])]
@@ -76,14 +62,7 @@ impl GlobalLoadOp {
             .deref(ctx)
             .value();
         Ok(Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![slot],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![slot]),
         })
     }
 }

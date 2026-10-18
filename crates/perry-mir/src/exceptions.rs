@@ -17,6 +17,7 @@
 //! - [ErrorNewOp], [ExceptionIsOp] and [ExceptionMessageOp] cover `new Error(...)`,
 //!   `instanceof` and `.message`.
 use crate::{
+    NewOp,
     attrs::ErrorKind,
     scalar::is_bool,
     types::{ExceptionType, StringType},
@@ -34,7 +35,6 @@ use pliron::{
     derive::{op_interface, op_interface_impl, pliron_op},
     op::Op,
     operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
     r#type::Typed,
     value::Value,
@@ -85,17 +85,6 @@ fn i32_type(ctx: &mut Context) -> pliron::r#type::TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }
 
-macro_rules! effects {
-    ($value:expr; $($op:ty),*) => {$(
-        #[op_interface_impl]
-        impl SideEffects for $op {
-            fn has_side_effects(&self, _ctx: &Context) -> bool {
-                $value
-            }
-        }
-    )*};
-}
-
 /// `new Error(message)`, `new TypeError(message)`, `new RangeError(message)` (kind `any` is
 /// plain `Error`).
 #[pliron_op(
@@ -110,14 +99,7 @@ impl ErrorNewOp {
     pub fn new(ctx: &mut Context, kind: ErrorKind, message: Value) -> Self {
         let ty = ExceptionType::get(ctx).into();
         let op = ErrorNewOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![message],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![message]),
         };
         op.set_attr_perry_error_kind(ctx, kind);
         op
@@ -154,14 +136,7 @@ impl RaiseOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let i32 = i32_type(ctx);
         RaiseOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i32],
-                vec![value],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![i32], vec![value]),
         }
     }
 }
@@ -189,14 +164,7 @@ impl ExitOp {
     pub fn new(ctx: &mut Context, code: Value) -> Self {
         let i32 = i32_type(ctx);
         ExitOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i32],
-                vec![code],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![i32], vec![code]),
         }
     }
 }
@@ -212,14 +180,7 @@ pub struct RethrowOp;
 impl RethrowOp {
     pub fn new(ctx: &mut Context, status: Value) -> Self {
         RethrowOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![status],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![], vec![status]),
         }
     }
 }
@@ -253,14 +214,7 @@ impl CaughtOp {
     pub fn new(ctx: &mut Context) -> Self {
         let i32 = i32_type(ctx);
         CaughtOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i32],
-                vec![],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![i32], vec![]),
         }
     }
 }
@@ -297,14 +251,7 @@ impl CatchOp {
     pub fn new(ctx: &mut Context, status: Value) -> Self {
         let ty = ExceptionType::get(ctx).into();
         CatchOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![status],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![status]),
         }
     }
 }
@@ -331,14 +278,7 @@ impl ExceptionIsOp {
     pub fn new(ctx: &mut Context, kind: ErrorKind, exception: Value) -> Self {
         let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let op = ExceptionIsOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i1],
-                vec![exception],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![i1], vec![exception]),
         };
         op.set_attr_perry_instance_kind(ctx, kind);
         op
@@ -373,14 +313,7 @@ impl ExceptionMessageOp {
     pub fn new(ctx: &mut Context, exception: Value) -> Self {
         let ty = StringType::get(ctx).into();
         ExceptionMessageOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![exception],
-                vec![],
-                0,
-            ),
+            op: Self::new_op(ctx, vec![ty], vec![exception]),
         }
     }
 }
@@ -397,8 +330,8 @@ impl Verify for ExceptionMessageOp {
     }
 }
 
-effects!(false; ErrorNewOp, ExceptionIsOp, ExceptionMessageOp);
-effects!(true; RaiseOp, ExitOp, CaughtOp, CatchOp);
+side_effects!(false; ErrorNewOp, ExceptionIsOp, ExceptionMessageOp);
+side_effects!(true; RaiseOp, ExitOp, CaughtOp, CatchOp);
 
 /// Mark the status-only bypass that sends process.exit around catch and finally.
 pub fn set_exit_only(ctx: &mut Context, op: &RethrowOp) {

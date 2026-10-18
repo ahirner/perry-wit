@@ -305,7 +305,7 @@ fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
         .any(|op| {
             matches!(
                 op.intrinsic(ctx),
-                Some(Intrinsic::PrintOut | Intrinsic::WritableStdout)
+                Intrinsic::PrintOut | Intrinsic::WritableStdout
             )
         })
 }

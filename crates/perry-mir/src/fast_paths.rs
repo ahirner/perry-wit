@@ -37,8 +37,7 @@ impl MatchRewrite for ExpandAppends {
                     .get_type(ctx)
                     .deref(ctx)
                     .is::<crate::types::StringType>())
-                || Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
-                    == Some(Intrinsic::StringScalarAppend))
+                || crate::intrinsics::intrinsic_of(ctx, op) == Some(Intrinsic::StringScalarAppend))
     }
     fn rewrite(
         &mut self,

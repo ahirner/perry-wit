@@ -77,11 +77,13 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
     let ops = operations(ctx, function);
     if ops.len() > LIMIT
         || ops.iter().any(|&op| {
-            Operation::get_op::<CallOp>(op, ctx).is_some()
-                || Operation::get_op::<AsyncCallOp>(op, ctx).is_some()
-                || Operation::get_op::<AwaitOp>(op, ctx).is_some()
-                || Operation::get_op::<TimerOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
+            crate::is_any::<(
+                CallOp,
+                AsyncCallOp,
+                AwaitOp,
+                TimerOp,
+                crate::foreign::ForeignOp,
+            )>(ctx, op)
                 || crate::intrinsics::may_throw(ctx, op)
                 || op.deref(ctx).num_regions() != 0
         })
@@ -107,11 +109,7 @@ pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus
     for function in &functions {
         let name = function.get_symbol_name(ctx);
         for op in operations(ctx, function) {
-            let callee = if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                call.callee(ctx)
-            } else if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
-                call.callee(ctx)
-            } else {
+            let Some(callee) = crate::calls::callee(ctx, op) else {
                 continue;
             };
             *callers.entry(callee.clone()).or_default() += 1;
@@ -240,10 +238,14 @@ pub(crate) fn promote_arguments(
     let mut async_callees: HashSet<Identifier> = HashSet::new();
     for function in &functions {
         for op in operations(ctx, function) {
-            if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                sites.entry(call.callee(ctx)).or_default().push(op);
-            } else if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
-                async_callees.insert(call.callee(ctx));
+            match crate::calls::callee(ctx, op) {
+                Some(callee) if Operation::is_op::<CallOp>(op, ctx) => {
+                    sites.entry(callee).or_default().push(op)
+                }
+                Some(callee) => {
+                    async_callees.insert(callee);
+                }
+                None => {}
             }
         }
     }
@@ -301,21 +303,13 @@ fn promote(
     };
     let entry = function.get_entry_block(ctx);
     let parameter = entry.deref(ctx).get_argument(index);
-    let field_types: Vec<_> = fields
-        .iter()
-        .map(|field| {
-            let record = parameter.get_type(ctx);
-            let record = record.deref(ctx);
-            let record = record.downcast_ref::<RecordType>().expect("a record");
-            record
-                .fields()
-                .expect("fields")
-                .iter()
-                .find(|(name, _)| name == field)
-                .map(|(_, ty)| *ty)
-                .expect("a field of the record")
-        })
-        .collect();
+    let field_types: Vec<_> = {
+        let record = parameter.get_type(ctx);
+        let record = record.deref(ctx);
+        let record = record.downcast_ref::<RecordType>().expect("a record");
+        let field = |name: &String| record.field(name).expect("a field of the record").1;
+        fields.iter().map(field).collect()
+    };
     // The callee: new parameters replace the reads.
     let first = entry.deref(ctx).get_num_arguments();
     for (offset, ty) in field_types.iter().enumerate() {
@@ -400,7 +394,7 @@ impl MatchRewrite for DecomposeRecords {
                         |intr| {
                             matches!(
                                 intr.intrinsic(ctx),
-                                Some(crate::Intrinsic::JsonSpread | crate::Intrinsic::JsonExclude)
+                                crate::Intrinsic::JsonSpread | crate::Intrinsic::JsonExclude
                             )
                         },
                     ))

@@ -14,7 +14,8 @@
 //! - declaration-order permutation (`permuted`).
 
 use crate::{
-    execution::{Observation, Outcome, check_equivalence, number},
+    emit::checksum,
+    execution::{FactLimits, Observation, Outcome, check_equivalence, number},
     program::INPUTS,
     registry::{Case, Contract, Witness},
 };
@@ -44,6 +45,88 @@ pub enum WitSignature {
     DirectList,
     /// `record observation { value: f64, maybe: option<f64>, trace: list<f64> }`
     OptionRecord,
+}
+
+impl WitSignature {
+    /// Record fields between `value` and `trace`, or `None` for the bare list export. Every
+    /// observer appends them, in this order, to the trace (an absent option as -66).
+    fn extras(self) -> Option<&'static [Extra]> {
+        match self {
+            Self::ObservationRecord => Some(&[]),
+            Self::MultiFieldRecord => Some(&[Extra::Head, Extra::Tail]),
+            Self::OptionRecord => Some(&[Extra::Maybe]),
+            Self::DirectList => None,
+        }
+    }
+
+    /// The WIT world exporting `run` with this signature.
+    pub(crate) fn wit_world(self) -> String {
+        let (record, output) = match self.extras() {
+            Some(extras) => (
+                format!(
+                    "record observation {{ value: f64, {} trace: list<f64> }}",
+                    extras
+                        .iter()
+                        .map(|extra| format!("{}: {},", extra.name(), extra.wit_type()))
+                        .collect::<String>()
+                ),
+                "observation",
+            ),
+            None => (String::new(), "list<f64>"),
+        };
+        format!(
+            "package test:generated;\nworld generated {{\n  {record}\n  export run: func(x: f64) -> result<{output}>;\n}}\n"
+        )
+    }
+
+    /// The TypeScript interface mirroring [`Self::wit_world`]'s record, if it has one.
+    fn ts_interface(self) -> Option<String> {
+        self.extras().map(|extras| {
+            format!(
+                "export interface Observation {{ value: number; {} trace: number[]; }}",
+                extras
+                    .iter()
+                    .map(|extra| format!("{};", extra.ts_member()))
+                    .collect::<String>()
+            )
+        })
+    }
+}
+
+/// A boundary-lifted observation field beyond `value` and `trace`.
+#[derive(Clone, Copy, Debug)]
+enum Extra {
+    /// `readSlotA(inst0)`
+    Head,
+    /// `readSlotB` of the last instance
+    Tail,
+    /// The first instance's child slot, absent without a child
+    Maybe,
+}
+
+impl Extra {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+            Self::Maybe => "maybe",
+        }
+    }
+
+    fn wit_type(self) -> &'static str {
+        match self {
+            Self::Head | Self::Tail => "f64",
+            Self::Maybe => "option<f64>",
+        }
+    }
+
+    fn ts_member(self) -> &'static str {
+        match self {
+            Self::Head => "head: number",
+            Self::Tail => "tail: number",
+            Self::Maybe => "maybe?: number",
+        }
+    }
 }
 
 /// Exact 64-bit integer seeds (including values `> 2^53` and radix-wrapping cases).
@@ -204,6 +287,8 @@ pub struct AggregateCase {
     pub ops: Vec<AggregateOp>,
     pub overflow_origins: bool,
     pub permuted: bool,
+    #[serde(default)]
+    pub fact_limits: FactLimits,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -353,12 +438,6 @@ fn non_zero_divisor(raw: i8) -> i64 {
 }
 
 impl AggregateCase {
-    pub fn with_permuted(&self, permuted: bool) -> Self {
-        let mut copy = self.clone();
-        copy.permuted = permuted;
-        copy
-    }
-
     /// Whether this case uses `> 2^53` exact `parseInt` values that Node's IEEE-754 `f64`
     /// `parseInt` rounds.
     pub fn uses_wide_exact_int(&self) -> bool {
@@ -376,24 +455,6 @@ impl AggregateCase {
                     AggregateOp::MutateSlot { new_source, .. } if new_source.uses_wide_exact_int()
                 )
             })
-    }
-
-    /// The WIT world definition for this case's export signature.
-    pub fn wit_world(&self) -> &'static str {
-        match self.wit_signature {
-            WitSignature::ObservationRecord => {
-                "package test:generated;\nworld generated {\n    record observation {\n        value: f64,\n        trace: list<f64>,\n    }\n    export run: func(x: f64) -> result<observation>;\n}\n"
-            }
-            WitSignature::MultiFieldRecord => {
-                "package test:generated;\nworld generated {\n    record observation {\n        value: f64,\n        head: f64,\n        tail: f64,\n        trace: list<f64>,\n    }\n    export run: func(x: f64) -> result<observation>;\n}\n"
-            }
-            WitSignature::DirectList => {
-                "package test:generated;\nworld generated {\n    export run: func(x: f64) -> result<list<f64>>;\n}\n"
-            }
-            WitSignature::OptionRecord => {
-                "package test:generated;\nworld generated {\n    record observation {\n        value: f64,\n        maybe: option<f64>,\n        trace: list<f64>,\n    }\n    export run: func(x: f64) -> result<observation>;\n}\n"
-            }
-        }
     }
 
     /// Evaluate the exact expected `Observation` for input `x` using the Rust reference model.
@@ -504,35 +565,23 @@ impl AggregateCase {
         }
 
         if self.overflow_origins {
-            // 36 distinct origins (`0..36`), last element has `a = 9007199254740993`, `9007199254740993 % 2 == 1`.
+            // Four runtime-parsed `2^53 + 1` records; the last one's `a % 2` is 1.
             trace.push(1.0);
         }
 
-        let mut checksum = 0.0f64;
-        for (idx, &item) in trace.iter().enumerate() {
-            let term = if item.is_nan() { -55.0 } else { item + 0.0 };
-            checksum += term * ((idx % 5) as f64 + 1.0);
-        }
-
-        // Append boundary-lifted fields (`head`, `tail`, `maybe`) after `finalizeAgg(trace)` so
-        // Wasmtime's WIT lifting of those fields is directly verified in `Observation.trace`.
-        match self.wit_signature {
-            WitSignature::ObservationRecord | WitSignature::DirectList => {}
-            WitSignature::MultiFieldRecord => {
-                trace.push(insts[0].a.to_f64() + 0.0);
-                trace.push(insts[n - 1].b.to_f64() + 0.0);
-            }
-            WitSignature::OptionRecord => {
-                if insts[0].has_child {
-                    trace.push(insts[0].child_a.to_f64() + 0.0);
-                } else {
-                    trace.push(-66.0);
-                }
-            }
+        let value = checksum(0.0, &trace);
+        // Boundary-lifted fields follow the checksummed trace, so their WIT lifting is observed.
+        for extra in self.wit_signature.extras().into_iter().flatten() {
+            trace.push(match extra {
+                Extra::Head => insts[0].a.to_f64() + 0.0,
+                Extra::Tail => insts[n - 1].b.to_f64() + 0.0,
+                Extra::Maybe if insts[0].has_child => insts[0].child_a.to_f64() + 0.0,
+                Extra::Maybe => -66.0,
+            });
         }
 
         Observation {
-            value: number(checksum),
+            value: number(value),
             trace: trace.into_iter().map(number).collect(),
         }
     }
@@ -660,15 +709,17 @@ pub(crate) fn aggregate_case_strategy() -> impl Strategy<Value = AggregateCase> 
         prop::collection::vec(instance_spec_strategy(), 2..=5),
         prop::collection::vec(aggregate_op_strategy(), 3..=8),
         any::<bool>(),
+        crate::strategies::fact_limits(),
     )
         .prop_map(
-            |(shape, wit_signature, instances, ops, overflow_origins)| AggregateCase {
+            |(shape, wit_signature, instances, ops, overflow_origins, fact_limits)| AggregateCase {
                 shape,
                 wit_signature,
                 instances,
                 ops,
                 overflow_origins,
                 permuted: false,
+                fact_limits,
             },
         )
 }
@@ -736,55 +787,11 @@ pub(crate) fn contract() -> Contract {
                 ],
                 overflow_origins: false,
                 permuted: false,
+                fact_limits: FactLimits::Summarized,
             }),
         },
         Witness {
-            partition: "mutually-recursive-origin-overflow-multi-field",
-            case: Case::Aggregate(AggregateCase {
-                shape: AggregateShape::MutuallyRecursive,
-                wit_signature: WitSignature::MultiFieldRecord,
-                instances: vec![
-                    InstanceSpec {
-                        a: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow54Plus3),
-                        b: ValueSource::FloatFraction(1),
-                        child_a: ValueSource::ConstParseInt(ExactIntSeed::TwoPow53Plus1),
-                        child_b: ValueSource::NarrowInt(-5),
-                        has_child: true,
-                    },
-                    InstanceSpec {
-                        a: ValueSource::FloatFraction(0),
-                        b: ValueSource::ConstParseInt(ExactIntSeed::I64MaxDec),
-                        child_a: ValueSource::NarrowInt(3),
-                        child_b: ValueSource::FloatFraction(-2),
-                        has_child: false,
-                    },
-                ],
-                ops: vec![
-                    AggregateOp::ArrayConcatSpread {
-                        inst_a: 0,
-                        inst_b: 1,
-                    },
-                    AggregateOp::BranchRead {
-                        inst_a: 0,
-                        inst_b: 1,
-                        slot: SlotSelector::ChildOrOpt,
-                    },
-                    AggregateOp::MutateSlot {
-                        inst: 1,
-                        slot_b: false,
-                        new_source: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow53Plus1),
-                    },
-                    AggregateOp::SharedHelperCall {
-                        inst: 1,
-                        slot_b: false,
-                    },
-                ],
-                overflow_origins: true,
-                permuted: false,
-            }),
-        },
-        Witness {
-            partition: "nested-record-option-boundary-special-values",
+            partition: "nested-record-option-boundary-special-values-and-overflow",
             case: Case::Aggregate(AggregateCase {
                 shape: AggregateShape::NestedRecord,
                 wit_signature: WitSignature::OptionRecord,
@@ -823,51 +830,19 @@ pub(crate) fn contract() -> Contract {
                         slot: SlotSelector::PrimaryB,
                         divisor: 0,
                     },
-                ],
-                overflow_origins: false,
-                permuted: false,
-            }),
-        },
-        Witness {
-            partition: "record-with-arrays-direct-list-boundary",
-            case: Case::Aggregate(AggregateCase {
-                shape: AggregateShape::RecordWithArrays,
-                wit_signature: WitSignature::DirectList,
-                instances: vec![
-                    InstanceSpec {
-                        a: ValueSource::ConstParseInt(ExactIntSeed::NegTwoPow53Plus1),
-                        b: ValueSource::BoundaryInput,
-                        child_a: ValueSource::IntArith(0),
-                        child_b: ValueSource::FloatFraction(0),
-                        has_child: true,
-                    },
-                    InstanceSpec {
-                        a: ValueSource::HelperIntArith(0),
-                        b: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow53Plus3),
-                        child_a: ValueSource::NegativeZero,
-                        child_b: ValueSource::NarrowInt(1),
-                        has_child: false,
-                    },
-                ],
-                ops: vec![
                     AggregateOp::ArrayConcatSpread {
                         inst_a: 0,
                         inst_b: 1,
                     },
-                    AggregateOp::BranchRead {
-                        inst_a: 0,
-                        inst_b: 1,
-                        slot: SlotSelector::ChildOrOpt,
-                    },
-                    AggregateOp::CompareSlots {
-                        inst_a: 0,
-                        slot_a_b: false,
-                        inst_b: 1,
-                        slot_b_b: true,
+                    AggregateOp::MutateSlot {
+                        inst: 1,
+                        slot_b: false,
+                        new_source: ValueSource::RuntimeParseInt(ExactIntSeed::TwoPow53Plus1),
                     },
                 ],
-                overflow_origins: false,
+                overflow_origins: true,
                 permuted: false,
+                fact_limits: FactLimits::Narrow,
             }),
         },
     ];

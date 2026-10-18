@@ -1,4 +1,4 @@
-//! Small-component size and initial-memory limits.
+//! Small-component and core-module size budgets and initial-memory limits.
 use anyhow::Result;
 use perry_wit::compile_for_world;
 use wasmparser::{Parser, Payload};
@@ -42,6 +42,25 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
             }
         }
         assert_eq!(memories, 1, "{name}: one linear memory");
+    }
+    // Core modules link only the runtime helpers a program reaches.
+    for (name, source, max_core_bytes) in [
+        (
+            "plain-date",
+            "export function check(): number { const d = Temporal.PlainDate.from('2024-02-29').subtract({ days: 1 }); return d.day; }",
+            24_576,
+        ),
+        (
+            "trim",
+            "export function check(s: string): string { return s.trim(); }",
+            6_144,
+        ),
+    ] {
+        let bytes = perry_wit::compile_core(source, name)?.len();
+        assert!(
+            bytes < max_core_bytes,
+            "{name}: {bytes} bytes exceeds {max_core_bytes}-byte limit"
+        );
     }
     Ok(())
 }

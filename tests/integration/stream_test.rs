@@ -4,11 +4,12 @@
 use anyhow::{Context, Result};
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Store, StoreLimits, StoreLimitsBuilder,
-    component::{Linker, ResourceTable, StreamReader},
+    Store,
+    component::{Linker, StreamReader},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi::WasiCtx;
 
+use crate::wasi_host::{self, Host};
 use crate::{engine::async_engine, output_capture};
 
 struct BlockedRead {
@@ -189,21 +190,6 @@ export async function leased(input: ReadableStream<Uint8Array>): Promise<number>
 }
 "#;
 
-struct Host {
-    ctx: WasiCtx,
-    table: ResourceTable,
-    limits: StoreLimits,
-}
-
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -211,22 +197,13 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("streams"))?;
     let compiled = compile_for_world(SOURCE, "streams.ts", &resolve, world, true)?;
-    let engine = async_engine()?;
-    let component =
-        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            table: ResourceTable::new(),
-            // One page: the leased reader must not keep a chunk per read.
-            limits: StoreLimitsBuilder::new().memory_size(1 << 16).build(),
-        },
-    );
-    store.limiter(|host| &mut host.limits);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        // One page: the leased reader must not keep a chunk per read.
+        Host::default().with_memory_limit(1 << 16),
+    )
+    .await?;
     let kept = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "kept")?;
     let leased = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "leased")?;
     let iterated =
@@ -322,25 +299,16 @@ async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
     let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
         source, "echo.ts", &resolve, world,
     )?;
-    let engine = async_engine()?;
-    let component =
-        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let bytes: Vec<u8> = (0..4 * 1024 * 1024)
         .map(|i| (i * 37 + i / 251) as u8)
         .collect();
     let output = output_capture::MemoryOutput::new(bytes.len() * 3);
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().stdout(output.clone()).build(),
-            table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new().memory_size(65536).build(),
-        },
-    );
-    store.limiter(|host| &mut host.limits);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        Host::new(WasiCtx::builder().stdout(output.clone()).build()).with_memory_limit(65536),
+    )
+    .await?;
     let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
     for _ in 0..3 {
         let input = StreamReader::new(&mut store, bytes.clone())?;

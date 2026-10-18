@@ -2,6 +2,13 @@
 use super::*;
 use crate::coerce::merge_absence;
 
+/// The truthiness operators `&&` and `||`; `??` tests nullishness and lowers separately.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortCircuit {
+    And,
+    Or,
+}
+
 impl<'s> FunctionBuilder<'s> {
     /// `left op right` for arithmetic operators and string concatenation.
     pub(super) fn binary_expression(
@@ -321,9 +328,11 @@ impl<'s> FunctionBuilder<'s> {
         right: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        if matches!(op, LogicalOp::Coalesce) {
-            return self.coalesce(ctx, left, right, expected);
-        }
+        let op = match op {
+            LogicalOp::And => ShortCircuit::And,
+            LogicalOp::Or => ShortCircuit::Or,
+            LogicalOp::Coalesce => return self.coalesce(ctx, left, right, expected),
+        };
         let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
         if expected == Some(i1_ty) {
             let lhs = self.condition(ctx, left)?;
@@ -332,12 +341,12 @@ impl<'s> FunctionBuilder<'s> {
             let rhs_block = self.new_block(ctx, "rhs");
             let join = self.new_block(ctx, "join");
             match op {
-                LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
-                _ => self.branch(ctx, lhs, join, rhs_block),
+                ShortCircuit::And => self.branch(ctx, lhs, rhs_block, join),
+                ShortCircuit::Or => self.branch(ctx, lhs, join, rhs_block),
             }
             self.switch_to(rhs_block);
             let mark = self.variant_guards.len();
-            self.variant_condition(left, matches!(op, LogicalOp::And));
+            self.variant_condition(left, op == ShortCircuit::And);
             let rhs = self.condition(ctx, right);
             self.variant_guards.truncate(mark);
             let rhs = rhs?;
@@ -354,12 +363,12 @@ impl<'s> FunctionBuilder<'s> {
             let rhs_block = self.new_block(ctx, "rhs");
             let join = self.new_block(ctx, "join");
             match op {
-                LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
-                _ => self.branch(ctx, lhs, join, rhs_block),
+                ShortCircuit::And => self.branch(ctx, lhs, rhs_block, join),
+                ShortCircuit::Or => self.branch(ctx, lhs, join, rhs_block),
             }
             self.switch_to(rhs_block);
             let mark = self.variant_guards.len();
-            self.variant_condition(left, matches!(op, LogicalOp::And));
+            self.variant_condition(left, op == ShortCircuit::And);
             let rhs = self.condition(ctx, right);
             self.variant_guards.truncate(mark);
             let rhs = rhs?;
@@ -376,7 +385,7 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, cond, truthy_block, falsy_block);
 
         match op {
-            LogicalOp::Or => {
+            ShortCircuit::Or => {
                 self.switch_to(truthy_block);
                 let defined_lhs = if self.is_optional(ctx, lhs) {
                     self.defined(ctx, lhs)?
@@ -448,7 +457,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(join);
                 self.load(ctx, result)
             }
-            LogicalOp::And => {
+            ShortCircuit::And => {
                 self.switch_to(falsy_block);
                 let falsy_end = self.block;
 
@@ -544,7 +553,6 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(join);
                 self.load(ctx, result)
             }
-            LogicalOp::Coalesce => unreachable!(),
         }
     }
 

@@ -3,7 +3,7 @@
 //! Branch ops are adapted from `pliron-llvm` (Apache-2.0, The pliron contributors), with the
 //! condition type fixed to signless `i1`. They implement [BranchOpInterface] so pliron's
 //! `mem2reg`, DCE and CFG simplification operate on perry MIR directly.
-use crate::scalar::is_bool;
+use crate::{NewOp, scalar::is_bool};
 use core::ops::Range;
 use pliron::{
     basic_block::BasicBlock,
@@ -24,10 +24,10 @@ use pliron::{
         },
         printers::iter_with_sep,
     },
-    location::{Located, Location},
+    location::Location,
     op::{Op, OpObj},
     operation::Operation,
-    parsable::{IntoParseResult, Parsable, ParseResult, StateStream},
+    parsable::{IntoParseResult, Parsable, ParseResult, StateStream, StreamLocation},
     printable::{ListSeparator, Printable},
     result::Result,
     value::Value,
@@ -256,7 +256,7 @@ pub struct ReturnOp;
 impl ReturnOp {
     pub fn new(ctx: &mut Context, values: Vec<Value>) -> Self {
         ReturnOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], values, vec![], 0),
+            op: Self::new_op(ctx, vec![], values),
         }
     }
 }
