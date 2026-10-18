@@ -1,10 +1,11 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
-use super::{
-    append_i64, append_number, append_u64, canonical, key_bytes, native_snapshot, node,
-    string_bytes, word,
-};
+use super::{canonical, json_number, key_bytes, native_snapshot, node, string_bytes, word};
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
 use perry_abi::json::{MAX_DEPTH, kind::*};
+use perry_abi::{
+    layout::numeric::Tag,
+    number::{Number, format_integer},
+};
 
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
@@ -114,25 +115,22 @@ pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u
 pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
     let w = writer(w);
     if !w.failed {
-        append_number(&mut w.text, number);
+        append_number(&mut w.text, Number::Float(number));
     }
 }
 
-/// Append a signed 64-bit integer with exact decimal digits.
+/// Serialize the compiler's numeric carriers without losing exact integer digits.
 #[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_write_i64(w: *mut u8, value: i64) {
+pub(crate) extern "C" fn std_json_write_numeric(w: *mut u8, tag: i32, bits: u64) {
     let w = writer(w);
     if !w.failed {
-        append_i64(&mut w.text, value);
-    }
-}
-
-/// Append an unsigned 64-bit integer with exact decimal digits.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_write_u64(w: *mut u8, value: u64) {
-    let w = writer(w);
-    if !w.failed {
-        append_u64(&mut w.text, value);
+        // Generated serializers handle absence before calling the numeric writer.
+        let tag = Tag::try_from(tag).expect("invalid JSON numeric tag");
+        assert!(
+            !matches!(tag, Tag::Null | Tag::Undefined | Tag::Omitted),
+            "absent JSON number"
+        );
+        append_number(&mut w.text, Number::from_numeric(tag, bits));
     }
 }
 
@@ -148,6 +146,25 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     }
     // SAFETY: guaranteed by the caller.
     quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
+}
+
+fn append_number(text: &mut Buffer, number: Number) {
+    let (magnitude, negative) = match number {
+        Number::Float(number) => {
+            if number.is_finite() {
+                let mut digits = [0; 40];
+                let len = crate::runtime::number_format(number, &mut digits);
+                text.extend_from_slice(&digits[..len]);
+            } else {
+                text.extend_from_slice(b"null");
+            }
+            return;
+        }
+        Number::Signed(value) => (value.unsigned_abs(), value < 0),
+        Number::Unsigned(value) => (value, false),
+    };
+    let mut digits = [0; 66];
+    text.extend_from_slice(format_integer(magnitude, negative, 10, &mut digits));
 }
 
 /// Append a JSON string literal, quotes included.
@@ -189,46 +206,35 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
         if depth + stack.len() as u32 > MAX_DEPTH {
             return false;
         }
-        match word(current, 0) {
-            NATIVE => {
-                current = native_snapshot(current);
-                continue;
-            }
-            EXCEPTION => text.extend_from_slice(b"{}"),
-            NULL | UNDEFINED => text.extend_from_slice(b"null"),
-            BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
-                b"true"
-            } else {
-                b"false"
-            }),
-            NUMBER => {
-                // SAFETY: number nodes hold an f64 at 8.
-                let number = unsafe { *(current.add(8) as *const f64) };
-                append_number(text, number);
-            }
-            INT64 => {
-                // SAFETY: INT64 nodes hold an i64 at 8.
-                let integer = unsafe { *(current.add(8) as *const i64) };
-                append_i64(text, integer);
-            }
-            UINT64 => {
-                // SAFETY: UINT64 nodes hold a u64 at 8.
-                let integer = unsafe { *(current.add(8) as *const u64) };
-                append_u64(text, integer);
-            }
-            STRING => quote(text, string_bytes(current)),
-            kind @ (ARRAY | OBJECT) => {
-                if kind == OBJECT {
-                    current = canonical(current);
+        if let Some(number) = json_number(current) {
+            append_number(text, number);
+        } else {
+            match word(current, 0) {
+                NATIVE => {
+                    current = native_snapshot(current);
+                    continue;
                 }
-                text.push(if kind == ARRAY { b'[' } else { b'{' });
-                stack.push(Open {
-                    node: current,
-                    next: word(current, 16),
-                    written: false,
-                });
+                EXCEPTION => text.extend_from_slice(b"{}"),
+                NULL | UNDEFINED => text.extend_from_slice(b"null"),
+                BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
+                    b"true"
+                } else {
+                    b"false"
+                }),
+                STRING => quote(text, string_bytes(current)),
+                kind @ (ARRAY | OBJECT) => {
+                    if kind == OBJECT {
+                        current = canonical(current);
+                    }
+                    text.push(if kind == ARRAY { b'[' } else { b'{' });
+                    stack.push(Open {
+                        node: current,
+                        next: word(current, 16),
+                        written: false,
+                    });
+                }
+                _ => return false,
             }
-            _ => return false,
         }
         // The next member to write, closing the containers that are done.
         loop {
@@ -272,6 +278,21 @@ pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     if value.is_null() {
         w.text.extend_from_slice(b"null");
     } else if !value_text(&mut w.text, value, w.depth) {
+        w.failed = true;
+    }
+}
+
+/// Write an undeclared property at its position among the native fields.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_write_member(w: *mut u8, member: *mut u8) {
+    let w = writer(w);
+    if w.failed || word(member, 0) == UNDEFINED {
+        return;
+    }
+    separate(w);
+    quote(&mut w.text, key_bytes(member as usize as u32));
+    w.text.push(b':');
+    if !value_text(&mut w.text, member, w.depth) {
         w.failed = true;
     }
 }

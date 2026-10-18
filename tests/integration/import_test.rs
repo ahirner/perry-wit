@@ -31,9 +31,11 @@ fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<(
         "initialization.ts",
         r#"
         let effects = 0;
+        const step = 1;
+        class Step { amount = step; }
         const failures = probe();
         let cell: number | undefined = undefined;
-        function value(): number { effects++; return 3; }
+        function value(): number { effects += new Step().amount; return 3; }
         function probe(): number {
             let failures = 0;
             try { const observed = cell; } catch { failures++; }

@@ -14,6 +14,15 @@ const d2 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 31 }, { overflow
 const d3 = Temporal.PlainDate.from("2024-03-10");
 console.log("fields", d1.toString(), d2.toString(), d1.until(d3).days, d3.until(d1).days);
 console.log("compare", Temporal.PlainDate.compare(d1, d2), Temporal.PlainDate.compare(d1, d3), Temporal.PlainDate.compare(d3, d1));
+for (const largestUnit of ["day", "weeks", "months", "years", "invalid"]) {
+  try {
+    // @ts-expect-error Exercise runtime validation of dynamic unit strings.
+    const duration = d1.until(Temporal.PlainDate.from("2025-05-31"), { largestUnit });
+    console.log("duration", largestUnit, duration.years, duration.months, duration.weeks, duration.days, duration.sign, duration.blank);
+  } catch (e) {
+    console.log("invalid-unit", e instanceof RangeError);
+  }
+}
 
 // Values survive timer payloads; JSON and string forms agree.
 const instant = Temporal.Instant.fromEpochMilliseconds(-1);

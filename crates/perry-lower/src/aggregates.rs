@@ -45,12 +45,12 @@ impl<'s> FunctionBuilder<'s> {
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
         );
-        if let Some((k_ty, v_ty, tuple_rec)) =
+        if let Some((k_ty, v_ty, _)) =
             crate::collections::dict_entry_types(ctx, array.get_type(ctx))
         {
             let key = self.expression_with(ctx, index, Some(k_ty))?;
             let val = self.expression_with(ctx, value, Some(v_ty))?;
-            return self.kv_set(ctx, array, key, val, k_ty, v_ty, tuple_rec);
+            return self.kv_set(ctx, array, key, val);
         }
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
@@ -72,12 +72,11 @@ impl<'s> FunctionBuilder<'s> {
         }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
-        if let Some((k_ty, v_ty, tuple_rec)) =
-            crate::collections::dict_entry_types(ctx, record.get_type(ctx))
+        if let Some((_, v_ty, _)) = crate::collections::dict_entry_types(ctx, record.get_type(ctx))
         {
             let key = self.string(ctx, field);
             let val = self.expression_with(ctx, value, Some(v_ty))?;
-            return self.kv_set(ctx, record, key, val, k_ty, v_ty, tuple_rec);
+            return self.kv_set(ctx, record, key, val);
         }
         if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
             && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)
@@ -128,9 +127,9 @@ impl<'s> FunctionBuilder<'s> {
             return self.variant_literal(ctx, ty, names, args);
         }
         if let Some(ty) = expected
-            && let Some((k_ty, v_ty, tuple_rec)) = crate::collections::dict_entry_types(ctx, ty)
+            && let Some((_, v_ty, tuple_rec)) = crate::collections::dict_entry_types(ctx, ty)
         {
-            return self.dict_literal(ctx, names, args, k_ty, v_ty, tuple_rec);
+            return self.dict_literal(ctx, names, args, v_ty, tuple_rec);
         }
         if let Some(record) =
             expected.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
@@ -205,6 +204,7 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         let mut positioned = Vec::with_capacity(values.len() + missing.len());
+        let mut order = Vec::with_capacity(values.len());
         for (index, ty) in missing {
             positioned.push((
                 index,
@@ -216,11 +216,16 @@ impl<'s> FunctionBuilder<'s> {
                 .deref(ctx)
                 .field(name)
                 .with_context(|| format!("record has no field {name}"))?;
+            order.push(index as u32);
             positioned.push((index, value));
         }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+        Ok(self.emit_value(ctx, |ctx| {
+            let allocation = AllocOp::new(ctx, record, operands);
+            allocation.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
+            allocation
+        }))
     }
 
     /// `new C(…)` of a class that Perry HIR made from an object literal.
@@ -401,7 +406,7 @@ impl<'s> FunctionBuilder<'s> {
         });
         enum ResidueStep {
             Spread(Value),
-            Exclude(String),
+            Insert(String),
         }
         let mut residue_steps: Vec<ResidueStep> = Vec::new();
         let mut field_values: Vec<(String, Value)> = Vec::new();
@@ -411,9 +416,7 @@ impl<'s> FunctionBuilder<'s> {
                     && matches!(val_expr, Expr::Undefined)
                 {
                     field_values.retain(|(k, _)| k != key);
-                    if !residue_steps.is_empty() {
-                        residue_steps.push(ResidueStep::Exclude(key.clone()));
-                    }
+                    residue_steps.push(ResidueStep::Insert(key.clone()));
                     continue;
                 }
                 let expected_field_ty = expected_record
@@ -448,9 +451,7 @@ impl<'s> FunctionBuilder<'s> {
                     Some(target_ty) => self.fit(ctx, val, target_ty)?,
                     None => val,
                 };
-                if !residue_steps.is_empty() {
-                    residue_steps.push(ResidueStep::Exclude(key.clone()));
-                }
+                residue_steps.push(ResidueStep::Insert(key.clone()));
                 if let Some((_, existing)) = field_values.iter_mut().find(|(k, _)| k == key) {
                     let existing_ty = existing.get_type(ctx);
                     let val_ty = val.get_type(ctx);
@@ -638,15 +639,19 @@ impl<'s> FunctionBuilder<'s> {
         }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        let alloc = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands));
+        let alloc = self.emit_value(ctx, |ctx| {
+            let alloc = AllocOp::new(ctx, record, operands);
+            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
+            alloc
+        });
         for step in residue_steps {
             match step {
                 ResidueStep::Spread(src) => {
                     self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![alloc, src]);
                 }
-                ResidueStep::Exclude(key) => {
+                ResidueStep::Insert(key) => {
                     let key_val = self.string(ctx, &key);
-                    self.intrinsic_void(ctx, Intrinsic::JsonExclude, vec![alloc, key_val]);
+                    self.intrinsic_void(ctx, Intrinsic::JsonInsert, vec![alloc, key_val]);
                 }
             }
         }
@@ -724,7 +729,11 @@ impl<'s> FunctionBuilder<'s> {
         }
         positioned.sort_by_key(|(index, _)| *index);
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        let alloc = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands));
+        let alloc = self.emit_value(ctx, |ctx| {
+            let alloc = AllocOp::new(ctx, record, operands);
+            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
+            alloc
+        });
         self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![alloc, src]);
         for key in exclude_keys {
             let key_val = self.string(ctx, key);

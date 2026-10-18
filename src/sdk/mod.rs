@@ -1,9 +1,9 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
 mod codegen;
-pub(crate) use codegen::{
-    collect_world_types, declaration_id, qualified_type_name, to_camel_case, to_pascal_case,
-    type_name, world_type_name,
+mod names;
+pub(crate) use names::{
+    NamedType, canonical_type, collect_world_types, declaration_id, to_camel_case, to_pascal_case,
 };
 mod tsconfig;
 

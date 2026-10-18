@@ -146,6 +146,19 @@ fn normalized(text: &str) -> String {
 fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, TEMPORARY_RECORDS);
+    walk_op(
+        ctx,
+        &mut (),
+        &WALKCONFIG_PREORDER_FORWARD,
+        module,
+        |ctx, _, node| {
+            if let IRNode::Operation(op) = node
+                && let Some(alloc) = Operation::get_op::<crate::AllocOp>(op, ctx)
+            {
+                alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
+            }
+        },
+    );
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     for expected in [
@@ -234,6 +247,33 @@ fn verifier_rejects_ill_typed_heap_ops() {
         "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.\"y\" = v; y = perry.field_get p.\"y\" : builtin.fp64;"
     )))
     .expect("well-typed heap ops verify");
+    for mut fields in [vec![0, 0], vec![2]] {
+        let ctx = &mut Context::new();
+        let module = parse(
+            ctx,
+            &single_block(&format!("p = perry.alloc Task (v, v) : {POINT};")),
+        );
+        walk_op(
+            ctx,
+            &mut fields,
+            &WALKCONFIG_PREORDER_FORWARD,
+            module,
+            |ctx, fields, node| {
+                if let IRNode::Operation(op) = node
+                    && let Some(alloc) = Operation::get_op::<crate::AllocOp>(op, ctx)
+                {
+                    alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(fields.clone()));
+                }
+            },
+        );
+        let error = verify_operation(module, ctx).expect_err("invalid field order");
+        assert!(
+            error
+                .disp(ctx)
+                .to_string()
+                .contains("invalid property insertion order")
+        );
+    }
 }
 
 #[test]
@@ -343,7 +383,18 @@ builtin.module @tasks {
 
 #[test]
 fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
-    for input in [RETAINED_RECORDS, ASYNC_STEP] {
+    let dictionary = single_block(
+        "value = perry.undef : perry.array <perry.record <Renamed dict_tuple [ _0: perry.string, _1: builtin.fp64 ]>>;",
+    );
+    let recursive_collection = single_block(
+        "value = perry.undef : perry.record <Recursive map_box [ _0: perry.array <perry.record <Entry map_tuple [ _0: perry.string, _1: perry.record <Recursive>, _2: builtin.integer i1, _3: builtin.fp64 ]>>, _1: builtin.fp64, _2: builtin.fp64, _3: builtin.fp64 ]>;",
+    );
+    for input in [
+        RETAINED_RECORDS,
+        ASYNC_STEP,
+        &dictionary,
+        &recursive_collection,
+    ] {
         let ctx = &mut Context::new();
         let module = parse(ctx, input);
         verify_operation(module, ctx)?;

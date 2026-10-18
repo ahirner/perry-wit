@@ -1,7 +1,7 @@
 use super::{
-    Constraint, Fact, Integer, Interval, Key, Outcomes, Range, ResultDomain, Solver, Work,
-    arithmetic_range, comparison_domain, constant_range, declared, heap, integer_arithmetic,
-    literal, promise_payload,
+    ArgumentDomain, Constraint, Fact, Integer, Interval, Key, Outcomes, Range, ResultDomain,
+    Solver, Work, arithmetic_range, comparison_domain, constant_range, declared, heap,
+    integer_arithmetic, literal, promise_payload,
 };
 use crate::{
     attrs::BinaryKind,
@@ -331,40 +331,36 @@ impl Solver {
                 let ty = value.get_type(ctx);
                 let ty = ty.deref(ctx);
                 if let Some(declared) = declared(&body.declared_args, position) {
-                    return Some(declared);
+                    return ArgumentDomain::Integer(declared);
+                }
+                let fact = state.fact(value);
+                if !asynchronous
+                    && !ty.is::<PromiseType>()
+                    && (fact == Fact::Numeric
+                        || (ty.is::<crate::types::OptionalType>() && fact.needs_lossless_64()))
+                {
+                    return ArgumentDomain::Numeric;
                 }
                 if ty.is::<PromiseType>() || ty.is::<crate::types::OptionalType>() {
-                    return None;
+                    return ArgumentDomain::Original;
                 }
-                match state.fact(value) {
-                    Fact::Integer(integer) => Some(integer),
+                match fact {
+                    Fact::Integer(integer) => ArgumentDomain::Integer(integer),
                     Fact::Literal { .. } => {
                         let Range::Bounds(interval) = state.range(value) else {
-                            return None;
+                            return ArgumentDomain::Original;
                         };
                         let base = if ty.is::<crate::types::BigIntType>() {
                             Integer::I64
                         } else {
                             Integer::I32
                         };
-                        interval.include(state.required.get(&value).copied().unwrap_or(base))
+                        interval
+                            .include(state.required.get(&value).copied().unwrap_or(base))
+                            .into()
                     }
-                    _ => None,
+                    _ => ArgumentDomain::Original,
                 }
-            })
-            .collect();
-        let numeric_args = operation
-            .operands()
-            .enumerate()
-            .map(|(position, value)| {
-                let fact = state.fact(value);
-                let ty = value.get_type(ctx);
-                let ty = ty.deref(ctx);
-                !asynchronous
-                    && declared(&body.declared_args, position).is_none()
-                    && !ty.is::<PromiseType>()
-                    && (fact == Fact::Numeric
-                        || (ty.is::<crate::types::OptionalType>() && fact.needs_lossless_64()))
             })
             .collect();
         let results = operation
@@ -381,7 +377,6 @@ impl Solver {
         Key {
             function: callee.clone(),
             args,
-            numeric_args,
             results,
             specialize: true,
         }

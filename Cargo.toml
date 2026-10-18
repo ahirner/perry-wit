@@ -15,7 +15,6 @@ workspace = true
 [workspace]
 members = [
   ".",
-  "crates/search-helper",
   "crates/text-helper",
   "crates/fetch-helper",
   "crates/json-helper",

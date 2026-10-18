@@ -69,7 +69,11 @@ const labels = new Map<string, { label: string }>();
 labels.set("k", { label: "found" });
 console.log("optional-chain", labels.get("k")?.label ?? null, labels.get("missing")?.label ?? null);
 const nums: number[] = [2, 3, 4];
-console.log("reduce", reduceAndForEach(nums));
+const backwards: number[] = [1, 2, 3];
+console.log("reduce", reduceAndForEach(nums), backwards.reduceRight((acc, n, i, array) => {
+  if (i === 2) { array.pop(); array.pop(); }
+  return acc * 10 + n;
+}, 0));
 console.log("at", nums.at(-1), nums.at(0), nums.at(5), nums.at(NaN), nums.at(-Infinity));
 console.log("find-last", nums.findLast((x) => x < 4), nums.findLastIndex((x) => x < 4), nums.findLast((x) => x > 9), nums.findLastIndex((x) => x > 9));
 const shrink: number[] = [1, 2, 3];

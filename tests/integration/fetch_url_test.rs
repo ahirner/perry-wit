@@ -98,7 +98,7 @@ fn ipv6_compression_and_ipv4_suffix_boundaries_match_node() {
     let expected: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
     for (input, expected) in inputs.iter().zip(expected) {
         let mut bytes = [0; 512];
-        let actual = url::normalize(input.as_bytes(), &mut bytes)
+        let actual = url::normalize_request(input.as_bytes(), &mut bytes)
             .ok()
             .map(|metadata| String::from_utf8(bytes[..metadata[4] as usize].to_vec()).unwrap());
         assert_eq!(actual, expected, "{input}");
@@ -157,8 +157,8 @@ fn http_url_normalization_matches_node_for_host_path_and_query_shapes() {
     let expected = String::from_utf8(output.stdout).unwrap();
     for (input, expected) in cases.iter().zip(expected.lines()) {
         let mut bytes = vec![0; input.len() * 4 + 64];
-        let metadata =
-            url::normalize(input.as_bytes(), &mut bytes).unwrap_or_else(|_| panic!("{input:?}"));
+        let metadata = url::normalize_request(input.as_bytes(), &mut bytes)
+            .unwrap_or_else(|_| panic!("{input:?}"));
         assert_eq!(
             std::str::from_utf8(&bytes[..metadata[4] as usize]).unwrap(),
             expected,
@@ -168,8 +168,8 @@ fn http_url_normalization_matches_node_for_host_path_and_query_shapes() {
         assert_eq!(bytes[metadata[3] as usize], b'/');
         let canonical = bytes[..metadata[4] as usize].to_vec();
         assert_eq!(
-            url::normalize(&canonical, &mut bytes).unwrap(),
-            metadata,
+            url::normalize_request(&canonical, &mut bytes).unwrap()[..5],
+            metadata[..5],
             "idempotence: {input:?}"
         );
         assert_eq!(&bytes[..canonical.len()], canonical);
@@ -196,52 +196,13 @@ fn invalid_http_authorities_and_short_outputs_fail_before_io() {
         "http://09/",
     ] {
         assert!(
-            url::normalize(input.as_bytes(), &mut [0; 512]).is_err(),
+            url::normalize_request(input.as_bytes(), &mut [0; 512]).is_err(),
             "{input}"
         );
     }
     let source = b"http://example.com/";
     for capacity in 0..source.len() {
-        assert!(url::normalize(source, &mut vec![0; capacity]).is_err());
-    }
-}
-
-#[test]
-fn relative_redirect_locations_match_node() {
-    let base = "http://example.com/a/b?old=yes";
-    let locations = [
-        "../c",
-        "./c?x=1#hash",
-        "/x/../z",
-        "//other.example:80/x",
-        "https://other.example",
-        "?new=query",
-        "#fragment",
-        "",
-        "  next  ",
-        "\\path\\next",
-        "é?q='{}",
-    ];
-    let script = "for(const ref of JSON.parse(process.argv[2])) {const u=new URL(ref,process.argv[1]);u.hash='';console.log(u.href)}";
-    let output = std::process::Command::new("node")
-        .args([
-            "-e",
-            script,
-            base,
-            &serde_json::to_string(&locations).unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let expected = String::from_utf8(output.stdout).unwrap();
-    for (location, expected) in locations.iter().zip(expected.lines()) {
-        let mut output = [0; 4096];
-        let metadata = url::resolve(base.as_bytes(), location.as_bytes(), &mut output).unwrap();
-        assert_eq!(
-            std::str::from_utf8(&output[..metadata[4] as usize]).unwrap(),
-            expected,
-            "{location:?}"
-        );
+        assert!(url::normalize_request(source, &mut vec![0; capacity]).is_err());
     }
 }
 

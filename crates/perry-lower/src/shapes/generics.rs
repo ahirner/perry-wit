@@ -2,6 +2,9 @@
 use super::*;
 use perry_hir::ir::{Class, Interface, TypeAlias};
 
+const RESOLUTION_DEPTH: usize = 32;
+const ARGUMENT_LIMIT: usize = 4096;
+
 pub(crate) trait DeclarationLookup {
     fn interface(&self, name: &str) -> Option<(usize, &Interface)>;
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)>;
@@ -110,7 +113,7 @@ impl<'a> Declaration<'a> {
             "too many type arguments for {base}"
         );
         let mut bindings = HashMap::with_capacity(parameters.len());
-        let mut remaining = 4096;
+        let mut remaining = ARGUMENT_LIMIT;
         for (index, parameter) in parameters.iter().enumerate() {
             let argument = match arguments.get(index) {
                 Some(argument) => *argument,
@@ -133,6 +136,28 @@ impl<'a> Declaration<'a> {
     }
 }
 
+fn instantiate_alias<L: DeclarationLookup>(
+    ctx: &Context,
+    lookup: &L,
+    base: &str,
+    arguments: &[ArgumentId],
+) -> Option<ArgumentId> {
+    let (_, Declaration::Alias(alias)) = Declaration::find(lookup, base)? else {
+        return None;
+    };
+    let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
+    let mut remaining = ARGUMENT_LIMIT;
+    Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()
+}
+
+fn union_of(ctx: &Context, members: Vec<ArgumentId>) -> ArgumentId {
+    match members.as_slice() {
+        [] => Argument::from_kind(ctx, Kind::Never),
+        [single] => *single,
+        _ => Argument::from_kind(ctx, Kind::Union(members)),
+    }
+}
+
 impl<'s> Shapes<'s> {
     pub(crate) fn class_value_type(
         &self,
@@ -148,7 +173,7 @@ impl<'s> Shapes<'s> {
             return self.value_type(ctx, ty);
         }
         let bindings = Declaration::Class(class).bind(ctx, class_name, type_args)?;
-        let mut remaining = 4096;
+        let mut remaining = ARGUMENT_LIMIT;
         let arg = Argument::from_hir(ctx, ty, &bindings, &mut remaining)?;
         self.source_type(ctx, arg)
     }
@@ -318,7 +343,7 @@ pub(super) fn collect_class_properties(
     bindings: &HashMap<&str, ArgumentId>,
 ) -> Option<Vec<(String, ArgumentId, bool)>> {
     let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
-    let mut remaining = 4096;
+    let mut remaining = ARGUMENT_LIMIT;
     for f in &class.fields {
         let field_ty = Argument::from_hir(ctx, &f.ty, bindings, &mut remaining).ok()?;
         if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == f.name) {
@@ -337,11 +362,11 @@ pub(super) fn collect_interface_properties<L: DeclarationLookup>(
     bindings: &HashMap<&str, ArgumentId>,
     depth: usize,
 ) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
-    let mut remaining = 4096;
+    let mut remaining = ARGUMENT_LIMIT;
     for ext in &interface.extends {
         let ext_sub = Argument::from_hir(ctx, ext, bindings, &mut remaining).ok()?;
         let parent_props = resolve_record_properties(ctx, lookup, ext_sub, depth + 1)?;
@@ -370,9 +395,17 @@ pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
     members: &[ArgumentId],
     depth: usize,
 ) -> Vec<ArgumentId> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return members.to_vec();
     }
+    let nested = |target: ArgumentId| match target.deref(ctx).kind() {
+        Kind::Union(members) => Some(members.clone()),
+        Kind::Named(_) | Kind::Generic { .. } => {
+            let flat = flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
+            (flat != [target]).then_some(flat)
+        }
+        _ => None,
+    };
     let mut out = Vec::new();
     for &member in members {
         let nested_union = match member.deref(ctx).kind() {
@@ -382,19 +415,11 @@ pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
                 if let Some((_, alias)) = lookup.type_alias(&name)
                     && alias.type_params.is_empty()
                 {
-                    let mut remaining = 4096;
+                    let mut remaining = ARGUMENT_LIMIT;
                     if let Ok(target) =
                         Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining)
                     {
-                        match target.deref(ctx).kind() {
-                            Kind::Union(nested) => Some(nested.clone()),
-                            Kind::Named(_) | Kind::Generic { .. } => {
-                                let flat =
-                                    flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
-                                if flat != [target] { Some(flat) } else { None }
-                            }
-                            _ => None,
-                        }
+                        nested(target)
                     } else {
                         None
                     }
@@ -409,28 +434,8 @@ pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
                     expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
                 {
                     Some(vec![expanded])
-                } else if let Some((_, Declaration::Alias(alias))) =
-                    Declaration::find(lookup, &base)
-                    && let Ok(bindings) = Declaration::Alias(alias).bind(ctx, &base, &arguments)
-                {
-                    let mut remaining = 4096;
-                    if let Ok(target) =
-                        Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)
-                    {
-                        match target.deref(ctx).kind() {
-                            Kind::Union(nested) => Some(nested.clone()),
-                            Kind::Named(_) | Kind::Generic { .. } => {
-                                let flat =
-                                    flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
-                                if flat != [target] { Some(flat) } else { None }
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
                 } else {
-                    None
+                    instantiate_alias(ctx, lookup, &base, &arguments).and_then(nested)
                 }
             }
             _ => None,
@@ -455,7 +460,7 @@ fn union_member_matches<L: DeclarationLookup>(
     pattern: ArgumentId,
     depth: usize,
 ) -> bool {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return false;
     }
     if member == pattern {
@@ -490,7 +495,10 @@ pub(super) fn expand_utility_type_with_lookup<L: DeclarationLookup>(
     arguments: &[ArgumentId],
     depth: usize,
 ) -> Option<ArgumentId> {
-    if depth >= 32 || lookup.interface(base).is_some() || lookup.type_alias(base).is_some() {
+    if depth >= RESOLUTION_DEPTH
+        || lookup.interface(base).is_some()
+        || lookup.type_alias(base).is_some()
+    {
         return None;
     }
     match (base, arguments) {
@@ -500,46 +508,22 @@ pub(super) fn expand_utility_type_with_lookup<L: DeclarationLookup>(
                 .into_iter()
                 .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void))
                 .collect();
-            Some(match filtered.len() {
-                0 => Argument::from_kind(ctx, Kind::Never),
-                1 => filtered[0],
-                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
-            })
+            Some(union_of(ctx, filtered))
         }
-        ("Exclude", [target, excluded]) => {
-            let target_members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
-            let excluded_members = flatten_union_with_lookup(ctx, lookup, &[*excluded], depth + 1);
-            let filtered: Vec<ArgumentId> = target_members
-                .into_iter()
-                .filter(|m| {
-                    !excluded_members
-                        .iter()
-                        .any(|ex| union_member_matches(ctx, lookup, *m, *ex, depth + 1))
-                })
-                .collect();
-            Some(match filtered.len() {
-                0 => Argument::from_kind(ctx, Kind::Never),
-                1 => filtered[0],
-                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
-            })
-        }
-        ("Extract", [target, extracted]) => {
-            let target_members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
-            let extracted_members =
-                flatten_union_with_lookup(ctx, lookup, &[*extracted], depth + 1);
-            let filtered: Vec<ArgumentId> = target_members
-                .into_iter()
-                .filter(|m| {
-                    extracted_members
-                        .iter()
-                        .any(|ex| union_member_matches(ctx, lookup, *m, *ex, depth + 1))
-                })
-                .collect();
-            Some(match filtered.len() {
-                0 => Argument::from_kind(ctx, Kind::Never),
-                1 => filtered[0],
-                _ => Argument::from_kind(ctx, Kind::Union(filtered)),
-            })
+        ("Exclude" | "Extract", [target, selected]) => {
+            let members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
+            let selected = flatten_union_with_lookup(ctx, lookup, &[*selected], depth + 1);
+            Some(union_of(
+                ctx,
+                members
+                    .into_iter()
+                    .filter(|member| {
+                        selected.iter().any(|candidate| {
+                            union_member_matches(ctx, lookup, *member, *candidate, depth + 1)
+                        }) == (base == "Extract")
+                    })
+                    .collect(),
+            ))
         }
         _ => None,
     }
@@ -551,7 +535,7 @@ fn extract_string_keys<L: DeclarationLookup>(
     ty: ArgumentId,
     depth: usize,
 ) -> Option<Vec<String>> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     match ty.deref(ctx).kind() {
@@ -570,7 +554,7 @@ fn extract_string_keys<L: DeclarationLookup>(
             if !alias.type_params.is_empty() {
                 return None;
             }
-            let mut remaining = 4096;
+            let mut remaining = ARGUMENT_LIMIT;
             let target =
                 Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining).ok()?;
             extract_string_keys(ctx, lookup, target, depth + 1)
@@ -583,14 +567,7 @@ fn extract_string_keys<L: DeclarationLookup>(
             {
                 return extract_string_keys(ctx, lookup, expanded, depth + 1);
             }
-            let (_, Declaration::Alias(alias)) = Declaration::find(lookup, &base)? else {
-                return None;
-            };
-            let bindings = Declaration::Alias(alias)
-                .bind(ctx, &base, &arguments)
-                .ok()?;
-            let mut remaining = 4096;
-            let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
+            let target = instantiate_alias(ctx, lookup, &base, &arguments)?;
             extract_string_keys(ctx, lookup, target, depth + 1)
         }
         _ => None,
@@ -622,7 +599,10 @@ pub(super) fn resolve_utility_record_properties<L: DeclarationLookup>(
     arguments: &[ArgumentId],
     depth: usize,
 ) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= 32 || lookup.interface(base).is_some() || lookup.type_alias(base).is_some() {
+    if depth >= RESOLUTION_DEPTH
+        || lookup.interface(base).is_some()
+        || lookup.type_alias(base).is_some()
+    {
         return None;
     }
     match (base, arguments) {
@@ -677,7 +657,7 @@ pub(super) fn resolve_record_properties<L: DeclarationLookup>(
     ty: ArgumentId,
     depth: usize,
 ) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     let kind_info = match ty.deref(ctx).kind() {
@@ -707,7 +687,7 @@ pub(super) fn resolve_generic_properties<L: DeclarationLookup>(
     arguments: &[ArgumentId],
     depth: usize,
 ) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     if let Some(props) = resolve_utility_record_properties(ctx, lookup, base, arguments, depth) {
@@ -721,7 +701,7 @@ pub(super) fn resolve_generic_properties<L: DeclarationLookup>(
         }
         Declaration::Class(class) => collect_class_properties(ctx, class, &bindings),
         Declaration::Alias(alias) => {
-            let mut remaining = 4096;
+            let mut remaining = ARGUMENT_LIMIT;
             let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
             resolve_record_properties(ctx, lookup, target, depth + 1)
         }
@@ -737,7 +717,7 @@ pub(crate) fn property_type(
     arguments: &[HirType],
     property: &str,
 ) -> Option<HirType> {
-    let mut remaining = 4096;
+    let mut remaining = ARGUMENT_LIMIT;
     let arguments = arguments
         .iter()
         .map(|ty| Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining))
@@ -755,7 +735,7 @@ fn property_type_depth(
     property: &str,
     depth: usize,
 ) -> Option<HirType> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     let lookup = (interfaces, type_aliases);
@@ -775,12 +755,7 @@ fn property_type_depth(
     {
         expanded
     } else {
-        let (_, Declaration::Alias(alias)) = Declaration::find(&lookup, base)? else {
-            return None;
-        };
-        let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
-        let mut remaining = 4096;
-        Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?
+        instantiate_alias(ctx, &lookup, base, arguments)?
     };
     let target = {
         let sub_ref = substituted.deref(ctx);
@@ -913,7 +888,7 @@ pub(crate) fn dict_entry_types(
     type_aliases: &[TypeAlias],
     ty: &HirType,
 ) -> Option<(HirType, HirType)> {
-    let mut remaining = 4096;
+    let mut remaining = ARGUMENT_LIMIT;
     let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
     let (k, v) = dict_entry_types_depth(ctx, interfaces, type_aliases, arg, 0)?;
     Some((k.deref(ctx).to_hir(ctx), v.deref(ctx).to_hir(ctx)))
@@ -926,7 +901,7 @@ fn dict_entry_types_depth(
     ty: ArgumentId,
     depth: usize,
 ) -> Option<(ArgumentId, ArgumentId)> {
-    if depth >= 32 {
+    if depth >= RESOLUTION_DEPTH {
         return None;
     }
     let lookup = (interfaces, type_aliases);
@@ -981,7 +956,7 @@ fn dict_entry_types_depth(
                     depth + 1,
                 );
             }
-            let mut remaining = 4096;
+            let mut remaining = ARGUMENT_LIMIT;
             let target =
                 Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining).ok()?;
             dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth + 1)
@@ -1001,12 +976,7 @@ fn dict_entry_types_generic(
     depth: usize,
 ) -> Option<(ArgumentId, ArgumentId)> {
     let lookup = (interfaces, type_aliases);
-    let (_, Declaration::Alias(alias)) = Declaration::find(&lookup, base)? else {
-        return None;
-    };
-    let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
-    let mut remaining = 4096;
-    let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
+    let target = instantiate_alias(ctx, &lookup, base, arguments)?;
     dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth)
 }
 
@@ -1016,7 +986,7 @@ pub(crate) fn object_properties(
     type_aliases: &[TypeAlias],
     ty: &HirType,
 ) -> Option<Vec<(String, HirType, bool)>> {
-    let mut remaining = 4096;
+    let mut remaining = ARGUMENT_LIMIT;
     let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
     let lookup = (interfaces, type_aliases);
     let props = resolve_record_properties(ctx, &lookup, arg, 0)?;

@@ -1,6 +1,6 @@
 //! Schema-specific JSON construction in MIR over the shared JSON lexer.
 use super::*;
-use perry_mir::{JsonCursorKeyOp, NumberStringType};
+use perry_mir::{JsonCursorKeyOp, JsonSchema};
 
 impl<'s> FunctionBuilder<'s> {
     fn cursor_index(&mut self, ctx: &mut Context, n: u32) -> Value {
@@ -94,7 +94,8 @@ impl<'s> FunctionBuilder<'s> {
         ty: TypeHandle,
         byte: Value,
     ) -> Result<(Value, Value)> {
-        if let Some(inner) = optional_value(ctx, ty) {
+        let schema = JsonSchema::of(ctx, ty);
+        if let Some(JsonSchema::Optional(inner)) = schema {
             let null = self.cursor_is(ctx, byte, b'n');
             let admitted = absence(ctx, ty).is_some_and(|s| s.admits_null());
             return self.cursor_choice(
@@ -118,12 +119,12 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if ty.deref(ctx).is::<JsonType>() {
+        if matches!(schema, Some(JsonSchema::Value)) {
             let value = self.intrinsic(ctx, Intrinsic::JsonCursorValue, vec![cursor]);
             let e = self.boolean(ctx, false);
             return Ok((value, e));
         }
-        if ty.deref(ctx).is::<NumberStringType>() {
+        if matches!(schema, Some(JsonSchema::NumberString)) {
             let string = self.cursor_is(ctx, byte, b'"');
             return self.cursor_choice(
                 ctx,
@@ -143,9 +144,9 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if ty.deref(ctx).is::<RecordType>()
-            || ty.deref(ctx).is::<ArrayType>()
-            || ty.deref(ctx).is::<perry_mir::VariantType>()
+        if let Some(
+            schema @ (JsonSchema::Record(_) | JsonSchema::Array(_) | JsonSchema::Variant(_)),
+        ) = schema
         {
             let name = self.json_decoder(
                 ctx,
@@ -154,10 +155,9 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx, entry| {
                     let input = entry.deref(ctx).get_argument(0);
                     let byte = entry.deref(ctx).get_argument(1);
-                    let variant = ty.deref(ctx).is::<perry_mir::VariantType>();
-                    let array = ty.deref(ctx).is::<ArrayType>()
-                        || TypedHandle::<RecordType>::from_handle(ty, ctx)
-                            .is_ok_and(|r| r.deref(ctx).is_tuple());
+                    let variant = matches!(schema, JsonSchema::Variant(_));
+                    let array = matches!(schema, JsonSchema::Array(_))
+                        || matches!(schema, JsonSchema::Record(r) if r.deref(ctx).is_tuple());
                     let wanted = b.cursor_is(ctx, byte, if array { b'[' } else { b'{' });
                     let (value, failed) = b.cursor_choice(
                         ctx,
@@ -187,60 +187,42 @@ impl<'s> FunctionBuilder<'s> {
             let op = call.get_operation().deref(ctx);
             return Ok((op.get_result(0), op.get_result(1)));
         }
-        let int64_signed = ty
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .filter(|int| int.width() == 64)
-            .map(|int| int.is_signed());
-        let (matches, intrinsic) = if ty.deref(ctx).is::<FP64Type>() {
-            let minus = self.cursor_is(ctx, byte, b'-');
-            let zero = self.cursor_index(ctx, u32::from(b'0'));
-            let nine = self.cursor_index(ctx, u32::from(b'9'));
-            let lower = self.compare(ctx, CompareKind::Ge, byte, zero);
-            let upper = self.compare(ctx, CompareKind::Le, byte, nine);
-            let boolean = lower.get_type(ctx);
-            let digits = self.choose(
-                ctx,
-                boolean,
-                lower,
-                |_, _| Ok(upper),
-                |b, ctx| Ok(b.boolean(ctx, false)),
-            )?;
-            (
-                self.cursor_or(ctx, minus, digits)?,
-                Intrinsic::JsonCursorNumber,
-            )
-        } else if let Some(signed) = int64_signed {
-            let minus = self.cursor_is(ctx, byte, b'-');
-            let zero = self.cursor_index(ctx, u32::from(b'0'));
-            let nine = self.cursor_index(ctx, u32::from(b'9'));
-            let lower = self.compare(ctx, CompareKind::Ge, byte, zero);
-            let upper = self.compare(ctx, CompareKind::Le, byte, nine);
-            let boolean = lower.get_type(ctx);
-            let digits = self.choose(
-                ctx,
-                boolean,
-                lower,
-                |_, _| Ok(upper),
-                |b, ctx| Ok(b.boolean(ctx, false)),
-            )?;
-            (
-                self.cursor_or(ctx, minus, digits)?,
-                if signed {
-                    Intrinsic::JsonCursorI64
-                } else {
-                    Intrinsic::JsonCursorU64
-                },
-            )
-        } else if ty.deref(ctx).is::<StringType>() {
-            (self.cursor_is(ctx, byte, b'"'), Intrinsic::JsonCursorString)
-        } else if self.is_bool_type(ctx, ty) {
-            let t = self.cursor_is(ctx, byte, b't');
-            let f = self.cursor_is(ctx, byte, b'f');
-            (self.cursor_or(ctx, t, f)?, Intrinsic::JsonCursorBoolean)
-        } else {
-            bail!("unsupported cursor scalar {}", ty.disp(ctx))
+        let int64_signed = match schema {
+            Some(JsonSchema::Integer { width: 64, signed }) => Some(signed),
+            _ => None,
         };
+        let (matches, intrinsic) =
+            if matches!(schema, Some(JsonSchema::Number)) || int64_signed.is_some() {
+                let minus = self.cursor_is(ctx, byte, b'-');
+                let zero = self.cursor_index(ctx, u32::from(b'0'));
+                let nine = self.cursor_index(ctx, u32::from(b'9'));
+                let lower = self.compare(ctx, CompareKind::Ge, byte, zero);
+                let upper = self.compare(ctx, CompareKind::Le, byte, nine);
+                let boolean = lower.get_type(ctx);
+                let digits = self.choose(
+                    ctx,
+                    boolean,
+                    lower,
+                    |_, _| Ok(upper),
+                    |b, ctx| Ok(b.boolean(ctx, false)),
+                )?;
+                (
+                    self.cursor_or(ctx, minus, digits)?,
+                    match int64_signed {
+                        Some(true) => Intrinsic::JsonCursorI64,
+                        Some(false) => Intrinsic::JsonCursorU64,
+                        None => Intrinsic::JsonCursorNumber,
+                    },
+                )
+            } else if matches!(schema, Some(JsonSchema::String)) {
+                (self.cursor_is(ctx, byte, b'"'), Intrinsic::JsonCursorString)
+            } else if matches!(schema, Some(JsonSchema::Boolean)) {
+                let t = self.cursor_is(ctx, byte, b't');
+                let f = self.cursor_is(ctx, byte, b'f');
+                (self.cursor_or(ctx, t, f)?, Intrinsic::JsonCursorBoolean)
+            } else {
+                bail!("unsupported cursor scalar {}", ty.disp(ctx))
+            };
         self.cursor_choice(
             ctx,
             ty,
@@ -248,10 +230,7 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| {
                 let v = b.intrinsic(ctx, intrinsic, vec![cursor]);
                 let e = if int64_signed.is_some() {
-                    let query = b.cursor_index(ctx, u32::MAX - 1);
-                    let failed = b.intrinsic(ctx, Intrinsic::JsonCursorSeek, vec![cursor, query]);
-                    let zero = b.cursor_index(ctx, 0);
-                    b.compare(ctx, CompareKind::Ne, failed, zero)
+                    b.intrinsic(ctx, Intrinsic::JsonCursorFailed, vec![cursor])
                 } else {
                     b.boolean(ctx, false)
                 };
@@ -322,10 +301,6 @@ impl<'s> FunctionBuilder<'s> {
             self.store(ctx, e, missing);
             failures.push(e);
         }
-        let json = JsonType::get(ctx).into();
-        let residue = self.entry_slot(ctx, json);
-        let empty = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
-        self.store(ctx, residue, empty);
         self.cursor_consume(ctx, cursor, b'{');
         let header = self.new_block(ctx, "json_members");
         let body = self.new_block(ctx, "json_member");
@@ -353,9 +328,7 @@ impl<'s> FunctionBuilder<'s> {
             self.jump(ctx, step);
         }
         self.switch_to(unknown);
-        let graph = self.load(ctx, residue)?;
-        let graph = self.intrinsic(ctx, Intrinsic::JsonCursorMember, vec![cursor, graph]);
-        self.store(ctx, residue, graph);
+        self.intrinsic_void(ctx, Intrinsic::JsonCursorExtra, vec![cursor]);
         self.jump(ctx, step);
         self.switch_to(step);
         let byte = self.intrinsic(ctx, Intrinsic::JsonCursorByte, vec![cursor]);
@@ -366,7 +339,6 @@ impl<'s> FunctionBuilder<'s> {
         self.cursor_consume(ctx, cursor, b',');
         self.jump(ctx, body);
         self.switch_to(done);
-        self.cursor_consume(ctx, cursor, b'}');
         let mut failed = self.boolean(ctx, false);
         for e in failures {
             let e = self.load(ctx, e)?;
@@ -377,8 +349,8 @@ impl<'s> FunctionBuilder<'s> {
             .map(|v| self.load(ctx, v))
             .collect::<Result<Vec<_>>>()?;
         let native = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields));
-        let graph = self.load(ctx, residue)?;
-        self.intrinsic_void(ctx, Intrinsic::JsonResidue, vec![native, graph]);
+        self.intrinsic_void(ctx, Intrinsic::JsonCursorRecord, vec![cursor, native]);
+        self.cursor_consume(ctx, cursor, b'}');
         Ok((native, failed))
     }
     fn cursor_array(

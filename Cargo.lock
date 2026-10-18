@@ -1500,6 +1500,7 @@ name = "perry-lower"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "perry-abi",
  "perry-hir",
  "perry-mir",
  "perry-parser",
@@ -1552,10 +1553,6 @@ dependencies = [
  "libm",
  "talc",
 ]
-
-[[package]]
-name = "perry-search-helper"
-version = "0.1.0"
 
 [[package]]
 name = "perry-std"

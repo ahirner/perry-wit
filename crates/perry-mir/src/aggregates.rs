@@ -17,8 +17,11 @@ use crate::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
+        attributes::TypeAttr,
         op_interfaces::{OneResultInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
+        type_interfaces::FunctionTypeInterface,
+        types::FunctionType,
     },
     context::{Context, Ptr},
     identifier::Identifier,
@@ -37,7 +40,7 @@ use pliron::{
     r#type::{Typed, TypedHandle},
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Callees of at most this many operations are inlined at every call site; larger leaves
 /// only where they have a single caller (and are not exported), so code does not grow.
@@ -211,14 +214,25 @@ fn inline_call(ctx: &mut Context, call: Ptr<Operation>, callee: &FuncOp) {
 
 /// The fields a record parameter is read through, when those reads are its only uses (the
 /// parameter's escape summary: it does not escape and is not written through).
-fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
-    let mut fields = std::collections::BTreeSet::new();
+fn read_only_fields(ctx: &Context, parameter: Value) -> Option<BTreeMap<String, FieldReads>> {
+    let mut fields = BTreeMap::<_, FieldReads>::new();
     for use_ in parameter.uses(ctx) {
         let get = Operation::get_op::<FieldGetOp>(use_.user_op(), ctx)?;
-        let field = get.field(ctx);
-        fields.insert(field);
+        fields
+            .entry(get.field(ctx))
+            .and_modify(|field| field.others.push(get))
+            .or_insert_with(|| FieldReads {
+                first: get,
+                others: Vec::new(),
+            });
     }
-    Some(fields.into_iter().collect())
+    Some(fields)
+}
+
+/// Retain the verified projections so promotion does not rediscover field types or uses.
+struct FieldReads {
+    first: FieldGetOp,
+    others: Vec<FieldGetOp>,
 }
 
 /// A record parameter of a
@@ -231,21 +245,17 @@ pub(crate) fn promote_arguments(
     root: Ptr<Operation>,
     ctx: &mut Context,
     effects: &crate::facts::ProgramFacts,
-) -> IRStatus {
+) -> Result<IRStatus> {
     let functions = functions(root, ctx);
     // Direct call sites per callee; callees also called asynchronously are left alone.
-    let mut sites: HashMap<Identifier, Vec<Ptr<Operation>>> = HashMap::new();
+    let mut sites: HashMap<Identifier, Vec<CallOp>> = HashMap::new();
     let mut async_callees: HashSet<Identifier> = HashSet::new();
     for function in &functions {
         for op in operations(ctx, function) {
-            match crate::calls::callee(ctx, op) {
-                Some(callee) if Operation::is_op::<CallOp>(op, ctx) => {
-                    sites.entry(callee).or_default().push(op)
-                }
-                Some(callee) => {
-                    async_callees.insert(callee);
-                }
-                None => {}
+            if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
+                sites.entry(call.callee(ctx)).or_default().push(call);
+            } else if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
+                async_callees.insert(call.callee(ctx));
             }
         }
     }
@@ -256,8 +266,7 @@ pub(crate) fn promote_arguments(
             || crate::calls::is_specialized_entry(ctx, function)
             || is_async(ctx, function)
             || effects
-                .effects(&name)
-                .expect("function effects")
+                .function_summary(ctx, function)?
                 .effects
                 .may_mutate_records()
             || async_callees.contains(&name)
@@ -282,11 +291,11 @@ pub(crate) fn promote_arguments(
                 index,
                 &fields,
                 sites.entry(name.clone()).or_default(),
-            );
+            )?;
             status = IRStatus::Changed;
         }
     }
-    status
+    Ok(status)
 }
 
 /// Replace parameter `index` of `function` with one parameter per field in `fields`, at the
@@ -295,39 +304,20 @@ fn promote(
     ctx: &mut Context,
     function: &FuncOp,
     index: usize,
-    fields: &[String],
-    calls: &mut [Ptr<Operation>],
-) {
-    use pliron::builtin::{
-        attributes::TypeAttr, type_interfaces::FunctionTypeInterface, types::FunctionType,
-    };
+    fields: &BTreeMap<String, FieldReads>,
+    calls: &mut [CallOp],
+) -> Result<()> {
     let entry = function.get_entry_block(ctx);
-    let parameter = entry.deref(ctx).get_argument(index);
-    let field_types: Vec<_> = {
-        let record = parameter.get_type(ctx);
-        let record = record.deref(ctx);
-        let record = record.downcast_ref::<RecordType>().expect("a record");
-        let field = |name: &String| record.field(name).expect("a field of the record").1;
-        fields.iter().map(field).collect()
-    };
+    let mut rewriter = IRRewriter::<DummyListener>::default();
     // The callee: new parameters replace the reads.
     let first = entry.deref(ctx).get_num_arguments();
-    for (offset, ty) in field_types.iter().enumerate() {
-        BasicBlock::insert_argument(entry, ctx, first + offset, *ty);
-    }
-    for use_ in parameter.uses(ctx) {
-        let get = use_.user_op();
-        let field = Operation::get_op::<FieldGetOp>(get, ctx)
-            .expect("read-only parameter")
-            .field(ctx);
-        let position = fields
-            .iter()
-            .position(|f| *f == field)
-            .expect("listed field");
-        let value = entry.deref(ctx).get_argument(first + position);
-        let result = get.deref(ctx).get_result(0);
-        result.replace_all_uses_with(ctx, &value);
-        Operation::erase(get, ctx);
+    for (offset, field) in fields.values().enumerate() {
+        let ty = field.first.get_result(ctx).get_type(ctx);
+        BasicBlock::insert_argument(entry, ctx, first + offset, ty);
+        let value = entry.deref(ctx).get_argument(first + offset);
+        for get in std::iter::once(&field.first).chain(&field.others) {
+            rewriter.replace_operation_with_values(ctx, get.get_operation(), vec![value]);
+        }
     }
     BasicBlock::remove_argument(entry, ctx, index);
     let arguments: Vec<_> = entry
@@ -335,45 +325,33 @@ fn promote(
         .arguments()
         .map(|argument| argument.get_type(ctx))
         .collect();
-    let results = {
-        let ty = function.get_type(ctx);
-        let ty = ty.deref(ctx);
-        ty.downcast_ref::<FunctionType>()
-            .expect("a function type")
-            .res_types()
-    };
+    let results = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?
+        .deref(ctx)
+        .res_types();
     let ty = FunctionType::get(ctx, arguments, results);
     function.set_attr_builtin_func_type(ctx, TypeAttr::new(ty.into()));
     // The callers read the fields at the call.
     for site in calls {
-        let call = *site;
-        let callee = Operation::get_op::<CallOp>(call, ctx)
-            .expect("a call")
-            .callee(ctx);
+        let call = site.get_operation();
+        let callee = site.callee(ctx);
         let mut operands: Vec<Value> = call.deref(ctx).operands().collect();
         let record = operands.remove(index);
-        for field in fields {
-            let get = FieldGetOp::new(ctx, record, field.clone())
-                .expect("a field of the record")
-                .get_operation();
-            get.insert_before(ctx, call);
-            operands.push(get.deref(ctx).get_result(0));
+        for field in fields.keys() {
+            let get = FieldGetOp::new(ctx, record, field.clone())?;
+            get.get_operation().insert_before(ctx, call);
+            operands.push(get.get_result(ctx));
         }
         let results: Vec<_> = call
             .deref(ctx)
             .results()
             .map(|result| result.get_type(ctx))
             .collect();
-        let replacement = CallOp::new(ctx, callee, operands, results).get_operation();
-        replacement.insert_before(ctx, call);
-        let old: Vec<Value> = call.deref(ctx).results().collect();
-        for (position, value) in old.into_iter().enumerate() {
-            let new = replacement.deref(ctx).get_result(position);
-            value.replace_all_uses_with(ctx, &new);
-        }
-        Operation::erase(call, ctx);
+        let replacement = CallOp::new(ctx, callee, operands, results);
+        replacement.get_operation().insert_before(ctx, call);
+        rewriter.replace_operation(ctx, call, replacement.get_operation());
         *site = replacement;
     }
+    Ok(())
 }
 
 /// Split a record into local field slots only when all uses are direct field reads/writes.
@@ -394,7 +372,10 @@ impl MatchRewrite for DecomposeRecords {
                         |intr| {
                             matches!(
                                 intr.intrinsic(ctx),
-                                crate::Intrinsic::JsonSpread | crate::Intrinsic::JsonExclude
+                                crate::Intrinsic::JsonSpread
+                                    | crate::Intrinsic::JsonExclude
+                                    | crate::Intrinsic::JsonInsert
+                                    | crate::Intrinsic::JsonOrderCopy
                             )
                         },
                     ))

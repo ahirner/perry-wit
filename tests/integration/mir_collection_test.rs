@@ -462,7 +462,7 @@ export function run(n: number): number {
     if (value.tag === 'number') total = total + value.val;
     if (value.tag === 'text') total = total + value.val.length;
     if (value.tag === 'point') total = total + value.val.x;
-    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"label":"json","x":7}}') throw new Error('serialization');
+    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"x":7,"label":"json"}}') throw new Error('serialization');
     try {
         const bad: Value = JSON.parse('{"tag":"number","val":null}');
         return -1;
@@ -825,6 +825,8 @@ export function callbacks():number {
  const optional=small.map(n=>{if(n===1)return 'yes';});
  const bare=small.map(n=>{if(n===1)return;return 'value';});
  if(optional[0]!=='yes' || optional[1]!==undefined || bare[0]!==undefined || bare[1]!=='value')return 6;
+ const nested=numbers.map(n=>{const adjust=(v:number)=>v+n;const inner=small.map(adjust);return inner[0]+adjust(1);});
+ if(nested[0]!==4 || nested[3]!==10 || small[0]!==1)return 8;
  return small.filter(nothing).length;
 }
 export function iteration():number {

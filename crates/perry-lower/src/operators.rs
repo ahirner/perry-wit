@@ -334,30 +334,12 @@ impl<'s> FunctionBuilder<'s> {
             LogicalOp::Coalesce => return self.coalesce(ctx, left, right, expected),
         };
         let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        if expected == Some(i1_ty) {
-            let lhs = self.condition(ctx, left)?;
-            let result = self.entry_slot(ctx, i1_ty);
-            self.store(ctx, result, lhs);
-            let rhs_block = self.new_block(ctx, "rhs");
-            let join = self.new_block(ctx, "join");
-            match op {
-                ShortCircuit::And => self.branch(ctx, lhs, rhs_block, join),
-                ShortCircuit::Or => self.branch(ctx, lhs, join, rhs_block),
-            }
-            self.switch_to(rhs_block);
-            let mark = self.variant_guards.len();
-            self.variant_condition(left, op == ShortCircuit::And);
-            let rhs = self.condition(ctx, right);
-            self.variant_guards.truncate(mark);
-            let rhs = rhs?;
-            self.store(ctx, result, rhs);
-            self.jump(ctx, join);
-            self.switch_to(join);
-            return self.load(ctx, result);
-        }
-
-        let lhs = self.expression(ctx, left)?;
-        if expected.is_none() && lhs.get_type(ctx) == i1_ty {
+        let lhs = if expected == Some(i1_ty) {
+            self.condition(ctx, left)?
+        } else {
+            self.expression(ctx, left)?
+        };
+        if expected == Some(i1_ty) || (expected.is_none() && lhs.get_type(ctx) == i1_ty) {
             let result = self.entry_slot(ctx, i1_ty);
             self.store(ctx, result, lhs);
             let rhs_block = self.new_block(ctx, "rhs");
@@ -384,176 +366,90 @@ impl<'s> FunctionBuilder<'s> {
         let join = self.new_block(ctx, "logical_join");
         self.branch(ctx, cond, truthy_block, falsy_block);
 
-        match op {
-            ShortCircuit::Or => {
-                self.switch_to(truthy_block);
-                let defined_lhs = if self.is_optional(ctx, lhs) {
-                    self.defined(ctx, lhs)?
-                } else {
-                    lhs
-                };
-                let truthy_end = self.block;
-
-                self.switch_to(falsy_block);
-                let rhs_expected = expected.or_else(|| {
-                    let base_ty = defined_lhs.get_type(ctx);
-                    Some(match right {
-                        Expr::Null => {
-                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null)
-                        }
-                        Expr::Undefined => {
-                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
-                        }
-                        _ => base_ty,
-                    })
-                });
-                let mark = self.variant_guards.len();
-                self.variant_condition(left, false);
-                let rhs = self.expression_with(ctx, right, rhs_expected);
-                self.variant_guards.truncate(mark);
-                let rhs = rhs?;
-                let falsy_end = self.block;
-
-                if expected.is_none()
-                    && rhs.get_type(ctx) == i1_ty
-                    && defined_lhs.get_type(ctx) != i1_ty
-                {
-                    let result = self.entry_slot(ctx, i1_ty);
-                    self.switch_to(truthy_end);
-                    let t = self.boolean(ctx, true);
-                    self.store(ctx, result, t);
-                    self.jump(ctx, join);
-                    self.switch_to(falsy_end);
-                    self.store(ctx, result, rhs);
-                    self.jump(ctx, join);
-                    self.switch_to(join);
-                    return self.load(ctx, result);
+        let (short_block, rhs_block) = match op {
+            ShortCircuit::Or => (truthy_block, falsy_block),
+            ShortCircuit::And => (falsy_block, truthy_block),
+        };
+        self.switch_to(short_block);
+        let lhs = if op == ShortCircuit::Or && self.is_optional(ctx, lhs) {
+            self.defined(ctx, lhs)?
+        } else {
+            lhs
+        };
+        let short_end = self.block;
+        self.switch_to(rhs_block);
+        let rhs_expected = expected.or_else(|| {
+            let base = optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
+            Some(match right {
+                Expr::Null => crate::coerce::admitting(ctx, base, perry_mir::Absence::Null),
+                Expr::Undefined => {
+                    crate::coerce::admitting(ctx, base, perry_mir::Absence::Undefined)
                 }
-
-                let result_ty = match expected {
-                    Some(ty) => ty,
-                    None => {
-                        let left_ty = defined_lhs.get_type(ctx);
-                        let right_ty = rhs.get_type(ctx);
-                        if let Some(states) =
-                            merge_absence(absence(ctx, left_ty), absence(ctx, right_ty))
-                        {
-                            let inner = optional_value(ctx, left_ty).unwrap_or(left_ty);
-                            perry_mir::OptionalType::get_with(ctx, inner, states).into()
-                        } else {
-                            left_ty
-                        }
-                    }
-                };
-                let result = self.entry_slot(ctx, result_ty);
-                self.switch_to(truthy_end);
-                let lhs_fitted = self.fit(ctx, defined_lhs, result_ty)?;
-                self.store(ctx, result, lhs_fitted);
-                self.jump(ctx, join);
-                self.switch_to(falsy_end);
-                let rhs_fitted = self.fit(ctx, rhs, result_ty)?;
-                self.store(ctx, result, rhs_fitted);
-                self.jump(ctx, join);
-                self.switch_to(join);
-                self.load(ctx, result)
-            }
-            ShortCircuit::And => {
-                self.switch_to(falsy_block);
-                let falsy_end = self.block;
-
-                self.switch_to(truthy_block);
-                let rhs_expected = expected.or_else(|| {
-                    let base_ty =
-                        optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
-                    Some(match right {
-                        Expr::Null => {
-                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Null)
-                        }
-                        Expr::Undefined => {
-                            crate::coerce::admitting(ctx, base_ty, perry_mir::Absence::Undefined)
-                        }
-                        _ => base_ty,
-                    })
-                });
-                let mark = self.variant_guards.len();
-                self.variant_condition(left, true);
-                let rhs = self.expression_with(ctx, right, rhs_expected);
-                self.variant_guards.truncate(mark);
-                let rhs = rhs?;
-                let truthy_end = self.block;
-
-                if expected.is_none() && rhs.get_type(ctx) == i1_ty && lhs.get_type(ctx) != i1_ty {
-                    let result = self.entry_slot(ctx, i1_ty);
-                    self.switch_to(falsy_end);
-                    let f = self.boolean(ctx, false);
-                    self.store(ctx, result, f);
-                    self.jump(ctx, join);
-                    self.switch_to(truthy_end);
-                    self.store(ctx, result, rhs);
-                    self.jump(ctx, join);
-                    self.switch_to(join);
-                    return self.load(ctx, result);
+                _ => base,
+            })
+        });
+        let mark = self.variant_guards.len();
+        self.variant_condition(left, op == ShortCircuit::And);
+        let rhs = self.expression_with(ctx, right, rhs_expected);
+        self.variant_guards.truncate(mark);
+        let rhs = rhs?;
+        let rhs_end = self.block;
+        let boolean =
+            expected.is_none() && rhs.get_type(ctx) == i1_ty && lhs.get_type(ctx) != i1_ty;
+        let result_ty = if boolean {
+            i1_ty
+        } else if let Some(ty) = expected {
+            ty
+        } else {
+            let left_ty = lhs.get_type(ctx);
+            let right_ty = rhs.get_type(ctx);
+            let inner = match op {
+                ShortCircuit::Or => optional_value(ctx, left_ty).unwrap_or(left_ty),
+                ShortCircuit::And => optional_value(ctx, right_ty)
+                    .or_else(|| optional_value(ctx, left_ty))
+                    .unwrap_or(right_ty),
+            };
+            merge_absence(absence(ctx, left_ty), absence(ctx, right_ty)).map_or(inner, |states| {
+                perry_mir::OptionalType::get_with(ctx, inner, states).into()
+            })
+        };
+        let result = self.entry_slot(ctx, result_ty);
+        self.switch_to(short_end);
+        let left_ty = lhs.get_type(ctx);
+        let lhs = if boolean {
+            self.boolean(ctx, op == ShortCircuit::Or)
+        } else if op == ShortCircuit::And
+            && optional_value(ctx, left_ty).is_some()
+            && optional_value(ctx, left_ty) != optional_value(ctx, result_ty)
+            && let Some((_, states)) = optional_parts(ctx, result_ty)
+        {
+            match states {
+                perry_mir::Absence::Null => self.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty)),
+                perry_mir::Absence::Undefined => {
+                    self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))
                 }
-
-                let result_ty = match expected {
-                    Some(ty) => ty,
-                    None => {
-                        let left_ty = lhs.get_type(ctx);
-                        let right_ty = rhs.get_type(ctx);
-                        let inner = optional_value(ctx, right_ty)
-                            .or_else(|| optional_value(ctx, left_ty))
-                            .unwrap_or(right_ty);
-                        if let Some(states) =
-                            merge_absence(absence(ctx, left_ty), absence(ctx, right_ty))
-                        {
-                            perry_mir::OptionalType::get_with(ctx, inner, states).into()
-                        } else {
-                            inner
-                        }
-                    }
-                };
-                let result = self.entry_slot(ctx, result_ty);
-                self.switch_to(falsy_end);
-                let left_ty = lhs.get_type(ctx);
-                let lhs_fitted = if optional_value(ctx, left_ty).is_some()
-                    && optional_value(ctx, left_ty) != optional_value(ctx, result_ty)
-                    && let Some((_, states)) = optional_parts(ctx, result_ty)
-                {
-                    match states {
-                        perry_mir::Absence::Null => {
-                            self.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))
-                        }
-                        perry_mir::Absence::Undefined => {
-                            self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))
-                        }
-                        perry_mir::Absence::Both => {
-                            let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, lhs));
-                            self.choose(
-                                ctx,
-                                result_ty,
-                                is_null,
-                                |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
-                                |b, ctx| {
-                                    Ok(b.emit_value(ctx, |ctx| {
-                                        OmittedOp::with_type(ctx, result_ty)
-                                    }))
-                                },
-                            )?
-                        }
-                    }
-                } else {
-                    self.fit(ctx, lhs, result_ty)?
-                };
-                self.store(ctx, result, lhs_fitted);
-                self.jump(ctx, join);
-                self.switch_to(truthy_end);
-                let rhs_fitted = self.fit(ctx, rhs, result_ty)?;
-                self.store(ctx, result, rhs_fitted);
-                self.jump(ctx, join);
-                self.switch_to(join);
-                self.load(ctx, result)
+                perry_mir::Absence::Both => {
+                    let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, lhs));
+                    self.choose(
+                        ctx,
+                        result_ty,
+                        is_null,
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))),
+                    )?
+                }
             }
-        }
+        } else {
+            self.fit(ctx, lhs, result_ty)?
+        };
+        self.store(ctx, result, lhs);
+        self.jump(ctx, join);
+        self.switch_to(rhs_end);
+        let rhs = self.fit(ctx, rhs, result_ty)?;
+        self.store(ctx, result, rhs);
+        self.jump(ctx, join);
+        self.switch_to(join);
+        self.load(ctx, result)
     }
 
     /// `left ?? right`: evaluates `right` only when `left` is `null` or `undefined`.

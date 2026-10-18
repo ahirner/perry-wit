@@ -306,13 +306,13 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             match &definition.kind {
                 TypeDefKind::Type(inner) => abi_type(resolve, inner)?,
                 TypeDefKind::Resource => AbiType::Resource {
-                    key: super::resources::canonical(resolve, *id).index() as u32,
+                    key: crate::sdk::canonical_type(resolve, *id).index() as u32,
                     owned: true,
                 },
                 TypeDefKind::Handle(
                     wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
                 ) => AbiType::Resource {
-                    key: super::resources::canonical(resolve, *resource).index() as u32,
+                    key: crate::sdk::canonical_type(resolve, *resource).index() as u32,
                     owned: matches!(
                         definition.kind,
                         TypeDefKind::Handle(wit_parser::Handle::Own(_))

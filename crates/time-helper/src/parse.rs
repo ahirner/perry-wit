@@ -84,6 +84,25 @@ impl<'a> Cursor<'a> {
         }
         Ok(value)
     }
+
+    /// Basic and colon-separated hours/minutes/seconds use the same grammar in offsets.
+    fn hms(&mut self) -> Result<(u8, u8, Option<u8>), Error> {
+        let hour = self.digits(2)? as u8;
+        let extended = self.eat(b':');
+        if !extended && !self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            return Ok((hour, 0, None));
+        }
+        let minute = self.digits(2)? as u8;
+        let seconds = if extended {
+            self.eat(b':')
+        } else {
+            self.peek().is_some_and(|b| b.is_ascii_digit())
+        };
+        let second = seconds
+            .then(|| self.digits(2).map(|n| n as u8))
+            .transpose()?;
+        Ok((hour, minute, second))
+    }
 }
 
 pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
@@ -130,20 +149,7 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
         Some(b'T' | b't' | b' ') => cur.pos += 1,
         _ => return Err(Error::Syntax),
     }
-    let hour = cur.digits(2)? as u8;
-    let mut minute = 0u8;
-    let mut second = 0u8;
-    if cur.eat(b':') {
-        minute = cur.digits(2)? as u8;
-        if cur.eat(b':') {
-            second = cur.digits(2)? as u8;
-        }
-    } else if cur.peek().is_some_and(|b| b.is_ascii_digit()) {
-        minute = cur.digits(2)? as u8;
-        if cur.peek().is_some_and(|b| b.is_ascii_digit()) {
-            second = cur.digits(2)? as u8;
-        }
-    }
+    let (hour, minute, second) = cur.hms()?;
     let nanosecond = if cur.eat(b'.') || cur.eat(b',') {
         cur.fraction_nanos()?
     } else {
@@ -152,7 +158,7 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
     let time = Some(TimeRecord {
         hour,
         minute,
-        second,
+        second: second.unwrap_or(0),
         nanosecond,
     });
     let offset = match cur.peek() {
@@ -162,28 +168,13 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
         }
         Some(sign @ (b'+' | b'-')) => {
             cur.pos += 1;
-            let off_hour = cur.digits(2)? as u8;
-            let mut off_min = 0u8;
-            let mut off_sec = 0u8;
-            let mut has_sec = false;
-            if cur.eat(b':') {
-                off_min = cur.digits(2)? as u8;
-                if cur.eat(b':') {
-                    off_sec = cur.digits(2)? as u8;
-                    has_sec = true;
-                }
-            } else if cur.peek().is_some_and(|b| b.is_ascii_digit()) {
-                off_min = cur.digits(2)? as u8;
-                if cur.peek().is_some_and(|b| b.is_ascii_digit()) {
-                    off_sec = cur.digits(2)? as u8;
-                    has_sec = true;
-                }
-            }
-            let off_nano = if has_sec && (cur.eat(b'.') || cur.eat(b',')) {
+            let (off_hour, off_min, off_sec) = cur.hms()?;
+            let off_nano = if off_sec.is_some() && (cur.eat(b'.') || cur.eat(b',')) {
                 cur.fraction_nanos()?
             } else {
                 0
             };
+            let off_sec = off_sec.unwrap_or(0);
             if off_hour > 23 || off_min > 59 || off_sec > 59 {
                 return Err(Error::Range);
             }

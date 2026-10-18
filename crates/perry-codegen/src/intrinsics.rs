@@ -6,7 +6,7 @@ use crate::{
     repr::{Carriers, Repr, repr},
     runtime::{Runtime, W},
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use perry_mir::{Intrinsic, NumericType, absence};
 use pliron::{
     context::{Context, Ptr},
@@ -35,11 +35,7 @@ impl FunctionLowering<'_, '_> {
             let str_op = op.deref(ctx).get_operand(0);
             let str_val = self.mapped(ctx, str_op)?;
             let (radix_tag, radix_payload) = self.numeric_operand(ctx, op, 1)?;
-            let out = *self
-                .state
-                .numeric_result
-                .get_or_insert_with(|| self.state.data.append(8, &[0; 8]));
-            let out_ptr = self.i32_const(ctx, out as i32);
+            let out_ptr = self.numeric_result_slot(ctx);
             let tag = self.runtime(
                 ctx,
                 Runtime::StdParseInt,
@@ -58,10 +54,17 @@ impl FunctionLowering<'_, '_> {
             let arg_ty = op.deref(ctx).get_operand(0).get_type(ctx);
             arg_ty.deref(ctx).is::<NumericType>() || crate::numeric::integer(ctx, arg_ty).is_some()
         };
-        if intrinsic == Intrinsic::NumberToString && exact_number(ctx) {
+        if intrinsic == Intrinsic::NumberInspect
+            || (intrinsic == Intrinsic::NumberToString && exact_number(ctx))
+        {
             let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
             let norm_tag = self.canonical_numeric_tag(ctx, tag);
-            let value = self.runtime(ctx, Runtime::StdNumberToString, vec![norm_tag, payload]);
+            let runtime = if intrinsic == Intrinsic::NumberInspect {
+                Runtime::StdNumberInspect
+            } else {
+                Runtime::StdNumberToString
+            };
+            let value = self.runtime(ctx, runtime, vec![norm_tag, payload]);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -100,10 +103,6 @@ impl FunctionLowering<'_, '_> {
         }
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
-            Intrinsic::ExceptionEqual => Some(self.runtime(ctx, Runtime::StdExceptionEqual, args)),
-            Intrinsic::ExceptionBigIntEqual => {
-                Some(self.runtime(ctx, Runtime::StdExceptionBigIntEqual, args))
-            }
             Intrinsic::ModuleInitialize => Some(self.initialization_promise(ctx)?),
             Intrinsic::BytesByteInput | Intrinsic::UrlSearchParams => Some(args[0]),
             Intrinsic::PrintOut | Intrinsic::PrintErr => {
@@ -141,10 +140,6 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::DateNow => {
                 self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
                 Some(self.runtime(ctx, Runtime::DateNow, args))
-            }
-            Intrinsic::ExitCodeSet => {
-                self.runtime_void(ctx, Runtime::ExitCodeSet, args);
-                None
             }
             Intrinsic::MathFloor
             | Intrinsic::MathCeil
@@ -218,21 +213,7 @@ impl FunctionLowering<'_, '_> {
                     Some(self.num(ctx, NumOpcode::F64Max, args))
                 }
             }
-            Intrinsic::MathRound => {
-                // floor(x), plus one when the fraction is at least ½; the result keeps the
-                // sign of x, so -0.4 rounds to -0 as in ECMAScript.
-                let x = args[0];
-                let floor = self.num(ctx, NumOpcode::F64Floor, vec![x]);
-                let fraction = self.num(ctx, NumOpcode::F64Sub, vec![x, floor]);
-                let half = self.f64_const(ctx, 0.5);
-                let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
-                let one = self.f64_const(ctx, 1.0);
-                let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
-                let rounded = self.select(ctx, up, next, floor);
-                Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
-            }
-            Intrinsic::ParseFloat => Some(self.runtime(ctx, Runtime::StdParseFloat, args)),
-            Intrinsic::StringToNumber => Some(self.runtime(ctx, Runtime::StdStringToNumber, args)),
+            Intrinsic::MathRound => Some(self.round_half_up(ctx, args[0])),
             Intrinsic::NumberIsNaN => {
                 let x = args[0];
                 Some(self.num(ctx, NumOpcode::F64Ne, vec![x, x]))
@@ -330,33 +311,6 @@ impl FunctionLowering<'_, '_> {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
             }
-            Intrinsic::JsonCursorBegin => Some(self.runtime(ctx, Runtime::JsonCursorBegin, args)),
-            Intrinsic::JsonCursorByte => Some(self.runtime(ctx, Runtime::JsonCursorByte, args)),
-            Intrinsic::JsonCursorNumber => Some(self.runtime(ctx, Runtime::JsonCursorNumber, args)),
-            Intrinsic::JsonCursorI64 => Some(self.runtime(ctx, Runtime::JsonCursorI64, args)),
-            Intrinsic::JsonCursorU64 => Some(self.runtime(ctx, Runtime::JsonCursorU64, args)),
-            Intrinsic::JsonToI64 => Some(self.runtime(ctx, Runtime::StdJsonToI64, args)),
-            Intrinsic::JsonToU64 => Some(self.runtime(ctx, Runtime::StdJsonToU64, args)),
-            Intrinsic::JsonCursorBoolean => {
-                Some(self.runtime(ctx, Runtime::JsonCursorBoolean, args))
-            }
-            Intrinsic::JsonCursorString => Some(self.runtime(ctx, Runtime::JsonCursorString, args)),
-            Intrinsic::JsonCursorValue => Some(self.runtime(ctx, Runtime::JsonCursorValue, args)),
-            Intrinsic::JsonCursorMember => Some(self.runtime(ctx, Runtime::JsonCursorMember, args)),
-            Intrinsic::JsonCursorConsume => {
-                self.runtime_void(ctx, Runtime::JsonCursorConsume, args);
-                None
-            }
-            Intrinsic::JsonCursorDiscard => {
-                self.runtime_void(ctx, Runtime::JsonCursorDiscard, args);
-                None
-            }
-            Intrinsic::JsonCursorTail => Some(self.runtime(ctx, Runtime::JsonCursorTail, args)),
-            Intrinsic::JsonCursorSeek => Some(self.runtime(ctx, Runtime::JsonCursorSeek, args)),
-            Intrinsic::JsonCursorFinish => {
-                self.runtime_void(ctx, Runtime::JsonCursorFinish, args);
-                None
-            }
             Intrinsic::JsonResidue => {
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
                 let offset = if ty.deref(ctx).is::<perry_mir::RecordType>() {
@@ -368,57 +322,75 @@ impl FunctionLowering<'_, '_> {
                 None
             }
             Intrinsic::JsonRetain => {
-                use perry_mir::{JsonType, RecordType};
+                use perry_mir::RecordType;
                 let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-                let (offset, graph) =
-                    if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-                        let required = record
-                            .deref(ctx)
-                            .fields()?
-                            .iter()
-                            .filter(|(_, ty)| {
-                                !ty.deref(ctx).is::<JsonType>()
-                                    && !absence(ctx, *ty)
-                                        .is_some_and(|absence| absence.admits_undefined())
-                            })
-                            .count();
-                        // Successful validation found every required member. An equal raw count
-                        // leaves no room for extra members or duplicates, so no graph is needed.
-                        let count = self.load(
-                            ctx,
-                            MemKind::I32,
-                            args[1],
-                            perry_abi::json::MEMBER_COUNT as u32,
-                        );
-                        let required = self.i32_const(ctx, required as i32);
-                        let complete = self.num(ctx, NumOpcode::I32Eq, vec![count, required]);
-                        let zero = self.i32_const(ctx, 0);
-                        let graph = self.select(ctx, complete, zero, args[1]);
-                        (perry_abi::layout::record::JSON, graph)
+                if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+                    && !record.deref(ctx).is_tuple()
+                {
+                    let (table, count) = self.json_field_table(ctx, ty)?;
+                    let table = self.i32_const(ctx, table as i32);
+                    let count = self.i32_const(ctx, count as i32);
+                    self.runtime_void(
+                        ctx,
+                        Runtime::StdJsonRecordRetain,
+                        vec![args[0], args[1], table, count],
+                    );
+                } else {
+                    let offset = if ty.deref(ctx).is::<RecordType>() {
+                        perry_abi::layout::record::JSON
                     } else {
-                        (perry_abi::layout::variant::JSON, args[1])
+                        perry_abi::layout::variant::JSON
                     };
-                self.store(ctx, MemKind::I32, args[0], offset, graph);
-                None
-            }
-            Intrinsic::JsonSpread => {
-                if self.state.retains_json {
-                    let offset = perry_abi::layout::record::JSON;
-                    let base = self.load(ctx, MemKind::I32, args[0], offset);
-                    let src = self.load(ctx, MemKind::I32, args[1], offset);
-                    let merged = self.runtime(ctx, Runtime::StdJsonMergeResidue, vec![base, src]);
-                    self.store(ctx, MemKind::I32, args[0], offset, merged);
+                    self.store(ctx, MemKind::I32, args[0], offset, args[1]);
                 }
                 None
             }
-            Intrinsic::JsonExclude => {
-                if self.state.retains_json {
-                    let offset = perry_abi::layout::record::JSON;
-                    let graph = self.load(ctx, MemKind::I32, args[0], offset);
-                    let filtered =
-                        self.runtime(ctx, Runtime::StdJsonExcludeKey, vec![graph, args[1]]);
-                    self.store(ctx, MemKind::I32, args[0], offset, filtered);
+            Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy => {
+                let target_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                let source_ty = op.deref(ctx).get_operand(1).get_type(ctx);
+                let (table, count) = self.json_field_table(ctx, target_ty)?;
+                let (source_table, source_count) = self.json_field_table(ctx, source_ty)?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let source_table = self.i32_const(ctx, source_table as i32);
+                let source_count = self.i32_const(ctx, source_count as i32);
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdJsonRecordSpread,
+                    vec![args[0], args[1], table, count, source_table, source_count],
+                );
+                if intrinsic == Intrinsic::JsonOrderCopy {
+                    let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)?;
+                    let fields = record.deref(ctx).fields()?.to_vec();
+                    for (name, ty) in fields {
+                        if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                            let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;
+                            let value = self.load_slot_value(ctx, args[0], offset, ty)?;
+                            let omitted = self.is_omitted_value(ctx, value, ty)?;
+                            let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
+                            let key = self.state.data.string(&name);
+                            let key = self.i32_const(ctx, key as i32);
+                            self.runtime_void(
+                                ctx,
+                                Runtime::StdJsonRecordField,
+                                vec![args[0], table, count, key, present],
+                            );
+                        }
+                    }
                 }
+                None
+            }
+            Intrinsic::JsonInsert | Intrinsic::JsonExclude => {
+                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                let (table, count) = self.json_field_table(ctx, ty)?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let present = self.i32_const(ctx, i32::from(intrinsic == Intrinsic::JsonInsert));
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdJsonRecordField,
+                    vec![args[0], table, count, args[1], present],
+                );
                 None
             }
             Intrinsic::JsonParse => {
@@ -443,8 +415,9 @@ impl FunctionLowering<'_, '_> {
             | Intrinsic::PlainDateTimePart
             | Intrinsic::InstantString
             | Intrinsic::PlainDateString
-            | Intrinsic::PlainDateTimeString => self.temporal_intrinsic(ctx, intrinsic, args),
-            Intrinsic::AbortNew => Some(self.runtime(ctx, Runtime::AbortNew, args)),
+            | Intrinsic::PlainDateTimeString => {
+                Some(self.temporal_intrinsic(ctx, intrinsic, args)?)
+            }
             Intrinsic::AbortAbort => {
                 let message = self.state.data.string("The operation was aborted");
                 let message = self.i32_const(ctx, message as i32);
@@ -456,7 +429,6 @@ impl FunctionLowering<'_, '_> {
                 self.runtime_void(ctx, Runtime::Abort, vec![args[0], message, scope_error]);
                 None
             }
-            Intrinsic::AbortAborted => Some(self.runtime(ctx, Runtime::AbortAborted, args)),
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
             Intrinsic::ExceptionSetCause => {
                 let (exception, cause) = (args[0], args[1]);
@@ -468,24 +440,6 @@ impl FunctionLowering<'_, '_> {
                     cause,
                 );
                 None
-            }
-            Intrinsic::JsonStrictEqual => {
-                Some(self.runtime(ctx, Runtime::StdJsonStrictEqual, args))
-            }
-            Intrinsic::JsonExceptionEqual => {
-                Some(self.runtime(ctx, Runtime::StdJsonExceptionEqual, args))
-            }
-            Intrinsic::JsonOriginEqual => {
-                Some(self.runtime(ctx, Runtime::StdJsonOriginEqual, args))
-            }
-            Intrinsic::JsonFromException => {
-                Some(self.runtime(ctx, Runtime::StdJsonFromException, args))
-            }
-            Intrinsic::JsonToException => {
-                Some(self.runtime(ctx, Runtime::StdJsonToException, args))
-            }
-            Intrinsic::JsonExceptionIs => {
-                Some(self.runtime(ctx, Runtime::StdJsonExceptionIs, args))
             }
             Intrinsic::ExceptionIsNull | Intrinsic::ExceptionIsUndefined => {
                 let kind = self.load(
@@ -617,142 +571,13 @@ impl FunctionLowering<'_, '_> {
                 Some(self.runtime(ctx, function, args))
             }
             other => {
-                let function = match other {
-                    Intrinsic::StringScalarConcat => Runtime::StringScalarConcat,
-                    Intrinsic::StringScalarAppend => Runtime::StringScalarAppend,
-                    Intrinsic::BigIntFromNumber => Runtime::StdBigintFromNumber,
-                    Intrinsic::BigIntNegate => Runtime::StdBigintNegate,
-                    Intrinsic::BigIntToNumber => Runtime::StdBigintToNumber,
-                    Intrinsic::BigIntToString => Runtime::StdBigintToString,
-                    Intrinsic::StringFromCodePoint => Runtime::StdStringFromCodePoint,
-                    Intrinsic::StringCodePointAt => Runtime::StdStringCodePointAt,
-                    Intrinsic::StringAt => Runtime::StdStringAt,
-                    Intrinsic::StringIndex => Runtime::StdStringIndex,
-                    Intrinsic::StringSlice => Runtime::StdStringSlice,
-                    Intrinsic::StringSubstring => Runtime::StdStringSubstring,
-                    Intrinsic::StringIndexOf => Runtime::StdStringIndexOf,
-                    Intrinsic::StringLastIndexOf => Runtime::StdStringLastIndexOf,
-                    Intrinsic::StringStartsWith => Runtime::StdStringStartsWith,
-                    Intrinsic::StringEndsWith => Runtime::StdStringEndsWith,
-                    Intrinsic::StringTrim => Runtime::StdStringTrim,
-                    Intrinsic::StringTrimStart => Runtime::StdStringTrimStart,
-                    Intrinsic::StringTrimEnd => Runtime::StdStringTrimEnd,
-                    Intrinsic::StringPadStart => Runtime::StdStringPadStart,
-                    Intrinsic::StringPadEnd => Runtime::StdStringPadEnd,
-                    Intrinsic::StringReplace => Runtime::StdStringReplace,
-                    Intrinsic::StringReplaceAll => Runtime::StdStringReplaceAll,
-                    Intrinsic::StringSplit => Runtime::StdStringSplit,
-                    Intrinsic::StringRepeat => Runtime::StdStringRepeat,
-                    Intrinsic::StringNormalize => Runtime::StdStringNormalize,
-                    Intrinsic::BytesNew => Runtime::StdBytesNew,
-                    Intrinsic::BytesFromArray => Runtime::StdBytesFromArray,
-                    Intrinsic::BytesBuffer => Runtime::StdBytesBuffer,
-                    Intrinsic::BytesOffset => Runtime::StdBytesOffset,
-                    Intrinsic::BufferLength => Runtime::StdBufferLength,
-                    Intrinsic::BytesFromBuffer => Runtime::StdBytesFromBuffer,
-                    Intrinsic::BytesCopy => Runtime::StdBytesCopy,
-                    Intrinsic::BytesGet => Runtime::StdBytesGet,
-                    Intrinsic::BytesSet => Runtime::StdBytesSet,
-                    Intrinsic::BytesLength => Runtime::StdBytesLength,
-                    Intrinsic::BytesSubarray => Runtime::StdBytesSubarray,
-                    Intrinsic::BytesSlice => Runtime::StdBytesSlice,
-                    Intrinsic::BytesSetFrom => Runtime::StdBytesSetFrom,
-                    Intrinsic::BytesFill => Runtime::StdBytesFill,
-                    Intrinsic::TextEncode => Runtime::StdTextEncode,
-                    Intrinsic::StringByteInput => Runtime::StdStringByteInput,
-                    Intrinsic::UrlNew => Runtime::WebUrlNew,
-                    Intrinsic::UrlGet => Runtime::WebUrlGet,
-                    Intrinsic::UrlSetPathname => Runtime::WebUrlSetPathname,
-                    Intrinsic::UrlAppend => Runtime::WebUrlAppend,
-                    Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
-                    Intrinsic::RegexExec => Runtime::StdRegexExec,
-                    Intrinsic::RegexMatch => Runtime::StdRegexMatch,
-                    Intrinsic::RegexSearch => Runtime::StdRegexSearch,
-                    Intrinsic::RegexReplace => Runtime::StdRegexReplace,
-                    Intrinsic::RegexSplit => Runtime::StdRegexSplit,
-                    Intrinsic::DecoderValidateLabel => Runtime::StdDecoderValidateLabel,
-                    Intrinsic::DecoderNew => Runtime::StdDecoderNew,
-                    Intrinsic::TextDecode => Runtime::StdDecoderDecode,
-                    Intrinsic::JsonMember => Runtime::StdJsonMember,
-                    Intrinsic::JsonKeys => Runtime::StdJsonKeys,
-                    Intrinsic::JsonIndex => Runtime::StdJsonIndex,
-                    Intrinsic::JsonLength => Runtime::StdJsonLength,
-                    Intrinsic::JsonToNumber => Runtime::StdJsonToNumber,
-                    Intrinsic::JsonRequireNumber => Runtime::StdJsonRequireNumber,
-                    Intrinsic::JsonToString => Runtime::StdJsonToString,
-                    Intrinsic::JsonToBool => Runtime::StdJsonToBool,
-                    Intrinsic::JsonTruthy => Runtime::StdJsonTruthy,
-                    Intrinsic::JsonDisplay => Runtime::StdJsonDisplay,
-                    Intrinsic::JsonTypeOf => Runtime::StdJsonTypeOf,
-                    Intrinsic::JsonRequireObject => Runtime::StdJsonRequireObject,
-                    Intrinsic::JsonFirst => Runtime::StdJsonFirst,
-                    Intrinsic::JsonNext => Runtime::StdJsonNext,
-                    Intrinsic::JsonIsNull => Runtime::StdJsonIsNull,
-                    Intrinsic::JsonObject => Runtime::StdJsonObject,
-                    Intrinsic::JsonAssign => Runtime::StdJsonAssign,
-                    Intrinsic::JsonSet => Runtime::StdJsonSet,
-                    Intrinsic::JsonFromNumber => Runtime::StdJsonFromNumber,
-                    Intrinsic::JsonFromString => Runtime::StdJsonFromString,
-                    Intrinsic::StatsIsFile => Runtime::FsStatsIsFile,
-                    Intrinsic::StatsIsDirectory => Runtime::FsStatsIsDirectory,
-                    Intrinsic::StatsSize => Runtime::FsStatsSize,
-                    Intrinsic::HeadersNew => Runtime::WebHeadersNew,
-                    Intrinsic::HeadersCopy => Runtime::WebHeadersCopy,
-                    Intrinsic::HeadersAppend => Runtime::WebHeadersAppend,
-                    Intrinsic::HeadersSet => Runtime::WebHeadersSet,
-                    Intrinsic::HeadersGet => Runtime::WebHeadersGet,
-                    Intrinsic::HeadersHas => Runtime::WebHeadersHas,
-                    Intrinsic::HeadersDelete => Runtime::WebHeadersDelete,
-                    Intrinsic::ResponseNew => Runtime::WebResponseNew,
-                    Intrinsic::ResponseStatus => Runtime::WebResponseStatus,
-                    Intrinsic::ResponseStatusText => Runtime::WebResponseStatusText,
-                    Intrinsic::ResponseOk => Runtime::WebResponseOk,
-                    Intrinsic::ResponseHeaders => Runtime::WebResponseHeaders,
-                    Intrinsic::ResponseBodyUsed | Intrinsic::RequestBodyUsed => {
-                        Runtime::WebBodyUsed
-                    }
-                    Intrinsic::ResponseBytes | Intrinsic::RequestBytes => Runtime::WebBodyBytes,
-                    Intrinsic::ServeBody => Runtime::WebServeBody,
-                    Intrinsic::ServeMethod => Runtime::WebServeMethod,
-                    Intrinsic::ServeMethodOther => Runtime::WebServeMethodOther,
-                    Intrinsic::ServeHasScheme => Runtime::WebServeHasScheme,
-                    Intrinsic::ServeScheme => Runtime::WebServeScheme,
-                    Intrinsic::ServeSchemeOther => Runtime::WebServeSchemeOther,
-                    Intrinsic::ServeAuthority => Runtime::WebServeAuthority,
-                    Intrinsic::ServePath => Runtime::WebServePath,
-                    Intrinsic::ServeHeaderCount => Runtime::WebServeHeaderCount,
-                    Intrinsic::ServeHeaderName => Runtime::WebServeHeaderName,
-                    Intrinsic::ServeHeaderValue => Runtime::WebServeHeaderValue,
-                    Intrinsic::ServeAddHeader => Runtime::WebServeAddHeader,
-                    Intrinsic::ServeRespond => Runtime::WebServeRespond,
-                    Intrinsic::ResponseText | Intrinsic::RequestText => Runtime::WebBodyText,
-                    Intrinsic::RequestNew => Runtime::WebRequestNew,
-                    Intrinsic::RequestMethod => Runtime::WebRequestMethod,
-                    Intrinsic::WritableLocked => Runtime::WebWritableLocked,
-                    Intrinsic::WritableGetWriter => Runtime::WebWritableGetWriter,
-                    Intrinsic::WriterClose => Runtime::WebWriterClose,
-                    Intrinsic::WriterReleaseLock => Runtime::WebWriterReleaseLock,
-                    Intrinsic::ReadableLocked => Runtime::WebReadableLocked,
-                    Intrinsic::ReadableGetReader | Intrinsic::ReadableGetByobReader => {
-                        Runtime::WebReadableGetReader
-                    }
-                    Intrinsic::ReadableCancel => Runtime::WebReadableCancel,
-                    Intrinsic::ReaderCancel => Runtime::WebReaderCancel,
-                    Intrinsic::ReaderReleaseLock => Runtime::WebReaderReleaseLock,
-                    Intrinsic::ReadDone => Runtime::WebReadDone,
-                    Intrinsic::ReadValue => Runtime::WebReadValue,
-                    Intrinsic::RequestUrl => Runtime::WebRequestUrl,
-                    Intrinsic::RequestHeaders => Runtime::WebRequestHeaders,
-                    Intrinsic::ExceptionToBool => Runtime::StdExceptionToBool,
-                    Intrinsic::ExceptionToNumber => Runtime::StdExceptionToNumber,
-                    Intrinsic::ExceptionName => Runtime::StdExceptionName,
-                    Intrinsic::ExceptionToString => Runtime::StdExceptionToString,
-                    other => bail!("intrinsic {} has no runtime lowering", other.name()),
-                };
+                let function = Runtime::for_intrinsic(other).with_context(|| {
+                    format!("intrinsic {} has no runtime lowering", other.name())
+                })?;
                 let result = self.call_runtime(ctx, function, args);
                 // Runtime results as `number | undefined` come as bits.
                 result.map(|value| {
-                    if function.result() == Some(W::I64) {
+                    if function.result() == Some(W::F64Bits) {
                         self.num(ctx, NumOpcode::F64ReinterpretI64, vec![value])
                     } else {
                         value

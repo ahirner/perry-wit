@@ -2,15 +2,16 @@ use pliron::basic_block::BasicBlock;
 use pliron::builtin::attributes::{FPDoubleAttr, IntegerAttr};
 use pliron::builtin::op_interfaces::{OneResultInterface, SingleBlockRegionInterface};
 use pliron::builtin::ops::{ConstantOp, FuncOp, ModuleOp};
-use pliron::builtin::types::{FP64Type, FunctionType, IntegerType, Signedness};
+use pliron::builtin::types::{FunctionType, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::Identifier;
 use pliron::op::Op;
 use pliron::result::Result;
-use pliron::r#type::{TypeHandle, Typed, TypedHandle};
+use pliron::r#type::{TypeHandle, Typed};
 use pliron::utils::apint::{APInt, bw};
 use pliron::value::Value;
 
+use crate::JsonSchema;
 use crate::attrs::{Absence, BinaryKind, CompareKind, ErrorKind};
 use crate::collections::{ArrayAtOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, StringConstOp};
 use crate::control::{BrOp, CondBrOp, ReturnOp};
@@ -21,7 +22,6 @@ use crate::optional::{
     IsNullOp, IsUndefinedOp, NullOp, OmittedOp, UnwrapOp, WrapOp, absence, optional_value,
 };
 use crate::scalar::{BinaryOp, CompareOp};
-use crate::types::{ArrayType, RecordType, VariantType};
 use crate::variants::{VariantNewOp, VariantPayloadOp, VariantTagOp};
 
 use super::{CopyPosition, is_supported_scalar};
@@ -191,9 +191,13 @@ fn emit_normalize_value(
     let s_inner = source_ty;
     let t_inner = optional_value(ctx, target_ty).unwrap_or(target_ty);
     let wrap = t_abs.is_some();
+    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
 
     // Scalar: FP64Type (`f64`)
-    if s_inner.deref(ctx).is::<FP64Type>() && t_inner.deref(ctx).is::<FP64Type>() {
+    if matches!(
+        schemas,
+        (Some(JsonSchema::Number), Some(JsonSchema::Number))
+    ) {
         let is_finite = IntrinsicOp::new(ctx, Intrinsic::NumberIsFinite, vec![source]);
         append_op(ctx, block, &is_finite);
         let is_finite_val = is_finite.get_operation().deref(ctx).get_result(0);
@@ -228,13 +232,9 @@ fn emit_normalize_value(
     }
 
     // RecordType (both records and tuples): allocate a fresh Record of `t_inner` and normalize/project fields
-    let rec_fields = {
-        let s_obj = s_inner.deref(ctx);
-        let t_obj = t_inner.deref(ctx);
-        if let (Some(s_rec), Some(t_rec)) = (
-            s_obj.downcast_ref::<RecordType>(),
-            t_obj.downcast_ref::<RecordType>(),
-        ) {
+    let rec_fields = match schemas {
+        (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(target))) => {
+            let (s_rec, t_rec) = (s_rec.deref(ctx), target.deref(ctx));
             let child_pos = if t_rec.is_tuple() {
                 CopyPosition::Element
             } else {
@@ -244,12 +244,12 @@ fn emit_normalize_value(
                 s_rec.fields()?.to_vec(),
                 t_rec.fields()?.to_vec(),
                 child_pos,
+                target,
             ))
-        } else {
-            None
         }
+        _ => None,
     };
-    if let Some((s_fields, t_fields, child_pos)) = rec_fields {
+    if let Some((s_fields, t_fields, child_pos, target)) = rec_fields {
         let mut cur_block = block;
         let mut field_vals = Vec::with_capacity(t_fields.len());
 
@@ -269,22 +269,28 @@ fn emit_normalize_value(
             }
         }
 
-        let t_rec_handle = TypedHandle::<RecordType>::from_handle(t_inner, ctx)?;
-        let alloc = AllocOp::new(ctx, t_rec_handle, field_vals);
+        let alloc = AllocOp::new(ctx, target, field_vals);
+        if child_pos == CopyPosition::RecordField {
+            alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(Vec::new()));
+        }
         append_op(ctx, cur_block, &alloc);
+        if child_pos == CopyPosition::RecordField {
+            let order = IntrinsicOp::new(
+                ctx,
+                Intrinsic::JsonOrderCopy,
+                vec![alloc.get_result(ctx), source],
+            );
+            append_op(ctx, cur_block, &order);
+        }
         let out = wrap_if(ctx, cur_block, alloc.get_result(ctx), target_ty, wrap);
         return Ok((cur_block, out));
     }
 
     // ArrayType: allocate a fresh array and normalize each element in a loop
-    let arr_elems = {
-        let s_obj = s_inner.deref(ctx);
-        let t_obj = t_inner.deref(ctx);
-        s_obj
-            .downcast_ref::<ArrayType>()
-            .zip(t_obj.downcast_ref::<ArrayType>())
-            .map(|(s_arr, t_arr)| (s_arr.element(), t_arr.element()))
-    };
+    let arr_elems = schemas
+        .0
+        .and_then(JsonSchema::storage_element)
+        .zip(schemas.1.and_then(JsonSchema::storage_element));
     if let Some((s_elem_ty, t_elem_ty)) = arr_elems {
         let len_op = ArrayLenOp::new(ctx, source);
         append_op(ctx, block, &len_op);
@@ -344,13 +350,13 @@ fn emit_normalize_value(
     }
 
     // VariantType: dispatch on variant tag, normalize payload if present, reconstruct variant
-    let var_cases = if s_inner == t_inner {
-        s_inner
-            .deref(ctx)
-            .downcast_ref::<VariantType>()
-            .map(|var| var.cases().to_vec())
-    } else {
-        None
+    let var_cases = match schemas {
+        (Some(JsonSchema::Variant(source)), Some(JsonSchema::Variant(target)))
+            if source == target =>
+        {
+            Some(source.deref(ctx).cases().to_vec())
+        }
+        _ => None,
     };
     if let Some(cases) = var_cases {
         let tag_op = VariantTagOp::new(ctx, source);

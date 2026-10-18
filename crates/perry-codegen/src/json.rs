@@ -1,14 +1,15 @@
 //! Typed JSON serialization.
+mod properties;
 use crate::{
-    aggregates::record_slot,
     function::FunctionLowering,
-    repr::{Carriers, i32_type, optional_inner, slot_kind, wasm_type},
+    repr::{Carriers, i32_type, optional_inner, slot_kind, slot_size, wasm_type},
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow, ensure};
-use perry_abi::layout::{array, record};
+use perry_abi::layout::{array, numeric, record};
 use perry_mir::{
-    ArrayType, DateType, ExceptionType, Intrinsic, JsonType, OptionalType, RecordType, StringType,
+    ArrayType, DateType, ExceptionType, Intrinsic, JsonSchema, JsonType, OptionalType, RecordType,
+    StringType,
 };
 use pliron::{
     builtin::{
@@ -50,26 +51,42 @@ fn json_key(name: &str) -> String {
 }
 
 impl FunctionLowering<'_, '_> {
+    /// Share the indexed name table between cursor decoding and retained record graphs.
+    pub(super) fn json_field_table(
+        &mut self,
+        ctx: &Context,
+        ty: TypeHandle,
+    ) -> Result<(u32, usize)> {
+        if let Some(&table) = self.state.json_fields.get(&ty) {
+            return Ok(table);
+        }
+        let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
+        let record = record.deref(ctx);
+        let mut names = record.fields()?.iter().enumerate().collect::<Vec<_>>();
+        names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+        });
+        let mut bytes = Vec::with_capacity(names.len() * 8);
+        for (index, (name, _)) in &names {
+            bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
+            bytes.extend_from_slice(&(*index as u32).to_le_bytes());
+        }
+        let table = (self.state.data.append(4, &bytes), names.len());
+        self.state.json_fields.insert(ty, table);
+        Ok(table)
+    }
+
     pub(super) fn json_cursor_key(
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
         ty: TypeHandle,
     ) -> Result<()> {
-        let (table, count) = if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
-            let record = record.deref(ctx);
-            let mut names = record.fields()?.iter().enumerate().collect::<Vec<_>>();
-            names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
-                a.len()
-                    .cmp(&b.len())
-                    .then_with(|| a.as_bytes().cmp(b.as_bytes()))
-            });
-            let mut bytes = Vec::with_capacity(names.len() * 8);
-            for (index, (name, _)) in &names {
-                bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
-                bytes.extend_from_slice(&(*index as u32).to_le_bytes());
-            }
-            (self.state.data.append(4, &bytes), names.len())
+        let ordered = ty.deref(ctx).is::<RecordType>();
+        let (table, count) = if ordered {
+            self.json_field_table(ctx, ty)?
         } else if ty.deref(ctx).is::<perry_mir::VariantType>() {
             let mut bytes = Vec::with_capacity(16);
             for (index, name) in [(0u32, "tag"), (1u32, "val")] {
@@ -83,7 +100,12 @@ impl FunctionLowering<'_, '_> {
         let table = self.i32_const(ctx, table as i32);
         let count = self.i32_const(ctx, count as i32);
         let cursor = self.operand(ctx, op, 0)?;
-        let index = self.runtime(ctx, Runtime::JsonCursorKey, vec![cursor, table, count]);
+        let ordered = self.i32_const(ctx, i32::from(ordered));
+        let index = self.runtime(
+            ctx,
+            Runtime::JsonCursorKey,
+            vec![cursor, table, count, ordered],
+        );
         self.define(ctx, op, index);
         Ok(())
     }
@@ -112,7 +134,7 @@ impl FunctionLowering<'_, '_> {
                 let name = self.state.data.string(name);
                 let field = self.native_descriptor(ctx, *field_ty)?;
                 words.extend([name, field, field_offset]);
-                field_offset += record_slot(ctx, *field_ty);
+                field_offset += slot_size(ctx, *field_ty);
             }
             words
         } else if let Some(inner) = optional_inner(ctx, ty) {
@@ -188,32 +210,11 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if let Carriers::Numeric { tag, payload } = value {
-            let norm_tag = self.canonical_numeric_tag(ctx, tag);
-            let floats = self.new_block(ctx, vec![]);
-            let signed = self.new_block(ctx, vec![]);
-            let unsigned = self.new_block(ctx, vec![]);
-            let invalid = self.new_block(ctx, vec![]);
-            let done = self.new_block(ctx, vec![]);
-            self.br_table(ctx, norm_tag, vec![floats, signed, unsigned], invalid);
-
-            self.block = invalid;
-            let op = pliron_wasm::control::UnreachableOp::new(ctx).get_operation();
-            self.insert(ctx, op);
-
-            self.block = floats;
-            let float = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
-            self.runtime_void(ctx, Runtime::StdJsonNumber, vec![writer, float]);
-            self.br(ctx, done, vec![]);
-
-            self.block = signed;
-            self.runtime_void(ctx, Runtime::StdJsonWriteI64, vec![writer, payload]);
-            self.br(ctx, done, vec![]);
-
-            self.block = unsigned;
-            self.runtime_void(ctx, Runtime::StdJsonWriteU64, vec![writer, payload]);
-            self.br(ctx, done, vec![]);
-
-            self.block = done;
+            self.runtime_void(
+                ctx,
+                Runtime::StdJsonWriteNumeric,
+                vec![writer, tag, payload],
+            );
             return Ok(());
         }
         let value = value.scalar()?;
@@ -266,12 +267,15 @@ impl FunctionLowering<'_, '_> {
                 } else {
                     self.num(ctx, NumOpcode::I64ExtendI32S, vec![value])
                 };
-                let runtime = if unsigned {
-                    Runtime::StdJsonWriteU64
-                } else {
-                    Runtime::StdJsonWriteI64
-                };
-                self.runtime_void(ctx, runtime, vec![writer, value]);
+                let tag = self.i32_const(
+                    ctx,
+                    if unsigned {
+                        numeric::UNSIGNED
+                    } else {
+                        numeric::SIGNED
+                    },
+                );
+                self.runtime_void(ctx, Runtime::StdJsonWriteNumeric, vec![writer, tag, value]);
             }
             return Ok(());
         }
@@ -305,31 +309,12 @@ impl FunctionLowering<'_, '_> {
         let writer = entry.deref(ctx).get_argument(0);
         let value = entry.deref(ctx).get_argument(1);
         let mut b = FunctionLowering::glue(self.state, ctx, &function);
-        let record_type = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
-        let tuple = record_type.is_some_and(|record| record.deref(ctx).is_tuple());
-        let variant_type = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx).ok();
-        let dict_entry = TypedHandle::<ArrayType>::from_handle(ty, ctx)
-            .ok()
-            .map(|a| a.deref(ctx).element())
-            .and_then(|elem| {
-                let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
-                let rec_ref = rec.deref(ctx);
-                if !rec_ref.is_tuple() || !rec_ref.name().as_ref().starts_with("dict_tuple_") {
-                    return None;
-                }
-                let fields = rec_ref.fields().ok()?;
-                if fields.len() != 2 {
-                    return None;
-                }
-                Some((elem, fields[0].1, fields[1].1))
-            });
-        let (open, close) = if (record_type.is_some() && !tuple)
-            || variant_type.is_some()
-            || dict_entry.is_some()
-        {
-            ('{', '}')
-        } else {
+        let schema = JsonSchema::of(ctx, ty).ok_or_else(|| anyhow!("unsupported JSON schema"))?;
+        let tuple = matches!(schema, JsonSchema::Record(record) if record.deref(ctx).is_tuple());
+        let (open, close) = if tuple || matches!(schema, JsonSchema::Array(_)) {
             ('[', ']')
+        } else {
+            ('{', '}')
         };
         let done = b.new_block(ctx, vec![]);
         let bracket = b.i32_const(ctx, open as i32);
@@ -337,80 +322,85 @@ impl FunctionLowering<'_, '_> {
         let body = b.new_block(ctx, vec![]);
         b.cond_br(ctx, opened, (body, vec![]), (done, vec![]));
         b.block = body;
-        if let Some(record_type) = record_type {
-            // Detached from the context, which the writers below mutate.
-            let (types, keys): (Vec<TypeHandle>, Vec<String>) = {
-                let record_type = record_type.deref(ctx);
-                let fields = record_type
-                    .fields()
-                    .map_err(|_| anyhow!("record without fields"))?;
-                let keys = if tuple {
-                    Vec::new()
-                } else {
-                    fields.iter().map(|(name, _)| name.to_string()).collect()
+        match schema {
+            JsonSchema::Record(record_type) => {
+                // Detached from the context, which the writers below mutate.
+                let (types, keys): (Vec<TypeHandle>, Vec<String>) = {
+                    let record_type = record_type.deref(ctx);
+                    let fields = record_type
+                        .fields()
+                        .map_err(|_| anyhow!("record without fields"))?;
+                    let keys = if tuple {
+                        Vec::new()
+                    } else {
+                        fields.iter().map(|(name, _)| name.to_string()).collect()
+                    };
+                    (fields.iter().map(|&(_, ty)| ty).collect(), keys)
                 };
-                (fields.iter().map(|&(_, ty)| ty).collect(), keys)
-            };
-            let count = b.i32_const(ctx, types.len() as i32);
-            if tuple {
-                b.json_tuple_items(ctx, writer, value, &types)?;
-            } else {
-                b.json_record_members(ctx, writer, value, &keys, &types)?;
-            }
-            // A tuple has no keys: its extras are the elements past `count`.
-            b.json_extras(ctx, writer, value, record::JSON, &keys, count);
-        } else if let Some(variant_type) = variant_type {
-            let count = b.json_variant(ctx, writer, value, variant_type)?;
-            b.json_extras(
-                ctx,
-                writer,
-                value,
-                perry_abi::layout::variant::JSON,
-                &["tag", "val"],
-                count,
-            );
-        } else if let Some((tuple_ty, k_ty, v_ty)) = dict_entry {
-            let kind = slot_kind(ctx, tuple_ty)?;
-            let k_kind = slot_kind(ctx, k_ty)?;
-            let len = b.load(ctx, MemKind::I32, value, array::LEN);
-            let data = b.load(ctx, MemKind::I32, value, array::DATA);
-            let val_offset = record::HEADER + record_slot(ctx, k_ty);
-            b.counted_loop(ctx, len, |b, ctx, i| {
-                let slot = b.slot_address(ctx, data, i, tuple_ty);
-                let item = b.load(ctx, kind, slot, 0);
-                let key = b.load(ctx, k_kind, item, record::HEADER);
-                let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
-                let present = b.json_member_present(ctx, val, v_ty)?;
-                let member = b.new_block(ctx, vec![]);
-                let next = b.new_block(ctx, vec![]);
-                match present {
-                    Some(present) => b.cond_br(ctx, present, (member, vec![]), (next, vec![])),
-                    None => b.br(ctx, member, vec![]),
+                let count = b.i32_const(ctx, types.len() as i32);
+                if tuple {
+                    b.json_tuple_items(ctx, writer, value, &types)?;
+                    b.json_extras(ctx, writer, value, record::JSON, &keys, count);
+                } else {
+                    b.json_record_members(ctx, writer, value, ty, &keys, &types)?;
                 }
-                b.block = member;
-                b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
-                b.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, key]);
-                b.json_raw(ctx, writer, ":");
-                let val_write_ty = optional_inner(ctx, v_ty).unwrap_or(v_ty);
-                b.json_value(ctx, writer, val, val_write_ty)?;
-                b.br(ctx, next, vec![]);
-                b.block = next;
-                Ok(())
-            })?;
-        } else {
-            let element = FunctionLowering::element_type(ctx, value).or_else(|_| {
-                TypedHandle::<ArrayType>::from_handle(ty, ctx)
-                    .map(|a| a.deref(ctx).element())
-                    .map_err(|_| anyhow!("array"))
-            })?;
-            let len = b.load(ctx, MemKind::I32, value, array::LEN);
-            let data = b.load(ctx, MemKind::I32, value, array::DATA);
-            b.counted_loop(ctx, len, |b, ctx, i| {
-                b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
-                let slot = b.slot_address(ctx, data, i, element);
-                let item = b.load_slot_value(ctx, slot, 0, element)?;
-                b.json_value(ctx, writer, item, element)
-            })?;
+            }
+            JsonSchema::Variant(variant_type) => {
+                let count = b.json_variant(ctx, writer, value, variant_type)?;
+                b.json_extras(
+                    ctx,
+                    writer,
+                    value,
+                    perry_abi::layout::variant::JSON,
+                    &["tag", "val"],
+                    count,
+                );
+            }
+            JsonSchema::Dictionary {
+                entry,
+                key: k_ty,
+                value: v_ty,
+            } => {
+                let tuple_ty = entry.into();
+                let kind = slot_kind(ctx, tuple_ty)?;
+                let k_kind = slot_kind(ctx, k_ty)?;
+                let len = b.load(ctx, MemKind::I32, value, array::LEN);
+                let data = b.load(ctx, MemKind::I32, value, array::DATA);
+                let val_offset = record::HEADER + slot_size(ctx, k_ty);
+                b.counted_loop(ctx, len, |b, ctx, i| {
+                    let slot = b.slot_address(ctx, data, i, tuple_ty);
+                    let item = b.load(ctx, kind, slot, 0);
+                    let key = b.load(ctx, k_kind, item, record::HEADER);
+                    let val = b.load_slot_value(ctx, item, val_offset, v_ty)?;
+                    let present = b.json_member_present(ctx, val, v_ty)?;
+                    let member = b.new_block(ctx, vec![]);
+                    let next = b.new_block(ctx, vec![]);
+                    match present {
+                        Some(present) => b.cond_br(ctx, present, (member, vec![]), (next, vec![])),
+                        None => b.br(ctx, member, vec![]),
+                    }
+                    b.block = member;
+                    b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
+                    b.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, key]);
+                    b.json_raw(ctx, writer, ":");
+                    let val_write_ty = optional_inner(ctx, v_ty).unwrap_or(v_ty);
+                    b.json_value(ctx, writer, val, val_write_ty)?;
+                    b.br(ctx, next, vec![]);
+                    b.block = next;
+                    Ok(())
+                })?;
+            }
+            JsonSchema::Array(element) => {
+                let len = b.load(ctx, MemKind::I32, value, array::LEN);
+                let data = b.load(ctx, MemKind::I32, value, array::DATA);
+                b.counted_loop(ctx, len, |b, ctx, i| {
+                    b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
+                    let slot = b.slot_address(ctx, data, i, element);
+                    let item = b.load_slot_value(ctx, slot, 0, element)?;
+                    b.json_value(ctx, writer, item, element)
+                })?;
+            }
+            _ => return Err(anyhow!("expected an aggregate JSON schema")),
         }
         let bracket = b.i32_const(ctx, close as i32);
         b.runtime_void(ctx, Runtime::StdJsonClose, vec![writer, bracket]);
@@ -467,39 +457,36 @@ impl FunctionLowering<'_, '_> {
             let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
             self.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
             self.json_value(ctx, writer, slot, field_ty)?;
-            offset += record_slot(ctx, field_ty);
+            offset += slot_size(ctx, field_ty);
         }
         Ok(())
     }
 
-    /// Serialize the declared record fields, omitting `undefined`.
-    fn json_record_members(
+    /// Write a field selected by the record's insertion order.
+    fn json_record_field(
         &mut self,
         ctx: &mut Context,
         writer: Value,
         value: Value,
-        keys: &[String],
-        types: &[TypeHandle],
+        key: &str,
+        field_ty: TypeHandle,
+        offset: u32,
     ) -> Result<()> {
-        let mut offset = record::HEADER;
-        for (key, &field_ty) in keys.iter().zip(types) {
-            let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
-            offset += record_slot(ctx, field_ty);
-            let key = self.state.data.string(&json_key(key));
-            let present = self.json_member_present(ctx, slot, field_ty)?;
-            let member = self.new_block(ctx, vec![]);
-            let next = self.new_block(ctx, vec![]);
-            match present {
-                Some(present) => self.cond_br(ctx, present, (member, vec![]), (next, vec![])),
-                None => self.br(ctx, member, vec![]),
-            }
-            self.block = member;
-            let key = self.i32_const(ctx, key as i32);
-            self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
-            self.json_value(ctx, writer, slot, field_ty)?;
-            self.br(ctx, next, vec![]);
-            self.block = next;
+        let slot = self.load_slot_value(ctx, value, offset, field_ty)?;
+        let key = self.state.data.string(&json_key(key));
+        let present = self.json_member_present(ctx, slot, field_ty)?;
+        let member = self.new_block(ctx, vec![]);
+        let next = self.new_block(ctx, vec![]);
+        match present {
+            Some(present) => self.cond_br(ctx, present, (member, vec![]), (next, vec![])),
+            None => self.br(ctx, member, vec![]),
         }
+        self.block = member;
+        let key = self.i32_const(ctx, key as i32);
+        self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
+        self.json_value(ctx, writer, slot, field_ty)?;
+        self.br(ctx, next, vec![]);
+        self.block = next;
         Ok(())
     }
 

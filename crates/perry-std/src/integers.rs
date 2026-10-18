@@ -87,20 +87,11 @@ pub(crate) unsafe extern "C" fn std_bigint_to_number(value: *const Integer) -> f
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_bigint_to_string(value: *const Integer) -> *mut u8 {
     let value = unsafe { &*value };
-    let mut digits = [0; 21];
-    let mut at = digits.len();
-    let mut magnitude = value.magnitude;
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (magnitude % 10) as u8;
-        magnitude /= 10;
-        if magnitude == 0 {
-            break;
-        }
-    }
-    if value.negative != 0 {
-        at -= 1;
-        digits[at] = b'-';
-    }
-    runtime::from_bytes(&digits[at..])
+    let mut digits = [0; 66];
+    runtime::from_bytes(perry_abi::number::format_integer(
+        value.magnitude,
+        value.negative != 0,
+        10,
+        &mut digits,
+    ))
 }

@@ -303,6 +303,7 @@ intrinsics! {
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
     NumberToString = "number_to_string" (Number) -> (String), pure, atomic => NumberOnly;
+    NumberInspect = "number_inspect" (Number) -> (String), pure, atomic => NumberOnly;
     NumberToStringRadix = "number_to_string_radix" (Number, Number) -> (String), throws, atomic => NumberOnly;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
@@ -404,17 +405,22 @@ intrinsics! {
     JsonCursorNumber = "json_cursor_number" (JsonCursor) -> (Number), noalloc;
     JsonCursorI64 = "json_cursor_i64" (JsonCursor) -> (I64), throws, noalloc;
     JsonCursorU64 = "json_cursor_u64" (JsonCursor) -> (U64), throws, noalloc;
+    JsonCursorFailed = "json_cursor_failed" (JsonCursor) -> (Bool), noalloc;
     JsonCursorBoolean = "json_cursor_boolean" (JsonCursor) -> (Bool), noalloc;
     JsonCursorString = "json_cursor_string" (JsonCursor) -> (String), atomic;
     JsonCursorDiscard = "json_cursor_discard" (JsonCursor) -> (), noalloc;
     JsonCursorValue = "json_cursor_value" (JsonCursor) -> (Json), atomic;
     JsonCursorMember = "json_cursor_member" (JsonCursor, Json) -> (Json), atomic;
+    JsonCursorExtra = "json_cursor_extra" (JsonCursor) -> (), atomic;
+    JsonCursorRecord = "json_cursor_record" (JsonCursor, Aggregate) -> (), noalloc;
     JsonCursorTail = "json_cursor_tail" (JsonCursor, Json, Index) -> (Json), atomic;
     JsonCursorSeek = "json_cursor_seek" (JsonCursor, Index) -> (Index), noalloc;
     JsonCursorFinish = "json_cursor_finish" (JsonCursor, Bool) -> (), throws, atomic;
     JsonResidue = "json_residue" (Aggregate, Json) -> (), noalloc;
     JsonRetain = "json_retain" (Aggregate, Json) -> (), noalloc;
     JsonSpread = "json_spread" (Aggregate, Aggregate) -> ();
+    JsonOrderCopy = "json_order_copy" (Aggregate, Aggregate) -> ();
+    JsonInsert = "json_insert" (Aggregate, String) -> ();
     JsonExclude = "json_exclude" (Aggregate, String) -> ();
     JsonMember = "json_member" (Json, String) -> (Json), throws;
     JsonKeys = "json_keys" (Json) -> (StringArray), throws;
@@ -449,20 +455,20 @@ intrinsics! {
     AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
     InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws, atomic;
     InstantFrom = "instant_from" (String) -> (Instant), throws, atomic;
-    InstantMs = "instant_ms" (Instant) -> (Number), pure, noalloc;
+    InstantMs = "instant_ms" (Instant) -> (Number), throws, noalloc;
     InstantString = "instant_string" (Instant) -> (String), pure, atomic;
     PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws, atomic;
     PlainDateFromFields = "plain_date_from_fields" (Number, Number, Number, Number) -> (PlainDate), throws, atomic;
     PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws, atomic;
     PlainDateAddCalendar = "plain_date_add_calendar" (PlainDate, Number, Number, Number, Number, Number) -> (PlainDate), throws, atomic;
     PlainDateEpochDays = "plain_date_epoch_days" (PlainDate) -> (Number), pure, noalloc;
-    PlainDateUntilPart = "plain_date_until_part" (PlainDate, PlainDate, Number, Number) -> (Number), pure, noalloc;
-    PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure, noalloc;
+    PlainDateUntilPart = "plain_date_until_part" (PlainDate, PlainDate, Number, Number) -> (Number), throws, noalloc;
+    PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), throws, noalloc;
     PlainDateString = "plain_date_string" (PlainDate) -> (String), pure, atomic;
     PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws, atomic;
     PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws, atomic;
     PlainDateTimeAddCalendar = "plain_date_time_add_calendar" (PlainDateTime, Number, Number, Number, Number, Number) -> (PlainDateTime), throws, atomic;
-    PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure, noalloc;
+    PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), throws, noalloc;
     PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure, atomic;
 
     // `Error` objects: `cause` (strings only, set at construction) and `name`.

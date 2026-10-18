@@ -14,6 +14,7 @@ impl Shapes<'_> {
             ctx,
             vec![("_0".to_string(), first), ("_1".to_string(), second)],
             Some("tuple"),
+            RecordKind::Tuple,
         )
     }
 
@@ -35,6 +36,7 @@ impl Shapes<'_> {
                 ("_3".to_string(), f64_ty),
             ],
             Some("map_tuple"),
+            RecordKind::MapEntry,
         )
     }
 
@@ -54,6 +56,7 @@ impl Shapes<'_> {
                 ("_2".to_string(), f64_ty),
             ],
             Some("set_tuple"),
+            RecordKind::SetEntry,
         )
     }
 
@@ -68,6 +71,7 @@ impl Shapes<'_> {
                 ("_2".to_string(), f64_ty),
             ],
             Some("cursor_tuple"),
+            RecordKind::Tuple,
         )
     }
 
@@ -88,7 +92,8 @@ impl Shapes<'_> {
                 ("_2".to_string(), f64_ty),
                 ("_3".to_string(), f64_ty),
             ],
-            Some(kind.box_prefix()),
+            Some(kind.box_kind().name()),
+            kind.box_kind(),
         )
     }
 
@@ -106,7 +111,8 @@ impl Shapes<'_> {
                 ("_0".to_string(), box_ty),
                 ("_1".to_string(), cursor_rec.into()),
             ],
-            Some(view.record_prefix()),
+            Some(view.record_kind().name()),
+            view.record_kind(),
         )
     }
 
@@ -148,7 +154,8 @@ impl Shapes<'_> {
         let k_ty = self.source_type(ctx, k)?;
         let v_ty = self.source_type(ctx, v)?;
         let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
-        let entry = self.mir_record_prefix(ctx, fields, Some("dict_tuple"))?;
+        let entry =
+            self.mir_record_prefix(ctx, fields, Some("dict_tuple"), RecordKind::DictionaryEntry)?;
         Ok(ArrayType::get(ctx, entry.into()).into())
     }
 

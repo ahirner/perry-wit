@@ -126,11 +126,33 @@ pub fn specialized_implementation(ctx: &Context, function: &FuncOp) -> Identifie
         .unwrap_or_else(|| function.get_symbol_name(ctx))
 }
 
+/// Each context argument has exactly one representation constraint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ArgumentDomain {
+    Original,
+    Integer(Integer),
+    Numeric,
+}
+
+impl ArgumentDomain {
+    fn integer(self) -> Option<Integer> {
+        match self {
+            Self::Integer(integer) => Some(integer),
+            Self::Original | Self::Numeric => None,
+        }
+    }
+}
+
+impl From<Option<Integer>> for ArgumentDomain {
+    fn from(integer: Option<Integer>) -> Self {
+        integer.map_or(Self::Original, Self::Integer)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Key {
     function: Identifier,
-    args: Vec<Option<Integer>>,
-    numeric_args: Vec<bool>,
+    args: Vec<ArgumentDomain>,
     results: Vec<ResultDomain>,
     /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
     specialize: bool,
@@ -146,8 +168,7 @@ impl Key {
     ) -> Self {
         Self {
             function,
-            numeric_args: vec![false; args.len()],
-            args,
+            args: args.into_iter().map(ArgumentDomain::from).collect(),
             results: results.into_iter().map(ResultDomain::from).collect(),
             specialize,
         }
@@ -365,11 +386,28 @@ pub struct ProgramFacts {
     heap: heap::HeapFacts,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("function {0} has no effect summary")]
+struct MissingEffects(Identifier);
+
 impl ProgramFacts {
     pub fn effects(&self, function: &Identifier) -> Option<&crate::effects::Summary> {
         self.generic
             .get(function)
             .map(|&id| &self.states[id].summary)
+    }
+
+    /// A resolved function must have been included in this analysis.
+    pub fn function_summary(
+        &self,
+        ctx: &Context,
+        function: &FuncOp,
+    ) -> Result<&crate::effects::Summary> {
+        let name = function.get_symbol_name(ctx);
+        self.effects(&name).map_or_else(
+            || pliron::input_err!(function.loc(ctx).clone(), MissingEffects(name)),
+            Ok,
+        )
     }
 
     /// Non-negative integral values, including loop-carried counts after range widening.
@@ -454,17 +492,26 @@ impl Solver {
     fn summary_key(&self, ctx: &Context, key: &Key) -> Key {
         let body = &self.analysis.bodies[&key.function];
         let is_async = crate::calls::is_async(ctx, &body.function);
-        let mut args = vec![None; key.args.len()];
-        let mut numeric_args = vec![false; key.args.len()];
-        for (idx, param) in body.parameters.iter().enumerate() {
-            let ty = param.get_type(ctx);
-            args[idx] = declared(&body.declared_args, idx).or_else(|| Integer::from_type(ctx, ty));
-            // Unconstrained numbers stay lossless unless an async payload keeps its carrier.
-            let number = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
-            numeric_args[idx] = args[idx].is_none()
-                && !is_async
-                && number.deref(ctx).is::<pliron::builtin::types::FP64Type>();
-        }
+        let args = body
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(idx, param)| {
+                let ty = param.get_type(ctx);
+                if let Some(integer) =
+                    declared(&body.declared_args, idx).or_else(|| Integer::from_type(ctx, ty))
+                {
+                    return ArgumentDomain::Integer(integer);
+                }
+                // Unconstrained numbers stay lossless unless an async payload keeps its carrier.
+                let number = crate::optional::optional_value(ctx, ty).unwrap_or(ty);
+                if !is_async && number.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
+                    ArgumentDomain::Numeric
+                } else {
+                    ArgumentDomain::Original
+                }
+            })
+            .collect();
         let res_types = body.signature.deref(ctx).res_types();
         let results = (0..key.results.len())
             .map(|idx| {
@@ -481,7 +528,6 @@ impl Solver {
         Key {
             function: key.function.clone(),
             args,
-            numeric_args,
             results,
             specialize: true,
         }
@@ -569,17 +615,15 @@ impl Solver {
             if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
                 state.origins.insert(parameter, BTreeSet::from([position]));
             }
-            let fact = if let Some(domain) = *domain {
-                Fact::Integer(domain)
-            } else if key.numeric_args.get(position).copied().unwrap_or(false) {
-                Fact::Numeric
-            } else {
-                Fact::Original
+            let fact = match *domain {
+                ArgumentDomain::Integer(integer) => Fact::Integer(integer),
+                ArgumentDomain::Numeric => Fact::Numeric,
+                ArgumentDomain::Original => Fact::Original,
             };
             state.facts.insert(parameter, fact);
             state.ranges.insert(
                 parameter,
-                domain.map_or(
+                domain.integer().map_or(
                     if body.external {
                         Range::Unknown
                     } else {

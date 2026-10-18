@@ -92,8 +92,10 @@ impl OperationKind {
             Self::None
         } else {
             match crate::intrinsics::intrinsic_of(ctx, op) {
-                Some(crate::Intrinsic::JsonSpread) => Self::JsonSpread,
-                Some(crate::Intrinsic::JsonExclude) => Self::None,
+                Some(crate::Intrinsic::JsonSpread | crate::Intrinsic::JsonOrderCopy) => {
+                    Self::JsonSpread
+                }
+                Some(crate::Intrinsic::JsonExclude | crate::Intrinsic::JsonInsert) => Self::None,
                 _ => Self::Unknown,
             }
         }

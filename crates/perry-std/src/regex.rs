@@ -1,6 +1,9 @@
 //! Statically checked reverse and anchored-forward DFA execution with optional NFA captures.
 use crate::runtime;
-use perry_abi::layout::regex::MAX_CAPTURES;
+use perry_abi::layout::regex::{
+    FORWARD_CLASSES, FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_PENDING, MAX_STATES,
+    MAX_THREADS, NfaState, NfaTable, REVERSE_CLASSES, REVERSE_ROWS,
+};
 
 #[inline(always)]
 unsafe fn read_u16(ptr: *const u8) -> u16 {
@@ -17,36 +20,24 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn look_matches(code: u8, text: &[u8], cursor: usize) -> bool {
+fn look_matches(code: LookCode, text: &[u8], cursor: usize) -> bool {
     let prev_word = cursor > 0 && text.get(cursor - 1).is_some_and(|&b| is_word_byte(b));
     let curr_word = text.get(cursor).is_some_and(|&b| is_word_byte(b));
-    if code == 1 {
-        cursor == 0
-    } else if code == 2 {
-        cursor == text.len()
-    } else if code == 3 {
-        cursor == 0 || text.get(cursor - 1) == Some(&b'\n')
-    } else if code == 4 {
-        cursor == text.len() || text.get(cursor) == Some(&b'\n')
-    } else if code == 5 {
-        prev_word != curr_word
-    } else if code == 6 {
-        prev_word == curr_word
-    } else if code == 7 {
-        !prev_word && curr_word
-    } else if code == 8 {
-        prev_word && !curr_word
-    } else {
-        false
+    match code {
+        LookCode::Start => cursor == 0,
+        LookCode::End => cursor == text.len(),
+        LookCode::StartLine => cursor == 0 || text.get(cursor - 1) == Some(&b'\n'),
+        LookCode::EndLine => cursor == text.len() || text.get(cursor) == Some(&b'\n'),
+        LookCode::WordBoundary => prev_word != curr_word,
+        LookCode::NotWordBoundary => prev_word == curr_word,
+        LookCode::WordStart => !prev_word && curr_word,
+        LookCode::WordEnd => prev_word && !curr_word,
     }
 }
 
-const MAX_THREADS: usize = 24;
+type Slots = [u32; 2 * MAX_CAPTURES];
 const MAX_SLOTS: usize = 2 * MAX_CAPTURES;
 
-/// The group count of `program`, whole match included. The compiler rejects patterns with more
-/// than `MAX_CAPTURES` explicit groups, so a larger count is a corrupt table.
-///
 /// # Safety
 /// `program` must be a compiler-generated regex table.
 unsafe fn group_count(program: *const u8) -> usize {
@@ -55,96 +46,85 @@ unsafe fn group_count(program: *const u8) -> usize {
     count
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn eps_closure(
-    nfa_base: *const u8,
-    state_count: u16,
-    states_base: *const u8,
-    text: &[u8],
-    end: usize,
-    cursor: usize,
-    seed_state: u16,
-    work_slots: &mut [u32; MAX_SLOTS],
-    visited: &mut [u64; 4],
-    next_states: &mut [u16; MAX_THREADS],
-    next_slots: &mut [[u32; MAX_SLOTS]; MAX_THREADS],
-    next_len: &mut usize,
-    matched_slots: &mut [u32; MAX_SLOTS],
-) -> bool {
-    let mut stack = [(0u32, 0u32); 64];
-    let mut stack_len = 1usize;
-    stack[0] = (u32::from(seed_state), 0);
-    while stack_len > 0 {
-        stack_len -= 1;
-        let (tag, prev_val) = stack[stack_len];
-        if tag & 0x8000_0000 != 0 {
-            let idx = (tag & 0x7fff_ffff) as usize;
-            if idx < MAX_SLOTS {
-                work_slots[idx] = prev_val;
-            }
-            continue;
-        }
-        let state_id = tag as u16;
-        if state_id >= state_count {
-            continue;
-        }
-        let word = (state_id >> 6) as usize;
-        let bit = 1u64 << (state_id & 63);
-        if let Some(w) = visited.get_mut(word) {
-            if *w & bit != 0 {
-                continue;
-            }
-            *w |= bit;
-        }
-        let offset = unsafe { read_u16(nfa_base.add(4 + usize::from(state_id) * 2)) } as usize;
-        let sp = unsafe { states_base.add(offset) };
-        let op = unsafe { *sp };
-        if op == 1 || op == 2 {
-            if *next_len < MAX_THREADS {
-                next_states[*next_len] = state_id;
-                next_slots[*next_len] = *work_slots;
-                *next_len += 1;
-            }
-        } else if op == 3 {
-            let code = unsafe { *sp.add(1) };
-            let next = unsafe { read_u16(sp.add(2)) };
-            if look_matches(code, text, cursor) && stack_len < stack.len() {
-                stack[stack_len] = (u32::from(next), 0);
-                stack_len += 1;
-            }
-        } else if op == 4 {
-            let count = unsafe { read_u16(sp.add(1)) } as usize;
-            let ap = unsafe { sp.add(3) };
-            for i in (0..count).rev() {
-                if stack_len < stack.len() {
-                    let alt = unsafe { read_u16(ap.add(i * 2)) };
-                    stack[stack_len] = (u32::from(alt), 0);
-                    stack_len += 1;
-                }
-            }
-        } else if op == 5 {
-            let raw_slot = unsafe { *sp.add(1) } as usize;
-            let next = unsafe { read_u16(sp.add(2)) };
-            if let Some(idx) = raw_slot.checked_sub(2)
-                && idx < MAX_SLOTS
-            {
-                let prev = work_slots[idx];
-                work_slots[idx] = cursor as u32 + 1;
-                if stack_len + 2 <= stack.len() {
-                    stack[stack_len] = ((idx as u32) | 0x8000_0000, prev);
-                    stack[stack_len + 1] = (u32::from(next), 0);
-                    stack_len += 2;
-                }
-            } else if stack_len < stack.len() {
-                stack[stack_len] = (u32::from(next), 0);
-                stack_len += 1;
-            }
-        } else if op == 6 && cursor == end {
-            *matched_slots = *work_slots;
-            return true;
+struct Threads<'a> {
+    entries: [(&'a [[u8; 4]], Slots); MAX_THREADS],
+    len: usize,
+}
+
+impl Default for Threads<'_> {
+    fn default() -> Self {
+        Self {
+            entries: [(&[], [0; MAX_SLOTS]); MAX_THREADS],
+            len: 0,
         }
     }
-    false
+}
+
+struct Nfa<'a> {
+    table: NfaTable<'a>,
+    text: &'a [u8],
+    end: usize,
+    slots: Slots,
+    matched: Slots,
+    visited: [u64; MAX_STATES / 64],
+}
+
+impl<'a> Nfa<'a> {
+    fn closure(&mut self, cursor: usize, seed: u16, next: &mut Threads<'a>) -> bool {
+        let mut stack = [(0u32, 0u32); MAX_PENDING];
+        let mut len = 1;
+        stack[0] = (u32::from(seed), 0);
+        while len > 0 {
+            len -= 1;
+            let (tag, previous) = stack[len];
+            if tag & 0x8000_0000 != 0 {
+                self.slots[(tag & 0x7fff_ffff) as usize] = previous;
+                continue;
+            }
+            let state = tag as u16;
+            let word = (state >> 6) as usize;
+            let bit = 1u64 << (state & 63);
+            if self.visited[word] & bit != 0 {
+                continue;
+            }
+            self.visited[word] |= bit;
+            match self.table.state(state) {
+                NfaState::Ranges(ranges) => {
+                    next.entries[next.len] = (ranges, self.slots);
+                    next.len += 1;
+                }
+                NfaState::Look(code, target) => {
+                    if look_matches(code, self.text, cursor) {
+                        stack[len] = (u32::from(target), 0);
+                        len += 1;
+                    }
+                }
+                NfaState::Union(alternates) => {
+                    for &target in alternates.iter().rev() {
+                        stack[len] = (u32::from(u16::from_le_bytes(target)), 0);
+                        len += 1;
+                    }
+                }
+                NfaState::Capture(slot, target) => {
+                    // The DFA supplies whole-match bounds; only explicit groups need slots.
+                    if let Some(slot) = slot.checked_sub(2) {
+                        let previous = self.slots[usize::from(slot)];
+                        self.slots[usize::from(slot)] = cursor as u32 + 1;
+                        stack[len] = (u32::from(slot) | 0x8000_0000, previous);
+                        len += 1;
+                    }
+                    stack[len] = (u32::from(target), 0);
+                    len += 1;
+                }
+                NfaState::Match if cursor == self.end => {
+                    self.matched = self.slots;
+                    return true;
+                }
+                NfaState::Fail | NfaState::Match => {}
+            }
+        }
+        false
+    }
 }
 
 unsafe fn extract_captures(
@@ -152,129 +132,68 @@ unsafe fn extract_captures(
     text: &[u8],
     start: usize,
     end: usize,
-    matched_slots: &mut [u32; MAX_SLOTS],
+    matched_slots: &mut Slots,
 ) -> usize {
-    *matched_slots = [0u32; MAX_SLOTS];
+    *matched_slots = [0; MAX_SLOTS];
     let group_count = unsafe { group_count(program) };
     if group_count <= 1 {
         return 0;
     }
     let fwd_header = unsafe { read_u32(program.add(4)) };
-    let fwd_base = unsafe { program.add((fwd_header & 0x7fff_ffff) as usize) };
+    let fwd_base = unsafe { program.add((fwd_header & !GLOBAL) as usize) };
     let nfa_offset = unsafe { read_u32(fwd_base.add(8)) } as usize;
-    if nfa_offset == 0 {
-        return 0;
-    }
-    let nfa_base = unsafe { program.add(nfa_offset) };
-    let state_count = unsafe { read_u16(nfa_base) };
-    let start_state = unsafe { read_u16(nfa_base.add(2)) };
-    let states_base = unsafe { nfa_base.add(4 + usize::from(state_count) * 2) };
-    let mut curr_states = [0u16; MAX_THREADS];
-    let mut next_states = [0u16; MAX_THREADS];
-    let mut curr_slots = [[0u32; MAX_SLOTS]; MAX_THREADS];
-    let mut next_slots = [[0u32; MAX_SLOTS]; MAX_THREADS];
-    let mut curr_len = 0usize;
-    let mut work_slots = [0u32; MAX_SLOTS];
-    let mut visited = [0u64; 4];
-    let _ = unsafe {
-        eps_closure(
-            nfa_base,
-            state_count,
-            states_base,
-            text,
-            end,
-            start,
-            start_state,
-            &mut work_slots,
-            &mut visited,
-            &mut curr_states,
-            &mut curr_slots,
-            &mut curr_len,
-            matched_slots,
-        )
+    assert!(nfa_offset != 0, "missing regex capture program");
+    let bytes = unsafe {
+        let base = program.add(nfa_offset);
+        core::slice::from_raw_parts(base, read_u32(base) as usize)
     };
-    for cursor in start..end {
-        if curr_len == 0 {
+    let mut nfa = Nfa {
+        table: NfaTable::read(bytes),
+        text,
+        end,
+        slots: [0; MAX_SLOTS],
+        matched: [0; MAX_SLOTS],
+        visited: [0; MAX_STATES / 64],
+    };
+    let mut current = Threads::default();
+    let mut next = Threads::default();
+    nfa.closure(start, nfa.table.start(), &mut current);
+    for (cursor, &byte) in text.iter().enumerate().take(end).skip(start) {
+        if current.len == 0 {
             break;
         }
-        let b = unsafe { *text.get_unchecked(cursor) };
-        let mut next_len = 0usize;
-        visited = [0u64; 4];
-        for i in 0..curr_len {
-            let state_id = curr_states[i];
-            let offset = unsafe { read_u16(nfa_base.add(4 + usize::from(state_id) * 2)) } as usize;
-            let sp = unsafe { states_base.add(offset) };
-            let op = unsafe { *sp };
-            let target = if op == 1 {
-                let lo = unsafe { *sp.add(1) };
-                let hi = unsafe { *sp.add(2) };
-                if b >= lo && b <= hi {
-                    Some(unsafe { read_u16(sp.add(3)) })
-                } else {
-                    None
-                }
-            } else if op == 2 {
-                let count = unsafe { read_u16(sp.add(1)) } as usize;
-                let mut tp = unsafe { sp.add(3) };
-                let mut found = None;
-                for _ in 0..count {
-                    let lo = unsafe { *tp };
-                    let hi = unsafe { *tp.add(1) };
-                    if b >= lo && b <= hi {
-                        found = Some(unsafe { read_u16(tp.add(2)) });
-                        break;
-                    }
-                    tp = unsafe { tp.add(4) };
-                }
-                found
-            } else {
-                None
-            };
-            if let Some(next_state) = target {
-                work_slots = curr_slots[i];
-                if unsafe {
-                    eps_closure(
-                        nfa_base,
-                        state_count,
-                        states_base,
-                        text,
-                        end,
-                        cursor + 1,
-                        next_state,
-                        &mut work_slots,
-                        &mut visited,
-                        &mut next_states,
-                        &mut next_slots,
-                        &mut next_len,
-                        matched_slots,
-                    )
-                } {
+        next.len = 0;
+        nfa.visited.fill(0);
+        for &(ranges, slots) in &current.entries[..current.len] {
+            let target = ranges.iter().find(|r| r[0] <= byte && byte <= r[1]);
+            if let Some(&[_, _, lo, hi]) = target {
+                nfa.slots = slots;
+                if nfa.closure(cursor + 1, u16::from_le_bytes([lo, hi]), &mut next) {
                     break;
                 }
             }
         }
-        curr_states = next_states;
-        curr_slots = next_slots;
-        curr_len = next_len;
+        core::mem::swap(&mut current, &mut next);
     }
+    *matched_slots = nfa.matched;
     group_count - 1
 }
 
-/// Find the leftmost match `(start, end)` in `text` starting at or after byte offset `pos`.
+/// Find the leftmost match start at or after byte offset `pos`.
 ///
 /// # Safety
 /// `program` must be a compiler-generated reverse+forward DFA table.
-unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usize, usize)> {
+unsafe fn match_start(text: &[u8], pos: usize, program: *const u8) -> Option<usize> {
     if pos > text.len() {
         return None;
     }
     let rev_end_column = unsafe { read_u16(program) } as usize;
-    let rev_rows = unsafe { program.add(264) };
+    let rev_rows = unsafe { program.add(REVERSE_ROWS) };
     let mut state = rev_rows;
     let mut best_start = None;
     for cursor in (pos..text.len()).rev() {
         let byte = unsafe { *text.get_unchecked(cursor) };
-        let class = unsafe { *program.add(8 + byte as usize) };
+        let class = unsafe { *program.add(REVERSE_CLASSES + byte as usize) };
         let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
         state = unsafe { rev_rows.add(offset as usize) };
         if unsafe { read_u16(state) } != 0 && text.get(cursor + 1).is_none_or(|&b| b & 0xc0 != 0x80)
@@ -289,17 +208,21 @@ unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usi
             best_start = Some(0);
         }
     } else if let Some(&prev) = text.get(pos - 1) {
-        let class = unsafe { *program.add(8 + prev as usize) };
+        let class = unsafe { *program.add(REVERSE_CLASSES + prev as usize) };
         let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
         state = unsafe { rev_rows.add(offset as usize) };
         if unsafe { read_u16(state) } != 0 && text.get(pos).is_none_or(|&b| b & 0xc0 != 0x80) {
             best_start = Some(pos);
         }
     }
-    let start = best_start?;
+    best_start
+}
+
+unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usize, usize)> {
+    let start = unsafe { match_start(text, pos, program) }?;
 
     let fwd_header = unsafe { read_u32(program.add(4)) };
-    let fwd_base = unsafe { program.add((fwd_header & 0x7fff_ffff) as usize) };
+    let fwd_base = unsafe { program.add((fwd_header & !GLOBAL) as usize) };
     let fwd_end_column = unsafe { read_u16(fwd_base) } as usize;
     let start_offset = if start == 0 {
         unsafe { read_u16(fwd_base.add(2)) }
@@ -308,13 +231,13 @@ unsafe fn next_match(text: &[u8], pos: usize, program: *const u8) -> Option<(usi
     } else {
         unsafe { read_u16(fwd_base.add(6)) }
     };
-    let fwd_rows = unsafe { fwd_base.add(268) };
+    let fwd_rows = unsafe { fwd_base.add(FORWARD_ROWS) };
     let mut state = unsafe { fwd_rows.add(start_offset as usize) };
     let mut best_end = None;
     let mut hit_dead = false;
     for cursor in start..text.len() {
         let byte = unsafe { *text.get_unchecked(cursor) };
-        let class = unsafe { *fwd_base.add(12 + byte as usize) };
+        let class = unsafe { *fwd_base.add(FORWARD_CLASSES + byte as usize) };
         let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
         state = unsafe { fwd_rows.add(offset as usize) };
         let flags = unsafe { read_u16(state) };
@@ -382,15 +305,15 @@ pub(crate) fn push_substitution(
                     index += 2;
                 }
                 b'&' => {
-                    out.extend_from_slice(text.get(start..end).unwrap_or(&[]));
+                    out.extend_from_slice(&text[start..end]);
                     index += 2;
                 }
                 b'`' => {
-                    out.extend_from_slice(text.get(..start).unwrap_or(&[]));
+                    out.extend_from_slice(&text[..start]);
                     index += 2;
                 }
                 b'\'' => {
-                    out.extend_from_slice(text.get(end..).unwrap_or(&[]));
+                    out.extend_from_slice(&text[end..]);
                     index += 2;
                 }
                 b'0'..=b'9' if group_count > 0 => {
@@ -401,9 +324,7 @@ pub(crate) fn push_substitution(
                             let s = captures[(two - 1) * 2];
                             let e = captures[(two - 1) * 2 + 1];
                             if s != 0 && e != 0 && s <= e {
-                                out.extend_from_slice(
-                                    text.get((s as usize - 1)..(e as usize - 1)).unwrap_or(&[]),
-                                );
+                                out.extend_from_slice(&text[(s as usize - 1)..(e as usize - 1)]);
                             }
                             index += 3;
                             continue;
@@ -413,9 +334,7 @@ pub(crate) fn push_substitution(
                         let s = captures[(d1 - 1) * 2];
                         let e = captures[(d1 - 1) * 2 + 1];
                         if s != 0 && e != 0 && s <= e {
-                            out.extend_from_slice(
-                                text.get((s as usize - 1)..(e as usize - 1)).unwrap_or(&[]),
-                            );
+                            out.extend_from_slice(&text[(s as usize - 1)..(e as usize - 1)]);
                         }
                         index += 2;
                     } else {
@@ -440,27 +359,8 @@ pub(crate) fn push_substitution(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const u8) -> f64 {
     let text = unsafe { runtime::bytes(text) };
-    let rows = unsafe { program.add(264) };
-    let mut state = rows;
-    let mut best = None;
-    for cursor in (0..text.len()).rev() {
-        let class = unsafe { *program.add(8 + *text.get_unchecked(cursor) as usize) };
-        let offset = unsafe { read_u16(state.add(2 + usize::from(class) * 2)) };
-        state = unsafe { rows.add(offset as usize) };
-        if unsafe { read_u16(state) } != 0 && text.get(cursor + 1).is_none_or(|&b| b & 0xc0 != 0x80)
-        {
-            best = Some(cursor + 1);
-        }
-    }
-    let end_column = unsafe { read_u16(program) };
-    let offset = unsafe { read_u16(state.add(end_column as usize)) };
-    state = unsafe { rows.add(offset as usize) };
-    if unsafe { read_u16(state) } != 0 {
-        best = Some(0);
-    }
-    best.map_or(-1.0, |end| {
-        text.get(..end)
-            .unwrap_or(&[])
+    unsafe { match_start(text, 0, program) }.map_or(-1.0, |start| {
+        text[..start]
             .iter()
             .filter(|&&byte| byte & 0xc0 != 0x80)
             .count() as f64
@@ -486,7 +386,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
     let mut cap_slots = [0u32; MAX_SLOTS];
     let is_global = (unsafe { read_u32(program.add(4)) } >> 31) != 0;
     let mut out = runtime::Buffer::new();
-    out.extend_from_slice(text.get(..first_start).unwrap_or(&[]));
+    out.extend_from_slice(&text[..first_start]);
     let cap_len = if needs_captures {
         unsafe { extract_captures(program, text, first_start, first_end, &mut cap_slots) * 2 }
     } else {
@@ -501,7 +401,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
         &cap_slots[..cap_len],
     );
     if !is_global {
-        out.extend_from_slice(text.get(first_end..).unwrap_or(&[]));
+        out.extend_from_slice(&text[first_end..]);
         return unsafe { out.into_string() };
     }
     let mut last_end = first_end;
@@ -510,11 +410,11 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
     } else if first_end < text.len() {
         next_scalar_boundary(text, first_end)
     } else {
-        out.extend_from_slice(text.get(last_end..).unwrap_or(&[]));
+        out.extend_from_slice(&text[last_end..]);
         return unsafe { out.into_string() };
     };
     while let Some((start, end)) = unsafe { next_match(text, pos, program) } {
-        out.extend_from_slice(text.get(last_end..start).unwrap_or(&[]));
+        out.extend_from_slice(&text[last_end..start]);
         let cap_len = if needs_captures {
             unsafe { extract_captures(program, text, start, end, &mut cap_slots) * 2 }
         } else {
@@ -530,7 +430,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
             break;
         }
     }
-    out.extend_from_slice(text.get(last_end..).unwrap_or(&[]));
+    out.extend_from_slice(&text[last_end..]);
     unsafe { out.into_string() }
 }
 

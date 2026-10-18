@@ -112,7 +112,7 @@ impl Effects {
 }
 
 pub(crate) struct LocalEffects {
-    pub effects: Effects,
+    pub(crate) effects: Effects,
     asynchronous: bool,
     recursive: bool,
     loop_calls: HashSet<Ptr<Operation>>,
@@ -183,6 +183,9 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
     if let Some(intrinsic) = intrinsic_of(ctx, op) {
         intrinsic.allocation()
     } else if bigint_cast()
+        || (Operation::is_op::<FieldSetOp>(op, ctx)
+            && crate::absence(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
+                .is_some_and(|absence| absence.admits_undefined()))
         || is_any::<(
             NativeJsonOp,
             ConcatSegmentsOp,

@@ -136,3 +136,13 @@ pub(crate) fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
 pub(crate) fn optional_inner(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     perry_mir::optional_value(ctx, ty)
 }
+
+/// Bytes an aggregate slot occupies: numeric alternatives keep a tag and a payload.
+pub(crate) fn slot_size(ctx: &Context, ty: TypeHandle) -> u32 {
+    if crate::values::is_numeric_type(ctx, ty) {
+        perry_abi::layout::array::Elements::Numeric
+    } else {
+        perry_abi::layout::array::Elements::Scalar
+    }
+    .stride()
+}

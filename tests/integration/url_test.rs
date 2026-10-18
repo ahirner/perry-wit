@@ -46,7 +46,24 @@ export function inspect(input: string, base: string): string {
         ("//[2001:0db8::1]:443/a", "https://base.test/"),
         ("#next", "http://base.test/path?q=x#old"),
         ("https://:pass@example.test/?#", "https://base.test/"),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        [
+            "../c",
+            "./c?x=1#hash",
+            "/x/../z",
+            "//other.example:80/x",
+            "https://other.example",
+            "?new=query",
+            "#fragment",
+            "",
+            "  next  ",
+            "\\path\\next",
+            "é?q='{}",
+        ]
+        .map(|location| (location, "http://example.com/a/b?old=yes")),
+    ) {
         let node = std::process::Command::new("node")
             .arg("--experimental-strip-types")
             .arg(&script)

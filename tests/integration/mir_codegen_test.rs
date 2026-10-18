@@ -425,9 +425,36 @@ export function dispatch(n: number): number {
     }
     return trace * 10 + value;
 }
+export function labeledSwitch(n: number): number {
+    let result = 0;
+    outer: switch ([n].map(value => {
+        switch (value) { case 0: return 0; default: return 1; }
+    })[0] ?? 0) {
+        case 0: result = 10; break outer;
+        default: result = 20;
+    }
+    return result;
+}
+export function labeledLoop(n: number): number {
+    let result = 0;
+    outer: for (let i = 0; i < n; i++) {
+        inner: do {
+            try {
+                if (i === 1) continue outer;
+                if (i === 3) break outer;
+                result += i;
+            } finally { result += 10; }
+            break inner;
+        } while (true);
+    }
+    return result;
+}
 "#,
     );
     assert_eq!(program.number("run", 6.0), 735.0);
+    assert_eq!(program.number("labeledSwitch", 0.0), 10.0);
+    assert_eq!(program.number("labeledSwitch", 1.0), 20.0);
+    assert_eq!(program.number("labeledLoop", 5.0), 42.0);
     for (value, expected) in [(1.0, 11.0), (2.0, 122.0), (3.0, 1233.0), (4.0, 1236.0)] {
         assert_eq!(program.number("dispatch", value), expected);
     }
@@ -453,7 +480,7 @@ export function run(n: number): number {
     const nullable: Options = { value: null, next: { label: 'abc', value: n } };
     const parsed: Options = JSON.parse('{"value":null,"next":{"label":"é"}}');
     if (JSON.stringify(empty) !== '{}') return -1;
-    if (JSON.stringify(parsed) !== '{"next":{"label":"é"},"value":null}') return -2;
+    if (JSON.stringify(parsed) !== '{"value":null,"next":{"label":"é"}}') return -2;
     empty.label = 'x';
     empty.value = 5;
     empty.label = undefined;

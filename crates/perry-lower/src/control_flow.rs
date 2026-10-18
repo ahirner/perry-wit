@@ -2,6 +2,11 @@
 use super::*;
 use crate::collections::LiveCursor;
 
+pub(super) enum LoopCondition<'s> {
+    Before(Option<&'s Expr>),
+    After(&'s Expr),
+}
+
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
         let entry = self.entry_block();
@@ -23,6 +28,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         discriminant: &'s Expr,
         cases: &'s [perry_hir::ir::SwitchCase],
+        label: Option<&'s str>,
     ) -> Result<()> {
         let value = self.expression(ctx, discriminant)?;
         let ty = value.get_type(ctx);
@@ -57,7 +63,6 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(next);
             }
         }
-        let label = self.pending_label.take();
         self.jump(ctx, default);
         self.controls.push(Control::Switch {
             label,
@@ -244,14 +249,18 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         init: Option<&'s Stmt>,
-        condition: Option<&'s Expr>,
+        condition: LoopCondition<'s>,
         update: Option<&'s Expr>,
         body: &'s [Stmt],
-        body_first: bool,
+        label: Option<&'s str>,
     ) -> Result<()> {
-        let label = self.pending_label.take();
+        let body_first = matches!(condition, LoopCondition::After(_));
+        let condition = match condition {
+            LoopCondition::Before(condition) => condition,
+            LoopCondition::After(condition) => Some(condition),
+        };
         if let Some(init) = init {
-            self.statement(ctx, init)?;
+            self.statement(ctx, init, None)?;
         }
         let header = self.new_block(ctx, "header");
         let body_block = self.new_block(ctx, "body");

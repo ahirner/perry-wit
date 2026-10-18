@@ -3,8 +3,7 @@
 //! records are object types, variants unions of `{ tag, val }` objects, options
 //! `T | null`, tuples tuples and `list<u8>` a `Uint8Array`.
 use crate::sdk::{
-    collect_world_types, declaration_id, qualified_type_name, to_camel_case, to_pascal_case,
-    type_name, world_type_name,
+    NamedType, canonical_type, collect_world_types, declaration_id, to_camel_case, to_pascal_case,
 };
 use perry_lower::hir::{Foreign, ObjectType, PropertyInfo, Signedness, Type as HirType};
 use std::collections::HashMap;
@@ -20,24 +19,27 @@ pub(crate) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
         if definition.name.is_none() || declaration_id(resolve, id) != id {
             continue;
         }
+        let Some(named) = NamedType::get(resolve, id) else {
+            continue;
+        };
         let entry = if matches!(definition.kind, TypeDefKind::Resource) {
-            Foreign::Resource(super::resources::canonical(resolve, id).index() as u32)
+            Foreign::Resource(canonical_type(resolve, id).index() as u32)
         } else {
             let Some(ty) = kind(resolve, &definition.kind) else {
                 continue;
             };
             Foreign::Type(ty)
         };
-        let qualified = qualified_type_name(resolve, id);
+        let qualified = named.qualified();
         let input_entry =
             Foreign::Input(Box::new(Foreign::Type(HirType::Named(qualified.clone()))));
         types.insert(qualified.clone(), entry);
         types.insert(format!("{qualified}Input"), input_entry);
         for alias in [
-            Some(type_name(resolve, id)),
+            Some(named.in_scope(resolve.types.iter().map(|(id, _)| id))),
             world_types
                 .as_ref()
-                .map(|wt| world_type_name(resolve, wt, id)),
+                .map(|wt| named.in_scope(wt.iter().copied())),
         ]
         .into_iter()
         .flatten()
@@ -58,7 +60,10 @@ pub(crate) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
         };
         for (name, id) in &interface.types {
             let decl = declaration_id(resolve, *id);
-            let target = qualified_type_name(resolve, decl);
+            let Some(named) = NamedType::get(resolve, decl) else {
+                continue;
+            };
+            let target = named.qualified();
             if types.contains_key(&target) {
                 let local = to_pascal_case(name);
                 types.insert(
@@ -122,8 +127,8 @@ pub(super) fn ty(resolve: &Resolve, ty: &Type) -> Option<HirType> {
         Type::ErrorContext => return None,
         Type::Id(id) => {
             let definition = &resolve.types[*id];
-            if definition.name.is_some() {
-                HirType::Named(qualified_type_name(resolve, *id))
+            if let Some(named) = NamedType::get(resolve, *id) {
+                HirType::Named(named.qualified())
             } else {
                 kind(resolve, &definition.kind)?
             }
@@ -135,7 +140,7 @@ fn kind(resolve: &Resolve, kind: &TypeDefKind) -> Option<HirType> {
     Some(match kind {
         TypeDefKind::Type(inner) => ty(resolve, inner)?,
         TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            super::resources::source_type(resolve, *id)
+            super::resources::source_type(resolve, *id)?
         }
         TypeDefKind::Record(record) => object(
             record

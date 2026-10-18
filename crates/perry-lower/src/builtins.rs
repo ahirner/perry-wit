@@ -1,6 +1,7 @@
 //! Built-in globals and methods of primitive values: `Math`, `JSON`, errors, strings,
 //! bytes, text coding and `console`.
 use super::*;
+use crate::methods::Method;
 
 /// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
 pub(super) const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
@@ -51,11 +52,16 @@ impl<'s> FunctionBuilder<'s> {
         }
         let arg = |index: usize| args.get(index);
         let method = method.name();
-        if let Some(value) = self.collection_method(ctx, object, receiver, method, args)? {
+        if let Some(value) = self.collection_method(ctx, receiver, method, args)? {
             return Ok(value);
         }
+        if kind(ctx, receiver)? == Kind::Array
+            && let Some(method) = Method::parse(method)
+            && let Some(value) = self.array_method(ctx, receiver, method, args)?
+        {
+            return Ok(Some(value));
+        }
         let value = match (kind(ctx, receiver)?, method) {
-            (Kind::Array, "push") => Some(self.push_values(ctx, receiver, args)?),
             (Kind::String, "concat") => {
                 let mut segments = Vec::with_capacity(args.len());
                 for argument in args {
@@ -67,89 +73,6 @@ impl<'s> FunctionBuilder<'s> {
                     result = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, result, segment));
                 }
                 Some(result)
-            }
-            (Kind::Array, "concat") => Some(self.concat_values(ctx, receiver, args)?),
-            (Kind::Array, "map" | "filter") => {
-                let [callback] = args else {
-                    bail!("array.{method} requires one static callback")
-                };
-                Some(self.array_transform(ctx, receiver, callback, method == "filter")?)
-            }
-            (Kind::Array, "find" | "findIndex") => {
-                let [callback] = args else {
-                    bail!("array.{method} requires one static callback")
-                };
-                Some(self.array_find(ctx, receiver, callback, method == "findIndex")?)
-            }
-            (Kind::Array, "some" | "every") => {
-                let [callback] = args else {
-                    bail!("array.{method} requires one static callback")
-                };
-                Some(self.array_quantifier(ctx, receiver, callback, method == "every")?)
-            }
-            (Kind::Array, "flatMap") => {
-                let [callback] = args else {
-                    bail!("array.flatMap requires one static callback")
-                };
-                Some(self.array_flat_map(ctx, receiver, callback)?)
-            }
-            (Kind::Array, "sort" | "toSorted") => {
-                ensure!(
-                    args.len() <= 1,
-                    "array.{method} accepts at most one comparator callback"
-                );
-                Some(self.array_sort(ctx, receiver, arg(0), method == "toSorted")?)
-            }
-            (Kind::Array, "reduce" | "reduceRight") => {
-                let (Some(callback), true) = (arg(0), args.len() <= 2) else {
-                    bail!("array.{method} requires a callback and optional initial value")
-                };
-                Some(self.array_reduce(ctx, receiver, callback, arg(1), method == "reduceRight")?)
-            }
-            (Kind::Array, "forEach") => {
-                let [callback] = args else {
-                    bail!("array.forEach requires one static callback")
-                };
-                Some(self.array_for_each(ctx, receiver, callback)?)
-            }
-            (Kind::Array, "join") => {
-                ensure!(args.len() <= 1, "array.join accepts at most one separator");
-                Some(self.array_join(ctx, receiver, arg(0))?)
-            }
-            (Kind::Array, "slice") => {
-                ensure!(args.len() <= 2, "array.slice accepts at most two bounds");
-                Some(self.array_slice(ctx, receiver, arg(0), arg(1))?)
-            }
-            (Kind::Array, "reverse" | "toReversed") => {
-                ensure!(args.is_empty(), "array.{method} takes no arguments");
-                Some(self.array_reverse(ctx, receiver, method == "toReversed")?)
-            }
-            (Kind::Array, "flat") => {
-                ensure!(
-                    args.len() <= 1,
-                    "array.flat accepts at most one depth argument"
-                );
-                Some(self.array_flat(ctx, receiver, arg(0))?)
-            }
-            (Kind::Array, "findLast" | "findLastIndex") => {
-                let [callback] = args else {
-                    bail!("array.{method} requires one static callback")
-                };
-                Some(self.array_find_last(ctx, receiver, callback, method == "findLastIndex")?)
-            }
-            (Kind::Array, "at") => {
-                ensure!(args.len() <= 1, "array.at accepts at most one index");
-                Some(self.array_at(ctx, receiver, arg(0))?)
-            }
-            (Kind::Array, "pop") => {
-                ensure!(args.is_empty(), "array.pop takes no arguments");
-                Some(self.array_pop(ctx, receiver)?)
-            }
-            (Kind::Array, "with") => {
-                let [index, value] = args else {
-                    bail!("array.with requires index and value arguments");
-                };
-                Some(self.array_with(ctx, receiver, index, value)?)
             }
             (Kind::String, "normalize") => {
                 ensure!(
@@ -185,22 +108,6 @@ impl<'s> FunctionBuilder<'s> {
                         )
                     },
                 )?)
-            }
-            (Kind::Array, "includes" | "indexOf") => {
-                let (value, from_index) = match args {
-                    [value] => (value, None),
-                    [value, from_index] => (value, Some(from_index)),
-                    _ => bail!("array.{method} requires a value and optional starting index"),
-                };
-                Some(self.array_search(ctx, receiver, value, from_index, method == "includes")?)
-            }
-            (Kind::Array, "lastIndexOf") => {
-                let (value, from_index) = match args {
-                    [value] => (value, None),
-                    [value, from_index] => (value, Some(from_index)),
-                    _ => bail!("array.lastIndexOf requires a value and optional starting index"),
-                };
-                Some(self.array_last_index_of(ctx, receiver, value, from_index)?)
             }
             (Kind::String, "split") => {
                 let [separator] = args else {
@@ -781,7 +688,7 @@ impl<'s> FunctionBuilder<'s> {
         let mut line: Option<Value> = None;
         for arg in args {
             let value = self.expression(ctx, arg)?;
-            let text = self.display(ctx, value)?;
+            let text = self.display_as(ctx, value, crate::coerce::DisplayMode::Console)?;
             line = Some(match line {
                 None => text,
                 Some(line) => {

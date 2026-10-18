@@ -15,7 +15,7 @@
 //! Options distinguish admitted null and undefined states; tuples use `{ _0: A, _1: B }`.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
@@ -31,6 +31,7 @@ use std::{
 
 mod arguments;
 mod collection_types;
+mod globals;
 mod representation;
 pub(crate) use arguments::{Argument, ArgumentId, Kind};
 pub(super) mod generics;
@@ -208,17 +209,7 @@ impl<'h> Shapes<'h> {
             .iter()
             .map(|function| function.name.as_str())
             .collect();
-        let mut global_ids: HashSet<perry_hir::types::LocalId> = if !hir.functions.is_empty() {
-            hir.init
-                .iter()
-                .filter_map(|s| match s {
-                    perry_hir::ir::Stmt::Let { id, .. } => Some(*id),
-                    _ => None,
-                })
-                .collect()
-        } else {
-            Default::default()
-        };
+        let mut global_ids = globals::captured(hir);
         if !hir.functions.is_empty() || !classes.is_empty() {
             global_ids.extend(static_fields.values().map(|(id, _)| *id));
         }
@@ -330,24 +321,21 @@ impl<'h> Shapes<'h> {
                 .collect::<Result<_>>()?;
             perry_mir::VariantType::get(ctx, cases).into()
         } else if let Some(record) = deref.downcast_ref::<RecordType>() {
-            let get = if record.is_tuple() {
-                RecordType::get_tuple
-            } else {
-                RecordType::get
-            };
+            let kind = record.kind();
             let name = identifier(&format!("input_{}", record.name()))?;
             let fields = record
                 .fields()
                 .map_err(|_| anyhow!("opaque input record"))?
                 .to_vec();
             drop(deref);
-            let mapped = get(ctx, name.clone(), None).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
+            let mapped = RecordType::get_kind(ctx, name.clone(), None, kind)
+                .map_err(|e| anyhow!("{}", e.disp(ctx)))?;
             self.inputs.borrow_mut().insert(ty, mapped.into());
             let fields = fields
                 .into_iter()
                 .map(|(name, ty)| Ok((name, self.input_type(ctx, ty)?)))
                 .collect::<Result<_>>()?;
-            get(ctx, name, Some(fields))
+            RecordType::get_kind(ctx, name, Some(fields), kind)
                 .map_err(|e| anyhow!("{}", e.disp(ctx)))?
                 .into()
         } else {
@@ -583,7 +571,7 @@ impl<'h> Shapes<'h> {
         match reserved {
             Some(name) => RecordType::get(ctx, identifier(&name)?, Some(typed))
                 .map_err(|e| anyhow!("{}", e.disp(ctx))),
-            None => self.mir_record_prefix(ctx, typed, prefix),
+            None => self.mir_record_prefix(ctx, typed, prefix, RecordKind::Object),
         }
     }
 
@@ -593,7 +581,7 @@ impl<'h> Shapes<'h> {
         ctx: &Context,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_prefix(ctx, fields, None)
+        self.mir_record_prefix(ctx, fields, None, RecordKind::Object)
     }
 
     pub(super) fn mir_record_kind(
@@ -602,7 +590,12 @@ impl<'h> Shapes<'h> {
         fields: Vec<(String, TypeHandle)>,
         tuple: bool,
     ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_prefix(ctx, fields, tuple.then_some("tuple"))
+        let kind = if tuple {
+            RecordKind::Tuple
+        } else {
+            RecordKind::Object
+        };
+        self.mir_record_prefix(ctx, fields, tuple.then_some(kind.name()), kind)
     }
 
     pub(super) fn mir_record_prefix(
@@ -610,9 +603,9 @@ impl<'h> Shapes<'h> {
         ctx: &Context,
         mut fields: Vec<(String, TypeHandle)>,
         prefix: Option<&str>,
+        kind: RecordKind,
     ) -> Result<TypedHandle<RecordType>> {
-        let tuple = prefix.is_some_and(|p| !p.starts_with("class_"));
-        if !tuple {
+        if kind == RecordKind::Object {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }
         let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
@@ -620,11 +613,6 @@ impl<'h> Shapes<'h> {
         let base = match prefix {
             Some(p) => format!("{p}_{base}"),
             None => base,
-        };
-        let get = if tuple {
-            RecordType::get_tuple
-        } else {
-            RecordType::get
         };
         // The first name whose definition matches, or which is still free.
         let mut suffix = 1;
@@ -634,10 +622,21 @@ impl<'h> Shapes<'h> {
             } else {
                 format!("{base}_{suffix}")
             };
-            if let Ok(record) = get(ctx, identifier(&name)?, Some(fields.clone())) {
-                return Ok(record);
+            let name = identifier(&name)?;
+            let record = RecordType::get_kind(ctx, name.clone(), None, kind)
+                .map_err(|e| anyhow!("{}", e.disp(ctx)))?;
+            let definition = record.deref(ctx);
+            match definition.fields() {
+                Ok(existing) if existing == fields && definition.kind() == kind => {
+                    return Ok(record);
+                }
+                Ok(_) => suffix += 1,
+                Err(_) => {
+                    drop(definition);
+                    return RecordType::get_kind(ctx, name, Some(fields), kind)
+                        .map_err(|e| anyhow!("{}", e.disp(ctx)));
+                }
             }
-            suffix += 1;
         }
     }
 

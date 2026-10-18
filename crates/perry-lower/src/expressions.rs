@@ -1,5 +1,6 @@
 //! Expressions: the dispatch over HIR expressions, and locals, literals and member reads.
 use super::*;
+use crate::array_methods::{Direction, FindResult, Mutation, Quantifier, SearchResult, Transform};
 use crate::builtins::{BytesCreation, JSON_CALLBACKS};
 
 mod members;
@@ -272,7 +273,8 @@ impl<'s> FunctionBuilder<'s> {
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
                 if let Some(target) = expected.filter(|ty| {
-                    !ty.deref(ctx).is::<JsonType>() && crate::json::direct_json_schema(ctx, *ty)
+                    !ty.deref(ctx).is::<JsonType>()
+                        && perry_mir::JsonSchema::supports_cursor(ctx, *ty)
                 }) {
                     self.parse_cursor(ctx, text, target)?
                 } else {
@@ -291,7 +293,7 @@ impl<'s> FunctionBuilder<'s> {
                     self.shapes.value_type(ctx, ty)?
                 };
                 let decoded = if !target.deref(ctx).is::<JsonType>()
-                    && crate::json::direct_json_schema(ctx, target)
+                    && perry_mir::JsonSchema::supports_cursor(ctx, target)
                 {
                     self.parse_cursor(ctx, text, target)?
                 } else if target.deref(ctx).is::<JsonType>() {
@@ -329,7 +331,8 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 let text = self.string_operand(ctx, text)?;
                 if let Some(target) = expected.filter(|ty| {
-                    !ty.deref(ctx).is::<JsonType>() && crate::json::direct_json_schema(ctx, *ty)
+                    !ty.deref(ctx).is::<JsonType>()
+                        && perry_mir::JsonSchema::supports_cursor(ctx, *ty)
                 }) {
                     self.parse_cursor(ctx, text, target)?
                 } else {
@@ -347,10 +350,6 @@ impl<'s> FunctionBuilder<'s> {
                 let name = self.string(ctx, name);
                 self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
             }
-            Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => {
-                self.intrinsic(ctx, Intrinsic::EnvKeys, vec![])
-            }
-            Expr::ObjectKeys(object) | Expr::ForInKeys(object) => self.object_keys(ctx, object)?,
             Expr::PerformanceNow => self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]),
             Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
             Expr::ErrorNew(message) => {
@@ -395,8 +394,15 @@ impl<'s> FunctionBuilder<'s> {
             } => self.instance_of(ctx, value, ty)?,
             Expr::Await(promise) => self.await_(ctx, promise)?,
             Expr::PropertyGet {
-                object, property, ..
-            } => self.property_get(ctx, object, property)?,
+                object,
+                property,
+                byte_offset,
+            } => self.property_get(ctx, object, property).map_err(|error| {
+                self.shapes
+                    .metadata
+                    .locations
+                    .annotate_member(error, *byte_offset)
+            })?,
             Expr::PropertySet {
                 object,
                 property,
@@ -515,7 +521,11 @@ impl<'s> FunctionBuilder<'s> {
                     ctx,
                     array,
                     callback,
-                    matches!(expr, Expr::ArrayFilter { .. }),
+                    if matches!(expr, Expr::ArrayFilter { .. }) {
+                        Transform::Filter
+                    } else {
+                        Transform::Map
+                    },
                 )?
             }
             Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
@@ -524,7 +534,12 @@ impl<'s> FunctionBuilder<'s> {
                     ctx,
                     array,
                     callback,
-                    matches!(expr, Expr::ArrayFindIndex { .. }),
+                    if matches!(expr, Expr::ArrayFindIndex { .. }) {
+                        FindResult::Index
+                    } else {
+                        FindResult::Value
+                    },
+                    Direction::Forward,
                 )?
             }
             Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } => {
@@ -533,25 +548,29 @@ impl<'s> FunctionBuilder<'s> {
                     ctx,
                     array,
                     callback,
-                    matches!(expr, Expr::ArrayEvery { .. }),
+                    if matches!(expr, Expr::ArrayEvery { .. }) {
+                        Quantifier::Every
+                    } else {
+                        Quantifier::Some
+                    },
                 )?
             }
             Expr::ArrayFlatMap { array, callback } => {
                 let array = self.expression(ctx, array)?;
-                self.array_flat_map(ctx, array, callback)?
+                self.array_transform(ctx, array, callback, Transform::FlatMap)?
             }
             Expr::ArraySort { array, comparator } => {
                 let array = self.expression(ctx, array)?;
                 let comparator =
                     (!matches!(**comparator, Expr::Undefined)).then_some(comparator.as_ref());
-                self.array_sort(ctx, array, comparator, false)?
+                self.array_sort(ctx, array, comparator, Mutation::InPlace)?
             }
             Expr::ArrayToSorted { array, comparator } => {
                 let array = self.expression(ctx, array)?;
                 let comparator = comparator
                     .as_deref()
                     .filter(|c| !matches!(c, Expr::Undefined));
-                self.array_sort(ctx, array, comparator, true)?
+                self.array_sort(ctx, array, comparator, Mutation::Copy)?
             }
             Expr::ArrayIncludes {
                 array,
@@ -569,7 +588,11 @@ impl<'s> FunctionBuilder<'s> {
                     array,
                     value,
                     from_index.as_deref(),
-                    matches!(expr, Expr::ArrayIncludes { .. }),
+                    if matches!(expr, Expr::ArrayIncludes { .. }) {
+                        SearchResult::Includes
+                    } else {
+                        SearchResult::Index
+                    },
                 )?
             }
             Expr::ArrayPush {

@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 
 use pliron::builtin::op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface};
 use pliron::builtin::ops::{FuncOp, ModuleOp};
-use pliron::builtin::types::{FP64Type, IntegerType};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::{Identifier, Legaliser};
 use pliron::irbuild::{
@@ -21,13 +20,14 @@ use pliron::result::Result;
 use pliron::r#type::{TypeHandle, Typed};
 use pliron::value::Value;
 
+use crate::JsonSchema;
 use crate::attrs::{Absence, JsonDecoderKind};
 use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
 use crate::exceptions::CaughtOp;
 use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
 use crate::optional::{UnwrapOp, absence, optional_value};
-use crate::types::{ArrayType, JsonType, RecordType, StringType, VariantType};
+use crate::types::VariantType;
 
 use self::emit::{build_json_copy_helper, const_i32};
 
@@ -314,7 +314,9 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
         return false;
     }
     let inner = optional_value(ctx, ty).unwrap_or(ty);
-    if let Some(rec) = inner.deref(ctx).downcast_ref::<RecordType>() {
+    let schema = JsonSchema::of(ctx, inner);
+    if let Some(JsonSchema::Record(rec)) = schema {
+        let rec = rec.deref(ctx);
         if rec.is_tuple() {
             return rec
                 .fields()
@@ -327,14 +329,14 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
         }
         return true;
     }
-    if inner.deref(ctx).downcast_ref::<JsonType>().is_some() {
+    if matches!(schema, Some(JsonSchema::Value)) {
         return true;
     }
-    if let Some(arr) = inner.deref(ctx).downcast_ref::<ArrayType>() {
-        return type_may_contain_record(ctx, arr.element(), seen);
+    if let Some(element) = schema.and_then(JsonSchema::storage_element) {
+        return type_may_contain_record(ctx, element, seen);
     }
-    if let Some(var) = inner.deref(ctx).downcast_ref::<VariantType>() {
-        return var.cases().iter().any(|(_, payload)| {
+    if let Some(JsonSchema::Variant(var)) = schema {
+        return var.deref(ctx).cases().iter().any(|(_, payload)| {
             payload.is_some_and(|payload| type_may_contain_record(ctx, payload, seen))
         });
     }
@@ -365,8 +367,10 @@ fn value_reaches_stringify(
                 return true;
             }
             match intrinsic_of(ctx, user) {
-                Some(Intrinsic::JsonResidue | Intrinsic::JsonRetain) => return true,
-                Some(Intrinsic::JsonSpread) => {
+                Some(
+                    Intrinsic::JsonResidue | Intrinsic::JsonRetain | Intrinsic::JsonCursorRecord,
+                ) => return true,
+                Some(Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy) => {
                     let op_ref = user.deref(ctx);
                     if op_ref.get_num_operands() >= 2 && val == op_ref.get_operand(1) {
                         worklist.push(op_ref.get_operand(0));
@@ -427,10 +431,9 @@ fn schemas_add_fields(
     if s_inner == t_inner {
         return false;
     }
-    if let (Some(s_rec), Some(t_rec)) = (
-        s_inner.deref(ctx).downcast_ref::<RecordType>(),
-        t_inner.deref(ctx).downcast_ref::<RecordType>(),
-    ) {
+    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
+    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
+        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
         let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
             return true;
         };
@@ -448,11 +451,11 @@ fn schemas_add_fields(
                 .is_none_or(|(_, s_fty)| schemas_add_fields(ctx, *s_fty, *t_fty, seen))
         });
     }
-    if let (Some(s_arr), Some(t_arr)) = (
-        s_inner.deref(ctx).downcast_ref::<ArrayType>(),
-        t_inner.deref(ctx).downcast_ref::<ArrayType>(),
+    if let (Some(source), Some(target)) = (
+        schemas.0.and_then(JsonSchema::storage_element),
+        schemas.1.and_then(JsonSchema::storage_element),
     ) {
-        return schemas_add_fields(ctx, s_arr.element(), t_arr.element(), seen);
+        return schemas_add_fields(ctx, source, target, seen);
     }
     false
 }
@@ -500,34 +503,10 @@ fn schemas_compatible(
         return false;
     }
 
-    if s_inner == t_inner {
-        if let Some(rec) = s_inner.deref(ctx).downcast_ref::<RecordType>() {
-            let Ok(fields) = rec.fields() else {
-                return false;
-            };
-            return fields
-                .iter()
-                .all(|(_, fty)| schemas_compatible(ctx, *fty, *fty, seen));
-        }
-        if let Some(arr) = s_inner.deref(ctx).downcast_ref::<ArrayType>() {
-            return schemas_compatible(ctx, arr.element(), arr.element(), seen);
-        }
-        if let Some(var) = s_inner.deref(ctx).downcast_ref::<VariantType>() {
-            if !variant_is_unambiguous(ctx, var) {
-                return false;
-            }
-            return var.cases().iter().all(|(_, payload)| {
-                payload.is_none_or(|pty| schemas_compatible(ctx, pty, pty, seen))
-            });
-        }
-        return is_supported_scalar(ctx, s_inner);
-    }
-
-    if let (Some(s_rec), Some(t_rec)) = (
-        s_inner.deref(ctx).downcast_ref::<RecordType>(),
-        t_inner.deref(ctx).downcast_ref::<RecordType>(),
-    ) {
-        if s_rec.is_tuple() != t_rec.is_tuple() {
+    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
+    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
+        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
+        if s_rec.kind() != t_rec.kind() {
             return false;
         }
         let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
@@ -561,19 +540,46 @@ fn schemas_compatible(
         });
     }
 
-    if let (Some(s_arr), Some(t_arr)) = (
-        s_inner.deref(ctx).downcast_ref::<ArrayType>(),
-        t_inner.deref(ctx).downcast_ref::<ArrayType>(),
-    ) {
-        return schemas_compatible(ctx, s_arr.element(), t_arr.element(), seen);
+    match schemas {
+        (Some(JsonSchema::Array(source)), Some(JsonSchema::Array(target))) => {
+            schemas_compatible(ctx, source, target, seen)
+        }
+        (
+            Some(JsonSchema::Dictionary {
+                key: sk, value: sv, ..
+            }),
+            Some(JsonSchema::Dictionary {
+                key: tk, value: tv, ..
+            }),
+        ) => {
+            // Stringification drops undefined dictionary members, changing the entry count.
+            !absence(ctx, sv).is_some_and(|a| a.admits_undefined())
+                && schemas_compatible(ctx, sk, tk, seen)
+                && schemas_compatible(ctx, sv, tv, seen)
+        }
+        (Some(JsonSchema::Variant(source)), Some(JsonSchema::Variant(target)))
+            if source == target =>
+        {
+            let variant = source.deref(ctx);
+            variant_is_unambiguous(ctx, &variant)
+                && variant.cases().iter().all(|(_, payload)| {
+                    payload.is_none_or(|ty| schemas_compatible(ctx, ty, ty, seen))
+                })
+        }
+        _ => s_inner == t_inner && is_supported_scalar(ctx, s_inner),
     }
-
-    false
 }
 
 fn is_supported_scalar(ctx: &Context, ty: TypeHandle) -> bool {
-    let obj = ty.deref(ctx);
-    obj.is::<IntegerType>() || obj.is::<FP64Type>() || obj.is::<StringType>()
+    matches!(
+        JsonSchema::of(ctx, ty),
+        Some(
+            JsonSchema::Number
+                | JsonSchema::Integer { .. }
+                | JsonSchema::Boolean
+                | JsonSchema::String
+        )
+    )
 }
 
 fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
@@ -585,10 +591,12 @@ fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
                     if *t1 == *t2 {
                         return false;
                     }
-                    let o1 = t1.deref(ctx);
-                    let o2 = t2.deref(ctx);
-                    if (o1.is::<RecordType>() && o2.is::<RecordType>())
-                        || (o1.is::<ArrayType>() && o2.is::<ArrayType>())
+                    let schemas = (JsonSchema::of(ctx, *t1), JsonSchema::of(ctx, *t2));
+                    if matches!(
+                        schemas,
+                        (Some(JsonSchema::Record(_)), Some(JsonSchema::Record(_)))
+                    ) || (schemas.0.and_then(JsonSchema::storage_element).is_some()
+                        && schemas.1.and_then(JsonSchema::storage_element).is_some())
                     {
                         return false;
                     }
@@ -642,7 +650,8 @@ fn erase_op_and_caught(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::OptionalType;
+    use crate::types::{ArrayType, OptionalType, RecordType};
+    use pliron::builtin::types::FP64Type;
 
     #[test]
     fn schema_field_changes_are_directional() -> Result<()> {

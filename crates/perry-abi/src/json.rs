@@ -13,9 +13,120 @@ pub mod kind {
     pub const UINT64: u32 = 10;
 }
 pub const MAX_DEPTH: u32 = 128;
+pub const NEXT: usize = 4;
+pub const TAIL: usize = 8;
+pub const FIRST: usize = 16;
 pub const MEMBER_COUNT: usize = 20;
+pub const KEY: usize = 24;
+pub const METADATA: usize = 28;
+pub const NODE_BYTES: u32 = 32;
+pub const PACKED_FIELDS: usize = 8;
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Small records keep a sequence of one-based field indices in their header word.
+pub fn append_field(mut order: u32, field: u32) -> u32 {
+    assert!(field < PACKED_FIELDS as u32, "packed record field");
+    let field = field + 1;
+    for shift in (0..32).step_by(4) {
+        let previous = (order >> shift) & 15;
+        if previous == field {
+            return order;
+        }
+        if previous == 0 {
+            order |= field << shift;
+            return order;
+        }
+    }
+    panic!("packed record order is full")
+}
+
+/// Deletion removes the field's position, so a later insertion can append it.
+pub fn remove_field(mut order: u32, field: u32) -> u32 {
+    let mut kept = 0;
+    let mut shift = 0;
+    while order != 0 {
+        let next = order & 15;
+        if next != field + 1 {
+            kept |= next << shift;
+            shift += 4;
+        }
+        order >>= 4;
+    }
+    kept
+}
+
+/// Look up a field in the compiler's table sorted by UTF-8 length, then bytes.
+///
+/// # Safety
+/// `table` contains `count` pairs of live string addresses and field indices.
+pub unsafe fn field_index(
+    table: *const u32,
+    count: u32,
+    compare: impl Fn(&[u8]) -> core::cmp::Ordering,
+) -> u32 {
+    let names = unsafe { core::slice::from_raw_parts(table, count as usize * 2) }
+        .as_chunks::<2>()
+        .0;
+    let compare =
+        |entry: &[u32; 2]| compare(unsafe { crate::bytes(entry[0] as usize as *mut u8) }).reverse();
+    let index = if count < 16 {
+        names.iter().position(|entry| compare(entry).is_eq())
+    } else {
+        names.binary_search_by(compare).ok()
+    };
+    index.map_or(count, |i| names[i][1])
+}
+
+/// Resolve a storage index in the compiler's indexed name table.
+///
+/// # Safety
+/// `table` contains `count` pairs with each field index exactly once.
+pub unsafe fn field_name(table: *const u32, count: u32, index: u32) -> *mut u8 {
+    let names = unsafe { core::slice::from_raw_parts(table, count as usize * 2) }
+        .as_chunks::<2>()
+        .0;
+    names
+        .iter()
+        .find(|entry| entry[1] == index)
+        .expect("record field in schema")[0] as usize as *mut u8
+}
+
+/// The array index a key names (a canonical decimal below 2³² − 1), if any.
+pub fn array_index(key: &[u8]) -> Option<u32> {
+    if key.is_empty() || key.len() > 10 || (key[0] == b'0' && key.len() > 1) {
+        return None;
+    }
+    let mut value = 0u64;
+    for &digit in key {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u64::from(digit - b'0');
+    }
+    (value < u64::from(u32::MAX)).then_some(value as u32)
+}
+
+/// Append an unlinked child to a JSON container under construction.
+///
+/// # Safety
+/// Both pointers and the container's existing tail must address live, aligned `NODE_BYTES`
+/// blocks in Wasm32 memory. The caller owns the container and child's link fields.
+pub unsafe fn link_child(container: *mut u8, child: *mut u8) {
+    unsafe {
+        let tail = container.add(TAIL).cast::<u32>();
+        let last = tail.read();
+        let link = if last == 0 {
+            container.add(FIRST)
+        } else {
+            (last as usize as *mut u8).add(NEXT)
+        };
+        link.cast::<u32>().write(child as usize as u32);
+        tail.write(child as usize as u32);
+        let count = container.add(MEMBER_COUNT).cast::<u32>();
+        count.write(count.read() + 1);
+    }
+}
 
 /// The length of the leading run of `bytes` that needs no escape, eight bytes at a time.
 pub fn unescaped_prefix(bytes: &[u8]) -> usize {

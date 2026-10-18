@@ -46,6 +46,18 @@ impl FunctionLowering<'_, '_> {
         Ok(Some(Carriers::Numeric { tag, payload }))
     }
 
+    /// ECMAScript rounds halves toward positive infinity while preserving the sign of zero.
+    pub(crate) fn round_half_up(&mut self, ctx: &mut Context, value: Value) -> Value {
+        let floor = self.num(ctx, NumOpcode::F64Floor, vec![value]);
+        let fraction = self.num(ctx, NumOpcode::F64Sub, vec![value, floor]);
+        let half = self.f64_const(ctx, 0.5);
+        let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
+        let one = self.f64_const(ctx, 1.0);
+        let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
+        let rounded = self.select(ctx, up, next, floor);
+        self.num(ctx, NumOpcode::F64Copysign, vec![rounded, value])
+    }
+
     /// Round a float operand; integer operands are already integral and pass through.
     fn numeric_round(
         &mut self,
@@ -58,16 +70,7 @@ impl FunctionLowering<'_, '_> {
         let f = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
         let rounded = match rounding {
             Rounding::Native(opcode) => self.num(ctx, opcode, vec![f]),
-            Rounding::HalfUp => {
-                let floor = self.num(ctx, NumOpcode::F64Floor, vec![f]);
-                let fraction = self.num(ctx, NumOpcode::F64Sub, vec![f, floor]);
-                let half = self.f64_const(ctx, 0.5);
-                let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
-                let one = self.f64_const(ctx, 1.0);
-                let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
-                let rounded = self.select(ctx, up, next, floor);
-                self.num(ctx, NumOpcode::F64Copysign, vec![rounded, f])
-            }
+            Rounding::HalfUp => self.round_half_up(ctx, f),
         };
         let float_payload = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![rounded]);
         let is_float = self.num(ctx, NumOpcode::I32Eqz, vec![tag]);

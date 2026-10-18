@@ -2,7 +2,11 @@
 //!
 //! Allocations carry a [Tier]; field reads and writes are typed against the record's shape.
 //! Escape analysis, SROA and tier classification (P3.3, P3.4, P3.7) rewrite these ops.
-use crate::{NewOp, attrs::Tier, types::RecordType};
+use crate::{
+    NewOp,
+    attrs::{FieldOrder, Tier},
+    types::RecordType,
+};
 use pliron::{
     builtin::{
         attributes::StringAttr,
@@ -35,6 +39,8 @@ pub(crate) enum HeapErr {
     NoField { record: String, field: String },
     #[error("perry.alloc tier {0:?} is not an allocation tier")]
     Tier(Tier),
+    #[error("record {0} has an invalid property insertion order")]
+    FieldOrder(String),
 }
 
 fn record<'a>(
@@ -51,9 +57,9 @@ fn record<'a>(
 /// Allocate a record whose fields are initialized from the operands in declaration order.
 #[pliron_op(
     name = "perry.alloc",
-    format = "attr($perry_tier, $Tier) ` (` operands(CharSpace(`,`)) `) : ` type($0)",
+    format = "attr($perry_tier, $Tier) ` (` operands(CharSpace(`,`)) `) ` opt_attr($perry_field_order, $FieldOrder, label($order)) ` : ` type($0)",
     interfaces = [OneResultInterface],
-    attributes = (perry_tier: Tier)
+    attributes = (perry_tier: Tier, perry_field_order: FieldOrder)
 )]
 pub struct AllocOp;
 
@@ -84,6 +90,13 @@ impl Verify for AllocOp {
         }
         let record = record(ctx, self.get_result(ctx).get_type(ctx), "perry.alloc")?;
         let fields = record.fields()?;
+        if let Some(order) = self.get_attr_perry_field_order(ctx)
+            && order.0.iter().enumerate().any(|(position, &field)| {
+                field as usize >= fields.len() || order.0[..position].contains(&field)
+            })
+        {
+            verify_err!(loc.clone(), HeapErr::FieldOrder(record.name().to_string()))?;
+        }
         let operands: Vec<Value> = self.get_operation().deref(ctx).operands().collect();
         if fields.len() != operands.len() {
             verify_err!(

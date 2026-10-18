@@ -2,9 +2,14 @@
 //! Instant stores little-endian i128 epoch nanoseconds. PlainDateTime stores an i32
 //! epoch day, four padding bytes, and u64 nanoseconds within that day.
 //! Status: 0 success, 1 syntax, 2 range, 3 annotation, 4 capacity, 6 memory/overlap.
-//! Scalar accessors return NaN on invalid storage; valid values are always finite.
+//! Scalar accessors write eight bytes on success and use the same status convention.
 
 use crate::{Error, Instant, PlainDateTime};
+
+#[path = "../../perry-abi/src/layout/time.rs"]
+#[expect(unreachable_pub, reason = "Shared codes are public in perry-abi.")]
+mod codes;
+use codes::{DatePart, DurationPart, Overflow, Unit};
 
 #[path = "../../../src/helpers/guest_memory.rs"]
 mod memory;
@@ -27,7 +32,7 @@ pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32) -> f64 
 pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
     // SAFETY: the caller owns output; transform checks its guest-memory range.
     unsafe {
-        transform(0, 0, output, capacity, |_, output| {
+        transform([], output, capacity, |[], output| {
             Instant::from_epoch_milliseconds(value)?.format_milliseconds(output)
         })
     }
@@ -40,7 +45,7 @@ pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity:
 pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; transform checks ranges and overlap.
     unsafe {
-        transform(input, length, output, 16, |input, output| {
+        transform([(input, length)], output, 16, |[input], output| {
             let value = Instant::parse(input)?;
             output.copy_from_slice(&value.epoch_nanoseconds().to_le_bytes());
             Ok(16)
@@ -54,7 +59,7 @@ pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, outp
 pub(crate) unsafe extern "C" fn time_utc_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, length, output, 16, |input, output| {
+        transform([(input, length)], output, 16, |[input], output| {
             let value = Instant::parse_utc(input)?;
             output.copy_from_slice(&value.epoch_nanoseconds().to_le_bytes());
             Ok(16)
@@ -68,7 +73,7 @@ pub(crate) unsafe extern "C" fn time_utc_parse(input: u32, length: u32, output: 
 pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
     // SAFETY: no input range; output ownership is the caller's contract.
     unsafe {
-        transform(0, 0, output, 16, |_, output| {
+        transform([], output, 16, |[], output| {
             let value = Instant::from_epoch_milliseconds(value)?;
             output.copy_from_slice(&value.epoch_nanoseconds().to_le_bytes());
             Ok(16)
@@ -77,14 +82,15 @@ pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) ->
 }
 
 /// # Safety
-/// Input must be initialized immutable guest-owned storage outside helper stack/data.
+/// Input must be initialized; output must be exclusively owned and disjoint.
+/// Both ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_instant_ms(input: u32) -> f64 {
-    let Ok(input) = GuestRange::new(input, 16) else {
-        return f64::NAN;
-    };
-    // SAFETY: checked bounds and caller's immutable ownership contract.
-    instant(unsafe { input.bytes() }).map_or(f64::NAN, |value| value.epoch_milliseconds() as f64)
+pub(crate) unsafe extern "C" fn time_instant_ms(input: u32, output: u32) -> u64 {
+    unsafe {
+        scalar([(input, 16)], output, |[input]| {
+            Ok(instant(input)?.epoch_milliseconds() as f64)
+        })
+    }
 }
 
 /// # Safety
@@ -93,7 +99,7 @@ pub(crate) unsafe extern "C" fn time_instant_ms(input: u32) -> f64 {
 pub(crate) unsafe extern "C" fn time_instant_format(input: u32, output: u32, capacity: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, 16, output, capacity, |input, output| {
+        transform([(input, 16)], output, capacity, |[input], output| {
             instant(input)?.format(output)
         })
     }
@@ -105,7 +111,7 @@ pub(crate) unsafe extern "C" fn time_instant_format(input: u32, output: u32, cap
 pub(crate) unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, length, output, 16, |input, output| {
+        transform([(input, length)], output, 16, |[input], output| {
             write_plain(PlainDateTime::parse(input)?, output);
             Ok(16)
         })
@@ -118,7 +124,7 @@ pub(crate) unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output
 pub(crate) unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, length, output, 16, |input, output| {
+        transform([(input, length)], output, 16, |[input], output| {
             write_plain(PlainDateTime::parse_plain_date(input)?, output);
             Ok(16)
         })
@@ -137,12 +143,10 @@ pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
 ) -> u64 {
     // SAFETY: no input range; output ownership is the caller's contract.
     unsafe {
-        transform(0, 0, output, 16, |_, output| {
-            if constrain > 1 {
-                return Err(Error::Range);
-            }
+        transform([], output, 16, |[], output| {
+            let overflow = Overflow::try_from(constrain).map_err(|_| Error::Range)?;
             write_plain(
-                PlainDateTime::from_fields(year, month, day, constrain != 0)?,
+                PlainDateTime::from_fields(year, month, day, overflow == Overflow::Constrain)?,
                 output,
             );
             Ok(16)
@@ -156,7 +160,7 @@ pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
 pub(crate) unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, 16, output, 16, |input, output| {
+        transform([(input, 16)], output, 16, |[input], output| {
             if !days.is_finite() || days.abs() > 200_000_002.0 || days != (days as i64) as f64 {
                 return Err(Error::Range);
             }
@@ -180,10 +184,8 @@ pub(crate) unsafe extern "C" fn time_plain_add_calendar(
 ) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, 16, output, 16, |input, output| {
-            if constrain > 1 {
-                return Err(Error::Range);
-            }
+        transform([(input, 16)], output, 16, |[input], output| {
+            let overflow = Overflow::try_from(constrain).map_err(|_| Error::Range)?;
             let mut sign = 0i64;
             let mut to_int = |v: f64| -> Result<i64, Error> {
                 if !v.is_finite() || v.abs() > 200_000_002.0 || v != (v as i64) as f64 {
@@ -204,7 +206,7 @@ pub(crate) unsafe extern "C" fn time_plain_add_calendar(
             let w = to_int(weeks)?;
             let d = to_int(days)?;
             write_plain(
-                plain(input)?.add_calendar(y, m, w, d, constrain != 0)?,
+                plain(input)?.add_calendar(y, m, w, d, overflow == Overflow::Constrain)?,
                 output,
             );
             Ok(16)
@@ -213,61 +215,73 @@ pub(crate) unsafe extern "C" fn time_plain_add_calendar(
 }
 
 /// # Safety
-/// Inputs must be initialized immutable guest-owned storage outside helper stack/data.
+/// Inputs must be initialized; output must be exclusively owned and disjoint from both.
+/// All ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_until_part(
     a: u32,
     b: u32,
     largest_unit: u32,
     part: u32,
-) -> f64 {
-    let (Ok(a), Ok(b)) = (GuestRange::new(a, 16), GuestRange::new(b, 16)) else {
-        return f64::NAN;
-    };
-    // SAFETY: checked bounds and caller's immutable ownership contract.
-    let (Ok(a), Ok(b)) = (plain(unsafe { a.bytes() }), plain(unsafe { b.bytes() })) else {
-        return f64::NAN;
-    };
-    let (months, rem_days) = a.until_months_and_days(b);
-    let (years, months) = if largest_unit == 3 {
-        (months / 12, months % 12)
-    } else {
-        (0, months)
-    };
-    match part {
-        0 => f64::from(years),
-        1 => f64::from(months),
-        2 => 0.0,
-        3 => f64::from(rem_days),
-        _ => f64::NAN,
+    output: u32,
+) -> u64 {
+    unsafe {
+        scalar([(a, 16), (b, 16)], output, |[a, b]| {
+            let unit = Unit::try_from(largest_unit).map_err(|_| Error::Range)?;
+            let part = DurationPart::try_from(part).map_err(|_| Error::Range)?;
+            let (a, b) = (plain(a)?, plain(b)?);
+            let (years, months, weeks, days) = match unit {
+                Unit::Year | Unit::Month => {
+                    let (months, days) = a.until_months_and_days(b);
+                    if unit == Unit::Year {
+                        (months / 12, months % 12, 0, days)
+                    } else {
+                        (0, months, 0, days)
+                    }
+                }
+                Unit::Day | Unit::Week => {
+                    let days = b.day_and_nanosecond().0 - a.day_and_nanosecond().0;
+                    if unit == Unit::Week {
+                        (0, 0, days / 7, days % 7)
+                    } else {
+                        (0, 0, 0, days)
+                    }
+                }
+            };
+            Ok(f64::from(match part {
+                DurationPart::Years => years,
+                DurationPart::Months => months,
+                DurationPart::Weeks => weeks,
+                DurationPart::Days => days,
+            }))
+        })
     }
 }
 
 /// # Safety
-/// Input must be initialized immutable guest-owned storage outside helper stack/data.
+/// Input must be initialized; output must be exclusively owned and disjoint.
+/// Both ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32) -> f64 {
-    let Ok(input) = GuestRange::new(input, 16) else {
-        return f64::NAN;
-    };
-    // SAFETY: checked bounds and caller's immutable ownership contract.
-    let Ok(value) = plain(unsafe { input.bytes() }) else {
-        return f64::NAN;
-    };
-    let (year, month, day) = value.date();
-    let (hour, minute, second, fraction) = value.time();
-    match part {
-        0 => f64::from(year),
-        1 => f64::from(month),
-        2 => f64::from(day),
-        3 => f64::from(hour),
-        4 => f64::from(minute),
-        5 => f64::from(second),
-        6 => f64::from(fraction / 1_000_000),
-        7 => f64::from(fraction / 1_000 % 1_000),
-        8 => f64::from(fraction % 1_000),
-        9 => f64::from(value.weekday()),
-        _ => f64::NAN,
+pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32, output: u32) -> u64 {
+    unsafe {
+        scalar([(input, 16)], output, |[input]| {
+            let part = DatePart::try_from(part).map_err(|_| Error::Range)?;
+            let value = plain(input)?;
+            let (year, month, day) = value.date();
+            let (hour, minute, second, fraction) = value.time();
+            Ok(match part {
+                DatePart::Year => f64::from(year),
+                DatePart::Month => f64::from(month),
+                DatePart::Day => f64::from(day),
+                DatePart::Hour => f64::from(hour),
+                DatePart::Minute => f64::from(minute),
+                DatePart::Second => f64::from(second),
+                DatePart::Millisecond => f64::from(fraction / 1_000_000),
+                DatePart::Microsecond => f64::from(fraction / 1_000 % 1_000),
+                DatePart::Nanosecond => f64::from(fraction % 1_000),
+                DatePart::Weekday => f64::from(value.weekday()),
+            })
+        })
     }
 }
 
@@ -277,7 +291,7 @@ pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32) -> f64 {
 pub(crate) unsafe extern "C" fn time_plain_format(input: u32, output: u32, capacity: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, 16, output, capacity, |input, output| {
+        transform([(input, 16)], output, capacity, |[input], output| {
             plain(input)?.format(output)
         })
     }
@@ -293,7 +307,7 @@ pub(crate) unsafe extern "C" fn time_plain_date_format(
 ) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
-        transform(input, 16, output, capacity, |input, output| {
+        transform([(input, 16)], output, capacity, |[input], output| {
             plain(input)?.format_plain_date(output)
         })
     }
@@ -333,25 +347,28 @@ pub(crate) extern "C" fn time_date_set(
     crate::date_set(time, part, count as usize, [a, b, c, d])
 }
 
-unsafe fn transform(
-    input: u32,
-    length: u32,
+unsafe fn transform<const N: usize>(
+    inputs: [(u32, u32); N],
     output: u32,
     capacity: u32,
-    operation: impl FnOnce(&[u8], &mut [u8]) -> Result<usize, Error>,
+    operation: impl FnOnce([&[u8]; N], &mut [u8]) -> Result<usize, Error>,
 ) -> u64 {
-    let (Ok(input), Ok(output)) = (
-        GuestRange::new(input, length),
-        GuestRange::new(output, capacity),
-    ) else {
+    let Ok(output) = GuestRange::new(output, capacity) else {
         return 6 << 32;
     };
-    if input.overlaps(output) {
-        return 6 << 32;
+    let mut borrowed = [&[][..]; N];
+    for (bytes, (pointer, length)) in borrowed.iter_mut().zip(inputs) {
+        let Ok(input) = GuestRange::new(pointer, length) else {
+            return 6 << 32;
+        };
+        if input.overlaps(output) {
+            return 6 << 32;
+        }
+        *bytes = unsafe { input.bytes() };
     }
     // SAFETY: ranges are in bounds and disjoint; the caller supplies initialization
     // and exclusive output ownership outside the helper's own stack/data.
-    let result = operation(unsafe { input.bytes() }, unsafe { output.bytes_mut() });
+    let result = operation(borrowed, unsafe { output.bytes_mut() });
     match result {
         Ok(length) => length as u64,
         Err(error) => {
@@ -362,6 +379,19 @@ unsafe fn transform(
                 Error::Capacity => 4,
             }) << 32
         }
+    }
+}
+
+unsafe fn scalar<const N: usize>(
+    inputs: [(u32, u32); N],
+    output: u32,
+    operation: impl FnOnce([&[u8]; N]) -> Result<f64, Error>,
+) -> u64 {
+    unsafe {
+        transform(inputs, output, 8, |inputs, output| {
+            output.copy_from_slice(&operation(inputs)?.to_le_bytes());
+            Ok(8)
+        })
     }
 }
 

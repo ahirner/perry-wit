@@ -20,6 +20,9 @@ export function run(x: number): number {
     mutated.a = 20;
     const preserved = JSON.parse<Item>(mText);
     const negZeroFixed = Object.is(copy.a, 0) && !Object.is(copy.a, -0);
+    const entries: Record<string, number | undefined> = { keep: x, drop: undefined };
+    const dictionary = JSON.parse<Record<string, number | undefined>>(JSON.stringify(entries));
+    if (Object.keys(dictionary).length !== 1 || ("drop" in dictionary) || dictionary.keep !== x) return -2;
     let threw = false;
     try {
         JSON.parse<Item>(JSON.stringify({ a: NaN, tags: ["bad"] }));

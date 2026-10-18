@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// The entry and payload fields cleared when a live collection member is deleted.
+struct Tombstone<'a> {
+    entry: Value,
+    kind: EntryKind,
+    fields: &'a [(&'a str, TypeHandle)],
+}
+
 /// A cursor tracking `(index, min_seq, epoch)` against a collection box.
 #[derive(Clone, Copy)]
 pub(crate) enum LiveCursor {
@@ -454,26 +461,30 @@ impl<'s> FunctionBuilder<'s> {
         cleared: &[(&str, TypeHandle)],
         owner: Option<Value>,
     ) -> Result<()> {
+        let tombstone = Tombstone {
+            entry,
+            kind,
+            fields: cleared,
+        };
         if let Some(box_val) = owner {
             let live = self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
-            return self.reclaim_after_delete(ctx, box_val, entries, live, entry, kind, cleared);
+            return self.reclaim_after_delete(ctx, box_val, entries, live, tombstone);
         }
-        self.clear_tombstone_entry(ctx, entry, kind, cleared);
+        self.clear_tombstone_entry(ctx, &tombstone);
         Ok(())
     }
 
-    fn clear_tombstone_entry(
-        &mut self,
-        ctx: &mut Context,
-        entry: Value,
-        kind: EntryKind,
-        cleared: &[(&str, TypeHandle)],
-    ) {
+    fn clear_tombstone_entry(&mut self, ctx: &mut Context, tombstone: &Tombstone<'_>) {
+        let Tombstone {
+            entry,
+            kind,
+            fields,
+        } = *tombstone;
         let dead = self.boolean(ctx, false);
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, entry, kind.live_field().to_string(), dead)
         });
-        for &(field, ty) in cleared {
+        for &(field, ty) in fields {
             if let Some(dummy) = self.zero_value_for_type(ctx, ty) {
                 self.emit(ctx, |ctx| {
                     FieldSetOp::new(ctx, entry, field.to_string(), dummy)
@@ -526,16 +537,13 @@ impl<'s> FunctionBuilder<'s> {
 
     /// After a delete: empty the entries when nothing is live, else mark the tombstone and
     /// compact once at least 32 and at least half of the slots are tombstones, bumping the box epoch.
-    #[allow(clippy::too_many_arguments)]
     fn reclaim_after_delete(
         &mut self,
         ctx: &mut Context,
         box_val: Value,
         entries: Value,
         live: Value,
-        entry: Value,
-        kind: EntryKind,
-        cleared: &[(&str, TypeHandle)],
+        tombstone: Tombstone<'_>,
     ) -> Result<()> {
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
@@ -556,7 +564,7 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
-        self.clear_tombstone_entry(ctx, entry, kind, cleared);
+        self.clear_tombstone_entry(ctx, &tombstone);
         let cap = self.array_length(ctx, entries);
         let dead = self.binary(ctx, BinaryKind::Sub, cap, live);
         let min_dead = self.number(ctx, 32.0);
@@ -577,7 +585,7 @@ impl<'s> FunctionBuilder<'s> {
         self.store(ctx, write_slot, zero);
         self.index_loop(ctx, "reclaim_scan", zero, cap, |b, ctx, r, next, _| {
             let e = b.element_at(ctx, entries, r)?;
-            let live_op = FieldGetOp::new(ctx, e, kind.live_field().to_string())?;
+            let live_op = FieldGetOp::new(ctx, e, tombstone.kind.live_field().to_string())?;
             let is_live = b.append_value(ctx, &live_op);
             let live_branch = b.new_block(ctx, "reclaim_keep");
             b.branch(ctx, is_live, live_branch, next);

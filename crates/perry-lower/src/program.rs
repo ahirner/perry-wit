@@ -1,23 +1,28 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
 
-pub(super) struct Signature {
+pub(super) struct ParamSig<'s> {
+    pub(super) source: &'s perry_hir::ir::Param,
+    pub(super) binding: BindingType,
+    pub(super) base: BindingType,
+}
+
+pub(super) struct Signature<'s> {
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
-    pub(super) params: Vec<BindingType>,
-    pub(super) base_params: Vec<BindingType>,
-    pub(super) defaults: Vec<Option<Expr>>,
-    pub(super) never_params: Vec<bool>,
-    pub(super) has_rest: bool,
+    pub(super) params: Vec<ParamSig<'s>>,
     pub(super) returns_never: bool,
     pub(super) result: Option<BindingType>,
 }
 
-impl Signature {
-    pub(super) fn carrier_params(&self) -> Vec<TypeHandle> {
-        self.params.iter().map(|p| p.carrier).collect()
+impl Signature<'_> {
+    pub(super) fn parameters(&self) -> (&[ParamSig<'_>], Option<&ParamSig<'_>>) {
+        match self.params.split_last() {
+            Some((last, fixed)) if last.source.is_rest => (fixed, Some(last)),
+            _ => (&self.params, None),
+        }
     }
 
     pub(super) fn carrier_results(&self) -> Vec<TypeHandle> {
@@ -25,11 +30,11 @@ impl Signature {
     }
 
     pub(super) fn wit_constraints(&self) -> Option<(Vec<TypeHandle>, Vec<TypeHandle>)> {
-        (self.params.iter().any(|p| p.integer.is_some())
+        (self.params.iter().any(|p| p.binding.integer.is_some())
             || self.result.is_some_and(|r| r.integer.is_some()))
         .then(|| {
             (
-                self.params.iter().map(|p| p.wit_type()).collect(),
+                self.params.iter().map(|p| p.binding.wit_type()).collect(),
                 self.result.iter().map(|r| r.wit_type()).collect(),
             )
         })
@@ -115,10 +120,6 @@ pub(super) fn build_module(
         }
 
         let mut params = Vec::with_capacity(function.params.len());
-        let mut base_params = Vec::with_capacity(function.params.len());
-        let mut defaults = Vec::with_capacity(function.params.len());
-        let mut never_params = Vec::with_capacity(function.params.len());
-        let has_rest = function.params.last().is_some_and(|p| p.is_rest);
         for (idx, param) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
                 return Err(shapes.annotate_local(
@@ -136,13 +137,14 @@ pub(super) fn build_module(
             } else {
                 base_carrier
             };
-            params.push(BindingType { carrier, integer });
-            base_params.push(BindingType {
-                carrier: base_carrier,
-                integer,
+            params.push(ParamSig {
+                source: param,
+                binding: BindingType { carrier, integer },
+                base: BindingType {
+                    carrier: base_carrier,
+                    integer,
+                },
             });
-            defaults.push(param.default.clone());
-            never_params.push(matches!(param.ty, HirType::Never));
         }
         let result_carrier = match (&function.return_type, function.is_async) {
             (HirType::Void, false) => Ok(None),
@@ -169,10 +171,6 @@ pub(super) fn build_module(
                     && locations.async_init(),
                 name: identifier(&function.name)?,
                 params,
-                base_params,
-                defaults,
-                never_params,
-                has_rest,
                 returns_never: matches!(function.return_type, HirType::Never),
                 result,
             },
@@ -199,10 +197,6 @@ pub(super) fn build_module(
             is_async: !persistent || locations.async_init(),
             await_initialization: false,
             params: vec![],
-            base_params: vec![],
-            defaults: vec![],
-            never_params: vec![],
-            has_rest: false,
             returns_never: false,
             result: if persistent && !locations.async_init() {
                 None
@@ -215,7 +209,6 @@ pub(super) fn build_module(
         let func = FunctionBuilder::lower_body(
             ctx,
             &signature,
-            &[],
             &hir.init,
             &signatures,
             &shapes,

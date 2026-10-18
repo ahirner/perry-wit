@@ -1,6 +1,7 @@
 //! Numeric layout specialization of aggregate types from converged slot domains.
 use super::*;
 use pliron::identifier::Legaliser;
+use std::cell::Ref;
 
 impl ProgramFacts {
     /// The specialized type of `value` in context `id`, if its layout or domain changes.
@@ -9,54 +10,39 @@ impl ProgramFacts {
         ctx: &Context,
         id: usize,
         value: Value,
-    ) -> Option<TypeHandle> {
+    ) -> Result<Option<TypeHandle>> {
         let ty = value.get_type(ctx);
         if aggregate(ctx, ty)
             && !ty.deref(ctx).is::<PromiseType>()
             && let Some(&cell) = self.states[id].heap_values.get(&value)
-            && let Some(spec) = self.specialized_cell_type(ctx, ty, cell)
+            && let Some(spec) = self.specialized_cell_type(ctx, ty, cell)?
         {
-            return Some(spec);
+            return Ok(Some(spec));
         }
         let state = &self.states[id];
         if let Some(op) = value.defining_op() {
             // A projection of a specialized base takes the projected specialized type.
-            let base = || self.specialized_value_type(ctx, id, op.deref(ctx).get_operand(0));
             let changed = |projected: TypeHandle| (projected != ty).then_some(projected);
-            if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
-                let record = base()?;
-                let field = record
-                    .deref(ctx)
-                    .downcast_ref::<RecordType>()?
-                    .field(&get.field(ctx));
-                return changed(field?.1);
-            }
-            if crate::is_any::<(ArrayAtOp, ArrayGetOp)>(ctx, op) {
-                let element = base()?.deref(ctx).downcast_ref::<ArrayType>()?.element();
-                return changed(if Operation::is_op::<ArrayGetOp>(op, ctx) {
-                    crate::types::OptionalType::get(ctx, element).into()
-                } else {
-                    element
-                });
-            }
-            if crate::is_any::<(UnwrapOp, crate::optional::ToNumberOp)>(ctx, op)
-                && let Some(optional) = base()
+            if crate::is_any::<(
+                FieldGetOp,
+                ArrayAtOp,
+                ArrayGetOp,
+                UnwrapOp,
+                crate::optional::ToNumberOp,
+                WrapOp,
+                OptionalCastOp,
+            )>(ctx, op)
             {
-                return changed(crate::optional::optional_value(ctx, optional)?);
-            }
-            if crate::is_any::<(WrapOp, OptionalCastOp)>(ctx, op)
-                && let Some(payload) = base()
-            {
-                let payload = if Operation::is_op::<OptionalCastOp>(op, ctx) {
-                    crate::optional::optional_value(ctx, payload)?
-                } else {
-                    payload
-                };
-                let absence = crate::optional::absence(ctx, ty)?;
-                return changed(crate::types::OptionalType::get_with(ctx, payload, absence).into());
+                let base = self.specialized_value_type(ctx, id, op.deref(ctx).get_operand(0))?;
+                if let Some(base) = base {
+                    return Ok(projected_type(ctx, op, base, ty).and_then(changed));
+                }
+                if crate::is_any::<(FieldGetOp, ArrayAtOp, ArrayGetOp)>(ctx, op) {
+                    return Ok(None);
+                }
             }
             if crate::is_any::<(crate::locals::LoadOp, AwaitOp)>(ctx, op) {
-                return None;
+                return Ok(None);
             }
             if let Some(intrinsic) = crate::intrinsics::intrinsic_of(ctx, op) {
                 let integral = super::super::rewrite::integral_intrinsic(ctx, op, intrinsic, |v| {
@@ -68,7 +54,7 @@ impl ProgramFacts {
                         .operands()
                         .any(|v| state.fact(v) == Fact::Numeric);
                 if !integral && !numeric {
-                    return None;
+                    return Ok(None);
                 }
             }
         }
@@ -76,9 +62,9 @@ impl ProgramFacts {
             || (state.fact(value).needs_lossless_64()
                 && !super::super::rewrite::can_specialize_value(ctx, state, value))
         {
-            return numeric_type_for(ctx, ty);
+            return Ok(numeric_type_for(ctx, ty));
         }
-        None
+        Ok(None)
     }
 
     /// The specialized type of result `pos` of context `id`, declared as `ty`.
@@ -88,18 +74,21 @@ impl ProgramFacts {
         id: usize,
         pos: usize,
         ty: TypeHandle,
-    ) -> Option<TypeHandle> {
+    ) -> Result<Option<TypeHandle>> {
         let res = &self.states[id].results[pos];
         if aggregate(ctx, ty) && !ty.deref(ctx).is::<PromiseType>() {
-            let cell = res.heap?;
-            return self.specialized_cell_type(ctx, ty, cell);
+            return res
+                .heap
+                .map(|cell| self.specialized_cell_type(ctx, ty, cell))
+                .transpose()
+                .map(Option::flatten);
         }
         if res.domain == Fact::Numeric
             || (res.domain.needs_lossless_64() && ty.deref(ctx).is::<crate::types::OptionalType>())
         {
-            return numeric_type_for(ctx, ty);
+            return Ok(numeric_type_for(ctx, ty));
         }
-        None
+        Ok(None)
     }
 
     fn specialized_cell_type(
@@ -107,67 +96,59 @@ impl ProgramFacts {
         ctx: &Context,
         ty: TypeHandle,
         cell: usize,
-    ) -> Option<TypeHandle> {
+    ) -> Result<Option<TypeHandle>> {
         let objects = &self.heap.cells[cell].layout_objects;
-        let (t, real) = self.specialized_type_inner(ctx, ty, objects, &mut HashMap::new())?;
-        real.then_some(t)
+        self.specialized_type_inner(ctx, ty, objects, &mut HashMap::new())
     }
 
     /// Specializes `ty` when every object in `objects` agrees on numeric slots.
-    /// Returns `Some((type, real_change))` where `real_change` is false if the result is
-    /// merely an unverified recursive reservation stub.
     fn specialized_type_inner(
         &self,
         ctx: &Context,
         ty: TypeHandle,
         objects: &BTreeSet<usize>,
         visiting: &mut HashMap<TypeHandle, TypeHandle>,
-    ) -> Option<(TypeHandle, bool)> {
+    ) -> Result<Option<TypeHandle>> {
         if let Some(&target) = visiting.get(&ty) {
-            return Some((target, true));
+            return Ok(Some(target));
         }
         if let Some((inner, absence)) = crate::optional::optional_parts(ctx, ty) {
-            let (inner, real) = self.specialized_type_inner(ctx, inner, objects, visiting)?;
-            return Some((
-                crate::types::OptionalType::get_with(ctx, inner, absence).into(),
-                real,
-            ));
+            return Ok(self
+                .specialized_type_inner(ctx, inner, objects, visiting)?
+                .map(|inner| crate::types::OptionalType::get_with(ctx, inner, absence).into()));
         }
         if objects.is_empty() {
-            return None;
+            return Ok(None);
         }
-        match Layout::of(ctx, ty)? {
+        let Some(layout) = Layout::of(ctx, ty) else {
+            return Ok(None);
+        };
+        match layout {
             Layout::Array(element) => {
-                let (element, real) = match self.heap.step(ctx, objects, None, element)? {
-                    Step::Numeric(element) => (element, true),
-                    Step::Nested(nested) => {
+                let specialized = match self.heap.step(ctx, objects, None, element, Lossless::All) {
+                    Some(Step::Numeric(element)) => Some(element),
+                    Some(Step::Nested(nested)) => {
                         self.specialized_type_inner(ctx, element, &nested, visiting)?
                     }
-                    Step::Keep => return None,
+                    Some(Step::Keep) | None => None,
                 };
-                Some((ArrayType::get(ctx, element).into(), real))
+                Ok(specialized.map(|element| ArrayType::get(ctx, element).into()))
             }
-            Layout::Record { tuple, fields, .. } => {
-                let (key, _) = self.layout_key(ctx, ty, objects, &mut Vec::new())?;
+            Layout::Record { kind, fields, .. } => {
+                let Some((key, _)) = self.layout_key(ctx, ty, objects, &mut Vec::new()) else {
+                    return Ok(None);
+                };
                 let name = key.record_identifier();
                 let get = |ctx: &Context, fields: Option<Vec<(String, TypeHandle)>>| {
-                    let record = if tuple {
-                        RecordType::get_tuple(ctx, name.clone(), fields)
-                    } else {
-                        RecordType::get(ctx, name.clone(), fields)
-                    };
-                    record.expect("a specialized layout is consistent with its reservation")
+                    RecordType::get_kind(ctx, name.clone(), fields, kind)
                 };
-                // A recursive record reserves its name, so its own fields can refer to it.
-                let recursive = is_recursive_type(ctx, ty, &mut HashSet::new());
-                if recursive {
-                    visiting.insert(ty, get(ctx, None).into());
-                }
-                let fields = self.specialized_fields(ctx, fields, objects, visiting);
-                if recursive {
-                    visiting.remove(&ty);
-                }
-                Some((get(ctx, Some(fields?)).into(), true))
+                // Reserving before the fields also handles recursive records without a pre-walk.
+                visiting.insert(ty, get(ctx, None)?.into());
+                let fields = self.specialized_fields(ctx, fields.to_vec(), objects, visiting);
+                visiting.remove(&ty);
+                fields?
+                    .map(|fields| get(ctx, Some(fields)).map(Into::into))
+                    .transpose()
             }
         }
     }
@@ -176,32 +157,29 @@ impl ProgramFacts {
     fn specialized_fields(
         &self,
         ctx: &Context,
-        fields: Vec<(String, TypeHandle)>,
+        mut fields: Vec<(String, TypeHandle)>,
         objects: &BTreeSet<usize>,
         visiting: &mut HashMap<TypeHandle, TypeHandle>,
-    ) -> Option<Vec<(String, TypeHandle)>> {
+    ) -> Result<Option<Vec<(String, TypeHandle)>>> {
         let mut real_change = false;
-        let mut specialized = Vec::with_capacity(fields.len());
-        for (index, (name, ty)) in fields.into_iter().enumerate() {
-            let ty = match self.heap.step(ctx, objects, Some(index), ty)? {
-                Step::Numeric(numeric) => {
-                    real_change = true;
-                    numeric
-                }
-                Step::Nested(nested) => {
-                    match self.specialized_type_inner(ctx, ty, &nested, visiting) {
-                        Some((nested, real)) => {
-                            real_change |= real;
-                            nested
-                        }
-                        None => ty,
-                    }
-                }
-                Step::Keep => ty,
+        for (index, (_, ty)) in fields.iter_mut().enumerate() {
+            let Some(step) = self
+                .heap
+                .step(ctx, objects, Some(index), *ty, Lossless::All)
+            else {
+                return Ok(None);
             };
-            specialized.push((name, ty));
+            let specialized = match step {
+                Step::Numeric(numeric) => Some(numeric),
+                Step::Nested(nested) => self.specialized_type_inner(ctx, *ty, &nested, visiting)?,
+                Step::Keep => None,
+            };
+            if let Some(specialized) = specialized {
+                real_change = true;
+                *ty = specialized;
+            }
         }
-        real_change.then_some(specialized)
+        Ok(real_change.then_some(fields))
     }
 
     /// Whether some slot group `objects` share under `ty` specializes to a numeric carrier.
@@ -223,7 +201,7 @@ impl ProgramFacts {
         }
         let found = Layout::of(ctx, ty).is_some_and(|layout| {
             for (field, _, child) in layout.children() {
-                let numeric = match self.heap.step(ctx, objects, field, child) {
+                let numeric = match self.heap.step(ctx, objects, field, child, Lossless::All) {
                     None => return false,
                     Some(Step::Numeric(_)) => true,
                     Some(Step::Nested(nested)) => {
@@ -270,16 +248,17 @@ impl ProgramFacts {
         }
         match Layout::of(ctx, ty)? {
             Layout::Array(element) => {
-                let (key, real) = match self.heap.step(ctx, objects, None, element)? {
-                    Step::Numeric(_) => (LayoutKey::Numeric, true),
-                    Step::Nested(nested) => self.layout_key(ctx, element, &nested, visiting)?,
-                    Step::Keep => return None,
-                };
+                let (key, real) =
+                    match self.heap.step(ctx, objects, None, element, Lossless::All)? {
+                        Step::Numeric(_) => (LayoutKey::Numeric, true),
+                        Step::Nested(nested) => self.layout_key(ctx, element, &nested, visiting)?,
+                        Step::Keep => return None,
+                    };
                 Some((LayoutKey::Array(Box::new(key)), real))
             }
             Layout::Record {
                 name: base_name,
-                tuple: is_tuple,
+                kind,
                 fields,
             } => {
                 visiting.push(ty);
@@ -287,8 +266,8 @@ impl ProgramFacts {
                 visiting.pop();
                 let specialized_fields = fields?;
                 let key = LayoutKey::Record {
-                    base_name,
-                    is_tuple,
+                    base_name: base_name.clone(),
+                    is_tuple: kind != crate::RecordKind::Object,
                     specialized_fields,
                 };
                 Some((key, true))
@@ -307,7 +286,10 @@ impl ProgramFacts {
         let mut real_change = false;
         let mut specialized = Vec::new();
         for (index, &(_, ty)) in fields.iter().enumerate() {
-            match self.heap.step(ctx, objects, Some(index), ty)? {
+            match self
+                .heap
+                .step(ctx, objects, Some(index), ty, Lossless::All)?
+            {
                 Step::Numeric(_) => {
                     specialized.push((index, LayoutKey::Numeric));
                     real_change = true;
@@ -356,14 +338,10 @@ impl ProgramFacts {
         let verified = Layout::of(ctx, ty).map_or(Ok(()), |layout| {
             for (field, name, child) in layout.children() {
                 // A shape the objects do not share specializes nothing.
-                let Some(slots) = self.heap.slots(objects, field) else {
+                let Some(step) = self.heap.step(ctx, objects, field, child, Lossless::Any) else {
                     return Ok(());
                 };
-                if slots
-                    .iter()
-                    .any(|&slot| self.heap.cells[slot].domain.needs_lossless_64())
-                    && numeric_type_for(ctx, child).is_some()
-                {
+                if let Step::Numeric(_) = step {
                     let message = name.map_or_else(
                         || "array element with Fact::Numeric has f64 carrier".to_string(),
                         |name| format!("record field `{name}` with Fact::Numeric has f64 carrier"),
@@ -373,8 +351,7 @@ impl ProgramFacts {
                         crate::facts::rewrite::LosslessRepresentationErr(message)
                     );
                 }
-                if aggregate(ctx, child) {
-                    let nested = self.heap.layout_objects(&slots);
+                if let Step::Nested(nested) = step {
                     self.verify_objects_layout_lossless(ctx, loc, child, &nested, visiting)?;
                 }
             }
@@ -385,91 +362,128 @@ impl ProgramFacts {
     }
 }
 
-/// The array or record shape of an aggregate type, copied out of the type storage because
-/// specializing instantiates types while it is walked.
-enum Layout {
+/// Projects a specialized base through the access or optional conversion that produced `ty`.
+fn projected_type(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    base: TypeHandle,
+    ty: TypeHandle,
+) -> Option<TypeHandle> {
+    if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
+        return base
+            .deref(ctx)
+            .downcast_ref::<RecordType>()?
+            .field(&get.field(ctx))
+            .map(|(_, ty)| ty);
+    }
+    if crate::is_any::<(ArrayAtOp, ArrayGetOp)>(ctx, op) {
+        let element = base.deref(ctx).downcast_ref::<ArrayType>()?.element();
+        return Some(if Operation::is_op::<ArrayGetOp>(op, ctx) {
+            crate::types::OptionalType::get(ctx, element).into()
+        } else {
+            element
+        });
+    }
+    if crate::is_any::<(UnwrapOp, crate::optional::ToNumberOp)>(ctx, op) {
+        return crate::optional::optional_value(ctx, base);
+    }
+    let payload = if Operation::is_op::<OptionalCastOp>(op, ctx) {
+        crate::optional::optional_value(ctx, base)?
+    } else {
+        base
+    };
+    let absence = crate::optional::absence(ctx, ty)?;
+    Some(crate::types::OptionalType::get_with(ctx, payload, absence).into())
+}
+
+/// Borrowed children avoid copying fields during read-only layout walks.
+enum Layout<'a> {
     Array(TypeHandle),
     Record {
-        name: Identifier,
-        tuple: bool,
-        fields: Vec<(String, TypeHandle)>,
+        name: Ref<'a, Identifier>,
+        kind: crate::RecordKind,
+        fields: Ref<'a, [(String, TypeHandle)]>,
     },
 }
 
-impl Layout {
+impl<'a> Layout<'a> {
     /// `None` for other types and for opaque records, which have nothing to specialize.
-    fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+    fn of(ctx: &'a Context, ty: TypeHandle) -> Option<Self> {
         let ty = ty.deref(ctx);
         if let Some(array) = ty.downcast_ref::<ArrayType>() {
             return Some(Self::Array(array.element()));
         }
-        let record = ty.downcast_ref::<RecordType>()?;
+        let record = Ref::filter_map(ty, |ty| ty.downcast_ref::<RecordType>()).ok()?;
         Some(Self::Record {
-            name: record.name().clone(),
-            tuple: record.is_tuple(),
-            fields: record.fields().ok()?.to_vec(),
+            name: Ref::map(Ref::clone(&record), RecordType::name),
+            kind: record.kind(),
+            fields: Ref::filter_map(record, |record| record.fields().ok()).ok()?,
         })
     }
 
     /// `(field index, field name, type)` of each child; an array's one child is its element.
-    fn children(&self) -> Vec<(Option<usize>, Option<&str>, TypeHandle)> {
-        match self {
-            Self::Array(element) => vec![(None, None, *element)],
-            Self::Record { fields, .. } => fields
+    fn children(&self) -> impl Iterator<Item = (Option<usize>, Option<&str>, TypeHandle)> {
+        let (element, fields) = match self {
+            Self::Array(element) => (Some((None, None, *element)), &[][..]),
+            Self::Record { fields, .. } => (None, &fields[..]),
+        };
+        element.into_iter().chain(
+            fields
                 .iter()
                 .enumerate()
-                .map(|(index, (name, ty))| (Some(index), Some(name.as_str()), *ty))
-                .collect(),
-        }
+                .map(|(index, (name, ty))| (Some(index), Some(name.as_str()), *ty)),
+        )
     }
 }
 
 /// How the slots holding one child of every object in a group specialize.
 enum Step {
-    /// Every slot needs a lossless carrier and the child is an `f64` one: its numeric type.
+    /// The lossless requirement holds for an `f64` child: its numeric carrier.
     Numeric(TypeHandle),
     /// The child is an aggregate, decided by the objects its slots may hold.
     Nested(BTreeSet<usize>),
     Keep,
 }
 
+/// Specialization needs agreement; verification rejects even one lossy slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lossless {
+    All,
+    Any,
+}
+
 impl HeapFacts {
-    /// The slot each of `objects` holds at record `field` (array elements for `None`), or
-    /// `None` when an object has another shape.
-    fn slots(&self, objects: &BTreeSet<usize>, field: Option<usize>) -> Option<Vec<usize>> {
-        objects
-            .iter()
-            .map(|&object| match (&self.objects[object].contents, field) {
-                (Contents::Array { element, .. }, None) => Some(*element),
-                (Contents::Record(slots), Some(index)) => slots.get(index).copied(),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The objects any of `slots` may lay out.
-    fn layout_objects(&self, slots: &[usize]) -> BTreeSet<usize> {
-        slots
-            .iter()
-            .flat_map(|&slot| self.cells[slot].layout_objects.iter().copied())
-            .collect()
-    }
-
-    /// How child `field` of type `ty` specializes across `objects`; `None` for a shape mismatch.
+    /// Classify a child without materializing its slot list; reject mismatched object shapes.
     fn step(
         &self,
         ctx: &Context,
         objects: &BTreeSet<usize>,
         field: Option<usize>,
         ty: TypeHandle,
+        requirement: Lossless,
     ) -> Option<Step> {
-        let slots = self.slots(objects, field)?;
-        let lossless = slots
-            .iter()
-            .all(|&slot| self.cells[slot].domain.needs_lossless_64());
+        let mut lossless = requirement == Lossless::All;
+        let is_aggregate = aggregate(ctx, ty);
+        let mut nested = BTreeSet::new();
+        for &object in objects {
+            let slot = match (&self.objects[object].contents, field) {
+                (Contents::Array { element, .. }, None) => *element,
+                (Contents::Record(slots), Some(index)) => *slots.get(index)?,
+                _ => return None,
+            };
+            let cell = &self.cells[slot];
+            let needs_lossless = cell.domain.needs_lossless_64();
+            match requirement {
+                Lossless::All => lossless &= needs_lossless,
+                Lossless::Any => lossless |= needs_lossless,
+            }
+            if is_aggregate {
+                nested.extend(cell.layout_objects.iter().copied());
+            }
+        }
         Some(match numeric_type_for(ctx, ty) {
             Some(numeric) if lossless => Step::Numeric(numeric),
-            _ if aggregate(ctx, ty) => Step::Nested(self.layout_objects(&slots)),
+            _ if is_aggregate => Step::Nested(nested),
             _ => Step::Keep,
         })
     }
@@ -569,29 +583,4 @@ fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     }
     let (value, absence) = crate::optional::optional_parts(ctx, ty)?;
     is_number(value).then(|| crate::types::OptionalType::get_with(ctx, numeric, absence).into())
-}
-
-/// Whether `ty` reaches a record already on the `visiting` path.
-fn is_recursive_type(ctx: &Context, ty: TypeHandle, visiting: &mut HashSet<TypeHandle>) -> bool {
-    let shape = ty.deref(ctx);
-    if let Some(opt) = shape.downcast_ref::<crate::types::OptionalType>() {
-        return is_recursive_type(ctx, opt.value(), visiting);
-    }
-    if let Some(arr) = shape.downcast_ref::<ArrayType>() {
-        return is_recursive_type(ctx, arr.element(), visiting);
-    }
-    let Some(record) = shape.downcast_ref::<RecordType>() else {
-        return false;
-    };
-    if !visiting.insert(ty) {
-        return true;
-    }
-    // An opaque record has no fields to specialize; `specialized_objects_type` rejects it.
-    let recursive = record.fields().is_ok_and(|fields| {
-        fields
-            .iter()
-            .any(|&(_, field)| is_recursive_type(ctx, field, visiting))
-    });
-    visiting.remove(&ty);
-    recursive
 }

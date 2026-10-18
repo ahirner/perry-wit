@@ -5,8 +5,7 @@ use wasmtime::{
     Val, ValType,
 };
 
-use crate::link;
-use link::libraries;
+use crate::link::{self, libraries};
 
 const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
 const INPUT: u32 = 262_144;

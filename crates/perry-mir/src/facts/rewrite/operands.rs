@@ -16,12 +16,12 @@ pub(super) fn rewrite_implementation(
     rewriter: &mut IRRewriter<DummyListener>,
     implementations: &Implementations,
     implementation: &Implementation,
-) {
+) -> Result<()> {
     let id = implementation.primary_context;
     let mapping = &implementation.mapping;
     let state = &analysis.states[id];
     let body = &analysis.bodies[&analysis.keys[id].function];
-    retype_values(ctx, analysis, id, mapping);
+    retype_values(ctx, analysis, id, mapping)?;
     let mut expected = Vec::new();
     for &constraint in &body.constraints {
         let Constraint::Op { op: original, .. } = constraint else {
@@ -51,10 +51,16 @@ pub(super) fn rewrite_implementation(
         );
         coerce_operands(ctx, rewriter, analysis, state, original, op, &expected);
     }
+    Ok(())
 }
 
 /// Gives every cloned non-parameter value its integer representation or specialized type.
-fn retype_values(ctx: &mut Context, analysis: &ProgramFacts, id: usize, mapping: &IrMapping) {
+fn retype_values(
+    ctx: &mut Context,
+    analysis: &ProgramFacts,
+    id: usize,
+    mapping: &IrMapping,
+) -> Result<()> {
     let state = &analysis.states[id];
     let body = &analysis.bodies[&analysis.keys[id].function];
     let values = state.facts.keys().chain(
@@ -79,12 +85,13 @@ fn retype_values(ctx: &mut Context, analysis: &ProgramFacts, id: usize, mapping:
             };
             cloned.set_type(ctx, ty);
         } else if !value.get_type(ctx).deref(ctx).is::<PromiseType>()
-            && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, value)
+            && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, value)?
         {
             let cloned = mapping.lookup_value(value).expect("cloned value");
             cloned.set_type(ctx, spec_ty);
         }
     }
+    Ok(())
 }
 
 /// Replaces `op` by a constant, cast or subtraction when its integer result is known.

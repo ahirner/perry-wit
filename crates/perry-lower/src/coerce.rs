@@ -1,6 +1,12 @@
 //! Value kinds and the ECMAScript conversions between typed MIR values.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum DisplayMode {
+    String,
+    Console,
+}
+
 pub(super) fn merge_absence(
     left: Option<perry_mir::Absence>,
     right: Option<perry_mir::Absence>,
@@ -502,7 +508,11 @@ impl<'s> FunctionBuilder<'s> {
                 format!("record field {name} cannot become {}", dst_ty.disp(ctx))
             })?);
         }
-        let projected = self.emit_value(ctx, |ctx| AllocOp::new(ctx, dst_rec, projected));
+        let projected = self.emit_value(ctx, |ctx| {
+            let alloc = AllocOp::new(ctx, dst_rec, projected);
+            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
+            alloc
+        });
         self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
         self.fit(ctx, projected, target)
     }
@@ -574,6 +584,15 @@ impl<'s> FunctionBuilder<'s> {
 
     /// ECMAScript `ToString` of a primitive, as `console.log` and `+` display it.
     pub(super) fn display(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.display_as(ctx, value, DisplayMode::String)
+    }
+
+    pub(super) fn display_as(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        mode: DisplayMode,
+    ) -> Result<Value> {
         if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
             if inner.deref(ctx).is::<StringType>() {
                 return Ok(self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value)));
@@ -592,7 +611,7 @@ impl<'s> FunctionBuilder<'s> {
                         |b, ctx| {
                             let op = UnwrapOp::new(ctx, value)?;
                             let defined = b.append_value(ctx, &op);
-                            b.display(ctx, defined)
+                            b.display_as(ctx, defined, mode)
                         },
                     )
                 },
@@ -611,7 +630,7 @@ impl<'s> FunctionBuilder<'s> {
                         let payload = b.emit_value(ctx, |ctx| {
                             perry_mir::VariantPayloadOp::new(ctx, value, ty)
                         });
-                        b.display(ctx, payload)
+                        b.display_as(ctx, payload, mode)
                     },
                     |b, ctx| {
                         let ty = StringType::get(ctx).into();
@@ -637,7 +656,14 @@ impl<'s> FunctionBuilder<'s> {
             }
             Kind::String => value,
             Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
-            Kind::Number => self.intrinsic(ctx, Intrinsic::NumberToString, vec![value]),
+            Kind::Number => self.intrinsic(
+                ctx,
+                match mode {
+                    DisplayMode::String => Intrinsic::NumberToString,
+                    DisplayMode::Console => Intrinsic::NumberInspect,
+                },
+                vec![value],
+            ),
             Kind::Boolean => self.choose_string(
                 ctx,
                 value,

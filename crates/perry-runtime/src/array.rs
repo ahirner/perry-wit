@@ -34,42 +34,7 @@ impl Array {
     }
 }
 
-/// The element representation of an array, decoded from the `references` flag compiled code
-/// passes (`*_ELEMENTS`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Elements {
-    /// Opaque 8-byte slots: `f64`, booleans or fixed-width integers.
-    Scalar,
-    /// 8-byte slots holding a reference in the low half, traced precisely.
-    References,
-    /// Opaque 16-byte slots holding a numeric tag and payload.
-    Numeric,
-}
-
 impl Elements {
-    /// Decode the ABI flag; any other value is a compiler bug, so it traps.
-    fn decode(references: u32) -> Self {
-        match references {
-            SCALAR_ELEMENTS => Self::Scalar,
-            REFERENCE_ELEMENTS => Self::References,
-            NUMERIC_ELEMENTS => Self::Numeric,
-            _ => panic!("invalid array element kind"),
-        }
-    }
-
-    /// Bytes per element slot.
-    fn stride(self) -> u32 {
-        match self {
-            Self::Scalar | Self::References => SLOT,
-            Self::Numeric => NUMERIC_SLOT,
-        }
-    }
-
-    /// `u64` words per element slot.
-    fn words(self) -> usize {
-        (self.stride() / SLOT) as usize
-    }
-
     /// Byte size of `cap` slots; traps when it exceeds the 32-bit address space.
     fn bytes(self, cap: u32) -> u32 {
         crate::sequence::byte_size(cap, self.stride(), 0)

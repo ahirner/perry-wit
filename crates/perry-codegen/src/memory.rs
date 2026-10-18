@@ -1,11 +1,11 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
 use crate::{
-    aggregates::record_slot,
+    analysis::{ModuleAnalyses, module_analyses},
     function::FunctionLowering,
-    repr::{Repr, i32_type, repr},
+    repr::{Repr, i32_type, repr, slot_size},
     runtime::Runtime,
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use perry_abi::layout::{array, record, roots as root_stack};
 use perry_mir::{AsyncCallOp, CallOp, RecordType};
 use pliron::{
@@ -13,7 +13,6 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    printable::Printable,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
@@ -70,17 +69,21 @@ pub(crate) fn needs_collector(
     ctx: &Context,
     functions: &[pliron::builtin::ops::FuncOp],
     summaries: &perry_mir::ProgramFacts,
-) -> bool {
+) -> Result<bool> {
     use pliron::builtin::op_interfaces::SymbolOpInterface;
-    functions.iter().any(|function| {
+    for function in functions {
         let name = function.get_symbol_name(ctx);
-        let effects = &summaries.effects(&name).expect("function effects").effects;
-        name.as_ref() == perry_mir::INITIALIZER
+        let effects = &summaries.function_summary(ctx, function)?.effects;
+        if name.as_ref() == perry_mir::INITIALIZER
             || effects.repeated_allocations
             || effects.unknown_helper_bound
             || effects.may_suspend
             || effects.may_reenter
-    })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Explain the conservative allocation decisions for the optimized MIR actually emitted.
@@ -93,21 +96,13 @@ pub fn explain_tiers(
     use pliron::builtin::op_interfaces::SymbolOpInterface;
     use std::fmt::Write;
     let functions = crate::analysis::reachable_functions(ctx, module, exports);
-    analyses
-        .get_analysis::<perry_mir::LiveValues>(module.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
-    analyses
-        .get_analysis::<perry_mir::ProgramFacts>(module.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
-    let effects = analyses
-        .try_get_analysis::<perry_mir::ProgramFacts>(module.get_operation())
-        .expect("runtime effects");
+    let ModuleAnalyses {
+        facts: effects,
+        live,
+    } = module_analyses(ctx, module, analyses)?;
     let summaries = &*effects;
-    let live = analyses
-        .try_get_analysis::<perry_mir::LiveValues>(module.get_operation())
-        .expect("liveness");
     let collectible = !crate::boundary::used_keys(ctx, &functions).is_empty()
-        || needs_collector(ctx, &functions, summaries);
+        || needs_collector(ctx, &functions, summaries)?;
     let tier = if collectible {
         "instance (precise collection)"
     } else {
@@ -115,10 +110,22 @@ pub fn explain_tiers(
     };
     let mut report = format!("Allocation tiers after MIR optimization: {tier}\n");
     let stats = perry_mir::optimization_statistics(module.get_operation(), ctx);
-    writeln!(report, "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}, summarized_contexts={}, range_widenings={}, parse_stringify_rewrites={}, parse_stringify_missed={}", stats.numeric_contexts, stats.constraint_visits, stats.specializations, stats.cleanup_rounds, stats.summarized_heap_sets, stats.summarized_contexts, stats.range_widenings, stats.parse_stringify_rewrites, stats.parse_stringify_missed).expect("string write");
+    writeln!(
+        report,
+        "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}, summarized_contexts={}, range_widenings={}, parse_stringify_rewrites={}, parse_stringify_missed={}",
+        stats.numeric_contexts,
+        stats.constraint_visits,
+        stats.specializations,
+        stats.cleanup_rounds,
+        stats.summarized_heap_sets,
+        stats.summarized_contexts,
+        stats.range_widenings,
+        stats.parse_stringify_rewrites,
+        stats.parse_stringify_missed
+    )?;
     for function in &functions {
         let name = function.get_symbol_name(ctx);
-        let summary = summaries.effects(&name).expect("function effects");
+        let summary = summaries.function_summary(ctx, function)?;
         let ops = crate::analysis::function_ops(ctx, function);
         let sites = ops
             .iter()
@@ -130,8 +137,13 @@ pub fn explain_tiers(
             .filter(|allocation| allocation.tier(ctx) == perry_mir::Tier::Frame)
             .count();
         let leases = crate::lease::leased(ctx, function, &live).len();
-        writeln!(report, "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
-            summary.effects.repeated_allocations, summary.effects.unknown_helper_bound, summary.escapes).expect("string write");
+        writeln!(
+            report,
+            "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
+            summary.effects.repeated_allocations,
+            summary.effects.unknown_helper_bound,
+            summary.escapes
+        )?;
     }
     report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use the selected task or instance storage\n  buffer: host operations pin owners until acknowledgement\n");
     Ok(report)
@@ -549,7 +561,7 @@ impl FunctionLowering<'_, '_> {
                 if repr(ctx, *field_ty).is_ok_and(|kind| kind == Repr::Ref) {
                     offsets.push(field_offset);
                 }
-                field_offset += record_slot(ctx, *field_ty);
+                field_offset += slot_size(ctx, *field_ty);
             }
             if self.state.retains_json {
                 offsets.push(record::JSON);
@@ -580,7 +592,7 @@ impl FunctionLowering<'_, '_> {
                 Runtime::ArrayNewCollectible,
                 vec![capacity, references],
             ))
-        } else if elem_kind == array::NUMERIC_ELEMENTS {
+        } else if elem_kind == array::Elements::Numeric {
             let references = self.i32_const(ctx, elem_kind as i32);
             Ok(self.runtime(ctx, Runtime::ArrayNewTyped, vec![capacity, references]))
         } else {

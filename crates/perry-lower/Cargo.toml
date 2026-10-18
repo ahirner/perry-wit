@@ -6,6 +6,7 @@ publish = false
 description = "Perry HIR to perry-mir builder (TODOs.md P2.2)"
 
 [dependencies]
+perry-abi.workspace = true
 perry-mir.workspace = true
 perry-parser.workspace = true
 perry-hir.workspace = true

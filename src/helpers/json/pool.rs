@@ -1,6 +1,7 @@
 //! Pooled graph storage for dynamic JSON and undeclared typed members.
 use super::{Error, reader::Reader, storage::GraphStorage};
 use perry_abi as runtime;
+use perry_abi::json::{NODE_BYTES, kind};
 fn set_word(value: *mut u8, offset: usize, word: u32) {
     unsafe { value.add(offset).cast::<u32>().write(word) }
 }
@@ -141,19 +142,19 @@ impl Residue {
     }
 }
 pub(super) fn json_node(kind: u32, residue: &mut Residue) -> *mut u8 {
-    let node = residue.alloc(32, 8);
-    unsafe { core::ptr::write_bytes(node, 0, 32) };
+    let node = residue.alloc(NODE_BYTES, 8);
+    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
     set_word(node, 0, kind);
     node
 }
 pub(super) fn json_text(value: Text<'_>, residue: &mut Residue) -> *mut u8 {
-    let size = 32u32
+    let size = NODE_BYTES
         .checked_add(if value.escaped { value.bytes } else { 0 })
         .expect("string size");
     let node = residue.alloc(size, 8);
-    unsafe { core::ptr::write_bytes(node, 0, 32) };
-    set_word(node, 0, 4);
-    let data = value.data_in(|_| unsafe { node.add(32) });
+    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
+    set_word(node, 0, kind::STRING);
+    let data = value.data_in(|_| unsafe { node.add(NODE_BYTES as usize) });
     set_word(node, 8, data as usize as u32);
     set_word(node, 12, value.bytes);
     set_word(node, 16, value.scalar_count());

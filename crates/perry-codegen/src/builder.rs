@@ -136,6 +136,15 @@ impl FunctionLowering<'_, '_> {
         op.deref(ctx).results().next()
     }
 
+    /// Synchronous helpers finish writing before the next call can reuse this cell.
+    pub(super) fn numeric_result_slot(&mut self, ctx: &mut Context) -> Value {
+        let address = *self
+            .state
+            .numeric_result
+            .get_or_insert_with(|| self.state.data.append(8, &[0; 8]));
+        self.i32_const(ctx, address as i32)
+    }
+
     /// Call a runtime function that returns a value. Results are declared statically in
     /// [Runtime], so a function without one is a bug at the call site.
     pub(crate) fn runtime(

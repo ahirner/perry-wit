@@ -12,20 +12,20 @@
 //! position and its last value) is applied when serializing or enumerating ([canonical]).
 //! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
 //! the same step, so duplicate and numeric keys come out as in Node.
+mod order;
 mod reflection;
 mod writer;
 
+use perry_abi::number::Number;
 pub(crate) use reflection::std_json_strict_equal;
 use reflection::{native_property, native_snapshot};
 
-use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, scalars_length};
+use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
-use perry_abi::json::{MEMBER_COUNT, kind::*};
+use perry_abi::json::{
+    MEMBER_COUNT, METADATA as CANONICAL, NODE_BYTES, array_index, kind::*, link_child,
+};
 use perry_abi::layout::descriptor;
-
-/// Word 28 of an object: nonzero once its members are in property order.
-const CANONICAL: usize = 28;
-const NODE_BYTES: u32 = 32;
 
 fn word(node: *mut u8, offset: usize) -> u32 {
     // SAFETY: compiled code passes graph nodes.
@@ -43,6 +43,49 @@ fn set_word(node: *mut u8, offset: usize, value: u32) {
 
 fn address(node: *mut u8) -> u32 {
     node as usize as u32
+}
+
+/// Graph nodes carry the same three numeric representations as generated code.
+fn json_number(value: *mut u8) -> Option<Number> {
+    if value.is_null() {
+        return None;
+    }
+    let tag = match word(value, 0) {
+        NUMBER => perry_abi::layout::numeric::Tag::Float,
+        INT64 => perry_abi::layout::numeric::Tag::Signed,
+        UINT64 => perry_abi::layout::numeric::Tag::Unsigned,
+        _ => return None,
+    };
+    // Numeric node tags guarantee an initialized 64-bit payload at offset 8.
+    Some(Number::from_numeric(tag, unsafe {
+        value.add(8).cast::<u64>().read()
+    }))
+}
+
+fn numeric_node(number: Number) -> *mut u8 {
+    let kind = match number {
+        Number::Float(_) => NUMBER,
+        Number::Signed(_) => INT64,
+        Number::Unsigned(_) => UINT64,
+    };
+    let node = new_node(kind);
+    unsafe {
+        node.add(8).cast::<u64>().write(number.into_numeric().1);
+    }
+    node
+}
+
+fn json_integer<T: TryFrom<i64> + TryFrom<u64>>(value: *mut u8) -> Option<T> {
+    match json_number(value)? {
+        Number::Signed(value) => T::try_from(value).ok(),
+        Number::Unsigned(value) => T::try_from(value).ok(),
+        Number::Float(value)
+            if value.abs() <= (1u64 << 53) as f64 && (value as i64) as f64 == value =>
+        {
+            T::try_from(value as i64).ok()
+        }
+        Number::Float(_) => None,
+    }
 }
 
 /// A fresh zeroed node of `kind`.
@@ -269,11 +312,10 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
     if value.is_null() {
         return f64::NAN;
     }
+    if let Some(number) = json_number(value) {
+        return number.as_f64();
+    }
     match word(value, 0) {
-        // SAFETY: number nodes hold an f64 at 8.
-        NUMBER => unsafe { *(value.add(8) as *const f64) },
-        INT64 => unsafe { *(value.add(8) as *const i64) as f64 },
-        UINT64 => unsafe { *(value.add(8) as *const u64) as f64 },
         NULL => 0.0,
         BOOLEAN => f64::from(word(value, 8)),
         _ => {
@@ -289,13 +331,8 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
 /// `value` is null (undefined) or a live JSON node.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
-    if !value.is_null() {
-        match word(value, 0) {
-            NUMBER => return unsafe { *(value.add(8) as *const f64) },
-            INT64 => return unsafe { *(value.add(8) as *const i64) as f64 },
-            UINT64 => return unsafe { *(value.add(8) as *const u64) as f64 },
-            _ => {}
-        }
+    if let Some(number) = json_number(value) {
+        return number.as_f64();
     }
     raise(TYPE_ERROR, "JSON value is not a number");
     0.0
@@ -307,26 +344,8 @@ pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
 /// `value` is null (undefined) or a live JSON node.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
-    if !value.is_null() {
-        match word(value, 0) {
-            INT64 => return unsafe { *(value.add(8) as *const i64) },
-            UINT64 => {
-                let u = unsafe { *(value.add(8) as *const u64) };
-                if let Ok(i) = i64::try_from(u) {
-                    return i;
-                }
-            }
-            NUMBER => {
-                let n = unsafe { *(value.add(8) as *const f64) };
-                if n.is_finite()
-                    && libm::trunc(n) == n
-                    && (-(1i64 << 53) as f64..=(1i64 << 53) as f64).contains(&n)
-                {
-                    return n as i64;
-                }
-            }
-            _ => {}
-        }
+    if let Some(integer) = json_integer(value) {
+        return integer;
     }
     raise(TYPE_ERROR, "JSON value does not match the declared schema");
     0
@@ -338,24 +357,8 @@ pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
 /// `value` is null (undefined) or a live JSON node.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
-    if !value.is_null() {
-        match word(value, 0) {
-            UINT64 => return unsafe { *(value.add(8) as *const u64) },
-            INT64 => {
-                let i = unsafe { *(value.add(8) as *const i64) };
-                if let Ok(u) = u64::try_from(i) {
-                    return u;
-                }
-            }
-            NUMBER => {
-                let n = unsafe { *(value.add(8) as *const f64) };
-                if n.is_finite() && libm::trunc(n) == n && (0.0..=(1u64 << 53) as f64).contains(&n)
-                {
-                    return n as u64;
-                }
-            }
-            _ => {}
-        }
+    if let Some(integer) = json_integer(value) {
+        return integer;
     }
     raise(TYPE_ERROR, "JSON value does not match the declared schema");
     0
@@ -402,43 +405,6 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
     }
 }
 
-fn append_number(text: &mut Buffer, number: f64) {
-    if number.is_finite() {
-        let mut digits = [0; 40];
-        let len = crate::runtime::number_format(number, &mut digits);
-        text.extend_from_slice(&digits[..len]);
-    } else {
-        text.extend_from_slice(b"null");
-    }
-}
-
-pub(super) fn format_integer(mut magnitude: u64, negative: bool, digits: &mut [u8; 21]) -> &[u8] {
-    let mut at = digits.len();
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (magnitude % 10) as u8;
-        magnitude /= 10;
-        if magnitude == 0 {
-            break;
-        }
-    }
-    if negative {
-        at -= 1;
-        digits[at] = b'-';
-    }
-    &digits[at..]
-}
-
-pub(super) fn append_i64(text: &mut Buffer, value: i64) {
-    let mut digits = [0u8; 21];
-    text.extend_from_slice(format_integer(value.unsigned_abs(), value < 0, &mut digits));
-}
-
-pub(super) fn append_u64(text: &mut Buffer, value: u64) {
-    let mut digits = [0u8; 21];
-    text.extend_from_slice(format_integer(value, false, &mut digits));
-}
-
 /// `typeof value`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
@@ -457,21 +423,6 @@ pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_is_null(value: *mut u8) -> u32 {
     u32::from(!value.is_null() && word(value, 0) == NULL)
-}
-
-/// The array index a key names (a canonical decimal below 2³² − 1), if any.
-fn array_index(key: &[u8]) -> Option<u32> {
-    if key.is_empty() || key.len() > 10 || (key[0] == b'0' && key.len() > 1) {
-        return None;
-    }
-    let mut value = 0u64;
-    for &digit in key {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        value = value * 10 + u64::from(digit - b'0');
-    }
-    (value < u64::from(u32::MAX)).then_some(value as u32)
 }
 
 fn key_bytes(member: u32) -> &'static [u8] {
@@ -607,12 +558,8 @@ fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
         copy
     };
     set_word(copy, 24, address(key));
-    match word(object, 8) {
-        0 => set_word(object, 16, address(copy)),
-        last => set_word(node(last), 4, address(copy)),
-    }
-    set_word(object, 8, address(copy));
-    set_word(object, MEMBER_COUNT, word(object, MEMBER_COUNT) + 1);
+    // Both nodes are owned, and the shallow copy's next link is clear.
+    unsafe { link_child(object, copy) };
     set_word(object, CANONICAL, 0);
 }
 
@@ -699,26 +646,11 @@ pub(crate) unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, valu
     append(object, value, key);
 }
 
-/// Merge undeclared JSON residue from `source` into `base`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_merge_residue(base: *mut u8, source: *mut u8) -> *mut u8 {
-    if source.is_null() {
-        return base;
-    }
-    let out = new_node(OBJECT);
-    if !base.is_null() {
-        std_json_assign(out, base);
-    }
-    std_json_assign(out, source);
-    out
-}
-
 /// Remove a key from a JSON residue object graph.
 ///
 /// # Safety
 /// `key` must be a valid string pointer when `graph` is non-null.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_json_exclude_key(graph: *mut u8, key: *mut u8) -> *mut u8 {
+unsafe fn exclude_key(graph: *mut u8, key: *mut u8) -> *mut u8 {
     if graph.is_null() || word(graph, 0) != OBJECT {
         return graph;
     }
@@ -743,28 +675,19 @@ pub(crate) unsafe extern "C" fn std_json_exclude_key(graph: *mut u8, key: *mut u
 /// A number as a JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
-    let node = new_node(NUMBER);
-    // SAFETY: number nodes hold an f64 at 8.
-    unsafe { *(node.add(8) as *mut f64) = value };
-    node
+    numeric_node(Number::Float(value))
 }
 
 /// A signed 64-bit integer as an exact JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_i64(value: i64) -> *mut u8 {
-    let node = new_node(INT64);
-    // SAFETY: INT64 nodes hold an i64 at 8.
-    unsafe { *(node.add(8) as *mut i64) = value };
-    node
+    numeric_node(Number::Signed(value))
 }
 
 /// An unsigned 64-bit integer as an exact JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_u64(value: u64) -> *mut u8 {
-    let node = new_node(UINT64);
-    // SAFETY: UINT64 nodes hold a u64 at 8.
-    unsafe { *(node.add(8) as *mut u64) = value };
-    node
+    numeric_node(Number::Unsigned(value))
 }
 
 /// A string as a JSON value.

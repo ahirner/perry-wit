@@ -157,7 +157,8 @@ const sparse: Array<number | undefined> = [undefined, 7];
 const filled = sparse.map((v = ++calls, i = v + 10) => v + i);
 const present: Array<number | undefined> = [1];
 const unthrown = present.map((v = failNumber()) => v);
-console.log("defaults", formatTag(), formatTag(undefined, 5), formatTag("box", undefined, "kg"), formatTag("box", 2, null), sumWithBase(), sumWithBase(5, 1, 2, 3));
+const fixedArgs: [string, number] = ["spread", 5];
+console.log("defaults", formatTag(), formatTag(undefined, 5), formatTag("box", undefined, "kg"), formatTag("box", 2, null), sumWithBase(), sumWithBase(5, 1, 2, 3), formatTag(...fixedArgs), sumWithBase(undefined, ...[1, 2, 3]));
 console.log("callback-defaults", calls, filled.join(","), unthrown[0]);
 
 function stringifyUnknown(v: unknown): string {

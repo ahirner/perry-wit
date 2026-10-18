@@ -14,7 +14,6 @@ use wasmparser::{
 };
 
 pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fetch.wasm"));
-pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
 pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm"));
 pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
@@ -33,7 +32,6 @@ pub(crate) enum LibraryId {
     Fs,
     Web,
     Fetch,
-    Search,
     Text,
     Json,
     Time,
@@ -47,19 +45,10 @@ impl LibraryId {
             entry if entry.starts_with("std_") => Self::Std,
             entry if entry.starts_with("fs_") => Self::Fs,
             entry if entry.starts_with("web_") => Self::Web,
-            "number_remainder" | "number_format" => Self::Number,
-            "fetch_status_text" | "fetch_url" | "fetch_url_value" | "fetch_redirect"
-            | "fetch_decode" | "fetch_method" | "fetch_header_value" | "fetch_header_size"
-            | "fetch_header_get" | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
-            "str_find_substring" | "str_scalar_to_byte" => Self::Search,
-            "str_code_point_at"
-            | "str_from_code_point"
-            | "str_case_convert"
-            | "str_normalize"
-            | "str_split_count"
-            | "str_split_populate"
-            | "str_join_total_len"
-            | "str_join" => Self::Text,
+            "number_format" => Self::Number,
+            "fetch_status_text" | "fetch_url" | "fetch_url_value" | "fetch_method"
+            | "fetch_header_value" | "fetch_header_name" => Self::Fetch,
+            "str_case_convert" | "str_normalize" => Self::Text,
             entry if entry.starts_with("json_") => Self::Json,
             // The time helper exports every `time_` entry, so new ones cannot drift out of a list.
             entry if entry.starts_with("time_") => Self::Time,
@@ -82,7 +71,6 @@ impl LibraryId {
             Self::Fs => FS,
             Self::Web => WEB,
             Self::Fetch => FETCH,
-            Self::Search => SEARCH,
             Self::Text => TEXT,
             Self::Json => JSON,
             Self::Time => TIME,
@@ -181,7 +169,25 @@ pub(crate) struct Library {
     pub(crate) start: Option<u32>,
 }
 
-struct HelperCalls<'a>(&'a [Vec<usize>]);
+struct HelperCalls<'a> {
+    successors: &'a [Vec<usize>],
+    predecessors: Vec<Vec<usize>>,
+}
+
+impl<'a> HelperCalls<'a> {
+    fn new(successors: &'a [Vec<usize>]) -> Self {
+        let mut predecessors = vec![Vec::new(); successors.len()];
+        for (caller, calls) in successors.iter().enumerate() {
+            for &callee in calls {
+                predecessors[callee].push(caller);
+            }
+        }
+        Self {
+            successors,
+            predecessors,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct FunctionIndex(usize);
@@ -195,38 +201,22 @@ impl HasLabel<()> for FunctionIndex {
 impl ControlFlowGraph<()> for HelperCalls<'_> {
     type Node = FunctionIndex;
     fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.0[node.0].len()
+        self.successors[node.0].len()
     }
     fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.0[node.0][index])
+        FunctionIndex(self.successors[node.0][index])
     }
     fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.0
-            .iter()
-            .flat_map(|calls| calls.iter())
-            .filter(|&&callee| callee == node.0)
-            .count()
+        self.predecessors[node.0].len()
     }
     fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(
-            self.0
-                .iter()
-                .enumerate()
-                .flat_map(|(caller, calls)| {
-                    calls
-                        .iter()
-                        .filter(move |&&callee| callee == node.0)
-                        .map(move |_| caller)
-                })
-                .nth(index)
-                .expect("predecessor index"),
-        )
+        FunctionIndex(self.predecessors[node.0][index])
     }
     fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
-        (!self.0.is_empty()).then_some(FunctionIndex(0))
+        (!self.successors.is_empty()).then_some(FunctionIndex(0))
     }
     fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
-        Box::new((0..self.0.len()).map(FunctionIndex))
+        Box::new((0..self.successors.len()).map(FunctionIndex))
     }
 }
 
@@ -375,7 +365,7 @@ impl Library {
             graph.push(calls);
             frames.push(frame.map_or(0, |(_, size)| size as u32));
         }
-        let graph = HelperCalls(&graph);
+        let graph = HelperCalls::new(&graph);
         let mut depths = vec![0_u32; frames.len()];
         for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
             if component.is_cyclic && component.nodes.iter().any(|node| frames[node.0] != 0) {
@@ -383,9 +373,11 @@ impl Library {
             }
             let mut depth = 0_u32;
             for node in &component.nodes {
-                let callee_depth = graph.0[node.0].iter().try_fold(0_u32, |deepest, &callee| {
-                    Some(deepest.max(*depths.get(callee)?))
-                })?;
+                let callee_depth = graph.successors[node.0]
+                    .iter()
+                    .try_fold(0_u32, |deepest, &callee| {
+                        Some(deepest.max(*depths.get(callee)?))
+                    })?;
                 depth = depth.max(frames[node.0].checked_add(callee_depth)?);
             }
             for node in component.nodes {

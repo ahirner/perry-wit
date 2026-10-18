@@ -51,7 +51,7 @@ function inspect(input: string, delta: number): string {
   const invalidJson = date.toJSON();
   const recovered = date.setUTCFullYear(0);
   const embedded = JSON.stringify([new Date(0), new Date(NaN)]);
-  return JSON.stringify([parsed, original, year, month, day, weekday, hour, minute, second, ms, changed, seen, copy.getTime(), iso, changedMonth, final, utc, constructed, zero, invalid, invalidJson, recovered, embedded]);
+  return JSON.stringify({parsed, original, year, month, day, weekday, hour, minute, second, ms, changed, seen, copy: copy.getTime(), iso, changedMonth, final, utc, constructed, zero, invalid, invalidJson, recovered, embedded});
 }
 const dates: Array<[string, number]> = [
   ["1970-01-01T00:00:00.000Z", -1],
