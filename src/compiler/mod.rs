@@ -195,13 +195,12 @@ pub(super) fn emit_component(
 ) -> Result<Compiled> {
     let imports = bind::imports(resolve, world);
     let streams = bind::stream_anchor(resolve, world);
-    let stdout = imports
-        .iter()
-        .any(|name| name.starts_with("wasi:cli/stdout@"))
-        && uses_stdout(ctx, mir);
-    let stderr = imports
-        .iter()
-        .any(|name| name.starts_with("wasi:cli/stderr@"));
+    let (mut has_stdout, mut stderr) = (false, false);
+    for name in &imports {
+        has_stdout |= name.starts_with("wasi:cli/stdout@");
+        stderr |= name.starts_with("wasi:cli/stderr@");
+    }
+    let stdout = has_stdout && uses_stdout(ctx, mir);
     let exports = Exports::Canonical {
         memory_checks,
         exports,
@@ -219,7 +218,8 @@ pub(super) fn emit_component(
     if strip_unused_stdio {
         core = link::raw::available_stdio(core, stdout, stderr)?;
     }
-    allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
+    use std::fmt::Write as _;
+    let _ = writeln!(allocation_report, "Linked helper functions: {helpers}");
     let component = componentize
         .then(|| ComponentOutput::encode(&core, resolve, world))
         .transpose()?;

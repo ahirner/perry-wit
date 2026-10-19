@@ -4,8 +4,16 @@ use wit_parser::{Resolve, Type, TypeDefKind, TypeId, TypeOwner, World, WorldItem
 
 /// Converts a kebab-case or snake_case string into camelCase.
 pub(crate) fn to_camel_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
+    convert_case(s, false)
+}
+
+/// Converts a kebab-case or snake_case string into PascalCase.
+pub(crate) fn to_pascal_case(s: &str) -> String {
+    convert_case(s, true)
+}
+
+fn convert_case(s: &str, mut capitalize_next: bool) -> String {
+    let mut result = String::with_capacity(s.len());
     for (i, c) in s.chars().enumerate() {
         if !c.is_ascii_alphanumeric() {
             capitalize_next = true;
@@ -14,23 +22,6 @@ pub(crate) fn to_camel_case(s: &str) -> String {
             capitalize_next = false;
         } else if i == 0 {
             result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-/// Converts a kebab-case or snake_case string into PascalCase.
-pub(crate) fn to_pascal_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = true;
-    for c in s.chars() {
-        if !c.is_ascii_alphanumeric() {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
         } else {
             result.push(c);
         }

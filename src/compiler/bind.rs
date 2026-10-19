@@ -12,7 +12,6 @@ use pliron::{
     context::Context,
     op::Op,
 };
-use std::collections::BTreeMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
@@ -103,11 +102,15 @@ pub(crate) fn exports(
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
-    let mut exported: BTreeMap<String, FuncOp> = module_functions(ctx, mir)
-        .into_iter()
-        .filter(|function| is_exported(ctx, function))
-        .map(|function| (function.get_symbol_name(ctx).to_string(), function))
-        .collect();
+    let mut exported = std::collections::HashSet::new();
+    let mut main_present = false;
+    for function in module_functions(ctx, mir) {
+        let name = function.get_symbol_name(ctx);
+        main_present |= name.as_ref() == perry_lower::MAIN;
+        if is_exported(ctx, &function) {
+            exported.insert(name.to_string());
+        }
+    }
 
     let mut bound = Vec::new();
     for entry in crate::abi::world_functions(resolve, world.exports.iter()) {
@@ -119,9 +122,9 @@ pub(crate) fn exports(
             function.name.clone()
         };
         {
-            let found = exported.remove(&implementation).is_some();
+            let found = exported.remove(&implementation);
             // A command's `wasi:cli/run.run` may be the module's top-level statements.
-            let command = !found && is_cli_run(&core_name) && has_main(ctx, mir);
+            let command = !found && is_cli_run(&core_name) && main_present;
             ensure!(
                 found || command,
                 "WIT export {core_name} needs an exported TypeScript function {implementation}"

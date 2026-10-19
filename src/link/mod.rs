@@ -96,11 +96,13 @@ pub(crate) fn link_helpers_with(
     let mut export_realloc = canonical.export_realloc;
     let mut helper_imports = Vec::new();
     let mut external_imports = Vec::new();
+    let mut old_to_new_func_index = BTreeMap::new();
     for (index, &(module, name, ty)) in core.imports.iter().enumerate() {
         export_realloc |= canonical.import(module, name);
         if module == HELPER_MODULE {
             helper_imports.push((index as u32, name, ty));
         } else {
+            old_to_new_func_index.insert(index as u32, external_imports.len() as u32);
             external_imports.push((Cow::Borrowed(module), Cow::Borrowed(name), ty));
         }
     }
@@ -201,17 +203,6 @@ pub(crate) fn link_helpers_with(
     let num_core_defined_funcs = core.function_types.len() as u32;
     let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
 
-    let mut old_to_new_func_index = BTreeMap::new();
-
-    // Map external imports of the core module (they keep their order, first).
-    let mut external_import_idx = 0u32;
-    for old_idx in 0..next_import_func_idx {
-        if !helper_imports.iter().any(|(h_idx, _, _)| *h_idx == old_idx) {
-            old_to_new_func_index.insert(old_idx, external_import_idx);
-            external_import_idx += 1;
-        }
-    }
-
     // Map core defined functions
     for i in 0..num_core_defined_funcs {
         let old_func_idx = next_import_func_idx + i;
@@ -221,7 +212,7 @@ pub(crate) fn link_helpers_with(
 
     // Determine existing static data extent from core module
     let mut existing_data_end = 1024u32;
-    for seg in core.data.clone().into_iter().flatten() {
+    for seg in core.data.iter().cloned().flatten() {
         let seg = seg?;
         if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
             let mut reader = offset_expr.get_operators_reader();
@@ -432,7 +423,7 @@ pub(crate) fn link_helpers_with(
     module.section(&new_functions);
 
     let mut new_tables = wasm_encoder::TableSection::new();
-    for (index, table) in core.tables.clone().into_iter().flatten().enumerate() {
+    for (index, table) in core.tables.iter().cloned().flatten().enumerate() {
         let mut table = table?;
         if index == 0 {
             let initial = table.ty.initial.max(u64::from(current_table_size));
