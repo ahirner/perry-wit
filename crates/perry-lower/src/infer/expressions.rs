@@ -175,13 +175,15 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         Expr::ObjectKeys(_) | Expr::ForInKeys(_) => HirType::Array(Box::new(HirType::String)),
         Expr::ObjectValues(object) => {
             let obj_ty = strip_nullish(expression(object, env)).0;
-            shapes::generics::dict_entry_types(env.ctx, env.interfaces, env.type_aliases, &obj_ty)
+            env.decls
+                .dict_entry_types(env.ctx, &obj_ty)
                 .map(|(_, val_ty)| HirType::Array(Box::new(val_ty)))
                 .unwrap_or(HirType::Any)
         }
         Expr::ObjectEntries(object) => {
             let obj_ty = strip_nullish(expression(object, env)).0;
-            shapes::generics::dict_entry_types(env.ctx, env.interfaces, env.type_aliases, &obj_ty)
+            env.decls
+                .dict_entry_types(env.ctx, &obj_ty)
                 .map(|(key_ty, val_ty)| {
                     HirType::Array(Box::new(HirType::Tuple(vec![key_ty, val_ty])))
                 })
@@ -327,44 +329,26 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 {
                     HirType::Number
                 }
-                HirType::Generic { base, type_args } => shapes::generics::property_type(
-                    env.ctx,
-                    env.interfaces,
-                    env.type_aliases,
-                    &base,
-                    &type_args,
-                    property,
-                )
-                .or_else(|| env.class_member_type(&base, &type_args, property))
-                .or_else(|| {
-                    shapes::generics::dict_entry_types(
-                        env.ctx,
-                        env.interfaces,
-                        env.type_aliases,
-                        &HirType::Generic { base, type_args },
-                    )
-                    .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
-                })
-                .unwrap_or_else(|| fallback(env)),
-                HirType::Named(base) => shapes::generics::property_type(
-                    env.ctx,
-                    env.interfaces,
-                    env.type_aliases,
-                    &base,
-                    &[],
-                    property,
-                )
-                .or_else(|| env.named_property_type(&base, property))
-                .or_else(|| {
-                    shapes::generics::dict_entry_types(
-                        env.ctx,
-                        env.interfaces,
-                        env.type_aliases,
-                        &HirType::Named(base),
-                    )
-                    .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
-                })
-                .unwrap_or_else(|| fallback(env)),
+                HirType::Generic { base, type_args } => env
+                    .decls
+                    .property_type(env.ctx, &base, &type_args, property)
+                    .or_else(|| env.class_member_type(&base, &type_args, property))
+                    .or_else(|| {
+                        env.decls
+                            .dict_entry_types(env.ctx, &HirType::Generic { base, type_args })
+                            .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
+                    })
+                    .unwrap_or_else(|| fallback(env)),
+                HirType::Named(base) => env
+                    .decls
+                    .property_type(env.ctx, &base, &[], property)
+                    .or_else(|| env.named_property_type(&base, property))
+                    .or_else(|| {
+                        env.decls
+                            .dict_entry_types(env.ctx, &HirType::Named(base))
+                            .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
+                    })
+                    .unwrap_or_else(|| fallback(env)),
                 HirType::Object(object) => object
                     .properties
                     .get(property)
@@ -400,12 +384,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             other => match shapes::generics::iterated_element(other) {
                 Ok(element) => element,
                 Err(other) => {
-                    if let Some((_, val_ty)) = shapes::generics::dict_entry_types(
-                        env.ctx,
-                        env.interfaces,
-                        env.type_aliases,
-                        &other,
-                    ) {
+                    if let Some((_, val_ty)) = env.decls.dict_entry_types(env.ctx, &other) {
                         with_absences(val_ty, Absence::Undefined)
                     } else if let HirType::Named(base) = other
                         && let Some(HirType::Array(element)) = env.resolve_foreign_type(&base)
@@ -489,21 +468,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     } else {
                         single_spread_named = None;
                     }
-                    let resolved_props = shapes::generics::object_properties(
-                        env.ctx,
-                        env.interfaces,
-                        env.type_aliases,
-                        &src_ty,
-                    )
-                    .or_else(|| match src_ty {
-                        HirType::Object(obj) => Some(
-                            obj.properties
-                                .into_iter()
-                                .map(|(name, info)| (name, info.ty, info.optional))
-                                .collect(),
-                        ),
-                        _ => None,
-                    });
+                    let resolved_props =
+                        env.decls
+                            .object_properties(env.ctx, &src_ty)
+                            .or_else(|| match src_ty {
+                                HirType::Object(obj) => Some(
+                                    obj.properties
+                                        .into_iter()
+                                        .map(|(name, info)| (name, info.ty, info.optional))
+                                        .collect(),
+                                ),
+                                _ => None,
+                            });
                     if let Some(resolved) = resolved_props {
                         for (name, prop_ty, opt) in resolved {
                             let (ty, optional) = match (prop_ty, props.remove(&name)) {
@@ -537,12 +513,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 perry_hir::infer_expr_type(expr, env)
             } else {
                 if let Some(named) = single_spread_named.map(HirType::Named)
-                    && let Some(orig) = shapes::generics::object_properties(
-                        env.ctx,
-                        env.interfaces,
-                        env.type_aliases,
-                        &named,
-                    )
+                    && let Some(orig) = env.decls.object_properties(env.ctx, &named)
                     && orig.len() == props.len()
                     && orig.iter().all(|(k, t, opt)| {
                         props
@@ -566,12 +537,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             exclude_keys,
         } => {
             let src_ty = strip_nullish(expression(object, env)).0;
-            if let Some(resolved) = shapes::generics::object_properties(
-                env.ctx,
-                env.interfaces,
-                env.type_aliases,
-                &src_ty,
-            ) {
+            if let Some(resolved) = env.decls.object_properties(env.ctx, &src_ty) {
                 let mut props = HashMap::new();
                 for (name, prop_ty, opt) in resolved {
                     if !exclude_keys.contains(&name) {

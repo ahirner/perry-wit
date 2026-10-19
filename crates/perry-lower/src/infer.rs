@@ -24,11 +24,7 @@ use environment::FunctionEnv;
 
 struct Inference<'a> {
     ctx: &'a Context,
-    interfaces: &'a [perry_hir::ir::Interface],
-    type_aliases: &'a [perry_hir::ir::TypeAlias],
-    integer_aliases: &'a HashMap<String, HirType>,
-    imported_types: &'a HashMap<String, String>,
-    foreign: &'a HashMap<String, crate::hir::Foreign>,
+    decls: &'a shapes::Declarations<'a>,
     metadata: &'a hir_compat::Metadata<'a>,
     generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
 }
@@ -57,13 +53,9 @@ impl Inference<'_> {
         FunctionEnv {
             ctx: self.ctx,
             base,
-            interfaces: self.interfaces,
-            type_aliases: self.type_aliases,
+            decls: self.decls,
             classes,
             locals,
-            integer_aliases: self.integer_aliases,
-            imported_types: self.imported_types,
-            foreign: self.foreign,
             metadata: self.metadata,
             generic_functions: self.generic_functions,
             instantiated_returns: HashMap::new(),
@@ -73,97 +65,11 @@ impl Inference<'_> {
 
 use expressions::*;
 
-fn collect_foreign_imports(
-    hir: &HirModule,
-    foreign: &HashMap<String, crate::hir::Foreign>,
-) -> (HashMap<String, HirType>, HashMap<String, String>) {
-    let mut names: HashMap<String, HirType> =
-        ["u8", "s8", "u16", "s16", "u32", "s32", "u64", "s64"]
-            .into_iter()
-            .filter_map(|tag| {
-                let (width, _) = shapes::perry_integer_spec(tag)?;
-                Some((
-                    format!("perry:types/{tag}"),
-                    shapes::integer_hir_carrier(width),
-                ))
-            })
-            .chain(foreign.iter().filter_map(|(key, entry)| match entry {
-                crate::hir::Foreign::Integer { width, .. } => {
-                    Some((key.clone(), shapes::integer_hir_carrier(*width)))
-                }
-                _ => None,
-            }))
-            .collect();
-    let user_types: HashSet<&str> = hir
-        .interfaces
-        .iter()
-        .map(|i| i.name.as_str())
-        .chain(hir.type_aliases.iter().map(|a| a.name.as_str()))
-        .chain(hir.classes.iter().map(|c| c.name.as_str()))
-        .collect();
-    let mut imported_types = HashMap::new();
-    for import in &hir.imports {
-        let source_module = import
-            .source
-            .strip_prefix("wit:")
-            .unwrap_or(import.source.as_str());
-        for specifier in &import.specifiers {
-            let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                continue;
-            };
-            if user_types.contains(local.as_str()) {
-                continue;
-            }
-            if import.source == "perry:types"
-                && let Some((width, _)) = shapes::perry_integer_spec(imported)
-            {
-                names.insert(local.clone(), shapes::integer_hir_carrier(width));
-                continue;
-            }
-            if let Some((candidate, entry)) =
-                [format!("{source_module}#{imported}"), imported.clone()]
-                    .into_iter()
-                    .find_map(|c| foreign.get(&c).map(|e| (c, e)))
-            {
-                match entry {
-                    crate::hir::Foreign::Integer { width, .. } => {
-                        names.insert(local.clone(), shapes::integer_hir_carrier(*width));
-                    }
-                    crate::hir::Foreign::Type(HirType::Named(target)) => {
-                        if let Some(carrier) = names.get(target).cloned() {
-                            names.insert(local.clone(), carrier);
-                        }
-                    }
-                    crate::hir::Foreign::Type(_)
-                    | crate::hir::Foreign::Resource(_)
-                    | crate::hir::Foreign::Input(_) => {}
-                    crate::hir::Foreign::Function(_) => continue,
-                }
-                imported_types.insert(local.clone(), candidate);
-            }
-        }
-    }
-    while hir.type_aliases.iter().any(|alias| {
-        alias.type_params.is_empty()
-            && matches!(&alias.ty, HirType::Named(target) if names.contains_key(target) && !names.contains_key(&alias.name))
-    }) {
-        for alias in &hir.type_aliases {
-            if alias.type_params.is_empty()
-                && let HirType::Named(target) = &alias.ty
-                && let Some(carrier) = names.get(target).cloned()
-            {
-                names.entry(alias.name.clone()).or_insert(carrier);
-            }
-        }
-    }
-    (names, imported_types)
-}
-
 fn clear_inferred_type_vars<V>(
     statements: &mut [Stmt],
     inferred: &HashSet<LocalId>,
     spans: &HashMap<LocalId, V>,
-    integer_aliases: &HashMap<String, HirType>,
+    decls: &shapes::Declarations<'_>,
 ) {
     walk::locals_mut(statements, &mut |id, ty| {
         if inferred.contains(&id) || !spans.contains_key(&id) {
@@ -172,20 +78,16 @@ fn clear_inferred_type_vars<V>(
             {
                 *ty = HirType::Any;
             } else if let HirType::Named(name) = ty
-                && let Some(carrier) = integer_aliases.get(name)
-                && *carrier != HirType::BigInt
+                && let Some(carrier) = decls.integer_carrier(name)
+                && carrier != HirType::BigInt
             {
-                *ty = carrier.clone();
+                *ty = carrier;
             }
         }
     });
 }
 
-fn push_return_type(
-    types: &mut Vec<HirType>,
-    ty: HirType,
-    integer_aliases: &HashMap<String, HirType>,
-) {
+fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Declarations<'_>) {
     if matches!(ty, HirType::Never) {
         return;
     }
@@ -205,11 +107,11 @@ fn push_return_type(
             }
             match defined.len() {
                 0 => {}
-                1 => push_return_type(types, defined.swap_remove(0), integer_aliases),
-                _ => push_return_type(types, HirType::Union(defined), integer_aliases),
+                1 => push_return_type(types, defined.swap_remove(0), decls),
+                _ => push_return_type(types, HirType::Union(defined), decls),
             }
             for absence in absences {
-                push_return_type(types, absence, integer_aliases);
+                push_return_type(types, absence, decls);
             }
             return;
         }
@@ -221,10 +123,9 @@ fn push_return_type(
     }
     let normalized = match ty {
         HirType::Int32 => HirType::Number,
-        HirType::Named(name) => integer_aliases
-            .get(&name)
-            .filter(|carrier| **carrier != HirType::BigInt)
-            .cloned()
+        HirType::Named(name) => decls
+            .integer_carrier(&name)
+            .filter(|carrier| *carrier != HirType::BigInt)
             .unwrap_or(HirType::Named(name)),
         HirType::StringLiteral(_) => HirType::String,
         ty => ty,
@@ -273,7 +174,7 @@ fn infer_body_return(
     is_async: bool,
     return_type: &mut HirType,
     env: &mut FunctionEnv<'_>,
-    integer_aliases: &HashMap<String, HirType>,
+    decls: &shapes::Declarations<'_>,
 ) -> bool {
     let mut returned = Vec::new();
     walk::scan(body, env, Some(&mut returned), None);
@@ -295,7 +196,7 @@ fn infer_body_return(
     }
     let mut types = Vec::new();
     for ty in returned {
-        push_return_type(&mut types, ty, integer_aliases);
+        push_return_type(&mut types, ty, decls);
     }
     let ty = match types.as_slice() {
         [] => HirType::Void,
@@ -331,13 +232,14 @@ pub(super) fn unresolved_types(
 ) {
     let inferred = &metadata.inferred_bindings;
     let locations = &metadata.locations;
-    let (integer_aliases, imported_types) = collect_foreign_imports(hir, foreign);
-    clear_inferred_type_vars(
-        &mut hir.init,
-        inferred,
-        &hir.local_source_spans,
-        &integer_aliases,
+    let decls = shapes::Declarations::new(
+        &hir.interfaces,
+        &hir.type_aliases,
+        &hir.imports,
+        &hir.classes,
+        foreign,
     );
+    clear_inferred_type_vars(&mut hir.init, inferred, &hir.local_source_spans, &decls);
     for function in &mut hir.functions {
         if !function.type_params.is_empty() {
             let bounds: HashMap<&str, &HirType> = function
@@ -364,7 +266,7 @@ pub(super) fn unresolved_types(
             &mut function.body,
             inferred,
             &hir.local_source_spans,
-            &integer_aliases,
+            &decls,
         );
     }
     for class in &mut hir.classes {
@@ -373,17 +275,13 @@ pub(super) fn unresolved_types(
                 &mut function.body,
                 inferred,
                 &hir.local_source_spans,
-                &integer_aliases,
+                &decls,
             );
         }
     }
     let inference = Inference {
         ctx,
-        interfaces: &hir.interfaces,
-        type_aliases: &hir.type_aliases,
-        integer_aliases: &integer_aliases,
-        imported_types: &imported_types,
-        foreign,
+        decls: &decls,
         metadata,
         generic_functions: None,
     };
@@ -413,18 +311,17 @@ pub(super) fn unresolved_types(
         }
         let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
         for fn_idx in 0..fn_count {
-            let mut params = std::mem::take(
-                &mut shapes::class_functions_mut(&mut hir.classes[class_idx])
-                    .nth(fn_idx)
-                    .unwrap()
-                    .params,
-            );
+            let Some(mut params) = shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .nth(fn_idx)
+                .map(|f| std::mem::take(&mut f.params))
+            else {
+                break;
+            };
             let mut env = inference.function(&module_env, &hir.classes, &mut locals);
             infer_params(&mut params, false, &mut env);
-            shapes::class_functions_mut(&mut hir.classes[class_idx])
-                .nth(fn_idx)
-                .unwrap()
-                .params = params;
+            if let Some(f) = shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx) {
+                f.params = params;
+            }
         }
         for f_idx in 0..hir.classes[class_idx].fields.len() {
             let inferred_ty = {
@@ -486,7 +383,7 @@ pub(super) fn unresolved_types(
                 function.is_async,
                 &mut function.return_type,
                 &mut env,
-                &integer_aliases,
+                &decls,
             ) {
                 changed = true;
             }
@@ -497,7 +394,9 @@ pub(super) fn unresolved_types(
             for fn_idx in 0..fn_count {
                 let updated = {
                     let class = &hir.classes[class_idx];
-                    let method = shapes::class_functions(class).nth(fn_idx).unwrap();
+                    let Some(method) = shapes::class_functions(class).nth(fn_idx) else {
+                        break;
+                    };
                     if class
                         .constructor
                         .as_ref()
@@ -514,21 +413,15 @@ pub(super) fn unresolved_types(
                             &mut locals,
                             &method.params,
                         );
-                        infer_body_return(
-                            &method.body,
-                            method.is_async,
-                            &mut ret,
-                            &mut env,
-                            &integer_aliases,
-                        )
-                        .then_some(ret)
+                        infer_body_return(&method.body, method.is_async, &mut ret, &mut env, &decls)
+                            .then_some(ret)
                     }
                 };
-                if let Some(ret) = updated {
-                    shapes::class_functions_mut(&mut hir.classes[class_idx])
-                        .nth(fn_idx)
-                        .unwrap()
-                        .return_type = ret;
+                if let Some(ret) = updated
+                    && let Some(method) =
+                        shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx)
+                {
+                    method.return_type = ret;
                     changed = true;
                 }
             }
@@ -555,23 +448,26 @@ pub(super) fn unresolved_types(
         module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
         let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
         for fn_idx in 0..fn_count {
-            let mut body = std::mem::take(
-                &mut shapes::class_functions_mut(&mut hir.classes[class_idx])
-                    .nth(fn_idx)
-                    .unwrap()
-                    .body,
-            );
-            let params = &shapes::class_functions(&hir.classes[class_idx])
+            let Some(mut body) = shapes::class_functions_mut(&mut hir.classes[class_idx])
                 .nth(fn_idx)
-                .unwrap()
-                .params;
-            let env =
-                inference.function_with_params(&module_env, &hir.classes, &mut locals, params);
-            walk::resolve_locals(&mut body, env);
-            shapes::class_functions_mut(&mut hir.classes[class_idx])
-                .nth(fn_idx)
-                .unwrap()
-                .body = body;
+                .map(|f| std::mem::take(&mut f.body))
+            else {
+                break;
+            };
+            if let Some(method) = shapes::class_functions(&hir.classes[class_idx]).nth(fn_idx) {
+                let env = inference.function_with_params(
+                    &module_env,
+                    &hir.classes,
+                    &mut locals,
+                    &method.params,
+                );
+                walk::resolve_locals(&mut body, env);
+            }
+            if let Some(method) =
+                shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx)
+            {
+                method.body = body;
+            }
         }
     }
     module_env.set_current_class(None);

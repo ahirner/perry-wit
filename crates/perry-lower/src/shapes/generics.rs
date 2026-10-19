@@ -17,56 +17,44 @@ pub(super) trait DeclarationLookup {
     }
 }
 
-impl DeclarationLookup for (&[Interface], &[TypeAlias]) {
+impl DeclarationLookup for Declarations<'_> {
     fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
-        self.0.iter().enumerate().find(|(_, i)| i.name == name)
+        self.interfaces.get(name).copied()
     }
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
-        self.1.iter().enumerate().find(|(_, a)| a.name == name)
+        self.type_aliases.get(name).copied()
     }
 }
 
-impl DeclarationLookup for (&[Interface], &[TypeAlias], &[Class]) {
+impl DeclarationLookup for Shapes<'_> {
     fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
-        self.0.iter().enumerate().find(|(_, i)| i.name == name)
+        self.decls.interface(name)
     }
     fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
-        self.1.iter().enumerate().find(|(_, a)| a.name == name)
+        self.decls.type_alias(name)
     }
     fn class(&self, name: &str) -> Option<(usize, &Class)> {
-        self.2.iter().enumerate().find(|(_, c)| c.name == name)
+        self.classes.get(name).copied()
     }
 }
 
-impl DeclarationLookup
-    for (
-        &HashMap<&str, (usize, &Interface)>,
-        &HashMap<&str, (usize, &TypeAlias)>,
-    )
-{
-    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
-        self.0.get(name).copied()
-    }
-    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
-        self.1.get(name).copied()
-    }
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Utility {
+    Partial,
+    Required,
+    Pick,
+    Omit,
 }
 
-impl DeclarationLookup
-    for (
-        &HashMap<&str, (usize, &Interface)>,
-        &HashMap<&str, (usize, &TypeAlias)>,
-        &HashMap<&str, (usize, &Class)>,
-    )
-{
-    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
-        self.0.get(name).copied()
-    }
-    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
-        self.1.get(name).copied()
-    }
-    fn class(&self, name: &str) -> Option<(usize, &Class)> {
-        self.2.get(name).copied()
+impl Utility {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Partial" => Some(Self::Partial),
+            "Required" => Some(Self::Required),
+            "Pick" => Some(Self::Pick),
+            "Omit" => Some(Self::Omit),
+            _ => None,
+        }
     }
 }
 
@@ -75,6 +63,7 @@ pub(super) enum DeclarationId {
     Interface(usize),
     Alias(usize),
     Class(usize),
+    Utility(Utility),
 }
 
 /// The generic declaration an instantiation expands.
@@ -302,8 +291,7 @@ impl<'s> Shapes<'s> {
         {
             return self.value_type(ctx, inner);
         }
-        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-        let resolver = Resolver::new(ctx, &lookup);
+        let resolver = Resolver::new(ctx, self);
         let arg_ids = TypeId::intern_slice(ctx, arguments);
         if !self.is_user_type(base) {
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
@@ -312,13 +300,13 @@ impl<'s> Shapes<'s> {
                 })?;
                 return self.value_type(ctx, expanded.hir(ctx));
             }
-            if matches!(base, "Partial" | "Required" | "Pick" | "Omit") {
-                let key = ShapeKeyRef::Utility(base, &arg_ids);
-                if let Some(ty) = self.named.borrow().get(&key as &dyn ShapeLookup) {
+            if let Some(utility) = Utility::from_name(base) {
+                let key = (DeclarationId::Utility(utility), arg_ids);
+                if let Some(ty) = self.named.borrow().get(&key) {
                     return Ok(*ty);
                 }
                 let properties = resolver
-                    .named(base, &arg_ids, false, Query::Record, 0)
+                    .named(base, &key.1, false, Query::Record, 0)
                     .and_then(|(view, _)| view.properties(ctx))
                     .with_context(|| {
                         format!("MIR backend could not resolve utility type {base}")
@@ -326,37 +314,38 @@ impl<'s> Shapes<'s> {
                 let ty: TypeHandle = self
                     .source_record(
                         ctx,
-                        Some(key),
+                        Some(&key),
                         properties
                             .iter()
                             .map(|(n, ty, opt)| (n.as_str(), ty.hir(ctx), *opt))
                             .collect(),
                     )?
                     .into();
-                if !self.pending.borrow().contains_key(&key as &dyn ShapeLookup) {
-                    self.named.borrow_mut().insert(key.to_owned(), ty);
+                if !self.pending.borrow().contains_key(&key) {
+                    self.named.borrow_mut().insert(key, ty);
                 }
                 return Ok(ty);
             }
         }
-        let (identity, declaration) = Declaration::find(&lookup, base).with_context(|| {
+        let (identity, declaration) = Declaration::find(self, base).with_context(|| {
             format!("MIR backend does not support unresolved generic type {base}")
         })?;
-        if arg_ids.len() == declaration.parameters().len() {
-            let fast_key = ShapeKeyRef::Generic(identity, &arg_ids);
-            if let Some(ty) = self.named.borrow().get(&fast_key as &dyn ShapeLookup) {
+        let mut key = (identity, arg_ids);
+        if key.1.len() == declaration.parameters().len()
+            && let Some(ty) = self.named.borrow().get(&key)
+        {
+            return Ok(*ty);
+        }
+        let bindings = declaration.bind(ctx, base, &key.1)?;
+        if key.1.len() < declaration.parameters().len() {
+            key.1.extend(
+                declaration.parameters()[key.1.len()..]
+                    .iter()
+                    .map(|parameter| bindings[parameter.name.as_str()]),
+            );
+            if let Some(ty) = self.named.borrow().get(&key) {
                 return Ok(*ty);
             }
-        }
-        let bindings = declaration.bind(ctx, base, &arg_ids)?;
-        let effective_args: Vec<TypeId> = declaration
-            .parameters()
-            .iter()
-            .map(|parameter| bindings[parameter.name.as_str()])
-            .collect();
-        let key = ShapeKeyRef::Generic(identity, &effective_args);
-        if let Some(ty) = self.named.borrow().get(&key as &dyn ShapeLookup) {
-            return Ok(*ty);
         }
         ensure!(
             self.pending.borrow().len() < 128,
@@ -388,7 +377,7 @@ impl<'s> Shapes<'s> {
                 let ty: TypeHandle = self
                     .source_record_prefix(
                         ctx,
-                        Some(key),
+                        Some(&key),
                         prefix.as_deref(),
                         properties
                             .iter()
@@ -399,7 +388,7 @@ impl<'s> Shapes<'s> {
                 if let Declaration::Class(class) = declaration {
                     self.class_records
                         .borrow_mut()
-                        .insert(ty, (class.name.clone(), effective_args.clone()));
+                        .insert(ty, (class.name.clone(), key.1.clone()));
                 }
                 ty
             }
@@ -411,7 +400,7 @@ impl<'s> Shapes<'s> {
                 {
                     self.source_record(
                         ctx,
-                        Some(key),
+                        Some(&key),
                         obj.properties
                             .iter()
                             .map(|(name, p)| (name.as_str(), &p.ty, p.optional))
@@ -420,22 +409,20 @@ impl<'s> Shapes<'s> {
                     .into()
                 } else {
                     ensure!(
-                        !self.pending.borrow().contains_key(&key as &dyn ShapeLookup),
+                        !self.pending.borrow().contains_key(&key),
                         "nonproductive recursive type alias {base}"
                     );
                     self.pending
                         .borrow_mut()
-                        .insert(key.to_owned(), PendingShape::Resolving);
+                        .insert(key.clone(), PendingShape::Resolving);
                     let value = self.value_type(ctx, value_hir);
-                    self.pending.borrow_mut().remove(&key as &dyn ShapeLookup);
+                    self.pending.borrow_mut().remove(&key);
                     value?
                 }
             }
         };
-        if !self.pending.borrow().contains_key(&key as &dyn ShapeLookup) {
-            self.named
-                .borrow_mut()
-                .insert(ShapeKey::Generic(identity, effective_args), ty);
+        if !self.pending.borrow().contains_key(&key) {
+            self.named.borrow_mut().insert(key, ty);
         }
         Ok(ty)
     }
@@ -458,27 +445,6 @@ fn strip_void(ctx: &Context, ty: TypeId) -> TypeId {
     } else {
         union_of(ctx, filtered)
     }
-}
-
-/// HIR compatibility result for a selected member.
-pub(crate) fn property_type(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    base: &str,
-    arguments: &[HirType],
-    property: &str,
-) -> Option<HirType> {
-    if arguments
-        .iter()
-        .any(|ty| ty.any(&mut |n| matches!(n, HirType::TypeVar(_))))
-    {
-        return None;
-    }
-    let lookup = (interfaces, type_aliases);
-    let arg_ids = TypeId::intern_slice(ctx, arguments);
-    let (ty, optional) = Resolver::new(ctx, &lookup).property(base, &arg_ids, property)?;
-    Some(optional_property(ty.hir(ctx).clone(), optional))
 }
 
 pub(crate) fn optional_property(ty: HirType, optional: bool) -> HirType {
@@ -519,38 +485,55 @@ pub(crate) fn iterated_element(ty: HirType) -> Result<HirType, HirType> {
     picked.map_err(|type_args| HirType::Generic { base, type_args })
 }
 
-/// Extract `(key_ty, value_ty)` if `ty` resolves to `Record<K, V>`, `{ [key: string]: V }`, or a
-/// closed record/interface whose properties share a uniform value type.
-pub(crate) fn dict_entry_types(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    ty: &HirType,
-) -> Option<(HirType, HirType)> {
-    if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
-        return None;
+impl Declarations<'_> {
+    /// HIR compatibility result for a selected member.
+    pub(crate) fn property_type(
+        &self,
+        ctx: &Context,
+        base: &str,
+        arguments: &[HirType],
+        property: &str,
+    ) -> Option<HirType> {
+        if arguments
+            .iter()
+            .any(|ty| ty.any(&mut |n| matches!(n, HirType::TypeVar(_))))
+        {
+            return None;
+        }
+        let arg_ids = TypeId::intern_slice(ctx, arguments);
+        let (ty, optional) = Resolver::new(ctx, self).property(base, &arg_ids, property)?;
+        Some(optional_property(ty.hir(ctx).clone(), optional))
     }
-    let lookup = (interfaces, type_aliases);
-    let id = TypeId::intern(ctx, ty);
-    Resolver::new(ctx, &lookup).dictionary(id)
-}
 
-pub(crate) fn object_properties(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    ty: &HirType,
-) -> Option<Vec<(String, HirType, bool)>> {
-    if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
-        return None;
+    /// Extract `(key_ty, value_ty)` if `ty` resolves to `Record<K, V>`, `{ [key: string]: V }`, or a
+    /// closed record/interface whose properties share a uniform value type.
+    pub(crate) fn dict_entry_types(
+        &self,
+        ctx: &Context,
+        ty: &HirType,
+    ) -> Option<(HirType, HirType)> {
+        if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
+            return None;
+        }
+        let id = TypeId::intern(ctx, ty);
+        Resolver::new(ctx, self).dictionary(id)
     }
-    let lookup = (interfaces, type_aliases);
-    let id = TypeId::intern(ctx, ty);
-    Some(
-        Resolver::new(ctx, &lookup)
-            .record(id, 0)?
-            .into_iter()
-            .map(|(name, ty, optional)| (name, ty.hir(ctx).clone(), optional))
-            .collect(),
-    )
+
+    pub(crate) fn object_properties(
+        &self,
+        ctx: &Context,
+        ty: &HirType,
+    ) -> Option<Vec<(String, HirType, bool)>> {
+        if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
+            return None;
+        }
+        let id = TypeId::intern(ctx, ty);
+        Some(
+            Resolver::new(ctx, self)
+                .record(id, 0)?
+                .into_iter()
+                .map(|(name, ty, optional)| (name, ty.hir(ctx).clone(), optional))
+                .collect(),
+        )
+    }
 }

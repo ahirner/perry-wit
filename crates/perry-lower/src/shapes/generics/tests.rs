@@ -14,19 +14,16 @@ fn unproductive_alias_expansion_is_bounded() -> Result<()> {
     let ast = crate::hir_compat::parse(&source, "resolution.ts")?;
     let module = perry_hir::lower_module(&ast, "main", "resolution.ts")?;
     let ctx = Context::new();
+    let foreign = HashMap::new();
+    let decls = Declarations::new(
+        &module.interfaces,
+        &module.type_aliases,
+        &module.imports,
+        &module.classes,
+        &foreign,
+    );
     for name in ["Cycle", "Chain0"] {
-        assert_eq!(
-            property_type(
-                &ctx,
-                &module.interfaces,
-                &module.type_aliases,
-                name,
-                &[],
-                "a"
-            ),
-            None,
-            "{name}"
-        );
+        assert_eq!(decls.property_type(&ctx, name, &[], "a"), None, "{name}");
     }
     Ok(())
 }

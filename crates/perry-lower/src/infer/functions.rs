@@ -210,7 +210,7 @@ impl Instances<'_> {
                 instance.is_async,
                 &mut instance.return_type,
                 env,
-                env.integer_aliases,
+                env.decls,
             );
             *env.locals = caller_locals;
         }
@@ -283,13 +283,18 @@ impl Instances<'_> {
         })
     }
 
-    fn callable(&mut self, function: &mut Function, env: &mut FunctionEnv<'_>) -> Result<()> {
-        for param in &mut function.params {
+    fn callable(
+        &mut self,
+        params: &mut [perry_hir::ir::Param],
+        body: &mut [Stmt],
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
+        for param in params {
             if let Some(default) = &mut param.default {
                 self.expression(default, env)?;
             }
         }
-        self.body(&mut function.body, env)
+        self.body(body, env)
     }
 
     fn append(&mut self, functions: &mut Vec<Function>, base: &mut perry_hir::HirTypeEnv) {
@@ -367,7 +372,6 @@ pub(crate) fn specialize_functions(
         return Ok(());
     }
     let mut base = perry_hir::HirTypeEnv::from_module(hir);
-    let (integer_aliases, imported_types) = collect_foreign_imports(hir, foreign);
     let mut templates = HashMap::new();
     let mut next_function = 0;
     let mut next_local = hir.local_source_spans.keys().copied().max().unwrap_or(0);
@@ -399,13 +403,16 @@ pub(crate) fn specialize_functions(
             templates.insert(function.id, function);
         }
     }
+    let decls = shapes::Declarations::new(
+        &hir.interfaces,
+        &hir.type_aliases,
+        &hir.imports,
+        &hir.classes,
+        foreign,
+    );
     let inference = Inference {
         ctx,
-        interfaces: &hir.interfaces,
-        type_aliases: &hir.type_aliases,
-        integer_aliases: &integer_aliases,
-        imported_types: &imported_types,
-        foreign,
+        decls: &decls,
         metadata,
         generic_functions: Some(&templates),
     };
@@ -439,25 +446,25 @@ pub(crate) fn specialize_functions(
         for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
             *dst = src;
         }
-        let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
-        for fn_idx in 0..fn_count {
-            let mut func = {
-                let target = shapes::class_functions_mut(&mut hir.classes[class_idx])
-                    .nth(fn_idx)
-                    .unwrap();
-                let body = std::mem::take(&mut target.body);
-                Function {
-                    body,
-                    ..target.clone()
-                }
-            };
-            let mut env =
-                inference.function_with_params(&base, &hir.classes, &mut locals, &func.params);
-            instances.callable(&mut func, &mut env)?;
-            *shapes::class_functions_mut(&mut hir.classes[class_idx])
-                .nth(fn_idx)
-                .unwrap() = func;
+        let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
+            shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .map(|target| {
+                    (
+                        std::mem::take(&mut target.params),
+                        std::mem::take(&mut target.body),
+                    )
+                })
+                .collect();
+        for (params, body) in &mut class_fns {
+            let mut env = inference.function_with_params(&base, &hir.classes, &mut locals, params);
+            instances.callable(params, body, &mut env)?;
             instances.append(&mut hir.functions, &mut base);
+        }
+        for (target, (params, body)) in
+            shapes::class_functions_mut(&mut hir.classes[class_idx]).zip(class_fns)
+        {
+            target.params = params;
+            target.body = body;
         }
     }
     base.set_current_class(None);
@@ -473,7 +480,7 @@ pub(crate) fn specialize_functions(
         }
         let mut env =
             inference.function_with_params(&base, &hir.classes, &mut locals, &function.params);
-        instances.callable(function, &mut env)?;
+        instances.callable(&mut function.params, &mut function.body, &mut env)?;
     }
     Ok(())
 }

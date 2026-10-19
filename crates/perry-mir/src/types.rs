@@ -22,7 +22,7 @@ pub use kinds::*;
 macro_rules! record_kinds {
     ($($kind:ident => $name:literal),+ $(,)?) => {
         /// Logical record role, preserved when numeric storage is specialized.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum RecordKind { $($kind),+ }
 
         impl RecordKind {

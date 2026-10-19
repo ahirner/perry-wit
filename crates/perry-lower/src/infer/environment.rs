@@ -5,13 +5,9 @@ pub(super) struct FunctionEnv<'a> {
     pub(super) instantiated_returns: HashMap<FuncId, HirType>,
     pub(super) ctx: &'a Context,
     pub(super) base: &'a perry_hir::HirTypeEnv,
-    pub(super) interfaces: &'a [perry_hir::ir::Interface],
-    pub(super) type_aliases: &'a [perry_hir::ir::TypeAlias],
+    pub(super) decls: &'a shapes::Declarations<'a>,
     pub(super) classes: &'a [perry_hir::ir::Class],
     pub(super) locals: &'a mut HashMap<LocalId, HirType>,
-    pub(super) integer_aliases: &'a HashMap<String, HirType>,
-    pub(super) imported_types: &'a HashMap<String, String>,
-    pub(super) foreign: &'a HashMap<String, crate::hir::Foreign>,
     pub(super) metadata: &'a hir_compat::Metadata<'a>,
 }
 
@@ -21,7 +17,7 @@ const BIGINT_TYPE: HirType = HirType::BigInt;
 impl<'a> FunctionEnv<'a> {
     pub(super) fn normalize<'t>(&self, ty: &'t HirType) -> &'t HirType {
         match ty {
-            HirType::Named(name) => match self.integer_aliases.get(name) {
+            HirType::Named(name) => match self.decls.integer_carrier(name) {
                 Some(HirType::BigInt) => &BIGINT_TYPE,
                 Some(_) => &NUMBER_TYPE,
                 None => ty,
@@ -33,29 +29,16 @@ impl<'a> FunctionEnv<'a> {
     pub(super) fn normalize_owned(&self, mut ty: HirType) -> HirType {
         ty.transform(&mut |node| {
             if let HirType::Named(name) = node
-                && let Some(alias) = self.integer_aliases.get(name.as_str())
+                && let Some(alias) = self.decls.integer_carrier(name)
             {
-                *node = alias.clone();
+                *node = alias;
             }
         });
         ty
     }
 
     pub(super) fn resolve_foreign_type(&self, type_name: &str) -> Option<&'a HirType> {
-        let mut current = self
-            .imported_types
-            .get(type_name)
-            .map_or(type_name, String::as_str);
-        for _ in 0..8 {
-            match self.foreign.get(current)? {
-                crate::hir::Foreign::Type(HirType::Named(next)) if next != current => {
-                    current = next;
-                }
-                crate::hir::Foreign::Type(ty) => return Some(ty),
-                _ => return None,
-            }
-        }
-        None
+        self.decls.resolve_foreign_type(type_name)
     }
 
     pub(super) fn class_member_type(

@@ -173,8 +173,7 @@ impl Shapes<'_> {
     }
 
     fn union_type_ids(&self, ctx: &Context, members: &[TypeId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-        let resolver = Resolver::new(ctx, &lookup);
+        let resolver = Resolver::new(ctx, self);
         let flattened = resolver.flatten(members, 0);
         let members = flattened.as_slice();
         if members
@@ -243,8 +242,7 @@ impl Shapes<'_> {
 
     /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
     fn result(&self, ctx: &Context, alternatives: &[TypeId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-        let resolver = Resolver::new(ctx, &lookup);
+        let resolver = Resolver::new(ctx, self);
         ensure!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
@@ -291,8 +289,7 @@ impl Shapes<'_> {
     }
 
     fn variant(&self, ctx: &Context, members: &[TypeId]) -> Result<TypeHandle> {
-        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-        let resolver = Resolver::new(ctx, &lookup);
+        let resolver = Resolver::new(ctx, self);
         let mut cases = Vec::new();
         for &member in members {
             let Some(properties) = resolver.record(member, 0) else {
@@ -347,68 +344,8 @@ impl Shapes<'_> {
         let HirType::Named(name) = ty else {
             return None;
         };
-        let mut seen = HashSet::new();
-        self.integer_type_by_name(ctx, name, &mut seen)
-    }
-
-    fn integer_type_by_name<'a>(
-        &'a self,
-        ctx: &Context,
-        name: &'a str,
-        seen: &mut HashSet<&'a str>,
-    ) -> Option<TypedHandle<IntegerType>> {
-        if let Some((width, signedness)) = name
-            .strip_prefix("perry:types/")
-            .and_then(perry_integer_spec)
-        {
-            return Some(IntegerType::get(ctx, width, signedness));
-        }
-        if !seen.insert(name) {
-            return None;
-        }
-        if !self.is_user_type(name) {
-            if let Some(&(width, signedness)) = self.integer_imports.get(name) {
-                return Some(IntegerType::get(ctx, width, signedness));
-            }
-            if let Some(entry) = self
-                .imported_types
-                .get(name)
-                .copied()
-                .or_else(|| self.foreign.get(name))
-            {
-                return self.foreign_integer_type(ctx, entry, seen);
-            }
-        }
-        if let Some((_, alias)) = self
-            .type_aliases
-            .get(name)
-            .copied()
-            .filter(|(_, a)| a.type_params.is_empty())
-            && let HirType::Named(target) = &alias.ty
-        {
-            return self.integer_type_by_name(ctx, target, seen);
-        }
-        None
-    }
-
-    fn foreign_integer_type<'a>(
-        &'a self,
-        ctx: &Context,
-        entry: &'a crate::hir::Foreign,
-        seen: &mut HashSet<&'a str>,
-    ) -> Option<TypedHandle<IntegerType>> {
-        match entry {
-            crate::hir::Foreign::Integer { width, signedness } => {
-                Some(IntegerType::get(ctx, *width, *signedness))
-            }
-            crate::hir::Foreign::Type(HirType::Named(name)) => {
-                self.integer_type_by_name(ctx, name, seen)
-            }
-            crate::hir::Foreign::Input(inner) => self.foreign_integer_type(ctx, inner, seen),
-            crate::hir::Foreign::Type(_)
-            | crate::hir::Foreign::Resource(_)
-            | crate::hir::Foreign::Function(_) => None,
-        }
+        let (width, signedness) = self.decls.integer_spec(name)?;
+        Some(IntegerType::get(ctx, width, signedness))
     }
 
     pub(super) fn foreign_value_type(
