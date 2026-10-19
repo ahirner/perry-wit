@@ -1,34 +1,49 @@
 //! BYOB regressions ported from main: transferred storage, queued reads and cancellation.
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
+use std::sync::{Arc, atomic::Ordering};
+use tokio::sync::mpsc;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
-    component::{Component, Instance, Linker, StreamReader},
+    component::{Component, ComponentType, Lift, Linker, StreamProducer, StreamReader, TypedFunc},
 };
 #[path = "../support/p3_input.rs"]
 mod input;
 
 use crate::engine::async_engine;
+use input::{ControlledProducer, Observations};
 
-async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, Instance)> {
-    let wit = format!(
-        "package test:byob; world run {{ export run: async func(input: stream<u8>) -> result<{result}>; }}"
-    );
-    let (resolve, package) = perry_wit::component::wit::resolve_source("byob.wit", &wit)?;
-    let world = resolve.select_world(&[package], Some("run"))?;
-    let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
-        source, "byob.ts", &resolve, world,
-    )?;
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut store = Store::new(
-        &engine,
-        StoreLimitsBuilder::new().memory_size(65536).build(),
-    );
-    store.limiter(|limits| limits);
-    let instance = Linker::new(&engine)
-        .instantiate_async(&mut store, &component)
-        .await?;
-    Ok((store, instance))
+struct Byob<R> {
+    store: Store<StoreLimits>,
+    run: TypedFunc<(StreamReader<u8>,), (Result<R, ()>,)>,
+}
+
+impl<R: ComponentType + Lift + 'static> Byob<R> {
+    async fn compile(source: &str, result: &str) -> Result<Self> {
+        let wit = format!(
+            "package test:byob; world run {{ export run: async func(input: stream<u8>) -> result<{result}>; }}"
+        );
+        let bytes = MemoryChecked.component(&wit, "run", "byob.ts", source)?;
+        let engine = async_engine()?;
+        let component = Component::new(&engine, bytes)?;
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(65536).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_typed_func(&mut store, "run")?;
+        Ok(Self { store, run })
+    }
+
+    async fn read(&mut self, producer: impl StreamProducer<StoreLimits, Item = u8>) -> Result<R> {
+        let input = StreamReader::new(&mut self.store, producer)?;
+        let (result,) = self.run.call_async(&mut self.store, (input,)).await?;
+        self.store.assert_concurrent_state_empty();
+        result.map_err(|()| anyhow::anyhow!("BYOB fixture returned an error"))
+    }
 }
 
 fn check_typescript(source: &str) -> Result<()> {
@@ -77,19 +92,11 @@ const SUM_BYTES: &str = r#"
 async fn byob_reuses_transferred_buffers_with_offsets_and_bounded_memory() -> Result<()> {
     let source = SUM_BYTES;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<f64>::compile(source, "f64").await?;
     for size in [0, 1, 8191, 8192, 8193, 4 * 1024 * 1024, 37] {
         let bytes: Vec<u8> = (0..size).map(|i| (i * 37 + i / 251) as u8).collect();
         let expected = bytes.iter().map(|&b| f64::from(b)).sum::<f64>();
-        let input = StreamReader::new(&mut store, bytes)?;
-        assert_eq!(
-            run.call_async(&mut store, (input,)).await?.0.unwrap(),
-            expected
-        );
-        store.assert_concurrent_state_empty();
+        assert_eq!(guest.read(bytes).await?, expected);
     }
     Ok(())
 }
@@ -106,31 +113,20 @@ async fn byob_minimum_and_short_eof_preserve_transferred_bytes() -> Result<()> {
     }
     "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
     for size in [0, 1, 7, 8, 9] {
         let bytes: Vec<u8> = (1..=size).collect();
         let read = usize::from(size.min(8));
         let mut expected = vec![u8::from(size < 8), size.min(8)];
         expected.extend_from_slice(&bytes[..read]);
         expected.resize(10, 0);
-        let input = StreamReader::new(&mut store, bytes)?;
-        assert_eq!(
-            run.call_async(&mut store, (input,)).await?.0.unwrap(),
-            expected
-        );
-        store.assert_concurrent_state_empty();
+        assert_eq!(guest.read(bytes).await?, expected);
     }
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
-    use input::{ControlledProducer, Observations};
-    use std::sync::{Arc, atomic::Ordering};
-    use tokio::sync::mpsc;
     let source = r#"
     export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
         const reader=input.getReader({mode:"byob"});
@@ -149,24 +145,17 @@ async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
     }
     "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
     for prefix in [0, 2] {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
         if prefix == 2 {
             sender.send(Ok(vec![3, 7])).await?;
         }
-        let input = StreamReader::new(
-            &mut store,
-            ControlledProducer {
-                receiver,
-                observations: observations.clone(),
-            },
-        )?;
-        let mut invocation = Box::pin(run.call_async(&mut store, (input,)));
+        let mut invocation = Box::pin(guest.read(ControlledProducer {
+            receiver,
+            observations: observations.clone(),
+        }));
         tokio::select! {
             result=&mut invocation=>panic!("completed before input: {result:?}"),
             ()=observations.pending.notified()=>{}
@@ -185,18 +174,14 @@ async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
             tokio::join!(invocation, feed)
         })
         .await?;
-        assert_eq!(result?.0.unwrap(), [3, 7, 11, 19, 23]);
+        assert_eq!(result?, [3, 7, 11, 19, 23]);
         assert!(observations.dropped.load(Ordering::SeqCst));
-        store.assert_concurrent_state_empty();
     }
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
-    use input::{ControlledProducer, Observations};
-    use std::sync::{Arc, atomic::Ordering};
-    use tokio::sync::mpsc;
     let source = r#"
     export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
         const reader=input.getReader({mode:"byob"});const bytes=new Uint8Array(8);
@@ -210,32 +195,22 @@ async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
     }
     "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<f64>::compile(source, "f64").await?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (_sender, receiver) = mpsc::channel(1);
-        let input = StreamReader::new(
-            &mut store,
-            ControlledProducer {
-                receiver,
-                observations: observations.clone(),
-            },
-        )?;
         assert_eq!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                run.call_async(&mut store, (input,))
+                guest.read(ControlledProducer {
+                    receiver,
+                    observations: observations.clone(),
+                })
             )
-            .await??
-            .0
-            .unwrap(),
+            .await??,
             1.0
         );
         assert!(observations.dropped.load(Ordering::SeqCst));
-        store.assert_concurrent_state_empty();
     }
     Ok(())
 }
@@ -260,23 +235,15 @@ async fn byob_validation_rejects_without_transferring_the_buffer() -> Result<()>
     }
     "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<f64>::compile(source, "f64").await?;
     for _ in 0..3 {
-        let input = StreamReader::new(&mut store, vec![1, 2, 3])?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 7.0);
-        store.assert_concurrent_state_empty();
+        assert_eq!(guest.read(vec![1, 2, 3]).await?, 7.0);
     }
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn byob_minimum_waits_across_host_releases() -> Result<()> {
-    use input::{ControlledProducer, Observations};
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
     let source = r#"
     export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
         const reader=input.getReader({mode:"byob"});
@@ -284,22 +251,15 @@ async fn byob_minimum_waits_across_host_releases() -> Result<()> {
         const bytes=result.value;if(result.done || bytes===undefined)throw 91;
         await reader.cancel();reader.releaseLock();return bytes;
     }"#;
-    let (mut store, instance) = instantiate(source, "list<u8>").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<Vec<u8>, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
         sender.send(Ok(vec![1, 2])).await?;
-        let input = StreamReader::new(
-            &mut store,
-            ControlledProducer {
-                receiver,
-                observations: observations.clone(),
-            },
-        )?;
-        let mut invocation = Box::pin(run.call_async(&mut store, (input,)));
+        let mut invocation = Box::pin(guest.read(ControlledProducer {
+            receiver,
+            observations: observations.clone(),
+        }));
         tokio::select! {
             result=&mut invocation=>panic!("completed below minimum: {result:?}"),
             ()=observations.pending.notified()=>{}
@@ -311,13 +271,9 @@ async fn byob_minimum_waits_across_host_releases() -> Result<()> {
         );
         sender.send(Ok(vec![3, 4])).await?;
         assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), invocation)
-                .await??
-                .0
-                .unwrap(),
+            tokio::time::timeout(std::time::Duration::from_secs(5), invocation).await??,
             [1, 2, 3, 4]
         );
-        store.assert_concurrent_state_empty();
     }
     Ok(())
 }
@@ -347,25 +303,17 @@ async fn buffered_byob_reads_keep_offsets_and_reject_short_closed_queues() -> Re
     }
     "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<f64>::compile(source, "f64").await?;
     for _ in 0..10 {
-        let input = StreamReader::new(&mut store, Vec::<u8>::new())?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 1.0);
-        store.assert_concurrent_state_empty();
+        assert_eq!(guest.read(Vec::<u8>::new()).await?, 1.0);
     }
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> Result<()> {
-    let (mut store, instance) = instantiate(SUM_BYTES, "f64").await?;
+    let Byob { mut store, run } = Byob::<f64>::compile(SUM_BYTES, "f64").await?;
     *store.data_mut() = StoreLimitsBuilder::new().memory_size(512 * 1024).build();
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
     for _ in 0..10 {
         let left = StreamReader::new(&mut store, vec![3u8; 65_539])?;
         let right = StreamReader::new(&mut store, vec![7u8; 131_079])?;
@@ -414,14 +362,9 @@ export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
 }
 "#;
     check_typescript(source)?;
-    let (mut store, instance) = instantiate(source, "f64").await?;
-    let run = instance.get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, ()>,)>(
-        &mut store, "run",
-    )?;
+    let mut guest = Byob::<f64>::compile(source, "f64").await?;
     for _ in 0..3 {
-        let input = StreamReader::new(&mut store, vec![9u8; 32])?;
-        assert_eq!(run.call_async(&mut store, (input,)).await?.0.unwrap(), 7.0);
-        store.assert_concurrent_state_empty();
+        assert_eq!(guest.read(vec![9u8; 32]).await?, 7.0);
     }
     Ok(())
 }

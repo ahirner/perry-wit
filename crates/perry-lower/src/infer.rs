@@ -1,7 +1,9 @@
 //! Conservative completion-aware inference for unresolved local helper returns.
 use super::*;
 
+use crate::coerce::merge_absence;
 use perry_hir::HirTypeFacts;
+use perry_mir::Absence;
 use std::collections::HashMap;
 
 pub(super) fn contains_type_var(ty: &HirType) -> bool {
@@ -302,9 +304,9 @@ fn infer_params(params: &mut [perry_hir::ir::Param], is_exported: bool, env: &mu
             && is_resolvable_type(&param.ty)
         {
             if matches!(default_expr, Expr::Null) {
-                param.ty = with_absences(param.ty.clone(), vec![HirType::Null]);
+                param.ty = with_absences(param.ty.clone(), Absence::Null);
             } else if matches!(default_expr, Expr::Undefined) && !is_exported {
-                param.ty = with_absences(param.ty.clone(), vec![HirType::Void]);
+                param.ty = with_absences(param.ty.clone(), Absence::Undefined);
             }
         }
         env.locals.insert(param.id, param.ty.clone());
@@ -333,7 +335,7 @@ fn infer_body_return(
     {
         return false;
     }
-    if array_methods::returns_optional(body) {
+    if inline::returns_optional(body) {
         returned.push(HirType::Void);
     }
     let mut types = Vec::new();

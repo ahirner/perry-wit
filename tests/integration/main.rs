@@ -10,6 +10,8 @@ mod engine;
 #[allow(dead_code)]
 #[path = "../support/http_fixture.rs"]
 mod http_fixture;
+#[path = "../support/node_oracle.rs"]
+mod node_oracle;
 #[path = "../support/output_capture.rs"]
 mod output_capture;
 #[path = "../support/wasi_host.rs"]

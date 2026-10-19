@@ -1,7 +1,7 @@
 //! Representation rewriting after ProgramFacts has converged.
 use super::{
     ArgumentDomain, Constraint, Integer, ProgramFacts, SPECIALIZATION, WIT_SIGNATURE,
-    comparison_domain, literal, promise_payload,
+    comparison_domain, literal,
 };
 use crate::{
     attrs::BinaryKind,
@@ -44,6 +44,8 @@ use pliron::{
 use std::collections::{HashMap, HashSet};
 
 mod operands;
+mod plan;
+use plan::{BodyPlan, ContextPlan};
 
 pub(crate) struct Specialize;
 
@@ -91,7 +93,7 @@ impl Pass for Specialize {
     }
 }
 
-/// One emitted function body, shared by every context whose `CoalesceKey` matches.
+/// One emitted function body, shared by every context whose `BodyPlan` matches.
 struct Implementation {
     function: FuncOp,
     mapping: IrMapping,
@@ -112,22 +114,6 @@ impl Implementations {
     fn of(&self, id: usize) -> &Implementation {
         &self.unique[self.of[&id]]
     }
-}
-
-/// Everything that decides a context's rewritten body; equal keys share one implementation.
-#[derive(PartialEq, Eq, Hash)]
-struct CoalesceKey {
-    function: Identifier,
-    arg_kinds: Vec<Option<bool>>,
-    arg_specs: Vec<Option<TypeHandle>>,
-    results: Vec<Option<Integer>>,
-    result_specs: Vec<Option<TypeHandle>>,
-    values: Vec<Option<Integer>>,
-    value_specs: Vec<Option<TypeHandle>>,
-    compares: Vec<Option<Integer>>,
-    numeric_compares: Vec<bool>,
-    constrained_bins: Vec<bool>,
-    calls: Vec<(usize, Option<bool>, Option<Integer>)>,
 }
 
 pub(in crate::facts) fn can_specialize_value(
@@ -175,99 +161,6 @@ pub(in crate::facts) fn integral_intrinsic(
     }
 }
 
-fn coalesce_key(ctx: &Context, analysis: &ProgramFacts, id: usize) -> Result<CoalesceKey> {
-    let key = &analysis.keys[id];
-    let body = &analysis.bodies[&key.function];
-    let state = &analysis.states[id];
-    let mut values = Vec::new();
-    let mut value_specs = Vec::new();
-    let mut compares = Vec::new();
-    let mut numeric_compares = Vec::new();
-    let mut constrained_bins = Vec::new();
-    let mut calls = Vec::new();
-    for &constraint in &body.constraints {
-        match constraint {
-            Constraint::Op { op, .. } => {
-                for res in op.deref(ctx).results() {
-                    let can = can_specialize_value(ctx, state, res);
-                    values.push(can.then(|| state.representation(res)).flatten());
-                    value_specs.push(analysis.specialized_value_type(ctx, id, res)?);
-                }
-                if super::integer_arithmetic(ctx, op).is_some() {
-                    constrained_bins.push(state.is_constrained(op.deref(ctx).get_result(0)));
-                }
-                if Operation::get_op::<CompareOp>(op, ctx).is_some() {
-                    let inputs = [op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1)];
-                    compares.push(comparison_domain(state, &inputs));
-                    numeric_compares.push(
-                        inputs
-                            .iter()
-                            .any(|&v| state.fact(v) == super::Fact::Numeric),
-                    );
-                }
-                if let Some(&child) = state.calls.get(&op) {
-                    let call_res = op.deref(ctx).results().next();
-                    calls.push((
-                        child,
-                        call_res.map(|r| state.is_constrained(r)),
-                        call_res.and_then(|r| {
-                            state
-                                .required
-                                .get(&r)
-                                .copied()
-                                .or_else(|| state.representation(r))
-                        }),
-                    ));
-                }
-            }
-            Constraint::Edge { to, .. } => {
-                values.push(state.representation(to));
-                value_specs.push(analysis.specialized_value_type(ctx, id, to)?);
-            }
-        }
-    }
-    let arg_specs = body
-        .parameters
-        .iter()
-        .map(|&p| analysis.specialized_value_type(ctx, id, p))
-        .collect::<Result<_>>()?;
-    // Owned first: specializing may instantiate types while a signature borrow is live.
-    let res_types = body.signature.deref(ctx).res_types();
-    let results = state
-        .results
-        .iter()
-        .zip(&res_types)
-        .map(|(r, &ty)| {
-            (!ty.deref(ctx).is::<crate::types::OptionalType>()
-                && !ty.deref(ctx).is::<PromiseType>())
-            .then(|| r.domain.integer())
-            .flatten()
-        })
-        .collect();
-    let result_specs = res_types
-        .into_iter()
-        .enumerate()
-        .map(|(pos, ty)| analysis.specialized_result_type(ctx, id, pos, ty))
-        .collect::<Result<_>>()?;
-    Ok(CoalesceKey {
-        function: key.function.clone(),
-        arg_kinds: key
-            .args
-            .iter()
-            .map(|a| a.integer().map(|i| i.bits == 64 && !i.signed))
-            .collect(),
-        arg_specs,
-        results,
-        result_specs,
-        values,
-        value_specs,
-        compares,
-        numeric_compares,
-        constrained_bins,
-        calls,
-    })
-}
-
 fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     let root_ids: HashSet<usize> = analysis.roots.iter().map(|&(_, id)| id).collect();
@@ -275,9 +168,15 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
     let reachable = crate::reachable(root_ids.iter().copied(), |id| {
         analysis.states[id].calls.values().copied()
     });
-    let changed = changed_contexts(ctx, analysis, &reachable, &root_ids)?;
+    let plans = reachable
+        .iter()
+        .map(|&id| {
+            ContextPlan::new(ctx, analysis, id, root_ids.contains(&id)).map(|plan| (id, plan))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    let changed = changed_contexts(analysis, &plans);
     let mut implementations = Implementations::default();
-    let mut coalesced_map: HashMap<CoalesceKey, usize> = HashMap::new();
+    let mut coalesced_map: HashMap<&BodyPlan, usize> = HashMap::new();
     for (id, key) in analysis
         .keys
         .iter()
@@ -285,10 +184,9 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
         .filter(|(id, _)| reachable.contains(id))
     {
         let body = &analysis.bodies[&key.function];
-        let ckey = (changed.contains(&id) && !root_ids.contains(&id))
-            .then(|| coalesce_key(ctx, analysis, id))
-            .transpose()?;
-        if let Some(&impl_idx) = ckey.as_ref().and_then(|ckey| coalesced_map.get(ckey)) {
+        let plan = &plans[&id];
+        let ckey = (changed.contains(&id) && !root_ids.contains(&id)).then_some(&plan.body);
+        if let Some(&impl_idx) = ckey.and_then(|ckey| coalesced_map.get(ckey)) {
             widen_arguments(ctx, &mut implementations.unique[impl_idx], &key.args);
             implementations.of.insert(id, impl_idx);
             continue;
@@ -297,18 +195,20 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
             function: body.function,
             mapping: IrMapping::new(),
             arg_domains: key.args.iter().map(|a| a.integer()).collect(),
-            arguments: body.signature.deref(ctx).arg_types(),
-            results: body.signature.deref(ctx).res_types(),
+            arguments: if changed.contains(&id) {
+                plan.arguments.clone()
+            } else {
+                body.signature.deref(ctx).arg_types()
+            },
+            results: if changed.contains(&id) {
+                plan.body.results.clone()
+            } else {
+                body.signature.deref(ctx).res_types()
+            },
             primary_context: id,
         };
         if changed.contains(&id) {
-            clone_implementation(
-                ctx,
-                analysis,
-                &mut rewriter,
-                &mut implementation,
-                root_ids.contains(&id),
-            )?;
+            clone_implementation(ctx, analysis, &mut rewriter, &mut implementation);
         }
         let impl_idx = implementations.unique.len();
         if let Some(ckey) = ckey {
@@ -325,6 +225,7 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
                 &mut rewriter,
                 &implementations,
                 implementation,
+                &plans[&implementation.primary_context],
             )?;
         }
     }
@@ -377,99 +278,20 @@ fn rewrite(ctx: &mut Context, analysis: &ProgramFacts) -> Result<usize> {
 /// Reachable specialized contexts whose types change, plus their specialized callers, which
 /// must call the rewritten clone.
 fn changed_contexts(
-    ctx: &Context,
     analysis: &ProgramFacts,
-    reachable: &HashSet<usize>,
-    root_ids: &HashSet<usize>,
-) -> Result<HashSet<usize>> {
-    let mut roots = Vec::new();
-    for &id in reachable {
-        if analysis.keys[id].specialize && types_change(ctx, analysis, id, root_ids)? {
-            roots.push(id);
-        }
-    }
-    Ok(crate::reachable(roots, |id| {
+    plans: &HashMap<usize, ContextPlan>,
+) -> HashSet<usize> {
+    let roots = plans
+        .iter()
+        .filter_map(|(&id, plan)| (analysis.keys[id].specialize && plan.changed).then_some(id));
+    crate::reachable(roots, |id| {
         analysis.states[id]
             .callers
             .iter()
             .filter_map(|&(caller, _)| {
-                (analysis.keys[caller].specialize && reachable.contains(&caller)).then_some(caller)
+                (analysis.keys[caller].specialize && plans.contains_key(&caller)).then_some(caller)
             })
-    }))
-}
-
-/// Whether specializing context `id` changes any argument, result, value or comparison type.
-fn types_change(
-    ctx: &Context,
-    analysis: &ProgramFacts,
-    id: usize,
-    root_ids: &HashSet<usize>,
-) -> Result<bool> {
-    let state = &analysis.states[id];
-    let body = &analysis.bodies[&analysis.keys[id].function];
-    // Owned first: specializing may instantiate types while a signature borrow is live.
-    let arg_types = body.signature.deref(ctx).arg_types();
-    let res_types = body.signature.deref(ctx).res_types();
-    if analysis.keys[id]
-        .args
-        .iter()
-        .zip(arg_types)
-        .any(|(domain, ty)| domain.integer().is_some_and(|domain| domain.ty(ctx) != ty))
-    {
-        return Ok(true);
-    }
-    for &param in &body.parameters {
-        if analysis.specialized_value_type(ctx, id, param)?.is_some() {
-            return Ok(true);
-        }
-    }
-    let is_root = root_ids.contains(&id);
-    for (pos, ty) in res_types.into_iter().enumerate() {
-        if specialized_result(ctx, analysis, id, pos, ty, is_root)?.is_some_and(|new| new != ty) {
-            return Ok(true);
-        }
-    }
-    for &value in state.facts.keys() {
-        if (can_specialize_value(ctx, state, value)
-            && state.representation(value).is_some_and(|domain| {
-                let ty = value.get_type(ctx);
-                let ty = TypedHandle::<PromiseType>::from_handle(ty, ctx)
-                    .map_or(ty, |promise| promise.deref(ctx).value());
-                Integer::from_type(ctx, ty) != Some(domain)
-            }))
-            || (!value.get_type(ctx).deref(ctx).is::<PromiseType>()
-                && analysis.specialized_value_type(ctx, id, value)?.is_some())
-        {
-            return Ok(true);
-        }
-    }
-    for &value in state.heap_values.keys() {
-        if analysis.specialized_value_type(ctx, id, value)?.is_some() {
-            return Ok(true);
-        }
-    }
-    if body.constraints.iter().any(|&constraint| {
-        matches!(
-            constraint,
-            Constraint::Op { op, .. } if super::domains::const_parsed_int(ctx, op).is_some()
-        )
-    }) {
-        return Ok(true);
-    }
-    Ok(body.constraints.iter().any(|&constraint| {
-        let Constraint::Op { op, .. } = constraint else {
-            return false;
-        };
-        if Operation::get_op::<CompareOp>(op, ctx).is_none() {
-            return false;
-        };
-        let lhs = op.deref(ctx).get_operand(0);
-        let rhs = op.deref(ctx).get_operand(1);
-        let lhs_ty = lhs.get_type(ctx);
-        comparison_domain(state, &[lhs, rhs]).is_some_and(|domain| domain.ty(ctx) != lhs_ty)
-            || state.fact(lhs).needs_lossless_64()
-            || state.fact(rhs).needs_lossless_64()
-    }))
+    })
 }
 
 /// Widens a coalesced implementation's integer arguments to also accept `args`.
@@ -496,8 +318,7 @@ fn clone_implementation(
     analysis: &ProgramFacts,
     rewriter: &mut IRRewriter<DummyListener>,
     implementation: &mut Implementation,
-    is_root: bool,
-) -> Result<()> {
+) {
     let id = implementation.primary_context;
     let key = &analysis.keys[id];
     let body = &analysis.bodies[&key.function];
@@ -517,51 +338,8 @@ fn clone_implementation(
     function.set_symbol_name(ctx, name);
     cloned.deref_mut(ctx).attributes.0.remove(&WIT_SIGNATURE);
     cloned.insert_after(ctx, body.function.get_operation());
-    for (pos, (ty, domain)) in implementation
-        .arguments
-        .iter_mut()
-        .zip(&key.args)
-        .enumerate()
-    {
-        if let Some(domain) = domain.integer() {
-            *ty = domain.ty(ctx);
-        } else if let Some(&param) = body.parameters.get(pos)
-            && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, param)?
-        {
-            *ty = spec_ty;
-        }
-    }
-    for (pos, ty) in implementation.results.iter_mut().enumerate() {
-        if let Some(specialized) = specialized_result(ctx, analysis, id, pos, *ty, is_root)? {
-            *ty = specialized;
-        }
-    }
     implementation.function = function;
     set_signature(ctx, implementation);
-    Ok(())
-}
-
-/// The type context `id` gives its result `pos`, declared `ty`: its integer domain, or a
-/// specialized numeric layout; at a root only aggregates change. Promises keep theirs.
-fn specialized_result(
-    ctx: &Context,
-    analysis: &ProgramFacts,
-    id: usize,
-    pos: usize,
-    ty: TypeHandle,
-    is_root: bool,
-) -> Result<Option<TypeHandle>> {
-    if ty.deref(ctx).is::<PromiseType>() {
-        return Ok(None);
-    }
-    let optional = ty.deref(ctx).is::<crate::types::OptionalType>();
-    match analysis.states[id].results[pos].domain.integer() {
-        Some(domain) if !optional => Ok(Some(domain.ty(ctx))),
-        _ if !is_root || super::heap::aggregate(ctx, ty) => {
-            analysis.specialized_result_type(ctx, id, pos, ty)
-        }
-        _ => Ok(None),
-    }
 }
 
 /// Writes the implementation's argument and result types onto its function and entry block.
@@ -757,8 +535,8 @@ fn verify_lossless_context(
         if (!is_root || super::heap::aggregate(ctx, orig_ty))
             && !orig_ty.deref(ctx).is::<PromiseType>()
         {
-            if res_fact.domain.needs_lossless_64() && is_fp64_carrier(ctx, actual_ty) {
-                let domain = res_fact.domain;
+            if res_fact.facts.domain.needs_lossless_64() && is_fp64_carrier(ctx, actual_ty) {
+                let domain = res_fact.facts.domain;
                 return fail(format!("result {pos} with {domain:?} has f64 carrier"));
             }
             if let Some(cell) = res_fact.heap {

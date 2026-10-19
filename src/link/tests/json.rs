@@ -7,7 +7,7 @@ use wasmtime::{
 
 use crate::link::{self, libraries};
 
-const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
+const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json.wasm"));
 const INPUT: u32 = 262_144;
 const GRAPH: u32 = 327_680;
 

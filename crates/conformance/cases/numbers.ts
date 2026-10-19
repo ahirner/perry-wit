@@ -26,3 +26,23 @@ function signedZero(value: number): string {
   return value === 0 && 1 / value < 0 ? "-0" : `${value}`;
 }
 console.log("rounded-zero", signedZero(Math.round(-0.25)), signedZero(Math.ceil(-0.5)), Math.trunc(-0.5));
+
+function scalarStep(acc: number, i: number): number {
+  return (acc + i * 3) % 1000003;
+}
+
+function scalarLoops(x: number): number {
+  let acc = 0;
+  for (let i = 0; i < x; i++) {
+  acc = scalarStep(acc, i);
+  }
+  let k = 0;
+  while (true) {
+  k++;
+  if (k > 10) { break; }
+  if (k % 2 === 0) { continue; }
+  acc = acc - 1;
+  }
+  return acc;
+}
+for (const x of [0, 1, 10, 1000, 7.5]) console.log("scalar-loops", x, scalarLoops(x));

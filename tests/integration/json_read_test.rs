@@ -146,6 +146,10 @@ export function duplicates():number {
  try {const bad:Row = JSON.parse('{"name":false,"inner":{},"ignored":[1,]}'); return 12;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":"ok","inner":null}'); return 13;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":"ok"}'); return 14;} catch(e) {}
+ const retagged:Envelope=JSON.parse('{"result":{"tag":"ok","val":"recovered","tag":"err"}}');
+ if(retagged.result.tag !== 'err' || retagged.result.val !== 'recovered')return 15;
+ try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok","val":{"n":6},"tag":"err"}}');return 16;}
+ catch(e) {if(!(e instanceof TypeError))return 17;}
  const fixed:Row = JSON.parse('{"name":"ok","inner":false,"inner":{"n":4}}');
  return fixed.inner.n - 4;
 }
@@ -278,6 +282,69 @@ export function mutate():number {
         assert!(program.outcome("warm", &[]).0 > 0.0);
         assert_eq!(program.outcome("read", &[]), (1.0, 0));
         assert_eq!(program.outcome("mutate", &[]), (1.0, 0));
+    }
+    let mut mixed = Program::checked(
+        r#"
+interface MixedInner { n:number }
+interface Mixed { inner:MixedInner; values:number[]; optional?:number }
+export function mixed(x:number):number {
+ const exact=parseInt('9007199254740993');
+ const native:Mixed={inner:{n:exact},values:[exact],optional:exact};
+ const parsed:Mixed=JSON.parse('{"inner":{"n":0.5},"values":[0.5],"optional":null,"optional":0.5}');
+ const copy:Mixed=JSON.parse(JSON.stringify(native));
+ const selected=x===0?native:parsed;
+ const expected=x===0?'{"inner":{"n":9007199254740993},"values":[9007199254740993],"optional":9007199254740993}':'{"inner":{"n":0.5},"values":[0.5],"optional":0.5}';
+ if(JSON.stringify(selected)!==expected)return 1;
+ copy.inner.n=7;
+ if(native.inner.n===7)return 2;
+ return 0;
+}
+"#,
+        "mixed-json-layout.ts",
+    );
+    mixed.stress_collection(true);
+    for value in [0.0f64, 1.0] {
+        assert_eq!(
+            mixed.outcome("mixed", &[wasmtime::Val::F64(value.to_bits())]),
+            (0.0, 0)
+        );
+    }
+    let mut native = Program::checked(
+        r#"
+interface Link {next?:Link}
+export function dates():number {
+ const dates=[new Date(NaN),new Date(253402300800000),new Date(-62198755200000)];
+ return JSON.stringify(dates)==='[null,"+010000-01-01T00:00:00.000Z","-000001-01-01T00:00:00.000Z"]'?1:0;
+}
+export function sentinel(n:number, useNull:boolean):number {
+ const value:number|null=useNull?null:n;
+ if(JSON.stringify(value)!=='null' || JSON.stringify({value})!=='{"value":null}')return 1;
+ const copy:{value:number|null}=JSON.parse(JSON.stringify({value}));
+ return copy.value===null?0:2;
+}
+export function depth(n:number):number {
+ let value:Link={};
+ for(let i=0;i<n;i++)value={next:value};
+ try {JSON.stringify(value);return 0;}catch(e){
+  return e instanceof TypeError && JSON.stringify({ok:true})==='{"ok":true}'?1:-1;
+ }
+}
+"#,
+        "native-json-writing.ts",
+    );
+    native.stress_collection(true);
+    assert_eq!(native.outcome("dates", &[]), (1.0, 0));
+    assert_eq!(native.throwing("depth", 127.0), (0.0, 0));
+    assert_eq!(native.throwing("depth", 128.0), (1.0, 0));
+    for payload in [1, 2, 3, 0x8000_0000_0000] {
+        let nan = f64::INFINITY.to_bits() | payload;
+        assert_eq!(
+            native.outcome(
+                "sentinel",
+                &[wasmtime::Val::F64(nan), wasmtime::Val::I32(0)]
+            ),
+            (0.0, 0)
+        );
     }
 }
 

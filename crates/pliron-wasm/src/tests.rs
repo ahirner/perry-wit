@@ -553,6 +553,18 @@ fn dialect_round_trips_through_text() {
     )
     .unwrap_or_else(|error| panic!("{}", error.disp(ctx2)));
     verify_operation(reparsed, ctx2).unwrap();
+    let invalid = loops().replace(
+        "negative = wasm.num I32LtS x, zero : builtin.integer i32;",
+        "negative = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1;",
+    );
+    let module = parse_from_str(spaced(Operation::top_level_parser()), ctx2, &invalid).unwrap();
+    assert!(
+        verify_operation(module, ctx2)
+            .unwrap_err()
+            .disp(ctx2)
+            .to_string()
+            .contains("condition must be a signless i32")
+    );
 }
 
 /// Drop printer-only location references (` !N`).

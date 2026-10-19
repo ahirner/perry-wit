@@ -1,7 +1,7 @@
 //! Expressions: the dispatch over HIR expressions, and locals, literals and member reads.
 use super::*;
-use crate::array_methods::{Direction, FindResult, Mutation, Quantifier, SearchResult, Transform};
 use crate::builtins::{BytesCreation, JSON_CALLBACKS};
+use crate::methods::Call;
 
 mod members;
 
@@ -59,6 +59,20 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         if let Some(value) = self.collection_expression(ctx, expr, expected)? {
+            return self.narrow_primitive(ctx, expr, value);
+        }
+        if let Some((receiver, call)) = Call::expression(expr) {
+            let receiver = match receiver {
+                crate::methods::CallReceiver::Expression(expr) => self.expression(ctx, expr)?,
+                crate::methods::CallReceiver::Local(id) => self
+                    .local(id)
+                    .and_then(|slot| self.load(ctx, slot))
+                    .map_err(|error| self.shapes.annotate_local(error, id))?,
+            };
+            let receiver = self.defined(ctx, receiver)?;
+            let value = call
+                .lower(self, ctx, receiver)?
+                .context("method expression produces no value")?;
             return self.narrow_primitive(ctx, expr, value);
         }
         let value = match expr {
@@ -137,11 +151,7 @@ impl<'s> FunctionBuilder<'s> {
                 else_expr,
             } => self.conditional(ctx, condition, then_expr, else_expr, expected)?,
             Expr::Unary { op, operand } => self.unary(ctx, op, operand)?,
-            Expr::StringSplit(text, separator) => {
-                let text = self.string_operand(ctx, text)?;
-                let separator = self.string_operand(ctx, separator)?;
-                self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, separator])
-            }
+
             Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
             Expr::Call {
                 callee,
@@ -270,11 +280,7 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.number_operand(ctx, value)?;
                 self.intrinsic(ctx, Intrinsic::StringFromCodePoint, vec![value])
             }
-            Expr::StringCodePointAt { string, index } => {
-                let value = self.string_operand(ctx, string)?;
-                let index = self.number_operand(ctx, index)?;
-                self.intrinsic(ctx, Intrinsic::StringCodePointAt, vec![value, index])
-            }
+
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
@@ -489,95 +495,6 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
-            Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
-                let array = self.expression(ctx, array)?;
-                self.array_transform(
-                    ctx,
-                    array,
-                    callback,
-                    if matches!(expr, Expr::ArrayFilter { .. }) {
-                        Transform::Filter
-                    } else {
-                        Transform::Map
-                    },
-                )?
-            }
-            Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
-                let array = self.expression(ctx, array)?;
-                self.array_find(
-                    ctx,
-                    array,
-                    callback,
-                    if matches!(expr, Expr::ArrayFindIndex { .. }) {
-                        FindResult::Index
-                    } else {
-                        FindResult::Value
-                    },
-                    Direction::Forward,
-                )?
-            }
-            Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } => {
-                let array = self.expression(ctx, array)?;
-                self.array_quantifier(
-                    ctx,
-                    array,
-                    callback,
-                    if matches!(expr, Expr::ArrayEvery { .. }) {
-                        Quantifier::Every
-                    } else {
-                        Quantifier::Some
-                    },
-                )?
-            }
-            Expr::ArrayFlatMap { array, callback } => {
-                let array = self.expression(ctx, array)?;
-                self.array_transform(ctx, array, callback, Transform::FlatMap)?
-            }
-            Expr::ArraySort { array, comparator } => {
-                let array = self.expression(ctx, array)?;
-                let comparator =
-                    (!matches!(**comparator, Expr::Undefined)).then_some(comparator.as_ref());
-                self.array_sort(ctx, array, comparator, Mutation::InPlace)?
-            }
-            Expr::ArrayToSorted { array, comparator } => {
-                let array = self.expression(ctx, array)?;
-                let comparator = comparator
-                    .as_deref()
-                    .filter(|c| !matches!(c, Expr::Undefined));
-                self.array_sort(ctx, array, comparator, Mutation::Copy)?
-            }
-            Expr::ArrayIncludes {
-                array,
-                value,
-                from_index,
-            }
-            | Expr::ArrayIndexOf {
-                array,
-                value,
-                from_index,
-            } => {
-                let array = self.expression(ctx, array)?;
-                self.array_search(
-                    ctx,
-                    array,
-                    value,
-                    from_index.as_deref(),
-                    if matches!(expr, Expr::ArrayIncludes { .. }) {
-                        SearchResult::Includes
-                    } else {
-                        SearchResult::Index
-                    },
-                )?
-            }
-            Expr::ArrayPush {
-                array_id, value, ..
-            } => self
-                .local(*array_id)
-                .and_then(|slot| self.load(ctx, slot))
-                .and_then(|array| {
-                    self.push_values(ctx, array, std::slice::from_ref(value.as_ref()))
-                })
-                .map_err(|error| self.shapes.annotate_local(error, *array_id))?,
             Expr::IndexGet { object, index } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
                 object,
@@ -701,42 +618,19 @@ impl<'s> FunctionBuilder<'s> {
         else_expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let guards = self.variant_guards.len();
         let test = self.condition(ctx, condition)?;
         let then = self.new_block(ctx, "then");
         let otherwise = self.new_block(ctx, "else");
-        let join = self.new_block(ctx, "join");
         self.branch(ctx, test, then, otherwise);
-        if expected.is_none()
+        let reverse = expected.is_none()
             && matches!(then_expr, Expr::Null | Expr::Undefined)
-            && !matches!(else_expr, Expr::Null | Expr::Undefined)
-        {
-            self.switch_to(otherwise);
-            self.variant_condition(condition, false);
-            let else_value = self.expression_with(ctx, else_expr, None)?;
-            let else_ty = else_value.get_type(ctx);
-            let then_absence = if matches!(then_expr, Expr::Null) {
-                perry_mir::Absence::Null
-            } else {
-                perry_mir::Absence::Undefined
-            };
-            let ty = crate::coerce::admitting(ctx, else_ty, then_absence);
-            let result = self.entry_slot(ctx, ty);
-            let else_value = self.fit(ctx, else_value, ty)?;
-            self.store(ctx, result, else_value);
-            self.jump(ctx, join);
-            self.variant_guards.truncate(guards);
-            self.switch_to(then);
-            self.variant_condition(condition, true);
-            let then_value = self.expression_with(ctx, then_expr, Some(ty))?;
-            let then_value = self.fit(ctx, then_value, ty)?;
-            self.store(ctx, result, then_value);
-            self.jump(ctx, join);
-            self.variant_guards.truncate(guards);
-            self.switch_to(join);
-            return self.load(ctx, result);
-        }
-        let (undef_eq_path, undef_ne_path) = match condition {
+            && !matches!(else_expr, Expr::Null | Expr::Undefined);
+        let arms = if reverse {
+            [(otherwise, false, else_expr), (then, true, then_expr)]
+        } else {
+            [(then, true, then_expr), (otherwise, false, else_expr)]
+        };
+        let defined_path = match condition {
             Expr::Compare {
                 op: op @ (CompareOp::Eq | CompareOp::Ne),
                 left,
@@ -749,104 +643,49 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     None
                 };
-                match (op, tested.and_then(variants::path)) {
-                    (CompareOp::Eq, p) => (p, None),
-                    (CompareOp::Ne, p) => (None, p),
-                    _ => (None, None),
-                }
+                tested
+                    .and_then(variants::path)
+                    .map(|path| (*op == CompareOp::Ne, path))
             }
-            _ => (None, None),
+            _ => None,
         };
-        let then_expected = match expected {
-            Some(expected) => Some(expected),
-            None if matches!(then_expr, Expr::Null | Expr::Undefined) => {
-                if let Expr::LocalGet(id) = else_expr
-                    && let Some(local) = self.locals.get(id)
-                    && let Ok(else_ty) = self.slot_type(ctx, local.slot)
-                {
-                    let inner = present_type(ctx, else_ty);
-                    let then_absence = if matches!(then_expr, Expr::Null) {
-                        perry_mir::Absence::Null
-                    } else {
-                        perry_mir::Absence::Undefined
-                    };
-                    Some(crate::coerce::admitting(ctx, inner, then_absence))
-                } else {
-                    None
-                }
-            }
-            None => None,
+        let lower_arm = |b: &mut Self,
+                         ctx: &mut Context,
+                         (block, truth, expr),
+                         opposite: &Expr,
+                         hint|
+         -> Result<_> {
+            b.switch_to(block);
+            let guards = b.variant_guards.len();
+            b.variant_condition(condition, truth);
+            let value = b.expression_with(ctx, expr, hint);
+            b.variant_guards.truncate(guards);
+            let value = value?;
+            let value = if defined_path.as_ref().is_some_and(|(defined_truth, path)| {
+                *defined_truth == truth && Some(path) == variants::path(expr).as_ref()
+            }) && !matches!(opposite, Expr::Undefined)
+            {
+                b.strip_undefined(ctx, value)?
+            } else {
+                value
+            };
+            Ok((b.block, [value]))
         };
-        self.switch_to(then);
-        // With an expected type both arms fit it (`cond ? value : undefined`).
-        self.variant_condition(condition, true);
-        let then_value = self.expression_with(ctx, then_expr, then_expected)?;
-        let then_value = if undef_ne_path.is_some()
-            && undef_ne_path == variants::path(then_expr)
-            && !matches!(else_expr, Expr::Undefined)
-        {
-            self.strip_undefined(ctx, then_value)?
-        } else {
-            then_value
-        };
-        let then_value = match expected {
-            Some(expected) => self.fit(ctx, then_value, expected)?,
-            None => then_value,
-        };
-        let then_end = self.block;
-        let then_ty = then_value.get_type(ctx);
-        self.switch_to(otherwise);
-        self.variant_guards.truncate(guards);
-        self.variant_condition(condition, false);
-        let else_expected = match expected {
-            Some(expected) => expected,
-            None if matches!(else_expr, Expr::Null | Expr::Undefined) => {
-                let else_absence = if matches!(else_expr, Expr::Null) {
-                    perry_mir::Absence::Null
-                } else {
-                    perry_mir::Absence::Undefined
-                };
-                crate::coerce::admitting(ctx, then_ty, else_absence)
-            }
-            None => then_ty,
-        };
-        let else_value = self.expression_with(ctx, else_expr, Some(else_expected))?;
-        let else_value = if undef_eq_path.is_some()
-            && undef_eq_path == variants::path(else_expr)
-            && !matches!(then_expr, Expr::Undefined)
-        {
-            self.strip_undefined(ctx, else_value)?
-        } else {
-            else_value
-        };
-        let else_end = self.block;
-        let ty = match expected {
-            Some(expected) => expected,
-            None => {
-                let else_ty = else_value.get_type(ctx);
-                if let Some(states) =
-                    crate::coerce::merge_absence(absence(ctx, then_ty), absence(ctx, else_ty))
-                {
-                    let inner = present_type(ctx, then_ty);
-                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
-                } else {
-                    then_ty
-                }
-            }
-        };
-        // The slot is created in the entry block so it dominates both arms.
-        let result = self.entry_slot(ctx, ty);
-        self.switch_to(then_end);
-        let then_value = self.fit(ctx, then_value, ty)?;
-        self.store(ctx, result, then_value);
-        self.jump(ctx, join);
-        self.switch_to(else_end);
-        let else_value = self.fit(ctx, else_value, ty)?;
-        self.store(ctx, result, else_value);
-        self.jump(ctx, join);
-        self.variant_guards.truncate(guards);
-        self.switch_to(join);
-        self.load(ctx, result)
+        let left = lower_arm(self, ctx, arms[0], arms[1].2, expected)?;
+        let hint = expected.or_else(|| {
+            Some(crate::coerce::expression_hint(
+                ctx,
+                arms[1].2,
+                left.1[0].get_type(ctx),
+            ))
+        });
+        let right = lower_arm(self, ctx, arms[1], arms[0].2, hint)?;
+        let left_ty = left.1[0].get_type(ctx);
+        let right_ty = right.1[0].get_type(ctx);
+        let ty =
+            expected.unwrap_or_else(|| crate::coerce::merged_type(ctx, left_ty, left_ty, right_ty));
+        let [value] = self.merge_branches(ctx, [ty], [left, right])?;
+        Ok(value)
     }
 
     /// `await promise` in an async function.

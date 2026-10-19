@@ -8,7 +8,6 @@ use crate::{
     collections::{ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp},
     control::ReturnOp,
     effects::Failure,
-    exceptions::MayThrowInterface,
     facts::{
         ProgramFacts, Specialize, constrain_signature, specialized_implementation,
         verify_lossless_module, with_fact_limits,
@@ -30,6 +29,7 @@ use pliron::{
         type_interfaces::FunctionTypeInterface,
         types::{FP64Type, FunctionType, IntegerType, Signedness},
     },
+    common_traits::Verify,
     context::{Context, Ptr},
     graph::{
         dominance::DomInfo,
@@ -38,7 +38,7 @@ use pliron::{
     irbuild::{IRStatus, inserter::OpInsertionPoint, match_rewrite::PassWrapper},
     irfmt::parsers::spaced,
     linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::{Operation, verify_operation},
     opts::{constants::ConstFoldInterface, dce::dce, mem2reg::mem2reg},
     parsable::parse_from_str,
@@ -181,6 +181,15 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
         normalized(&printed),
         normalized(&print(reparsed_ctx, reparsed))
     );
+    let invalid = TEMPORARY_RECORDS.replace(
+        "more = perry.compare Lt i, n : builtin.integer i1;",
+        "more = builtin.constant <builtin.integer <1: i32>> : builtin.integer i32;",
+    );
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("condition must be a signless i1")
+    );
     Ok(())
 }
 
@@ -212,7 +221,7 @@ fn verifier_rejects_ill_typed_heap_ops() {
     let flag = "builtin.integer i1";
     let cases = [
         (
-            format!("p = perry.alloc Unassigned (v) : {POINT};"),
+            format!("b = perry.undef : {flag}; p = perry.alloc Unassigned (b) : {POINT};"),
             "has 2 fields but perry.alloc supplies 1",
         ),
         (
@@ -232,6 +241,18 @@ fn verifier_rejects_ill_typed_heap_ops() {
             "not an allocation tier",
         ),
         (
+            format!(
+                "p = perry.alloc Unassigned (v, v) : {POINT}; x = perry.field_get p.\"x\" : perry.string;"
+            ),
+            "field x has a different type",
+        ),
+        (
+            format!(
+                "p = perry.alloc Unassigned (v, v) : {POINT}; x = perry.field_present p.\"x\" : builtin.integer si1;"
+            ),
+            "field x has a different type",
+        ),
+        (
             "c = perry.compare Lt v, v : builtin.fp64;".to_string(),
             "must produce a signless i1",
         ),
@@ -247,6 +268,23 @@ fn verifier_rejects_ill_typed_heap_ops() {
         "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.\"y\" = v; y = perry.field_get p.\"y\" : builtin.fp64;"
     )))
     .expect("well-typed heap ops verify");
+    for (source, target, valid) in [
+        ("perry.string", POINT, false),
+        ("perry.exception", "builtin.fp64", false),
+        ("perry.bigint", "builtin.fp64", false),
+        ("builtin.integer si8", "builtin.fp64", true),
+        ("perry.numeric", "builtin.fp64", true),
+        (POINT, POINT, true),
+    ] {
+        let text = single_block(&format!("copy = perry.json_copy v : {target};"))
+            .replacen("(builtin.fp64)", &format!("({source})"), 1)
+            .replacen("v: builtin.fp64", &format!("v: {source}"), 1);
+        let result = verify_text(&text);
+        assert_eq!(result.is_ok(), valid, "{source} -> {target}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.contains("json_copy"), "{error}");
+        }
+    }
     for mut fields in [vec![0, 0], vec![2]] {
         let ctx = &mut Context::new();
         let module = parse(
@@ -317,14 +355,20 @@ builtin.module @m {
 
 #[test]
 fn verifier_rejects_ill_typed_slot_access() {
-    let error = verify_text(&single_block(
-        "s = perry.local : perry.slot <builtin.fp64>; b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; perry.store s = b;",
-    ))
-    .expect_err("store of the wrong type");
-    assert!(
-        error.contains("value type differs from the slot"),
-        "{error}"
-    );
+    for access in [
+        "perry.store s = b;",
+        "x = perry.load s : perry.string;",
+        "x = perry.global_load s : perry.string;",
+    ] {
+        let error = verify_text(&single_block(&format!(
+            "s = perry.local : perry.slot <builtin.fp64>; b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; {access}",
+        )))
+        .expect_err("access with the wrong type");
+        assert!(
+            error.contains("value type differs from the slot"),
+            "{error}"
+        );
+    }
 }
 
 /// `wasi.execution.scaling.retained_records` with a helper call, arrays and an optional read.
@@ -411,7 +455,7 @@ fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
 }
 
 #[test]
-fn verifier_rejects_mismatched_calls_and_awaits() {
+fn verifier_rejects_malformed_operation_contracts() {
     let mismatched_call = RETAINED_RECORDS.replace(
         "point = perry.call make (i) : perry.record <Point>;",
         "point = perry.call make (i, i) : perry.record <Point>;",
@@ -438,6 +482,109 @@ fn verifier_rejects_mismatched_calls_and_awaits() {
         error.contains("perry.promise of the result type"),
         "{error}"
     );
+    let ctx = &mut Context::new();
+    let number = FP64Type::get(ctx).into();
+    let value = crate::UndefOp::new(ctx, number).get_result(ctx);
+    for operands in [vec![], vec![value], vec![value, value]] {
+        let malformed = Operation::new_op::<AwaitOp>(ctx, vec![number], operands, vec![], 0);
+        let error =
+            verify_operation(malformed.get_operation(), ctx).expect_err("invalid await source");
+        assert!(
+            error
+                .disp(ctx)
+                .to_string()
+                .contains("perry.promise of the result type")
+        );
+    }
+
+    let array = ArrayNewOp::new(ctx, number, vec![value]).get_result(ctx);
+    for (operands, results) in [
+        (vec![], vec![]),
+        (vec![array, value, value], vec![]),
+        (vec![array, value], vec![number]),
+    ] {
+        let malformed = Operation::new_op::<crate::ArrayPushOp>(ctx, results, operands, vec![], 0);
+        assert!(
+            malformed.verify(ctx).is_err(),
+            "direct verification must reject malformed arity"
+        );
+        assert!(malformed.verify_interfaces(ctx).is_err());
+    }
+    let predicate = IntegerType::get(ctx, 1, Signedness::Signless).into();
+    for (operands, results, valid) in [
+        (vec![value, value], vec![predicate], true),
+        (vec![value], vec![predicate], false),
+        (vec![value, value], vec![], false),
+        (vec![value, value], vec![predicate, predicate], false),
+    ] {
+        let compare = Operation::new_op::<CompareOp>(ctx, results, operands, vec![], 0);
+        compare.set_attr_perry_compare_kind(ctx, CompareKind::Eq);
+        assert_eq!(compare.verify(ctx).is_ok(), valid);
+        assert_eq!(compare.verify_interfaces(ctx).is_ok(), valid);
+    }
+    let missing_result = Operation::new_op::<crate::WrapOp>(ctx, vec![], vec![value], vec![], 0);
+    assert!(missing_result.verify(ctx).is_err());
+    let missing_result = Operation::new_op::<ArrayNewOp>(ctx, vec![], vec![value], vec![], 0);
+    assert!(missing_result.verify(ctx).is_err());
+    assert!(
+        crate::ConcatOp::from_sources(ctx, vec![])
+            .verify(ctx)
+            .is_err()
+    );
+    assert!(
+        crate::ConcatSegmentsOp::new(ctx, value)
+            .verify(ctx)
+            .is_err()
+    );
+
+    let promises = "p = perry.promise_resolved v : perry.promise <builtin.fp64>; \
+        ps = perry.array_new Unassigned (p) : perry.array <perry.promise <builtin.fp64>>; \
+        settled = perry.undef : perry.settled <builtin.fp64>;";
+    for (operation, result) in [
+        (
+            "perry.promise_combinator All ps",
+            "perry.promise <perry.array <builtin.fp64>>",
+        ),
+        (
+            "perry.promise_combinator Race ps",
+            "perry.promise <builtin.fp64>",
+        ),
+        (
+            "perry.promise_combinator AllSettled ps",
+            "perry.promise <perry.array <perry.settled <builtin.fp64>>>",
+        ),
+        ("perry.settled_field Status settled", "perry.string"),
+        (
+            "perry.settled_field Value settled",
+            "perry.optional <builtin.fp64,Undefined>",
+        ),
+        (
+            "perry.settled_field Reason settled",
+            "perry.optional <perry.exception,Undefined>",
+        ),
+        ("perry.promise_resolved v", "perry.promise <builtin.fp64>"),
+        ("perry.promise_rejected v", "perry.promise <perry.string>"),
+    ] {
+        let invalid = if operation.contains("rejected") || !result.starts_with("perry.promise") {
+            "builtin.fp64"
+        } else {
+            "perry.promise <perry.exception>"
+        };
+        for (ty, valid) in [(result, true), (invalid, false)] {
+            let body = format!("{promises} r = {operation} : {ty};");
+            assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+        }
+    }
+    assert!(PromiseCombinatorOp::new(ctx, Combinator::All, value).is_none());
+    assert!(crate::SettledFieldOp::new(ctx, crate::SettledField::Value, value).is_none());
+
+    let status = crate::RaiseOp::new(ctx, value).get_result(ctx);
+    assert!(crate::CatchOp::new(ctx, status).verify(ctx).is_ok());
+    let catch = Operation::new_op::<crate::CatchOp>(ctx, vec![number], vec![status], vec![], 0);
+    assert!(
+        catch.verify(ctx).is_err(),
+        "catch must produce an exception"
+    );
 
     let wrong_push = RETAINED_RECORDS.replace(
         "perry.array_push items <- point;",
@@ -462,6 +609,10 @@ fn optional_reads_coerce_and_unwrap() {
     )))
     .expect("well-typed optional ops verify");
 
+    for (payload, valid) in [("builtin.fp64", true), ("perry.string", false)] {
+        let body = format!("x = perry.wrap v : perry.optional <{payload},Null>;");
+        assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+    }
     let cases = [
         (
             format!(
@@ -495,6 +646,61 @@ fn optional_reads_coerce_and_unwrap() {
             "{body}: expected {expected:?}, got {error}"
         );
     }
+    for (ty, width, signless) in [
+        ("i1", 1, true),
+        ("si1", 1, false),
+        ("ui1", 1, false),
+        ("i32", 32, true),
+        ("si32", 32, false),
+        ("ui32", 32, false),
+    ] {
+        for (operation, valid) in [
+            ("perry.array_len a", width == 32),
+            ("perry.string_len text", width == 32),
+            ("perry.is_undefined m", width == 1 && signless),
+            ("perry.is_null m", width == 1 && signless),
+            ("perry.intrinsic NumberIsNaN (v)", width == 1),
+            ("perry.raise v", width == 32 && signless),
+        ] {
+            let body = format!(
+                "{read} text = perry.string_const \"\" : perry.string; x = {operation} : builtin.integer {ty};"
+            );
+            assert_eq!(
+                verify_text(&single_block(&body)).is_ok(),
+                valid,
+                "{operation}: {ty}"
+            );
+        }
+    }
+    let numeric = "s = perry.undef : perry.string; n = perry.undef : perry.numeric; \
+        i = perry.undef : builtin.integer si32; bytes = perry.undef : perry.bytes;";
+    let optional_number = "perry.optional <builtin.fp64,Undefined>";
+    for (operation, result, valid) in [
+        ("BytesGet (bytes, v)", optional_number, true),
+        (
+            "BytesGet (bytes, v)",
+            "perry.optional <builtin.fp64,Null>",
+            true,
+        ),
+        ("BytesGet (bytes, v)", "builtin.fp64", false),
+        ("BytesGet (bytes)", optional_number, false),
+        ("BytesGet (bytes, v, v)", optional_number, false),
+        ("BytesGet (bytes, n)", optional_number, false),
+        ("StringCodePointAt (s, v)", optional_number, true),
+        ("ParseInt (s, n)", "builtin.integer si32", true),
+        ("ParseInt (s, i)", "perry.numeric", true),
+        ("BytesAt (bytes, i)", "builtin.integer si32", true),
+        ("BytesAt (bytes, i)", "perry.numeric", false),
+        ("NumberToStringRadix (n, v)", "perry.string", true),
+        ("NumberToStringRadix (v, n)", "perry.string", false),
+        ("NumberInspect (n)", "perry.string", false),
+        ("MathFloor (i)", "builtin.integer si32", true),
+        ("MathFloor (i)", "builtin.integer si64", false),
+        ("MathFloor (n)", "perry.numeric", true),
+    ] {
+        let body = format!("{numeric} r = perry.intrinsic {operation} : {result};");
+        assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+    }
 }
 
 #[test]
@@ -504,7 +710,10 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         ctx,
         &RETAINED_RECORDS.replace(
             "perry.return count",
-            "perry.array_set items[zero] = first;\n        perry.return count",
+            "perry.array_set items[zero] = first;\n\
+             abs = perry.intrinsic MathAbs (count) : builtin.integer i32;\n\
+             status = perry.caught : builtin.integer i32;\n\
+             perry.return count",
         ),
     );
     verify_operation(module, ctx).expect("verifies");
@@ -516,9 +725,14 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         module,
         |ctx, throwing, node| {
             if let IRNode::Operation(op) = node {
-                let op = Operation::get_op_dyn(op, ctx);
-                if let Some(may_throw) = op_cast::<dyn MayThrowInterface>(&*op) {
-                    throwing.push(format!("{} {:?}", op.get_opid(), may_throw.exception(ctx)));
+                if Operation::is_op::<IntrinsicOp>(op, ctx) {
+                    assert!(
+                        !crate::may_throw(ctx, op),
+                        "a pure intrinsic still has a status boundary"
+                    );
+                }
+                if let Some(exception) = crate::semantics::exception(ctx, op) {
+                    throwing.push(format!("{} {:?}", Operation::get_opid(op, ctx), exception));
                 }
             }
         },
@@ -528,7 +742,8 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         [
             "perry.call Any",
             "perry.unwrap TypeError",
-            "perry.array_set RangeError"
+            "perry.array_set RangeError",
+            "perry.intrinsic Any"
         ],
         "array_get, to_number and the rest are pure reads"
     );

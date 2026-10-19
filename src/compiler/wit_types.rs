@@ -2,12 +2,11 @@
 //! declarations (which the parser does not read). The mapping mirrors the SDK's TypeScript:
 //! records are object types, variants unions of `{ tag, val }` objects, options
 //! `T | null`, tuples tuples and `list<u8>` a `Uint8Array`.
-use crate::sdk::{
-    NamedType, canonical_type, collect_world_types, declaration_id, to_camel_case, to_pascal_case,
-};
+use crate::abi::types::{Contract, Input, convert, primitive};
+use crate::sdk::{NamedType, canonical_type, collect_world_types, declaration_id, to_pascal_case};
 use perry_lower::hir::{Foreign, ObjectType, PropertyInfo, Signedness, Type as HirType};
 use std::collections::HashMap;
-use wit_parser::{Resolve, Type, TypeDefKind, WorldId};
+use wit_parser::{Resolve, TypeDefKind, WorldId};
 
 /// Every named WIT type of `resolve` that has a HIR equivalent, registered under its
 /// qualified SDK name, world-scoped SDK name (when non-colliding), and `module#Name`
@@ -25,7 +24,7 @@ pub(crate) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
         let entry = if matches!(definition.kind, TypeDefKind::Resource) {
             Foreign::Resource(canonical_type(resolve, id).index() as u32)
         } else {
-            let Some(ty) = kind(resolve, &definition.kind) else {
+            let Some(ty) = ty(resolve, Input::Definition(id)) else {
                 continue;
             };
             Foreign::Type(ty)
@@ -94,111 +93,81 @@ pub(crate) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
     types
 }
 
-fn object(fields: impl IntoIterator<Item = (String, HirType)>) -> HirType {
-    HirType::Object(ObjectType {
+fn object(fields: impl IntoIterator<Item = Option<(String, HirType)>>) -> Option<HirType> {
+    Some(HirType::Object(ObjectType {
         properties: fields
             .into_iter()
-            .map(|(name, ty)| {
-                let info = PropertyInfo {
-                    ty,
-                    optional: false,
-                    readonly: false,
-                };
-                (name, info)
-            })
-            .collect(),
-        ..ObjectType::default()
-    })
-}
-
-pub(super) fn ty(resolve: &Resolve, ty: &Type) -> Option<HirType> {
-    Some(match ty {
-        Type::Bool => HirType::Boolean,
-        Type::U8 => HirType::Named("perry:types/u8".into()),
-        Type::S8 => HirType::Named("perry:types/s8".into()),
-        Type::U16 => HirType::Named("perry:types/u16".into()),
-        Type::S16 => HirType::Named("perry:types/s16".into()),
-        Type::U32 => HirType::Named("perry:types/u32".into()),
-        Type::S32 => HirType::Named("perry:types/s32".into()),
-        Type::F32 | Type::F64 => HirType::Number,
-        Type::Char | Type::String => HirType::String,
-        Type::U64 => HirType::Named("perry:types/u64".into()),
-        Type::S64 => HirType::Named("perry:types/s64".into()),
-        Type::ErrorContext => return None,
-        Type::Id(id) => {
-            let definition = &resolve.types[*id];
-            if let Some(named) = NamedType::get(resolve, *id) {
-                HirType::Named(named.qualified())
-            } else {
-                kind(resolve, &definition.kind)?
-            }
-        }
-    })
-}
-
-fn kind(resolve: &Resolve, kind: &TypeDefKind) -> Option<HirType> {
-    Some(match kind {
-        TypeDefKind::Type(inner) => ty(resolve, inner)?,
-        TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            super::resources::source_type(resolve, *id)?
-        }
-        TypeDefKind::Record(record) => object(
-            record
-                .fields
-                .iter()
-                .map(|field| Some((to_camel_case(&field.name), ty(resolve, &field.ty)?)))
-                .collect::<Option<Vec<_>>>()?,
-        ),
-        TypeDefKind::Variant(variant) => HirType::Union(
-            variant
-                .cases
-                .iter()
-                .map(|case| {
-                    let mut fields =
-                        vec![("tag".to_string(), HirType::StringLiteral(case.name.clone()))];
-                    if let Some(payload) = &case.ty {
-                        fields.push(("val".to_string(), ty(resolve, payload)?));
-                    }
-                    Some(object(fields))
-                })
-                .collect::<Option<_>>()?,
-        ),
-        TypeDefKind::Enum(enumeration) => HirType::Union(
-            enumeration
-                .cases
-                .iter()
-                .map(|case| HirType::StringLiteral(case.name.clone()))
-                .collect(),
-        ),
-        TypeDefKind::Result(result) => HirType::Union(
-            [
-                ("value", result.ok.as_ref()),
-                ("error", result.err.as_ref()),
-            ]
-            .into_iter()
-            .map(|(name, payload)| {
-                let mut fields = vec![("ok".into(), HirType::Boolean)];
-                if let Some(payload) = payload {
-                    fields.push((name.into(), ty(resolve, payload)?));
-                }
-                Some(object(fields))
+            .map(|field| {
+                let (name, ty) = field?;
+                Some((
+                    name,
+                    PropertyInfo {
+                        ty,
+                        optional: false,
+                        readonly: false,
+                    },
+                ))
             })
             .collect::<Option<_>>()?,
-        ),
-        TypeDefKind::Option(inner) => HirType::Union(vec![ty(resolve, inner)?, HirType::Null]),
-        TypeDefKind::List(Type::U8) => HirType::Named("Uint8Array".into()),
-        TypeDefKind::List(element) => HirType::Array(Box::new(ty(resolve, element)?)),
-        TypeDefKind::Tuple(tuple) => HirType::Tuple(
-            tuple
-                .types
-                .iter()
-                .map(|element| ty(resolve, element))
-                .collect::<Option<_>>()?,
-        ),
-        TypeDefKind::Stream(Some(Type::U8)) => HirType::Generic {
-            base: "ReadableStream".into(),
-            type_args: vec![HirType::Named("Uint8Array".into())],
+        ..ObjectType::default()
+    }))
+}
+
+pub(super) fn ty(resolve: &Resolve, input: Input) -> Option<HirType> {
+    convert(
+        resolve,
+        input,
+        &|id| {
+            Some(Some(HirType::Named(
+                NamedType::get(resolve, id)?.qualified(),
+            )))
         },
-        _ => return None,
-    })
+        &|contract| {
+            Some(match contract {
+                Contract::Scalar(ty) => primitive!(ty, hir)?,
+                Contract::Resource { id, .. } => super::resources::source_type(resolve, id)?,
+                Contract::Record(fields) => {
+                    return object(fields.map(|(name, ty)| Some((name, ty?))));
+                }
+                Contract::Variant(cases) => HirType::Union(
+                    cases
+                        .map(|(name, payload)| {
+                            object(
+                                std::iter::once(Some((
+                                    "tag".into(),
+                                    HirType::StringLiteral(name.into()),
+                                )))
+                                .chain(payload.map(|ty| Some(("val".into(), ty?)))),
+                            )
+                        })
+                        .collect::<Option<_>>()?,
+                ),
+                Contract::Enum(cases) => HirType::Union(
+                    cases
+                        .map(|name| HirType::StringLiteral(name.into()))
+                        .collect(),
+                ),
+                Contract::Result { ok, err } => HirType::Union(
+                    [("value", ok), ("error", err)]
+                        .into_iter()
+                        .map(|(name, payload)| {
+                            object(
+                                std::iter::once(Some(("ok".into(), HirType::Boolean)))
+                                    .chain(payload.map(|ty| Some((name.into(), ty?)))),
+                            )
+                        })
+                        .collect::<Option<_>>()?,
+                ),
+                Contract::Option(ty) => HirType::Union(vec![ty?, HirType::Null]),
+                Contract::Bytes => HirType::Named("Uint8Array".into()),
+                Contract::List(ty) => HirType::Array(Box::new(ty?)),
+                Contract::Tuple(items) => HirType::Tuple(items.collect::<Option<_>>()?),
+                Contract::ByteStream => HirType::Generic {
+                    base: "ReadableStream".into(),
+                    type_args: vec![HirType::Named("Uint8Array".into())],
+                },
+                Contract::Unsupported(_) => return None,
+            })
+        },
+    )
 }

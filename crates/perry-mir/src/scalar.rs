@@ -1,24 +1,23 @@
 //! Scalar arithmetic and comparison.
-use crate::{
-    NewOp,
-    attrs::{BinaryKind, CompareKind},
-};
+use crate::attrs::{BinaryKind, CompareKind};
+use crate::operation_schema::op_schema;
+use crate::signatures::{Accepts, OutputContract, ResultType, Ty};
 use pliron::{
     builtin::{
         op_interfaces::{
             NOpdsInterface, OneResultInterface, SameOperandsAndResultType, SameOperandsType,
             SameResultsType,
         },
-        types::{IntegerType, Signedness},
+        types::IntegerType,
     },
     common_traits::Verify,
     context::Context,
     derive::pliron_op,
     op::Op,
+    operation::Operation,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
-    verify_err,
 };
 use thiserror::Error;
 
@@ -43,9 +42,7 @@ pliron::dict_key!(UNCONSTRAINED_ARITH, "perry_unconstrained_arith");
 impl BinaryOp {
     pub fn new(ctx: &mut Context, kind: BinaryKind, lhs: Value, rhs: Value) -> Self {
         let ty = lhs.get_type(ctx);
-        let op = BinaryOp {
-            op: Self::new_op(ctx, vec![ty], vec![lhs, rhs]),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![ty], vec![lhs, rhs], vec![], 0);
         op.set_attr_perry_binary_kind(ctx, kind);
         op
     }
@@ -79,30 +76,25 @@ impl BinaryOp {
     }
 }
 
-side_effects!(false; BinaryOp, CompareOp, NumericCastOp);
-
-/// Comparison of two operands of one type, producing an `i1`.
-///
-/// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
-/// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
-#[pliron_op(
-    name = "perry.compare",
-    format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)",
-    interfaces = [NOpdsInterface<2>, OneResultInterface, SameOperandsType],
-    attributes = (perry_compare_kind: CompareKind)
-)]
-pub struct CompareOp;
+op_schema! {
+    /// Comparison of two operands of one type, producing an `i1`.
+    ///
+    /// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
+    /// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
+    pub CompareOp(_lhs, _rhs) -> infallible;
+    name = "perry.compare";
+    format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)";
+    interfaces = [SameOperandsType];
+    attributes = (perry_compare_kind: CompareKind);
+    constructors { pub new(kind: CompareKind, _lhs: Value, _rhs: Value) => infer(); }
+    initialize(op) {
+        op.set_attr_perry_compare_kind(ctx, kind);
+    }
+    result(ctx): Ty = Ty::Predicate;
+    error = CompareResultErr;
+}
 
 impl CompareOp {
-    pub fn new(ctx: &mut Context, kind: CompareKind, lhs: Value, rhs: Value) -> Self {
-        let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let op = CompareOp {
-            op: Self::new_op(ctx, vec![i1], vec![lhs, rhs]),
-        };
-        op.set_attr_perry_compare_kind(ctx, kind);
-        op
-    }
-
     pub fn kind(&self, ctx: &Context) -> CompareKind {
         *self.get_attr_perry_compare_kind(ctx).expect("compare kind")
     }
@@ -112,81 +104,42 @@ impl CompareOp {
 #[error("perry.compare must produce a signless i1")]
 pub(crate) struct CompareResultErr;
 
-impl Verify for CompareOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if !is_bool(ctx, self.get_result(ctx)) {
-            verify_err!(self.loc(ctx), CompareResultErr)?
-        }
-        Ok(())
-    }
-}
-
 /// Whether `value` is a signless `i1`, the type of branch conditions.
 pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
-    value
-        .get_type(ctx)
-        .deref(ctx)
-        .downcast_ref::<IntegerType>()
-        .is_some_and(|ty| ty.width() == 1 && ty.signedness() == Signedness::Signless)
+    Ty::Predicate.matches(ctx, value.get_type(ctx))
 }
 
-/// A representation conversion with explicit source and destination numeric types.
-/// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
-/// conversion to an integer saturates, matching the existing floating-point WIT boundary.
-#[pliron_op(
-    name = "perry.numeric_cast",
-    format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface]
-)]
-pub struct NumericCastOp;
-
-impl NumericCastOp {
-    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
-        Self {
-            op: Self::new_op(ctx, vec![target], vec![value]),
-        }
-    }
+op_schema! {
+    /// A representation conversion with explicit source and destination numeric types.
+    /// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
+    /// conversion to an integer saturates, matching the existing floating-point WIT boundary.
+    pub NumericCastOp(value) -> infallible;
+    name = "perry.numeric_cast";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(value: Value, target: TypeHandle) => explicit(target); }
+    result(ctx, value: Value): impl OutputContract = {
+        Accepts(move |ctx: &Context, target: TypeHandle| {
+            let source = value.get_type(ctx);
+            let bigint = |ty: TypeHandle| ty.deref(ctx).is::<crate::types::BigIntType>();
+            let integer = |ty: TypeHandle| {
+                ty.deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            };
+            if bigint(source) || bigint(target) {
+                return integer(if bigint(source) { target } else { source });
+            }
+            [source, target].into_iter().all(|ty| {
+                let ty = crate::optional::present_type(ctx, ty);
+                ty.deref(ctx).is::<crate::types::NumericType>()
+                    || Ty::Number.matches(ctx, ty)
+                    || integer(ty)
+            })
+        })
+    };
+    error = NumericCastErr;
 }
 
 #[derive(Debug, Error)]
 #[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
 struct NumericCastErr;
-
-impl Verify for NumericCastOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let op = self.get_operation().deref(ctx);
-        let source = op.get_operand(0).get_type(ctx);
-        let target = op.get_result(0).get_type(ctx);
-        if source.deref(ctx).is::<crate::types::BigIntType>()
-            || target.deref(ctx).is::<crate::types::BigIntType>()
-        {
-            let other = if source.deref(ctx).is::<crate::types::BigIntType>() {
-                target
-            } else {
-                source
-            };
-            if other
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
-            {
-                return Ok(());
-            }
-            verify_err!(self.loc(ctx), NumericCastErr)?;
-        }
-        for value in op.operands().chain(op.results()) {
-            let ty = value.get_type(ctx);
-            let ty = crate::optional::present_type(ctx, ty);
-            let ty = ty.deref(ctx);
-            if !ty.is::<crate::types::NumericType>()
-                && !ty.is::<pliron::builtin::types::FP64Type>()
-                && !ty
-                    .downcast_ref::<IntegerType>()
-                    .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
-            {
-                verify_err!(self.loc(ctx), NumericCastErr)?;
-            }
-        }
-        Ok(())
-    }
-}

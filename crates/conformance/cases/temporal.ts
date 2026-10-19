@@ -14,6 +14,23 @@ const d2 = Temporal.PlainDate.from({ year: 2024, month: 2, day: 31 }, { overflow
 const d3 = Temporal.PlainDate.from("2024-03-10");
 console.log("fields", d1.toString(), d2.toString(), d1.until(d3).days, d3.until(d1).days);
 console.log("compare", Temporal.PlainDate.compare(d1, d2), Temporal.PlainDate.compare(d1, d3), Temporal.PlainDate.compare(d3, d1));
+function calendarFields(fields: { year: number; month: number; day: number }, duration: { months?: number; days?: number }, options: { overflow?: "constrain" | "reject" }, units: { largestUnit?: "day" | "month" }): string {
+  const date = Temporal.PlainDate.from(fields, options).add(duration, options);
+  const delta = date.until(Temporal.PlainDate.from("2024-05-31"), units);
+  return `${date.toString()}:${delta.months}:${delta.days}`;
+}
+console.log("record-options",
+  calendarFields({ year: 2024, month: 2, day: 31 }, { days: 1 }, {}, {}),
+  calendarFields({ year: 2024, month: 2, day: 31 }, { months: undefined, days: 1 }, { overflow: undefined }, { largestUnit: undefined }),
+  calendarFields({ year: 2024, month: 2, day: 29 }, { months: 1, days: undefined }, { overflow: "reject" }, { largestUnit: "month" }));
+const fieldOrder: number[] = [];
+function markedField(value: number): number { fieldOrder.push(value); return value; }
+const evaluatedDate = Temporal.PlainDate.from(
+  // @ts-expect-error Duplicate and unknown fields exercise object evaluation before Temporal conversion.
+  { year: markedField(2024), ignored: markedField(99), month: markedField(2), day: markedField(1), day: markedField(31) },
+  // @ts-expect-error The last duplicate controls overflow; unrelated fields still evaluate.
+  { ignored: markedField(77), overflow: "reject", overflow: "constrain" });
+console.log("field-order", evaluatedDate.toString(), fieldOrder.join(","));
 for (const largestUnit of ["day", "weeks", "months", "years", "invalid"]) {
   try {
     // @ts-expect-error Exercise runtime validation of dynamic unit strings.

@@ -1,3 +1,5 @@
+use crate::node_oracle::NodeOracle;
+
 #[path = "../../src/helpers/fetch/url.rs"]
 mod url;
 
@@ -8,16 +10,11 @@ fn url_values_preserve_credentials_and_fragments() {
         "https://a:b:c@example.com/p#x y",
         "https://example.com/path#",
     ];
-    let output = std::process::Command::new("node")
-        .args([
-            "-e",
-            "for (const u of JSON.parse(process.argv[1])) console.log(new URL(u).href)",
-            &serde_json::to_string(&cases).unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let expected = String::from_utf8(output.stdout).unwrap();
+    let expected = NodeOracle::Inline(
+        "for (const u of JSON.parse(process.argv[1])) console.log(new URL(u).href)",
+    )
+    .run(&[&serde_json::to_string(&cases).unwrap()])
+    .unwrap();
     for (input, expected) in cases.into_iter().zip(expected.lines()) {
         let mut bytes = vec![0; input.len() * 4 + 64];
         let metadata = url::normalize_url(input.as_bytes(), &mut bytes).unwrap();
@@ -90,12 +87,10 @@ fn ipv6_compression_and_ipv4_suffix_boundaries_match_node() {
         .map(|host| format!("http://[{host}]:8080/"))
         .collect::<Vec<_>>();
     let script = "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(s=>{try{return new URL(s).href}catch{return null}})))";
-    let output = std::process::Command::new("node")
-        .args(["-e", script, &serde_json::to_string(&inputs).unwrap()])
-        .output()
+    let output = NodeOracle::Inline(script)
+        .run(&[&serde_json::to_string(&inputs).unwrap()])
         .unwrap();
-    assert!(output.status.success());
-    let expected: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: Vec<Option<String>> = serde_json::from_str(&output).unwrap();
     for (input, expected) in inputs.iter().zip(expected) {
         let mut bytes = [0; 512];
         let actual = url::normalize_request(input.as_bytes(), &mut bytes)
@@ -145,16 +140,9 @@ fn http_url_normalization_matches_node_for_host_path_and_query_shapes() {
         "\0http://example.com/\0",
     ];
     let script = "for(const source of JSON.parse(process.argv[1])) {const u=new URL(source);u.hash='';console.log(u.href)}";
-    let output = std::process::Command::new("node")
-        .args(["-e", script, &serde_json::to_string(&cases[..]).unwrap()])
-        .output()
+    let expected = NodeOracle::Inline(script)
+        .run(&[&serde_json::to_string(&cases[..]).unwrap()])
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected = String::from_utf8(output.stdout).unwrap();
     for (input, expected) in cases.iter().zip(expected.lines()) {
         let mut bytes = vec![0; input.len() * 4 + 64];
         let metadata = url::normalize_request(input.as_bytes(), &mut bytes)
@@ -214,16 +202,14 @@ fn request_urls_retain_fragments_while_transport_coordinates_exclude_them() {
         "http://example.com/#a#b?{}'`\"",
         "http://example.com/a#x\ny",
     ] {
-        let expected = std::process::Command::new("node")
-            .args(["-e", "console.log(new Request(process.argv[1]).url)", input])
-            .output()
+        let expected = NodeOracle::Inline("console.log(new Request(process.argv[1]).url)")
+            .run(&[input])
             .unwrap();
-        assert!(expected.status.success());
         let mut output = [0; 1024];
         let metadata = url::normalize_request(input.as_bytes(), &mut output).unwrap();
         assert_eq!(
             std::str::from_utf8(&output[..metadata[5] as usize]).unwrap(),
-            String::from_utf8(expected.stdout).unwrap().trim()
+            expected.trim()
         );
         assert!(!output[..metadata[4] as usize].contains(&b'#'));
     }

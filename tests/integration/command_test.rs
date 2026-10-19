@@ -1,8 +1,8 @@
 //! Commands: top-level statements (with top-level `await`) implement `wasi:cli/run`. Console
 //! output drains through WASI P3 streams, `process.exitCode`/`process.exit` and uncaught
 //! exceptions decide the result, and exceptions are values `try`/`catch` can inspect.
+use crate::world::Compiler::Standard;
 use anyhow::Result;
-use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::component::Component;
 use wasmtime_wasi::{FsPerms, WasiCtx, p3::bindings::Command};
 
@@ -33,13 +33,9 @@ async fn execute_output(
     root: Option<&std::path::Path>,
     output_limit: usize,
 ) -> Result<Run> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("command"))?;
-    let compiled = compile_for_world(source, "main.ts", &resolve, world, true)?;
+    let bytes = Standard.component(WIT, "command", "main.ts", source)?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = Component::new(&engine, bytes)?;
     let (stdout, stderr) = (MemoryOutput::new(output_limit), MemoryOutput::new(1 << 20));
     let mut builder = WasiCtx::builder();
     builder.stdout(stdout.clone()).stderr(stderr.clone());
@@ -259,22 +255,16 @@ setTimeout(60_000);
     assert!(!run.ok);
     assert_eq!(run.stderr, format!("{DETACHED}\n"));
 
-    let (resolve, package) = perry_wit::component::wit::resolve_source(
-        "detached.wit",
+    let bytes = Standard.component(
         "package test:detached; world boundary {import wasi:clocks/monotonic-clock@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func()->string;}",
-    )?;
-    let world = resolve.select_world(&[package], Some("boundary"))?;
-    let compiled = compile_for_world(
-        "import {setTimeout} from 'node:timers/promises'; export async function run():Promise<string>{setTimeout(60000);return await Promise.resolve('ready');}",
+        "boundary",
         "detached.ts",
-        &resolve,
-        world,
-        true,
+        "import {setTimeout} from 'node:timers/promises'; export async function run():Promise<string>{setTimeout(60000);return await Promise.resolve('ready');}",
     )?;
     let stderr = MemoryOutput::new(8192);
     let (mut store, instance) = wasi_host::instantiate(
         &async_engine()?,
-        &compiled.component.unwrap().stripped,
+        &bytes,
         Host::new(WasiCtx::builder().stderr(stderr.clone()).build()),
     )
     .await?;

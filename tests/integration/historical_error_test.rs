@@ -1,7 +1,8 @@
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
 use std::{future::Future, time::Duration};
 use wasmtime::component::{Component, ComponentType, Instance, Lift, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Engine, Store};
 use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi_http::{WasiBody, WasiHttpHooks};
 
@@ -32,22 +33,9 @@ impl WasiHttpHooks for Failure {
 type Host = wasi_host::Host<Failure>;
 
 fn compile_component(source: &str, wit: &str) -> Result<(Engine, Component, Linker<Host>)> {
-    let (resolve, package) = perry_wit::component::wit::resolve_source("errors.wit", wit)?;
-    let world = resolve.select_world(&[package], Some("boundary"))?;
-    let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
-        source,
-        "errors.ts",
-        &resolve,
-        world,
-    )?;
-    let mut config = Config::new();
-    config
-        .wasm_component_model_async(true)
-        .wasm_component_model_more_async_builtins(true)
-        .wasm_component_model_threading(true)
-        .wasm_component_model_async_stackful(true);
-    let engine = Engine::new(&config)?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let bytes = MemoryChecked.component(wit, "boundary", "errors.ts", source)?;
+    let engine = crate::engine::async_engine()?;
+    let component = Component::new(&engine, bytes)?;
     let linker = wasi_host::linker(&engine)?;
     Ok((engine, component, linker))
 }

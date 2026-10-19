@@ -36,7 +36,6 @@ impl FunctionLowering<'_, '_> {
                 let len = self.load(ctx, MemKind::I32, args[0], perry_abi::layout::string::LEN);
                 self.runtime(ctx, Runtime::TimeDateParse, vec![data, len])
             }
-            Intrinsic::DateUtc => self.runtime(ctx, Runtime::TimeDateUtc, args),
             Intrinsic::DatePart => {
                 let time = self.load(ctx, MemKind::F64, args[0], 0);
                 let part = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[1]]);

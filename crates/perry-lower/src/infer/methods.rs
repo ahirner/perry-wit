@@ -49,123 +49,9 @@ pub(super) fn call(
     if method == hir_compat::Method::Iteration {
         return expression(object, env);
     }
-    if let Some(method) = Method::parse(name) {
-        return match method.result() {
-            MethodResult::Mapped | MethodResult::FlatMapped => {
-                args.first().map_or(HirType::Any, |callback| {
-                    infer_array_closure_return(
-                        object,
-                        callback,
-                        env,
-                        matches!(method.result(), MethodResult::FlatMapped),
-                    )
-                })
-            }
-            MethodResult::Receiver => expression(object, env),
-            MethodResult::Flat => {
-                let zero_depth = matches!(args.first(), Some(Expr::Number(n)) if *n <= 0.0)
-                    || matches!(args.first(), Some(Expr::Integer(n)) if *n <= 0);
-                match strip_nullish(expression(object, env)).0 {
-                    HirType::Array(inner)
-                        if !zero_depth && matches!(inner.as_ref(), HirType::Array(_)) =>
-                    {
-                        *inner
-                    }
-                    other => other,
-                }
-            }
-            MethodResult::Element | MethodResult::At => {
-                match strip_nullish(expression(object, env)).0 {
-                    HirType::Array(element) => with_absences(*element, vec![HirType::Void]),
-                    HirType::String if method == Method::At => {
-                        with_absences(HirType::String, vec![HirType::Void])
-                    }
-                    _ => HirType::Any,
-                }
-            }
-            MethodResult::Reduced => {
-                if let Some(Expr::Closure {
-                    params,
-                    return_type,
-                    ..
-                }) = args.first()
-                {
-                    if let Some(first) = params.first()
-                        && !matches!(first.ty, HirType::Any | HirType::Unknown)
-                    {
-                        return first.ty.clone();
-                    }
-                    if !matches!(return_type, HirType::Any | HirType::Unknown | HirType::Void) {
-                        return return_type.clone();
-                    }
-                }
-                if let Some(initial) = args.get(1) {
-                    let ty = expression(initial, env);
-                    if is_resolvable_type(&ty) {
-                        return ty;
-                    }
-                }
-                match strip_nullish(expression(object, env)).0 {
-                    HirType::Array(element) => *element,
-                    _ => HirType::Any,
-                }
-            }
-            MethodResult::Void => HirType::Void,
-            MethodResult::String => HirType::String,
-            MethodResult::Strings => HirType::Array(Box::new(HirType::String)),
-            MethodResult::NullableStrings => with_absences(
-                HirType::Array(Box::new(HirType::String)),
-                vec![HirType::Null],
-            ),
-            MethodResult::Number => HirType::Number,
-            MethodResult::Boolean => HirType::Boolean,
-            MethodResult::Duration => HirType::Object(perry_hir::types::ObjectType {
-                name: None,
-                properties: [
-                    ("blank", HirType::Boolean),
-                    ("days", HirType::Number),
-                    ("months", HirType::Number),
-                    ("sign", HirType::Number),
-                    ("weeks", HirType::Number),
-                    ("years", HirType::Number),
-                ]
-                .into_iter()
-                .map(|(name, ty)| {
-                    (
-                        name.into(),
-                        perry_hir::types::PropertyInfo {
-                            ty,
-                            optional: false,
-                            readonly: false,
-                        },
-                    )
-                })
-                .collect(),
-                property_order: None,
-                index_signature: None,
-            }),
-            MethodResult::Lookup => match strip_nullish(expression(object, env)).0 {
-                HirType::Generic { base, type_args }
-                    if matches!(base.as_str(), "Map" | "ReadonlyMap") =>
-                {
-                    match <[HirType; 2]>::try_from(type_args) {
-                        Ok([_, value]) => with_absences(value, vec![HirType::Void]),
-                        Err(_) => perry_hir::infer_expr_type(expr, env),
-                    }
-                }
-                _ => perry_hir::infer_expr_type(expr, env),
-            },
-            MethodResult::Collection => {
-                let ty = strip_nullish(expression(object, env)).0;
-                if matches!(&ty, HirType::Generic { base, .. } if matches!(base.as_str(), "Map" | "Set"))
-                    || matches!(&ty, HirType::Named(name) if matches!(name.as_str(), "Temporal.PlainDate" | "Temporal.PlainDateTime"))
-                {
-                    ty
-                } else {
-                    perry_hir::infer_expr_type(expr, env)
-                }
-            }
-        };
+    let source = strip_nullish(expression(object, env)).0;
+    if let Some(rule) = Method::inferred(env.ctx, &source, name, false) {
+        return result(expr, object, |index| args.get(index), rule, env);
     }
     if let Expr::PropertyGet {
         object: namespace,
@@ -190,10 +76,151 @@ pub(super) fn call(
             _ => perry_hir::infer_expr_type(expr, env),
         };
     }
-    if let Some(method) = IteratorMethod::parse(name) {
-        let source = strip_nullish(expression(object, env)).0;
-        return iterator_view(source, method)
-            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env));
-    }
     perry_hir::infer_expr_type(expr, env)
+}
+
+pub(super) fn result<'s>(
+    expr: &Expr,
+    object: &Expr,
+    argument: impl Fn(usize) -> Option<&'s Expr>,
+    rule: MethodResult,
+    env: &mut FunctionEnv<'_>,
+) -> HirType {
+    match rule {
+        MethodResult::Mapped | MethodResult::FlatMapped => {
+            argument(0).map_or(HirType::Any, |callback| {
+                infer_array_closure_return(
+                    object,
+                    callback,
+                    env,
+                    matches!(rule, MethodResult::FlatMapped),
+                )
+            })
+        }
+        MethodResult::Receiver => expression(object, env),
+        MethodResult::Flat => {
+            let zero_depth = matches!(argument(0), Some(Expr::Number(n)) if *n <= 0.0)
+                || matches!(argument(0), Some(Expr::Integer(n)) if *n <= 0);
+            match strip_nullish(expression(object, env)).0 {
+                HirType::Array(inner)
+                    if !zero_depth && matches!(inner.as_ref(), HirType::Array(_)) =>
+                {
+                    *inner
+                }
+                other => other,
+            }
+        }
+        MethodResult::Element | MethodResult::At => {
+            match strip_nullish(expression(object, env)).0 {
+                HirType::Array(element) => with_absences(*element, Absence::Undefined),
+                HirType::String if rule == MethodResult::At => {
+                    with_absences(HirType::String, Absence::Undefined)
+                }
+                _ => HirType::Any,
+            }
+        }
+        MethodResult::Reduced => {
+            if let Some(Expr::Closure {
+                params,
+                return_type,
+                ..
+            }) = argument(0)
+            {
+                if let Some(first) = params.first()
+                    && !matches!(first.ty, HirType::Any | HirType::Unknown)
+                {
+                    return first.ty.clone();
+                }
+                if !matches!(return_type, HirType::Any | HirType::Unknown | HirType::Void) {
+                    return return_type.clone();
+                }
+            }
+            if let Some(initial) = argument(1) {
+                let ty = expression(initial, env);
+                if is_resolvable_type(&ty) {
+                    return ty;
+                }
+            }
+            match strip_nullish(expression(object, env)).0 {
+                HirType::Array(element) => *element,
+                _ => HirType::Any,
+            }
+        }
+        MethodResult::Native(kind) => native_type(kind),
+        MethodResult::Promise(kind) => HirType::Promise(Box::new(native_type(kind))),
+        MethodResult::PromiseVoid => HirType::Promise(Box::new(HirType::Void)),
+        MethodResult::PromiseJson => HirType::Promise(Box::new(HirType::Unknown)),
+        MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
+        MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
+        MethodResult::StreamReader => native_type(if argument(0).is_some() {
+            Kind::ByobReader
+        } else {
+            Kind::Reader
+        }),
+        MethodResult::Void => HirType::Void,
+        MethodResult::String => HirType::String,
+        MethodResult::Strings => HirType::Array(Box::new(HirType::String)),
+        MethodResult::NullableStrings => {
+            with_absences(HirType::Array(Box::new(HirType::String)), Absence::Null)
+        }
+        MethodResult::OptionalNumber => with_absences(HirType::Number, Absence::Undefined),
+        MethodResult::NullableString => with_absences(HirType::String, Absence::Null),
+        MethodResult::IteratorKeys
+        | MethodResult::IteratorValues
+        | MethodResult::IteratorEntries => {
+            let source = strip_nullish(expression(object, env)).0;
+            let projection = match rule {
+                MethodResult::IteratorKeys => IteratorMethod::Keys,
+                MethodResult::IteratorValues => IteratorMethod::Values,
+                _ => IteratorMethod::Entries,
+            };
+            iterator_view(source, projection)
+                .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env))
+        }
+        MethodResult::Number => HirType::Number,
+        MethodResult::Boolean => HirType::Boolean,
+        MethodResult::Duration => HirType::Object(perry_hir::types::ObjectType {
+            name: None,
+            properties: [
+                ("blank", HirType::Boolean),
+                ("days", HirType::Number),
+                ("months", HirType::Number),
+                ("sign", HirType::Number),
+                ("weeks", HirType::Number),
+                ("years", HirType::Number),
+            ]
+            .into_iter()
+            .map(|(name, ty)| {
+                (
+                    name.into(),
+                    perry_hir::types::PropertyInfo {
+                        ty,
+                        optional: false,
+                        readonly: false,
+                    },
+                )
+            })
+            .collect(),
+            property_order: None,
+            index_signature: None,
+        }),
+        MethodResult::Lookup => match strip_nullish(expression(object, env)).0 {
+            HirType::Generic { base, type_args }
+                if matches!(base.as_str(), "Map" | "ReadonlyMap") =>
+            {
+                match <[HirType; 2]>::try_from(type_args) {
+                    Ok([_, value]) => with_absences(value, Absence::Undefined),
+                    Err(_) => perry_hir::infer_expr_type(expr, env),
+                }
+            }
+            _ => perry_hir::infer_expr_type(expr, env),
+        },
+    }
+}
+
+fn native_type(kind: Kind) -> HirType {
+    match kind {
+        Kind::String => HirType::String,
+        other => HirType::Named(other.label().into()),
+    }
 }

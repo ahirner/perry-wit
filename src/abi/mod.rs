@@ -1,6 +1,7 @@
 //! Component contracts shared by the compiler and SDK.
 
 pub(crate) mod export_names;
+pub(crate) mod types;
 
 use wit_parser::{Function, InterfaceId, Resolve, World, WorldItem, WorldKey};
 

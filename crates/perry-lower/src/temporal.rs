@@ -2,32 +2,71 @@
 use super::*;
 use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as CalendarUnit};
 
-/// The `largestUnit` of `until`/`since`: a literal decided while lowering, or a runtime string.
-enum Unit<'s> {
-    Static(&'s str),
-    Dynamic(Value),
+#[derive(Clone, Copy)]
+enum Fields {
+    Date,
+    Duration(&'static str),
+    Overflow,
+    LargestUnit,
+}
+
+impl Fields {
+    fn names(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Date => &[
+                ("year", "a year number"),
+                ("month", "a month number"),
+                ("day", "a day number"),
+            ],
+            Self::Duration(_) => &[
+                ("years", "a number of years"),
+                ("months", "a number of months"),
+                ("weeks", "a number of weeks"),
+                ("days", "a number of days"),
+            ],
+            Self::Overflow => &[("overflow", "an overflow string")],
+            Self::LargestUnit => &[("largestUnit", "a largestUnit string")],
+        }
+    }
+
+    // The first choice supplies the missing/undefined option default.
+    fn choices(self) -> &'static [(u32, &'static [&'static str])] {
+        match self {
+            Self::Overflow => &[
+                (Overflow::Constrain as u32, &["constrain"]),
+                (Overflow::Reject as u32, &["reject"]),
+            ],
+            Self::LargestUnit => &[
+                (CalendarUnit::Day as u32, &["day", "days", "auto"]),
+                (CalendarUnit::Week as u32, &["week", "weeks"]),
+                (CalendarUnit::Month as u32, &["month", "months"]),
+                (CalendarUnit::Year as u32, &["year", "years"]),
+            ],
+            _ => &[],
+        }
+    }
+
+    fn object_error(self) -> String {
+        match self {
+            Self::Date => {
+                "Temporal.PlainDate.from fields object requires year, month, and day".into()
+            }
+            Self::Duration(method) => format!(
+                "Temporal {method} takes a duration object {{ years?, months?, weeks?, days? }}"
+            ),
+            Self::Overflow => "Temporal options must be an object".into(),
+            Self::LargestUnit => "Temporal until/since options must be an object or string".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FieldValue<'s> {
+    Literal(&'s Expr),
+    Loaded(Value),
 }
 
 impl<'s> FunctionBuilder<'s> {
-    fn numeric_fields<const N: usize>(
-        &mut self,
-        ctx: &mut Context,
-        pairs: impl IntoIterator<Item = (&'s str, &'s Expr)>,
-        fields: [(&str, &str); N],
-        unknown: impl Fn(&str) -> Result<()>,
-    ) -> Result<[Option<Value>; N]> {
-        let mut values = [None; N];
-        for (name, expr) in pairs {
-            if let Some(index) = fields.iter().position(|&(field, _)| field == name) {
-                values[index] =
-                    Some(self.typed_operand(ctx, expr, Kind::Number, fields[index].1)?);
-            } else {
-                unknown(name)?;
-            }
-        }
-        Ok(values)
-    }
-
     fn object_literal_pairs(
         &self,
         expr: &'s Expr,
@@ -47,39 +86,160 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    fn overflow_string_to_constrain(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
-        if let Expr::String(s) = expr {
-            return Ok(match s.as_str() {
-                "constrain" => self.number(ctx, Overflow::Constrain as u32 as f64),
-                "reject" => self.number(ctx, Overflow::Reject as u32 as f64),
-                _ => self.number(ctx, 2.0),
-            });
+    fn temporal_fields<const N: usize>(
+        &mut self,
+        ctx: &mut Context,
+        input: Option<FieldValue<'s>>,
+        schema: Fields,
+    ) -> Result<[Option<Value>; N]> {
+        let names = schema.names();
+        ensure!(N == names.len(), "Temporal field schema arity mismatch");
+        let mut fields = [None; N];
+        let mut literal = false;
+        let record = match input {
+            Some(FieldValue::Literal(expr)) if self.object_literal_pairs(expr).is_some() => {
+                literal = true;
+                for (name, expr) in self.object_literal_pairs(expr).into_iter().flatten() {
+                    let index = names.iter().position(|&(field, _)| field == name);
+                    if index.is_none()
+                        && let Fields::Duration(method) = schema
+                    {
+                        bail!(
+                            "Temporal {method} duration field {name} is not supported; use years, months, weeks, or days"
+                        );
+                    }
+                    let value = match expr {
+                        Expr::String(_) | Expr::Undefined => FieldValue::Literal(expr),
+                        _ => FieldValue::Loaded(self.expression(ctx, expr)?),
+                    };
+                    if let Some(index) = index {
+                        fields[index] = Some(value);
+                    }
+                }
+                None
+            }
+            None => None,
+            Some(FieldValue::Literal(Expr::Undefined)) if !schema.choices().is_empty() => None,
+            Some(FieldValue::Literal(expr @ Expr::String(_)))
+                if matches!(schema, Fields::LargestUnit) =>
+            {
+                fields[0] = Some(FieldValue::Literal(expr));
+                None
+            }
+            Some(FieldValue::Literal(expr)) => Some(self.expression(ctx, expr)?),
+            Some(FieldValue::Loaded(value)) => Some(value),
+        };
+        if let Some(value) = record {
+            let value = if schema.choices().is_empty() {
+                value
+            } else {
+                self.defined(ctx, value)?
+            };
+            if matches!(schema, Fields::LargestUnit) && kind(ctx, value)? == Kind::String {
+                fields[0] = Some(FieldValue::Loaded(value));
+            } else {
+                let record = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
+                    .with_context(|| schema.object_error())?;
+                for (slot, &(name, _)) in fields.iter_mut().zip(names) {
+                    if record.deref(ctx).field(name).is_some() {
+                        let op = FieldGetOp::new(ctx, value, name.into())?;
+                        *slot = Some(FieldValue::Loaded(self.field_read(ctx, &op)?));
+                    }
+                }
+            }
         }
-        let val = self.typed_operand(ctx, expr, Kind::String, "an overflow string")?;
-        self.overflow_from_value(ctx, val)
-    }
-
-    fn overflow_from_value(&mut self, ctx: &mut Context, val: Value) -> Result<Value> {
-        let constrain_str = self.string(ctx, "constrain");
-        let is_constrain = self.compare(ctx, CompareKind::Eq, val, constrain_str);
-        let f64_ty = FP64Type::get(ctx).into();
-        self.choose(
-            ctx,
-            f64_ty,
-            is_constrain,
-            |b, ctx| Ok(b.number(ctx, 1.0)),
-            |b, ctx| {
-                let reject_str = b.string(ctx, "reject");
-                let is_reject = b.compare(ctx, CompareKind::Eq, val, reject_str);
-                b.choose(
+        let choices = schema.choices();
+        let option = !choices.is_empty();
+        let mut values = [None; N];
+        for (index, field) in fields.into_iter().enumerate() {
+            let field = field
+                .filter(|field| !option || !matches!(field, FieldValue::Literal(Expr::Undefined)));
+            let Some(field) = field else {
+                if !literal && matches!(schema, Fields::Date) {
+                    bail!("{}", schema.object_error());
+                }
+                values[index] = choices
+                    .first()
+                    .map(|&(code, _)| self.number(ctx, code as f64));
+                continue;
+            };
+            if let FieldValue::Literal(Expr::String(name)) = field
+                && option
+            {
+                let code = choices
+                    .iter()
+                    .find(|(_, names)| names.contains(&name.as_str()));
+                ensure!(
+                    code.is_some() || matches!(schema, Fields::Overflow),
+                    "unsupported Temporal largestUnit {name:?}"
+                );
+                values[index] = Some(self.number(ctx, code.map_or(2.0, |&(code, _)| code as f64)));
+                continue;
+            }
+            let mut value = match field {
+                FieldValue::Literal(expr) => self.expression(ctx, expr)?,
+                FieldValue::Loaded(value) => value,
+            };
+            if self.is_optional(ctx, value)
+                && (option || !literal && matches!(schema, Fields::Duration(_)))
+            {
+                let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let default = if let Some((_, names)) = choices.first() {
+                    self.string(
+                        ctx,
+                        names.first().context("Temporal option has no spelling")?,
+                    )
+                } else {
+                    self.number(ctx, 0.0)
+                };
+                value = self.choose(
                     ctx,
-                    f64_ty,
-                    is_reject,
-                    |b, ctx| Ok(b.number(ctx, 0.0)),
-                    |b, ctx| Ok(b.number(ctx, 2.0)),
-                )
-            },
-        )
+                    default.get_type(ctx),
+                    undefined,
+                    |_, _| Ok(default),
+                    |b, ctx| b.strip_undefined(ctx, value),
+                )?;
+            } else if literal {
+                value = self.defined(ctx, value)?;
+            }
+            let (name, what) = names[index];
+            ensure!(
+                kind(ctx, value)? == if option { Kind::String } else { Kind::Number },
+                "{}",
+                if literal {
+                    format!("{what} is required here")
+                } else {
+                    match schema {
+                        Fields::Date => format!("Temporal.PlainDate.from {name} must be a number"),
+                        Fields::Duration(method) => {
+                            format!("Temporal {method} {name} field must be a number")
+                        }
+                        _ => format!("{what} is required here"),
+                    }
+                }
+            );
+            let mut selected = if option {
+                self.number(ctx, choices.len() as f64)
+            } else {
+                value
+            };
+            let ty = selected.get_type(ctx);
+            for &(code, names) in choices {
+                for name in names {
+                    let name = self.string(ctx, name);
+                    let matches = self.compare(ctx, CompareKind::Eq, value, name);
+                    selected = self.choose(
+                        ctx,
+                        ty,
+                        matches,
+                        |b, ctx| Ok(b.number(ctx, code as f64)),
+                        |_, _| Ok(selected),
+                    )?;
+                }
+            }
+            values[index] = Some(selected);
+        }
+        Ok(values)
     }
 
     fn overflow_constrain(
@@ -87,116 +247,48 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        let Some(opt) = options else {
-            return Ok(self.number(ctx, 1.0));
-        };
-        if matches!(opt, Expr::Undefined) {
-            return Ok(self.number(ctx, 1.0));
-        }
-        if let Some(pairs) = self.object_literal_pairs(opt) {
-            let Some((_, ov_expr)) = pairs.into_iter().find(|(k, _)| *k == "overflow") else {
-                return Ok(self.number(ctx, 1.0));
-            };
-            if matches!(ov_expr, Expr::Undefined) {
-                return Ok(self.number(ctx, 1.0));
-            }
-            return self.overflow_string_to_constrain(ctx, ov_expr);
-        }
-        let opt_val = self.expression(ctx, opt)?;
-        let opt_val = self.defined(ctx, opt_val)?;
-        let rec = TypedHandle::<RecordType>::from_handle(opt_val.get_type(ctx), ctx)
-            .context("Temporal options must be an object")?;
-        if rec.deref(ctx).field("overflow").is_none() {
-            return Ok(self.number(ctx, 1.0));
-        }
-        let op = FieldGetOp::new(ctx, opt_val, String::from("overflow"))?;
-        let raw_ov = self.field_read(ctx, &op)?;
-        let ov_val = if self.is_optional(ctx, raw_ov) {
-            let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, raw_ov));
-            let str_ty = StringType::get(ctx).into();
-            self.choose(
-                ctx,
-                str_ty,
-                is_undef,
-                |b, ctx| Ok(b.string(ctx, "constrain")),
-                |b, ctx| b.strip_undefined(ctx, raw_ov),
-            )?
-        } else {
-            raw_ov
-        };
-        self.overflow_from_value(ctx, ov_val)
+        let [value] =
+            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?;
+        value.context("overflow field default missing")
     }
 
-    fn coerce_plain_date(
+    pub(super) fn coerce_plain_date(
         &mut self,
         ctx: &mut Context,
         item: &'s Expr,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        if let Some(pairs) = self.object_literal_pairs(item) {
-            let [Some(year), Some(month), Some(day)] = self.numeric_fields(
-                ctx,
-                pairs,
-                [
-                    ("year", "a year number"),
-                    ("month", "a month number"),
-                    ("day", "a day number"),
-                ],
-                |_| Ok(()),
-            )?
-            else {
-                bail!("Temporal.PlainDate.from fields object requires year, month, and day");
-            };
-            let constrain = self.overflow_constrain(ctx, options)?;
-            return Ok(self.intrinsic(
-                ctx,
-                Intrinsic::PlainDateFromFields,
-                vec![year, month, day, constrain],
-            ));
-        }
-        let val = self.expression(ctx, item)?;
-        match kind(ctx, val)? {
-            Kind::PlainDate => {
-                if options.is_some() {
-                    let _ = self.overflow_constrain(ctx, options)?;
+        let input = if self.object_literal_pairs(item).is_some() {
+            FieldValue::Literal(item)
+        } else {
+            let value = self.expression(ctx, item)?;
+            match kind(ctx, value)? {
+                Kind::PlainDate | Kind::String => {
+                    self.overflow_constrain(ctx, options)?;
+                    return Ok(if kind(ctx, value)? == Kind::PlainDate {
+                        value
+                    } else {
+                        self.intrinsic(ctx, Intrinsic::PlainDateFrom, vec![value])
+                    });
                 }
-                Ok(val)
+                Kind::Record => FieldValue::Loaded(value),
+                other => bail!(
+                    "Temporal.PlainDate.from expects an ISO string, PlainDate, or {{ year, month, day }}, got {}",
+                    other.label()
+                ),
             }
-            Kind::String => {
-                if options.is_some() {
-                    let _ = self.overflow_constrain(ctx, options)?;
-                }
-                Ok(self.intrinsic(ctx, Intrinsic::PlainDateFrom, vec![val]))
-            }
-            Kind::Record => {
-                let mut read_num = |field: &str| -> Result<Value> {
-                    let op = FieldGetOp::new(ctx, val, String::from(field)).map_err(|_| {
-                        anyhow!(
-                            "Temporal.PlainDate.from fields object requires year, month, and day"
-                        )
-                    })?;
-                    let v = self.field_read(ctx, &op)?;
-                    ensure!(
-                        kind(ctx, v)? == Kind::Number,
-                        "Temporal.PlainDate.from {field} must be a number"
-                    );
-                    Ok(v)
-                };
-                let year = read_num("year")?;
-                let month = read_num("month")?;
-                let day = read_num("day")?;
-                let constrain = self.overflow_constrain(ctx, options)?;
-                Ok(self.intrinsic(
-                    ctx,
-                    Intrinsic::PlainDateFromFields,
-                    vec![year, month, day, constrain],
-                ))
-            }
-            other => bail!(
-                "Temporal.PlainDate.from expects an ISO string, PlainDate, or {{ year, month, day }}, got {}",
-                other.label()
-            ),
-        }
+        };
+        let [Some(year), Some(month), Some(day)] =
+            self.temporal_fields(ctx, Some(input), Fields::Date)?
+        else {
+            bail!("Temporal.PlainDate.from fields object requires year, month, and day");
+        };
+        let constrain = self.overflow_constrain(ctx, options)?;
+        Ok(self.intrinsic(
+            ctx,
+            Intrinsic::PlainDateFromFields,
+            vec![year, month, day, constrain],
+        ))
     }
 
     /// `Temporal.Instant.from(string)`, `Instant.fromEpochMilliseconds(number)`,
@@ -343,63 +435,16 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, intrinsic, vec![value, part]))
     }
 
-    fn temporal_until(
+    pub(super) fn temporal_until(
         &mut self,
         ctx: &mut Context,
         start: Value,
         end: Value,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        let mut unit = Unit::Static("day");
-        if let Some(opt) = options
-            && !matches!(opt, Expr::Undefined)
-        {
-            if let Expr::String(s) = opt {
-                unit = Unit::Static(s.as_str());
-            } else if let Some(pairs) = self.object_literal_pairs(opt) {
-                if let Some((_, lu_expr)) = pairs.into_iter().find(|(k, _)| *k == "largestUnit") {
-                    match lu_expr {
-                        Expr::Undefined => {}
-                        Expr::String(s) => unit = Unit::Static(s.as_str()),
-                        other => {
-                            unit = Unit::Dynamic(self.typed_operand(
-                                ctx,
-                                other,
-                                Kind::String,
-                                "a largestUnit string",
-                            )?);
-                        }
-                    }
-                }
-            } else {
-                let opt_val = self.expression(ctx, opt)?;
-                let opt_val = self.defined(ctx, opt_val)?;
-                if kind(ctx, opt_val)? == Kind::String {
-                    unit = Unit::Dynamic(opt_val);
-                } else {
-                    let rec = TypedHandle::<RecordType>::from_handle(opt_val.get_type(ctx), ctx)
-                        .context("Temporal until/since options must be an object or string")?;
-                    if rec.deref(ctx).field("largestUnit").is_some() {
-                        let op = FieldGetOp::new(ctx, opt_val, String::from("largestUnit"))?;
-                        let raw_lu = self.field_read(ctx, &op)?;
-                        unit = Unit::Dynamic(if self.is_optional(ctx, raw_lu) {
-                            let is_undef =
-                                self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, raw_lu));
-                            let str_ty = StringType::get(ctx).into();
-                            self.choose(
-                                ctx,
-                                str_ty,
-                                is_undef,
-                                |b, ctx| Ok(b.string(ctx, "day")),
-                                |b, ctx| b.strip_undefined(ctx, raw_lu),
-                            )?
-                        } else {
-                            raw_lu
-                        });
-                    }
-                }
-            }
-        }
+        let [unit] =
+            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::LargestUnit)?;
+        let unit = unit.context("largestUnit field default missing")?;
         let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![start]);
         let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![end]);
         let diff = self.binary(ctx, BinaryKind::Sub, db, da);
@@ -423,7 +468,6 @@ impl<'s> FunctionBuilder<'s> {
                 )
             },
         )?;
-        let unit = self.calendar_unit(ctx, unit)?;
         let month = self.number(ctx, CalendarUnit::Month as u32 as f64);
         let calendar = self.compare(ctx, CompareKind::Ge, unit, month);
         let week = self.number(ctx, CalendarUnit::Week as u32 as f64);
@@ -498,195 +542,62 @@ impl<'s> FunctionBuilder<'s> {
         }))
     }
 
-    fn calendar_unit(&mut self, ctx: &mut Context, unit: Unit<'_>) -> Result<Value> {
-        const UNITS: [(CalendarUnit, &[&str]); 4] = [
-            (CalendarUnit::Day, &["day", "days", "auto"]),
-            (CalendarUnit::Week, &["week", "weeks"]),
-            (CalendarUnit::Month, &["month", "months"]),
-            (CalendarUnit::Year, &["year", "years"]),
-        ];
-        let value = match unit {
-            Unit::Static(name) => {
-                let (unit, _) = UNITS
-                    .iter()
-                    .find(|(_, names)| names.contains(&name))
-                    .with_context(|| format!("unsupported Temporal largestUnit {name:?}"))?;
-                return Ok(self.number(ctx, *unit as u32 as f64));
-            }
-            Unit::Dynamic(value) => value,
-        };
-        // Invalid codes reach the checked calendar codec and raise RangeError.
-        let mut selected = self.number(ctx, 4.0);
-        let ty = FP64Type::get(ctx).into();
-        for (unit, names) in UNITS {
-            for name in names {
-                let name = self.string(ctx, name);
-                let matches = self.compare(ctx, CompareKind::Eq, value, name);
-                selected = self.choose(
-                    ctx,
-                    ty,
-                    matches,
-                    |b, ctx| Ok(b.number(ctx, unit as u32 as f64)),
-                    |_, _| Ok(selected),
-                )?;
-            }
-        }
-        Ok(selected)
-    }
-
-    pub(super) fn temporal_method(
+    pub(super) fn temporal_add(
         &mut self,
         ctx: &mut Context,
         receiver: Value,
-        method: &str,
-        args: &'s [Expr],
+        duration: &'s Expr,
+        options: Option<&'s Expr>,
+        subtract: bool,
     ) -> Result<Option<Value>> {
         let receiver_kind = kind(ctx, receiver)?;
-        Ok(match (receiver_kind, method) {
-            (Kind::Instant | Kind::PlainDate | Kind::PlainDateTime, "toString" | "toJSON") => {
-                ensure!(
-                    args.is_empty(),
-                    "Temporal toString options are not supported yet"
-                );
-                let intrinsic = match receiver_kind {
-                    Kind::Instant => Intrinsic::InstantString,
-                    Kind::PlainDate => Intrinsic::PlainDateString,
-                    _ => Intrinsic::PlainDateTimeString,
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver])
-            }
-            (Kind::PlainDate, "equals") => {
-                ensure!(
-                    args.len() == 1,
-                    "Temporal.PlainDate.equals takes one argument"
-                );
-                let other = self.coerce_plain_date(ctx, &args[0], None)?;
-                let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![receiver]);
-                let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![other]);
-                Some(self.compare(ctx, CompareKind::Eq, da, db))
-            }
-            (Kind::PlainDate, "until" | "since") => {
-                ensure!(
-                    (1..=2).contains(&args.len()),
-                    "Temporal.PlainDate.{method} takes one or two arguments"
-                );
-                let other = self.coerce_plain_date(ctx, &args[0], None)?;
-                let (start, end) = if method == "until" {
-                    (receiver, other)
-                } else {
-                    (other, receiver)
-                };
-                Some(self.temporal_until(ctx, start, end, args.get(1))?)
-            }
-            (Kind::PlainDate | Kind::PlainDateTime, "add" | "subtract") => {
-                ensure!(
-                    (1..=2).contains(&args.len()),
-                    "Temporal {method} takes a duration object and optional options"
-                );
-                let [years, months, weeks, days] = if let Some(pairs) =
-                    self.object_literal_pairs(&args[0])
-                {
-                    self.numeric_fields(
-                        ctx,
-                        pairs,
-                        [
-                            ("years", "a number of years"),
-                            ("months", "a number of months"),
-                            ("weeks", "a number of weeks"),
-                            ("days", "a number of days"),
-                        ],
-                        |other| bail!(
-                            "Temporal {method} duration field {other} is not supported; use years, months, weeks, or days"
-                        ),
-                    )?
-                } else {
-                    let value = self.expression(ctx, &args[0])?;
-                    let rec = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
-                        .map_err(|_| {
-                            anyhow!(
-                                "Temporal {method} takes a duration object {{ years?, months?, weeks?, days? }}"
-                            )
-                        })?;
-                    let mut read_unit = |name: &str| -> Result<Option<Value>> {
-                        if rec.deref(ctx).field(name).is_none() {
-                            return Ok(None);
-                        }
-                        let op = FieldGetOp::new(ctx, value, String::from(name))?;
-                        let field = self.field_read(ctx, &op)?;
-                        let field = if self.is_optional(ctx, field) {
-                            let is_undef =
-                                self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, field));
-                            let f64_ty = FP64Type::get(ctx).into();
-                            self.choose(
-                                ctx,
-                                f64_ty,
-                                is_undef,
-                                |b, ctx| Ok(b.number(ctx, 0.0)),
-                                |b, ctx| b.strip_undefined(ctx, field),
-                            )?
-                        } else {
-                            field
-                        };
-                        ensure!(
-                            kind(ctx, field)? == Kind::Number,
-                            "Temporal {method} {name} field must be a number"
-                        );
-                        Ok(Some(field))
-                    };
-                    [
-                        read_unit("years")?,
-                        read_unit("months")?,
-                        read_unit("weeks")?,
-                        read_unit("days")?,
-                    ]
-                };
-                ensure!(
-                    years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
-                    "Temporal {method} requires at least one of years, months, weeks, or days"
-                );
-                if years.is_none()
-                    && months.is_none()
-                    && weeks.is_none()
-                    && args.len() == 1
-                    && let Some(mut d) = days
-                {
-                    if method == "subtract" {
-                        let zero = self.number(ctx, 0.0);
-                        d = self.binary(ctx, BinaryKind::Sub, zero, d);
-                    }
-                    let intrinsic = if receiver_kind == Kind::PlainDate {
-                        Intrinsic::PlainDateAddDays
-                    } else {
-                        Intrinsic::PlainDateTimeAddDays
-                    };
-                    return Ok(self.call_intrinsic(ctx, intrinsic, vec![receiver, d]));
+        let method = if subtract { "subtract" } else { "add" };
+        Ok({
+            let [years, months, weeks, days] = self.temporal_fields(
+                ctx,
+                Some(FieldValue::Literal(duration)),
+                Fields::Duration(method),
+            )?;
+            ensure!(
+                years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
+                "Temporal {method} requires at least one of years, months, weeks, or days"
+            );
+            if years.is_none()
+                && months.is_none()
+                && weeks.is_none()
+                && options.is_none()
+                && let Some(mut d) = days
+            {
+                if subtract {
+                    let zero = self.number(ctx, 0.0);
+                    d = self.binary(ctx, BinaryKind::Sub, zero, d);
                 }
-                let zero = self.number(ctx, 0.0);
-                let mut negate_if_sub = |v: Option<Value>| -> Value {
-                    match v {
-                        Some(val) if method == "subtract" => {
-                            self.binary(ctx, BinaryKind::Sub, zero, val)
-                        }
-                        Some(val) => val,
-                        None => zero,
-                    }
-                };
-                let y = negate_if_sub(years);
-                let m = negate_if_sub(months);
-                let w = negate_if_sub(weeks);
-                let d = negate_if_sub(days);
-                let constrain = self.overflow_constrain(ctx, args.get(1))?;
                 let intrinsic = if receiver_kind == Kind::PlainDate {
-                    Intrinsic::PlainDateAddCalendar
+                    Intrinsic::PlainDateAddDays
                 } else {
-                    Intrinsic::PlainDateTimeAddCalendar
+                    Intrinsic::PlainDateTimeAddDays
                 };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver, y, m, w, d, constrain])
+                return Ok(self.call_intrinsic(ctx, intrinsic, vec![receiver, d]));
             }
-            _ => bail!(
-                "Temporal method {method} is not supported on {}",
-                receiver_kind.label()
-            ),
+            let zero = self.number(ctx, 0.0);
+            let mut negate_if_sub = |v: Option<Value>| -> Value {
+                match v {
+                    Some(val) if subtract => self.binary(ctx, BinaryKind::Sub, zero, val),
+                    Some(val) => val,
+                    None => zero,
+                }
+            };
+            let y = negate_if_sub(years);
+            let m = negate_if_sub(months);
+            let w = negate_if_sub(weeks);
+            let d = negate_if_sub(days);
+            let constrain = self.overflow_constrain(ctx, options)?;
+            let intrinsic = if receiver_kind == Kind::PlainDate {
+                Intrinsic::PlainDateAddCalendar
+            } else {
+                Intrinsic::PlainDateTimeAddCalendar
+            };
+            self.call_intrinsic(ctx, intrinsic, vec![receiver, y, m, w, d, constrain])
         })
     }
 }

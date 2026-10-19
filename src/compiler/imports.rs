@@ -32,7 +32,10 @@ pub(super) fn bindings(
                         p.name.clone(),
                         HirType::Generic {
                             base: "WitInput".into(),
-                            type_args: vec![wit_types::ty(resolve, &p.ty)?],
+                            type_args: vec![wit_types::ty(
+                                resolve,
+                                crate::abi::types::Input::Reference(p.ty),
+                            )?],
                         },
                         false,
                     ))
@@ -42,7 +45,7 @@ pub(super) fn bindings(
                 continue;
             };
             let result = match function.result {
-                Some(ty) => match wit_types::ty(resolve, &ty) {
+                Some(ty) => match wit_types::ty(resolve, crate::abi::types::Input::Reference(ty)) {
                     Some(ty) => ty,
                     None => continue,
                 },

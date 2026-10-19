@@ -1,6 +1,7 @@
 //! WIT integer domains: typed arithmetic, wrap points, widening and exact 64-bit values.
 use super::{compile, inspect_wasm};
 use crate::core_program::Program;
+use crate::world::Compiler::Standard;
 use anyhow::Result;
 use wasmparser::{Operator, Parser, Payload};
 use wasmtime::{Val, component::Val as CVal};
@@ -211,7 +212,7 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
         export function widenS8(a: s8, b: s8): s32 { return widenAfterAdd(a, b); }
         export function big(a: u64, b: u64): u64 { return a + b; }
     "#;
-    let compiled = crate::world::compile(wit_src, "test", "optimization.ts", source)?;
+    let compiled = Standard.compile(wit_src, "test", "optimization.ts", source)?;
     let mut program = Program::from_wasm(compiled.core);
     assert_eq!(program.memory_bytes(), 0);
     assert_eq!(
@@ -285,6 +286,10 @@ interface Node { value: number; next?: Node }
 function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
 function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
 function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
+function relation(a: number, b: number): number {
+    return (a === b ? 1 : 0) + (a !== b ? 2 : 0) + (a < b ? 4 : 0) +
+        (a <= b ? 8 : 0) + (a > b ? 16 : 0) + (a >= b ? 32 : 0);
+}
 export function run(flag: number): number {
     const s = choose(flag);
     const a = parseInt("9007199254740993");
@@ -303,6 +308,23 @@ export function run(flag: number): number {
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
     const exactVal = parseInt(s);
+    const rounded = parseFloat(flag > 0 ? "9007199254740992" : "0.5");
+    const minimum = parseInt(flag > 0 ? "-9223372036854775808" : "-7");
+    const minimumFloat = parseFloat(flag > 0 ? "-9223372036854775808" : "-7.5");
+    const maximum = parseInt(chooseU64Odd(flag));
+    const unordered = parseInt(flag > 0 ? "bad" : "1");
+    const ordering = relation(exactVal, rounded) === 50 && relation(rounded, exactVal) === 14 &&
+        relation(exactVal, exactVal) === 41 && relation(minimum, minimumFloat) === 41 &&
+        relation(maximum, 18446744073709551616) === 14 && relation(exactVal, Infinity) === 14 &&
+        relation(unordered, exactVal) === 2 && relation(exactVal, unordered) === 2;
+    const zero = parseFloat(flag > 0 ? "0" : "1.5");
+    const negativeZero = -zero;
+    const extrema = Object.is(Math.min(zero, negativeZero), -0) && Object.is(Math.min(negativeZero, zero), -0) &&
+        Object.is(Math.max(zero, negativeZero), 0) && Object.is(Math.max(negativeZero, zero), 0) &&
+        Math.max(exactVal, rounded) === exactVal && Math.min(rounded, exactVal) === rounded &&
+        Number.isNaN(Math.min(unordered, exactVal)) && Number.isNaN(Math.max(exactVal, unordered));
+    const magnitude = JSON.stringify(Math.abs(minimum)) === "9223372036854775808" &&
+        Object.is(minimum % -1, -0) && Object.is(minimum % 2, -0);
     const aliasSelf: Node = { value: exactVal };
     aliasSelf.next = aliasSelf;
     const sharedCell: Cell = { value: exactVal };
@@ -312,6 +334,9 @@ export function run(flag: number): number {
         aliasSelf.next === aliasSelf &&
         (aliasSelf.next?.value ?? 0) === exactVal &&
         sharedPair[1].value === 1.5;
+    if (!ordering) return 2;
+    if (!extrema) return 3;
+    if (!magnitude) return 4;
     return mul && overflow && nonJsWs && numRem && numMath && aliasIdentity ? 1 : 0;
 }
 "#,
@@ -348,8 +373,7 @@ export function run(flag: number): number {
         export function runS64(flag: number): SingleS64 { return { value: 9007199254740993n as s64 }; }
         export function runList(flag: number): number[] { return [parseInt(choose(flag)), 2.5]; }
     "#;
-    let component =
-        crate::world::component(wit_src, "test", "numeric-boundary.ts", boundary_source)?;
+    let component = Standard.component(wit_src, "test", "numeric-boundary.ts", boundary_source)?;
     let engine = wasmtime::Engine::default();
     let (mut store, instance) = crate::world::instantiate(&engine, &component)?;
     let record = |value| CVal::Record(vec![("value".into(), value)]);

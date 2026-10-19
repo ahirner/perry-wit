@@ -1,35 +1,27 @@
 //! Exact signed-magnitude integers for WIT's 64-bit transport domain.
-use crate::{NewOp, types::BigIntType};
+use crate::operation_schema::op_schema;
+use crate::signatures::Ty;
 use pliron::{
-    builtin::{
-        attributes::StringAttr,
-        op_interfaces::{NOpdsInterface, OneResultInterface},
-    },
-    common_traits::Verify,
-    context::Context,
-    derive::pliron_op,
-    op::Op,
-    result::Result,
-    r#type::Typed,
-    verify_err,
+    builtin::attributes::StringAttr, common_traits::Verify, context::Context, op::Op,
+    operation::Operation, result::Result,
 };
 
-#[pliron_op(name = "perry.bigint_const",
-    format = "attr($perry_integer_value, $StringAttr) ` : ` type($0)",
-    interfaces = [NOpdsInterface<0>, OneResultInterface],
-    attributes = (perry_integer_value: StringAttr))]
-pub struct BigIntConstOp;
+op_schema! {
+    pub BigIntConstOp() -> infallible;
+    name = "perry.bigint_const";
+    format = "attr($perry_integer_value, $StringAttr) ` : ` type($0)";
+    attributes = (perry_integer_value: StringAttr);
+    constructors { pub new(magnitude: u64) => infer(); }
+    initialize(op) {
+        op.set_attr_perry_integer_value(ctx, StringAttr::new(magnitude.to_string()));
+    }
+    prepare(this) {}
+    result(ctx): Ty = Ty::BigInt;
+    error = InvalidConstant;
+    check this.magnitude(ctx).is_some() => InvalidConstant;
+}
 
 impl BigIntConstOp {
-    pub fn new(ctx: &mut Context, magnitude: u64) -> Self {
-        let ty = BigIntType::get(ctx).into();
-        let op = Self {
-            op: Self::new_op(ctx, vec![ty], vec![]),
-        };
-        op.set_attr_perry_integer_value(ctx, StringAttr::new(magnitude.to_string()));
-        op
-    }
-
     pub fn magnitude(&self, ctx: &Context) -> Option<u64> {
         self.get_attr_perry_integer_value(ctx)?
             .as_str()
@@ -41,20 +33,3 @@ impl BigIntConstOp {
 #[derive(Debug, thiserror::Error)]
 #[error("bigint constant needs a 64-bit magnitude and a bigint result")]
 struct InvalidConstant;
-
-impl Verify for BigIntConstOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if self.magnitude(ctx).is_none()
-            || !self
-                .get_result(ctx)
-                .get_type(ctx)
-                .deref(ctx)
-                .is::<BigIntType>()
-        {
-            verify_err!(self.loc(ctx), InvalidConstant)?;
-        }
-        Ok(())
-    }
-}
-
-side_effects!(false; BigIntConstOp);

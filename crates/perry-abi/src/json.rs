@@ -13,14 +13,14 @@ pub mod kind {
     pub const UINT64: u32 = 10;
 }
 pub const MAX_DEPTH: u32 = 128;
-pub const NEXT: usize = 4;
+pub use crate::layout::json::NEXT;
 pub const TAIL: usize = 8;
 pub const FIRST: usize = 16;
 pub const MEMBER_COUNT: usize = 20;
 pub const KEY: usize = 24;
 pub const METADATA: usize = 28;
 pub const NODE_BYTES: u32 = 32;
-pub const PACKED_FIELDS: usize = 8;
+pub use crate::layout::record::PACKED_FIELDS;
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
 

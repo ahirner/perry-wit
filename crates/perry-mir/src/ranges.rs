@@ -9,12 +9,11 @@
 //! last execution of the target comes after the last definition of `i`, so the proof holds
 //! for the current value of `i`. There, `a[i]` becomes an unchecked read of the element:
 //!
-//! - arrays never shrink (writes stay within `[0, length]` and `push` appends), so a proven
-//!   index stays in range;
+//! - arrays retain a proven index unless an alias is truncated between the length read
+//!   and element read; calls use converged mutation and object-identity facts;
 //! - a `Uint8Array` shrinks to length 0 when its buffer is transferred (a BYOB read), which
 //!   happens only during a call or an `await`. Between the length read and the element read,
-//!   no operation may call, await or read into a view; the length must be read in the block
-//!   of the branch.
+//!   no operation may call, await or read into a view.
 //!
 //! The read's result is wrapped back into `T | undefined`; `fold` then removes the
 //! `undefined` tests and coercions of the wrapped value.
@@ -43,19 +42,18 @@ use pliron::{
     graph::dominance::DomInfo,
     irbuild::IRStatus,
     linked_list::ContainsLinkedList,
-    linked_list::LinkedList,
     op::Op,
     operation::Operation,
     r#type::Typed,
     utils::apint::{APInt, bw},
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// What a length is the length of.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Length {
-    Array(Value),
+    Array(Value, Ptr<Operation>),
     /// A view, and the operation that read its length.
     Bytes(Value, Ptr<Operation>),
     /// A string's scalar count.
@@ -73,13 +71,13 @@ enum Object {
 impl Length {
     fn object(self) -> Value {
         match self {
-            Length::Array(value) | Length::Bytes(value, _) | Length::String(value) => value,
+            Length::Array(value, _) | Length::Bytes(value, _) | Length::String(value) => value,
         }
     }
 
     fn kind(self) -> Object {
         match self {
-            Length::Array(_) => Object::Array,
+            Length::Array(..) => Object::Array,
             Length::Bytes(..) => Object::Bytes,
             Length::String(_) => Object::String,
         }
@@ -97,7 +95,7 @@ fn length(ctx: &Context, value: Value) -> Option<Length> {
             return Some(Length::String(len.deref(ctx).get_operand(0)));
         }
         Operation::get_op::<ArrayLenOp>(len, ctx)?;
-        return Some(Length::Array(len.deref(ctx).get_operand(0)));
+        return Some(Length::Array(len.deref(ctx).get_operand(0), len));
     }
     (intrinsic(ctx, op) == Some(Intrinsic::BytesLength))
         .then(|| Length::Bytes(op.deref(ctx).get_operand(0), op))
@@ -109,52 +107,9 @@ fn may_detach(ctx: &Context, op: Ptr<Operation>) -> bool {
         || intrinsic(ctx, op) == Some(Intrinsic::ReaderReadByob)
 }
 
-struct Function {
-    blocks: Vec<Ptr<BasicBlock>>,
-    successors: HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-    predecessors: HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-}
-
-impl Function {
-    fn new(ctx: &Context, function: &FuncOp) -> Self {
-        let blocks: Vec<Ptr<BasicBlock>> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-        let mut successors: HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>> = HashMap::new();
-        let mut predecessors: HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>> = HashMap::new();
-        for &block in &blocks {
-            let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
-                continue;
-            };
-            for dest in terminator.deref(ctx).successors() {
-                successors.entry(block).or_default().push(dest);
-                predecessors.entry(dest).or_default().push(block);
-            }
-        }
-        Function {
-            blocks,
-            successors,
-            predecessors,
-        }
-    }
-
-    /// Blocks reachable from `from` (included) along edges that do not enter `avoid`.
-    fn reach(
-        &self,
-        from: Ptr<BasicBlock>,
-        avoid: Ptr<BasicBlock>,
-        edges: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-    ) -> HashSet<Ptr<BasicBlock>> {
-        crate::reachable([from], move |block| {
-            let next = edges.get(&block).into_iter().flatten().copied();
-            next.filter(move |&next| next != avoid)
-        })
-    }
-}
-
 /// A proof that `index < length` holds in the blocks `target` dominates.
 struct Fact {
-    branch: Ptr<BasicBlock>,
     target: Ptr<BasicBlock>,
-    index: Value,
     length: Length,
 }
 
@@ -167,23 +122,11 @@ pub(crate) fn prove_bounds(
 ) -> IRStatus {
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
-        let info = Function::new(ctx, &function);
-        let facts = facts(ctx, &info, numeric, &function);
+        let facts = facts(ctx, numeric, &function);
+        let mut lengths = Vec::new();
         for op in operations(ctx, &function) {
             if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
-                let array = op.deref(ctx).get_operand(0);
-                if let Some((minimum, maximum)) = numeric.array_length(&function, array)
-                    && minimum == maximum
-                {
-                    let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-                    let attr = IntegerAttr::new(ty, APInt::from_u64(minimum.into(), bw(32)));
-                    let constant = ConstantOp::new(ctx, Box::new(attr));
-                    constant.get_operation().insert_before(ctx, op);
-                    let result = op.deref(ctx).get_result(0);
-                    result.replace_all_uses_with(ctx, &constant.get_result(ctx));
-                    Operation::erase(op, ctx);
-                    status = IRStatus::Changed;
-                }
+                lengths.push(op);
                 continue;
             }
             let kind = if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
@@ -202,7 +145,6 @@ pub(crate) fn prove_bounds(
                 let operation = op.deref(ctx);
                 (operation.get_operand(0), operation.get_operand(1))
             };
-            let bytes = kind == Object::Bytes;
             if kind == Object::Array {
                 let array = object.get_type(ctx);
                 let array = array.deref(ctx);
@@ -227,10 +169,25 @@ pub(crate) fn prove_bounds(
                     .any(|fact| {
                         (fact.target == block
                             || dominance.block_strictly_dominates_block(ctx, fact.target, block))
-                            && (!bytes || stays_attached(ctx, &info, fact, block))
+                            && stable_length(ctx, numeric, &function, fact, op)
                     });
             if proven {
                 unchecked(ctx, op, object, index, kind);
+                status = IRStatus::Changed;
+            }
+        }
+        for op in lengths {
+            let array = op.deref(ctx).get_operand(0);
+            if let Some((minimum, maximum)) = numeric.array_length(&function, array)
+                && minimum == maximum
+            {
+                let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+                let attr = IntegerAttr::new(ty, APInt::from_u64(minimum.into(), bw(32)));
+                let constant = ConstantOp::new(ctx, Box::new(attr));
+                constant.get_operation().insert_before(ctx, op);
+                let result = op.deref(ctx).get_result(0);
+                result.replace_all_uses_with(ctx, &constant.get_result(ctx));
+                Operation::erase(op, ctx);
                 status = IRStatus::Changed;
             }
         }
@@ -240,12 +197,11 @@ pub(crate) fn prove_bounds(
 
 fn facts(
     ctx: &Context,
-    info: &Function,
     numeric: &crate::facts::ProgramFacts,
     function: &FuncOp,
 ) -> HashMap<(Value, Value, Object), Vec<Fact>> {
     let mut facts = HashMap::new();
-    for &block in &info.blocks {
+    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
         let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
             continue;
         };
@@ -272,10 +228,7 @@ fn facts(
         };
         let target = terminator.deref(ctx).get_successor(succ);
         let other = terminator.deref(ctx).get_successor(1 - succ);
-        let single = info
-            .predecessors
-            .get(&target)
-            .is_some_and(|preds| preds.len() == 1);
+        let single = target.num_preds(ctx) == 1;
         if target == other || !single || !numeric.is_count(ctx, function, index) {
             continue;
         }
@@ -285,43 +238,31 @@ fn facts(
         facts
             .entry((length.object(), index, length.kind()))
             .or_insert_with(Vec::new)
-            .push(Fact {
-                branch: block,
-                target,
-                index,
-                length,
-            });
+            .push(Fact { target, length });
     }
     facts
 }
 
-/// Whether no operation between `fact`'s length read and a read in `block` may detach the
-/// view (see the module documentation).
-fn stays_attached(ctx: &Context, info: &Function, fact: &Fact, block: Ptr<BasicBlock>) -> bool {
-    let Length::Bytes(_, read) = fact.length else {
-        return true;
+/// Array mutation and byte detachment invalidate the length observed by a branch.
+fn stable_length(
+    ctx: &Context,
+    numeric: &crate::facts::ProgramFacts,
+    function: &FuncOp,
+    fact: &Fact,
+    consumer: Ptr<Operation>,
+) -> bool {
+    let read = match fact.length {
+        Length::Array(_, read) | Length::Bytes(_, read) => read,
+        Length::String(_) => return true,
     };
-    if read.deref(ctx).get_parent_block() != Some(fact.branch) {
-        return false;
-    }
-    let mut after = read.deref(ctx).get_next();
-    while let Some(op) = after {
-        if may_detach(ctx, op) {
-            return false;
-        }
-        after = op.deref(ctx).get_next();
-    }
-    // Paths from the branch's target to the read that do not redefine the index.
-    let Some(defined) = fact.index.get_parent_block(ctx) else {
-        return false;
-    };
-    let forward = info.reach(fact.target, defined, &info.successors);
-    let backward = info.reach(block, defined, &info.predecessors);
-    let mut on_paths: HashSet<Ptr<BasicBlock>> = forward.intersection(&backward).copied().collect();
-    on_paths.extend([fact.target, block]);
-    on_paths
-        .iter()
-        .all(|&on_path| on_path.deref(ctx).iter(ctx).all(|op| !may_detach(ctx, op)))
+    let mut array_invalidated = matches!(fact.length, Length::Array(..))
+        .then(|| numeric.array_length_invalidation(ctx, function, fact.length.object()));
+    crate::facts::paths::preserves(ctx, read, consumer, (), |op, ()| {
+        let invalidated = array_invalidated
+            .as_mut()
+            .map_or_else(|| may_detach(ctx, op), |invalidates| invalidates(op));
+        (!invalidated).then_some(())
+    })
 }
 
 /// Turn the checked read `op` into an unchecked one, wrapped back into `T | undefined`

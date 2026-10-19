@@ -1,4 +1,5 @@
 //! Ownership checks precede canonical calls; resource aliases share one opaque descriptor.
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
 use wasmtime::{
     Engine, Store,
@@ -7,20 +8,6 @@ use wasmtime::{
 
 use crate::engine::async_engine;
 
-fn compile(source: &str, wit: &str) -> Result<Vec<u8>> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("resources.wit", wit)?;
-    let world = resolve.select_world(&[package], Some("boundary"))?;
-    Ok(perry_wit::compiler::compile_for_world_with_memory_checks(
-        source,
-        "resources.ts",
-        &resolve,
-        world,
-    )?
-    .component
-    .unwrap()
-    .stripped)
-}
 const WIT: &str = "package test:boundary;
 interface secrets {
     resource secret;
@@ -76,7 +63,10 @@ fn imported_resources_transfer_borrow_collect_and_rollback() -> Result<()> {
             "import {{get,reveal,take,pair,dropSecret}} from 'test:boundary/secrets'; export function run(value:number):number {{{body}}}"
         );
         let engine = Engine::default();
-        let component = Component::new(&engine, compile(&source, WIT)?)?;
+        let component = Component::new(
+            &engine,
+            MemoryChecked.component(WIT, "boundary", "resources.ts", &source)?,
+        )?;
         let mut linker = Linker::<Counts>::new(&engine);
         let mut host = linker.instance("test:boundary/secrets")?;
         host.resource("secret", ResourceType::host::<Secret>(), |mut store, _| {
@@ -128,7 +118,10 @@ fn exported_resources_preserve_representations_and_expire_saved_borrows() -> Res
     let wit = "package test:boundary; interface secrets {resource secret; get:func(value:u32)->result<secret>; reveal:func(value:borrow<secret>)->result<u32>; stale:func()->result<u32>;} world boundary {export secrets;}";
     let source = "import type {Secret} from 'test:boundary/secrets'; import {newSecret,secretRep} from 'test:boundary/secrets'; let saved:Secret|undefined=undefined; export function secretsGet(value:number):Secret {return newSecret(value);} export function secretsReveal(value:Secret):number {saved=value;return secretRep(value);} export function secretsStale():number {try {return secretRep(saved);} catch(e) {if(e instanceof TypeError)return 7;return 0;}}";
     let engine = Engine::default();
-    let component = Component::new(&engine, compile(source, wit)?)?;
+    let component = Component::new(
+        &engine,
+        MemoryChecked.component(wit, "boundary", "resources.ts", source)?,
+    )?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let (_, interface) = instance
@@ -183,7 +176,10 @@ async fn async_resource_borrows_release_only_after_acknowledgement() -> Result<(
             "import {{get,work,dropSecret}} from 'test:boundary/secrets'; export async function run(value:number):Promise<number> {{const a=get(value);const p=work(a);{body}}}"
         );
         let engine = async_engine()?;
-        let component = Component::new(&engine, compile(&source, wit)?)?;
+        let component = Component::new(
+            &engine,
+            MemoryChecked.component(wit, "boundary", "resources.ts", &source)?,
+        )?;
         let mut linker = Linker::<Counts>::new(&engine);
         let ack = Arc::new(AtomicU32::new(0));
         let destroyed_after = ack.clone();
@@ -252,7 +248,10 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
         world boundary {import secrets;export service;}";
     let source = "import type {Secret} from 'test:boundary/secrets'; import {get,inspect} from 'test:boundary/secrets'; export function serviceGet(value:number):Secret {return get(value);} export async function serviceRun(value:Secret):Promise<number> {return await inspect(value);}";
     let engine = async_engine()?;
-    let component = Component::new(&engine, compile(source, wit)?)?;
+    let component = Component::new(
+        &engine,
+        MemoryChecked.component(wit, "boundary", "resources.ts", source)?,
+    )?;
     let mut store = Store::new(&engine, 0u32);
     let mut linker = Linker::new(&engine);
     let calls = Arc::new(AtomicU32::new(0));
@@ -316,7 +315,10 @@ async fn imported_borrows_pass_through_overlapping_host_transfers() -> Result<()
 #[test]
 fn ambiguous_imported_and_exported_resource_declarations_are_diagnosed() {
     let wit = "package test:boundary; interface tokens {resource token;} world boundary {import tokens;export tokens;}";
-    let error = compile("", wit).unwrap_err().to_string();
+    let error = crate::world::Compiler::MemoryChecked
+        .component(wit, "boundary", "resources.ts", "")
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("resource identities are distinct"),
         "{error}"
@@ -336,7 +338,10 @@ fn nested_tagged_results_transfer_each_resource_once() -> Result<()> {
             return {ok:false,error:result.error};
         }";
     let engine = Engine::default();
-    let component = Component::new(&engine, compile(source, wit)?)?;
+    let component = Component::new(
+        &engine,
+        MemoryChecked.component(wit, "boundary", "resources.ts", source)?,
+    )?;
     let mut linker = Linker::<Counts>::new(&engine);
     let mut host = linker.instance("test:boundary/secrets")?;
     host.resource("secret", ResourceType::host::<Secret>(), |mut store, _| {

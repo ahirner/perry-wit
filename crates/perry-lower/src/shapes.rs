@@ -43,13 +43,6 @@ enum ShapeKey {
     Utility(String, Vec<ArgumentId>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum DecoderInput {
-    Snapshot,
-    Cursor,
-    Text,
-}
-
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
 /// annotated with a width-specific integer type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -86,7 +79,6 @@ enum PendingShape {
 pub(super) struct Shapes<'h> {
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
-    pub(super) decoders: RefCell<HashMap<(TypeHandle, DecoderInput), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
     pub(super) type_env: perry_hir::HirTypeEnv,
@@ -216,7 +208,6 @@ impl<'h> Shapes<'h> {
         }
         Shapes {
             module,
-            decoders: RefCell::new(HashMap::new()),
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
             global_ids,
@@ -457,38 +448,8 @@ impl<'h> Shapes<'h> {
             if let Some(entry) = self.imported_types.get(name) {
                 return self.foreign_value_type(ctx, entry);
             }
-            match name {
-                "AbortController" | "AbortSignal" => {
-                    return Ok(perry_mir::AbortType::get(ctx).into());
-                }
-                "Uint8Array" => return Ok(perry_mir::BytesType::get(ctx).into()),
-                "URL" => return Ok(perry_mir::UrlType::get(ctx).into()),
-                "URLSearchParams" => return Ok(perry_mir::SearchParamsType::get(ctx).into()),
-                "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" => {
-                    return Ok(perry_mir::ExceptionType::get(ctx).into());
-                }
-                "RegExp" => return Ok(perry_mir::RegexType::get(ctx).into()),
-                "Date" => return Ok(perry_mir::DateType::get(ctx).into()),
-                "Temporal.Instant" => return Ok(perry_mir::InstantType::get(ctx).into()),
-                "Temporal.PlainDate" => {
-                    return Ok(perry_mir::PlainDateType::get(ctx).into());
-                }
-                "Temporal.PlainDateTime" => {
-                    return Ok(perry_mir::PlainDateTimeType::get(ctx).into());
-                }
-                "Headers" => return Ok(perry_mir::HeadersType::get(ctx).into()),
-                "Response" => return Ok(perry_mir::ResponseType::get(ctx).into()),
-                "Request" => return Ok(perry_mir::RequestType::get(ctx).into()),
-                "ReadableStream" => return Ok(perry_mir::ReadableType::get(ctx).into()),
-                "ArrayBuffer" => return Ok(perry_mir::ByteBufferType::get(ctx).into()),
-                "ReadableStreamBYOBReader" => {
-                    return Ok(perry_mir::ByobReaderType::get(ctx).into());
-                }
-                "ReadableStreamDefaultReader" => {
-                    return Ok(perry_mir::ReaderType::get(ctx).into());
-                }
-                "TextDecoder" => return Ok(perry_mir::DecoderType::get(ctx).into()),
-                _ => {}
+            if let Some(ty) = perry_mir::ValueKind::builtin_type(ctx, name) {
+                return Ok(ty);
             }
             if let Some(entry) = self.foreign.get(name) {
                 return self.foreign_value_type(ctx, entry);

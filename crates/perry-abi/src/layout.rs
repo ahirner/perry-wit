@@ -2,7 +2,12 @@
 #[path = "layout/time.rs"]
 pub mod time;
 
+pub mod json {
+    pub const NEXT: usize = 4;
+}
+
 pub mod record {
+    pub const PACKED_FIELDS: usize = 8;
     pub const ORDER: u32 = 0;
     pub const JSON: u32 = 4;
     pub const HEADER: u32 = 8;
@@ -69,6 +74,7 @@ pub mod variant {
     pub const VALUE: u32 = 8;
     pub const SIZE: u32 = 16;
     pub const JSON: u32 = SIZE;
+    pub const RETAINED_SIZE: u32 = SIZE + 8;
 }
 
 /// Native helpers and Wasm code share this definition, including string headers.
@@ -157,7 +163,8 @@ pub mod roots {
     pub const CAPACITY: u32 = 8;
 }
 
-/// Compiler-emitted native layout descriptors read by `perry-std` cause reflection.
+/// Native storage descriptors shared by cause reflection and JSON.
+/// JSON references carry absence flags in their low bits; reflection keeps the OPTIONAL prefix.
 pub mod descriptor {
     pub const NUMBER: u32 = 1;
     pub const BOOLEAN: u32 = 2;
@@ -168,7 +175,34 @@ pub mod descriptor {
     pub const OPTIONAL: u32 = 7;
     pub const SIGNED_INT: u32 = 8;
     pub const UNSIGNED_INT: u32 = 9;
+    pub const JSON_VALUE: u32 = 10;
+    pub const JSON_NUMERIC: u32 = 11;
+    pub const JSON_TUPLE: u32 = 12;
+    pub const JSON_VARIANT: u32 = 13;
+    pub const JSON_NUMBER_STRING: u32 = 14;
+    pub const JSON_DICTIONARY: u32 = 15;
+    pub const JSON_DATE: u32 = 16;
+    pub const UNDEFINED_ALLOWED: u32 = 1;
+    pub const NULL_ALLOWED: u32 = 2;
+    pub const ABSENCE_MASK: u32 = UNDEFINED_ALLOWED | NULL_ALLOWED;
+    pub const SCHEMA_MASK: i32 = !(ABSENCE_MASK as i32);
+    pub const UNDEFINED_BITS: u64 = 0x7ff0_0000_0000_0001;
+    pub const OMITTED_BITS: u64 = 0x7ff0_0000_0000_0003;
+    pub const UNDEFINED_BOOL: i32 = 2;
+    pub const OMITTED_BOOL: i32 = 4;
+    pub const OMITTED_REF: i32 = 2;
+    pub const COPY_UNDEFINED: i32 = -1;
+    pub const COPY_ABSENT: i32 = -2;
+    pub const COPY_NONFINITE: i32 = -3;
+    pub const VARIANT_TAG: i32 = -4;
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
+
+    const _: () = {
+        assert!(NULL_NUMBER_BITS == UNDEFINED_BITS + 1 && OMITTED_BITS == UNDEFINED_BITS + 2);
+        assert!(OMITTED_BOOL == UNDEFINED_BOOL + 2 && OMITTED_REF == 2);
+        assert!(super::numeric::NULL == super::numeric::UNDEFINED + 1);
+        assert!(super::numeric::OMITTED == super::numeric::UNDEFINED + 2);
+    };
 }
 
 #[path = "layout/regex.rs"]

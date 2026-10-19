@@ -1,19 +1,8 @@
 //! Runtime capabilities and local effect constraints for ProgramFacts.
 use crate::{
-    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, callee, is_async},
-    collections::{
-        ArrayExtendOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp, ConcatOp,
-        ConcatReuseOp, ConcatSegmentsOp, NativeJsonOp, StringConstOp,
-    },
-    exceptions::{CatchOp, ErrorNewOp, ExceptionMessageOp, RaiseOp},
-    foreign::ForeignOp,
-    heap::{AllocOp, FieldSetOp},
-    intrinsics::{
-        JsonStringifyOp, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, intrinsic_of,
-    },
-    is_any,
-    locals::StoreOp,
-    variants::VariantNewOp,
+    calls::{callee, is_async},
+    collections::StringConstOp,
+    semantics::{OperationKind, PrimitiveSemantics},
 };
 use pliron::{
     builtin::{
@@ -23,7 +12,7 @@ use pliron::{
     context::{Context, Ptr},
     graph::traversals::region::sccs_in_topological_order,
     linked_list::ContainsLinkedList,
-    op::Op,
+    op::{Op, op_cast},
     operation::Operation,
     result::Result,
     r#type::Typed,
@@ -77,6 +66,7 @@ pub struct Effects {
     pub unhandled_await: bool,
     pub writes_record: bool,
     pub writes_state: bool,
+    pub(crate) shrinks_arrays: bool,
     pub failure: Failure,
     /// Runtime-managed values or effectful services whose task independence is unproven.
     pub task_state: bool,
@@ -146,6 +136,7 @@ impl LocalEffects {
             synchronous && callee.unhandled_await && !self.handled.contains(&call);
         current.writes_record |= callee.writes_record;
         current.writes_state |= callee.writes_state;
+        current.shrinks_arrays |= callee.shrinks_arrays;
         current.task_state |= callee.task_state;
         if synchronous && callee.failure.throws() {
             current.failure = self.fail(current.failure, call, callee.failure.escapes());
@@ -155,6 +146,26 @@ impl LocalEffects {
         current.unknown_helper_bound |= callee.unknown_helper_bound;
         current.may_collect |= current.may_suspend || current.may_reenter;
         current
+    }
+}
+
+/// Explicit storage mutations. Operand zero is the destination.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mutation {
+    Field { slot: Option<usize> },
+    Element { index: Option<usize> },
+    Extend,
+    Truncate,
+    Local,
+}
+
+impl Mutation {
+    pub(crate) fn stored_operand(self) -> Option<usize> {
+        match self {
+            Self::Element { index: Some(_) } => Some(2),
+            Self::Truncate => None,
+            _ => Some(1),
+        }
     }
 }
 
@@ -171,51 +182,8 @@ pub enum Allocation {
 
 /// Allocation includes hidden temporaries and exception construction inside helpers.
 pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
-    let bigint_cast = || {
-        Operation::is_op::<crate::scalar::NumericCastOp>(op, ctx)
-            && op
-                .deref(ctx)
-                .get_result(0)
-                .get_type(ctx)
-                .deref(ctx)
-                .is::<crate::types::BigIntType>()
-    };
-    if let Some(intrinsic) = intrinsic_of(ctx, op) {
-        intrinsic.allocation()
-    } else if bigint_cast()
-        || (Operation::is_op::<FieldSetOp>(op, ctx)
-            && crate::absence(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
-                .is_some_and(|absence| absence.admits_undefined()))
-        || is_any::<(
-            NativeJsonOp,
-            ConcatSegmentsOp,
-            AllocOp,
-            ArrayNewOp,
-            ArrayPushOp,
-        )>(ctx, op)
-        || is_any::<(
-            ArrayExtendOp,
-            ArraySetOp,
-            VariantNewOp,
-            ConcatOp,
-            ConcatReuseOp,
-        )>(ctx, op)
-    {
-        Allocation::Atomic
-    } else if is_any::<(ForeignOp, TimerOp, PromiseResolvedOp, PromiseRejectedOp)>(ctx, op)
-        || is_any::<(
-            PromiseCombinatorOp,
-            JsonStringifyOp,
-            ErrorNewOp,
-            RaiseOp,
-            CatchOp,
-        )>(ctx, op)
-        || Operation::is_op::<ExceptionMessageOp>(op, ctx)
-    {
-        Allocation::Conservative
-    } else {
-        Allocation::None
-    }
+    op_cast::<dyn PrimitiveSemantics>(Operation::get_op_dyn(op, ctx).as_ref())
+        .map_or(Allocation::None, |semantics| semantics.allocation(ctx))
 }
 
 pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
@@ -268,12 +236,19 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 if crate::exceptions::is_handled(ctx, op) {
                     local[index].handled.insert(op);
                 }
+                let kind = OperationKind::classify(ctx, op);
                 let allocation = allocation(ctx, op);
-                let intrinsic = intrinsic_of(ctx, op);
-                let call = Operation::is_op::<CallOp>(op, ctx);
-                let async_call = Operation::is_op::<AsyncCallOp>(op, ctx);
-                let wait = Operation::is_op::<AwaitOp>(op, ctx);
-                let foreign = Operation::is_op::<ForeignOp>(op, ctx);
+                let intrinsic = match kind {
+                    OperationKind::Intrinsic(i) => Some(i),
+                    _ => None,
+                };
+                let call = kind
+                    == OperationKind::Call {
+                        asynchronous: false,
+                    };
+                let async_call = kind == OperationKind::Call { asynchronous: true };
+                let wait = kind == OperationKind::Await;
+                let foreign = matches!(kind, OperationKind::Foreign(_));
                 if atomic {
                     let closed = callee.is_none()
                         || target.is_some_and(|i| local[i].effects.atomic_construction);
@@ -293,19 +268,13 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                         );
                     }
                 }
-                let writes_record = Operation::is_op::<FieldSetOp>(op, ctx);
+                let writes_record = matches!(kind, OperationKind::Mutate(Mutation::Field { .. }));
                 effects.writes_record |= writes_record;
-                effects.writes_state |= writes_record
-                    || foreign
-                    || is_any::<(
-                        ArraySetOp,
-                        ArrayPushOp,
-                        ArrayExtendOp,
-                        ArrayTruncateOp,
-                        StoreOp,
-                    )>(ctx, op);
+                effects.writes_state |= matches!(kind, OperationKind::Mutate(_)) || foreign;
+                effects.shrinks_arrays |= kind == OperationKind::Mutate(Mutation::Truncate);
                 let operation = op.deref(ctx);
-                effects.task_state |= intrinsic.is_some_and(|i| !i.pure())
+                effects.task_state |= intrinsic
+                    .is_some_and(|i| i.policy().effect != crate::intrinsics::ServiceEffect::Pure)
                     || operation
                         .operands()
                         .chain(operation.results())
@@ -331,7 +300,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 effects.may_suspend |= wait || async_call;
                 effects.may_reenter |= foreign;
                 effects.host_work |= foreign
-                    || Operation::is_op::<TimerOp>(op, ctx)
+                    || kind == OperationKind::Timer
                     || intrinsic.is_some()
                         && operation.results().any(|value| {
                             value
@@ -340,8 +309,8 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                                 .is::<crate::types::PromiseType>()
                         });
                 effects.unknown_helper_bound |= foreign
-                    || intrinsic.is_some_and(|i| i.allocation() == Allocation::Conservative)
-                    || Operation::is_op::<JsonStringifyOp>(op, ctx);
+                    || intrinsic.is_some_and(|i| i.policy().allocation == Allocation::Conservative)
+                    || matches!(kind, OperationKind::Stringify | OperationKind::JsonDecode);
                 if let Some(target) = target {
                     callees[index].push(target);
                 } else if callee.is_some() {
@@ -354,6 +323,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                         host_work: true,
                         writes_record: true,
                         writes_state: true,
+                        shrinks_arrays: true,
                         task_state: true,
                         unknown_helper_bound: true,
                         ..effects

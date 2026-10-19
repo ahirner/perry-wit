@@ -2,6 +2,10 @@
 use super::*;
 use perry_hir::ir::{Class, Interface, TypeAlias};
 
+mod resolution;
+use resolution::Query;
+pub(super) use resolution::Resolver;
+
 const RESOLUTION_DEPTH: usize = 32;
 const ARGUMENT_LIMIT: usize = 4096;
 
@@ -144,20 +148,6 @@ fn generic_parts(kind: &Kind) -> Option<(&str, &[ArgumentId])> {
     }
 }
 
-fn instantiate_alias<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    base: &str,
-    arguments: &[ArgumentId],
-) -> Option<ArgumentId> {
-    let (_, Declaration::Alias(alias)) = Declaration::find(lookup, base)? else {
-        return None;
-    };
-    let bindings = Declaration::Alias(alias).bind(ctx, base, arguments).ok()?;
-    let mut remaining = ARGUMENT_LIMIT;
-    Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()
-}
-
 fn union_of(ctx: &Context, members: Vec<ArgumentId>) -> ArgumentId {
     match members.as_slice() {
         [] => Argument::from_kind(ctx, Kind::Never),
@@ -194,6 +184,8 @@ impl<'s> Shapes<'s> {
         base: &str,
         arguments: &[ArgumentId],
     ) -> Result<TypeHandle> {
+        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
+        let resolver = Resolver::new(ctx, &lookup);
         if !self.is_user_type(base) {
             if base == "Readonly"
                 && let [inner] = arguments
@@ -201,11 +193,9 @@ impl<'s> Shapes<'s> {
                 return self.source_type(ctx, *inner);
             }
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
-                let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-                let expanded = expand_utility_type_with_lookup(ctx, &lookup, base, arguments, 0)
-                    .with_context(|| {
-                        format!("MIR backend could not resolve utility type {base}")
-                    })?;
+                let expanded = resolver.utility_type(base, arguments, 0).with_context(|| {
+                    format!("MIR backend could not resolve utility type {base}")
+                })?;
                 return self.source_type(ctx, expanded);
             }
             if matches!(base, "Partial" | "Required" | "Pick" | "Omit") {
@@ -213,12 +203,12 @@ impl<'s> Shapes<'s> {
                 if let Some(ty) = self.named.borrow().get(&key) {
                     return Ok(*ty);
                 }
-                let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-                let properties =
-                    resolve_utility_record_properties(ctx, &lookup, base, arguments, 0)
-                        .with_context(|| {
-                            format!("MIR backend could not resolve utility type {base}")
-                        })?;
+                let properties = resolver
+                    .named(base, arguments, false, Query::Record, 0)
+                    .and_then(|(view, _)| view.properties(ctx))
+                    .with_context(|| {
+                        format!("MIR backend could not resolve utility type {base}")
+                    })?;
                 let ty: TypeHandle = self
                     .source_record(
                         ctx,
@@ -235,7 +225,6 @@ impl<'s> Shapes<'s> {
                 return Ok(ty);
             }
         }
-        let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         let (identity, declaration) = Declaration::find(&lookup, base).with_context(|| {
             format!("MIR backend does not support unresolved generic type {base}")
         })?;
@@ -245,7 +234,7 @@ impl<'s> Shapes<'s> {
             .iter()
             .map(|parameter| bindings[parameter.name.as_str()])
             .collect();
-        let key = ShapeKey::Generic(identity, effective_args.clone());
+        let key = ShapeKey::Generic(identity, effective_args);
         if let Some(ty) = self.named.borrow().get(&key) {
             return Ok(*ty);
         }
@@ -255,72 +244,62 @@ impl<'s> Shapes<'s> {
         );
         let mut remaining = usize::MAX;
         let ty = match declaration {
-            Declaration::Interface(interface) => {
-                ensure!(
-                    interface.methods.is_empty(),
-                    "interface {base}: methods are not supported yet"
-                );
-                let properties =
-                    collect_interface_properties(ctx, &lookup, interface, &bindings, 0)
-                        .with_context(|| {
-                            format!("failed to resolve inherited properties of interface {base}")
-                        })?;
-                self.source_record(
-                    ctx,
-                    Some(&key),
-                    properties
-                        .iter()
-                        .map(|(name, ty, optional)| (name.as_str(), *ty, *optional))
-                        .collect(),
-                )?
-                .into()
-            }
-            Declaration::Class(class) => {
-                let properties = collect_class_properties(ctx, class, &bindings)
-                    .with_context(|| format!("failed to resolve fields of class {base}"))?;
-                let prefix = format!("class_{}", class.name);
-                let rec = self.source_record_prefix(
-                    ctx,
-                    Some(&key),
-                    Some(&prefix),
-                    properties
-                        .iter()
-                        .map(|(name, ty, optional)| (name.as_str(), *ty, *optional))
-                        .collect(),
-                )?;
-                let ty: TypeHandle = rec.into();
-                self.class_records
-                    .borrow_mut()
-                    .insert(ty, (class.name.clone(), effective_args));
+            Declaration::Interface(_) | Declaration::Class(_) => {
+                if let Declaration::Interface(interface) = declaration {
+                    ensure!(
+                        interface.methods.is_empty(),
+                        "interface {base}: methods are not supported yet"
+                    );
+                }
+                let prefix = match declaration {
+                    Declaration::Class(class) => Some(format!("class_{}", class.name)),
+                    _ => None,
+                };
+                let properties = resolver
+                    .fields(declaration, &bindings, 0)
+                    .with_context(|| {
+                        let subject = if prefix.is_some() {
+                            "fields of class"
+                        } else {
+                            "inherited properties of interface"
+                        };
+                        format!("failed to resolve {subject} {base}")
+                    })?;
+                let ty: TypeHandle = self
+                    .source_record_prefix(
+                        ctx,
+                        Some(&key),
+                        prefix.as_deref(),
+                        properties
+                            .iter()
+                            .map(|(name, ty, optional)| (name.as_str(), *ty, *optional))
+                            .collect(),
+                    )?
+                    .into();
+                if let Declaration::Class(class) = declaration
+                    && let ShapeKey::Generic(_, arguments) = &key
+                {
+                    self.class_records
+                        .borrow_mut()
+                        .insert(ty, (class.name.clone(), arguments.clone()));
+                }
                 ty
             }
             Declaration::Alias(alias) => {
                 let value = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)?;
-                let object_fields: Option<Vec<(String, ArgumentId, bool)>> = {
-                    let value_ref = value.deref(ctx);
-                    if let Kind::Object {
-                        properties,
-                        index_signature: None,
-                        ..
-                    } = value_ref.kind()
-                    {
-                        Some(
-                            properties
-                                .iter()
-                                .map(|p| (p.name.clone(), p.ty, p.optional))
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    }
-                };
-                if let Some(properties) = object_fields {
+                let value_ref = value.deref(ctx);
+                if let Kind::Object {
+                    properties,
+                    index_signature: None,
+                    ..
+                } = value_ref.kind()
+                {
                     self.source_record(
                         ctx,
                         Some(&key),
                         properties
                             .iter()
-                            .map(|(name, ty, opt)| (name.as_str(), *ty, *opt))
+                            .map(|p| (p.name.as_str(), p.ty, p.optional))
                             .collect(),
                     )?
                     .into()
@@ -345,374 +324,20 @@ impl<'s> Shapes<'s> {
     }
 }
 
-pub(super) fn collect_class_properties(
-    ctx: &Context,
-    class: &Class,
-    bindings: &HashMap<&str, ArgumentId>,
-) -> Option<Vec<(String, ArgumentId, bool)>> {
-    let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
-    let mut remaining = ARGUMENT_LIMIT;
-    for f in &class.fields {
-        let field_ty = Argument::from_hir(ctx, &f.ty, bindings, &mut remaining).ok()?;
-        if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == f.name) {
-            *existing = (f.name.clone(), field_ty, false);
-        } else {
-            merged.push((f.name.clone(), field_ty, false));
-        }
-    }
-    Some(merged)
-}
-
-pub(super) fn collect_interface_properties<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    interface: &Interface,
-    bindings: &HashMap<&str, ArgumentId>,
-    depth: usize,
-) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
-    let mut merged: Vec<(String, ArgumentId, bool)> = Vec::new();
-    let mut remaining = ARGUMENT_LIMIT;
-    for ext in &interface.extends {
-        let ext_sub = Argument::from_hir(ctx, ext, bindings, &mut remaining).ok()?;
-        let parent_props = resolve_record_properties(ctx, lookup, ext_sub, depth + 1)?;
-        for (name, ty, opt) in parent_props {
-            if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == name) {
-                *existing = (name, ty, opt);
-            } else {
-                merged.push((name, ty, opt));
-            }
-        }
-    }
-    for p in &interface.properties {
-        let prop_ty = Argument::from_hir(ctx, &p.ty, bindings, &mut remaining).ok()?;
-        if let Some(existing) = merged.iter_mut().find(|(n, _, _)| *n == p.name) {
-            *existing = (p.name.clone(), prop_ty, p.optional);
-        } else {
-            merged.push((p.name.clone(), prop_ty, p.optional));
-        }
-    }
-    Some(merged)
-}
-
-pub(super) fn flatten_union_with_lookup<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    members: &[ArgumentId],
-    depth: usize,
-) -> Vec<ArgumentId> {
-    if depth >= RESOLUTION_DEPTH {
-        return members.to_vec();
-    }
-    let nested = |target: ArgumentId| match target.deref(ctx).kind() {
-        Kind::Union(members) => Some(members.clone()),
-        Kind::Named(_) | Kind::Generic { .. } => {
-            let flat = flatten_union_with_lookup(ctx, lookup, &[target], depth + 1);
-            (flat != [target]).then_some(flat)
-        }
-        _ => None,
-    };
-    let mut out = Vec::new();
-    for &member in members {
-        let nested_union = match member.deref(ctx).kind() {
-            Kind::Union(nested) => Some(nested.clone()),
-            Kind::Named(name) => {
-                let name = name.clone();
-                if let Some((_, alias)) = lookup.type_alias(&name)
-                    && alias.type_params.is_empty()
-                {
-                    let mut remaining = ARGUMENT_LIMIT;
-                    if let Ok(target) =
-                        Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining)
-                    {
-                        nested(target)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            Kind::Generic { base, arguments } => {
-                let base = base.clone();
-                let arguments = arguments.clone();
-                if let Some(expanded) =
-                    expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
-                {
-                    Some(vec![expanded])
-                } else {
-                    instantiate_alias(ctx, lookup, &base, &arguments).and_then(nested)
-                }
-            }
-            _ => None,
-        };
-        if let Some(nested) = nested_union {
-            for item in flatten_union_with_lookup(ctx, lookup, &nested, depth + 1) {
-                if !out.contains(&item) {
-                    out.push(item);
-                }
-            }
-        } else if !out.contains(&member) {
-            out.push(member);
-        }
-    }
-    out
-}
-
-fn union_member_matches<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    member: ArgumentId,
-    pattern: ArgumentId,
-    depth: usize,
-) -> bool {
-    if depth >= RESOLUTION_DEPTH {
-        return false;
-    }
-    if member == pattern {
-        return true;
-    }
-    if matches!(
-        (member.deref(ctx).kind(), pattern.deref(ctx).kind()),
-        (Kind::StringLiteral(_), Kind::String) | (Kind::Number, Kind::Number)
-    ) {
-        return true;
-    }
-    if let (Some(member_props), Some(pattern_props)) = (
-        resolve_record_properties(ctx, lookup, member, depth + 1),
-        resolve_record_properties(ctx, lookup, pattern, depth + 1),
-    ) {
-        return !pattern_props.is_empty()
-            && pattern_props.iter().all(|(p_name, p_ty, p_opt)| {
-                member_props.iter().any(|(m_name, m_ty, m_opt)| {
-                    m_name == p_name
-                        && (!*m_opt || *p_opt)
-                        && union_member_matches(ctx, lookup, *m_ty, *p_ty, depth + 1)
-                })
-            });
-    }
-    false
-}
-
-pub(super) fn expand_utility_type_with_lookup<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    base: &str,
-    arguments: &[ArgumentId],
-    depth: usize,
-) -> Option<ArgumentId> {
-    if depth >= RESOLUTION_DEPTH
-        || lookup.interface(base).is_some()
-        || lookup.type_alias(base).is_some()
-    {
-        return None;
-    }
-    match (base, arguments) {
-        ("NonNullable", [target]) => {
-            let members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
-            let filtered: Vec<ArgumentId> = members
-                .into_iter()
-                .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void))
-                .collect();
-            Some(union_of(ctx, filtered))
-        }
-        ("Exclude" | "Extract", [target, selected]) => {
-            let members = flatten_union_with_lookup(ctx, lookup, &[*target], depth + 1);
-            let selected = flatten_union_with_lookup(ctx, lookup, &[*selected], depth + 1);
-            Some(union_of(
-                ctx,
-                members
-                    .into_iter()
-                    .filter(|member| {
-                        selected.iter().any(|candidate| {
-                            union_member_matches(ctx, lookup, *member, *candidate, depth + 1)
-                        }) == (base == "Extract")
-                    })
-                    .collect(),
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn extract_string_keys<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    ty: ArgumentId,
-    depth: usize,
-) -> Option<Vec<String>> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
-    match ty.deref(ctx).kind() {
-        Kind::StringLiteral(s) => Some(vec![s.clone()]),
-        Kind::Union(members) => {
-            let members = members.clone();
-            let mut keys = Vec::new();
-            for m in members {
-                keys.extend(extract_string_keys(ctx, lookup, m, depth + 1)?);
-            }
-            Some(keys)
-        }
-        Kind::Named(name) => {
-            let name = name.clone();
-            let (_, alias) = lookup.type_alias(&name)?;
-            if !alias.type_params.is_empty() {
-                return None;
-            }
-            let mut remaining = ARGUMENT_LIMIT;
-            let target =
-                Argument::from_hir(ctx, &alias.ty, &HashMap::new(), &mut remaining).ok()?;
-            extract_string_keys(ctx, lookup, target, depth + 1)
-        }
-        Kind::Generic { base, arguments } => {
-            let base = base.clone();
-            let arguments = arguments.clone();
-            if let Some(expanded) =
-                expand_utility_type_with_lookup(ctx, lookup, &base, &arguments, depth + 1)
-            {
-                return extract_string_keys(ctx, lookup, expanded, depth + 1);
-            }
-            let target = instantiate_alias(ctx, lookup, &base, &arguments)?;
-            extract_string_keys(ctx, lookup, target, depth + 1)
-        }
-        _ => None,
-    }
-}
-
 fn strip_void_arg(ctx: &Context, ty: ArgumentId) -> ArgumentId {
-    let items = match ty.deref(ctx).kind() {
-        Kind::Union(items) => items.clone(),
-        _ => return ty,
+    let argument = ty.deref(ctx);
+    let Kind::Union(items) = argument.kind() else {
+        return ty;
     };
     let filtered: Vec<ArgumentId> = items
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|item| !matches!(item.deref(ctx).kind(), Kind::Void))
         .collect();
     if filtered.is_empty() {
         Argument::from_kind(ctx, Kind::Void)
-    } else if filtered.len() == 1 {
-        filtered[0]
     } else {
-        Argument::from_kind(ctx, Kind::Union(filtered))
-    }
-}
-
-pub(super) fn resolve_utility_record_properties<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    base: &str,
-    arguments: &[ArgumentId],
-    depth: usize,
-) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= RESOLUTION_DEPTH
-        || lookup.interface(base).is_some()
-        || lookup.type_alias(base).is_some()
-    {
-        return None;
-    }
-    match (base, arguments) {
-        ("Readonly", [inner]) => resolve_record_properties(ctx, lookup, *inner, depth + 1),
-        ("Exclude" | "Extract" | "NonNullable", _) => {
-            let expanded =
-                expand_utility_type_with_lookup(ctx, lookup, base, arguments, depth + 1)?;
-            resolve_record_properties(ctx, lookup, expanded, depth + 1)
-        }
-        ("Partial", [inner]) => {
-            let mut props = resolve_record_properties(ctx, lookup, *inner, depth + 1)?;
-            for (_, _, opt) in &mut props {
-                *opt = true;
-            }
-            Some(props)
-        }
-        ("Required", [inner]) => {
-            let mut props = resolve_record_properties(ctx, lookup, *inner, depth + 1)?;
-            for (_, ty, opt) in &mut props {
-                *opt = false;
-                *ty = strip_void_arg(ctx, *ty);
-            }
-            Some(props)
-        }
-        ("Pick", [inner, keys_ty]) => {
-            let keys = extract_string_keys(ctx, lookup, *keys_ty, depth + 1)?;
-            let props = resolve_record_properties(ctx, lookup, *inner, depth + 1)?;
-            Some(
-                props
-                    .into_iter()
-                    .filter(|(name, _, _)| keys.iter().any(|k| k == name))
-                    .collect(),
-            )
-        }
-        ("Omit", [inner, keys_ty]) => {
-            let keys = extract_string_keys(ctx, lookup, *keys_ty, depth + 1)?;
-            let props = resolve_record_properties(ctx, lookup, *inner, depth + 1)?;
-            Some(
-                props
-                    .into_iter()
-                    .filter(|(name, _, _)| !keys.iter().any(|k| k == name))
-                    .collect(),
-            )
-        }
-        _ => None,
-    }
-}
-
-pub(super) fn resolve_record_properties<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    ty: ArgumentId,
-    depth: usize,
-) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
-    let kind_info = match ty.deref(ctx).kind() {
-        Kind::Object {
-            properties,
-            index_signature: None,
-            ..
-        } => {
-            return Some(
-                properties
-                    .iter()
-                    .map(|p| (p.name.clone(), p.ty, p.optional))
-                    .collect(),
-            );
-        }
-        Kind::Named(name) => Some((name.clone(), Vec::new())),
-        Kind::Generic { base, arguments } => Some((base.clone(), arguments.clone())),
-        _ => None,
-    }?;
-    resolve_generic_properties(ctx, lookup, &kind_info.0, &kind_info.1, depth + 1)
-}
-
-pub(super) fn resolve_generic_properties<L: DeclarationLookup>(
-    ctx: &Context,
-    lookup: &L,
-    base: &str,
-    arguments: &[ArgumentId],
-    depth: usize,
-) -> Option<Vec<(String, ArgumentId, bool)>> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
-    if let Some(props) = resolve_utility_record_properties(ctx, lookup, base, arguments, depth) {
-        return Some(props);
-    }
-    let (_, declaration) = Declaration::find(lookup, base)?;
-    let bindings = declaration.bind(ctx, base, arguments).ok()?;
-    match declaration {
-        Declaration::Interface(interface) => {
-            collect_interface_properties(ctx, lookup, interface, &bindings, depth + 1)
-        }
-        Declaration::Class(class) => collect_class_properties(ctx, class, &bindings),
-        Declaration::Alias(alias) => {
-            let mut remaining = ARGUMENT_LIMIT;
-            let target = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining).ok()?;
-            resolve_record_properties(ctx, lookup, target, depth + 1)
-        }
+        union_of(ctx, filtered)
     }
 }
 
@@ -731,78 +356,9 @@ pub(crate) fn property_type(
         .map(|ty| Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining))
         .collect::<Result<Vec<_>>>()
         .ok()?;
-    property_type_depth(ctx, interfaces, type_aliases, base, &arguments, property, 0)
-}
-
-fn property_type_depth(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    base: &str,
-    arguments: &[ArgumentId],
-    property: &str,
-    depth: usize,
-) -> Option<HirType> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
     let lookup = (interfaces, type_aliases);
-    if base == "Record"
-        && let [_, val_ty] = arguments
-        && lookup.interface(base).is_none()
-        && lookup.type_alias(base).is_none()
-    {
-        return Some(optional_property(val_ty.deref(ctx).to_hir(ctx), true));
-    }
-    if let Some(props) = resolve_generic_properties(ctx, &lookup, base, arguments, depth) {
-        let (_, ty, optional) = props.into_iter().find(|(name, _, _)| name == property)?;
-        return Some(optional_property(ty.deref(ctx).to_hir(ctx), optional));
-    }
-    let substituted = if let Some(expanded) =
-        expand_utility_type_with_lookup(ctx, &lookup, base, arguments, depth + 1)
-    {
-        expanded
-    } else {
-        instantiate_alias(ctx, &lookup, base, arguments)?
-    };
-    let target = {
-        let sub_ref = substituted.deref(ctx);
-        if let Kind::Union(members) = sub_ref.kind() {
-            let flattened = flatten_union_with_lookup(ctx, &lookup, members, depth + 1);
-            let mut defined = flattened
-                .into_iter()
-                .filter(|m| !matches!(m.deref(ctx).kind(), Kind::Null | Kind::Void));
-            let single = defined.next()?;
-            if defined.next().is_some() {
-                return None;
-            }
-            single
-        } else {
-            substituted
-        }
-    };
-    let target = target.deref(ctx);
-    if let Kind::Object {
-        index_signature, ..
-    } = target.kind()
-    {
-        let (ty, optional) = match target.property(property) {
-            Some(prop) => (prop.ty, prop.optional),
-            None => ((*index_signature)?, true),
-        };
-        Some(optional_property(ty.deref(ctx).to_hir(ctx), optional))
-    } else {
-        let (base, arguments) = generic_parts(target.kind())?;
-        property_type_depth(
-            ctx,
-            interfaces,
-            type_aliases,
-            base,
-            arguments,
-            property,
-            depth + 1,
-        )
-    }
+    let (ty, optional) = Resolver::new(ctx, &lookup).property(base, &arguments, property)?;
+    Some(optional_property(ty.deref(ctx).to_hir(ctx), optional))
 }
 
 pub(crate) fn optional_property(ty: HirType, optional: bool) -> HirType {
@@ -850,10 +406,11 @@ fn optional_property_arg(ctx: &Context, ty: ArgumentId, optional: bool) -> Argum
     let void_arg = Argument::from_kind(ctx, Kind::Void);
     let items = match ty.deref(ctx).kind() {
         Kind::Union(items) => {
-            let mut items = items.clone();
-            if !items.contains(&void_arg) {
-                items.push(void_arg);
+            if items.contains(&void_arg) {
+                return ty;
             }
+            let mut items = items.clone();
+            items.push(void_arg);
             items
         }
         _ => vec![ty, void_arg],
@@ -871,49 +428,9 @@ pub(crate) fn dict_entry_types(
 ) -> Option<(HirType, HirType)> {
     let mut remaining = ARGUMENT_LIMIT;
     let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
-    let (k, v) = dict_entry_types_depth(ctx, interfaces, type_aliases, arg, 0)?;
-    Some((k.deref(ctx).to_hir(ctx), v.deref(ctx).to_hir(ctx)))
-}
-
-fn dict_entry_types_depth(
-    ctx: &Context,
-    interfaces: &[Interface],
-    type_aliases: &[TypeAlias],
-    ty: ArgumentId,
-    depth: usize,
-) -> Option<(ArgumentId, ArgumentId)> {
-    if depth >= RESOLUTION_DEPTH {
-        return None;
-    }
     let lookup = (interfaces, type_aliases);
-    if let Some(props) = resolve_record_properties(ctx, &lookup, ty, depth) {
-        let any_opt = props.iter().any(|(_, _, opt)| *opt);
-        let mut iter = props.into_iter();
-        let (_, first_ty, _) = iter.next()?;
-        let first_ty = optional_property_arg(ctx, first_ty, any_opt);
-        if iter.all(|(_, ty, _)| optional_property_arg(ctx, ty, any_opt) == first_ty) {
-            return Some((Argument::from_kind(ctx, Kind::String), first_ty));
-        }
-        return None;
-    }
-    let argument = ty.deref(ctx);
-    if let Kind::Object {
-        index_signature: Some(value),
-        ..
-    } = argument.kind()
-    {
-        return Some((Argument::from_kind(ctx, Kind::String), *value));
-    }
-    let (base, arguments) = generic_parts(argument.kind())?;
-    if base == "Record"
-        && let [_, value] = arguments
-        && lookup.interface(base).is_none()
-        && lookup.type_alias(base).is_none()
-    {
-        return Some((Argument::from_kind(ctx, Kind::String), *value));
-    }
-    let target = instantiate_alias(ctx, &lookup, base, arguments)?;
-    dict_entry_types_depth(ctx, interfaces, type_aliases, target, depth + 1)
+    let (k, v) = Resolver::new(ctx, &lookup).dictionary(arg)?;
+    Some((k.deref(ctx).to_hir(ctx), v.deref(ctx).to_hir(ctx)))
 }
 
 pub(crate) fn object_properties(
@@ -925,7 +442,7 @@ pub(crate) fn object_properties(
     let mut remaining = ARGUMENT_LIMIT;
     let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
     let lookup = (interfaces, type_aliases);
-    let props = resolve_record_properties(ctx, &lookup, arg, 0)?;
+    let props = Resolver::new(ctx, &lookup).record(arg, 0)?;
     Some(
         props
             .into_iter()

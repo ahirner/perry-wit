@@ -1,18 +1,15 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
-use crate::{
-    NewOp,
-    types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType},
-};
+use crate::operation_schema::op_schema;
+use crate::signatures::{Accepts, OutputContract};
+use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType};
 use pliron::{
-    builtin::op_interfaces::{OneOpdInterface, OneResultInterface},
     common_traits::Verify,
     context::Context,
-    derive::pliron_op,
     op::Op,
+    operation::Operation,
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
-    verify_err,
 };
 use std::collections::HashSet;
 
@@ -87,32 +84,17 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
     aggregate && compatible(ctx, source, target, &mut HashSet::new())
 }
 
-#[pliron_op(name = "perry.aggregate_view", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
-pub struct AggregateViewOp;
-
-impl AggregateViewOp {
-    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
-        Self {
-            op: Self::new_op(ctx, vec![target], vec![value]),
-        }
-    }
+op_schema! {
+    pub AggregateViewOp(value) -> infallible;
+    name = "perry.aggregate_view";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(value: Value, target: TypeHandle) => explicit(target); }
+    result(ctx, value: Value): impl OutputContract = Accepts(move |ctx: &Context, target| {
+        can_widen(ctx, value.get_type(ctx), target)
+    });
+    error = IncompatibleLayout;
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("aggregate widening requires compatible layouts")]
 struct IncompatibleLayout;
-
-impl Verify for AggregateViewOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if !can_widen(
-            ctx,
-            self.get_operand(ctx).get_type(ctx),
-            self.get_result(ctx).get_type(ctx),
-        ) {
-            return verify_err!(self.loc(ctx), IncompatibleLayout);
-        }
-        Ok(())
-    }
-}
-
-side_effects!(false; AggregateViewOp);

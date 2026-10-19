@@ -1,6 +1,7 @@
 //! `Record<K, V>` dictionaries and closed records: `Object.*`, `Array.isArray`, `in`, `delete`.
 
 use super::*;
+use crate::control_flow::Input;
 
 impl<'s> FunctionBuilder<'s> {
     /// A read of an optional that admits `undefined`, normalized to the type's `undefined`.
@@ -165,11 +166,15 @@ impl<'s> FunctionBuilder<'s> {
             )?,
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
-        self.live_collection_loop(ctx, "from_entries", entries_val, |b, ctx, _, entry| {
-            let (k, v) = b.entry_fields(ctx, entry)?;
-            b.kv_set(ctx, dict, k, v)?;
-            Ok(())
-        })?;
+        self.iterate(
+            ctx,
+            Input::Collection(entries_val),
+            |b, ctx, entry, _, _, _| {
+                let (k, v) = b.entry_fields(ctx, entry)?;
+                b.kv_set(ctx, dict, k, v)?;
+                Ok(())
+            },
+        )?;
         Ok(dict)
     }
 

@@ -214,7 +214,7 @@ impl FunctionLowering<'_, '_> {
             let object = self.mapped(ctx, record)?;
             let mut value = self.load_slot_value(ctx, object, offset, ty)?;
             if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
-                let omitted = self.is_omitted_value(ctx, value, ty)?;
+                let omitted = self.is_omitted(ctx, value, ty)?;
                 let undef = self.undefined_value(ctx, ty)?;
                 value = self.select_carriers(ctx, omitted, undef, value)?;
             }
@@ -227,7 +227,7 @@ impl FunctionLowering<'_, '_> {
             let value = if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                 let object = self.mapped(ctx, record)?;
                 let unpacked = self.load_slot_value(ctx, object, offset, ty)?;
-                let omitted = self.is_omitted_value(ctx, unpacked, ty)?;
+                let omitted = self.is_omitted(ctx, unpacked, ty)?;
                 self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
             } else {
                 self.i32_const(ctx, 1)
@@ -247,7 +247,7 @@ impl FunctionLowering<'_, '_> {
                 let count = self.i32_const(ctx, count as i32);
                 let key = self.state.data.string(&set.field(ctx));
                 let key = self.i32_const(ctx, key as i32);
-                let omitted = self.is_omitted_value(ctx, value, ty)?;
+                let omitted = self.is_omitted(ctx, value, ty)?;
                 let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
                 self.runtime_void(
                     ctx,
@@ -294,7 +294,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(native) = Operation::get_op::<perry_mir::NativeJsonOp>(op, ctx) {
             use pliron::builtin::op_interfaces::OneOpdInterface;
             let source = native.get_operand(ctx);
-            let descriptor = self.native_descriptor(ctx, source.get_type(ctx))?;
+            let descriptor = self.layout_descriptor(ctx, source.get_type(ctx), false)?;
             let descriptor = self.i32_const(ctx, descriptor as i32);
             let source = self.mapped(ctx, source)?;
             let value = self.runtime(ctx, Runtime::StdJsonNative, vec![source, descriptor]);

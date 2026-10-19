@@ -1,9 +1,12 @@
 //! Allocation-free Unicode default casing, including expansions and final sigma.
 
-use super::case_properties::{CASE_IGNORABLE, CASED};
 use core::{
     char::{ToLowercase, ToUppercase},
     iter::{Once, once},
+};
+use icu_properties::{
+    CodePointSetData,
+    props::{CaseIgnorable, Cased},
 };
 
 pub(super) fn mapped_scalars<I: Iterator<Item = char> + Clone>(
@@ -77,7 +80,7 @@ fn is_case_ignorable(scalar: char) -> bool {
     if scalar.is_ascii() {
         matches!(scalar, '\'' | '.' | ':' | '^' | '`')
     } else {
-        has_property(scalar, CASE_IGNORABLE)
+        CodePointSetData::new::<CaseIgnorable>().contains(scalar)
     }
 }
 
@@ -85,12 +88,6 @@ fn is_cased(scalar: char) -> bool {
     if scalar.is_ascii() {
         scalar.is_ascii_alphabetic()
     } else {
-        has_property(scalar, CASED)
+        CodePointSetData::new::<Cased>().contains(scalar)
     }
-}
-
-fn has_property(scalar: char, ranges: &[(u32, u32)]) -> bool {
-    let value = scalar as u32;
-    let index = ranges.partition_point(|&(_, end)| end < value);
-    ranges.get(index).is_some_and(|&(start, _)| start <= value)
 }

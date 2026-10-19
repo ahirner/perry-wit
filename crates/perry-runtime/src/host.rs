@@ -123,72 +123,28 @@ pub(crate) use imports::*;
 pub(crate) mod output {
     use super::imports::*;
 
-    pub(crate) fn new(fd: usize) -> u64 {
-        // SAFETY: canonical built-ins of the imported interface.
-        unsafe { if fd == 0 { stdout_new() } else { stderr_new() } }
-    }
-    pub(crate) fn start(fd: usize, readable: u32) -> u32 {
-        unsafe {
-            if fd == 0 {
-                stdout_start(readable)
-            } else {
-                stderr_start(readable)
+    macro_rules! dispatch {
+        ($($name:ident($($arg:ident: $ty:ty),*) $(-> $result:ty)? => $stdout:ident, $stderr:ident;)*) => {$(
+            pub(crate) fn $name(fd: usize, $($arg: $ty),*) $(-> $result)? {
+                // SAFETY: the caller retains buffers until the canonical operation completes.
+                dispatch!(@result unsafe {
+                    if fd == 0 { $stdout($($arg),*) } else { $stderr($($arg),*) }
+                } $(, $result)?)
             }
-        }
+        )*};
+        (@result $value:expr) => {{ $value; }};
+        (@result $value:expr, $result:ty) => { $value };
     }
-    pub(crate) fn write(fd: usize, writable: u32, data: *const u8, len: u32) -> u32 {
-        unsafe {
-            if fd == 0 {
-                stdout_write(writable, data, len)
-            } else {
-                stderr_write(writable, data, len)
-            }
-        }
-    }
-    pub(crate) fn drop_writer(fd: usize, writable: u32) {
-        unsafe {
-            if fd == 0 {
-                stdout_drop_writer(writable)
-            } else {
-                stderr_drop_writer(writable)
-            }
-        }
-    }
-    pub(crate) fn read(fd: usize, future: u32, result: *mut u8) -> u32 {
-        unsafe {
-            if fd == 0 {
-                stdout_read(future, result)
-            } else {
-                stderr_read(future, result)
-            }
-        }
-    }
-    pub(crate) fn drop_future(fd: usize, future: u32) {
-        unsafe {
-            if fd == 0 {
-                stdout_drop_future(future)
-            } else {
-                stderr_drop_future(future)
-            }
-        }
-    }
-    pub(crate) fn cancel_write(fd: usize, writable: u32) {
-        unsafe {
-            if fd == 0 {
-                stdout_cancel_write(writable);
-            } else {
-                stderr_cancel_write(writable);
-            }
-        }
-    }
-    pub(crate) fn cancel_read(fd: usize, future: u32) {
-        unsafe {
-            if fd == 0 {
-                stdout_cancel_read(future);
-            } else {
-                stderr_cancel_read(future);
-            }
-        }
+
+    dispatch! {
+        new() -> u64 => stdout_new, stderr_new;
+        start(readable: u32) -> u32 => stdout_start, stderr_start;
+        write(writable: u32, data: *const u8, len: u32) -> u32 => stdout_write, stderr_write;
+        drop_writer(writable: u32) => stdout_drop_writer, stderr_drop_writer;
+        read(future: u32, result: *mut u8) -> u32 => stdout_read, stderr_read;
+        drop_future(future: u32) => stdout_drop_future, stderr_drop_future;
+        cancel_write(writable: u32) => stdout_cancel_write, stderr_cancel_write;
+        cancel_read(future: u32) => stdout_cancel_read, stderr_cancel_read;
     }
 }
 

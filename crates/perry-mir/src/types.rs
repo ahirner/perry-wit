@@ -16,6 +16,9 @@ use pliron::{
 };
 use thiserror::Error;
 
+mod kinds;
+pub use kinds::*;
+
 macro_rules! record_kinds {
     ($($kind:ident => $name:literal),+ $(,)?) => {
         /// Logical record role, preserved when numeric storage is specialized.
@@ -59,12 +62,6 @@ pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
         && !ty.is::<pliron::builtin::types::IntegerType>()
         && !ty.is::<NumericType>()
 }
-
-/// A numeric value retaining an exact signed/unsigned 64-bit integer or IEEE double.
-/// Converting a narrower integer into this type explicitly widens its domain.
-#[pliron_type(name = "perry.numeric", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct NumericType;
 
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
@@ -343,206 +340,6 @@ impl ArrayType {
     }
 }
 
-/// An immutable, validated UTF-8 string indexed by Unicode scalar values.
-#[pliron_type(name = "perry.string", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct StringType;
-
-/// Immutable sign and 64-bit magnitude, preserving every WIT s64/u64 value.
-#[pliron_type(name = "perry.bigint", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct BigIntType;
-
-/// A `Uint8Array`: a view `{ length, data }` over bytes in the task region; `subarray`
-/// views share their bytes.
-#[pliron_type(name = "perry.bytes", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct BytesType;
-
-/// Read-only outbound WIT byte storage, accepting either UTF-8 strings or mutable bytes.
-#[pliron_type(
-    name = "perry.byte_input",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ByteInputType;
-
-#[pliron_type(name = "perry.url", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct UrlType;
-
-#[pliron_type(
-    name = "perry.search_params",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct SearchParamsType;
-
-/// An internal cursor over one fully validated immutable JSON document.
-#[pliron_type(
-    name = "perry.json_cursor",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct JsonCursorType;
-
-/// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
-/// Untyped data is a JSON tree, never `any` (subset rule R6).
-#[pliron_type(name = "perry.json", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct JsonType;
-
-/// A mutable Date object containing epoch milliseconds or NaN.
-#[pliron_type(name = "perry.date", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct DateType;
-
-/// `fs.Stats` of `stat()`: the entry type and size, read through `perry.intrinsic`.
-#[pliron_type(name = "perry.stats", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct StatsType;
-
-/// A Fetch `Headers` list.
-#[pliron_type(name = "perry.headers", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct HeadersType;
-
-/// A Fetch `Response`.
-#[pliron_type(
-    name = "perry.response",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ResponseType;
-
-/// A Fetch `Request`.
-#[pliron_type(name = "perry.request", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct RequestType;
-
-/// A Web `WritableStream` over a console output (`Writable.toWeb(process.stdout)`).
-#[pliron_type(
-    name = "perry.writable",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct WritableType;
-
-/// A `WritableStreamDefaultWriter`.
-#[pliron_type(name = "perry.writer", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct WriterType;
-
-/// A `ReadableStream<Uint8Array>` over a WIT `stream<u8>`.
-#[pliron_type(
-    name = "perry.readable",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ReadableType;
-
-/// A detachable `ArrayBuffer` backing mutable byte views.
-#[pliron_type(
-    name = "perry.byte_buffer",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ByteBufferType;
-
-/// A `ReadableStreamBYOBReader`.
-#[pliron_type(
-    name = "perry.byob_reader",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ByobReaderType;
-
-/// A `ReadableStreamDefaultReader`.
-#[pliron_type(name = "perry.reader", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ReaderType;
-
-/// A reader's `{ done, value }`.
-#[pliron_type(
-    name = "perry.read_result",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ReadResultType;
-
-/// A `Temporal.Instant`: 16 opaque bytes, little-endian `i128` epoch nanoseconds
-/// (the `time-helper` codec).
-#[pliron_type(name = "perry.instant", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct InstantType;
-
-/// A `Temporal.PlainDate`: 16 opaque bytes, an `i32` epoch day and zero nanoseconds.
-#[pliron_type(
-    name = "perry.plain_date",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct PlainDateType;
-
-/// A `Temporal.PlainDateTime`: 16 opaque bytes, an `i32` epoch day and the `u64`
-/// nanosecond of that day.
-#[pliron_type(
-    name = "perry.plain_date_time",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct PlainDateTimeType;
-
-/// An `AbortController` and its `AbortSignal` (one object): aborting rejects the timers that
-/// watch it.
-#[pliron_type(name = "perry.abort", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct AbortType;
-
-/// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
-/// response being built.
-#[pliron_type(
-    name = "perry.incoming",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct IncomingType;
-
-/// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
-/// task like every other value (R3, R4).
-#[pliron_type(
-    name = "perry.exception",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ExceptionType;
-
 /// The eventual value of an async call; lives no longer than its export task (subset rule R3).
 #[pliron_type(
     name = "perry.promise",
@@ -630,26 +427,6 @@ impl OptionalType {
     }
 }
 
-/// Stateful UTF-8 decoder with at most three pending bytes.
-#[pliron_type(name = "perry.decoder", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct DecoderType;
-
-/// Immutable, statically compiled regex program; no mutable lastIndex state.
-#[pliron_type(name = "perry.regex", generate_get = true, format, verifier = "succ")]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct RegexType;
-
-/// Canonical result area and argument owners of a suspended host call.
-#[pliron_type(
-    name = "perry.transfer",
-    generate_get = true,
-    format = "",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct TransferType;
-
 /// A closed tagged union. Only its active payload owns storage.
 #[pliron_type(name = "perry.variant")]
 #[derive(Hash, PartialEq, Eq, Debug)]
@@ -724,16 +501,6 @@ impl Parsable for VariantType {
         .into_parse_result()
     }
 }
-
-/// The finite primitive union `number | string`, with an exact owner slot for its string case.
-#[pliron_type(
-    name = "perry.number_string",
-    generate_get = true,
-    format,
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct NumberStringType;
 
 /// An opaque canonical resource identity. Ownership is checked by the shared descriptor.
 #[pliron_type(

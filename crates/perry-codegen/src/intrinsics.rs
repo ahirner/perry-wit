@@ -7,7 +7,7 @@ use crate::{
     runtime::{Runtime, W},
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use perry_mir::{CompareKind, Intrinsic, NumericType, absence};
+use perry_mir::{Intrinsic, NumericType, absence};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -124,58 +124,6 @@ impl FunctionLowering<'_, '_> {
                 let len = self.runtime(ctx, Runtime::NumberFormat, vec![args[0], data]);
                 Some(self.runtime(ctx, Runtime::StringAdopt, vec![data, len]))
             }
-            Intrinsic::EnvGet | Intrinsic::EnvKeys => {
-                self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
-                let function = if intrinsic == Intrinsic::EnvGet {
-                    Runtime::EnvGet
-                } else {
-                    Runtime::EnvKeys
-                };
-                Some(self.runtime(ctx, function, args))
-            }
-            Intrinsic::PerformanceNow => {
-                self.needs_import(MONOTONIC_CLOCK, "performance.now()")?;
-                Some(self.runtime(ctx, Runtime::PerformanceNow, args))
-            }
-            Intrinsic::DateNow => {
-                self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
-                Some(self.runtime(ctx, Runtime::DateNow, args))
-            }
-            Intrinsic::MathFloor
-            | Intrinsic::MathCeil
-            | Intrinsic::MathTrunc
-            | Intrinsic::MathRound
-                if crate::numeric::integer(ctx, op.deref(ctx).get_result(0).get_type(ctx))
-                    .is_some() =>
-            {
-                Some(args[0])
-            }
-            Intrinsic::MathFloor => Some(self.num(ctx, NumOpcode::F64Floor, args)),
-            Intrinsic::MathCeil => Some(self.num(ctx, NumOpcode::F64Ceil, args)),
-            Intrinsic::MathTrunc => Some(self.num(ctx, NumOpcode::F64Trunc, args)),
-            Intrinsic::MathAbs => {
-                let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                if let Some((bits, signed)) = crate::numeric::integer(ctx, ty) {
-                    if !signed {
-                        Some(args[0])
-                    } else if bits == 64 {
-                        let x = args[0];
-                        let zero = self.i64_const(ctx, 0);
-                        let neg = self.num(ctx, NumOpcode::I64Sub, vec![zero, x]);
-                        let is_neg = self.num(ctx, NumOpcode::I64LtS, vec![x, zero]);
-                        Some(self.select(ctx, is_neg, neg, x))
-                    } else {
-                        let x = args[0];
-                        let zero = self.i32_const(ctx, 0);
-                        let neg = self.num(ctx, NumOpcode::I32Sub, vec![zero, x]);
-                        let is_neg = self.num(ctx, NumOpcode::I32LtS, vec![x, zero]);
-                        let abs = self.select(ctx, is_neg, neg, x);
-                        Some(self.normalize_integer(ctx, abs, ty))
-                    }
-                } else {
-                    Some(self.num(ctx, NumOpcode::F64Abs, args))
-                }
-            }
             Intrinsic::MathSqrt => Some(self.num(ctx, NumOpcode::F64Sqrt, args)),
             Intrinsic::BytesAt => {
                 let data = self.load(ctx, MemKind::I32, args[0], perry_abi::BYTES_DATA as u32);
@@ -192,22 +140,6 @@ impl FunctionLowering<'_, '_> {
                     Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
                 }
             }
-            Intrinsic::MathMin | Intrinsic::MathMax => {
-                let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                if crate::numeric::integer(ctx, ty).is_some() {
-                    let lt = self.scalar_comparison(ctx, CompareKind::Lt, ty, args[0], args[1])?;
-                    if intrinsic == Intrinsic::MathMin {
-                        Some(self.select(ctx, lt, args[0], args[1]))
-                    } else {
-                        Some(self.select(ctx, lt, args[1], args[0]))
-                    }
-                } else if intrinsic == Intrinsic::MathMin {
-                    Some(self.num(ctx, NumOpcode::F64Min, args))
-                } else {
-                    Some(self.num(ctx, NumOpcode::F64Max, args))
-                }
-            }
-            Intrinsic::MathRound => Some(self.round_half_up(ctx, args[0])),
             Intrinsic::NumberIsNaN => {
                 let x = args[0];
                 Some(self.num(ctx, NumOpcode::F64Ne, vec![x, x]))
@@ -238,7 +170,6 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::DateFromTime
             | Intrinsic::DateTime
             | Intrinsic::DateParse
-            | Intrinsic::DateUtc
             | Intrinsic::DatePart
             | Intrinsic::DateSet
             | Intrinsic::DateIso
@@ -305,40 +236,6 @@ impl FunctionLowering<'_, '_> {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
             }
-            Intrinsic::JsonResidue => {
-                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-                let offset = if ty.deref(ctx).is::<perry_mir::RecordType>() {
-                    perry_abi::layout::record::JSON
-                } else {
-                    perry_abi::layout::variant::JSON
-                };
-                self.store(ctx, MemKind::I32, args[0], offset, args[1]);
-                None
-            }
-            Intrinsic::JsonRetain => {
-                use perry_mir::RecordType;
-                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-                if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx)
-                    && !record.deref(ctx).is_tuple()
-                {
-                    let (table, count) = self.json_field_table(ctx, ty)?;
-                    let table = self.i32_const(ctx, table as i32);
-                    let count = self.i32_const(ctx, count as i32);
-                    self.runtime_void(
-                        ctx,
-                        Runtime::StdJsonRecordRetain,
-                        vec![args[0], args[1], table, count],
-                    );
-                } else {
-                    let offset = if ty.deref(ctx).is::<RecordType>() {
-                        perry_abi::layout::record::JSON
-                    } else {
-                        perry_abi::layout::variant::JSON
-                    };
-                    self.store(ctx, MemKind::I32, args[0], offset, args[1]);
-                }
-                None
-            }
             Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy => {
                 let target_ty = op.deref(ctx).get_operand(0).get_type(ctx);
                 let source_ty = op.deref(ctx).get_operand(1).get_type(ctx);
@@ -360,7 +257,7 @@ impl FunctionLowering<'_, '_> {
                         if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                             let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;
                             let value = self.load_slot_value(ctx, args[0], offset, ty)?;
-                            let omitted = self.is_omitted_value(ctx, value, ty)?;
+                            let omitted = self.is_omitted(ctx, value, ty)?;
                             let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
                             let key = self.state.data.string(&name);
                             let key = self.i32_const(ctx, key as i32);
@@ -479,18 +376,6 @@ impl FunctionLowering<'_, '_> {
                 };
                 Some(self.runtime(ctx, Runtime::StdJsonFromScalar, vec![kind, truth]))
             }
-            Intrinsic::MathRandom => {
-                self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
-                Some(self.runtime(ctx, Runtime::StdMathRandom, args))
-            }
-            Intrinsic::RandomUuid => {
-                self.needs_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
-                Some(self.runtime(ctx, Runtime::StdRandomUuid, args))
-            }
-            Intrinsic::BytesFillRandom => {
-                self.needs_import("wasi:random/random@0.3.0", "crypto.getRandomValues()")?;
-                Some(self.runtime(ctx, Runtime::StdBytesFillRandom, args))
-            }
             Intrinsic::JsonSerialize => {
                 bail!("JSON.stringify of parsed JSON values is not supported yet")
             }
@@ -509,62 +394,65 @@ impl FunctionLowering<'_, '_> {
                 let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
                 Some(self.runtime(ctx, Runtime::WebWriterWrite, vec![args[0], args[1], leased]))
             }
-            Intrinsic::Fetch => {
-                self.needs_import("wasi:http/client@0.3.0", "fetch")?;
-                self.needs_import("wasi:http/types@0.3.0", "fetch")?;
-                self.state.uses_fetch = true;
-                self.state.uses_streams = true;
-                Some(self.runtime(ctx, Runtime::WebFetch, args))
-            }
-            Intrinsic::ServeRequest => {
-                self.needs_import("wasi:http/types@0.3.0", "an HTTP handler")?;
-                self.state.uses_http_server = true;
-                self.state.uses_streams = true;
-                Some(self.runtime(ctx, Runtime::WebServeRequest, args))
-            }
-            Intrinsic::ResponseJson | Intrinsic::RequestJson => {
-                self.state.uses_json_bodies = true;
-                Some(self.runtime(ctx, Runtime::WebBodyJson, args))
-            }
-            Intrinsic::ResponseBody | Intrinsic::RequestBody => {
-                self.state.uses_streams = true;
-                Some(self.runtime(ctx, Runtime::WebBodyStream, args))
-            }
-            Intrinsic::ReaderReadByob => {
-                self.state.uses_streams = true;
-                Some(self.runtime(ctx, Runtime::WebReaderReadByob, args))
-            }
             Intrinsic::ReaderRead => {
                 self.state.uses_streams = true;
                 let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
                 Some(self.runtime(ctx, Runtime::WebReaderRead, vec![args[0], leased]))
             }
-            Intrinsic::FsReadText
-            | Intrinsic::FsReadBytes
-            | Intrinsic::FsWriteText
-            | Intrinsic::FsWriteBytes
-            | Intrinsic::FsStat
-            | Intrinsic::FsReaddir
-            | Intrinsic::FsMkdir
-            | Intrinsic::FsUnlink
-            | Intrinsic::FsRmdir => {
-                self.needs_import("wasi:filesystem/types@0.3.0", "node:fs")?;
-                self.needs_import("wasi:filesystem/preopens@0.3.0", "node:fs")?;
-                self.state.uses_fs = true;
-                let function = match intrinsic {
-                    Intrinsic::FsReadText => Runtime::FsReadText,
-                    Intrinsic::FsReadBytes => Runtime::FsReadBytes,
-                    Intrinsic::FsWriteText => Runtime::FsWriteText,
-                    Intrinsic::FsWriteBytes => Runtime::FsWriteBytes,
-                    Intrinsic::FsStat => Runtime::FsStat,
-                    Intrinsic::FsReaddir => Runtime::FsReaddir,
-                    Intrinsic::FsMkdir => Runtime::FsMkdir,
-                    Intrinsic::FsUnlink => Runtime::FsUnlink,
-                    _ => Runtime::FsRmdir,
-                };
-                Some(self.runtime(ctx, function, args))
-            }
             other => {
+                match other {
+                    Intrinsic::EnvGet | Intrinsic::EnvKeys => {
+                        self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
+                    }
+                    Intrinsic::PerformanceNow => {
+                        self.needs_import(MONOTONIC_CLOCK, "performance.now()")?;
+                    }
+                    Intrinsic::DateNow => {
+                        self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
+                    }
+                    Intrinsic::MathRandom => {
+                        self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
+                    }
+                    Intrinsic::RandomUuid => {
+                        self.needs_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
+                    }
+                    Intrinsic::BytesFillRandom => {
+                        self.needs_import("wasi:random/random@0.3.0", "crypto.getRandomValues()")?;
+                    }
+                    Intrinsic::Fetch => {
+                        self.needs_import("wasi:http/client@0.3.0", "fetch")?;
+                        self.needs_import("wasi:http/types@0.3.0", "fetch")?;
+                        self.state.uses_fetch = true;
+                        self.state.uses_streams = true;
+                    }
+                    Intrinsic::ServeRequest => {
+                        self.needs_import("wasi:http/types@0.3.0", "an HTTP handler")?;
+                        self.state.uses_http_server = true;
+                        self.state.uses_streams = true;
+                    }
+                    Intrinsic::ResponseJson | Intrinsic::RequestJson => {
+                        self.state.uses_json_bodies = true;
+                    }
+                    Intrinsic::ResponseBody
+                    | Intrinsic::RequestBody
+                    | Intrinsic::ReaderReadByob => {
+                        self.state.uses_streams = true;
+                    }
+                    Intrinsic::FsReadText
+                    | Intrinsic::FsReadBytes
+                    | Intrinsic::FsWriteText
+                    | Intrinsic::FsWriteBytes
+                    | Intrinsic::FsStat
+                    | Intrinsic::FsReaddir
+                    | Intrinsic::FsMkdir
+                    | Intrinsic::FsUnlink
+                    | Intrinsic::FsRmdir => {
+                        self.needs_import("wasi:filesystem/types@0.3.0", "node:fs")?;
+                        self.needs_import("wasi:filesystem/preopens@0.3.0", "node:fs")?;
+                        self.state.uses_fs = true;
+                    }
+                    _ => {}
+                }
                 let function = Runtime::for_intrinsic(other).with_context(|| {
                     format!("intrinsic {} has no runtime lowering", other.name())
                 })?;

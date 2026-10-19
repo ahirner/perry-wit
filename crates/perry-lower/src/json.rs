@@ -1,6 +1,5 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
-use crate::shapes::DecoderInput;
 use perry_mir::JsonSchema;
 
 impl<'s> FunctionBuilder<'s> {
@@ -14,7 +13,7 @@ impl<'s> FunctionBuilder<'s> {
         match expected
             .filter(|ty| !ty.deref(ctx).is::<JsonType>() && JsonSchema::supports_cursor(ctx, *ty))
         {
-            Some(target) => self.parse_cursor(ctx, text, target),
+            Some(target) => self.decode_json(ctx, text, target),
             None => Ok(self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])),
         }
     }
@@ -27,25 +26,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
         if self.is_optional(ctx, scalar) {
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, scalar));
-            return self.choose(
+            return self.match_optional(
                 ctx,
+                scalar,
                 boolean,
-                undefined,
                 |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, scalar));
-                    b.choose(
-                        ctx,
-                        boolean,
-                        null,
-                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
-                        |b, ctx| {
-                            let scalar = b.defined(ctx, scalar)?;
-                            b.json_scalar_equal(ctx, json, scalar)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
+                |b, ctx, defined| b.json_scalar_equal(ctx, json, defined),
             );
         }
         if kind(ctx, scalar)? == Kind::Exception {
@@ -74,235 +61,6 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| Ok(b.boolean(ctx, false)),
         )
     }
-
-    pub(super) fn decode_aggregate(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        let name = self.json_decoder(
-            ctx,
-            target,
-            crate::shapes::DecoderInput::Snapshot,
-            |builder, ctx, entry| {
-                let input = entry.deref(ctx).get_argument(0);
-                Ok(vec![builder.decode_fields(ctx, input, target)?])
-            },
-        )?;
-        let call = CallOp::new(ctx, name, vec![value], vec![target]);
-        self.append(ctx, &call);
-        Ok(call.get_operation().deref(ctx).get_result(0))
-    }
-
-    pub(super) fn json_decoder(
-        &mut self,
-        ctx: &mut Context,
-        target: TypeHandle,
-        input: crate::shapes::DecoderInput,
-        build: impl FnOnce(&mut Self, &mut Context, Ptr<BasicBlock>) -> Result<Vec<Value>>,
-    ) -> Result<Identifier> {
-        let key = (target, input);
-        if let Some(name) = self.shapes.decoders.borrow().get(&key).cloned() {
-            return Ok(name);
-        }
-        let (prefix, params, results) = match input {
-            DecoderInput::Snapshot => ("decode", vec![JsonType::get(ctx).into()], vec![target]),
-            DecoderInput::Text => ("parse", vec![StringType::get(ctx).into()], vec![target]),
-            DecoderInput::Cursor => (
-                "cursor",
-                vec![
-                    perry_mir::JsonCursorType::get(ctx).into(),
-                    IntegerType::get(ctx, 32, Signedness::Signless).into(),
-                ],
-                vec![
-                    target,
-                    IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                ],
-            ),
-        };
-        let mut index = self.shapes.decoders.borrow().len();
-        let name = loop {
-            let candidate = identifier(&format!("perry_json_{prefix}_{index}"))?;
-            if self.signatures.values().all(|s| s.name != candidate)
-                && self
-                    .shapes
-                    .decoders
-                    .borrow()
-                    .values()
-                    .all(|n| *n != candidate)
-            {
-                break candidate;
-            }
-            index += 1;
-        };
-        self.shapes.decoders.borrow_mut().insert(key, name.clone());
-        let result = results.first().copied().map(BindingType::plain);
-        let ty = FunctionType::get(ctx, params, results);
-        let function = FuncOp::new(ctx, name.clone(), ty);
-        perry_mir::set_json_decoder(
-            ctx,
-            &function,
-            match input {
-                DecoderInput::Text => perry_mir::JsonDecoderKind::Parse,
-                DecoderInput::Snapshot => perry_mir::JsonDecoderKind::Value,
-                DecoderInput::Cursor => perry_mir::JsonDecoderKind::Cursor,
-            },
-        );
-        if input != DecoderInput::Snapshot {
-            perry_mir::set_atomic_construction(ctx, &function);
-        }
-        self.shapes
-            .module
-            .append_operation(ctx, function.get_operation(), 0);
-        let entry = function.get_entry_block(ctx);
-        let mut builder = Self::new(
-            ctx,
-            &function,
-            result,
-            false,
-            self.signatures,
-            self.shapes,
-            self.builtins,
-        );
-        let results = build(&mut builder, ctx, entry)?;
-        builder.emit(ctx, |ctx| ReturnOp::new(ctx, results));
-        remove_unreachable(ctx, builder.region);
-        Ok(name)
-    }
-
-    fn decode_fields(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        let schema = JsonSchema::of(ctx, target);
-        if matches!(schema, Some(JsonSchema::NumberString)) {
-            let tag = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]);
-            let number = self.string(ctx, "number");
-            let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
-            return self.choose(
-                ctx,
-                target,
-                is_number,
-                |b, ctx| {
-                    let ty = FP64Type::get(ctx).into();
-                    let number = b.fit(ctx, value, ty)?;
-                    b.fit(ctx, number, target)
-                },
-                |b, ctx| {
-                    let ty = StringType::get(ctx).into();
-                    let string = b.fit(ctx, value, ty)?;
-                    b.fit(ctx, string, target)
-                },
-            );
-        }
-        if let Some(JsonSchema::Variant(variant)) = schema {
-            let cases = variant.deref(ctx).cases().to_vec();
-            self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-            let tag_key = self.string(ctx, "tag");
-            let tag = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, tag_key]);
-            let string = StringType::get(ctx).into();
-            let tag = self.fit(ctx, tag, string)?;
-            let result = self.entry_slot(ctx, target);
-            let done = self.new_block(ctx, "variant_done");
-            for (name, payload) in cases {
-                let text = self.string(ctx, &name);
-                let matches = self.compare(ctx, CompareKind::Eq, tag, text);
-                let active = self.new_block(ctx, "variant_case");
-                let next = self.new_block(ctx, "variant_next");
-                self.branch(ctx, matches, active, next);
-                self.switch_to(active);
-                let payload = if let Some(ty) = payload {
-                    let key = self.string(ctx, "val");
-                    let member = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key]);
-                    Some(self.fit(ctx, member, ty)?)
-                } else {
-                    None
-                };
-                let decoded = self.emit_value(ctx, |ctx| {
-                    perry_mir::VariantNewOp::new(ctx, target, &name, payload)
-                });
-                self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
-                self.store(ctx, result, decoded);
-                self.jump(ctx, done);
-                self.switch_to(next);
-            }
-            let message = self.string(ctx, "JSON tag is not a case of the declared variant");
-            let error = self.emit_value(ctx, |ctx| {
-                ErrorNewOp::new(ctx, ErrorKind::TypeError, message)
-            });
-            let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
-            self.propagate(ctx, status);
-            self.switch_to(done);
-            return self.load(ctx, result);
-        }
-        if let Some(JsonSchema::Record(record)) = schema {
-            let tuple = record.deref(ctx).is_tuple();
-            let fields = record
-                .deref(ctx)
-                .fields()
-                .map_err(|_| anyhow!("opaque JSON schema"))?
-                .to_vec();
-            let mut element = if tuple {
-                self.call_intrinsic(ctx, Intrinsic::JsonFirst, vec![value])
-            } else {
-                self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-                None
-            };
-            let mut values = Vec::with_capacity(fields.len());
-            for (field, ty) in fields {
-                let member = if let Some(current) = element {
-                    element = self.call_intrinsic(ctx, Intrinsic::JsonNext, vec![current]);
-                    current
-                } else {
-                    let name = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field.as_ref()));
-                    self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
-                };
-                values.push(self.fit(ctx, member, ty)?);
-            }
-            let decoded = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values));
-            self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
-            return Ok(decoded);
-        }
-        if let Some(JsonSchema::Dictionary {
-            entry,
-            key,
-            value: element,
-        }) = schema
-        {
-            return self.decode_dict(ctx, value, key, element, entry);
-        }
-        if let Some(JsonSchema::Array(element)) = schema {
-            let first = self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value]);
-            let json = JsonType::get(ctx).into();
-            let cursor = self.entry_slot(ctx, json);
-            self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, first));
-            let array = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-            let header = self.new_block(ctx, "decode_header");
-            let body = self.new_block(ctx, "decode_element");
-            let done = self.new_block(ctx, "decode_done");
-            self.jump(ctx, header);
-            self.switch_to(header);
-            let load = LoadOp::new(ctx, cursor)?;
-            let item = self.append_value(ctx, &load);
-            let end = self.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![item]);
-            self.branch(ctx, end, done, body);
-            self.switch_to(body);
-            let decoded = self.fit(ctx, item, element)?;
-            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, decoded));
-            let next = self.intrinsic(ctx, Intrinsic::JsonNext, vec![item]);
-            self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, next));
-            self.jump(ctx, header);
-            self.switch_to(done);
-            return Ok(array);
-        }
-        bail!(
-            "JSON schema requires scalars, closed records or dense arrays, found {}",
-            target.disp(ctx)
-        )
-    }
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -319,6 +77,8 @@ impl<'s> FunctionBuilder<'s> {
         {
             return self.record_object_spread(ctx, parts, None, Some(rec));
         }
+        let mut remaining = parts;
+        let mut initial = None;
         if expected_inner.is_none() {
             if let Some((None, first_spread)) = parts.first() {
                 let first_src = self.expression(ctx, first_spread)?;
@@ -336,30 +96,12 @@ impl<'s> FunctionBuilder<'s> {
                 {
                     return self.record_object_spread(ctx, parts, Some(first_src), None);
                 }
-                let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
                 if !is_exc {
-                    let source = first_json.context(
+                    initial = Some(first_json.context(
                         "object spread is supported over typed records or JSON values with static keys",
-                    )?;
-                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                    )?);
                 }
-                for (key, value) in &parts[1..] {
-                    if let Some(key) = key {
-                        let key = self.string(ctx, key);
-                        let value = self.json_value(ctx, value)?;
-                        self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
-                    } else {
-                        let source = self.expression(ctx, value)?;
-                        if matches!(kind(ctx, source), Ok(Kind::Exception)) {
-                            continue;
-                        }
-                        let source = self.json_operand(ctx, source)?.context(
-                            "object spread is supported over typed records or JSON values with static keys",
-                        )?;
-                        self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
-                    }
-                }
-                return Ok(object);
+                remaining = &parts[1..];
             } else if parts.iter().any(|(k, _)| k.is_none())
                 && parts
                     .iter()
@@ -369,7 +111,10 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
-        for (key, value) in parts {
+        if let Some(source) = initial {
+            self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+        }
+        for (key, value) in remaining {
             if let Some(key) = key {
                 let key = self.string(ctx, key);
                 let value = self.json_value(ctx, value)?;
@@ -421,25 +166,13 @@ impl<'s> FunctionBuilder<'s> {
         }
         if self.is_optional(ctx, value) {
             let json = JsonType::get(ctx).into();
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-            return self.choose(
+            return self.match_optional(
                 ctx,
+                value,
                 json,
-                undefined,
                 |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
-                    b.choose(
-                        ctx,
-                        json,
-                        null,
-                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
-                        |b, ctx| {
-                            let value = b.defined(ctx, value)?;
-                            b.error_cause(ctx, value)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
+                |b, ctx, defined| b.error_cause(ctx, defined),
             );
         }
         let intrinsic = match kind(ctx, value)? {

@@ -1443,6 +1443,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-decimal-helper"
+version = "0.1.0"
+dependencies = [
+ "perry-abi",
+]
+
+[[package]]
 name = "perry-diagnostics"
 version = "0.5.1659"
 source = "git+https://github.com/PerryTS/perry?rev=fbea15a351f9ea15af69b18e5276908bb48990df#fbea15a351f9ea15af69b18e5276908bb48990df"
@@ -1520,9 +1527,18 @@ dependencies = [
  "perry-abi",
  "perry-wit-diagnostics",
  "pliron",
+ "pliron-control",
  "regex",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "perry-normalization-helper"
+version = "0.1.0"
+dependencies = [
+ "icu_normalizer",
+ "icu_properties",
 ]
 
 [[package]]
@@ -1566,6 +1582,9 @@ dependencies = [
 [[package]]
 name = "perry-text-helper"
 version = "0.1.0"
+dependencies = [
+ "icu_properties",
+]
 
 [[package]]
 name = "perry-time-helper"
@@ -1679,7 +1698,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pliron"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=435536c8611af34c48c8f73d78e77894a05d103d#435536c8611af34c48c8f73d78e77894a05d103d"
+source = "git+https://github.com/pliron-org/pliron?rev=957bef3e132932b6ba66173762b84c3e3508b7ba#957bef3e132932b6ba66173762b84c3e3508b7ba"
 dependencies = [
  "awint",
  "combine",
@@ -1703,9 +1722,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pliron-control"
+version = "0.1.0"
+
+[[package]]
 name = "pliron-derive"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=435536c8611af34c48c8f73d78e77894a05d103d#435536c8611af34c48c8f73d78e77894a05d103d"
+source = "git+https://github.com/pliron-org/pliron?rev=957bef3e132932b6ba66173762b84c3e3508b7ba#957bef3e132932b6ba66173762b84c3e3508b7ba"
 dependencies = [
  "combine",
  "convert_case",
@@ -1721,6 +1744,7 @@ name = "pliron-wasm"
 version = "0.1.0"
 dependencies = [
  "pliron",
+ "pliron-control",
  "thiserror",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",

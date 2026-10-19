@@ -114,6 +114,16 @@ interface Product {
   plu: string;
   price?: number;
 }
+type SelectedProduct = Required<Partial<Pick<Product, "id" | "price">>>;
+type PriceIndex<T = number> = Record<string, T>;
+type MaybeSelected = SelectedProduct | null | undefined;
+function selectedPrice(value: MaybeSelected): number {
+  return value == null ? -1 : value.id + value.price;
+}
+function indexedPrice(values: PriceIndex): number {
+  return Object.values(values).reduce((sum, price) => sum + price, 0);
+}
+console.log("resolved-views", selectedPrice({ id: 7, price: 13 }), selectedPrice(null), selectedPrice(undefined), indexedPrice({ first: 2, second: 3 }));
 interface Triple {
   a: number;
   b: number;
@@ -142,6 +152,14 @@ const nullableA: { p: number | null } = { p: 1 };
 const nullableB: { p: number | null } = { p: null };
 console.log("presence", overUndef.p, "p" in overUndef, overOmitted.p, "p" in overOmitted, "p" in omitted, "p" in copyOmitted, Object.keys(copyOmitted).length);
 console.log("rest-presence", q, "p" in restOmitted, Object.keys(restOmitted).length, { ...nullableA, ...nullableB }.p);
+
+interface ProjectionSource { item?: { value: number; extra: string }; extra: number }
+interface ProjectionTarget { item?: { value: number } }
+function projectFields(value: ProjectionSource): ProjectionTarget { return value; }
+const absentProjection: ProjectionSource = { extra: 1 };
+const fullProjection: ProjectionSource = { item: { value: 2, extra: "nested" }, extra: 3 };
+const projectedAbsent = projectFields(absentProjection);
+console.log("record-projection", "item" in projectedAbsent, projectedAbsent.item?.value, projectFields(fullProjection).item?.value);
 
 function formatTag(tagLabel = "item", count = 1, suffix: string | null = null): string {
   return `${tagLabel}:${count}:${suffix ?? "none"}`;
@@ -223,3 +241,60 @@ fromStatic.inc(5);
 const boxed = new Holder<string>("hello");
 console.log("classes", before, incremented, counter.describe(), Counter.scaled(4), fromStatic.describe(), boxed.unwrap());
 console.log("instanceof", counter instanceof Counter, counter instanceof Holder, boxed instanceof Holder, boxed instanceof Counter);
+
+interface UpdateCell { value: number }
+function updateReceiver(cell: UpdateCell, visits: number[]): UpdateCell { visits.push(1); return cell; }
+function recordUpdates(x: number): number {
+  const cell: UpdateCell = { value: x };
+  const visits: number[] = [];
+  const first = updateReceiver(cell, visits).value++;
+  const second = --updateReceiver(cell, visits).value;
+  return first * 100 + second * 10 + cell.value + visits.length * 1000;
+}
+console.log("record-updates", recordUpdates(3));
+
+interface OptionalFields { label?: string; value?: number | null; next?: OptionalFields | null; }
+function readOptionalFields(value: OptionalFields): number {
+  let result = 0;
+  if (value.label !== undefined) result += value.label.length;
+  if (value.value === undefined) result += 10;
+  else if (value.value === null) result += 20;
+  else result += value.value;
+  const next = value.next;
+  if (next !== undefined && next !== null) result += readOptionalFields(next);
+  return result;
+}
+function optionalClosedFields(n: number): number {
+  const empty: OptionalFields = {};
+  const nullable: OptionalFields = { value: null, next: { label: 'abc', value: n } };
+  const parsed: OptionalFields = JSON.parse('{"value":null,"next":{"label":"é"}}');
+  if (JSON.stringify(empty) !== '{}') return -1;
+  if (JSON.stringify(parsed) !== '{"value":null,"next":{"label":"é"}}') return -2;
+  empty.label = 'x';
+  empty.value = 5;
+  empty.label = undefined;
+  empty.value = undefined;
+  return readOptionalFields(empty) + readOptionalFields(nullable) + readOptionalFields(parsed);
+}
+console.log("optional-fields", optionalClosedFields(7));
+
+function traceLiteral(value: number): number {
+  console.log("literal-field", value);
+  if (value < 0) throw new Error("negative");
+  return value;
+}
+const orderedPoint: { x: number; y: number } = { y: traceLiteral(1), x: traceLiteral(2) };
+console.log("literal-result", orderedPoint.x - orderedPoint.y);
+function tracePoint(value: number): { x: number; y: number } {
+  return { y: traceLiteral(value), x: traceLiteral(value + 1) };
+}
+const { x: discardedPoint, ...orderedRest } = {
+  ...tracePoint(3), y: traceLiteral(5), x: traceLiteral(6), extra: traceLiteral(7)
+};
+console.log("construction-order", discardedPoint, JSON.stringify(orderedRest));
+try {
+  const failedPoint = { ...tracePoint(8), extra: traceLiteral(-1), ...tracePoint(100) };
+  console.log("unreachable-point", failedPoint.x);
+} catch {
+  console.log("construction-stopped");
+}

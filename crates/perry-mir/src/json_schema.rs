@@ -35,6 +35,63 @@ pub enum JsonSchema {
 }
 
 impl JsonSchema {
+    pub fn supports_descriptor(ctx: &Context, root: TypeHandle) -> bool {
+        Self::supports_input(ctx, root, false)
+    }
+
+    fn supports_input(ctx: &Context, root: TypeHandle, cursor: bool) -> bool {
+        let mut pending = vec![root];
+        let mut visited = HashSet::new();
+        while let Some(ty) = pending.pop() {
+            if !visited.insert(ty) {
+                continue;
+            }
+            if ty.deref(ctx).is::<crate::NumericType>() {
+                continue;
+            }
+            match Self::of(ctx, ty) {
+                Some(
+                    JsonSchema::Value
+                    | JsonSchema::Number
+                    | JsonSchema::Boolean
+                    | JsonSchema::String
+                    | JsonSchema::NumberString
+                    | JsonSchema::Integer { width: 64, .. },
+                ) => {}
+                Some(JsonSchema::Array(element) | JsonSchema::Optional(element)) => {
+                    pending.push(element)
+                }
+                Some(JsonSchema::Record(record)) => {
+                    let record = record.deref(ctx);
+                    if cursor && !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple) {
+                        return false;
+                    }
+                    let Ok(fields) = record.fields() else {
+                        return false;
+                    };
+                    pending.extend(fields.iter().map(|(_, ty)| *ty));
+                }
+                Some(JsonSchema::Dictionary { entry, .. }) if !cursor => pending.push(entry.into()),
+                Some(JsonSchema::Variant(variant)) => {
+                    for (_, payload) in variant.deref(ctx).cases() {
+                        if let Some(payload) = payload {
+                            // Variant payload storage has one scalar slot, unlike record/array slots.
+                            if crate::present_type(ctx, *payload)
+                                .deref(ctx)
+                                .is::<crate::NumericType>()
+                            {
+                                return false;
+                            }
+                            pending.push(*payload);
+                        }
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
     /// Classify logical types without relying on generated record names.
     pub fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
         let definition = ty.deref(ctx);
@@ -90,38 +147,6 @@ impl JsonSchema {
 
     /// Whether every reachable type can be built directly from the JSON lexer.
     pub fn supports_cursor(ctx: &Context, root: TypeHandle) -> bool {
-        let mut pending = vec![root];
-        let mut visited = HashSet::new();
-        while let Some(ty) = pending.pop() {
-            if !visited.insert(ty) {
-                continue;
-            }
-            match Self::of(ctx, ty) {
-                Some(Self::Record(record)) => {
-                    let record = record.deref(ctx);
-                    if !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple) {
-                        return false;
-                    }
-                    let Ok(fields) = record.fields() else {
-                        return false;
-                    };
-                    pending.extend(fields.iter().map(|(_, ty)| *ty));
-                }
-                Some(Self::Array(element) | Self::Optional(element)) => pending.push(element),
-                Some(Self::Variant(variant)) => {
-                    pending.extend(variant.deref(ctx).cases().iter().filter_map(|(_, ty)| *ty));
-                }
-                Some(
-                    Self::Value
-                    | Self::Number
-                    | Self::Boolean
-                    | Self::String
-                    | Self::NumberString
-                    | Self::Integer { width: 64, .. },
-                ) => {}
-                Some(Self::Dictionary { .. } | Self::Integer { .. }) | None => return false,
-            }
-        }
-        true
+        Self::supports_input(ctx, root, true)
     }
 }

@@ -132,7 +132,10 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
     pub(crate) native_descriptors: HashMap<TypeHandle, u32>,
-    pub(crate) json_serializers: HashMap<TypeHandle, Identifier>,
+    pub(crate) json_descriptors: HashMap<TypeHandle, u32>,
+    pub(crate) json_copy_plans: HashMap<(TypeHandle, TypeHandle), u32>,
+    pub(crate) json_result: Option<u32>,
+    pub(crate) json_write_data: Option<u32>,
     pub(crate) json_fields: HashMap<TypeHandle, (u32, usize)>,
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage rather than task storage.
@@ -237,7 +240,10 @@ pub(crate) fn lower(
         uses_fetch: false,
         uses_json_bodies: false,
         uses_http_server: false,
-        json_serializers: HashMap::new(),
+        json_descriptors: HashMap::new(),
+        json_copy_plans: HashMap::new(),
+        json_result: None,
+        json_write_data: None,
         json_fields: HashMap::new(),
         native_descriptors: HashMap::new(),
         retains_json: functions.iter().any(|function| {
@@ -250,18 +256,17 @@ pub(crate) fn lower(
                     {
                         return true;
                     }
-                    Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
-                        matches!(
-                            op.intrinsic(ctx),
-                            perry_mir::Intrinsic::JsonRetain
-                                | perry_mir::Intrinsic::JsonResidue
-                                | perry_mir::Intrinsic::JsonCursorRecord
-                                | perry_mir::Intrinsic::JsonSpread
-                                | perry_mir::Intrinsic::JsonOrderCopy
-                                | perry_mir::Intrinsic::JsonInsert
-                                | perry_mir::Intrinsic::JsonExclude
-                        )
-                    })
+                    Operation::is_op::<perry_mir::JsonDecodeOp>(op, ctx)
+                        || Operation::is_op::<perry_mir::JsonCopyOp>(op, ctx)
+                        || Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                            matches!(
+                                op.intrinsic(ctx),
+                                perry_mir::Intrinsic::JsonSpread
+                                    | perry_mir::Intrinsic::JsonOrderCopy
+                                    | perry_mir::Intrinsic::JsonInsert
+                                    | perry_mir::Intrinsic::JsonExclude
+                            )
+                        })
                 })
         }),
         leased: HashSet::new(),

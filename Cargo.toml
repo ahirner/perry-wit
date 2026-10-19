@@ -16,14 +16,17 @@ workspace = true
 members = [
   ".",
   "crates/text-helper",
+  "crates/normalization-helper",
   "crates/fetch-helper",
   "crates/json-helper",
   "crates/number-helper",
+  "crates/decimal-helper",
   "crates/time-helper",
   "crates/conformance",
   "crates/perry-mir",
   "crates/perry-lower",
   "crates/pliron-wasm",
+  "crates/pliron-control",
   "crates/perry-runtime",
   "crates/perry-abi",
   "crates/perry-std",
@@ -49,7 +52,8 @@ perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
 perry-runtime = { path = "crates/perry-runtime" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "435536c8611af34c48c8f73d78e77894a05d103d", default-features = false }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "957bef3e132932b6ba66173762b84c3e3508b7ba", default-features = false }
+pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
 tempfile = "3.27.0"
@@ -97,6 +101,7 @@ serde_json.workspace = true
 wit-bindgen = "0.62"
 
 [build-dependencies]
+wat = "1.261.0"
 wasmparser.workspace = true
 
 [dev-dependencies]

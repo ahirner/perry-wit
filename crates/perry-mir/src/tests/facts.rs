@@ -267,6 +267,193 @@ builtin.module @lengths { ^module():
 }
 
 #[test]
+fn branch_bounds_require_stable_aliased_lengths() -> Result<()> {
+    let fixture = r#"
+builtin.module @bounds { ^module():
+  builtin.func @shrink: builtin.function <(perry.array <builtin.fp64>) -> ()> {
+    ^entry(items: perry.array <builtin.fp64>):
+      zero = builtin.constant <builtin.integer <0: i32>> : builtin.integer i32;
+      perry.array_truncate items, zero;
+      perry.return
+  };
+  builtin.func @grow: builtin.function <(perry.array <builtin.fp64>) -> ()> {
+    ^entry(items: perry.array <builtin.fp64>):
+      zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+      perry.array_push items <- zero;
+      perry.return
+  };
+  builtin.func @run: builtin.function <(perry.array <builtin.fp64>) -> (perry.optional <builtin.fp64,Undefined>)> {
+    ^entry(items: perry.array <builtin.fp64>):
+      zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+      count = builtin.constant <builtin.integer <0: i32>> : builtin.integer i32;
+      other = perry.array_new Unassigned (zero) : perry.array <builtin.fp64>;
+      holder = perry.alloc Unassigned (items) : perry.record <Holder { items: perry.array <builtin.fp64> }>;
+      alias = perry.field_get holder."items" : perry.array <builtin.fp64>;
+      length = perry.array_len items : builtin.integer i32;
+      bound = perry.numeric_cast length : builtin.fp64;
+      BEFORE
+      more = perry.compare Lt zero, bound : builtin.integer i1;
+      perry.cond_br if more ^body() else ^empty()
+    ^body():
+      DURING
+      value = perry.array_get items[zero] : perry.optional <builtin.fp64,Undefined>;
+      AFTER
+      perry.return value
+    ^empty():
+      absent = perry.undefined : perry.optional <builtin.fp64,Undefined>;
+      perry.return absent
+  }
+}
+"#;
+    for (position, mutation, checked) in [
+        ("DURING", "perry.array_truncate items, count;", true),
+        ("DURING", "perry.array_truncate alias, count;", true),
+        ("BEFORE", "perry.array_truncate alias, count;", true),
+        ("DURING", "perry.call shrink (holder) : ;", true),
+        ("DURING", "perry.call shrink (alias) : ;", true),
+        ("DURING", "perry.call shrink (other) : ;", false),
+        ("DURING", "perry.array_truncate other, count;", false),
+        ("DURING", "perry.array_push alias <- zero;", false),
+        ("DURING", "perry.call grow (alias) : ;", false),
+        ("AFTER", "perry.array_truncate alias, count;", false),
+        ("LOOP", "perry.array_truncate alias, count;", true),
+        ("REFRESH", "perry.array_truncate alias, count;", false),
+        ("DURING", "", false),
+    ] {
+        let ctx = &mut Context::new();
+        let repeats = matches!(position, "LOOP" | "REFRESH");
+        let mut input = fixture.replace(if repeats { "AFTER" } else { position }, mutation);
+        if repeats {
+            let header = if position == "REFRESH" {
+                "length = perry.array_len"
+            } else {
+                "more = perry.compare"
+            };
+            input = input
+                .replace(
+                    header,
+                    &format!("perry.br ^header()\n    ^header():\n      {header}"),
+                )
+                .replace("perry.return value", "perry.br ^header()");
+        }
+        for unused in ["BEFORE", "DURING", "AFTER"] {
+            input = input.replace(unused, "");
+        }
+        // The record case checks mutation through a containing argument.
+        if mutation.contains("(holder)") {
+            input = input.replace(
+                "@shrink: builtin.function <(perry.array <builtin.fp64>)",
+                "@shrink: builtin.function <(perry.record <Holder { items: perry.array <builtin.fp64> }>)",
+            ).replace(
+                "^entry(items: perry.array <builtin.fp64>):\n      zero = builtin.constant <builtin.integer",
+                "^entry(record: perry.record <Holder>):\n      items = perry.field_get record.\"items\" : perry.array <builtin.fp64>;\n      zero = builtin.constant <builtin.integer",
+            );
+        }
+        let module = parse(ctx, &input);
+        verify_operation(module, ctx)?;
+        let run = function(ctx, module, "run");
+        set_exported(ctx, &run);
+        let numeric = facts(ctx, module)?;
+        let mut dominance = DomInfo::default();
+        crate::ranges::prove_bounds(module, ctx, &numeric, &mut dominance);
+        let retained = crate::aggregates::operations(ctx, &run)
+            .into_iter()
+            .any(|op| Operation::is_op::<ArrayGetOp>(op, ctx));
+        assert_eq!(retained, checked, "{position}: {mutation}");
+        verify_operation(module, ctx)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn json_copy_paths_preserve_parse_order_without_visiting_dead_ends() -> Result<()> {
+    let fixture = r#"
+builtin.module @paths { ^module():
+  builtin.func @effect: builtin.function <() -> ()> {
+    ^entry(): perry.return
+  };
+  builtin.func @run: builtin.function <(builtin.integer i1) -> (builtin.fp64)> {
+    ^entry(flag: builtin.integer i1):
+      zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+      items = perry.array_new Unassigned (zero) : perry.array <builtin.fp64>;
+      other = perry.array_new Unassigned (zero) : perry.array <builtin.fp64>;
+      text = perry.json_stringify items : perry.string;
+      perry.cond_br if flag ^before() else ^parse()
+    ^before():
+      BEFORE
+      perry.br ^parse()
+    ^parse():
+      parsed = perry.intrinsic JsonParse (text) : perry.json;
+      perry.cond_br if flag ^after() else ^side()
+    ^after():
+      AFTER
+      perry.br ^consume()
+    ^side():
+      SIDE
+      EXIT
+    ^consume():
+      number = perry.intrinsic JsonToNumber (parsed) : builtin.fp64;
+      TAIL
+      perry.return number
+  }
+}
+"#;
+    for (position, operation, blocks) in [
+        ("BEFORE", "perry.call effect () : ;", false),
+        ("AFTER", "perry.call effect () : ;", true),
+        ("BEFORE", "perry.array_push items <- zero;", true),
+        ("AFTER", "perry.array_push other <- zero;", false),
+        ("SIDE", "perry.array_push items <- zero;", false),
+        ("TAIL", "perry.array_push items <- zero;", true),
+    ] {
+        let ctx = &mut Context::new();
+        let mut input = fixture.replace(position, operation);
+        for unused in ["BEFORE", "AFTER", "SIDE", "TAIL"] {
+            input = input.replace(unused, "");
+        }
+        input = input.replace(
+            "EXIT",
+            if position == "SIDE" {
+                "perry.return zero"
+            } else {
+                "perry.br ^consume()"
+            },
+        );
+        if position == "TAIL" {
+            input = input.replace(
+                "perry.return number",
+                "perry.cond_br if flag ^consume() else ^done()\n    ^done(): perry.return number",
+            );
+        }
+        let module = parse(ctx, &input);
+        verify_operation(module, ctx)?;
+        let run = function(ctx, module, "run");
+        let stringify = first::<crate::JsonStringifyOp>(ctx, &run);
+        let intrinsic = |kind| {
+            crate::aggregates::operations(ctx, &run)
+                .into_iter()
+                .find(|&op| crate::intrinsics::intrinsic_of(ctx, op) == Some(kind))
+                .expect("fixture intrinsic")
+        };
+        let parse_op = intrinsic(crate::Intrinsic::JsonParse);
+        let consumer = intrinsic(crate::Intrinsic::JsonToNumber);
+        assert_eq!(
+            facts(ctx, module)?.may_prevent_json_copy_between(
+                ctx,
+                &run,
+                stringify.deref(ctx).get_operand(0),
+                stringify,
+                (None, Some(parse_op)),
+                consumer,
+            ),
+            blocks,
+            "{position}: {operation}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn promise_outcomes_follow_aggregate_aliases_and_recursive_calls() -> Result<()> {
     let fixture = r#"
 builtin.module @outcomes { ^module():
@@ -310,6 +497,18 @@ builtin.module @outcomes { ^module():
             ("perry.call write (holder, ready) : ;", false),
             ("perry.call write (holder, failed) : ;", true),
             ("perry.call write (holder, unknown) : ;", true),
+            (
+                "extra = perry.array_new Unassigned (failed) : perry.array <perry.promise <builtin.fp64>>; perry.array_extend jobs, extra;",
+                true,
+            ),
+            (
+                "extra = perry.array_new Unassigned (failed) : perry.array <perry.promise <builtin.fp64>>; copied = perry.concat jobs, extra : perry.array <perry.promise <builtin.fp64>>; perry.field_set holder.\"jobs\" = copied;",
+                true,
+            ),
+            (
+                "extra = perry.array_new Unassigned (ready) : perry.array <perry.promise <builtin.fp64>>; segments = perry.array_new Unassigned (jobs, extra) : perry.array <perry.array <perry.promise <builtin.fp64>>>; copied = perry.concat_segments segments : perry.array <perry.promise <builtin.fp64>>; perry.field_set holder.\"jobs\" = copied; perry.array_push extra <- failed;",
+                true,
+            ),
             ("view = perry.json_native holder : perry.json;", true),
         ] {
             let ctx = &mut Context::new();
@@ -549,6 +748,10 @@ builtin.module @lossless_check { ^module():
       node = perry.alloc Unassigned (parsed, none) : perry.record <Node>;
       loaded = perry.field_get node."x" : builtin.fp64;
       copy = perry.alloc Unassigned (loaded, none) : perry.record <Node>;
+      linked = perry.wrap node : perry.optional <perry.record <Node>,Undefined>;
+      back = perry.wrap copy : perry.optional <perry.record <Node>,Undefined>;
+      perry.field_set copy."next" = linked;
+      perry.field_set node."next" = back;
       perry.return copy
   }
 }
@@ -576,6 +779,9 @@ builtin.module @lossless_check { ^module():
         .deref(ctx)
         .name()
         .clone();
+    let record = TypedHandle::<RecordType>::from_handle(layout, ctx)?;
+    let (_, next) = record.deref(ctx).field("next").unwrap();
+    assert_eq!(crate::optional_value(ctx, next), Some(layout));
     let fp64: TypeHandle = FP64Type::get(ctx).into();
 
     // 1. A ParseInt result and 2. a FieldGetOp of a Fact::Numeric field degraded back to f64

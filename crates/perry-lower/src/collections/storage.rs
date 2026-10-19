@@ -2,6 +2,7 @@
 
 use super::StorageField as Field;
 use super::*;
+use crate::control_flow::Projection;
 
 /// The entry and payload fields cleared when a live collection member is deleted.
 struct Tombstone<'a> {
@@ -12,19 +13,17 @@ struct Tombstone<'a> {
 
 /// A cursor tracking `(index, min_seq, epoch)` against a collection box.
 #[derive(Clone, Copy)]
-pub(crate) enum LiveCursor {
-    /// A view's own cursor: it survives `break`, and exhaustion parks it at infinity.
-    View {
-        box_val: Value,
-        cursor: Value,
-        kind: EntryKind,
-    },
-    /// A cursor created for one direct collection loop.
-    Loop {
-        box_val: Value,
-        cursor: Value,
-        kind: EntryKind,
-    },
+pub(crate) struct LiveCursor {
+    box_val: Value,
+    cursor: Value,
+    kind: EntryKind,
+    owner: CursorOwner,
+}
+
+#[derive(Clone, Copy)]
+enum CursorOwner {
+    View,
+    Loop,
 }
 
 impl LiveCursor {
@@ -44,27 +43,29 @@ impl LiveCursor {
         } else {
             EntryKind::Set
         };
-        Ok(Some(
-            if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
-                let cursor = b.storage_field(ctx, coll, Field::ViewCursor)?;
-                let live = Self::View {
-                    box_val,
-                    cursor,
-                    kind,
-                };
-                let start = live.position(b, ctx)?;
-                b.store(ctx, index, start);
-                live
-            } else {
-                let start = b.load(ctx, index)?;
-                let cursor = b.new_collection_cursor(ctx, box_val, start)?;
-                Self::Loop {
-                    box_val,
-                    cursor,
-                    kind,
-                }
-            },
-        ))
+        let (cursor, owner) = if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
+            (
+                b.storage_field(ctx, coll, Field::ViewCursor)?,
+                CursorOwner::View,
+            )
+        } else {
+            let start = b.load(ctx, index)?;
+            (
+                b.new_collection_cursor(ctx, box_val, start)?,
+                CursorOwner::Loop,
+            )
+        };
+        let live = Self {
+            box_val,
+            cursor,
+            kind,
+            owner,
+        };
+        if matches!(owner, CursorOwner::View) {
+            let start = live.position(b, ctx)?;
+            b.store(ctx, index, start);
+        }
+        Ok(Some(live))
     }
 
     /// Record that the next visit starts at `next` (after `entry`'s sequence number), before the
@@ -76,16 +77,12 @@ impl LiveCursor {
         next: Value,
         entry: Value,
     ) -> Result<()> {
-        let (Self::View {
+        let Self {
             box_val,
             cursor,
             kind,
-        }
-        | Self::Loop {
-            box_val,
-            cursor,
-            kind,
-        }) = self;
+            ..
+        } = self;
         let seq_op = FieldGetOp::new(ctx, entry, kind.seq_field().to_string())?;
         let seq = b.append_value(ctx, &seq_op);
         let one = b.number(ctx, 1.0);
@@ -99,30 +96,17 @@ impl LiveCursor {
 
     /// The index the next visit starts at, synchronized with clears and compactions.
     pub(crate) fn position(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<Value> {
-        let (Self::View {
-            box_val,
-            cursor,
-            kind,
-        }
-        | Self::Loop {
-            box_val,
-            cursor,
-            kind,
-        }) = self;
-        b.sync_collection_cursor(ctx, box_val, cursor, kind)
+        b.sync_collection_cursor(ctx, self.box_val, self.cursor, self.kind)
     }
 
     /// The loop ran out of entries: a view stays exhausted at infinity.
     pub(crate) fn exhausted(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
-        match self {
-            Self::View { cursor, .. } => {
-                let inf = b.number(ctx, f64::INFINITY);
-                b.set_storage_field(ctx, cursor, Field::CursorIndex, inf);
-                b.set_storage_field(ctx, cursor, Field::CursorSequence, inf);
-                Ok(())
-            }
-            Self::Loop { .. } => Ok(()),
+        if matches!(self.owner, CursorOwner::View) {
+            let inf = b.number(ctx, f64::INFINITY);
+            b.set_storage_field(ctx, self.cursor, Field::CursorIndex, inf);
+            b.set_storage_field(ctx, self.cursor, Field::CursorSequence, inf);
         }
+        Ok(())
     }
 }
 
@@ -215,35 +199,10 @@ impl<'s> FunctionBuilder<'s> {
         val: Value,
         idx: Value,
     ) -> Result<Value> {
-        let ty = present_type(ctx, val.get_type(ctx));
+        let projection = Projection::collection(ctx, val.get_type(ctx))?;
         let entries = self.collection_entries_array(ctx, val)?;
         let entry = self.element_at(ctx, entries, idx)?;
-        let yielded = match collection_view_record(ctx, ty) {
-            Some((view, _)) => Some(view),
-            None if set_box_record(ctx, ty).is_some() => Some(CollectionViewKind::SetValues),
-            None if map_box_record(ctx, ty).is_some() => Some(CollectionViewKind::MapEntries),
-            None => None,
-        };
-        match yielded {
-            Some(CollectionViewKind::MapKeys | CollectionViewKind::SetValues) => {
-                let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                Ok(self.append_value(ctx, &op))
-            }
-            Some(CollectionViewKind::MapValues) => {
-                let op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
-                Ok(self.append_value(ctx, &op))
-            }
-            Some(CollectionViewKind::MapEntries) => {
-                let (k, v) = self.entry_fields(ctx, entry)?;
-                self.pair(ctx, k, v)
-            }
-            Some(CollectionViewKind::SetEntries) => {
-                let op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                let item = self.append_value(ctx, &op);
-                self.pair(ctx, item, item)
-            }
-            None => Ok(entry),
-        }
+        projection.read(self, ctx, entry)
     }
 
     /// The key (`_0`) and value (`_1`) of a key-value entry or pair.
@@ -267,81 +226,17 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A fresh `[first, second]` tuple.
-    fn pair(&mut self, ctx: &mut Context, first: Value, second: Value) -> Result<Value> {
+    pub(crate) fn pair(&mut self, ctx: &mut Context, first: Value, second: Value) -> Result<Value> {
         let (first_ty, second_ty) = (first.get_type(ctx), second.get_type(ctx));
         let tuple_rec = self.shapes.pair_type(ctx, first_ty, second_ty)?;
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![first, second])))
     }
 
-    /// The element type iterating `ty` yields: an array element, set value, view item or pair.
-    pub(super) fn iterable_element_type(
-        &mut self,
-        ctx: &mut Context,
-        ty: TypeHandle,
-    ) -> Result<TypeHandle> {
-        let ty = present_type(ctx, ty);
-        if let Some((elem_ty, _)) = set_entry_type(ctx, ty) {
-            return Ok(elem_ty);
-        }
-        if let Some((k_ty, v_ty, _)) = map_entry_types(ctx, ty) {
-            return Ok(self.shapes.pair_type(ctx, k_ty, v_ty)?.into());
-        }
-        if let Some((view, view_rec)) = collection_view_record(ctx, ty) {
-            let (_, inner_box) = view_rec
-                .deref(ctx)
-                .field("_0")
-                .context("collection view missing _0 field")?;
-            let expected = || format!("expected a {} box", view.type_name());
-            return match view {
-                CollectionViewKind::MapKeys
-                | CollectionViewKind::MapValues
-                | CollectionViewKind::MapEntries => {
-                    let (k_ty, v_ty, _) = map_entry_types(ctx, inner_box).with_context(expected)?;
-                    Ok(match view {
-                        CollectionViewKind::MapKeys => k_ty,
-                        CollectionViewKind::MapValues => v_ty,
-                        _ => self.shapes.pair_type(ctx, k_ty, v_ty)?.into(),
-                    })
-                }
-                CollectionViewKind::SetValues | CollectionViewKind::SetEntries => {
-                    let (elem_ty, _) = set_entry_type(ctx, inner_box).with_context(expected)?;
-                    Ok(if view == CollectionViewKind::SetEntries {
-                        self.shapes.pair_type(ctx, elem_ty, elem_ty)?.into()
-                    } else {
-                        elem_ty
-                    })
-                }
-            };
-        }
-        if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
-            return Ok(arr.deref(ctx).element());
-        }
-        bail!("expected an array or collection iterable")
-    }
-
-    /// Copy what iterating `coll` yields into a fresh array.
-    pub(crate) fn materialize_collection_to_array(
-        &mut self,
-        ctx: &mut Context,
-        coll: Value,
-    ) -> Result<Value> {
-        let elem_ty = self.iterable_element_type(ctx, coll.get_type(ctx))?;
-        let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        self.live_collection_loop(ctx, "materialize_iter", coll, |b, ctx, _, item| {
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, item));
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
     pub(super) fn next_collection_seq(
         &mut self,
         ctx: &mut Context,
-        owner: Option<Value>,
+        box_val: Value,
     ) -> Result<Value> {
-        let Some(box_val) = owner else {
-            return Ok(self.number(ctx, 0.0));
-        };
         let seq = self.storage_field(ctx, box_val, Field::BoxSequence)?;
         let one = self.number(ctx, 1.0);
         let next_seq = self.binary(ctx, BinaryKind::Add, seq, one);
@@ -430,7 +325,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// Mark `entry` deleted, overwrite its `cleared` fields so they hold no references, and
-    /// compact the owning box, if any.
+    /// compact the owning box.
     pub(super) fn tombstone_entry(
         &mut self,
         ctx: &mut Context,
@@ -438,19 +333,15 @@ impl<'s> FunctionBuilder<'s> {
         entry: Value,
         kind: EntryKind,
         cleared: &[(&str, TypeHandle)],
-        owner: Option<Value>,
+        box_val: Value,
     ) -> Result<()> {
         let tombstone = Tombstone {
             entry,
             kind,
             fields: cleared,
         };
-        if let Some(box_val) = owner {
-            let live = self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
-            return self.reclaim_after_delete(ctx, box_val, entries, live, tombstone);
-        }
-        self.clear_tombstone_entry(ctx, &tombstone);
-        Ok(())
+        let live = self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
+        self.reclaim_after_delete(ctx, box_val, entries, live, tombstone)
     }
 
     fn clear_tombstone_entry(&mut self, ctx: &mut Context, tombstone: &Tombstone<'_>) {
@@ -522,7 +413,6 @@ impl<'s> FunctionBuilder<'s> {
         tombstone: Tombstone<'_>,
     ) -> Result<()> {
         let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
 
         let is_empty = self.compare(ctx, CompareKind::Eq, live, zero);
@@ -557,26 +447,10 @@ impl<'s> FunctionBuilder<'s> {
         self.branch(ctx, should_compact, compact_bb, done_bb);
 
         self.switch_to(compact_bb);
-        let write_slot = self.entry_slot(ctx, zero.get_type(ctx));
-        self.store(ctx, write_slot, zero);
-        self.index_loop(ctx, "reclaim_scan", zero, cap, |b, ctx, r, next, _| {
-            let e = b.element_at(ctx, entries, r)?;
-            let live_op = FieldGetOp::new(ctx, e, tombstone.kind.live_field().to_string())?;
-            let is_live = b.append_value(ctx, &live_op);
-            let live_branch = b.new_block(ctx, "reclaim_keep");
-            b.branch(ctx, is_live, live_branch, next);
-
-            b.switch_to(live_branch);
-            let w = b.load(ctx, write_slot)?;
-            b.emit(ctx, |ctx| ArraySetOp::new(ctx, entries, w, e));
-            let next_w = b.binary(ctx, BinaryKind::Add, w, one);
-            b.store(ctx, write_slot, next_w);
-            b.jump(ctx, next);
-            Ok(())
+        self.retain_array(ctx, entries, |b, ctx, entry| {
+            let op = FieldGetOp::new(ctx, entry, tombstone.kind.live_field().to_string())?;
+            Ok(b.append_value(ctx, &op))
         })?;
-        let final_w = self.load(ctx, write_slot)?;
-        let new_len = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, final_w, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, new_len));
         self.bump_box_epoch(ctx, box_val)?;
         self.jump(ctx, done_bb);
 
@@ -600,112 +474,27 @@ impl<'s> FunctionBuilder<'s> {
         Ok(Some(self.append_value(ctx, &op)))
     }
 
-    /// `size`: a box's live count, otherwise a count of live entries.
+    /// `size`: a box's live count or a plain array's length.
     pub(crate) fn collection_size(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
         if let Some(box_val) = self.collection_underlying_box(ctx, arr)? {
             return self.storage_field(ctx, box_val, Field::BoxLength);
         }
-        let num_ty = FP64Type::get(ctx).into();
-        let count_slot = self.entry_slot(ctx, num_ty);
-        let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
-        self.store(ctx, count_slot, zero);
-        self.live_collection_loop(ctx, "coll_size", arr, |b, ctx, _, _| {
-            let cur = b.load(ctx, count_slot)?;
-            let next_c = b.binary(ctx, BinaryKind::Add, cur, one);
-            b.store(ctx, count_slot, next_c);
-            Ok(())
-        })?;
-        self.load(ctx, count_slot)
+        Ok(self.array_length(ctx, arr))
     }
 
-    /// `clear()`: empty a box and bump its epoch, or tombstone every entry of a bare array.
-    pub(super) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
-        if let Some(box_val) = self.collection_underlying_box(ctx, coll)? {
-            let entries = self.collection_entries_array(ctx, box_val)?;
-            let zero = self.number(ctx, 0.0);
-            let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-            let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
-            self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
-            self.set_storage_field(ctx, box_val, Field::BoxLength, zero);
-            self.bump_box_epoch(ctx, box_val)?;
-        } else {
-            let kind = TypedHandle::<ArrayType>::from_handle(coll.get_type(ctx), ctx)
-                .ok()
-                .and_then(|arr| {
-                    TypedHandle::<RecordType>::from_handle(arr.deref(ctx).element(), ctx).ok()
-                })
-                .and_then(|rec| EntryKind::of_entry(ctx, rec))
-                .context("clear() requires a Map or Set")?;
-            let limit = self.array_length(ctx, coll);
-            let zero = self.number(ctx, 0.0);
-            let false_val = self.boolean(ctx, false);
-            self.index_loop(ctx, "coll_clear", zero, limit, |b, ctx, idx, _, _| {
-                let entry = b.element_at(ctx, coll, idx)?;
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, entry, kind.live_field().to_string(), false_val)
-                });
-                Ok(())
-            })?;
-        }
+    /// Empty a collection box and invalidate its cursors' cached positions.
+    pub(crate) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
+        let box_val = self
+            .collection_underlying_box(ctx, coll)?
+            .context("clear() requires a Map or Set")?;
+        let entries = self.collection_entries_array(ctx, box_val)?;
+        let zero = self.number(ctx, 0.0);
+        let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
+        let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
+        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
+        self.set_storage_field(ctx, box_val, Field::BoxLength, zero);
+        self.bump_box_epoch(ctx, box_val)?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
-    }
-
-    /// Run `body(index, item)` for each live entry of `coll`, in insertion order, tracking the
-    /// position with a [LiveCursor] so deletes during `body` neither skip nor repeat entries.
-    pub(super) fn live_collection_loop(
-        &mut self,
-        ctx: &mut Context,
-        label: &str,
-        coll: Value,
-        body: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
-    ) -> Result<()> {
-        let entries = self.collection_entries_array(ctx, coll)?;
-        let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
-        let index = self.entry_slot(ctx, zero.get_type(ctx));
-        self.store(ctx, index, zero);
-        let cursor = LiveCursor::open(self, ctx, coll, index)?;
-        let header = self.new_block(ctx, &format!("{label}_header"));
-        let check = self.new_block(ctx, &format!("{label}_check"));
-        let entered = self.new_block(ctx, &format!("{label}_body"));
-        let next = self.new_block(ctx, &format!("{label}_next"));
-        let done = self.new_block(ctx, &format!("{label}_done"));
-        self.jump(ctx, header);
-        self.switch_to(header);
-        let current = self.load(ctx, index)?;
-        let limit = self.array_length(ctx, entries);
-        let more = self.compare(ctx, CompareKind::Lt, current, limit);
-        self.branch(ctx, more, check, done);
-        self.switch_to(check);
-        let next_idx = self.binary(ctx, BinaryKind::Add, current, one);
-        let raw_entry = self.element_at(ctx, entries, current)?;
-        if let Some(cursor) = cursor {
-            cursor.advance(self, ctx, next_idx, raw_entry)?;
-        }
-        match self.collection_entry_live(ctx, raw_entry)? {
-            Some(live) => self.branch(ctx, live, entered, next),
-            None => self.jump(ctx, entered),
-        }
-        self.switch_to(entered);
-        let item = self.collection_view_element_at(ctx, coll, current)?;
-        body(self, ctx, current, item)?;
-        self.jump(ctx, next);
-        self.switch_to(next);
-        let advanced = match cursor {
-            Some(cursor) => cursor.position(self, ctx)?,
-            None => {
-                let cur = self.load(ctx, index)?;
-                self.binary(ctx, BinaryKind::Add, cur, one)
-            }
-        };
-        self.store(ctx, index, advanced);
-        self.jump(ctx, header);
-        self.switch_to(done);
-        if let Some(cursor) = cursor {
-            cursor.exhausted(self, ctx)?;
-        }
-        Ok(())
     }
 }

@@ -1,6 +1,7 @@
 //! Strings in compiled core modules: scalar positions, UTF-8 ordering, Unicode casing,
 //! append and split sharing, and the allocations they avoid.
 use crate::core_program::{Counter, Program};
+use std::fmt::Write;
 
 #[test]
 fn retained_prefix_does_not_keep_later_append_storage_alive() {
@@ -277,35 +278,17 @@ fn short_literal_comparisons_preserve_utf8_order_and_boundaries() {
     );
     for (index, literal) in literals.iter().enumerate() {
         let literal = serde_json::to_string(literal).unwrap();
-        let operators = ["===", "!==", "<", "<=", ">", ">="];
-        let mut terms = Vec::new();
-        for (position, operator) in operators.iter().enumerate() {
-            terms.push(format!("(s {operator} {literal} ? {} : 0)", 1 << position));
-            terms.push(format!(
-                "({literal} {operator} s ? {} : 0)",
-                1 << (position + 6)
-            ));
-        }
         source += &format!(
             "export function compare{index}(n: number): number {{ const s = samples[n]; if (s === undefined) return -1; return {}; }}\n",
-            terms.join(" + ")
+            comparison_expression("s", &literal)
         );
     }
     let mut program = Program::new(&source);
     for (index, literal) in literals.iter().enumerate() {
         for (position, sample) in samples.iter().enumerate() {
-            let mut expected = 0;
-            for (shift, (a, b)) in [(0, (sample, literal)), (6, (literal, sample))] {
-                for (bit, value) in [a == b, a != b, a < b, a <= b, a > b, a >= b]
-                    .into_iter()
-                    .enumerate()
-                {
-                    expected += i32::from(value) << (shift + bit);
-                }
-            }
             assert_eq!(
                 program.number(&format!("compare{index}"), position as f64),
-                expected as f64,
+                f64::from(comparison_mask(sample, literal)),
                 "{sample:?} against {literal:?}"
             );
         }
@@ -384,15 +367,10 @@ fn scalar_characters_preserve_empty_indices_and_unicode_ordering() {
     let mut source = String::new();
     for (index, literal) in literals.iter().enumerate() {
         let literal = serde_json::to_string(literal).unwrap();
-        let mut terms = Vec::new();
-        for (bit, operator) in ["===", "!==", "<", "<=", ">", ">="].iter().enumerate() {
-            terms.push(format!("(c {operator} {literal} ? {} : 0)", 1 << bit));
-            terms.push(format!("({literal} {operator} c ? {} : 0)", 1 << (bit + 6)));
-        }
         source += &format!(
             "export function check{index}(n: number): number {{ const c = {}.charAt(n); return {} + c.length * 4096; }}\n",
             serde_json::to_string(text).unwrap(),
-            terms.join(" + ")
+            comparison_expression("c", &literal)
         );
     }
     let mut program = Program::new(&source);
@@ -422,18 +400,8 @@ fn scalar_characters_preserve_empty_indices_and_unicode_ordering() {
         };
         let sample = sample.map_or_else(String::new, |c| c.to_string());
         for (index, &literal) in literals.iter().enumerate() {
-            let mut expected = if sample.is_empty() { 0 } else { 4096 };
-            for (shift, (a, b)) in [
-                (0, (sample.as_str(), literal)),
-                (6, (literal, sample.as_str())),
-            ] {
-                for (bit, value) in [a == b, a != b, a < b, a <= b, a > b, a >= b]
-                    .into_iter()
-                    .enumerate()
-                {
-                    expected += i32::from(value) << (shift + bit);
-                }
-            }
+            let expected =
+                comparison_mask(&sample, literal) + if sample.is_empty() { 0 } else { 4096 };
             assert_eq!(
                 program.number(&format!("check{index}"), position),
                 f64::from(expected),
@@ -490,4 +458,33 @@ export function build(n: number): number {
     assert_eq!(program.number("build", 20_000.0), 20_000.0);
     let after = program.counter(Counter::Allocations);
     assert!(after - before < 30);
+}
+
+fn comparison_expression(variable: &str, literal: &str) -> String {
+    let mut expression = String::new();
+    for (bit, operator) in ["===", "!==", "<", "<=", ">", ">="].iter().enumerate() {
+        if bit != 0 {
+            expression.push_str(" + ");
+        }
+        let _ = write!(
+            expression,
+            "({variable} {operator} {literal} ? {} : 0) + ({literal} {operator} {variable} ? {} : 0)",
+            1 << bit,
+            1 << (bit + 6)
+        );
+    }
+    expression
+}
+
+fn comparison_mask(left: &str, right: &str) -> i32 {
+    let mut mask = 0;
+    for (shift, (a, b)) in [(0, (left, right)), (6, (right, left))] {
+        for (bit, value) in [a == b, a != b, a < b, a <= b, a > b, a >= b]
+            .into_iter()
+            .enumerate()
+        {
+            mask |= i32::from(value) << (shift + bit);
+        }
+    }
+    mask
 }

@@ -14,30 +14,14 @@ mod byob;
 /// of a function of the WIT world that carries a `stream<u8>` (all such streams share one
 /// type per component instance).
 mod canon {
-    #[cfg(target_arch = "wasm32")]
-    #[link(wasm_import_module = "perry:canon")]
-    unsafe extern "C" {
+    perry_abi::wasm_imports! { "perry:canon";
         #[link_name = "[async-lower][stream-read]u8"]
         pub(super) fn read(stream: u32, buffer: *mut u8, len: u32) -> u32;
         #[link_name = "[stream-cancel-read]u8"]
         pub(super) fn cancel_read(stream: u32) -> u32;
         #[link_name = "[stream-drop-readable]u8"]
-        pub(super) fn drop_readable(stream: u32);
+        pub(super) fn drop_readable(_stream: u32) => {};
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::missing_safety_doc)]
-    mod host {
-        pub(crate) unsafe fn read(_: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("streams exist in linked modules")
-        }
-        pub(crate) unsafe fn cancel_read(_: u32) -> u32 {
-            unreachable!("streams exist in linked modules")
-        }
-        pub(crate) unsafe fn drop_readable(_: u32) {}
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) use host::*;
 }
 
 /// Default-reader transfer size. BYOB reads use the destination's remaining capacity.

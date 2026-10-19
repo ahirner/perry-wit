@@ -6,14 +6,14 @@
 //! retaining cursor lists or compaction histories.
 
 use super::*;
+use crate::control_flow::{ArrayOutput, Holes, Input, Projection};
 use crate::hir_compat::Constructor;
 use perry_mir::{OptionalType, RecordKind};
 
 mod keyed;
-mod methods;
+pub(super) use keyed::{SetOperation, SetRelation};
 mod objects;
 mod storage;
-use methods::{MapCall, SetCall};
 pub(super) use storage::LiveCursor;
 
 /// Stable tuple slots shared by collection construction and live iteration.
@@ -96,15 +96,6 @@ impl IteratorMethod {
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Entries => "entries",
-        }
-    }
-
-    pub(super) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "keys" => Some(Self::Keys),
-            "values" => Some(Self::Values),
-            "entries" => Some(Self::Entries),
-            _ => None,
         }
     }
 
@@ -237,17 +228,14 @@ pub(super) fn tuple_kv_types(
     Some((*k_ty, *v_ty, rec))
 }
 
-/// Extract `(K, V, tuple_rec)` if `ty` is a `Map<K, V>` (`map_box_*` or `map_tuple_*` element).
+/// The key, value and entry types of a `Map<K, V>` box.
 pub(super) fn map_entry_types(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
-    if let Some(box_rec) = map_box_record(ctx, ty) {
-        let (_, entries_ty) = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?;
-        return tuple_kv_types(ctx, entries_ty);
-    }
-    let (k, v, rec) = tuple_kv_types(ctx, ty)?;
-    (rec.deref(ctx).kind() == RecordKind::MapEntry).then_some((k, v, rec))
+    let box_rec = map_box_record(ctx, ty)?;
+    let (_, entries_ty) = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?;
+    tuple_kv_types(ctx, entries_ty)
 }
 
 /// Extract `(K, V, tuple_rec)` if `ty` is a `Record<K, V>` / dictionary (`dict_tuple_*` element).
@@ -272,44 +260,16 @@ pub(super) fn kv_entry_types(
 
 /// Extract `(K, V)` from any iterable of `[K, V]` pairs (`Map`, `Record`, `[K, V][]`, `MapEntries`, `SetEntries`).
 pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, TypeHandle)> {
-    if let Some((k, v, _)) = kv_entry_types(ctx, ty) {
-        return Some((k, v));
-    }
-    if let Some((view_kind, view_rec)) = collection_view_record(ctx, ty) {
-        let (_, inner_box) = view_rec.deref(ctx).field(StorageField::ViewBox.name())?;
-        return match view_kind {
-            CollectionViewKind::MapEntries => {
-                let (k, v, _) = map_entry_types(ctx, inner_box)?;
-                Some((k, v))
-            }
-            CollectionViewKind::SetEntries => {
-                let (elem, _) = set_entry_type(ctx, inner_box)?;
-                Some((elem, elem))
-            }
-            _ => None,
-        };
-    }
-    let ty = present_type(ctx, ty);
-    if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx)
-        && let Ok(elem_arr) = TypedHandle::<ArrayType>::from_handle(arr.deref(ctx).element(), ctx)
-    {
-        let inner = elem_arr.deref(ctx).element();
-        return Some((inner, inner));
-    }
-    None
+    Projection::collection(ctx, ty).ok()?.pair_types(ctx)
 }
 
-/// Extract `(T, tuple_rec)` if `ty` is a `Set<T>` (`set_box_*` or `set_tuple_*` element).
+/// The element and entry types of a `Set<T>` box.
 pub(super) fn set_entry_type(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypedHandle<RecordType>)> {
-    let ty = present_type(ctx, ty);
-    let entries_ty = if let Some(box_rec) = set_box_record(ctx, ty) {
-        box_rec.deref(ctx).field(StorageField::BoxEntries.name())?.1
-    } else {
-        ty
-    };
+    let box_rec = set_box_record(ctx, ty)?;
+    let entries_ty = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?.1;
     let arr = TypedHandle::<ArrayType>::from_handle(entries_ty, ctx).ok()?;
     let elem = arr.deref(ctx).element();
     let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
@@ -383,60 +343,11 @@ impl<'s> FunctionBuilder<'s> {
                 }
             };
         }
-        let map_call = match expr {
-            Expr::MapGet { map, key } => Some((map, MapCall::Get(key))),
-            Expr::MapSet { map, key, value } => Some((map, MapCall::Set(key, value))),
-            Expr::MapHas { map, key } => Some((map, MapCall::Has(key))),
-            Expr::MapDelete { map, key } => Some((map, MapCall::Delete(key))),
-            _ => None,
-        };
-        if let Some((map, call)) = map_call {
-            let receiver = self.expression(ctx, map)?;
-            let receiver = self.defined(ctx, receiver)?;
-            return call.lower(self, ctx, receiver).map(Some);
-        }
         match expr {
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
                 Ok(Some(self.collection_size(ctx, m)?))
-            }
-            Expr::MapClear(map) | Expr::SetClear(map) => {
-                let m = self.expression(ctx, map)?;
-                let m = self.defined(ctx, m)?;
-                Ok(Some(self.collection_clear(ctx, m)?))
-            }
-            Expr::MapValues(source)
-            | Expr::SetValues(source)
-            | Expr::ArrayValues(source)
-            | Expr::MapKeys(source)
-            | Expr::ArrayKeys(source)
-            | Expr::MapEntries(source)
-            | Expr::ArrayEntries(source) => {
-                let receiver = self.expression(ctx, source)?;
-                let receiver = self.defined(ctx, receiver)?;
-                let method = match expr {
-                    Expr::MapKeys(_) | Expr::ArrayKeys(_) => IteratorMethod::Keys,
-                    Expr::MapEntries(_) | Expr::ArrayEntries(_) => IteratorMethod::Entries,
-                    _ => IteratorMethod::Values,
-                };
-                Ok(Some(self.collection_iterator(ctx, receiver, method)?))
-            }
-            Expr::SetAdd { set_id, value } => {
-                let slot = self.local(*set_id)?;
-                let receiver = self.load(ctx, slot)?;
-                let receiver = self.defined(ctx, receiver)?;
-                SetCall::Add(value).lower(self, ctx, receiver).map(Some)
-            }
-            Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
-                let receiver = self.expression(ctx, set)?;
-                let receiver = self.defined(ctx, receiver)?;
-                let call = if matches!(expr, Expr::SetHas { .. }) {
-                    SetCall::Has(value)
-                } else {
-                    SetCall::Delete(value)
-                };
-                call.lower(self, ctx, receiver).map(Some)
             }
             Expr::ObjectKeys(obj) if matches!(**obj, Expr::ProcessEnv) => {
                 Ok(Some(self.intrinsic(ctx, Intrinsic::EnvKeys, vec![])))
@@ -485,76 +396,42 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
-    pub(super) fn collection_method(
-        &mut self,
-        ctx: &mut Context,
-        receiver: Value,
-        method: &str,
-        args: &'s [Expr],
-    ) -> Result<Option<Value>> {
-        let recv_ty = receiver.get_type(ctx);
-        if let Some(iterator) = IteratorMethod::parse(method) {
-            let collection = if map_entry_types(ctx, recv_ty).is_some() {
-                Some("Map")
-            } else if set_entry_type(ctx, recv_ty).is_some() {
-                Some("Set")
-            } else if kind(ctx, receiver)? == Kind::Array
-                && dict_entry_types(ctx, recv_ty).is_none()
-            {
-                Some("Array")
-            } else {
-                None
-            };
-            if let Some(collection) = collection {
-                ensure!(args.is_empty(), "{collection}.{method} takes no arguments");
-                return self.collection_iterator(ctx, receiver, iterator).map(Some);
-            }
-        }
-
-        if map_entry_types(ctx, recv_ty).is_some() {
-            return MapCall::parse(method, args)?
-                .map(|call| call.lower(self, ctx, receiver))
-                .transpose();
-        }
-        if set_entry_type(ctx, recv_ty).is_some() {
-            return SetCall::parse(method, args)?
-                .map(|call| call.lower(self, ctx, receiver))
-                .transpose();
-        }
-
-        Ok(None)
-    }
-
-    fn collection_iterator(
+    pub(super) fn collection_iterator(
         &mut self,
         ctx: &mut Context,
         receiver: Value,
         method: IteratorMethod,
     ) -> Result<Value> {
         let ty = receiver.get_type(ctx);
-        if let Some((element, _)) = set_entry_type(ctx, ty) {
-            return match method {
-                IteratorMethod::Keys | IteratorMethod::Values => {
-                    self.set_values(ctx, receiver, element)
-                }
-                IteratorMethod::Entries => self.set_entries(ctx, receiver, element),
+        if set_box_record(ctx, ty).is_some() {
+            return self.alloc_collection_view(ctx, receiver, method.set_view());
+        }
+        if map_box_record(ctx, ty).is_some() {
+            return self.alloc_collection_view(ctx, receiver, method.map_view());
+        }
+        let keyed = tuple_kv_types(ctx, ty);
+        if keyed.is_none() && method == IteratorMethod::Values {
+            return Ok(receiver);
+        }
+        let input = if keyed.is_some() {
+            Input::Collection(receiver)
+        } else if method == IteratorMethod::Keys {
+            Input::UndefinedCount(self.array_length(ctx, receiver))
+        } else {
+            Input::Array(receiver, Holes::Dense)
+        };
+        self.collect_items(ctx, input, |b, ctx, item, index, _| {
+            let (key, value) = if keyed.is_some() {
+                b.entry_fields(ctx, item)?
+            } else {
+                (index, item)
             };
-        }
-        if kv_entry_types(ctx, ty).is_some() {
-            return match method {
-                IteratorMethod::Keys => self.kv_keys(ctx, receiver),
-                IteratorMethod::Values => self.kv_values(ctx, receiver),
-                IteratorMethod::Entries => self.kv_entries(ctx, receiver),
-            };
-        }
-        match method {
-            IteratorMethod::Keys => self.array_keys(ctx, receiver),
-            IteratorMethod::Values => Ok(receiver),
-            IteratorMethod::Entries => {
-                let element = self.array_element(ctx, receiver)?;
-                self.array_entries(ctx, receiver, element)
-            }
-        }
+            Ok(ArrayOutput::Item(match method {
+                IteratorMethod::Keys => key,
+                IteratorMethod::Values => value,
+                IteratorMethod::Entries => b.pair(ctx, key, value)?,
+            }))
+        })
     }
 
     fn empty_map(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {
@@ -590,11 +467,15 @@ impl<'s> FunctionBuilder<'s> {
             None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
         };
         let map = self.alloc_collection_box(ctx, map_tuple, EntryKind::Map)?;
-        self.live_collection_loop(ctx, "map_init", entries_val, |b, ctx, _, entry| {
-            let (k, v) = b.entry_fields(ctx, entry)?;
-            b.kv_set(ctx, map, k, v)?;
-            Ok(())
-        })?;
+        self.iterate(
+            ctx,
+            Input::Collection(entries_val),
+            |b, ctx, entry, _, _, _| {
+                let (k, v) = b.entry_fields(ctx, entry)?;
+                b.kv_set(ctx, map, k, v)?;
+                Ok(())
+            },
+        )?;
         Ok(map)
     }
 
@@ -621,7 +502,8 @@ impl<'s> FunctionBuilder<'s> {
         let (elem_ty, tuple_rec) = match set_entry_type(ctx, arr.get_type(ctx)) {
             Some((e, r)) => (e, r),
             None => {
-                let e = self.iterable_element_type(ctx, arr.get_type(ctx))?;
+                let e = Projection::collection(ctx, arr.get_type(ctx))?
+                    .output_type(ctx, self.shapes)?;
                 let r = match expected.and_then(|exp| set_entry_type(ctx, exp).map(|(_, r)| r)) {
                     Some(r) => r,
                     None => self.shapes.set_tuple_type(ctx, e)?,
@@ -630,8 +512,8 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         let set = self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)?;
-        self.live_collection_loop(ctx, "set_init", arr, |b, ctx, _, item| {
-            b.set_add(ctx, set, item, elem_ty, tuple_rec)?;
+        self.iterate(ctx, Input::Collection(arr), |b, ctx, item, _, _, _| {
+            b.set_add(ctx, set, item, elem_ty)?;
             Ok(())
         })?;
         Ok(set)
@@ -645,7 +527,10 @@ impl<'s> FunctionBuilder<'s> {
         ty: TypeHandle,
     ) -> Result<Value> {
         let eq = self.compare(ctx, CompareKind::Eq, a, b);
-        if ty.deref(ctx).is::<FP64Type>() {
+        if matches!(
+            Kind::of(ctx, present_type(ctx, ty)),
+            Some(Kind::Number | Kind::NumberString)
+        ) {
             let bool_ty = eq.get_type(ctx);
             let a_nan = self.compare(ctx, CompareKind::Ne, a, a);
             let b_nan = self.compare(ctx, CompareKind::Ne, b, b);
@@ -654,32 +539,5 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             Ok(eq)
         }
-    }
-
-    /// Convert a JSON object snapshot `{"k": v, ...}` into a `Record<string, V>` dictionary array.
-    pub(crate) fn decode_dict(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        _k_ty: TypeHandle,
-        v_ty: TypeHandle,
-        tuple_rec: TypedHandle<RecordType>,
-    ) -> Result<Value> {
-        self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-        let keys = self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value]);
-        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        let limit = self.array_length(ctx, keys);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "json_dict", zero, limit, |b, ctx, idx, _, _| {
-            let key_str = b.element_at(ctx, keys, idx)?;
-            let raw_val = b.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key_str]);
-            let decoded_val = b.fit(ctx, raw_val, v_ty)?;
-            let entry = b.emit_value(ctx, |ctx| {
-                AllocOp::new(ctx, tuple_rec, vec![key_str, decoded_val])
-            });
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, dict, entry));
-            Ok(())
-        })?;
-        Ok(dict)
     }
 }

@@ -27,6 +27,7 @@
 //! function, whose ops `ops` dispatches to the topical modules; `async_split` turns async
 //! functions into state machines and [boundary] binds them to the canonical ABI.
 use anyhow::{Context as _, Result, anyhow};
+use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
 use perry_mir::ErrorKind;
 use pliron::{
     builtin::ops::ModuleOp,
@@ -72,12 +73,6 @@ pub const HELPER_MODULE: &str = "__perry_helper";
 const DATA_BASE: u32 = 16;
 /// The interface `setTimeout` waits on.
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
-/// `undefined` in a `boolean | undefined` slot.
-const UNDEFINED_BOOL: i32 = 2;
-/// Omitted property in a `boolean | undefined` slot.
-const OMITTED_BOOL: i32 = 4;
-/// Omitted property in a reference `T | undefined` slot.
-const OMITTED_REF: i32 = 2;
 
 /// How functions are exported.
 pub enum Exports {

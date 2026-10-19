@@ -3,16 +3,17 @@
 //! The HIR→MIR builder (P2.2) emits one `perry.local` per mutable binding and plain loads and
 //! stores, so it never constructs SSA joins, loop-carried block parameters or await
 //! continuations itself; that hand-rolled machinery in the legacy `ssa.rs` goes away.
-use crate::{NewOp, types::SlotType};
+use crate::operation_schema::op_schema;
+use crate::signatures::{Accepts, OutputContract};
+use crate::types::SlotType;
 use pliron::{
-    builtin::op_interfaces::{
-        NOpdsInterface, NResultsInterface, OneOpdInterface, OneResultInterface,
-    },
+    builtin::op_interfaces::{NOpdsInterface, OneResultInterface},
     common_traits::Verify,
     context::Context,
     derive::{op_interface_impl, pliron_op},
     irbuild::{inserter::Inserter, rewriter::Rewriter},
     op::Op,
+    operation::Operation,
     opts::mem2reg::{
         AllocInfo, PromotableAllocationInterface, PromotableOpInterface, PromotableOpKind,
     },
@@ -51,35 +52,20 @@ pub struct UndefOp;
 
 impl UndefOp {
     pub fn new(ctx: &mut Context, ty: TypeHandle) -> Self {
-        UndefOp {
-            op: Self::new_op(ctx, vec![ty], vec![]),
-        }
+        Operation::new_op::<Self>(ctx, vec![ty], vec![], vec![], 0)
     }
 }
 
-side_effects!(false; UndefOp, LoadOp);
-
-/// Storage for one mutable local binding.
-#[pliron_op(
-    name = "perry.local",
-    format = "` : ` type($0)",
-    interfaces = [NOpdsInterface<0>, OneResultInterface],
-)]
-pub struct LocalOp;
-
-impl LocalOp {
-    pub fn new(ctx: &mut Context, value: TypeHandle) -> Self {
-        let slot = SlotType::get(ctx, value).into();
-        LocalOp {
-            op: Self::new_op(ctx, vec![slot], vec![]),
-        }
-    }
-}
-
-impl Verify for LocalOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        slot_value(ctx, self.get_result(ctx), "perry.local").map(|_| ())
-    }
+op_schema! {
+    /// Storage for one mutable local binding.
+    pub LocalOp() -> infallible;
+    name = "perry.local";
+    format = "` : ` type($0)";
+    constructors { pub new(value: TypeHandle) => explicit(SlotType::get(ctx, value).into()); }
+    result(ctx): impl OutputContract = {
+        Accepts(|ctx: &Context, ty: TypeHandle| ty.deref(ctx).is::<SlotType>())
+    };
+    error = LocalErr::NotSlot("perry.local");
 }
 
 #[op_interface_impl]
@@ -116,33 +102,19 @@ impl PromotableAllocationInterface for LocalOp {
     }
 }
 
-/// Read a local.
-#[pliron_op(
-    name = "perry.load",
-    format = "$0 ` : ` type($0)",
-    interfaces = [OneOpdInterface, OneResultInterface],
-)]
-pub struct LoadOp;
-
-impl LoadOp {
-    pub fn new(ctx: &mut Context, slot: Value) -> Result<Self> {
-        let ty = slot_value(ctx, slot, "perry.load")?;
-        Ok(LoadOp {
-            op: Self::new_op(ctx, vec![ty], vec![slot]),
-        })
-    }
-
-    pub(crate) fn slot(&self, ctx: &Context) -> Value {
-        self.get_operation().deref(ctx).get_operand(0)
-    }
+op_schema! {
+    /// Read a local.
+    pub LoadOp(slot) -> fallible;
+    name = "perry.load";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(slot: Value) => infer(slot); }
+    result(ctx, slot: Value): TypeHandle = slot_value(ctx, slot, "perry.load");
+    error = LocalErr::Type("perry.load");
 }
 
-impl Verify for LoadOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if slot_value(ctx, self.slot(ctx), "perry.load")? != self.get_result(ctx).get_type(ctx) {
-            verify_err!(self.loc(ctx), LocalErr::Type("perry.load"))?
-        }
-        Ok(())
+impl LoadOp {
+    pub(crate) fn slot(&self, ctx: &Context) -> Value {
+        self.get_operation().deref(ctx).get_operand(0)
     }
 }
 
@@ -173,36 +145,25 @@ impl PromotableOpInterface for LoadOp {
     }
 }
 
-/// Write a local.
-#[pliron_op(
-    name = "perry.store",
-    format = "$0 ` = ` $1",
-    interfaces = [NOpdsInterface<2>, NResultsInterface<0>],
-)]
-pub struct StoreOp;
+op_schema! {
+    /// Write a local.
+    pub StoreOp(slot, value) -> infallible;
+    name = "perry.store";
+    format = "$0 ` = ` $1";
+    constructors { pub new(slot: Value, value: Value) => empty(); }
+    result(ctx): () = ();
+    error = LocalErr::Type("perry.store");
+    check slot_value(ctx, slot, "perry.store")? == value.get_type(ctx)
+        => LocalErr::Type("perry.store");
+}
 
 impl StoreOp {
-    pub fn new(ctx: &mut Context, slot: Value, value: Value) -> Self {
-        StoreOp {
-            op: Self::new_op(ctx, vec![], vec![slot, value]),
-        }
-    }
-
     pub(crate) fn slot(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(0)
     }
 
     pub(crate) fn value(&self, ctx: &Context) -> Value {
         self.get_operation().deref(ctx).get_operand(1)
-    }
-}
-
-impl Verify for StoreOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if slot_value(ctx, self.slot(ctx), "perry.store")? != self.value(ctx).get_type(ctx) {
-            verify_err!(self.loc(ctx), LocalErr::Type("perry.store"))?
-        }
-        Ok(())
     }
 }
 

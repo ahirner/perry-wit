@@ -1,8 +1,9 @@
 //! Chunk boundaries, error recovery and BOM handling for the declared UTF-8 decoder.
-use anyhow::{Context, Result, ensure};
+use crate::world::Compiler::Standard;
+use anyhow::Result;
 use wasmtime::Engine;
 
-use crate::world;
+use crate::{node_oracle::NodeOracle, world};
 
 #[test]
 fn incremental_utf8_matches_node_at_every_byte_boundary() -> Result<()> {
@@ -24,20 +25,16 @@ export function decode(input: Uint8Array, split: number, fatal: boolean, ignore:
 }
 "#;
     let wit = "package test:decoder; world decoder { export decode: func(input: list<u8>, split: f64, fatal: bool, ignore: bool) -> result<string>; }";
-    let component = world::component(wit, "decoder", "decoder.ts", source)?;
+    let component = Standard.component(wit, "decoder", "decoder.ts", source)?;
     let engine = Engine::default();
     let (mut store, instance) = world::instantiate(&engine, &component)?;
     let decode = instance
         .get_typed_func::<(&[u8], f64, bool, bool), (std::result::Result<String, ()>,)>(
             &mut store, "decode",
         )?;
-    let directory = tempfile::tempdir()?;
-    let script = directory.path().join("decode.mts");
-    std::fs::write(
-        &script,
-        format!(
-            "{source}\nconst input = new Uint8Array(JSON.parse(process.argv[2]));\nconst values = [];\nfor (let split = 0; split <= input.length; split++) {{ for (const fatal of [false, true]) {{ for (const ignore of [false, true]) values.push(JSON.parse(decode(input, split, fatal, ignore))); }} }}\nconsole.log(JSON.stringify(values));"
-        ),
+    let oracle = NodeOracle::typescript(
+        source,
+        "const input = new Uint8Array(JSON.parse(process.argv[2]));\nconst values = [];\nfor (let split = 0; split <= input.length; split++) { for (const fatal of [false, true]) { for (const ignore of [false, true]) values.push(JSON.parse(decode(input, split, fatal, ignore))); } }\nconsole.log(JSON.stringify(values));",
     )?;
     for input in [
         b"".as_slice(),
@@ -46,18 +43,8 @@ export function decode(input: Uint8Array, split: number, fatal: boolean, ignore:
         b"\xe0\x80x\xed\xa0\x80\xf4\x90\x80\x80\xe2\x82",
         b"\xef\xbb",
     ] {
-        let node = std::process::Command::new("node")
-            .arg("--experimental-strip-types")
-            .arg(&script)
-            .arg(serde_json::to_string(input)?)
-            .output()
-            .context("Node UTF-8 oracle")?;
-        ensure!(
-            node.status.success(),
-            "Node: {}",
-            String::from_utf8_lossy(&node.stderr)
-        );
-        let expected: Vec<serde_json::Value> = serde_json::from_slice(&node.stdout)?;
+        let expected: Vec<serde_json::Value> =
+            serde_json::from_str(&oracle.run(&[&serde_json::to_string(input)?])?)?;
         let mut index = 0;
         for split in 0..=input.len() {
             for fatal in [false, true] {

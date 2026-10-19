@@ -9,11 +9,14 @@
 
 use core::ptr;
 
+mod wasm_imports;
+
 pub mod json;
 pub mod layout;
 pub mod number;
 // Public because `perry-runtime` compiles this source too and uses the compact counter.
 pub mod utf8;
+pub mod whitespace;
 /// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
 pub use utf8::scalars_length_wide as scalars_length;
 
@@ -46,11 +49,11 @@ pub const EXCEPTION_VALUE: usize = 8;
 pub const THROWN_VALUE: u32 = 4;
 pub const TAG_NUMBER: u32 = 1;
 pub const TAG_STRING: u32 = 3;
+/// Bits of an omitted optional field in a `number | undefined` slot.
+pub use layout::descriptor::OMITTED_BITS;
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
 /// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
-pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
-/// Bits of an omitted optional field in a `number | undefined` slot.
-pub const OMITTED_BITS: u64 = 0x7FF0_0000_0000_0003;
+pub use layout::descriptor::UNDEFINED_BITS;
 /// Offset of an array's data address ([layout::array::DATA]).
 pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].

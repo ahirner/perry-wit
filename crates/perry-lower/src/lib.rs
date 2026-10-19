@@ -27,8 +27,9 @@ mod foreign;
 mod hir_compat;
 mod host;
 mod infer;
+mod inline;
 mod json;
-mod json_cursor;
+mod json_decode;
 mod methods;
 mod modules;
 mod operators;
@@ -49,26 +50,23 @@ use perry_hir::{
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{
-    AbortType, AllocOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayTruncateOp, ArrayType, AsyncCallOp, AwaitOp, BigIntType, BinaryKind,
-    BinaryOp as MirBinary, BrOp, BytesType, CallOp, CatchOp, CaughtOp, Combinator, CompareKind,
-    CompareOp as MirCompare, ConcatOp, CondBrOp, DateType, ErrorKind, ErrorNewOp, ExceptionIsOp,
-    ExceptionMessageOp, ExceptionType, ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, HeadersType,
-    IncomingType, InstantType, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, JsonStringifyOp,
-    JsonType, LoadOp, LocalOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp, PlainDateTimeType,
-    PlainDateType, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp,
-    ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType, RethrowOp,
-    ReturnOp, SettledField, SettledFieldOp, SettledType, StatsType, StoreOp, StringConstOp,
-    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
-    WrapOp, WritableType, WriterType, absence, admits_undefined, may_throw, optional_parts,
-    optional_value, present_type, set_async,
+    AllocOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, ArrayTruncateOp,
+    ArrayType, AsyncCallOp, AwaitOp, BigIntType, BinaryKind, BinaryOp as MirBinary, BrOp,
+    BytesType, CallOp, CatchOp, CaughtOp, Combinator, CompareKind, CompareOp as MirCompare,
+    ConcatOp, CondBrOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
+    ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
+    JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
+    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp, ReaderType,
+    RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp,
+    StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence,
+    admits_undefined, may_throw, optional_parts, optional_value, present_type, set_async,
 };
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr},
+        attributes::IntegerAttr,
         op_interfaces::{OneResultInterface, SingleBlockRegionInterface},
         ops::{ConstantOp, FuncOp, ModuleOp},
         types::{FP64Type, FunctionType, IntegerType, Signedness},
@@ -104,9 +102,7 @@ pub mod hir {
         Function(FunctionType),
     }
 }
-use builder::{
-    Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding, remove_unreachable,
-};
+use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding};
 use coerce::{Kind, is_integer64, kind, void_type};
 use program::{Builtin, Signature};
 

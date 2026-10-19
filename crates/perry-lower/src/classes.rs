@@ -1,8 +1,8 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
 use crate::{
-    array_methods::{CallbackReturn, EMPTY_RETURN, FALLTHROUGH, completions},
     builder::LocalBinding,
+    inline::InlineResult,
     shapes::{Argument, ArgumentId, Kind as ArgKind},
 };
 use perry_mir::OptionalType;
@@ -510,52 +510,26 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
 
-        let done = self.new_block(ctx, "class_call_done");
-        let is_void = matches!(receiver, ClassReceiver::Constructor(_))
-            || matches!(func.return_type, HirType::Void);
-        let optional = !is_void && (completions(&func.body) & (FALLTHROUGH | EMPTY_RETURN) != 0);
-        let declared = if !is_void && !matches!(func.return_type, HirType::Any | HirType::Unknown) {
+        let result_type = if matches!(receiver, ClassReceiver::Constructor(_))
+            || matches!(func.return_type, HirType::Void)
+        {
+            InlineResult::Void
+        } else if matches!(func.return_type, HirType::Any | HirType::Unknown) {
+            InlineResult::Inferred
+        } else {
             self.shapes
                 .class_value_type(ctx, owner_class, type_args, &func.return_type)
                 .ok()
-        } else {
-            None
+                .map_or(InlineResult::Inferred, InlineResult::Declared)
         };
-        let slot = declared.map(|ty| {
-            let ty = if optional && !admits_undefined(ctx, ty) {
-                OptionalType::get(ctx, ty).into()
-            } else {
-                ty
-            };
-            self.entry_slot(ctx, ty)
-        });
-        self.callback_returns.push(CallbackReturn {
-            done,
-            slot,
-            optional,
-            empty_returns: Vec::new(),
-        });
-        let body = hir_compat::strip_synthetic_default_guards(&func.body, func.params.iter());
-        let mut result = self.statements(ctx, body);
-        if result.is_ok() && self.reachable(ctx, self.block) {
-            if is_void {
-                self.jump(ctx, done);
-            } else {
-                result = self.callback_return(ctx, None);
-            }
-        }
+        let result = self.inline_body(ctx, &func.body, &func.params, result_type);
         self.locals.restore(saved_locals);
         self.closures.restore(saved_closures);
         self.this_slot = saved_this;
         self.variant_guards.truncate(guards);
         self.finallies = finallies;
         self.controls = controls;
-        let callback = self
-            .callback_returns
-            .pop()
-            .context("class callable return frame")?;
-        result?;
-        let slot = self.finish_inline_return(ctx, callback, is_void)?;
+        let slot = result?;
         if let ClassReceiver::Constructor(slot) = receiver {
             return self.load(ctx, slot).map(Some);
         }

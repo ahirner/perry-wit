@@ -6,20 +6,45 @@ use wasmtime::{
     component::{Component, Instance, Linker},
 };
 
-/// Compile `source` (named `file`) for `world` of the WIT package text `wit`; ambient WASI
-/// packages resolve as dependencies.
-pub(crate) fn compile(
-    wit: &str,
-    world: &str,
-    file: &str,
-    source: &str,
-) -> Result<perry_wit::Compiled> {
-    let (resolve, package) =
-        perry_wit::component::wit::resolve_source(&format!("{world}.wit"), wit)?;
-    let world = resolve.select_world(&[package], Some(world))?;
-    Ok(perry_wit::compile_for_world(
-        source, file, &resolve, world, true,
-    )?)
+/// Select the instrumentation used by component fixtures.
+#[derive(Clone, Copy)]
+pub(crate) enum Compiler {
+    Standard,
+    MemoryChecked,
+}
+
+impl Compiler {
+    /// Resolve ambient WASI dependencies and compile the selected world.
+    pub(crate) fn compile(
+        self,
+        wit: &str,
+        world: &str,
+        file: &str,
+        source: &str,
+    ) -> Result<perry_wit::Compiled> {
+        let (resolve, package) =
+            perry_wit::component::wit::resolve_source(&format!("{world}.wit"), wit)?;
+        let world = resolve.select_world(&[package], Some(world))?;
+        Ok(match self {
+            Self::Standard => perry_wit::compile_for_world(source, file, &resolve, world, true)?,
+            Self::MemoryChecked => perry_wit::compiler::compile_for_world_with_memory_checks(
+                source, file, &resolve, world,
+            )?,
+        })
+    }
+
+    pub(crate) fn component(
+        self,
+        wit: &str,
+        world: &str,
+        file: &str,
+        source: &str,
+    ) -> Result<Vec<u8>> {
+        self.compile(wit, world, file, source)?
+            .component
+            .map(|component| component.stripped)
+            .ok_or_else(|| anyhow::anyhow!("no component for {file}"))
+    }
 }
 
 /// Compile `source` against a one-export world whose `run` has `signature`. Async worlds may
@@ -30,20 +55,12 @@ pub(crate) fn compile_signature(source: &str, signature: &str) -> Result<perry_w
     } else {
         ""
     };
-    compile(
+    Compiler::Standard.compile(
         &format!("package test:signature; world test {{ {imports} export run: {signature}; }}"),
         "test",
         "signature.ts",
         source,
     )
-}
-
-/// The stripped component of `source` (named `file`) for `world` in the package `wit`.
-pub(crate) fn component(wit: &str, world: &str, file: &str, source: &str) -> Result<Vec<u8>> {
-    compile(wit, world, file, source)?
-        .component
-        .map(|component| component.stripped)
-        .ok_or_else(|| anyhow::anyhow!("no component for {file}"))
 }
 
 /// A fresh store and instance of `component`.

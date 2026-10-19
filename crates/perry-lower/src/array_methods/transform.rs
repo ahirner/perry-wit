@@ -12,62 +12,22 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
-        let limit = self.array_length(ctx, array);
-        let start = self.number(ctx, 0.0);
-        let prepare = self.block;
-        self.dense_loop(
+        self.collect_items(
             ctx,
-            ArrayIteration {
-                array,
-                start,
-                limit,
-                direction: Direction::Forward,
-                holes: Holes::Skip,
-            },
-            |b, ctx, item, current, next, _| {
+            Input::Array(array, Holes::Skip),
+            |b, ctx, item, current, next| {
                 let mapped = b.array_callback(ctx, callback, &[item, current, array])?;
-                let (mapped, element) = match transform {
-                    Transform::Map => (mapped, mapped.get_type(ctx)),
-                    Transform::Filter => (mapped, item.get_type(ctx)),
-                    Transform::FlatMap => {
-                        let mapped = b.defined(ctx, mapped)?;
-                        let element = b
-                            .array_element(ctx, mapped)
-                            .context("flatMap callback must return an array")?;
-                        (mapped, element)
-                    }
-                };
-                let allocation = ArrayNewOp::new(ctx, element, vec![]);
-                insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
-                let result = allocation.get_result(ctx);
-                match transform {
+                Ok(match transform {
+                    Transform::Map => ArrayOutput::Item(mapped),
+                    Transform::FlatMap => ArrayOutput::Items(b.defined(ctx, mapped)?),
                     Transform::Filter => {
                         let keep = b.truthy(ctx, mapped)?;
                         let push = b.new_block(ctx, "array_keep");
                         b.branch(ctx, keep, push, next);
                         b.switch_to(push);
-                        b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
+                        ArrayOutput::Item(item)
                     }
-                    Transform::Map => {
-                        b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, mapped));
-                    }
-                    Transform::FlatMap => {
-                        let limit = b.array_length(ctx, mapped);
-                        let start = b.number(ctx, 0.0);
-                        b.index_loop(
-                            ctx,
-                            "flat_map_inner",
-                            start,
-                            limit,
-                            |b, ctx, index, _, _| {
-                                let element = b.element_at(ctx, mapped, index)?;
-                                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, element));
-                                Ok(())
-                            },
-                        )?;
-                    }
-                }
-                Ok(result)
+                })
             },
         )
     }
@@ -81,17 +41,9 @@ impl<'s> FunctionBuilder<'s> {
         mutation: Mutation,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
-        let element = self.array_element(ctx, array)?;
+        self.array_element(ctx, array)?;
         let target = if matches!(mutation, Mutation::Copy) {
-            let copy = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-            let limit = self.array_length(ctx, array);
-            let zero = self.number(ctx, 0.0);
-            self.index_loop(ctx, "sort_clone", zero, limit, |b, ctx, idx, _, _| {
-                let item = b.element_at(ctx, array, idx)?;
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, copy, item));
-                Ok(())
-            })?;
-            copy
+            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))
         } else {
             array
         };
@@ -99,47 +51,34 @@ impl<'s> FunctionBuilder<'s> {
         let one = self.number(ctx, 1.0);
         self.index_loop(ctx, "sort_outer", one, limit, |b, ctx, i, _, _| {
             let key = b.element_at(ctx, target, i)?;
-            let j_slot = b.entry_slot(ctx, i.get_type(ctx));
-            let one = b.number(ctx, 1.0);
+            let insert = b.entry_slot(ctx, i.get_type(ctx));
+            b.store(ctx, insert, i);
             let zero = b.number(ctx, 0.0);
-            let j_init = b.binary(ctx, BinaryKind::Sub, i, one);
-            b.store(ctx, j_slot, j_init);
-            let inner_header = b.new_block(ctx, "sort_inner_header");
-            let inner_cmp = b.new_block(ctx, "sort_inner_cmp");
-            let inner_shift = b.new_block(ctx, "sort_inner_shift");
-            let inner_done = b.new_block(ctx, "sort_inner_done");
-            b.jump(ctx, inner_header);
-            b.switch_to(inner_header);
-            let j = b.load(ctx, j_slot)?;
-            let ge_zero = b.compare(ctx, CompareKind::Ge, j, zero);
-            b.branch(ctx, ge_zero, inner_cmp, inner_done);
-            b.switch_to(inner_cmp);
-            let candidate = b.element_at(ctx, target, j)?;
-            let gt = if let Some(comparator) = comparator {
-                let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
-                let cmp = b.arithmetic(ctx, cmp);
-                ensure!(
-                    kind(ctx, cmp)? == Kind::Number,
-                    "sort comparator must return a number"
-                );
-                b.compare(ctx, CompareKind::Gt, cmp, zero)
-            } else {
-                let cand_str = b.display(ctx, candidate)?;
-                let key_str = b.display(ctx, key)?;
-                b.compare(ctx, CompareKind::Gt, cand_str, key_str)
-            };
-            b.branch(ctx, gt, inner_shift, inner_done);
-            b.switch_to(inner_shift);
-            let j_plus_one = b.binary(ctx, BinaryKind::Add, j, one);
-            b.emit(ctx, |ctx| {
-                ArraySetOp::new(ctx, target, j_plus_one, candidate)
-            });
-            let j_minus_one = b.binary(ctx, BinaryKind::Sub, j, one);
-            b.store(ctx, j_slot, j_minus_one);
-            b.jump(ctx, inner_header);
-            b.switch_to(inner_done);
-            let j_final = b.load(ctx, j_slot)?;
-            let insert_pos = b.binary(ctx, BinaryKind::Add, j_final, one);
+            b.index_loop(ctx, "sort_inner", zero, i, |b, ctx, step, _, done| {
+                let position = b.binary(ctx, BinaryKind::Sub, i, step);
+                let j = b.binary(ctx, BinaryKind::Sub, position, one);
+                let candidate = b.element_at(ctx, target, j)?;
+                let gt = if let Some(comparator) = comparator {
+                    let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
+                    let cmp = b.arithmetic(ctx, cmp);
+                    ensure!(
+                        kind(ctx, cmp)? == Kind::Number,
+                        "sort comparator must return a number"
+                    );
+                    b.compare(ctx, CompareKind::Gt, cmp, zero)
+                } else {
+                    let cand_str = b.display(ctx, candidate)?;
+                    let key_str = b.display(ctx, key)?;
+                    b.compare(ctx, CompareKind::Gt, cand_str, key_str)
+                };
+                let shift = b.new_block(ctx, "sort_shift");
+                b.branch(ctx, gt, shift, done);
+                b.switch_to(shift);
+                b.emit(ctx, |ctx| ArraySetOp::new(ctx, target, position, candidate));
+                b.store(ctx, insert, j);
+                Ok(())
+            })?;
+            let insert_pos = b.load(ctx, insert)?;
             b.emit(ctx, |ctx| ArraySetOp::new(ctx, target, insert_pos, key));
             Ok(())
         })?;
@@ -201,15 +140,17 @@ impl<'s> FunctionBuilder<'s> {
             (slot, one)
         };
         let acc_ty = self.slot_type(ctx, acc_slot)?;
-        self.dense_loop(
+        self.iterate(
             ctx,
-            ArrayIteration {
+            Input::Slice(
                 array,
-                start: start_step,
-                limit: len,
-                direction,
-                holes: Holes::Skip,
-            },
+                Span {
+                    start: start_step,
+                    limit: len,
+                    direction,
+                },
+                Holes::Skip,
+            ),
             |b, ctx, item, current, _, _| {
                 let acc = b.load(ctx, acc_slot)?;
                 let next_acc = b.array_callback(ctx, callback, &[acc, item, current, array])?;
@@ -229,25 +170,24 @@ impl<'s> FunctionBuilder<'s> {
         mutation: Mutation,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
-        let elem_ty = self.array_element(ctx, array)?;
+        self.array_element(ctx, array)?;
         let len = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
         if matches!(mutation, Mutation::Copy) {
-            let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-            self.index_loop(ctx, "to_reversed", zero, len, |b, ctx, step, next, _| {
-                let last = b.binary(ctx, BinaryKind::Sub, len, one);
-                let idx = b.binary(ctx, BinaryKind::Sub, last, step);
-                let available = b.array_length(ctx, array);
-                let present = b.compare(ctx, CompareKind::Lt, idx, available);
-                let read = b.new_block(ctx, "to_reversed_read");
-                b.branch(ctx, present, read, next);
-                b.switch_to(read);
-                let item = b.element_at(ctx, array, idx)?;
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
-                Ok(())
-            })?;
-            Ok(result)
+            self.collect_items(
+                ctx,
+                Input::Slice(
+                    array,
+                    Span {
+                        start: zero,
+                        limit: len,
+                        direction: Direction::Reverse,
+                    },
+                    Holes::Skip,
+                ),
+                |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
+            )
         } else {
             let two = self.number(ctx, 2.0);
             let half_raw = self.binary(ctx, BinaryKind::Div, len, two);
@@ -285,22 +225,12 @@ impl<'s> FunctionBuilder<'s> {
         if depth_num == 0 {
             return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])));
         }
-        if let Ok(inner_arr_ty) = TypedHandle::<ArrayType>::from_handle(outer_elem_ty, ctx) {
-            let inner_elem_ty = inner_arr_ty.deref(ctx).element();
-            let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, inner_elem_ty, vec![]));
-            let len = self.array_length(ctx, array);
-            let zero = self.number(ctx, 0.0);
-            self.index_loop(ctx, "flat", zero, len, |b, ctx, step, next, _| {
-                let available = b.array_length(ctx, array);
-                let present = b.compare(ctx, CompareKind::Lt, step, available);
-                let read = b.new_block(ctx, "flat_read");
-                b.branch(ctx, present, read, next);
-                b.switch_to(read);
-                let sub = b.element_at(ctx, array, step)?;
-                b.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, result, sub));
-                Ok(())
-            })?;
-            Ok(result)
+        if outer_elem_ty.deref(ctx).is::<ArrayType>() {
+            self.collect_items(
+                ctx,
+                Input::Array(array, Holes::Skip),
+                |_, _, array, _, _| Ok(ArrayOutput::Items(array)),
+            )
         } else {
             Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])))
         }
@@ -318,16 +248,13 @@ impl<'s> FunctionBuilder<'s> {
         let src_val = self.expression(ctx, source)?;
         let src_val = self.defined(ctx, src_val)?;
         let src_ty = src_val.get_type(ctx);
-        let arr_val = if crate::collections::is_collection_or_view_record(ctx, src_ty)
-            || crate::collections::set_entry_type(ctx, src_ty).is_some()
-            || crate::collections::map_entry_types(ctx, src_ty).is_some()
+        let input = if crate::collections::is_collection_or_view_record(ctx, src_ty)
+            || TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok()
         {
-            self.materialize_collection_to_array(ctx, src_val)?
-        } else if TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok() {
-            if map_fn.is_none() {
+            if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {
                 return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![src_val])));
             }
-            src_val
+            Input::Collection(src_val)
         } else if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src_ty, ctx)
             && !rec.deref(ctx).is_tuple()
             && rec.deref(ctx).field("length").is_some()
@@ -337,42 +264,39 @@ impl<'s> FunctionBuilder<'s> {
             let raw_len = self.arithmetic(ctx, raw_len);
             let len_trunc = self.integer_or_infinity(ctx, raw_len)?;
             let zero = self.number(ctx, 0.0);
-            let len = self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]);
-            let expected_elem = expected
-                .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
-                .map(|a| a.deref(ctx).element());
-            let prepare = self.block;
-            return self.index_loop(ctx, "array_from_len", zero, len, |b, ctx, idx, _, _| {
-                // Array-likes read as `undefined` elements.
-                let void = crate::coerce::void_type(ctx);
-                let undef = b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, void));
-                let item = if let Some(cb) = map_fn {
-                    let mapped = b.array_callback(ctx, cb, &[undef, idx])?;
-                    match expected_elem {
-                        Some(elem_ty) => b.fit(ctx, mapped, elem_ty)?,
-                        None => mapped,
-                    }
-                } else {
-                    match expected_elem {
-                        Some(elem_ty) => b.fit(ctx, undef, elem_ty)?,
-                        None => undef,
-                    }
-                };
-                let append = b.block;
-                let elem_ty = expected_elem.unwrap_or_else(|| item.get_type(ctx));
-                let allocation = ArrayNewOp::new(ctx, elem_ty, vec![]);
-                insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
-                let result = allocation.get_result(ctx);
-                b.switch_to(append);
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
-                Ok(result)
-            });
+            Input::UndefinedCount(self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]))
         } else {
             bail!("Array.from source must be an array, Set, Map, or {{ length }} object");
         };
-        let Some(cb) = map_fn else {
-            return Ok(arr_val);
+        let expected_elem = if matches!(input, Input::UndefinedCount(_)) {
+            expected
+                .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
+                .map(|array| array.deref(ctx).element())
+        } else {
+            None
         };
-        self.array_transform(ctx, arr_val, cb, Transform::Map)
+        let mapper = map_fn.map(|callback| {
+            let zero = self.number(ctx, 0.0);
+            let index = self.entry_slot(ctx, zero.get_type(ctx));
+            self.store(ctx, index, zero);
+            (callback, index)
+        });
+        self.collect_items(ctx, input, |b, ctx, item, _, _| {
+            let item = if let Some((callback, index)) = mapper {
+                let ordinal = b.load(ctx, index)?;
+                let mapped = b.array_callback(ctx, callback, &[item, ordinal])?;
+                let one = b.number(ctx, 1.0);
+                let advanced = b.binary(ctx, BinaryKind::Add, ordinal, one);
+                b.store(ctx, index, advanced);
+                mapped
+            } else {
+                item
+            };
+            let item = match expected_elem {
+                Some(ty) => b.fit(ctx, item, ty)?,
+                None => item,
+            };
+            Ok(ArrayOutput::Item(item))
+        })
     }
 }

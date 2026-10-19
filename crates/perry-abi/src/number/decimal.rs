@@ -8,10 +8,18 @@ pub enum DecimalSyntax {
 
 /// A borrowed token and the conversion facts collected during its lexical scan.
 pub struct DecimalLiteral<'a> {
+    token: &'a [u8],
     pub mantissa: &'a [u8],
     pub decimal: Decimal,
     pub exponent: i64,
     pub consumed: usize,
+}
+
+impl DecimalLiteral<'_> {
+    pub fn float(&self, negative: bool) -> Option<f64> {
+        let value: f64 = core::str::from_utf8(self.token).ok()?.parse().ok()?;
+        Some(if negative { -value } else { value })
+    }
 }
 
 pub fn split_sign(input: &[u8]) -> (bool, &[u8]) {
@@ -23,7 +31,7 @@ pub fn split_sign(input: &[u8]) -> (bool, &[u8]) {
 }
 
 /// Scan an unsigned decimal; syntax errors carry the offset of the expected digit.
-pub fn scan_decimal<const CONVERT: bool>(
+pub fn scan_decimal<const EXACT: bool>(
     input: &[u8],
     syntax: DecimalSyntax,
 ) -> Result<DecimalLiteral<'_>, usize> {
@@ -32,7 +40,7 @@ pub fn scan_decimal<const CONVERT: bool>(
     let mut digits = |at: &mut usize, fractional| {
         let start = *at;
         while let Some(byte @ b'0'..=b'9') = input.get(*at) {
-            if CONVERT {
+            if EXACT {
                 decimal.digit(*byte, fractional);
             }
             *at += 1;
@@ -77,11 +85,12 @@ pub fn scan_decimal<const CONVERT: bool>(
                 return Err(at);
             }
             at = mantissa_end;
-        } else if CONVERT {
+        } else if EXACT {
             exponent = parse_exponent(&input[mantissa_end..at]);
         }
     }
     Ok(DecimalLiteral {
+        token: &input[..at],
         mantissa: &input[..mantissa_end],
         decimal,
         exponent,

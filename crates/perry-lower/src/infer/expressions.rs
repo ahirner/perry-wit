@@ -49,6 +49,23 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             }
         };
     }
+    if let Some((receiver, call)) = crate::methods::Call::expression(expr) {
+        let local;
+        let object = match receiver {
+            crate::methods::CallReceiver::Expression(expr) => expr,
+            crate::methods::CallReceiver::Local(id) => {
+                local = Expr::LocalGet(id);
+                &local
+            }
+        };
+        return methods::result(
+            expr,
+            object,
+            |index| call.argument(index),
+            call.result(),
+            env,
+        );
+    }
     let ty = match expr {
         Expr::ScopedTemp { id, value, body } => {
             let val_ty = expression(value, env);
@@ -70,64 +87,56 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             then_expr,
             else_expr,
         } => {
-            let is_undef_eq = matches!(
-                &**condition,
-                Expr::Compare {
-                    op: CompareOp::Eq,
-                    left,
-                    right
-                } if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined)
-            );
-            let is_undef_ne = matches!(
-                &**condition,
-                Expr::Compare {
-                    op: CompareOp::Ne,
-                    left,
-                    right
-                } if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined)
-            );
-            if matches!(**then_expr, Expr::Undefined | Expr::Null) {
-                let absence = if matches!(**then_expr, Expr::Null) {
-                    HirType::Null
-                } else {
-                    HirType::Void
-                };
-                let else_ty = expression(else_expr, env);
-                if is_undef_eq {
-                    let (inner, mut absences) = strip_nullish(else_ty);
-                    absences.retain(|a| !matches!(a, HirType::Void));
-                    absences.push(absence);
-                    with_absences(inner, absences)
-                } else {
-                    with_absences(else_ty, vec![absence])
+            let undefined_check = match &**condition {
+                Expr::Compare { op, left, right }
+                    if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined) =>
+                {
+                    Some(op)
                 }
+                _ => None,
+            };
+            let absent_branch = if matches!(**then_expr, Expr::Undefined | Expr::Null) {
+                Some((
+                    then_expr,
+                    else_expr,
+                    matches!(undefined_check, Some(CompareOp::Eq)),
+                ))
             } else if matches!(**else_expr, Expr::Undefined | Expr::Null) {
-                let absence = if matches!(**else_expr, Expr::Null) {
-                    HirType::Null
+                Some((
+                    else_expr,
+                    then_expr,
+                    matches!(undefined_check, Some(CompareOp::Ne)),
+                ))
+            } else {
+                None
+            };
+            if let Some((absent, other, narrowed)) = absent_branch {
+                let state = if matches!(**absent, Expr::Null) {
+                    Absence::Null
                 } else {
-                    HirType::Void
+                    Absence::Undefined
                 };
-                let then_ty = expression(then_expr, env);
-                if is_undef_ne {
-                    let (inner, mut absences) = strip_nullish(then_ty);
-                    absences.retain(|a| !matches!(a, HirType::Void));
-                    absences.push(absence);
-                    with_absences(inner, absences)
+                let other = expression(other, env);
+                let (inner, states) = if narrowed {
+                    let (inner, states) = strip_nullish(other);
+                    (inner, without_undefined(states))
                 } else {
-                    with_absences(then_ty, vec![absence])
-                }
+                    (other, None)
+                };
+                with_absences(inner, merge_absence(states, Some(state)))
             } else {
                 let mut then_ty = expression(then_expr, env);
-                if is_undef_ne {
-                    let (inner, mut absences) = strip_nullish(then_ty);
-                    absences.retain(|a| !matches!(a, HirType::Void));
-                    then_ty = with_absences(inner, absences);
+                if matches!(undefined_check, Some(CompareOp::Ne)) {
+                    let (inner, states) = strip_nullish(then_ty);
+                    then_ty = with_absences(inner, without_undefined(states));
                 }
-                let (_, mut else_absences) = strip_nullish(expression(else_expr, env));
-                if is_undef_eq {
-                    else_absences.retain(|a| !matches!(a, HirType::Void));
-                }
-                with_absences(then_ty, else_absences)
+                let (_, states) = strip_nullish(expression(else_expr, env));
+                let states = if matches!(undefined_check, Some(CompareOp::Eq)) {
+                    without_undefined(states)
+                } else {
+                    states
+                };
+                with_absences(then_ty, states)
             }
         }
         Expr::Logical {
@@ -149,13 +158,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             left,
             right,
         } => {
-            let (left_inner, mut absences) = strip_nullish(expression(left, env));
+            let (left_inner, absences) = strip_nullish(expression(left, env));
             let (right_inner, right_absences) = strip_nullish(expression(right, env));
-            for a in right_absences {
-                if !absences.contains(&a) {
-                    absences.push(a);
-                }
-            }
+            let absences = merge_absence(absences, right_absences);
             let base = if is_resolvable_type(&right_inner) {
                 right_inner
             } else {
@@ -163,37 +168,10 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             };
             with_absences(base, absences)
         }
-        Expr::MapGet { map, .. } => match strip_nullish(expression(map, env)).0 {
-            HirType::Generic { base, type_args }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
-            {
-                with_absences(type_args[1].clone(), vec![HirType::Void])
-            }
-            _ => HirType::Any,
-        },
-        Expr::MapSet { map, .. } => expression(map, env),
-        Expr::SetAdd { set_id, .. } => env.local_type(*set_id).cloned().unwrap_or(HirType::Any),
-        Expr::MapHas { .. }
-        | Expr::MapDelete { .. }
-        | Expr::SetHas { .. }
-        | Expr::SetDelete { .. }
-        | Expr::ObjectIs(_, _)
-        | Expr::ArrayIsArray(_)
-        | Expr::In { .. }
-        | Expr::Delete(_) => HirType::Boolean,
+        Expr::ObjectIs(_, _) | Expr::ArrayIsArray(_) | Expr::In { .. } | Expr::Delete(_) => {
+            HirType::Boolean
+        }
         Expr::MapSize(_) | Expr::SetSize(_) => HirType::Number,
-        Expr::MapKeys(source) | Expr::ArrayKeys(source) => {
-            let source = strip_nullish(expression(source, env)).0;
-            iterator_view(source, IteratorMethod::Keys).unwrap_or(HirType::Any)
-        }
-        Expr::MapValues(source) | Expr::ArrayValues(source) | Expr::SetValues(source) => {
-            let source = strip_nullish(expression(source, env)).0;
-            iterator_view(source, IteratorMethod::Values).unwrap_or(HirType::Any)
-        }
-        Expr::MapEntries(source) | Expr::ArrayEntries(source) => {
-            let source = strip_nullish(expression(source, env)).0;
-            iterator_view(source, IteratorMethod::Entries).unwrap_or(HirType::Any)
-        }
         Expr::ObjectKeys(_) | Expr::ForInKeys(_) => HirType::Array(Box::new(HirType::String)),
         Expr::ObjectValues(object) => {
             let obj_ty = strip_nullish(expression(object, env)).0;
@@ -211,9 +189,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         }
         Expr::ObjectFromEntries(entries) => match strip_nullish(expression(entries, env)).0 {
             HirType::Array(inner) => match *inner {
-                HirType::Tuple(items) if items.len() == 2 => HirType::Generic {
+                HirType::Tuple(mut items) if items.len() == 2 => HirType::Generic {
                     base: String::from("Record"),
-                    type_args: vec![HirType::String, items[1].clone()],
+                    type_args: vec![HirType::String, items.swap_remove(1)],
                 },
                 _ => HirType::Any,
             },
@@ -255,23 +233,6 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
             infer_closure_return(element, map_fn, env, false)
         }
-        Expr::ArrayMap { array, callback } | Expr::ArrayFlatMap { array, callback } => {
-            infer_array_closure_return(
-                array,
-                callback,
-                env,
-                matches!(expr, Expr::ArrayFlatMap { .. }),
-            )
-        }
-        Expr::ArrayFilter { array, .. }
-        | Expr::ArraySort { array, .. }
-        | Expr::ArrayToSorted { array, .. } => expression(array, env),
-        Expr::ArrayFind { array, .. } => match strip_nullish(expression(array, env)).0 {
-            HirType::Array(element) => with_absences(*element, vec![HirType::Void]),
-            _ => HirType::Any,
-        },
-        Expr::ArrayFindIndex { .. } => HirType::Number,
-        Expr::ArraySome { .. } | Expr::ArrayEvery { .. } => HirType::Boolean,
         Expr::StructuredClone { value, .. } => expression(value, env),
         Expr::MapGroupBy { items, key_fn } => {
             let src_ty = strip_nullish(expression(items, env)).0;
@@ -320,65 +281,73 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
         Expr::PropertyGet {
             object, property, ..
-        } => match strip_nullish(expression(object, env)).0 {
-            HirType::Generic { base, .. }
-                if matches!(base.as_str(), "Map" | "ReadonlyMap" | "Set" | "ReadonlySet")
-                    && property == "size" =>
-            {
-                HirType::Number
-            }
-            HirType::Generic { base, type_args } => shapes::generics::property_type(
-                env.ctx,
-                env.interfaces,
-                env.type_aliases,
-                &base,
-                &type_args,
-                property,
-            )
-            .or_else(|| env.class_member_type(&base, &type_args, property))
-            .or_else(|| {
-                shapes::generics::dict_entry_types(
+        } => {
+            let source = strip_nullish(expression(object, env)).0;
+            let builtin = crate::methods::Method::inferred(env.ctx, &source, property, true);
+            let fallback = |env: &mut FunctionEnv<'_>| match builtin {
+                Some(rule) => methods::result(expr, object, |_| None, rule, env),
+                None => perry_hir::infer_expr_type(expr, env),
+            };
+            match source {
+                HirType::Generic { base, .. }
+                    if matches!(base.as_str(), "Map" | "ReadonlyMap" | "Set" | "ReadonlySet")
+                        && property == "size" =>
+                {
+                    HirType::Number
+                }
+                HirType::Generic { base, type_args } => shapes::generics::property_type(
                     env.ctx,
                     env.interfaces,
                     env.type_aliases,
-                    &HirType::Generic { base, type_args },
+                    &base,
+                    &type_args,
+                    property,
                 )
-                .map(|(_, val_ty)| with_absences(val_ty, vec![HirType::Void]))
-            })
-            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::Named(base) => shapes::generics::property_type(
-                env.ctx,
-                env.interfaces,
-                env.type_aliases,
-                &base,
-                &[],
-                property,
-            )
-            .or_else(|| env.named_property_type(&base, property))
-            .or_else(|| {
-                shapes::generics::dict_entry_types(
-                    env.ctx,
-                    env.interfaces,
-                    env.type_aliases,
-                    &HirType::Named(base),
-                )
-                .map(|(_, val_ty)| with_absences(val_ty, vec![HirType::Void]))
-            })
-            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::Object(object) => object
-                .properties
-                .get(property)
-                .map(|p| shapes::generics::optional_property(p.ty.clone(), p.optional))
+                .or_else(|| env.class_member_type(&base, &type_args, property))
                 .or_else(|| {
-                    object
-                        .index_signature
-                        .as_ref()
-                        .map(|v| with_absences((**v).clone(), vec![HirType::Void]))
+                    shapes::generics::dict_entry_types(
+                        env.ctx,
+                        env.interfaces,
+                        env.type_aliases,
+                        &HirType::Generic { base, type_args },
+                    )
+                    .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
                 })
-                .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
-            HirType::String | HirType::Array(_) if property == "length" => HirType::Number,
-            _ => perry_hir::infer_expr_type(expr, env),
-        },
+                .unwrap_or_else(|| fallback(env)),
+                HirType::Named(base) => shapes::generics::property_type(
+                    env.ctx,
+                    env.interfaces,
+                    env.type_aliases,
+                    &base,
+                    &[],
+                    property,
+                )
+                .or_else(|| env.named_property_type(&base, property))
+                .or_else(|| {
+                    shapes::generics::dict_entry_types(
+                        env.ctx,
+                        env.interfaces,
+                        env.type_aliases,
+                        &HirType::Named(base),
+                    )
+                    .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
+                })
+                .unwrap_or_else(|| fallback(env)),
+                HirType::Object(object) => object
+                    .properties
+                    .get(property)
+                    .map(|p| shapes::generics::optional_property(p.ty.clone(), p.optional))
+                    .or_else(|| {
+                        object
+                            .index_signature
+                            .as_ref()
+                            .map(|v| with_absences((**v).clone(), Absence::Undefined))
+                    })
+                    .unwrap_or_else(|| fallback(env)),
+                HirType::String | HirType::Array(_) if property == "length" => HirType::Number,
+                _ => fallback(env),
+            }
+        }
         Expr::IndexGet { object, index } => match strip_nullish(expression(object, env)).0 {
             HirType::Tuple(items) => {
                 // Only an array index names a tuple position; `t[1.5]` is a dynamic key.
@@ -402,7 +371,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                         env.type_aliases,
                         &other,
                     ) {
-                        with_absences(val_ty, vec![HirType::Void])
+                        with_absences(val_ty, Absence::Undefined)
                     } else if let HirType::Named(base) = other
                         && let Some(HirType::Array(element)) = env.resolve_foreign_type(&base)
                     {
@@ -413,6 +382,23 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 }
             },
         },
+        Expr::NativeMethodCall {
+            object: Some(object),
+            method,
+            args,
+            ..
+        } => {
+            let source = strip_nullish(expression(object, env)).0;
+            let rule = args
+                .is_empty()
+                .then(|| crate::methods::Method::inferred(env.ctx, &source, method, true))
+                .flatten()
+                .or_else(|| crate::methods::Method::inferred(env.ctx, &source, method, false));
+            match rule {
+                Some(rule) => methods::result(expr, object, |index| args.get(index), rule, env),
+                None => perry_hir::infer_expr_type(expr, env),
+            }
+        }
         Expr::NativeMethodCall {
             module,
             class_name: None,
@@ -435,11 +421,11 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                         && let Some(existing) = props.remove(key)
                     {
                         let abs = if matches!(val_expr, Expr::Null) {
-                            HirType::Null
+                            Absence::Null
                         } else {
-                            HirType::Void
+                            Absence::Undefined
                         };
-                        let widened = with_absences(existing.ty, vec![abs]);
+                        let widened = with_absences(existing.ty, abs);
                         props.insert(
                             key.clone(),
                             perry_hir::types::PropertyInfo {
@@ -486,17 +472,14 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     if let Some(resolved) = resolved_props {
                         for (name, prop_ty, opt) in resolved {
                             let (ty, optional) = match (prop_ty, props.remove(&name)) {
-                                (abs @ (HirType::Null | HirType::Void), Some(existing)) => {
-                                    (with_absences(existing.ty, vec![abs]), existing.optional)
-                                }
+                                (abs @ (HirType::Null | HirType::Void), Some(existing)) => (
+                                    with_absences(existing.ty, strip_nullish(abs).1),
+                                    existing.optional,
+                                ),
                                 (ty, Some(existing)) if opt => {
                                     let (inner, prop_abs) = strip_nullish(ty);
-                                    let (_, mut existing_abs) = strip_nullish(existing.ty);
-                                    for abs in prop_abs {
-                                        if !existing_abs.contains(&abs) {
-                                            existing_abs.push(abs);
-                                        }
-                                    }
+                                    let (_, existing_abs) = strip_nullish(existing.ty);
+                                    let existing_abs = merge_absence(existing_abs, prop_abs);
                                     (with_absences(inner, existing_abs), existing.optional)
                                 }
                                 (ty, _) => (ty, opt),

@@ -22,10 +22,8 @@ impl<'a> Reader<'a> {
         self.scan_number::<false>().map(|_| ())
     }
     pub(super) fn numeric(&mut self) -> Result<f64, Error> {
-        let (literal, negative) = self.scan_number::<true>()?;
-        Ok(literal
-            .decimal
-            .finish(literal.mantissa, negative, literal.exponent))
+        let (literal, negative) = self.scan_number::<false>()?;
+        literal.float(negative).ok_or(Error::Syntax(self.position))
     }
     #[cfg(target_arch = "wasm32")]
     pub(super) fn signed_integer(&mut self) -> Result<Option<i64>, Error> {
@@ -41,11 +39,11 @@ impl<'a> Reader<'a> {
             .decimal
             .finish_u64(literal.mantissa, negative, literal.exponent))
     }
-    fn scan_number<const CONVERT: bool>(&mut self) -> Result<(DecimalLiteral<'a>, bool), Error> {
+    fn scan_number<const EXACT: bool>(&mut self) -> Result<(DecimalLiteral<'a>, bool), Error> {
         let negative = self.peek() == Some(b'-');
         self.position += usize::from(negative);
         let start = self.position;
-        let literal = scan_decimal::<CONVERT>(&self.input.as_bytes()[start..], DecimalSyntax::Json)
+        let literal = scan_decimal::<EXACT>(&self.input.as_bytes()[start..], DecimalSyntax::Json)
             .map_err(|offset| Error::Syntax(start + offset))?;
         self.position += literal.consumed;
         Ok((literal, negative))

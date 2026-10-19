@@ -38,9 +38,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
     ) -> Result<Option<Value>> {
         let (value, field) = match expr {
-            Expr::UrlGetHref(value)
-            | Expr::UrlInstanceToString(value)
-            | Expr::UrlInstanceToJSON(value) => (value, "href"),
+            Expr::UrlGetHref(value) => (value, "href"),
             Expr::UrlGetPathname(value) => (value, "pathname"),
             Expr::UrlGetProtocol(value) => (value, "protocol"),
             Expr::UrlGetHost(value) => (value, "host"),
@@ -69,21 +67,6 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.string_operand(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::UrlSetPathname, vec![url, value]);
                 return Ok(Some(value));
-            }
-            Expr::UrlSearchParamsAppend {
-                params,
-                name,
-                value,
-            } => {
-                let params =
-                    self.typed_operand(ctx, params, Kind::SearchParams, "linked URL searchParams")?;
-                let name = self.string_operand(ctx, name)?;
-                let value = self.string_operand(ctx, value)?;
-                self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![params, name, value]);
-                let ty = void_type(ctx);
-                return Ok(Some(
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
-                ));
             }
             Expr::EncodeURIComponent(value) => {
                 let value = self.string_operand(ctx, value)?;

@@ -43,7 +43,9 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     let module = parse(
         ctx,
         &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.\"x\" : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
+            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.\"x\" : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;\n\
+             absolute = perry.intrinsic MathAbs (s) : builtin.fp64;\n\
+             json = perry.intrinsic JsonFromNumber (absolute) : perry.json;",
         ),
     );
     assert_eq!(dce(module, ctx)?, IRStatus::Changed);
@@ -52,7 +54,8 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     assert!(
         !printed.contains("perry.alloc")
             && !printed.contains("perry.field_get")
-            && !printed.contains("perry.binary"),
+            && !printed.contains("perry.binary")
+            && !printed.contains("perry.intrinsic"),
         "{printed}"
     );
     Ok(())

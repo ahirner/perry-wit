@@ -1,8 +1,9 @@
 //! Node differential coverage for the declared HTTP(S) URL surface.
-use anyhow::{Context, Result, ensure};
+use crate::world::Compiler::Standard;
+use anyhow::Result;
 use wasmtime::Engine;
 
-use crate::world;
+use crate::{node_oracle::NodeOracle, world};
 
 #[test]
 fn http_urls_match_node_for_construction_mutation_and_serialization() -> Result<()> {
@@ -21,17 +22,15 @@ export function inspect(input: string, base: string): string {
 }
 "#;
     let wit = "package test:url; world urls { export inspect: func(input: string, base: string) -> result<string>; }";
-    let component = world::component(wit, "urls", "url.ts", source)?;
+    let component = Standard.component(wit, "urls", "url.ts", source)?;
     let engine = Engine::default();
     let (mut store, instance) = world::instantiate(&engine, &component)?;
     let inspect = instance.get_typed_func::<(&str, &str), (std::result::Result<String, ()>,)>(
         &mut store, "inspect",
     )?;
-    let directory = tempfile::tempdir()?;
-    let script = directory.path().join("url.mts");
-    std::fs::write(
-        &script,
-        format!("{source}\nconsole.log(inspect(process.argv[2], process.argv[3]));"),
+    let oracle = NodeOracle::typescript(
+        source,
+        "console.log(inspect(process.argv[2], process.argv[3]));",
     )?;
     for (input, base) in [
         (
@@ -64,21 +63,10 @@ export function inspect(input: string, base: string): string {
         ]
         .map(|location| (location, "http://example.com/a/b?old=yes")),
     ) {
-        let node = std::process::Command::new("node")
-            .arg("--experimental-strip-types")
-            .arg(&script)
-            .args([input, base])
-            .output()
-            .context("Node URL oracle")?;
-        ensure!(
-            node.status.success(),
-            "Node failed: {}",
-            String::from_utf8_lossy(&node.stderr)
-        );
-        let expected = String::from_utf8(node.stdout)?.trim_end().to_owned();
+        let expected = oracle.run(&[input, base])?;
         let (actual,) = inspect.call(&mut store, (input, base))?;
         let actual = actual.expect("fixture has no escaping failure");
-        assert_eq!(actual, expected, "new URL({input:?}, {base:?})");
+        assert_eq!(actual, expected.trim_end(), "new URL({input:?}, {base:?})");
     }
     Ok(())
 }

@@ -58,13 +58,25 @@ impl FunctionLowering<'_, '_> {
                 .zip(&values)
                 .zip(record_offsets(import.params.iter()))
             {
-                self.lower_store(ctx, abi, mir.get_type(ctx), *value, area, offset)?;
+                self.lower_abi(
+                    ctx,
+                    abi,
+                    mir.get_type(ctx),
+                    *value,
+                    Canonical::Memory(area, offset),
+                )?;
             }
             args.push(area);
             params = vec![Flat::I32];
         } else {
             for ((abi, mir), value) in import.params.iter().zip(&operands).zip(&values) {
-                self.lower_flat_values(ctx, abi, mir.get_type(ctx), *value, &mut args)?;
+                self.lower_abi(
+                    ctx,
+                    abi,
+                    mir.get_type(ctx),
+                    *value,
+                    Canonical::Flat(&mut args),
+                )?;
             }
         }
         let result_flat = import
@@ -169,8 +181,13 @@ impl FunctionLowering<'_, '_> {
             if let Some(abi) = &import.result {
                 let mir = op.deref(ctx).get_result(0).get_type(ctx);
                 let value = match area {
-                    Some(area) => self.lift_load(ctx, abi, mir, area, 0)?,
-                    None => self.lift_flat(ctx, abi, mir, &mut result.into_iter().collect())?,
+                    Some(area) => self.lift_abi(ctx, abi, mir, Canonical::Memory(area, 0))?,
+                    None => self.lift_abi(
+                        ctx,
+                        abi,
+                        mir,
+                        Canonical::Flat(&mut result.into_iter().collect()),
+                    )?,
                 };
                 self.define(ctx, op, value);
             }
@@ -208,7 +225,7 @@ impl FunctionLowering<'_, '_> {
         let mir = op.deref(ctx).get_result(0).get_type(ctx);
         let value = if let Some(abi) = &import.result {
             let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
-            self.lift_load(ctx, abi, mir, area, 0)?
+            self.lift_abi(ctx, abi, mir, Canonical::Memory(area, 0))?
         } else {
             self.undefined(ctx, mir)?
         };
@@ -298,8 +315,8 @@ impl FunctionLowering<'_, '_> {
             | AbiType::Enum(_)
             | AbiType::Variant(_) => {
                 let tag = self.load(ctx, abi.discriminant_kind(), area, offset);
-                self.sum_switch(ctx, tag, abi.cases().len(), vec![], |b, ctx, case| {
-                    if let Some(payload) = abi.cases()[case] {
+                self.sum_switch(ctx, tag, abi.cases(), vec![], |b, ctx, _, payload| {
+                    if let Some(payload) = payload {
                         b.discard_canonical(ctx, payload, area, offset + abi.payload_offset())?;
                     }
                     Ok(vec![])
