@@ -52,15 +52,6 @@ impl<const N: usize> Big<N> {
         self.normalize();
     }
 
-    pub(super) fn mul_pow5(&mut self, mut power: u32) {
-        const POW5_13: u32 = 1_220_703_125;
-        while power >= 13 {
-            self.mul_add(POW5_13, 0);
-            power -= 13;
-        }
-        self.mul_add(5u32.pow(power), 0);
-    }
-
     pub fn shl(&mut self, bits: u32) {
         if self.is_zero() || bits == 0 {
             return;

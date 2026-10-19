@@ -1,8 +1,8 @@
 //! `stream<u8>` export arguments as `ReadableStream<Uint8Array>`: reads that keep their chunks
 //! get fresh objects, reads whose chunks die before the next read reuse one buffer (leases,
 //! `perry_codegen::lease`), and both see the same bytes.
+use crate::world::Compiler::{MemoryChecked, Standard};
 use anyhow::{Context, Result};
-use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
     Store,
     component::{Linker, StreamReader},
@@ -48,12 +48,10 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let (resolve, package) = perry_wit::component::wit::resolve_source(
-        "detached.wit",
+    let bytes = Standard.component(
         "package test:detached; world run {export run:async func(input:stream<u8>, mode:u32)->result<u32>;}",
-    )?;
-    let world = resolve.select_world(&[package], Some("run"))?;
-    let compiled = compile_for_world(
+        "run",
+        "detached.ts",
         r#"
 export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise<number> {
   if(mode>=4){
@@ -73,14 +71,9 @@ export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise
   return 7;
 }
 "#,
-        "detached.ts",
-        &resolve,
-        world,
-        true,
     )?;
     let engine = async_engine()?;
-    let component =
-        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = wasmtime::component::Component::new(&engine, bytes)?;
     for mode in [0, 1, 2, 3, 4, 5] {
         let mut store = Store::new(&engine, ());
         let instance = Linker::new(&engine)
@@ -192,14 +185,10 @@ export async function leased(input: ReadableStream<Uint8Array>): Promise<number>
 
 #[tokio::test(flavor = "current_thread")]
 async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("streams"))?;
-    let compiled = compile_for_world(SOURCE, "streams.ts", &resolve, world, true)?;
+    let bytes = Standard.component(WIT, "streams", "streams.ts", SOURCE)?;
     let (mut store, instance) = wasi_host::instantiate(
         &async_engine()?,
-        &compiled.component.unwrap().stripped,
+        &bytes,
         // One page: the leased reader must not keep a chunk per read.
         Host::default().with_memory_limit(1 << 16),
     )
@@ -289,15 +278,11 @@ async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
         writer.releaseLock();reader.releaseLock();return count;
     }
     "#;
-    let directory = tempfile::tempdir()?;
-    std::fs::write(
-        directory.path().join("world.wit"),
+    let component = MemoryChecked.component(
         "package test:echo; world echo { include wasi:cli/imports@0.3.0; export run:async func(input:stream<u8>)->f64; }",
-    )?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("echo"))?;
-    let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
-        source, "echo.ts", &resolve, world,
+        "echo",
+        "echo.ts",
+        source,
     )?;
     let bytes: Vec<u8> = (0..4 * 1024 * 1024)
         .map(|i| (i * 37 + i / 251) as u8)
@@ -305,7 +290,7 @@ async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
     let output = output_capture::MemoryOutput::new(bytes.len() * 3);
     let (mut store, instance) = wasi_host::instantiate(
         &async_engine()?,
-        &compiled.component.unwrap().stripped,
+        &component,
         Host::new(WasiCtx::builder().stdout(output.clone()).build()).with_memory_limit(65536),
     )
     .await?;

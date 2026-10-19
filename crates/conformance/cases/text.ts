@@ -43,6 +43,11 @@ let clean = "";
 for (const ch of "a-b c") clean += ch === "-" || ch === " " ? "_" : ch;
 console.log("scalars", clean, charLoop("a-b-c"));
 console.log("normalize", "é".normalize() === "é", "é".normalize("NFD") === "é");
+const normalization = ["\u09c7\u09be", "\u09c7\u0301\u09be", "\u0cc6\u0cc2\u0cd5", "\u1100\u1161\u11a8", "\u1100\u0301\u1161", "\u0344", "\u0958", "𝅗𝅥", "ÅΩK", "ṩ", "ᾯ", "a\u05b1\u05b0", "\u0301\u0323", "Ａﬃ¼¨", "\ufeff\0🙂"];
+for (const count of [63, 64, 65, 129]) normalization.push("a" + "\u0300".repeat(count), "\u09c7\u09be".repeat(count));
+for (const input of normalization) {
+  console.log("normalization", JSON.stringify([input.normalize("NFC"), input.normalize("NFD"), input.normalize("NFKC"), input.normalize("NFKD")]));
+}
 
 function captures(): void {
   const rx = /^([a-z]+)-(\d+)$/i;

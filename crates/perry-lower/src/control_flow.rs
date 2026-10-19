@@ -2,9 +2,20 @@
 use super::*;
 use crate::collections::LiveCursor;
 
+mod traversal;
+pub(super) use traversal::{ArrayOutput, Holes, Input, Projection, Span};
+
+#[derive(Clone, Copy)]
 pub(super) enum LoopCondition<'s> {
     Before(Option<&'s Expr>),
     After(&'s Expr),
+    Indices(Value, LoopBound),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LoopBound {
+    Fixed(Value),
+    Collection(Value),
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -254,86 +265,30 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         label: Option<&'s str>,
     ) -> Result<()> {
-        let body_first = matches!(condition, LoopCondition::After(_));
-        let condition = match condition {
-            LoopCondition::Before(condition) => condition,
-            LoopCondition::After(condition) => Some(condition),
-        };
         if let Some(init) = init {
             self.statement(ctx, init, None)?;
         }
-        let header = self.new_block(ctx, "header");
-        let body_block = self.new_block(ctx, "body");
-        let latch = self.new_block(ctx, "latch");
-        let exhausted_exit = self.new_block(ctx, "exhausted");
-        let exit = self.new_block(ctx, "exit");
-        let collection_loop = if body_first {
-            None
-        } else {
-            self.collection_loop(ctx, condition)?
+        let collection = match condition {
+            LoopCondition::Before(condition) => self.collection_loop(ctx, condition)?,
+            LoopCondition::After(_) | LoopCondition::Indices(..) => None,
         };
-        self.jump(ctx, if body_first { body_block } else { header });
-
-        self.switch_to(header);
-        match condition {
-            None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
-            Some(Expr::Bool(false)) => self.jump(ctx, exhausted_exit),
-            Some(condition) => {
-                let condition = self.condition(ctx, condition)?;
-                self.branch(ctx, condition, body_block, exhausted_exit);
-            }
-        }
-
-        self.switch_to(body_block);
-        if let Some(CollectionLoop {
-            index,
+        self.repeat(
+            ctx,
+            "source",
+            condition,
+            update,
             collection,
-            cursor,
-        }) = collection_loop
-        {
-            let idx_val = self.load(ctx, index)?;
-            let entries = self.collection_entries_array(ctx, collection)?;
-            let entry = self.element_at(ctx, entries, idx_val)?;
-            if let Some(cursor) = cursor {
-                let one = self.number(ctx, 1.0);
-                let next_idx = self.binary(ctx, BinaryKind::Add, idx_val, one);
-                cursor.advance(self, ctx, next_idx, entry)?;
-            }
-            if let Some(live) = self.collection_entry_live(ctx, entry)? {
-                let live_body = self.new_block(ctx, "loop_live_body");
-                self.branch(ctx, live, live_body, latch);
-                self.switch_to(live_body);
-            }
-        }
-        self.controls.push(Control::Loop {
-            label,
-            continue_to: latch,
-            break_to: exit,
-        });
-        let lowered = self.statements(ctx, body);
-        self.controls.pop();
-        lowered?;
-        self.jump(ctx, latch);
-
-        self.switch_to(latch);
-        if let Some(update) = update {
-            self.effect(ctx, update)?;
-        }
-        let cursor = collection_loop.and_then(|lp| lp.cursor.map(|cursor| (lp.index, cursor)));
-        if let Some((index, cursor)) = cursor {
-            let position = cursor.position(self, ctx)?;
-            self.store(ctx, index, position);
-        }
-        self.jump(ctx, header);
-
-        self.switch_to(exhausted_exit);
-        if let Some((_, cursor)) = cursor {
-            cursor.exhausted(self, ctx)?;
-        }
-        self.jump(ctx, exit);
-
-        self.switch_to(exit);
-        Ok(())
+            |b, ctx, next, done| {
+                b.controls.push(Control::Loop {
+                    label,
+                    continue_to: next,
+                    break_to: done,
+                });
+                let lowered = b.statements(ctx, body);
+                b.controls.pop();
+                lowered
+            },
+        )
     }
 
     /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
@@ -342,7 +297,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         condition: Option<&'s Expr>,
-    ) -> Result<Option<CollectionLoop>> {
+    ) -> Result<Option<CollectionTraversal>> {
         let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition) else {
             return Ok(None);
         };
@@ -361,7 +316,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(None);
         }
         let cursor = LiveCursor::open(self, ctx, collection, index)?;
-        Ok(Some(CollectionLoop {
+        Ok(Some(CollectionTraversal {
             index,
             collection,
             cursor,
@@ -369,11 +324,122 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-/// A loop over a live collection: the loop's index slot, the collection and its cursor
-/// (`None` for bare entry arrays, which have no cursor array).
 #[derive(Clone, Copy)]
-struct CollectionLoop {
+struct CollectionTraversal {
     index: Value,
     collection: Value,
     cursor: Option<LiveCursor>,
+}
+
+impl<'s> FunctionBuilder<'s> {
+    fn repeat<T>(
+        &mut self,
+        ctx: &mut Context,
+        label: &str,
+        condition: LoopCondition<'s>,
+        update: Option<&'s Expr>,
+        collection: Option<CollectionTraversal>,
+        body: impl FnOnce(&mut Self, &mut Context, Ptr<BasicBlock>, Ptr<BasicBlock>) -> Result<T>,
+    ) -> Result<T> {
+        let header = self.new_block(ctx, &format!("{label}_header"));
+        let entered = self.new_block(ctx, &format!("{label}_body"));
+        let next = self.new_block(ctx, &format!("{label}_next"));
+        let done = self.new_block(ctx, &format!("{label}_done"));
+        let exhausted = if collection.is_some_and(|walk| walk.cursor.is_some()) {
+            self.new_block(ctx, "loop_exhausted")
+        } else {
+            done
+        };
+        let body_first = matches!(condition, LoopCondition::After(_));
+        self.jump(ctx, if body_first { entered } else { header });
+        self.switch_to(header);
+        let test = match condition {
+            LoopCondition::Before(None | Some(Expr::Bool(true))) => None,
+            LoopCondition::Before(Some(condition)) | LoopCondition::After(condition) => {
+                Some(self.condition(ctx, condition)?)
+            }
+            LoopCondition::Indices(index, bound) => {
+                let current = self.load(ctx, index)?;
+                let limit = match bound {
+                    LoopBound::Fixed(limit) => limit,
+                    LoopBound::Collection(collection) => {
+                        self.collection_backing_length(ctx, collection)?
+                    }
+                };
+                Some(self.compare(ctx, CompareKind::Lt, current, limit))
+            }
+        };
+        match test {
+            Some(test) => self.branch(ctx, test, entered, exhausted),
+            None => self.jump(ctx, entered),
+        }
+        self.switch_to(entered);
+        if let Some(walk) = collection {
+            let current = self.load(ctx, walk.index)?;
+            let entries = self.collection_entries_array(ctx, walk.collection)?;
+            let entry = self.element_at(ctx, entries, current)?;
+            if let Some(cursor) = walk.cursor {
+                let one = self.number(ctx, 1.0);
+                let advanced = self.binary(ctx, BinaryKind::Add, current, one);
+                cursor.advance(self, ctx, advanced, entry)?;
+            }
+            if let Some(live) = self.collection_entry_live(ctx, entry)? {
+                let visit = self.new_block(ctx, "loop_live");
+                self.branch(ctx, live, visit, next);
+                self.switch_to(visit);
+            }
+        }
+        let output = body(self, ctx, next, done)?;
+        self.jump(ctx, next);
+        self.switch_to(next);
+        if let Some(update) = update {
+            self.effect(ctx, update)?;
+        }
+        if let Some(walk) = collection
+            && let Some(cursor) = walk.cursor
+        {
+            let position = cursor.position(self, ctx)?;
+            self.store(ctx, walk.index, position);
+        } else if let LoopCondition::Indices(index, _) = condition {
+            let current = self.load(ctx, index)?;
+            let one = self.number(ctx, 1.0);
+            let advanced = self.binary(ctx, BinaryKind::Add, current, one);
+            self.store(ctx, index, advanced);
+        }
+        self.jump(ctx, header);
+        if exhausted != done {
+            self.switch_to(exhausted);
+            if let Some(walk) = collection
+                && let Some(cursor) = walk.cursor
+            {
+                cursor.exhausted(self, ctx)?;
+            }
+            self.jump(ctx, done);
+        }
+        self.switch_to(done);
+        Ok(output)
+    }
+
+    pub(crate) fn index_loop<T>(
+        &mut self,
+        ctx: &mut Context,
+        label: &str,
+        start: Value,
+        limit: Value,
+        body: impl FnOnce(&mut Self, &mut Context, Value, Ptr<BasicBlock>, Ptr<BasicBlock>) -> Result<T>,
+    ) -> Result<T> {
+        let index = self.entry_slot(ctx, start.get_type(ctx));
+        self.store(ctx, index, start);
+        self.repeat(
+            ctx,
+            label,
+            LoopCondition::Indices(index, LoopBound::Fixed(limit)),
+            None,
+            None,
+            |b, ctx, next, done| {
+                let current = b.load(ctx, index)?;
+                body(b, ctx, current, next, done)
+            },
+        )
+    }
 }

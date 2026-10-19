@@ -1,8 +1,7 @@
 //! Member access: `object.property`, `object[index]` and `++object.field`.
 use super::*;
 use crate::collections::{
-    dict_entry_types, is_collection_or_view_record, map_box_record, map_entry_types,
-    set_box_record, set_entry_type,
+    dict_entry_types, is_collection_or_view_record, map_box_record, set_box_record,
 };
 
 impl<'s> FunctionBuilder<'s> {
@@ -280,17 +279,6 @@ impl<'s> FunctionBuilder<'s> {
                 let index = self.index(ctx, index)?;
                 let op = ArrayGetOp::new(ctx, array, index)?;
                 let val = self.append_value(ctx, &op);
-                if set_entry_type(ctx, ty).is_some() {
-                    let entry = self.defined(ctx, val)?;
-                    let get_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
-                    return Ok(self.append_value(ctx, &get_op));
-                }
-                if let Some((k_ty, v_ty, _)) = map_entry_types(ctx, ty) {
-                    let entry = self.defined(ctx, val)?;
-                    let (k, v) = self.entry_fields(ctx, entry)?;
-                    let tuple_rec = self.shapes.pair_type(ctx, k_ty, v_ty)?;
-                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![k, v])));
-                }
                 Ok(val)
             }
             _ => bail!("indexing is only supported on arrays so far"),

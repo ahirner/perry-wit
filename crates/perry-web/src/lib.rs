@@ -16,9 +16,7 @@ pub(crate) use perry_abi::{
 };
 
 pub(crate) mod helper {
-    #[cfg(target_arch = "wasm32")]
-    #[link(wasm_import_module = "__perry_helper")]
-    unsafe extern "C" {
+    perry_abi::wasm_imports! { "__perry_helper";
         pub(crate) fn fetch_header_name(
             input: *const u8,
             len: u32,
@@ -44,43 +42,6 @@ pub(crate) mod helper {
             cap: u32,
         ) -> u64;
     }
-
-    /// The fetch helper exists only in linked modules; host builds never call it.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::missing_safety_doc)]
-    mod host {
-        pub(crate) unsafe fn fetch_header_name(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_header_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_method(_: *const u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_status_text(_: *const u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_url(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_url_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
-            unreachable!("the JSON helper runs in linked modules")
-        }
-        pub(crate) unsafe fn json_populate_measured(
-            _: *const u8,
-            _: u32,
-            _: *mut u8,
-            _: u32,
-        ) -> u64 {
-            unreachable!("the JSON helper runs in linked modules")
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) use host::*;
 }
 
 mod url;
@@ -99,6 +60,7 @@ fn type_error(parts: &[&[u8]]) {
 mod body;
 mod fetch;
 mod headers;
+mod http_exchange;
 mod readable;
 mod serve;
 mod writable;

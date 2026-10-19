@@ -7,11 +7,12 @@
 //!   written through `perry.field_get`/`perry.field_set`) becomes one local per field, which
 //!   `mem2reg` then promotes to SSA values: the allocation disappears.
 use crate::{
-    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported},
+    calls::{AsyncCallOp, CallOp, is_async, is_exported},
     control::{BrOp, ReturnOp},
     exceptions::CaughtOp,
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::{LoadOp, LocalOp, StoreOp},
+    semantics::OperationKind,
     types::RecordType,
 };
 use pliron::{
@@ -80,14 +81,13 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
     let ops = operations(ctx, function);
     if ops.len() > LIMIT
         || ops.iter().any(|&op| {
-            crate::is_any::<(
-                CallOp,
-                AsyncCallOp,
-                AwaitOp,
-                TimerOp,
-                crate::foreign::ForeignOp,
-            )>(ctx, op)
-                || crate::intrinsics::may_throw(ctx, op)
+            matches!(
+                OperationKind::classify(ctx, op),
+                OperationKind::Call { .. }
+                    | OperationKind::Await
+                    | OperationKind::Timer
+                    | OperationKind::Foreign(_)
+            ) || crate::intrinsics::may_throw(ctx, op)
                 || op.deref(ctx).num_regions() != 0
         })
     {

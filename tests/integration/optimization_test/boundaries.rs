@@ -1,5 +1,6 @@
 //! Scalar export boundaries: which runtime pieces (memory, realloc, roots) are retained.
 use super::{compile, inspect_wasm};
+use crate::world::Compiler::Standard;
 use anyhow::Result;
 
 #[test]
@@ -56,7 +57,7 @@ fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
 
 #[test]
 fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
-    let compiled = crate::world::compile(
+    let compiled = Standard.compile(
         "package test:unused; world test { import label: func() -> string; export run: func(a:f64)->f64; }",
         "test",
         "unused.ts",

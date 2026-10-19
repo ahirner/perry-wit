@@ -4,75 +4,57 @@
 //! exported functions, records, variants, enums, and imported interfaces.
 
 use super::names::{TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children};
+use crate::abi::types::{Contract, Input, convert, primitive};
 use anyhow::Result;
 use std::collections::HashSet;
-use wit_parser::{
-    Function, Resolve, Result_ as WitResult, Type, TypeDefKind, World, WorldItem, WorldKey,
-};
+use wit_parser::{Function, Resolve, Type, TypeDefKind, World, WorldItem, WorldKey};
 
-/// Formats a WIT Type into its corresponding TypeScript representation.
-fn wit_type_to_ts(names: &TsNames<'_>, ty: &Type) -> String {
-    match ty {
-        Type::Bool => "boolean".to_string(),
-        Type::U8
-        | Type::U16
-        | Type::U32
-        | Type::S8
-        | Type::S16
-        | Type::S32
-        | Type::F32
-        | Type::F64 => "number".to_string(),
-        Type::U64 | Type::S64 => "bigint".to_string(),
-        Type::Char | Type::String => "string".to_string(),
-        Type::ErrorContext => "Error | unknown".to_string(),
-        Type::Id(id) => {
-            let type_def = &names.resolve.types[*id];
-            if let Some(name) = names.name(*id) {
-                name
-            } else {
-                type_kind_to_ts(names, &type_def.kind)
+fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
+    convert(
+        names.resolve,
+        input,
+        &|id| names.name(id),
+        &|contract| match contract {
+            Contract::Scalar(ty) => primitive!(ty, ts).into(),
+            Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
+            Contract::Bytes => "Uint8Array".into(),
+            Contract::ByteStream => "ReadableStream<Uint8Array>".into(),
+            Contract::List(ty) => format!("Array<{ty}>"),
+            Contract::Option(ty) => format!("{ty} | null"),
+            Contract::Result { ok, err } => {
+                let ok = ok.map(|ty| format!("; value: {ty}")).unwrap_or_default();
+                let err = err.map(|ty| format!("; error: {ty}")).unwrap_or_default();
+                format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
             }
-        }
-    }
-}
-
-fn type_kind_to_ts(names: &TsNames<'_>, kind: &TypeDefKind) -> String {
-    match kind {
-        TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            wit_type_to_ts(names, &Type::Id(*id))
-        }
-        TypeDefKind::Stream(Some(Type::U8)) => "ReadableStream<Uint8Array>".into(),
-        TypeDefKind::List(elem) => {
-            if matches!(elem, Type::U8) {
-                "Uint8Array".to_string()
-            } else {
-                format!("Array<{}>", wit_type_to_ts(names, elem))
+            Contract::Tuple(items) => {
+                format!("[{}]", items.collect::<Vec<_>>().join(", "))
             }
-        }
-        TypeDefKind::Option(inner) => {
-            format!("{} | null", wit_type_to_ts(names, inner))
-        }
-        TypeDefKind::Result(WitResult { ok, err }) => {
-            let ok = ok
-                .as_ref()
-                .map(|ty| format!("; value: {}", wit_type_to_ts(names, ty)))
-                .unwrap_or_default();
-            let err = err
-                .as_ref()
-                .map(|ty| format!("; error: {}", wit_type_to_ts(names, ty)))
-                .unwrap_or_default();
-            format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
-        }
-        TypeDefKind::Tuple(tuple) => {
-            let items: Vec<String> = tuple
-                .types
-                .iter()
-                .map(|t| wit_type_to_ts(names, t))
-                .collect();
-            format!("[{}]", items.join(", "))
-        }
-        _ => "unknown".to_string(),
-    }
+            Contract::Record(fields) => {
+                let mut out = String::from("{\n");
+                for (name, ty) in fields {
+                    out.push_str(&format!("  {name}: {ty};\n"));
+                }
+                out.push('}');
+                out
+            }
+            Contract::Enum(cases) => cases
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            Contract::Variant(cases) => {
+                let mut out = String::new();
+                for (name, payload) in cases {
+                    out.push_str(&format!("\n  | {{ tag: \"{name}\""));
+                    if let Some(ty) = payload {
+                        out.push_str(&format!("; val: {ty}"));
+                    }
+                    out.push_str(" }");
+                }
+                out
+            }
+            Contract::Unsupported(_) => "unknown".into(),
+        },
+    )
 }
 
 fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
@@ -87,7 +69,7 @@ fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
     found
 }
 fn outbound_ts(names: &TsNames<'_>, ty: &Type) -> String {
-    let ordinary = wit_type_to_ts(names, ty);
+    let ordinary = type_to_ts(names, Input::Reference(*ty));
     if has_bytes(names.resolve, ty) {
         format!("import(\"./world\").WitInput<{ordinary}>")
     } else {
@@ -147,7 +129,7 @@ fn implementation_signature(
 fn wit_result_to_ts(names: &TsNames<'_>, func: &Function) -> String {
     let result = match &func.result {
         None => "void".to_string(),
-        Some(ty) => wit_type_to_ts(names, ty),
+        Some(ty) => type_to_ts(names, Input::Reference(*ty)),
     };
     if func.kind.is_async() {
         format!("Promise<{result}>")
@@ -318,7 +300,7 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         }
         for (name, id) in &interface.types {
             let local = to_pascal_case(name);
-            let target = wit_type_to_ts(names, &Type::Id(*id));
+            let target = type_to_ts(names, Input::Reference(Type::Id(*id)));
             if has_bytes(names.resolve, &Type::Id(*id)) {
                 out.push_str(&format!(
                     "  export type {local}Input = import(\"./world\").WitInput<{target}>;\n"
@@ -334,7 +316,7 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
             if !matches!(names.resolve.types[*id].kind, TypeDefKind::Resource) {
                 continue;
             }
-            let resource = wit_type_to_ts(names, &Type::Id(*id));
+            let resource = type_to_ts(names, Input::Reference(Type::Id(*id)));
             let suffix = to_pascal_case(name);
             out.push_str(&format!("  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;\n"));
             if !imported {
@@ -357,7 +339,9 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
 }
 
 fn emit_params(out: &mut String, names: &TsNames<'_>, function: &Function) {
-    emit_function_params(out, names, function, wit_type_to_ts);
+    emit_function_params(out, names, function, |names, ty| {
+        type_to_ts(names, Input::Reference(*ty))
+    });
 }
 
 fn emit_function_params(
@@ -396,47 +380,20 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
             out.push_str(&type_name);
             out.push_str(" { private constructor(); readonly [__witResourceBrand]: true; private readonly __witResource: never; }\n\n");
         }
-        TypeDefKind::Record(record) => {
-            out.push_str("export interface ");
-            out.push_str(&type_name);
-            out.push_str(" {\n");
-            for field in &record.fields {
-                let fname = to_camel_case(&field.name);
-                let fty = wit_type_to_ts(names, &field.ty);
-                out.push_str("  ");
-                out.push_str(&fname);
-                out.push_str(": ");
-                out.push_str(&fty);
-                out.push_str(";\n");
+        TypeDefKind::Record(_)
+        | TypeDefKind::Enum(_)
+        | TypeDefKind::Variant(_)
+        | TypeDefKind::Type(_)
+        | TypeDefKind::List(_)
+        | TypeDefKind::Option(_)
+        | TypeDefKind::Tuple(_)
+        | TypeDefKind::Result(_) => {
+            let value = type_to_ts(names, Input::Definition(type_id));
+            if matches!(td.kind, TypeDefKind::Record(_)) {
+                out.push_str(&format!("export interface {type_name} {value}\n\n"));
+            } else {
+                out.push_str(&format!("export type {type_name} = {value};\n\n"));
             }
-            out.push_str("}\n\n");
-        }
-        TypeDefKind::Enum(en) => {
-            let cases: Vec<String> = en.cases.iter().map(|c| format!("\"{}\"", c.name)).collect();
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&cases.join(" | "));
-            out.push_str(";\n\n");
-        }
-        TypeDefKind::Variant(var) => {
-            let cases: Vec<String> = var
-                .cases
-                .iter()
-                .map(|c| {
-                    if let Some(payload) = &c.ty {
-                        let ty_str = wit_type_to_ts(names, payload);
-                        format!("{{ tag: \"{}\"; val: {ty_str} }}", c.name)
-                    } else {
-                        format!("{{ tag: \"{}\" }}", c.name)
-                    }
-                })
-                .collect();
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" =\n  | ");
-            out.push_str(&cases.join("\n  | "));
-            out.push_str(";\n\n");
         }
         TypeDefKind::Flags(flags) => {
             out.push_str("export interface ");
@@ -448,24 +405,6 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
                 out.push_str("?: boolean;\n");
             }
             out.push_str("}\n\n");
-        }
-        TypeDefKind::Type(alias) => {
-            let alias_ty = wit_type_to_ts(names, alias);
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&alias_ty);
-            out.push_str(";\n\n");
-        }
-        TypeDefKind::List(_)
-        | TypeDefKind::Option(_)
-        | TypeDefKind::Tuple(_)
-        | TypeDefKind::Result(_) => {
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&type_kind_to_ts(names, &td.kind));
-            out.push_str(";\n\n");
         }
         _ => {}
     }

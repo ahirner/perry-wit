@@ -1,7 +1,7 @@
 //! Numeric layout specialization of aggregate types from converged slot domains.
 use super::*;
 use pliron::identifier::Legaliser;
-use std::cell::Ref;
+use std::fmt::Write;
 
 impl ProgramFacts {
     /// The specialized type of `value` in context `id`, if its layout or domain changes.
@@ -83,8 +83,9 @@ impl ProgramFacts {
                 .transpose()
                 .map(Option::flatten);
         }
-        if res.domain == Fact::Numeric
-            || (res.domain.needs_lossless_64() && ty.deref(ctx).is::<crate::types::OptionalType>())
+        if res.facts.domain == Fact::Numeric
+            || (res.facts.domain.needs_lossless_64()
+                && ty.deref(ctx).is::<crate::types::OptionalType>())
         {
             return Ok(numeric_type_for(ctx, ty));
         }
@@ -97,213 +98,11 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> Result<Option<TypeHandle>> {
-        let objects = &self.heap.cells[cell].layout_objects;
-        self.specialized_type_inner(ctx, ty, objects, &mut HashMap::new())
-    }
-
-    /// Specializes `ty` when every object in `objects` agrees on numeric slots.
-    fn specialized_type_inner(
-        &self,
-        ctx: &Context,
-        ty: TypeHandle,
-        objects: &BTreeSet<usize>,
-        visiting: &mut HashMap<TypeHandle, TypeHandle>,
-    ) -> Result<Option<TypeHandle>> {
-        if let Some(&target) = visiting.get(&ty) {
-            return Ok(Some(target));
-        }
-        if let Some((inner, absence)) = crate::optional::optional_parts(ctx, ty) {
-            return Ok(self
-                .specialized_type_inner(ctx, inner, objects, visiting)?
-                .map(|inner| crate::types::OptionalType::get_with(ctx, inner, absence).into()));
-        }
-        if objects.is_empty() {
+        let plan = LayoutPlan::new(ctx, &self.heap, ty, cell, Lossless::All);
+        if !plan.changed[0] {
             return Ok(None);
         }
-        let Some(layout) = Layout::of(ctx, ty) else {
-            return Ok(None);
-        };
-        match layout {
-            Layout::Array(element) => {
-                let specialized = match self.heap.step(ctx, objects, None, element, Lossless::All) {
-                    Some(Step::Numeric(element)) => Some(element),
-                    Some(Step::Nested(nested)) => {
-                        self.specialized_type_inner(ctx, element, &nested, visiting)?
-                    }
-                    Some(Step::Keep) | None => None,
-                };
-                Ok(specialized.map(|element| ArrayType::get(ctx, element).into()))
-            }
-            Layout::Record { kind, fields, .. } => {
-                let Some((key, _)) = self.layout_key(ctx, ty, objects, &mut Vec::new()) else {
-                    return Ok(None);
-                };
-                let name = key.record_identifier();
-                let get = |ctx: &Context, fields: Option<Vec<(String, TypeHandle)>>| {
-                    RecordType::get_kind(ctx, name.clone(), fields, kind)
-                };
-                // Reserving before the fields also handles recursive records without a pre-walk.
-                visiting.insert(ty, get(ctx, None)?.into());
-                let fields = self.specialized_fields(ctx, fields.to_vec(), objects, visiting);
-                visiting.remove(&ty);
-                fields?
-                    .map(|fields| get(ctx, Some(fields)).map(Into::into))
-                    .transpose()
-            }
-        }
-    }
-
-    /// The fields of a record layout that `objects` share, with at least one specialized.
-    fn specialized_fields(
-        &self,
-        ctx: &Context,
-        mut fields: Vec<(String, TypeHandle)>,
-        objects: &BTreeSet<usize>,
-        visiting: &mut HashMap<TypeHandle, TypeHandle>,
-    ) -> Result<Option<Vec<(String, TypeHandle)>>> {
-        let mut real_change = false;
-        for (index, (_, ty)) in fields.iter_mut().enumerate() {
-            let Some(step) = self
-                .heap
-                .step(ctx, objects, Some(index), *ty, Lossless::All)
-            else {
-                return Ok(None);
-            };
-            let specialized = match step {
-                Step::Numeric(numeric) => Some(numeric),
-                Step::Nested(nested) => self.specialized_type_inner(ctx, *ty, &nested, visiting)?,
-                Step::Keep => None,
-            };
-            if let Some(specialized) = specialized {
-                real_change = true;
-                *ty = specialized;
-            }
-        }
-        Ok(real_change.then_some(fields))
-    }
-
-    /// Whether some slot group `objects` share under `ty` specializes to a numeric carrier.
-    fn has_numeric_specialization(
-        &self,
-        ctx: &Context,
-        ty: TypeHandle,
-        objects: &BTreeSet<usize>,
-        visiting: &mut HashSet<TypeHandle>,
-    ) -> bool {
-        if objects.is_empty() {
-            return false;
-        }
-        if let Some(inner) = payload_step(ctx, ty) {
-            return self.has_numeric_specialization(ctx, inner, objects, visiting);
-        }
-        if !visiting.insert(ty) {
-            return false;
-        }
-        let found = Layout::of(ctx, ty).is_some_and(|layout| {
-            for (field, _, child) in layout.children() {
-                let numeric = match self.heap.step(ctx, objects, field, child, Lossless::All) {
-                    None => return false,
-                    Some(Step::Numeric(_)) => true,
-                    Some(Step::Nested(nested)) => {
-                        self.has_numeric_specialization(ctx, child, &nested, visiting)
-                    }
-                    Some(Step::Keep) => false,
-                };
-                if numeric {
-                    return true;
-                }
-            }
-            false
-        });
-        visiting.remove(&ty);
-        found
-    }
-
-    /// The structural key of the layout `objects` share under `ty`, relative to the records on
-    /// the `visiting` path, and whether it specializes anything.
-    fn layout_key(
-        &self,
-        ctx: &Context,
-        ty: TypeHandle,
-        objects: &BTreeSet<usize>,
-        visiting: &mut Vec<TypeHandle>,
-    ) -> Option<(LayoutKey, bool)> {
-        if objects.is_empty() {
-            return None;
-        }
-        if let Some(pos) = visiting.iter().position(|&v_ty| v_ty == ty) {
-            let depth = visiting.len() - 1 - pos;
-            let real = self.has_numeric_specialization(ctx, ty, objects, &mut HashSet::new());
-            return Some((LayoutKey::SelfRef(depth), real));
-        }
-        if let Some((inner, absence)) = crate::optional::optional_parts(ctx, ty) {
-            let (inner, real) = self.layout_key(ctx, inner, objects, visiting)?;
-            let absence = absence as u8;
-            let inner = Box::new(inner);
-            return Some((LayoutKey::Optional { absence, inner }, real));
-        }
-        if let Some(inner) = payload_step(ctx, ty) {
-            let (inner, real) = self.layout_key(ctx, inner, objects, visiting)?;
-            return Some((LayoutKey::Promise(Box::new(inner)), real));
-        }
-        match Layout::of(ctx, ty)? {
-            Layout::Array(element) => {
-                let (key, real) =
-                    match self.heap.step(ctx, objects, None, element, Lossless::All)? {
-                        Step::Numeric(_) => (LayoutKey::Numeric, true),
-                        Step::Nested(nested) => self.layout_key(ctx, element, &nested, visiting)?,
-                        Step::Keep => return None,
-                    };
-                Some((LayoutKey::Array(Box::new(key)), real))
-            }
-            Layout::Record {
-                name: base_name,
-                kind,
-                fields,
-            } => {
-                visiting.push(ty);
-                let fields = self.layout_key_fields(ctx, &fields, objects, visiting);
-                visiting.pop();
-                let specialized_fields = fields?;
-                let key = LayoutKey::Record {
-                    base_name: base_name.clone(),
-                    is_tuple: kind != crate::RecordKind::Object,
-                    specialized_fields,
-                };
-                Some((key, true))
-            }
-        }
-    }
-
-    /// The keys of the specialized fields of a record layout, if at least one changes.
-    fn layout_key_fields(
-        &self,
-        ctx: &Context,
-        fields: &[(String, TypeHandle)],
-        objects: &BTreeSet<usize>,
-        visiting: &mut Vec<TypeHandle>,
-    ) -> Option<Vec<(usize, LayoutKey)>> {
-        let mut real_change = false;
-        let mut specialized = Vec::new();
-        for (index, &(_, ty)) in fields.iter().enumerate() {
-            match self
-                .heap
-                .step(ctx, objects, Some(index), ty, Lossless::All)?
-            {
-                Step::Numeric(_) => {
-                    specialized.push((index, LayoutKey::Numeric));
-                    real_change = true;
-                }
-                Step::Nested(nested) => {
-                    if let Some((key, real)) = self.layout_key(ctx, ty, &nested, visiting) {
-                        specialized.push((index, key));
-                        real_change |= real;
-                    }
-                }
-                Step::Keep => {}
-            }
-        }
-        real_change.then_some(specialized)
+        plan.materialize(ctx, 0, &mut HashMap::new()).map(Some)
     }
 
     pub(in crate::facts) fn verify_cell_layout_lossless(
@@ -313,52 +112,26 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> pliron::result::Result<()> {
-        self.verify_objects_layout_lossless(
-            ctx,
-            loc,
-            ty,
-            &self.heap.cells[cell].layout_objects,
-            &mut HashSet::new(),
-        )
-    }
-
-    /// Fails when a slot group that needs a lossless carrier is still typed `f64` in `ty`.
-    fn verify_objects_layout_lossless(
-        &self,
-        ctx: &Context,
-        loc: &pliron::location::Location,
-        ty: TypeHandle,
-        objects: &BTreeSet<usize>,
-        visiting: &mut HashSet<TypeHandle>,
-    ) -> pliron::result::Result<()> {
-        let ty = crate::optional::present_type(ctx, ty);
-        if objects.is_empty() || !visiting.insert(ty) {
-            return Ok(());
-        }
-        let verified = Layout::of(ctx, ty).map_or(Ok(()), |layout| {
-            for (field, name, child) in layout.children() {
-                // A shape the objects do not share specializes nothing.
-                let Some(step) = self.heap.step(ctx, objects, field, child, Lossless::Any) else {
-                    return Ok(());
+        let plan = LayoutPlan::new(ctx, &self.heap, ty, cell, Lossless::Any);
+        for node in &plan.nodes {
+            for (index, &child) in node.children().iter().enumerate() {
+                if !matches!(plan.nodes[child], LayoutNode::Numeric(_)) {
+                    continue;
+                }
+                let message = match node {
+                    LayoutNode::Record { ty, .. } => format!(
+                        "record field `{}` with Fact::Numeric has f64 carrier",
+                        ty.deref(ctx).fields()?[index].0
+                    ),
+                    _ => "array element with Fact::Numeric has f64 carrier".to_string(),
                 };
-                if let Step::Numeric(_) = step {
-                    let message = name.map_or_else(
-                        || "array element with Fact::Numeric has f64 carrier".to_string(),
-                        |name| format!("record field `{name}` with Fact::Numeric has f64 carrier"),
-                    );
-                    return pliron::verify_err!(
-                        loc.clone(),
-                        crate::facts::rewrite::LosslessRepresentationErr(message)
-                    );
-                }
-                if let Step::Nested(nested) = step {
-                    self.verify_objects_layout_lossless(ctx, loc, child, &nested, visiting)?;
-                }
+                return pliron::verify_err!(
+                    loc.clone(),
+                    crate::facts::rewrite::LosslessRepresentationErr(message)
+                );
             }
-            Ok(())
-        });
-        visiting.remove(&ty);
-        verified
+        }
+        Ok(())
     }
 }
 
@@ -394,46 +167,6 @@ fn projected_type(
     };
     let absence = crate::optional::absence(ctx, ty)?;
     Some(crate::types::OptionalType::get_with(ctx, payload, absence).into())
-}
-
-/// Borrowed children avoid copying fields during read-only layout walks.
-enum Layout<'a> {
-    Array(TypeHandle),
-    Record {
-        name: Ref<'a, Identifier>,
-        kind: crate::RecordKind,
-        fields: Ref<'a, [(String, TypeHandle)]>,
-    },
-}
-
-impl<'a> Layout<'a> {
-    /// `None` for other types and for opaque records, which have nothing to specialize.
-    fn of(ctx: &'a Context, ty: TypeHandle) -> Option<Self> {
-        let ty = ty.deref(ctx);
-        if let Some(array) = ty.downcast_ref::<ArrayType>() {
-            return Some(Self::Array(array.element()));
-        }
-        let record = Ref::filter_map(ty, |ty| ty.downcast_ref::<RecordType>()).ok()?;
-        Some(Self::Record {
-            name: Ref::map(Ref::clone(&record), RecordType::name),
-            kind: record.kind(),
-            fields: Ref::filter_map(record, |record| record.fields().ok()).ok()?,
-        })
-    }
-
-    /// `(field index, field name, type)` of each child; an array's one child is its element.
-    fn children(&self) -> impl Iterator<Item = (Option<usize>, Option<&str>, TypeHandle)> {
-        let (element, fields) = match self {
-            Self::Array(element) => (Some((None, None, *element)), &[][..]),
-            Self::Record { fields, .. } => (None, &fields[..]),
-        };
-        element.into_iter().chain(
-            fields
-                .iter()
-                .enumerate()
-                .map(|(index, (name, ty))| (Some(index), Some(name.as_str()), *ty)),
-        )
-    }
 }
 
 /// How the slots holding one child of every object in a group specialize.
@@ -472,7 +205,7 @@ impl HeapFacts {
                 _ => return None,
             };
             let cell = &self.cells[slot];
-            let needs_lossless = cell.domain.needs_lossless_64();
+            let needs_lossless = cell.facts.domain.needs_lossless_64();
             match requirement {
                 Lossless::All => lossless &= needs_lossless,
                 Lossless::Any => lossless |= needs_lossless,
@@ -489,80 +222,224 @@ impl HeapFacts {
     }
 }
 
-/// The payload of an optional or promise type, which share their payload's layout.
-fn payload_step(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    let ty = ty.deref(ctx);
-    ty.downcast_ref::<crate::types::OptionalType>()
-        .map(|optional| optional.value())
-        .or_else(|| {
-            ty.downcast_ref::<PromiseType>()
-                .map(|promise| promise.value())
-        })
+/// One heap walk supplies both the specialization graph and the lossless verifier.
+struct LayoutPlan {
+    nodes: Vec<LayoutNode>,
+    changed: Vec<bool>,
 }
 
-/// Canonical structural key for a specialized aggregate layout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum LayoutKey {
-    SelfRef(usize),
-    Numeric,
+enum LayoutNode {
+    Keep(TypeHandle),
+    Numeric(TypeHandle),
     Optional {
-        absence: u8,
-        inner: Box<Self>,
+        absence: crate::Absence,
+        inner: usize,
     },
-    Promise(Box<Self>),
-    Array(Box<Self>),
+    Array(usize),
     Record {
-        base_name: Identifier,
-        is_tuple: bool,
-        specialized_fields: Vec<(usize, Self)>,
+        ty: TypedHandle<RecordType>,
+        fields: Vec<usize>,
     },
 }
 
-impl LayoutKey {
-    fn record_identifier(&self) -> Identifier {
-        let mut out = String::from("perry_layout_");
-        self.write_encoded(&mut out);
-        Legaliser::default().legalise(&out)
-    }
-
-    fn write_encoded(&self, out: &mut String) {
-        use std::fmt::Write;
+impl LayoutNode {
+    fn children(&self) -> &[usize] {
         match self {
-            Self::SelfRef(depth) => {
-                let _ = write!(out, "S{depth}_");
-            }
-            Self::Numeric => out.push('N'),
-            Self::Optional { absence, inner } => {
-                let _ = write!(out, "O{absence}_");
-                inner.write_encoded(out);
-            }
-            Self::Promise(inner) => {
-                out.push('P');
-                inner.write_encoded(out);
-            }
-            Self::Array(inner) => {
-                out.push('A');
-                inner.write_encoded(out);
-            }
-            Self::Record {
-                base_name,
-                is_tuple,
-                specialized_fields,
-            } => {
-                out.push(if *is_tuple { 'T' } else { 'R' });
-                write_ident(out, base_name.as_ref());
-                let _ = write!(out, "{}_", specialized_fields.len());
-                for (idx, field_key) in specialized_fields {
-                    let _ = write!(out, "F{idx}_");
-                    field_key.write_encoded(out);
-                }
-            }
+            Self::Optional { inner, .. } | Self::Array(inner) => std::slice::from_ref(inner),
+            Self::Record { fields, .. } => fields,
+            Self::Keep(_) | Self::Numeric(_) => &[],
         }
     }
 }
 
+struct LayoutPlanner<'a> {
+    ctx: &'a Context,
+    heap: &'a HeapFacts,
+    lossless: Lossless,
+    visiting: HashMap<TypeHandle, usize>,
+    nodes: Vec<LayoutNode>,
+}
+
+impl LayoutPlan {
+    fn new(
+        ctx: &Context,
+        heap: &HeapFacts,
+        ty: TypeHandle,
+        cell: usize,
+        lossless: Lossless,
+    ) -> Self {
+        let mut planner = LayoutPlanner {
+            ctx,
+            heap,
+            lossless,
+            visiting: HashMap::new(),
+            nodes: Vec::new(),
+        };
+        planner.visit(ty, &heap.cells[cell].layout_objects);
+        let nodes = planner.nodes;
+        let mut changed = vec![false; nodes.len()];
+        let mut dependents = vec![Vec::new(); nodes.len()];
+        let mut pending = Vec::new();
+        for (parent, node) in nodes.iter().enumerate() {
+            if matches!(node, LayoutNode::Numeric(_)) {
+                pending.push(parent);
+            }
+            for &child in node.children() {
+                dependents[child].push(parent);
+            }
+        }
+        while let Some(node) = pending.pop() {
+            if !std::mem::replace(&mut changed[node], true) {
+                pending.extend(dependents[node].iter().copied());
+            }
+        }
+        Self { nodes, changed }
+    }
+
+    fn materialize(
+        &self,
+        ctx: &Context,
+        node: usize,
+        constructed: &mut HashMap<usize, TypeHandle>,
+    ) -> Result<TypeHandle> {
+        if let Some(&ty) = constructed.get(&node) {
+            return Ok(ty);
+        }
+        match &self.nodes[node] {
+            LayoutNode::Keep(ty) | LayoutNode::Numeric(ty) => Ok(*ty),
+            LayoutNode::Optional { absence, inner } => {
+                let inner = self.materialize(ctx, *inner, constructed)?;
+                Ok(crate::types::OptionalType::get_with(ctx, inner, *absence).into())
+            }
+            LayoutNode::Array(element) => {
+                let element = self.materialize(ctx, *element, constructed)?;
+                Ok(ArrayType::get(ctx, element).into())
+            }
+            LayoutNode::Record {
+                ty,
+                fields: children,
+            } => {
+                if !self.changed[node] {
+                    return Ok((*ty).into());
+                }
+                let mut encoded = String::from("perry_layout_");
+                self.write_key(ctx, node, &mut Vec::new(), &mut encoded);
+                let name = Legaliser::default().legalise(&encoded);
+                let kind = ty.deref(ctx).kind();
+                let reserved: TypeHandle =
+                    RecordType::get_kind(ctx, name.clone(), None, kind)?.into();
+                constructed.insert(node, reserved);
+                let mut fields = ty.deref(ctx).fields()?.to_vec();
+                for ((_, ty), &child) in fields.iter_mut().zip(children) {
+                    *ty = self.materialize(ctx, child, constructed)?;
+                }
+                Ok(RecordType::get_kind(ctx, name, Some(fields), kind)?.into())
+            }
+        }
+    }
+
+    fn write_key(&self, ctx: &Context, node: usize, path: &mut Vec<usize>, out: &mut String) {
+        if let Some(depth) = path.iter().rev().position(|&parent| parent == node) {
+            let _ = write!(out, "S{depth}_");
+            return;
+        }
+        match &self.nodes[node] {
+            LayoutNode::Numeric(_) => out.push('N'),
+            LayoutNode::Optional { absence, inner } => {
+                let _ = write!(out, "O{}_", *absence as u8);
+                self.write_key(ctx, *inner, path, out);
+            }
+            LayoutNode::Array(element) => {
+                out.push('A');
+                self.write_key(ctx, *element, path, out);
+            }
+            LayoutNode::Record { ty, fields } => {
+                let record = ty.deref(ctx);
+                out.push(if record.is_tuple() { 'T' } else { 'R' });
+                write_ident(out, record.name().as_ref());
+                let _ = write!(
+                    out,
+                    "{}_",
+                    fields.iter().filter(|&&c| self.changed[c]).count()
+                );
+                path.push(node);
+                for (index, &child) in fields.iter().enumerate() {
+                    if self.changed[child] {
+                        let _ = write!(out, "F{index}_");
+                        self.write_key(ctx, child, path, out);
+                    }
+                }
+                path.pop();
+            }
+            LayoutNode::Keep(_) => {}
+        }
+    }
+}
+
+impl LayoutPlanner<'_> {
+    fn visit(&mut self, ty: TypeHandle, objects: &BTreeSet<usize>) -> usize {
+        if let Some(&node) = self.visiting.get(&ty) {
+            return node;
+        }
+        let node = self.nodes.len();
+        self.nodes.push(LayoutNode::Keep(ty));
+        if objects.is_empty() {
+            return node;
+        }
+        self.visiting.insert(ty, node);
+        let layout = if let Some((inner, absence)) = crate::optional::optional_parts(self.ctx, ty) {
+            Some(LayoutNode::Optional {
+                absence,
+                inner: self.visit(inner, objects),
+            })
+        } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, self.ctx) {
+            let element = array.deref(self.ctx).element();
+            self.child(objects, None, element).map(LayoutNode::Array)
+        } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, self.ctx) {
+            record
+                .deref(self.ctx)
+                .fields()
+                .ok()
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, ty))| self.child(objects, Some(i), *ty))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .map(|fields| LayoutNode::Record { ty: record, fields })
+        } else {
+            None
+        };
+        self.visiting.remove(&ty);
+        match layout {
+            Some(layout) => self.nodes[node] = layout,
+            None => self.nodes.truncate(node + 1),
+        }
+        node
+    }
+
+    fn child(
+        &mut self,
+        objects: &BTreeSet<usize>,
+        field: Option<usize>,
+        ty: TypeHandle,
+    ) -> Option<usize> {
+        let step = self
+            .heap
+            .step(self.ctx, objects, field, ty, self.lossless)?;
+        let node = match step {
+            Step::Numeric(ty) => LayoutNode::Numeric(ty),
+            Step::Nested(nested) => return Some(self.visit(ty, &nested)),
+            Step::Keep => LayoutNode::Keep(ty),
+        };
+        let index = self.nodes.len();
+        self.nodes.push(node);
+        Some(index)
+    }
+}
+
 fn write_ident(out: &mut String, ident: &str) {
-    use std::fmt::Write;
     let mut encoded = String::with_capacity(ident.len());
     for ch in ident.chars() {
         if (ch.is_ascii_alphanumeric() && ch != 'X') || ch == '_' {

@@ -7,8 +7,12 @@ async function task(value: number): Promise<number> {
 
 const first = task(1);
 const second = task(2);
-const values = await Promise.all([first, second]);
+const values: number[] = await Promise.all([first, second]);
 const output = JSON.stringify(values);
 if (typeof output === 'string') console.log(output);
 const observedAgain = await first;
 if (observedAgain === 1) console.log('REPEATED_OBSERVATION_OK');
+
+const empty: Promise<number>[] = [];
+console.log("empty", (await Promise.all(empty)).length);
+console.log("typeof", typeof values[0], typeof output, typeof values[3], typeof JSON.parse("[1]"));

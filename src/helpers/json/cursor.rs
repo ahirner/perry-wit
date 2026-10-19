@@ -66,15 +66,38 @@ impl Cursor {
             }
         }
     }
-    /// Integer conversion failures are consumed separately from latched syntax failures.
-    fn integer<T: Default>(
+    fn scalar<T: Default>(
         &mut self,
+        kind: super::Kind,
         parse: impl FnOnce(&mut Reader<'static>) -> Result<Option<T>, Error>,
     ) -> T {
+        let accepted = self.read_token(false, |r| {
+            r.whitespace();
+            Ok(matches!(
+                (kind, r.peek()),
+                (super::Kind::Number, Some(b'-' | b'0'..=b'9'))
+                    | (super::Kind::String, Some(b'"'))
+                    | (super::Kind::Boolean, Some(b't' | b'f'))
+            ))
+        });
         self.scalar_depth();
-        let integer = self.read_token(Some(T::default()), parse);
-        self.scalar_failed = integer.is_none();
-        integer.unwrap_or_default()
+        if !accepted {
+            self.discard();
+            self.scalar_failed = true;
+            return T::default();
+        }
+        let value = self.read_token(Some(T::default()), parse);
+        self.scalar_failed = value.is_none();
+        value.unwrap_or_default()
+    }
+    fn discard(&mut self) {
+        if self.error.is_some() {
+            return;
+        }
+        match super::parse::skip(self.text(), self.position, self.containers.len()) {
+            Ok(end) => self.position = end,
+            Err(error) => self.fail(error),
+        }
     }
     fn value(&mut self) -> *mut u8 {
         if self.error.is_some() {
@@ -180,17 +203,15 @@ pub(crate) unsafe extern "C" fn json_cursor_consume(value: u32, byte: u32) {
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_number(value: u32) -> f64 {
-    let c = unsafe { cursor(value) };
-    c.scalar_depth();
-    c.read_token(0.0, Reader::numeric)
+    unsafe { cursor(value) }.scalar(super::Kind::Number, |r| r.numeric().map(Some))
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_i64(value: u32) -> i64 {
-    unsafe { cursor(value) }.integer(Reader::signed_integer)
+    unsafe { cursor(value) }.scalar(super::Kind::Number, Reader::signed_integer)
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_u64(value: u32) -> u64 {
-    unsafe { cursor(value) }.integer(Reader::unsigned_integer)
+    unsafe { cursor(value) }.scalar(super::Kind::Number, Reader::unsigned_integer)
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_failed(value: u32) -> u32 {
@@ -198,19 +219,17 @@ pub(crate) unsafe extern "C" fn json_cursor_failed(value: u32) -> u32 {
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_boolean(value: u32) -> u32 {
-    let c = unsafe { cursor(value) };
-    c.scalar_depth();
-    c.read_token(0, |r| {
+    unsafe { cursor(value) }.scalar(super::Kind::Boolean, |r| {
         let yes = r.peek() == Some(b't');
         r.keyword(if yes { b"true" } else { b"false" })?;
-        Ok(u32::from(yes))
+        Ok(Some(u32::from(yes)))
     })
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_string(value: u32) -> u32 {
-    let c = unsafe { cursor(value) };
-    c.scalar_depth();
-    c.read_token(0, |r| Ok(pool::text::<true>(r)?.decoded() as usize as u32))
+    unsafe { cursor(value) }.scalar(super::Kind::String, |r| {
+        Ok(Some(pool::text::<true>(r)?.decoded() as usize as u32))
+    })
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_key(
@@ -296,14 +315,7 @@ pub(crate) unsafe extern "C" fn json_cursor_value(value: u32) -> u32 {
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_discard(value: u32) {
-    let c = unsafe { cursor(value) };
-    if c.error.is_some() {
-        return;
-    }
-    match super::parse::skip(c.text(), c.position, c.containers.len()) {
-        Ok(end) => c.position = end,
-        Err(error) => c.fail(error),
-    }
+    unsafe { cursor(value) }.discard();
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_member(value: u32, graph: *mut u8) -> u32 {

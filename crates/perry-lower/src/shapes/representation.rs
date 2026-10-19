@@ -1,4 +1,5 @@
 //! Source schemas to the existing MIR representation contracts.
+use super::generics::Resolver;
 use super::*;
 use crate::collections::CollectionViewKind;
 
@@ -161,7 +162,8 @@ impl Shapes<'_> {
 
     fn union_type(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
         let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
-        let flattened = super::generics::flatten_union_with_lookup(ctx, &lookup, members, 0);
+        let resolver = Resolver::new(ctx, &lookup);
+        let flattened = resolver.flatten(members, 0);
         let members = flattened.as_slice();
         if members
             .iter()
@@ -171,13 +173,11 @@ impl Shapes<'_> {
         }
         if !members.is_empty()
             && members.iter().all(|ty| {
-                super::generics::resolve_record_properties(ctx, &lookup, *ty, 0).is_some_and(
-                    |props| {
-                        props.iter().any(|(name, prop_ty, _)| {
-                            name == "ok" && matches!(prop_ty.deref(ctx).kind(), Kind::Boolean)
-                        })
-                    },
-                )
+                resolver.record(*ty, 0).is_some_and(|props| {
+                    props.iter().any(|(name, prop_ty, _)| {
+                        name == "ok" && matches!(prop_ty.deref(ctx).kind(), Kind::Boolean)
+                    })
+                })
             })
         {
             return self.result(ctx, members);
@@ -230,16 +230,13 @@ impl Shapes<'_> {
     /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
     fn result(&self, ctx: &Context, alternatives: &[ArgumentId]) -> Result<TypeHandle> {
         let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
+        let resolver = Resolver::new(ctx, &lookup);
         ensure!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
-                    && super::generics::resolve_record_properties(
-                        ctx,
-                        &lookup,
-                        alternatives[0],
-                        0
-                    )
-                    .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
+                    && resolver
+                        .record(alternatives[0], 0)
+                        .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
             "a tagged result needs exactly two alternatives"
         );
         let mut fields = vec![(
@@ -249,9 +246,7 @@ impl Shapes<'_> {
         for name in ["value", "error"] {
             let mut payload_arg = None;
             for object in alternatives {
-                let Some(properties) =
-                    super::generics::resolve_record_properties(ctx, &lookup, *object, 0)
-                else {
+                let Some(properties) = resolver.record(*object, 0) else {
                     bail!("result alternatives only contain ok, value and error");
                 };
                 let valid_keys = properties
@@ -283,12 +278,11 @@ impl Shapes<'_> {
 
     fn variant(&self, ctx: &Context, members: &[ArgumentId]) -> Result<TypeHandle> {
         let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
+        let resolver = Resolver::new(ctx, &lookup);
         let mut cases = Vec::new();
         for member in members {
             let (tag, valid_props, val_arg) = {
-                let Some(properties) =
-                    super::generics::resolve_record_properties(ctx, &lookup, *member, 0)
-                else {
+                let Some(properties) = resolver.record(*member, 0) else {
                     bail!("unions other than tagged object types are not supported yet");
                 };
                 let Some((_, tag_ty, _)) = properties.iter().find(|(p_name, _, _)| p_name == "tag")

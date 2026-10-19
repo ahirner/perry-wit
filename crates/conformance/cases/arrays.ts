@@ -101,12 +101,30 @@ const items: Scored[] = [
 ];
 const byLabel = new Map(items.map((c) => [c.label, c]));
 console.log("map-from-entries", byLabel.size, byLabel.get("beta")?.score);
-console.log("array-from", Array.from({ length: 4 }, (_v, i) => i * 2).join(","), Array.from(new Set(["x", "y", "x"]), (s) => s.toUpperCase()).join(","));
+function fromDefault(value: number, index: number, offset = 5): number {
+  return value + index + offset;
+}
+console.log("array-from", Array.from({ length: 4 }, (_v, i) => i * 2).join(","), Array.from(new Set(["x", "y", "x"]), (s) => s.toUpperCase()).join(","), Array.from([1], fromDefault).join(","));
+const fromArray: number[] = [1, 2];
+const fromSet = new Set([1, 2, 3]);
+console.log("array-from-live", Array.from(fromArray, (value, index, source?: number[]) => {
+  if (index === 0) fromArray.push(3);
+  return value * 10 + index + (source === undefined ? 0 : 1000);
+}).join(","), Array.from(fromSet.values(), (value, index) => {
+  if (index === 0) { fromSet.delete(2); fromSet.add(4); }
+  return value * 10 + index;
+}).join(","));
+const fromShrinking: number[] = [1, 2, 3];
+console.log("array-from-shrink", Array.from(fromShrinking, (value) => {
+  fromShrinking.pop();
+  return value;
+}).join(","));
 const [first, second, ...tail] = ["head", "second", "t1", "t2", "t3"];
 const [only, missing = "def", ...emptyRest] = ["only"];
 console.log("rest-destructuring", first, second, tail.join(":"), only, missing, emptyRest.length);
 const series = [10, 20, 30, 20, 10];
 console.log("last-index", series.lastIndexOf(20), series.lastIndexOf(99), series.lastIndexOf(20, 2));
+console.log("last-index-bounds", series.lastIndexOf(10, undefined), series.lastIndexOf(10, NaN), series.lastIndexOf(20, -2), series.lastIndexOf(20, -Infinity), series.lastIndexOf(20, Infinity));
 console.log("with", series.with(1, 99).join(","), series.join(","), series.with(-1, 77).join(","));
 console.log("math-spread", Math.max(...series), Math.min(...series), Math.max(1, 5, 3, 9, 2));
 let visited = 0;
@@ -128,3 +146,56 @@ const cloned = structuredClone(original);
 original.a = 99;
 original.nested.push(4);
 console.log("structured-clone", cloned.a, cloned.nested.join(","));
+
+interface Point { x: number; y: number }
+function makePoint(i: number): Point {
+  return { y: i * 2, x: i };
+}
+function recordArrayLoop(x: number): number {
+  const items: Point[] = [];
+  for (let i = 0; i < x; i++) {
+  items.push(makePoint(i));
+  }
+  let sum = 0;
+  for (let k = 0; k < items.length; k++) {
+  const point = items[k];
+  point.x = point.x + 1;
+  sum = (sum + point.x + point.y) % 1000003;
+  }
+  const pair: number[] = [sum, x];
+  pair[1] = pair[0];
+  pair[2] = 5;
+  return pair[1] + pair[2];
+}
+for (const x of [0, 3, 100, 5000]) console.log("record-array-loop", x, recordArrayLoop(x));
+
+function inferredOptionalElements(x: number): number {
+  const bytes = new Uint8Array([7]);
+  const a = [bytes[x], 11];
+  const b = [13, bytes[x]];
+  if (a[0] === undefined && b[1] === undefined) { return a[1] + b[0]; }
+  return a[0] + b[1];
+}
+for (const x of [0, 1]) console.log("inferred-optional", x, inferredOptionalElements(x));
+
+const gapValues: number[] = [1, 4];
+const [gapFirst, , gapMissing = 7] = gapValues;
+const [tupleText, tupleCount] = ["ok", 3] as [string, number];
+console.log("destructuring-gaps", gapFirst, gapMissing, tupleText, tupleCount);
+
+interface Parent<T> { value: T }
+interface Child extends Parent<number> { extra: number }
+function nestedCollections() {
+    if (false) { const skipped = new Map<number, boolean>(); }
+    return new Map<string, Set<number>>([['key', new Set<number>([3])]]);
+}
+function nestedConstructorInference(n: number): number {
+    const shapes = new Map<string, {value:number}>();
+    shapes.set("a", {value:n});
+    const inferred = new Set([3, 4]);
+    const inferredMap = new Map([[1, 2], [3, 4]]);
+    const values = nestedCollections();
+    const pair: Child = {value: n, extra: values.size};
+    return pair.value + pair.extra + inferred.size + inferredMap.size;
+}
+for (const n of [0, 7]) console.log("nested-constructors", nestedConstructorInference(n));

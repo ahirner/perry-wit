@@ -43,9 +43,9 @@ pub(crate) fn export(
     let completion = export
         .result
         .as_ref()
-        .and_then(|ty| ty.completion(ctx, mir_results.first().copied()));
+        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure!(
-        completion.is_some() || mir_results.len() == usize::from(export.result.is_some()),
+        completion || mir_results.len() == usize::from(export.result.is_some()),
         "{} returns {} values but the WIT export returns {}",
         export.function,
         mir_results.len(),
@@ -131,23 +131,17 @@ pub(crate) fn export(
         b.cond_br(ctx, status, (trap, vec![]), (normal, vec![]));
         b.block = trap;
         b.return_resources(ctx);
-        if let Some(completion) = export
-            .result
-            .as_ref()
-            .filter(|r| r.accepts_exception())
-            .and_then(AbiType::error_completion)
+        if let Some(ty @ AbiType::Result { .. }) =
+            export.result.as_ref().filter(|r| r.accepts_exception())
         {
-            let ty = completion.result;
             let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-            let payload = b.completion_error(ctx, completion, exception)?;
-            let returned = if flat_result_len == 1 {
-                b.completion_flat(ctx, completion, 1, payload)?
-            } else {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                b.completion_store(ctx, completion, 1, payload, area)?;
-                vec![area]
-            };
+            let payload = b.completion_error(ctx, ty, exception)?;
+            let returned = b.lower_return(
+                ctx,
+                ty,
+                BoundaryValue::Completion { case: 1, payload },
+                flat_result_len != 1,
+            )?;
             let ret = ReturnOp::new(ctx, returned).get_operation();
             b.insert(ctx, ret);
         } else {
@@ -170,34 +164,17 @@ pub(crate) fn export(
         export.result.as_ref().is_some_and(AbiType::has_resources),
         None,
     )?;
-    let returned = if let Some(completion) = completion {
-        let ty = completion.result;
-        let payload = mir_results
-            .first()
-            .map(|ty| (*ty, Carriers::Scalar(values[0])));
-        if flat_result_len == 1 {
-            b.completion_flat(ctx, completion, 0, payload)?
-        } else {
-            let size = b.i32_const(ctx, ty.size() as i32);
-            let area = b.alloc(ctx, size);
-            b.completion_store(ctx, completion, 0, payload, area)?;
-            vec![area]
-        }
+    let payload = mir_results
+        .first()
+        .map(|ty| (*ty, Carriers::Scalar(values[0])));
+    let source = if completion {
+        Some(BoundaryValue::Completion { case: 0, payload })
     } else {
-        match (&export.result, mir_results.first()) {
-            (Some(ty), Some(mir_ty)) if flat_result_len == 1 => {
-                let mut flat = Vec::new();
-                b.lower_flat_values(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), &mut flat)?;
-                flat
-            }
-            (Some(ty), Some(mir_ty)) => {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                b.lower_store(ctx, ty, *mir_ty, Carriers::Scalar(values[0]), area, 0)?;
-                vec![area]
-            }
-            _ => vec![],
-        }
+        payload.map(|(mir, value)| BoundaryValue::Native(mir, value))
+    };
+    let returned = match (&export.result, source) {
+        (Some(ty), Some(source)) => b.lower_return(ctx, ty, source, flat_result_len != 1)?,
+        _ => vec![],
     };
     b.commit_resources(ctx);
     b.finish_resources(ctx);
@@ -245,7 +222,7 @@ fn async_export(
     let completion = export
         .result
         .as_ref()
-        .and_then(|ty| ty.completion(ctx, mir_results.first().copied()));
+        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -403,20 +380,16 @@ fn async_export(
                 .is_some_and(AbiType::accepts_exception)
             {
                 let mut values = Vec::new();
-                if let Some(completion) = export.result.as_ref().and_then(AbiType::error_completion)
-                {
-                    let ty = completion.result;
+                if let Some(ty @ AbiType::Result { .. }) = &export.result {
                     let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
                     let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-                    let payload = b.completion_error(ctx, completion, exception)?;
-                    if indirect {
-                        let size = b.i32_const(ctx, ty.size() as i32);
-                        let area = b.alloc(ctx, size);
-                        b.completion_store(ctx, completion, 1, payload, area)?;
-                        values.push(area);
-                    } else {
-                        values = b.completion_flat(ctx, completion, 1, payload)?;
-                    }
+                    let payload = b.completion_error(ctx, ty, exception)?;
+                    values = b.lower_return(
+                        ctx,
+                        ty,
+                        BoundaryValue::Completion { case: 1, payload },
+                        indirect,
+                    )?;
                 } else if let Some(AbiType::OkHandle { flat, error_case }) = &export.result {
                     // `err(error_case(some(description)))`, then end the task.
                     let text = b.runtime(ctx, Runtime::RejectionText, vec![promise]);
@@ -485,22 +458,15 @@ fn async_export(
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
             let value =
                 b.load_slot_value(ctx, promise, perry_abi::layout::promise::VALUE, *mir_ty)?;
-            if indirect {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                if let Some(completion) = completion {
-                    b.completion_store(ctx, completion, 0, Some((*mir_ty, value)), area)?;
-                } else {
-                    b.lower_store(ctx, ty, *mir_ty, value, area, 0)?;
+            let source = if completion {
+                BoundaryValue::Completion {
+                    case: 0,
+                    payload: Some((*mir_ty, value)),
                 }
-                flat.push(area);
             } else {
-                if let Some(completion) = completion {
-                    flat = b.completion_flat(ctx, completion, 0, Some((*mir_ty, value)))?;
-                } else {
-                    b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
-                }
-            }
+                BoundaryValue::Native(*mir_ty, value)
+            };
+            flat = b.lower_return(ctx, ty, source, indirect)?;
         }
         if b.state.uses_http_server {
             // Return the response once, then keep running until its body is written: the
@@ -689,4 +655,34 @@ fn async_export(
             .append_operation(ctx, callback.get_operation(), 0);
     }
     Ok(())
+}
+
+impl FunctionLowering<'_, '_> {
+    fn lower_return(
+        &mut self,
+        ctx: &mut Context,
+        ty: &AbiType,
+        source: BoundaryValue,
+        indirect: bool,
+    ) -> Result<Vec<Value>> {
+        let mut flat = Vec::new();
+        let area = if indirect {
+            let size = self.i32_const(ctx, ty.size() as i32);
+            Some(self.alloc(ctx, size))
+        } else {
+            None
+        };
+        let target = match area {
+            Some(area) => Canonical::Memory(area, 0),
+            None => Canonical::Flat(&mut flat),
+        };
+        match source {
+            BoundaryValue::Native(mir, value) => self.lower_abi(ctx, ty, mir, value, target)?,
+            source @ BoundaryValue::Completion { .. } => self.lower_sum(ctx, ty, source, target)?,
+        }
+        if let Some(area) = area {
+            flat.push(area);
+        }
+        Ok(flat)
+    }
 }

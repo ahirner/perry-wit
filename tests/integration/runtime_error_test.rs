@@ -1,9 +1,11 @@
 use crate::core_program::Program;
+use crate::world::Compiler::Standard;
 
 #[test]
 fn error_classes_causes_rethrows_primitives_and_rejections_preserve_values() {
     let source = r#"
 interface Detail { code:string }
+interface Nested { pair:[Detail,string]; table:Record<string,Detail> }
 async function fail():Promise<number> {const values:number[]=[];return values[0];}
 export async function run():Promise<number> {
  const original=new ReferenceError('original');
@@ -20,6 +22,10 @@ export async function run():Promise<number> {
  try{throw number.cause;}catch(e){if(e!==number.cause)return 9;}
  const children:Detail[]=[detail];const arrayError=new Error('array',{cause:children});
  if(arrayError.cause.length!==1 || arrayError.cause[0]!==detail)return 10;
+ const pair:[Detail,string]=[detail,'kept'];
+ const table:Record<string,Detail>={first:detail};
+ const nested:Nested={pair,table};const nestedError=new Error('nested',{cause:nested});
+ if(nestedError.cause.pair!==pair || nestedError.cause.table!==table)return 20;
  try{throw null;}catch(e){if(e!==null)return 6;}
  try{throw undefined;}catch(e){if(e!==undefined)return 7;}
  let first=new Error('placeholder');
@@ -73,7 +79,7 @@ struct Failure {
 fn initialization_failures_use_declared_results_and_remain_stable() -> anyhow::Result<()> {
     let wit = "package test:initialization; world app { record failure {name:string,message:string} export run:func()->result<f64,failure>; }";
     let source = "function setup():number{throw new RangeError('initialization failed');} const state=setup(); export function run():number{return state;}";
-    let component = crate::world::component(wit, "app", "initialization.ts", source)?;
+    let component = Standard.component(wit, "app", "initialization.ts", source)?;
     let engine = wasmtime::Engine::default();
     let (mut store, instance) = crate::world::instantiate(&engine, &component)?;
     let run = instance.get_typed_func::<(), (Result<f64, Failure>,)>(&mut store, "run")?;

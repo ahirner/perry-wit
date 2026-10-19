@@ -1,48 +1,9 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::{
-    array_methods::{CallbackReturn, insert_before_terminator},
-    builder::LocalBinding,
-    coerce::merge_absence,
-    hir_compat::RuntimeCall,
-};
+use crate::{builder::LocalBinding, coerce::merge_absence, hir_compat::RuntimeCall};
 use perry_mir::OptionalType;
 
 impl<'s> FunctionBuilder<'s> {
-    /// Complete delayed empty returns once the inlined body's result slot is known.
-    pub(super) fn finish_inline_return(
-        &mut self,
-        ctx: &mut Context,
-        callback: CallbackReturn,
-        is_void: bool,
-    ) -> Result<Option<Value>> {
-        let slot = match callback.slot {
-            Some(slot) => Some(slot),
-            None if is_void || callback.empty_returns.is_empty() => None,
-            None => {
-                let number = FP64Type::get(ctx).into();
-                let ty = OptionalType::get(ctx, number).into();
-                Some(self.entry_slot(ctx, ty))
-            }
-        };
-        if let Some(slot) = slot
-            && !callback.empty_returns.is_empty()
-        {
-            let ty = self.slot_type(ctx, slot)?;
-            for block in callback.empty_returns {
-                let undefined = UndefinedOp::with_type(ctx, ty);
-                let store = StoreOp::new(ctx, slot, undefined.get_result(ctx));
-                insert_before_terminator(
-                    ctx,
-                    block,
-                    [undefined.get_operation(), store.get_operation()],
-                )?;
-            }
-        }
-        self.switch_to(callback.done);
-        Ok(slot)
-    }
-
     /// Bind a supplied argument, evaluating its default only on the undefined path.
     pub(super) fn bind_inline_parameter(
         &mut self,

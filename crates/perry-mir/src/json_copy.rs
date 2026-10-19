@@ -1,11 +1,8 @@
-mod emit;
+use std::collections::HashSet;
 
-use std::collections::{HashMap, HashSet};
-
-use pliron::builtin::op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface};
+use pliron::builtin::op_interfaces::SingleBlockRegionInterface;
 use pliron::builtin::ops::{FuncOp, ModuleOp};
 use pliron::context::{Context, Ptr};
-use pliron::identifier::{Identifier, Legaliser};
 use pliron::irbuild::{
     IRStatus,
     inserter::{Inserter, OpInsertionPoint},
@@ -21,7 +18,7 @@ use pliron::r#type::{TypeHandle, Typed};
 use pliron::value::Value;
 
 use crate::JsonSchema;
-use crate::attrs::{Absence, JsonDecoderKind};
+use crate::attrs::Absence;
 use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
 use crate::exceptions::CaughtOp;
@@ -29,7 +26,12 @@ use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
 use crate::optional::{UnwrapOp, absence, present_type};
 use crate::types::VariantType;
 
-use self::emit::{build_json_copy_helper, const_i32};
+use pliron::builtin::{
+    attributes::IntegerAttr,
+    ops::ConstantOp,
+    types::{IntegerType, Signedness},
+};
+use pliron::utils::apint::{APInt, bw};
 
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy/normalization helper
@@ -54,8 +56,6 @@ impl Pass for NormalizeJsonCopy {
 
         let mut rewrites = 0u64;
         let mut missed = 0u64;
-        let mut helper_cache: HashMap<(TypeHandle, TypeHandle), Identifier> = HashMap::new();
-        let mut next_helper_id = 0usize;
 
         let funcs: Vec<FuncOp> = module
             .get_body(ctx, 0)
@@ -63,43 +63,14 @@ impl Pass for NormalizeJsonCopy {
             .iter(ctx)
             .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
             .collect();
-        let funcs_by_name: HashMap<Identifier, FuncOp> =
-            funcs.iter().map(|&f| (f.get_symbol_name(ctx), f)).collect();
-        let mut used_names: HashSet<Identifier> = funcs_by_name.keys().cloned().collect();
 
         for func in funcs {
-            let sites = find_parse_stringify_sites(func, ctx, &funcs_by_name);
+            let sites = find_parse_stringify_sites(func, ctx);
             for site in sites {
                 let source_ty = site.source_value.get_type(ctx);
                 let target_ty = site.target_ty;
-                if can_rewrite_parse_stringify(
-                    ctx,
-                    &facts,
-                    func,
-                    &funcs_by_name,
-                    &site,
-                    source_ty,
-                    target_ty,
-                ) {
-                    let helper_sym =
-                        if let Some(sym) = helper_cache.get(&(source_ty, target_ty)).cloned() {
-                            sym
-                        } else {
-                            let sym = loop {
-                                // Already a legal identifier, so legalising is the identity.
-                                let candidate = Legaliser::default()
-                                    .legalise(&format!("perry_json_copy_{next_helper_id}"));
-                                next_helper_id += 1;
-                                if used_names.insert(candidate.clone()) {
-                                    break candidate;
-                                }
-                            };
-                            build_json_copy_helper(ctx, module, sym.clone(), source_ty, target_ty)?;
-                            helper_cache.insert((source_ty, target_ty), sym.clone());
-                            sym
-                        };
-
-                    rewrite_site(ctx, &site, helper_sym);
+                if can_rewrite_parse_stringify(ctx, &facts, func, &site, source_ty, target_ty) {
+                    rewrite_site(ctx, &site);
                     rewrites += 1;
                 } else {
                     missed += 1;
@@ -135,39 +106,31 @@ struct ParseStringifySite {
     target_ty: TypeHandle,
 }
 
-fn find_parse_stringify_sites(
-    func: FuncOp,
-    ctx: &Context,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
-) -> Vec<ParseStringifySite> {
+fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringifySite> {
     crate::aggregates::operations(ctx, &func)
         .into_iter()
-        .filter_map(|op| parse_stringify_site(ctx, op, funcs_by_name))
+        .filter_map(|op| parse_stringify_site(ctx, op))
         .collect()
 }
 
 /// The site `op` consumes, when it decodes `JSON.parse(JSON.stringify(value))`: a decoder of
 /// text directly, or a value decoder of the parsed JSON.
-fn parse_stringify_site(
-    ctx: &Context,
-    op: Ptr<Operation>,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
-) -> Option<ParseStringifySite> {
+fn parse_stringify_site(ctx: &Context, op: Ptr<Operation>) -> Option<ParseStringifySite> {
     if !is_unary(ctx, op) {
         return None;
     }
     let arg = op.deref(ctx).get_operand(0);
-    let (intermediate_parse_op, text) = if is_value_decoder(ctx, op, funcs_by_name) {
+    let (intermediate_parse_op, text) = if is_value_decoder(ctx, op) {
         let parse_op = arg.defining_op()?;
         let parses = intrinsic_of(ctx, parse_op) == Some(Intrinsic::JsonParse);
         (parses && parse_op.deref(ctx).get_num_operands() == 1)
             .then(|| (Some(parse_op), parse_op.deref(ctx).get_operand(0)))?
-    } else if decoder_kind(ctx, op, funcs_by_name) == Some(JsonDecoderKind::Parse)
+    } else if is_text_decoder(ctx, op)
         || intrinsic_of(ctx, op) == Some(Intrinsic::JsonParse)
             // A parse a value decoder consumes is matched from that decoder instead.
             && !op.deref(ctx).get_result(0).uses(ctx).iter().any(|use_site| {
                 let user = use_site.user_op();
-                is_unary(ctx, user) && is_value_decoder(ctx, user, funcs_by_name)
+                is_unary(ctx, user) && is_value_decoder(ctx, user)
             })
     {
         (None, arg)
@@ -190,34 +153,20 @@ fn is_unary(ctx: &Context, op: Ptr<Operation>) -> bool {
     operation.get_num_operands() == 1 && operation.get_num_results() == 1
 }
 
-/// The kind of the generated JSON decoder `op` calls, if it calls one.
-fn decoder_kind(
-    ctx: &Context,
-    op: Ptr<Operation>,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
-) -> Option<JsonDecoderKind> {
-    let call = Operation::get_op::<CallOp>(op, ctx)?;
-    crate::calls::json_decoder_kind(ctx, funcs_by_name.get(&call.callee(ctx))?)
+fn is_text_decoder(ctx: &Context, op: Ptr<Operation>) -> bool {
+    Operation::is_op::<crate::JsonDecodeOp>(op, ctx)
+        && op
+            .deref(ctx)
+            .get_operand(0)
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::StringType>()
 }
 
-/// Whether `op` decodes a parsed JSON value: a generated value decoder or a scalar conversion.
-fn is_value_decoder(
-    ctx: &Context,
-    op: Ptr<Operation>,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
-) -> bool {
-    decoder_kind(ctx, op, funcs_by_name) == Some(JsonDecoderKind::Value)
-        || matches!(
-            intrinsic_of(ctx, op),
-            Some(
-                Intrinsic::JsonRequireNumber
-                    | Intrinsic::JsonToNumber
-                    | Intrinsic::JsonToI64
-                    | Intrinsic::JsonToU64
-                    | Intrinsic::JsonToBool
-                    | Intrinsic::JsonToString
-            )
-        )
+/// Whether `op` decodes a parsed JSON value or performs numeric coercion.
+fn is_value_decoder(ctx: &Context, op: Ptr<Operation>) -> bool {
+    Operation::is_op::<crate::JsonDecodeOp>(op, ctx) && !is_text_decoder(ctx, op)
+        || intrinsic_of(ctx, op) == Some(Intrinsic::JsonToNumber)
 }
 
 fn match_unwrapped_stringify(
@@ -249,18 +198,10 @@ fn match_unwrapped_stringify(
     None
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CopyPosition {
-    Root,
-    RecordField,
-    Element,
-}
-
 fn can_rewrite_parse_stringify(
     ctx: &Context,
     facts: &crate::facts::ProgramFacts,
     func: FuncOp,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
     site: &ParseStringifySite,
     source_ty: TypeHandle,
     target_ty: TypeHandle,
@@ -283,7 +224,7 @@ fn can_rewrite_parse_stringify(
     }
 
     let consumer_res = site.consumer_op.deref(ctx).get_result(0);
-    let reaches_stringify = value_reaches_stringify(ctx, consumer_res, funcs_by_name);
+    let reaches_stringify = value_reaches_stringify(ctx, consumer_res);
     if reaches_stringify && schemas_add_fields(ctx, target_ty, source_ty, &mut SchemaPairs::new()) {
         return false;
     }
@@ -293,7 +234,7 @@ fn can_rewrite_parse_stringify(
         return false;
     }
 
-    if !schemas_compatible(ctx, source_ty, target_ty, &mut SchemaPairs::new()) {
+    if !JsonSchema::supports_native_copy(ctx, source_ty, target_ty) {
         return false;
     }
 
@@ -343,11 +284,7 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     false
 }
 
-fn value_reaches_stringify(
-    ctx: &Context,
-    root: Value,
-    funcs_by_name: &HashMap<Identifier, FuncOp>,
-) -> bool {
+fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
     let may_contain_record = |ty| type_may_contain_record(ctx, ty, &mut HashSet::new());
     if !may_contain_record(root.get_type(ctx)) {
         return false;
@@ -366,21 +303,14 @@ fn value_reaches_stringify(
             if Operation::get_op::<JsonStringifyOp>(user, ctx).is_some() {
                 return true;
             }
-            match intrinsic_of(ctx, user) {
-                Some(
-                    Intrinsic::JsonResidue | Intrinsic::JsonRetain | Intrinsic::JsonCursorRecord,
-                ) => return true,
-                Some(Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy) => {
-                    let op_ref = user.deref(ctx);
-                    if op_ref.get_num_operands() >= 2 && val == op_ref.get_operand(1) {
-                        worklist.push(op_ref.get_operand(0));
-                    }
-                }
-                _ => {}
-            }
-            if Operation::get_op::<CallOp>(user, ctx).is_some()
-                && decoder_kind(ctx, user, funcs_by_name).is_none()
+            if let Some(Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy) = intrinsic_of(ctx, user)
             {
+                let op_ref = user.deref(ctx);
+                if op_ref.get_num_operands() >= 2 && val == op_ref.get_operand(1) {
+                    worklist.push(op_ref.get_operand(0));
+                }
+            }
+            if Operation::get_op::<CallOp>(user, ctx).is_some() {
                 return true;
             }
             if Operation::get_op::<BrOp>(user, ctx).is_some()
@@ -458,6 +388,13 @@ fn schemas_add_fields(
         return schemas_add_fields(ctx, source, target, seen);
     }
     false
+}
+
+impl JsonSchema {
+    /// Native layouts accepted before and after numeric fact specialization.
+    pub fn supports_native_copy(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
+        schemas_compatible(ctx, source, target, &mut SchemaPairs::new())
+    }
 }
 
 /// Whether a typed copy from `source_ty` to `target_ty` matches a JSON round trip.
@@ -563,10 +500,29 @@ fn schemas_compatible(
             let variant = source.deref(ctx);
             variant_is_unambiguous(ctx, &variant)
                 && variant.cases().iter().all(|(_, payload)| {
-                    payload.is_none_or(|ty| schemas_compatible(ctx, ty, ty, seen))
+                    payload.is_none_or(|ty| {
+                        !present_type(ctx, ty).deref(ctx).is::<crate::NumericType>()
+                            && schemas_compatible(ctx, ty, ty, seen)
+                    })
                 })
         }
-        _ => s_inner == t_inner && is_supported_scalar(ctx, s_inner),
+        _ => {
+            let numeric_source = s_inner.deref(ctx).is::<crate::NumericType>()
+                || matches!(
+                    schemas.0,
+                    Some(
+                        JsonSchema::Number
+                            | JsonSchema::Integer {
+                                width: 8 | 16 | 32 | 64,
+                                ..
+                            }
+                    )
+                );
+            let number_target = t_inner.deref(ctx).is::<crate::NumericType>()
+                || matches!(schemas.1, Some(JsonSchema::Number));
+            (numeric_source && number_target)
+                || s_inner == t_inner && is_supported_scalar(ctx, s_inner)
+        }
     }
 }
 
@@ -575,7 +531,10 @@ fn is_supported_scalar(ctx: &Context, ty: TypeHandle) -> bool {
         JsonSchema::of(ctx, ty),
         Some(
             JsonSchema::Number
-                | JsonSchema::Integer { .. }
+                | JsonSchema::Integer {
+                    width: 8 | 16 | 32 | 64,
+                    ..
+                }
                 | JsonSchema::Boolean
                 | JsonSchema::String
         )
@@ -608,18 +567,13 @@ fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
     true
 }
 
-fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite, helper_sym: Identifier) {
+fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(site.consumer_op));
-    let call = CallOp::new(
-        ctx,
-        helper_sym,
-        vec![site.source_value],
-        vec![site.target_ty],
-    );
+    let call = crate::JsonCopyOp::new(ctx, site.source_value, site.target_ty);
     rewriter.insert_operation(ctx, call.get_operation());
     // Keep any CaughtOp immediately following `site.consumer_op` intact so it now
-    // checks whether `call` (perry_json_copy_*) raised an exception inside a try block.
+    // checks whether normalization raised an exception inside a try block.
     rewriter.replace_operation(ctx, site.consumer_op, call.get_operation());
     if let Some(parse_op) = site.intermediate_parse_op {
         erase_op_and_caught(ctx, &mut rewriter, parse_op);
@@ -640,7 +594,11 @@ fn erase_op_and_caught(
         && Operation::get_op::<CaughtOp>(next, ctx).is_some()
     {
         rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(next));
-        let zero = const_i32(ctx, 0);
+        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+        let zero = ConstantOp::new(
+            ctx,
+            Box::new(IntegerAttr::new(ty, APInt::from_u64(0, bw(32)))),
+        );
         rewriter.insert_operation(ctx, zero.get_operation());
         rewriter.replace_operation(ctx, next, zero.get_operation());
     }

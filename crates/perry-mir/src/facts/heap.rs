@@ -2,12 +2,9 @@
 //! Writes join into slots; readers subscribe to slots and possible object identities.
 use super::*;
 use crate::{
-    collections::{
-        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp,
-    },
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
-    intrinsics::{Combinator, PromiseCombinatorOp},
+    collections::{ArrayAtOp, ArrayGetOp},
+    heap::FieldGetOp,
+    intrinsics::Combinator,
     optional::{OptionalCastOp, UnwrapOp, WrapOp},
     types::{ArrayType, RecordType},
 };
@@ -17,7 +14,7 @@ mod operations;
 mod queries;
 mod specialize;
 
-pub(super) use operations::OperationKind;
+use crate::semantics::OperationKind;
 
 struct Cell {
     ty: TypeHandle,
@@ -25,9 +22,7 @@ struct Cell {
     layout_objects: BTreeSet<usize>,
     owner: Option<usize>,
     summarized: bool,
-    domain: Fact,
-    range: Range,
-    outcome: Outcomes,
+    facts: ValueFacts,
     readers: BTreeSet<Work>,
 }
 
@@ -143,12 +138,9 @@ impl Solver {
             layout_objects: BTreeSet::new(),
             owner,
             summarized: false,
-            domain: Fact::Bottom,
-            range: Range::Bottom,
-            outcome: Outcomes::Bottom,
+            facts: ValueFacts::default(),
             readers: BTreeSet::new(),
         });
-        self.work.cells.push(false);
         id
     }
 
@@ -191,7 +183,6 @@ impl Solver {
             open,
             containers: BTreeSet::new(),
         });
-        self.work.objects.push(false);
         for index in 0..slots {
             let slot = self.analysis.heap.objects[id].contents.slots()[index];
             if payload(ctx, self.analysis.heap.cells[slot].ty) == ty {
@@ -201,7 +192,7 @@ impl Solver {
         if open {
             // Reserve the identity before the queued work follows recursive schema edges.
             self.analysis.heap.summaries.insert(ty, id);
-            self.work.enqueue(Work::OpenObject(id));
+            self.work.insert(Work::OpenObject(id));
         }
         Ok(id)
     }
@@ -231,7 +222,7 @@ impl Solver {
 
     fn heap_changed(&mut self, cell: usize) {
         for &reader in &self.analysis.heap.cells[cell].readers {
-            self.work.enqueue(reader);
+            self.work.insert(reader);
         }
     }
 
@@ -250,7 +241,7 @@ impl Solver {
     fn mark_open(&mut self, object: usize) {
         if !self.analysis.heap.objects[object].open {
             self.analysis.heap.objects[object].open = true;
-            self.work.enqueue(Work::OpenObject(object));
+            self.work.insert(Work::OpenObject(object));
             self.reconcile_containers(object);
         }
     }
@@ -258,7 +249,7 @@ impl Solver {
     /// Queues reconciliation of every cell whose layout may include `object`.
     fn reconcile_containers(&mut self, object: usize) {
         for &container in &self.analysis.heap.objects[object].containers {
-            self.work.enqueue(Work::ReconcileCell(container));
+            self.work.insert(Work::ReconcileCell(container));
         }
     }
 
@@ -281,7 +272,7 @@ impl Solver {
     fn add_layout_object(&mut self, cell: usize, object: usize) {
         if self.analysis.heap.cells[cell].layout_objects.insert(object) {
             self.analysis.heap.objects[object].containers.insert(cell);
-            self.work.enqueue(Work::ReconcileCell(cell));
+            self.work.insert(Work::ReconcileCell(cell));
             self.reconcile_owner(cell);
             self.heap_changed(cell);
         }
@@ -309,7 +300,7 @@ impl Solver {
             targets.summarized = true;
             self.analysis.heap.objects[summary].containers.insert(cell);
             self.analysis.summarized_heap_sets += 1;
-            self.work.enqueue(Work::ReconcileCell(cell));
+            self.work.insert(Work::ReconcileCell(cell));
             self.reconcile_owner(cell);
         }
         self.heap_changed(cell);
@@ -374,10 +365,12 @@ impl Solver {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
             let ty = self.analysis.heap.cells[cell].ty;
             let integer = Integer::from_type(ctx, payload(ctx, ty));
-            self.slot_domain(cell, integer.map_or(Fact::Original, Fact::Integer));
-            let range = integer.map_or(Range::Unknown, |integer| Range::Bounds(integer.bounds()));
-            self.slot_range(ctx, cell, range);
-            self.slot_outcome(cell, Outcomes::unknown(ctx, ty));
+            let mut facts = ValueFacts::numeric(
+                integer.map_or(Fact::Original, Fact::Integer),
+                Range::of(integer),
+            );
+            facts.outcome = Outcomes::unknown(ctx, ty);
+            self.update_slot(ctx, cell, facts);
             if aggregate(ctx, ty) {
                 self.open_aliases(cell, Work::OpenObject(object));
                 let summary = self.heap_summary(ctx, ty)?;
@@ -398,7 +391,7 @@ impl Solver {
         if joined != *length {
             *length = joined;
             for &reader in readers.iter() {
-                self.work.enqueue(reader);
+                self.work.insert(reader);
             }
         }
     }
@@ -428,37 +421,17 @@ impl Solver {
         }
     }
 
-    fn slot_domain(&mut self, slot: usize, domain: Fact) {
+    fn update_slot(&mut self, ctx: &Context, slot: usize, incoming: ValueFacts) {
         let cell = &mut self.analysis.heap.cells[slot];
-        let joined = cell.domain.join(domain);
-        if joined != cell.domain {
-            cell.domain = joined;
+        let old = cell.facts.domain;
+        let representation =
+            Representation::Storage(Integer::from_type(ctx, payload(ctx, cell.ty)));
+        if cell.facts.join(incoming, representation).0 {
+            let reconcile = old != cell.facts.domain && cell.facts.domain.needs_lossless_64();
             self.heap_changed(slot);
-            // Containers sharing a layout must agree once any of them holds a lossless 64-bit slot.
-            if joined.needs_lossless_64() {
+            if reconcile {
                 self.reconcile_owner(slot);
             }
-        }
-    }
-
-    fn slot_range(&mut self, ctx: &Context, slot: usize, range: Range) {
-        let cell = &mut self.analysis.heap.cells[slot];
-        let joined = cell.range.join(
-            range,
-            Integer::from_type(ctx, payload(ctx, cell.ty)).or(cell.domain.integer()),
-        );
-        if joined != cell.range {
-            cell.range = joined;
-            self.heap_changed(slot);
-        }
-    }
-
-    fn slot_outcome(&mut self, slot: usize, outcome: Outcomes) {
-        let cell = &mut self.analysis.heap.cells[slot];
-        let joined = cell.outcome.join(outcome);
-        if joined != cell.outcome {
-            cell.outcome = joined;
-            self.heap_changed(slot);
         }
     }
 
@@ -470,11 +443,7 @@ impl Solver {
         value: Value,
         reader: Work,
     ) -> Result<()> {
-        let domain = self.analysis.states[id].fact(value);
-        let range = self.analysis.states[id].range(value);
-        self.slot_domain(slot, domain);
-        self.slot_range(ctx, slot, range);
-        self.slot_outcome(slot, self.analysis.states[id].outcome(value));
+        self.update_slot(ctx, slot, self.analysis.states[id].value(value));
         if let Some(from) = self.heap_value(ctx, id, value) {
             self.copy_aliases(ctx, from, slot, reader)?;
         }
@@ -554,7 +523,7 @@ impl Solver {
         let cells = &self.analysis.heap.cells;
         let lossless = slots
             .iter()
-            .any(|&slot| cells[slot].domain.needs_lossless_64());
+            .any(|&slot| cells[slot].facts.domain.needs_lossless_64());
         let summarized = slots.iter().any(|&slot| cells[slot].summarized);
         let children: BTreeSet<usize> = slots
             .iter()
@@ -563,9 +532,16 @@ impl Solver {
         // Once any slot of the group is lossless, every slot widens to agree.
         if lossless {
             for &slot in slots {
-                if !self.analysis.heap.cells[slot].domain.needs_lossless_64() {
-                    self.slot_domain(slot, Fact::Numeric);
-                    self.slot_range(ctx, slot, Range::Unknown);
+                if !self.analysis.heap.cells[slot]
+                    .facts
+                    .domain
+                    .needs_lossless_64()
+                {
+                    self.update_slot(
+                        ctx,
+                        slot,
+                        ValueFacts::numeric(Fact::Numeric, Range::Unknown),
+                    );
                 }
             }
         }

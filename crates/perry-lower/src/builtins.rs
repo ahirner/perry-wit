@@ -1,7 +1,7 @@
 //! Built-in globals and methods of primitive values: `Math`, `JSON`, errors, strings,
 //! bytes, text coding and `console`.
 use super::*;
-use crate::methods::Method;
+use crate::methods::{Call, Receiver};
 
 /// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
 pub(super) const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
@@ -50,342 +50,53 @@ impl<'s> FunctionBuilder<'s> {
                 "push requires a dense array receiver"
             );
         }
-        let arg = |index: usize| args.get(index);
         let method = method.name();
-        if let Some(value) = self.collection_method(ctx, receiver, method, args)? {
-            return Ok(Some(value));
+        if let Some(call) = Call::parse(Receiver::of(ctx, receiver)?, method, args)? {
+            return call.lower(self, ctx, receiver);
         }
-        if kind(ctx, receiver)? == Kind::Array
-            && let Some(method) = Method::parse(method)
-            && let Some(value) = self.array_method(ctx, receiver, method, args)?
-        {
-            return Ok(Some(value));
-        }
-        let value = match (kind(ctx, receiver)?, method) {
-            (Kind::String, "concat") => {
-                let mut segments = Vec::with_capacity(args.len());
-                for argument in args {
-                    let value = self.expression(ctx, argument)?;
-                    segments.push(self.display(ctx, value)?);
+        bail!(
+            "method {method} is not supported on {} yet",
+            kind(ctx, receiver)?.label()
+        )
+    }
+
+    pub(super) fn replace_string(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        search: &'s Expr,
+        replacement: &'s Expr,
+        all: bool,
+    ) -> Result<Option<Value>> {
+        let method = if all { "replaceAll" } else { "replace" };
+        Ok({
+            let search_val = self.expression(ctx, search)?;
+            let search_val = self.defined(ctx, search_val)?;
+            let repl_val = self.string_operand(ctx, replacement)?;
+            match kind(ctx, search_val)? {
+                Kind::String => {
+                    let intrinsic = if all {
+                        Intrinsic::StringReplaceAll
+                    } else {
+                        Intrinsic::StringReplace
+                    };
+                    self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
                 }
-                let mut result = receiver;
-                for segment in segments {
-                    result = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, result, segment));
+                Kind::Regex => {
+                    if all && !Self::regex_global(ctx, search_val)? {
+                        bail!(
+                            "String.prototype.replaceAll called with a non-global RegExp argument"
+                        );
+                    }
+                    self.call_intrinsic(
+                        ctx,
+                        Intrinsic::RegexReplace,
+                        vec![receiver, search_val, repl_val],
+                    )
                 }
-                Some(result)
+                _ => bail!("string.{method} requires a string or literal regex search pattern"),
             }
-            (Kind::String, "normalize") => {
-                ensure!(
-                    args.len() <= 1,
-                    "string.normalize accepts at most one form argument"
-                );
-                let form = match args.first() {
-                    None | Some(Expr::Undefined) => self.string(ctx, "NFC"),
-                    Some(arg) => self.string_operand(ctx, arg)?,
-                };
-                self.call_intrinsic(ctx, Intrinsic::StringNormalize, vec![receiver, form])
-            }
-            (Kind::String, "localeCompare") => {
-                let [other] = args else {
-                    bail!("string.localeCompare requires one string");
-                };
-                let other = self.string_operand(ctx, other)?;
-                let num_ty = FP64Type::get(ctx).into();
-                let lt = self.compare(ctx, CompareKind::Lt, receiver, other);
-                Some(self.choose(
-                    ctx,
-                    num_ty,
-                    lt,
-                    |b, ctx| Ok(b.number(ctx, -1.0)),
-                    |b, ctx| {
-                        let gt = b.compare(ctx, CompareKind::Gt, receiver, other);
-                        b.choose(
-                            ctx,
-                            num_ty,
-                            gt,
-                            |b, ctx| Ok(b.number(ctx, 1.0)),
-                            |b, ctx| Ok(b.number(ctx, 0.0)),
-                        )
-                    },
-                )?)
-            }
-            (Kind::String, "split") => {
-                let [separator] = args else {
-                    bail!("string.split requires one string or regex separator");
-                };
-                let sep_val = self.expression(ctx, separator)?;
-                let sep_val = self.defined(ctx, sep_val)?;
-                match kind(ctx, sep_val)? {
-                    Kind::String => {
-                        self.call_intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, sep_val])
-                    }
-                    Kind::Regex => {
-                        self.call_intrinsic(ctx, Intrinsic::RegexSplit, vec![receiver, sep_val])
-                    }
-                    _ => bail!("string.split requires a string or literal regex separator"),
-                }
-            }
-            (Kind::String, "replace" | "replaceAll") => {
-                let [search, replacement] = args else {
-                    bail!("string.{method} requires a search pattern and replacement string");
-                };
-                let search_val = self.expression(ctx, search)?;
-                let search_val = self.defined(ctx, search_val)?;
-                let repl_val = self.string_operand(ctx, replacement)?;
-                match kind(ctx, search_val)? {
-                    Kind::String => {
-                        let intrinsic = if method == "replaceAll" {
-                            Intrinsic::StringReplaceAll
-                        } else {
-                            Intrinsic::StringReplace
-                        };
-                        self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
-                    }
-                    Kind::Regex => {
-                        if method == "replaceAll" && !Self::regex_global(ctx, search_val)? {
-                            bail!(
-                                "String.prototype.replaceAll called with a non-global RegExp argument"
-                            );
-                        }
-                        self.call_intrinsic(
-                            ctx,
-                            Intrinsic::RegexReplace,
-                            vec![receiver, search_val, repl_val],
-                        )
-                    }
-                    _ => bail!("string.{method} requires a string or literal regex search pattern"),
-                }
-            }
-            (Kind::Regex, "test") => {
-                ensure!(
-                    !Self::regex_global(ctx, receiver)?,
-                    "Regex search supports only the u and s flags"
-                );
-                let [text] = args else {
-                    bail!("literal regex.test requires one string");
-                };
-                let text = self.string_operand(ctx, text)?;
-                Some(self.regex_test(ctx, receiver, text))
-            }
-            (Kind::Regex, "exec") => {
-                let [text] = args else {
-                    bail!("regex.exec requires one string");
-                };
-                let text = self.string_operand(ctx, text)?;
-                self.call_intrinsic(ctx, Intrinsic::RegexExec, vec![text, receiver])
-            }
-            (Kind::String, "match") => {
-                let [regex] = args else {
-                    bail!("string.match requires one literal regex");
-                };
-                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-                self.call_intrinsic(ctx, Intrinsic::RegexMatch, vec![receiver, regex])
-            }
-            (Kind::String, "search") => {
-                let [regex] = args else {
-                    bail!("string.search requires one literal regex");
-                };
-                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-                ensure!(
-                    !Self::regex_global(ctx, regex)?,
-                    "Regex search supports only the u and s flags"
-                );
-                self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
-            }
-            (Kind::Decoder, "decode") => {
-                ensure!(
-                    args.len() <= 2,
-                    "TextDecoder.decode takes bytes and stream options"
-                );
-                Some(self.decode(ctx, receiver, arg(0), arg(1))?)
-            }
-            (Kind::Url, "toString" | "toJSON") => Some(self.url_field(ctx, receiver, "href")?),
-            (Kind::SearchParams, "append") => {
-                let [name, value] = args else {
-                    bail!("searchParams.append needs a name and value");
-                };
-                let name = self.string_operand(ctx, name)?;
-                let value = self.string_operand(ctx, value)?;
-                self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![receiver, name, value]);
-                let ty = void_type(ctx);
-                Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
-            }
-            (
-                Kind::Headers
-                | Kind::Response
-                | Kind::Request
-                | Kind::Writable
-                | Kind::Writer
-                | Kind::Readable
-                | Kind::Reader
-                | Kind::ByobReader,
-                _,
-            ) => {
-                return self.web_member(ctx, receiver, method, Some(args)).map(Some);
-            }
-            (Kind::Instant | Kind::PlainDate | Kind::PlainDateTime, _) => {
-                return self.temporal_method(ctx, receiver, method, args);
-            }
-            (Kind::Abort, "abort") => {
-                ensure!(args.is_empty(), "abort reasons are not supported yet");
-                self.intrinsic_void(ctx, Intrinsic::AbortAbort, vec![receiver]);
-                return Ok(None);
-            }
-            (Kind::Stats, "isFile" | "isDirectory") => {
-                let intrinsic = if method == "isFile" {
-                    Intrinsic::StatsIsFile
-                } else {
-                    Intrinsic::StatsIsDirectory
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver])
-            }
-            (Kind::String, "charCodeAt") => {
-                bail!("charCodeAt uses UTF-16 code units; use codePointAt with scalar indices")
-            }
-            (Kind::String, "charAt" | "codePointAt" | "at") => {
-                let position = self.number_or(ctx, arg(0), 0.0)?;
-                let intrinsic = match method {
-                    "codePointAt" => Intrinsic::StringCodePointAt,
-                    "at" => Intrinsic::StringAt,
-                    _ => Intrinsic::StringCharAt,
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver, position])
-            }
-            (Kind::String, "padStart" | "padEnd") => {
-                let target_len = self.number_or(ctx, arg(0), 0.0)?;
-                let pad_str = match arg(1) {
-                    None | Some(Expr::Undefined) => self.string(ctx, " "),
-                    Some(expr) => {
-                        let val = self.expression(ctx, expr)?;
-                        self.display(ctx, val)?
-                    }
-                };
-                let intrinsic = if method == "padStart" {
-                    Intrinsic::StringPadStart
-                } else {
-                    Intrinsic::StringPadEnd
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver, target_len, pad_str])
-            }
-            (Kind::String, "slice" | "substring") => {
-                let start = self.number_or(ctx, arg(0), 0.0)?;
-                let end = self.number_or(ctx, arg(1), f64::INFINITY)?;
-                let intrinsic = if method == "slice" {
-                    Intrinsic::StringSlice
-                } else {
-                    Intrinsic::StringSubstring
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver, start, end])
-            }
-            (Kind::String, "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith") => {
-                let needle = arg(0).context("a search string is required")?;
-                let needle = self.typed_operand(ctx, needle, Kind::String, "a search string")?;
-                let default = if matches!(method, "lastIndexOf" | "endsWith") {
-                    f64::INFINITY
-                } else {
-                    0.0
-                };
-                let position = self.number_or(ctx, arg(1), default)?;
-                let args = vec![receiver, needle, position];
-                match method {
-                    "indexOf" => self.call_intrinsic(ctx, Intrinsic::StringIndexOf, args),
-                    "lastIndexOf" => self.call_intrinsic(ctx, Intrinsic::StringLastIndexOf, args),
-                    "startsWith" => self.call_intrinsic(ctx, Intrinsic::StringStartsWith, args),
-                    "endsWith" => self.call_intrinsic(ctx, Intrinsic::StringEndsWith, args),
-                    _ => {
-                        let found = self.intrinsic(ctx, Intrinsic::StringIndexOf, args);
-                        let missing = self.number(ctx, -1.0);
-                        Some(self.compare(ctx, CompareKind::Ne, found, missing))
-                    }
-                }
-            }
-            (
-                Kind::String,
-                "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimLeft" | "trimEnd"
-                | "trimRight" | "toLocaleLowerCase" | "toLocaleUpperCase",
-            ) => {
-                let intrinsic = match method {
-                    "trim" => Intrinsic::StringTrim,
-                    "trimStart" | "trimLeft" => Intrinsic::StringTrimStart,
-                    "trimEnd" | "trimRight" => Intrinsic::StringTrimEnd,
-                    "toLowerCase" | "toLocaleLowerCase" => Intrinsic::StringLower,
-                    _ => Intrinsic::StringUpper,
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver])
-            }
-            (Kind::String, "repeat") => {
-                let count = self.number_or(ctx, arg(0), 0.0)?;
-                self.call_intrinsic(ctx, Intrinsic::StringRepeat, vec![receiver, count])
-            }
-            (Kind::String, "toString") => Some(receiver),
-            (Kind::Number, "toString") => {
-                ensure!(
-                    args.len() <= 1,
-                    "Number.prototype.toString accepts at most one radix"
-                );
-                let num = self.arithmetic(ctx, receiver);
-                match arg(0) {
-                    None | Some(Expr::Undefined) => {
-                        self.call_intrinsic(ctx, Intrinsic::NumberToString, vec![num])
-                    }
-                    Some(radix_expr) => {
-                        let radix = self.number_operand(ctx, radix_expr)?;
-                        self.call_intrinsic(ctx, Intrinsic::NumberToStringRadix, vec![num, radix])
-                    }
-                }
-            }
-            (Kind::Bytes, "subarray" | "slice") => {
-                let start = self.number_or(ctx, arg(0), 0.0)?;
-                let end = self.number_or(ctx, arg(1), f64::INFINITY)?;
-                let intrinsic = if method == "subarray" {
-                    Intrinsic::BytesSubarray
-                } else {
-                    Intrinsic::BytesSlice
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver, start, end])
-            }
-            (Kind::Bytes, "set") => {
-                let source = arg(0).context("set needs a source")?;
-                let source = self.expression(ctx, source)?;
-                let source = self.defined(ctx, source)?;
-                let source = match kind(ctx, source)? {
-                    Kind::Bytes => source,
-                    Kind::Array => self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![source]),
-                    _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
-                };
-                let offset = self.number_or(ctx, arg(1), 0.0)?;
-                self.intrinsic_void(ctx, Intrinsic::BytesSetFrom, vec![receiver, source, offset]);
-                None
-            }
-            (Kind::Bytes, "fill") => {
-                let value = self.number_or(ctx, arg(0), 0.0)?;
-                let start = self.number_or(ctx, arg(1), 0.0)?;
-                let end = self.number_or(ctx, arg(2), f64::INFINITY)?;
-                self.intrinsic_void(ctx, Intrinsic::BytesFill, vec![receiver, value, start, end]);
-                Some(receiver)
-            }
-            (Kind::Bytes, "$$cryptoFillRandom") => {
-                self.call_intrinsic(ctx, Intrinsic::BytesFillRandom, vec![receiver])
-            }
-            (Kind::Date, "getTime" | "valueOf") => {
-                self.call_intrinsic(ctx, Intrinsic::DateTime, vec![receiver])
-            }
-            (Kind::Date, "toISOString" | "toJSON") => {
-                let intrinsic = if method == "toJSON" {
-                    Intrinsic::DateJson
-                } else {
-                    Intrinsic::DateIso
-                };
-                self.call_intrinsic(ctx, intrinsic, vec![receiver])
-            }
-            (receiver_kind, method) => {
-                bail!(
-                    "method {method} is not supported on {} yet",
-                    receiver_kind.label()
-                )
-            }
-        };
-        Ok(value)
+        })
     }
 
     pub(super) fn regex_test(&mut self, ctx: &mut Context, regex: Value, text: Value) -> Value {
@@ -398,7 +109,7 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Whether `regex` has the `g` flag. Global and non-global regexes behave differently for
     /// every caller, so a regex whose flags are not statically one or the other is rejected.
-    fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
+    pub(super) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
         Self::static_regex_global(ctx, regex, &mut Vec::new()).context(
             "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag",
         )

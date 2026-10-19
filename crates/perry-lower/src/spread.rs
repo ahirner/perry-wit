@@ -1,5 +1,6 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
+use crate::control_flow::{ArrayOutput, Input};
 use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
 
 impl<'s> FunctionBuilder<'s> {
@@ -21,7 +22,9 @@ impl<'s> FunctionBuilder<'s> {
             || crate::collections::map_entry_types(ctx, val_ty).is_some()
         {
             let val = self.defined(ctx, val)?;
-            return self.materialize_collection_to_array(ctx, val);
+            return self.collect_items(ctx, Input::Collection(val), |_, _, item, _, _| {
+                Ok(ArrayOutput::Item(item))
+            });
         }
         Ok(val)
     }

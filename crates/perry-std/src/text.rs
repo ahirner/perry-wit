@@ -1,7 +1,7 @@
 //! UTF-8 string methods indexed by Unicode scalar values.
 mod normalize;
 use crate::runtime::{bytes, from_static, scalars_length};
-use perry_abi::number::{DecimalSyntax, ascii_digit, scan_decimal, split_sign};
+use perry_abi::whitespace::{trim_bytes, trim_end_bytes, trim_start_bytes};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.
 pub(crate) fn integer(value: f64) -> i64 {
@@ -341,64 +341,6 @@ pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, 
     u32::from(head(view.text, to).ends_with(needle.as_bytes()))
 }
 
-/// ECMAScript WhiteSpace and LineTerminator code points.
-fn space(scalar: char) -> bool {
-    perry_abi::number::space(scalar)
-}
-
-#[inline]
-fn ascii_space(byte: u8) -> bool {
-    byte <= 0x20 && matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
-}
-
-fn trim_start_bytes(mut bytes: &[u8]) -> &[u8] {
-    while let Some(&first) = bytes.first() {
-        if first < 0x80 {
-            if ascii_space(first) {
-                bytes = &bytes[1..];
-                continue;
-            }
-            break;
-        }
-        let s = unsafe { core::str::from_utf8_unchecked(bytes) };
-        let Some(ch) = s.chars().next() else {
-            break;
-        };
-        if space(ch) {
-            bytes = &bytes[ch.len_utf8()..];
-        } else {
-            break;
-        }
-    }
-    bytes
-}
-
-fn trim_end_bytes(mut bytes: &[u8]) -> &[u8] {
-    while let Some(&last) = bytes.last() {
-        if last < 0x80 {
-            if ascii_space(last) {
-                bytes = &bytes[..bytes.len() - 1];
-                continue;
-            }
-            break;
-        }
-        let s = unsafe { core::str::from_utf8_unchecked(bytes) };
-        let Some(ch) = s.chars().next_back() else {
-            break;
-        };
-        if space(ch) {
-            bytes = &bytes[..bytes.len() - ch.len_utf8()];
-        } else {
-            break;
-        }
-    }
-    bytes
-}
-
-fn trim_bytes(bytes: &[u8]) -> &[u8] {
-    trim_end_bytes(trim_start_bytes(bytes))
-}
-
 /// `s.trim()`.
 ///
 /// # Safety
@@ -690,70 +632,6 @@ pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     }
     let mut bytes = [0; 4];
     crate::runtime::from_bytes(scalar.encode_utf8(&mut bytes).as_bytes())
-}
-
-/// ECMAScript `parseFloat(string)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_parse_float(string: *mut u8) -> f64 {
-    let trimmed = trim_start_bytes(unsafe { crate::runtime::bytes(string) });
-    let (negative, rest) = split_sign(trimmed);
-    if rest.starts_with(b"Infinity") {
-        return if negative {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        };
-    }
-    let Ok(literal) = scan_decimal::<true>(rest, DecimalSyntax::Prefix) else {
-        return f64::NAN;
-    };
-    literal
-        .decimal
-        .finish(literal.mantissa, negative, literal.exponent)
-}
-
-/// ECMAScript `StringToNumber` (`Number(string)`).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_to_number(string: *mut u8) -> f64 {
-    let trimmed = trim_bytes(unsafe { crate::runtime::bytes(string) });
-    if trimmed.is_empty() {
-        return 0.0;
-    }
-    if trimmed.len() > 2 && trimmed[0] == b'0' {
-        let radix = match trimmed[1] {
-            b'x' | b'X' => Some(16u32),
-            b'o' | b'O' => Some(8u32),
-            b'b' | b'B' => Some(2u32),
-            _ => None,
-        };
-        if let Some(radix) = radix {
-            let mut value = 0.0f64;
-            for &byte in &trimmed[2..] {
-                let Some(digit) = ascii_digit(byte, radix) else {
-                    return f64::NAN;
-                };
-                value = value * f64::from(radix) + f64::from(digit);
-            }
-            return value;
-        }
-    }
-    let (negative, rest) = split_sign(trimmed);
-    if rest == b"Infinity" {
-        return if negative {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        };
-    }
-    let Ok(literal) = scan_decimal::<true>(rest, DecimalSyntax::Prefix) else {
-        return f64::NAN;
-    };
-    if literal.consumed != rest.len() {
-        return f64::NAN;
-    }
-    literal
-        .decimal
-        .finish(literal.mantissa, negative, literal.exponent)
 }
 
 #[cfg(test)]

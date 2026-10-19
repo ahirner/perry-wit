@@ -37,7 +37,7 @@ impl Outcomes {
 
 impl State {
     pub(super) fn outcome(&self, value: Value) -> Outcomes {
-        self.outcomes.get(&value).copied().unwrap_or_default()
+        self.value(value).outcome
     }
 }
 
@@ -45,26 +45,5 @@ impl ProgramFacts {
     pub fn may_reject(&self, function: &FuncOp, promise: Value) -> bool {
         let state = &self.states[self.generic[&function.get_operation()]];
         state.outcome(promise).may_reject()
-    }
-}
-
-impl Solver {
-    pub(super) fn outcome(&mut self, id: usize, value: Value, outcome: Outcomes) {
-        let old = self.analysis.states[id].outcome(value);
-        let joined = old.join(outcome);
-        if old != joined {
-            self.analysis.states[id].outcomes.insert(value, joined);
-            self.changed(id, value);
-        }
-    }
-}
-
-pub(super) fn promise_payload(ctx: &Context, op: Ptr<Operation>) -> Option<usize> {
-    if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
-        Some(0)
-    } else if Operation::get_op::<TimerOp>(op, ctx).is_some() {
-        Some(1)
-    } else {
-        None
     }
 }

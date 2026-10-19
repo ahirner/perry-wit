@@ -1,3 +1,4 @@
+use crate::world::Compiler::Standard;
 use std::{fs, path::PathBuf};
 
 use perry_wit::component::wit::resolve_wit;
@@ -86,7 +87,7 @@ fn source_and_interface_types_resolve_in_their_own_modules() -> anyhow::Result<(
             "import type { Options as Left } from 'test:scoped/left'; import type { Options as Right } from 'test:scoped/right'; export function run(left:Left,right:Right):number {return left.count + right.label.length;}",
         ),
     ] {
-        crate::world::compile(wit, "run", path, source)?;
+        Standard.compile(wit, "run", path, source)?;
     }
     Ok(())
 }

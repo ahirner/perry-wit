@@ -4,13 +4,7 @@
 //! representation facts forward and required widths backward, including recursive calls.
 //! Rewriting runs only after the analysis converges, fixing semantic wrap points before
 //! SCCP, inlining and other algebraic transformations.
-use crate::{
-    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp},
-    control::ReturnOp,
-    intrinsics::PromiseResolvedOp,
-    scalar::NumericCastOp,
-    types::PromiseType,
-};
+use crate::{calls::AwaitOp, scalar::NumericCastOp, semantics::OperationKind, types::PromiseType};
 use pliron::{
     builtin::{
         attributes::{IdentifierAttr, TypeAttr},
@@ -26,6 +20,7 @@ use pliron::{
     pass::{Analysis, AnalysisManager},
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
+    utils::table::HSet,
     value::Value,
 };
 use std::{
@@ -35,6 +30,7 @@ use std::{
 
 mod domains;
 mod heap;
+pub(crate) mod paths;
 mod rewrite;
 mod transfer;
 use domains::{
@@ -43,8 +39,10 @@ use domains::{
 };
 pub(crate) use rewrite::Specialize;
 pub use rewrite::{verify_lossless_module, verify_lossless_operations};
+mod value;
+use value::{Representation, ValueFacts};
 mod outcomes;
-use outcomes::{Outcomes, promise_payload};
+use outcomes::Outcomes;
 
 pliron::dict_key!(WIT_SIGNATURE, "perry_wit_signature");
 pliron::dict_key!(SPECIALIZATION, "perry_specialization");
@@ -179,7 +177,7 @@ impl Key {
 enum Constraint {
     Op {
         op: Ptr<Operation>,
-        heap: heap::OperationKind,
+        kind: OperationKind,
     },
     Edge {
         from: Value,
@@ -213,11 +211,9 @@ impl Body {
         let mut has_integer_constraints = !exported && signature.is_some();
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
-            constraints.push(Constraint::Op {
-                op,
-                heap: heap::OperationKind::classify(ctx, op),
-            });
-            if Operation::get_op::<crate::control::ReturnOp>(op, ctx).is_some() {
+            let kind = OperationKind::classify(ctx, op);
+            constraints.push(Constraint::Op { op, kind });
+            if kind == OperationKind::Return {
                 returns.push(op);
             }
             if !has_integer_constraints
@@ -325,9 +321,7 @@ pub fn with_fact_limits<R>(
 
 #[derive(Default)]
 struct State {
-    facts: HashMap<Value, Fact>,
-    ranges: HashMap<Value, Range>,
-    range_expansions: HashMap<Value, u8>,
+    facts: HashMap<Value, ValueFacts>,
     required: HashMap<Value, Integer>,
     constrained: HashSet<Value>,
     original_payloads: HashSet<Value>,
@@ -337,24 +331,36 @@ struct State {
     origins: HashMap<Value, BTreeSet<usize>>,
     summary: crate::effects::Summary,
     heap_values: HashMap<Value, usize>,
-    outcomes: HashMap<Value, Outcomes>,
 }
 
 #[derive(Clone, Copy, Default)]
 struct ResultFact {
-    domain: Fact,
-    range: Range,
-    expansions: u8,
+    facts: ValueFacts,
     heap: Option<usize>,
-    outcome: Outcomes,
 }
 
 impl State {
-    fn fact(&self, value: Value) -> Fact {
+    fn demand(&mut self, value: Value, required: Option<Integer>, constrained: bool) -> bool {
+        let mut changed = constrained && self.constrained.insert(value);
+        if let Some(required) = required {
+            let old = self.required.get(&value).copied();
+            let new = old.map_or(required, |old| old.common(required));
+            if old != Some(new) {
+                self.required.insert(value, new);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn value(&self, value: Value) -> ValueFacts {
         self.facts.get(&value).copied().unwrap_or_default()
     }
+    fn fact(&self, value: Value) -> Fact {
+        self.value(value).domain
+    }
     fn range(&self, value: Value) -> Range {
-        self.ranges.get(&value).copied().unwrap_or_default()
+        self.value(value).range
     }
     fn is_constrained(&self, value: Value) -> bool {
         self.constrained.contains(&value)
@@ -444,7 +450,7 @@ impl ProgramFacts {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Work {
     Operation(usize, usize),
     OpenObject(usize),
@@ -454,31 +460,20 @@ enum Work {
 #[derive(Default)]
 struct Worklist {
     pending: VecDeque<Work>,
-    operations: Vec<Vec<bool>>,
-    objects: Vec<bool>,
-    cells: Vec<bool>,
+    queued: HSet<Work>,
 }
 
 impl Worklist {
-    /// Whether `item` is pending.
-    fn queued(&mut self, item: Work) -> &mut bool {
-        match item {
-            Work::Operation(context, index) => &mut self.operations[context][index],
-            Work::OpenObject(object) => &mut self.objects[object],
-            Work::ReconcileCell(cell) => &mut self.cells[cell],
-        }
-    }
-
-    fn enqueue(&mut self, item: Work) {
-        if !std::mem::replace(self.queued(item), true) {
-            self.pending.push_back(item);
+    fn insert(&mut self, work: Work) {
+        if self.queued.insert(work) {
+            self.pending.push_back(work);
         }
     }
 
     fn pop(&mut self) -> Option<Work> {
-        let item = self.pending.pop_front()?;
-        *self.queued(item) = false;
-        Some(item)
+        let work = self.pending.pop_front()?;
+        self.queued.remove(&work);
+        Some(work)
     }
 }
 
@@ -587,9 +582,7 @@ impl Solver {
         for &op in &body.returns {
             for (position, value) in op.deref(ctx).operands().enumerate() {
                 if let Some(required) = key.results.get(position).and_then(|r| r.integer()) {
-                    let entry = state.required.entry(value).or_insert(required);
-                    *entry = entry.common(required);
-                    state.constrained.insert(value);
+                    state.demand(value, Some(required), true);
                 }
             }
         }
@@ -597,17 +590,11 @@ impl Solver {
             let mut progressed = false;
             for constraint in &body.constraints {
                 if let Constraint::Edge { from, to } = *constraint {
-                    if let Some(&req) = state.required.get(&to) {
-                        let old = state.required.get(&from).copied();
-                        let new = old.map_or(req, |old| old.common(req));
-                        if old != Some(new) {
-                            state.required.insert(from, new);
-                            progressed = true;
-                        }
-                    }
-                    if state.constrained.contains(&to) && state.constrained.insert(from) {
-                        progressed = true;
-                    }
+                    progressed |= state.demand(
+                        from,
+                        state.required.get(&to).copied(),
+                        state.is_constrained(to),
+                    );
                 }
             }
             if !progressed {
@@ -615,11 +602,6 @@ impl Solver {
             }
         }
         for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
-            if body.external {
-                state
-                    .outcomes
-                    .insert(parameter, Outcomes::unknown(ctx, parameter.get_type(ctx)));
-            }
             if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
                 state.origins.insert(parameter, BTreeSet::from([position]));
             }
@@ -628,9 +610,8 @@ impl Solver {
                 ArgumentDomain::Numeric => Fact::Numeric,
                 ArgumentDomain::Original => Fact::Original,
             };
-            state.facts.insert(parameter, fact);
-            state.ranges.insert(
-                parameter,
+            let mut facts = ValueFacts::numeric(
+                fact,
                 domain.integer().map_or(
                     if body.external {
                         Range::Unknown
@@ -640,13 +621,16 @@ impl Solver {
                     |domain| Range::Bounds(domain.bounds()),
                 ),
             );
+            if body.external {
+                facts.outcome = Outcomes::unknown(ctx, parameter.get_type(ctx));
+            }
+            state.facts.insert(parameter, facts);
         }
         let constraints = body.constraints.len();
         self.analysis.keys.push(key);
         self.analysis.states.push(state);
-        self.work.operations.push(vec![false; constraints]);
         for constraint in 0..constraints {
-            self.work.enqueue(Work::Operation(id, constraint));
+            self.work.insert(Work::Operation(id, constraint));
         }
         self.seed_heap_parameters(ctx, id)?;
         // The signature is fixed for this context, even when requirements propagate
@@ -659,7 +643,7 @@ impl Solver {
         let dependents = body.dependents.get(&value).into_iter().flatten();
         let parameter = body.parameters.contains(&value);
         for &constraint in dependents {
-            self.work.enqueue(Work::Operation(id, constraint));
+            self.work.insert(Work::Operation(id, constraint));
         }
         if parameter {
             self.notify_callers(id);
@@ -668,7 +652,7 @@ impl Solver {
 
     fn notify_callers(&mut self, id: usize) {
         for &caller in &self.analysis.states[id].callers {
-            self.work.enqueue(Work::Operation(caller.0, caller.1));
+            self.work.insert(Work::Operation(caller.0, caller.1));
         }
     }
 
@@ -810,7 +794,7 @@ impl Analysis for ProgramFacts {
                                 .then_some(Integer::I64)
                         });
                     if let Some(integer) = default_int {
-                        solver.require(id, value, Some(integer));
+                        solver.demand(id, value, Some(integer), false);
                         defaulted = true;
                     }
                 }

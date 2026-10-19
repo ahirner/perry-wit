@@ -1,12 +1,4 @@
-//! Correctly rounded decimal-to-double conversion shared by JSON number parsing and text-to-number
-//! built-ins (`parseFloat`, `Number(string)`).
-//!
-//! A literal is `D × 10^e` with `D` its significant digits. When `D < 2^53` and `10^|e|` is
-//! exact (Clinger's fast path, nearly every literal in practice) one multiplication or
-//! division rounds correctly. Otherwise an approximation from the leading 19 digits is
-//! corrected by exact comparison against the midpoints of neighbouring doubles, on a stack
-//! big integer. Digits after the 780th only decide ties: a midpoint has at most 767
-//! significant digits, so they act as one sticky digit.
+//! Numeric tokens and exact integer conversion shared by JSON and text-number built-ins.
 
 use crate::layout::numeric::Tag;
 
@@ -17,23 +9,11 @@ mod tests;
 pub use big::Big;
 pub use decimal::{DecimalLiteral, DecimalSyntax, scan_decimal, split_sign};
 
-/// Maximum significant digits kept exactly; further digits only mark the value as above.
-const KEPT_DIGITS: usize = 780;
-/// 32-bit limbs: `10^780 · 2^1100 · 5^310` and `2^1100 · 5^1104 · 2^54` both fit.
-const LIMBS: usize = 180;
-
-const EXACT: [f64; 23] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
-];
-
-/// Decimal facts accumulated by a single-pass lexer; no second mantissa scan is required on the
-/// fast path.
+/// Decimal facts used to recognize and convert exact integers.
 #[derive(Default, Clone, Copy)]
 pub struct Decimal {
     count: usize,
     trailing: usize,
-    leading: u64,
     fraction_digits: i64,
 }
 
@@ -44,24 +24,7 @@ impl Decimal {
             return;
         }
         self.count += 1;
-        if self.count <= 19 {
-            self.leading = self.leading * 10 + u64::from(byte - b'0');
-        }
         self.trailing = if byte == b'0' { self.trailing + 1 } else { 0 };
-    }
-
-    pub fn finish(mut self, mantissa: &[u8], negative: bool, exponent: i64) -> f64 {
-        let significant = self.count - self.trailing;
-        let exponent10 = exponent - self.fraction_digits + self.trailing as i64;
-        if significant < self.count.min(19) {
-            self.leading /= 10u64.pow((self.count.min(19) - significant) as u32);
-        }
-        let magnitude = if significant == 0 {
-            0.0
-        } else {
-            convert(mantissa, significant, exponent10, self.leading)
-        };
-        if negative { -magnitude } else { magnitude }
     }
 
     pub fn finish_u64(&self, mantissa: &[u8], negative: bool, exponent: i64) -> Option<u64> {
@@ -138,152 +101,6 @@ impl<'a> Digits<'a> {
     }
 }
 
-/// `D × 10^e` for the first `significant` digits (`D` without leading or trailing zeros).
-fn convert(mantissa: &[u8], significant: usize, exponent10: i64, leading: u64) -> f64 {
-    // Out of range either way: below half the smallest subnormal, or above the largest double.
-    let scale = significant as i64 + exponent10;
-    if scale <= -324 {
-        return 0.0;
-    }
-    if scale > 310 {
-        return f64::INFINITY;
-    }
-    let exponent10 = exponent10 as i32;
-    if significant <= 19 && leading < 1 << 53 {
-        if (0..=22).contains(&exponent10) {
-            return leading as f64 * EXACT[exponent10 as usize];
-        }
-        if (-22..0).contains(&exponent10) {
-            return leading as f64 / EXACT[(-exponent10) as usize];
-        }
-        // `1e30`: move powers of ten into the integer while it stays exact.
-        let mut integer = leading;
-        let mut rest = exponent10;
-        while rest > 22 && integer < (1 << 53) / 10 {
-            integer *= 10;
-            rest -= 1;
-        }
-        if (0..=22).contains(&rest) {
-            return integer as f64 * EXACT[rest as usize];
-        }
-    }
-    let approximate = scale10(
-        leading as f64,
-        exponent10 + significant.saturating_sub(19) as i32,
-    );
-    correct(&Digits::new(mantissa), significant, exponent10, approximate)
-}
-
-/// `x × 10^power` in a few roundings, without overflowing or underflowing on the way.
-fn scale10(mut x: f64, mut power: i32) -> f64 {
-    while power != 0 {
-        let step = power.clamp(-300, 300);
-        let factor = pow10(step.unsigned_abs());
-        x = if step > 0 { x * factor } else { x / factor };
-        power -= step;
-    }
-    x
-}
-
-fn pow10(mut power: u32) -> f64 {
-    let (mut result, mut base) = (1.0, 10.0f64);
-    while power > 0 {
-        if power & 1 != 0 {
-            result *= base;
-        }
-        base *= base;
-        power >>= 1;
-    }
-    result
-}
-
-/// A positive double (or the step past the largest) as `mantissa × 2^exponent`.
-fn decompose(bits: u64) -> (u64, i32) {
-    let biased = (bits >> 52) as i32;
-    let fraction = bits & ((1 << 52) - 1);
-    if biased == 0 {
-        (fraction, -1074)
-    } else {
-        (fraction | 1 << 52, biased - 1075)
-    }
-}
-
-/// Exact comparison of `D × 10^e` (digits beyond [KEPT_DIGITS] only make it larger) with the
-/// midpoint of the adjacent doubles `low` and `low + 1` (by bits), then step until the
-/// candidate is the nearest.
-#[inline(never)]
-fn correct(digits: &Digits<'_>, significant: usize, exponent10: i32, approximate: f64) -> f64 {
-    let kept = significant.min(KEPT_DIGITS);
-    let sticky = digits.iter().skip(kept).any(|digit| digit != 0);
-    let exponent10 = exponent10 + (significant - kept) as i32;
-    let mut value = Big::<LIMBS>::zero();
-    let mut chunk = 0u32;
-    let mut chunk_scale = 1u32;
-    for digit in digits.iter().take(kept) {
-        chunk = chunk * 10 + digit;
-        chunk_scale *= 10;
-        if chunk_scale == 1_000_000_000 {
-            value.mul_add(chunk_scale, chunk);
-            (chunk, chunk_scale) = (0, 1);
-        }
-    }
-    value.mul_add(chunk_scale, chunk);
-    // A positive `5^e` scales D once; a negative one scales each midpoint.
-    if exponent10 >= 0 {
-        value.mul_pow5(exponent10 as u32);
-    }
-    // `D × 10^e` against `low_mid × 2^k`: compare D × 5^e × 2^e and the midpoint scaled.
-    let compare = |low: u64| -> core::cmp::Ordering {
-        let (m0, k0) = decompose(low);
-        let (m1, k1) = decompose(low + 1);
-        let k = k0.min(k1);
-        let midpoint = (m0 << (k0 - k)) + (m1 << (k1 - k));
-        let exponent2 = k - 1;
-        let mut left = value.clone();
-        let mut right = Big::from_u64(midpoint);
-        let (mut left_shift, mut right_shift) = if exponent10 >= 0 {
-            (exponent10, 0)
-        } else {
-            right.mul_pow5(exponent10.unsigned_abs());
-            (0, -exponent10)
-        };
-        if exponent2 >= 0 {
-            right_shift += exponent2;
-        } else {
-            left_shift -= exponent2;
-        }
-        let common = left_shift.min(right_shift);
-        left.shl((left_shift - common) as u32);
-        right.shl((right_shift - common) as u32);
-        match left.compare(&right) {
-            core::cmp::Ordering::Equal if sticky => core::cmp::Ordering::Greater,
-            order => order,
-        }
-    };
-    const INFINITY: u64 = 0x7ff0_0000_0000_0000;
-    let mut bits = approximate.to_bits().min(INFINITY - 1);
-    // Up while the value is past the midpoint above (ties go to the even mantissa).
-    loop {
-        if bits == INFINITY {
-            break;
-        }
-        match compare(bits) {
-            core::cmp::Ordering::Greater => bits += 1,
-            core::cmp::Ordering::Equal if bits & 1 == 1 => bits += 1,
-            _ => break,
-        }
-    }
-    // Down while the value is below the midpoint beneath.
-    while bits > 0 {
-        match compare(bits - 1) {
-            core::cmp::Ordering::Less => bits -= 1,
-            core::cmp::Ordering::Equal if bits & 1 == 1 => bits -= 1,
-            _ => break,
-        }
-    }
-    f64::from_bits(bits)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Number {
     Float(f64),
@@ -352,17 +169,8 @@ impl Number {
 
 /// ECMAScript WhiteSpace and LineTerminator code points.
 pub fn space(scalar: char) -> bool {
-    matches!(
-        scalar,
-        '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
-    )
+    let mut bytes = [0; 4];
+    crate::whitespace::prefix(scalar.encode_utf8(&mut bytes).as_bytes()) != 0
 }
 
 pub fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {

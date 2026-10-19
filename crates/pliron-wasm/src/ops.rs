@@ -76,16 +76,7 @@ pub struct NumOp;
 impl NumOp {
     pub fn new(ctx: &mut Context, opcode: NumOpcode, operands: Vec<Value>) -> Self {
         let result = pliron_type(ctx, opcode.signature().1);
-        let op = NumOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                operands,
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![result], operands, vec![], 0);
         op.set_attr_wasm_num(ctx, opcode);
         op
     }
@@ -132,16 +123,7 @@ pub struct SelectOp;
 impl SelectOp {
     pub fn new(ctx: &mut Context, condition: Value, then: Value, otherwise: Value) -> Self {
         let ty = then.get_type(ctx);
-        SelectOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![then, otherwise, condition],
-                vec![],
-                0,
-            ),
-        }
+        Operation::new_op::<Self>(ctx, vec![ty], vec![then, otherwise, condition], vec![], 0)
     }
 }
 
@@ -185,16 +167,7 @@ pub struct LoadOp;
 impl LoadOp {
     pub fn new(ctx: &mut Context, kind: MemKind, address: Value, offset: u32) -> Self {
         let ty = pliron_type(ctx, kind.value());
-        let op = LoadOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![address],
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![ty], vec![address], vec![], 0);
         op.set_attr_wasm_load_kind(ctx, kind);
         let offset = offset_attr(ctx, offset);
         op.set_attr_wasm_load_offset(ctx, offset);
@@ -245,16 +218,7 @@ impl StoreOp {
         offset: u32,
         value: Value,
     ) -> Self {
-        let op = StoreOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![address, value],
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![], vec![address, value], vec![], 0);
         op.set_attr_wasm_store_kind(ctx, kind);
         let offset = offset_attr(ctx, offset);
         op.set_attr_wasm_store_offset(ctx, offset);
@@ -304,9 +268,7 @@ impl ImportFuncOp {
         module: &str,
         name: &str,
     ) -> Self {
-        let op = ImportFuncOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], vec![], vec![], 0),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
         op.set_symbol_name(ctx, symbol);
         op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty.into()));
         op.set_attr_wasm_import_module(ctx, StringAttr::new(module.to_string()));
@@ -386,16 +348,7 @@ impl Parsable for ImportFuncOp {
             .parse_stream(state_stream)
             .map(|(symbol, ty, _, module, name)| -> OpObj {
                 let ctx = &mut state_stream.state.ctx;
-                let op = ImportFuncOp {
-                    op: Operation::new(
-                        ctx,
-                        Self::get_concrete_op_info(),
-                        vec![],
-                        vec![],
-                        vec![],
-                        0,
-                    ),
-                };
+                let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
                 op.set_symbol_name(ctx, symbol);
                 op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty));
                 op.set_attr_wasm_import_module(ctx, module);
@@ -444,9 +397,7 @@ impl CallOp {
         args: Vec<Value>,
         results: Vec<TypeHandle>,
     ) -> Self {
-        let op = CallOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
-        };
+        let op = Operation::new_op::<Self>(ctx, results, args, vec![], 0);
         op.set_attr_wasm_callee(ctx, IdentifierAttr::new(callee));
         op
     }

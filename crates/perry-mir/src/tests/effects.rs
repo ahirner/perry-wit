@@ -131,6 +131,8 @@ builtin.module @repetition { ^module():
 }
 "#;
     for statement in [
+        "copy = perry.json_copy value : builtin.fp64;",
+        "text = perry.string_const \"[]\" : perry.string; decoded = perry.json_decode text : perry.array <builtin.fp64>;",
         "cell = perry.alloc Unassigned (value) : perry.record <Cell>;",
         "cell = perry.call allocate (value) : perry.record <Cell>;",
         "result = perry.call pure (value, again) : builtin.fp64;",
@@ -152,6 +154,14 @@ builtin.module @repetition { ^module():
                     .effects
                     .repeated_allocations
             };
+            assert_eq!(
+                facts
+                    .effects(&pliron::ident!("run"))
+                    .unwrap()
+                    .effects
+                    .unknown_helper_bound,
+                statement.contains("perry.json_")
+            );
             let run = !statement.contains("call pure")
                 && (position == "BODY" || statement.contains("call recursive"));
             assert_eq!(

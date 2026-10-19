@@ -6,5 +6,8 @@ edition = "2024"
 [lib]
 path = "../../src/helpers/text.rs"
 
+[dependencies]
+icu_properties = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+
 [lints]
 workspace = true

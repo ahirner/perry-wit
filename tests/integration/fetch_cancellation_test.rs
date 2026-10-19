@@ -1,4 +1,5 @@
 //! Host cancellation uses the existing HTTP hook and 03ea's component cancellation caller.
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body::{Body, Frame};
@@ -13,6 +14,7 @@ use std::{
     task::{Context, Poll},
 };
 use wasmtime::component::Component;
+use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 
 use crate::cancellation;
@@ -22,6 +24,7 @@ use crate::wasi_host::{self, Host};
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     Request,
+    Upload,
     Body,
 }
 #[derive(Default)]
@@ -29,6 +32,7 @@ struct Observations {
     ready: AtomicBool,
     requests: AtomicUsize,
     dropped_requests: AtomicUsize,
+    uploaded_bytes: AtomicUsize,
     body_bytes: AtomicUsize,
     dropped_bodies: AtomicUsize,
 }
@@ -71,6 +75,10 @@ struct Fixture {
     observations: Arc<Observations>,
 }
 impl WasiHttpHooks for Fixture {
+    fn p3_outgoing_body_chunk_size(&mut self) -> usize {
+        7
+    }
+
     fn send_request(
         &mut self,
         request: http::Request<WasiBody>,
@@ -93,8 +101,21 @@ impl WasiHttpHooks for Fixture {
         let guard = RequestGuard(observations.clone());
         Box::new(async move {
             let _guard = guard;
-            let _request = request;
-            if matches!(phase, Phase::Request) {
+            let mut request = request;
+            if !matches!(phase, Phase::Body) {
+                if matches!(phase, Phase::Upload) {
+                    let frame = request
+                        .body_mut()
+                        .frame()
+                        .await
+                        .ok_or(ErrorCode::HttpProtocolError)??;
+                    let bytes = frame
+                        .into_data()
+                        .map_err(|_| ErrorCode::HttpProtocolError)?;
+                    observations
+                        .uploaded_bytes
+                        .fetch_add(bytes.len(), Ordering::SeqCst);
+                }
                 observations.ready.store(true, Ordering::SeqCst);
                 std::future::pending::<()>().await;
             }
@@ -113,23 +134,15 @@ impl WasiHttpHooks for Fixture {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
-    let (resolve, package) = perry_wit::component::wit::resolve_source(
-        "cancel.wit",
+    let bytes = MemoryChecked.component(
         "package test:fetch-cancel; world run {import wasi:http/client@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func();}",
-    )?;
-    let world = resolve.select_world(&[package], Some("run"))?;
-    let compiled = perry_wit::compiler::compile_for_world_with_memory_checks(
-        "export async function run():Promise<void>{const response=await fetch('https://example.test/body');try{await response.bytes();}finally{throw new Error('cancelled continuation ran');}}",
+        "run",
         "cancel.ts",
-        &resolve,
-        world,
+        "export async function run():Promise<void>{const response=await fetch('https://example.test/body',{method:'POST',body:new Uint8Array(1024)});try{await response.bytes();}finally{throw new Error('cancelled continuation ran');}}",
     )?;
     let engine = async_engine()?;
-    let component = Component::new(
-        &engine,
-        cancellation::cancellation_caller(&compiled.component.unwrap().stripped, true)?,
-    )?;
-    for phase in [Phase::Request, Phase::Body] {
+    let component = Component::new(&engine, cancellation::cancellation_caller(&bytes, true)?)?;
+    for phase in [Phase::Request, Phase::Upload, Phase::Body] {
         let observations = Arc::new(Observations::default());
         let mut linker = wasi_host::linker(&engine)?;
         let readiness = observations.clone();
@@ -163,6 +176,12 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
             );
             assert_eq!(observations.requests.load(Ordering::SeqCst), round);
             assert_eq!(observations.dropped_requests.load(Ordering::SeqCst), round);
+            if matches!(phase, Phase::Upload) {
+                assert_eq!(
+                    observations.uploaded_bytes.load(Ordering::SeqCst),
+                    round * 7
+                );
+            }
             if matches!(phase, Phase::Body) {
                 assert_eq!(observations.body_bytes.load(Ordering::SeqCst), round * 3);
                 assert_eq!(observations.dropped_bodies.load(Ordering::SeqCst), round);

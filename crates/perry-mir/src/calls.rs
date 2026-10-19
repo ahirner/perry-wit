@@ -2,18 +2,16 @@
 //!
 //! Perry has no first-class functions in MIR (subset rule R5): every callee is a symbol,
 //! which keeps escape summaries and inlining (P3.2, P3.3) exact.
-use crate::{NewOp, types::PromiseType};
+use crate::operation_schema::op_schema;
+use crate::signatures::{OutputContract, ResultType, Signature, Ty};
+use crate::types::PromiseType;
 use pliron::{
     builtin::{
-        attributes::IdentifierAttr,
-        op_interfaces::{OneResultInterface, SymbolTableInterface},
-        ops::FuncOp,
-        type_interfaces::FunctionTypeInterface,
-        types::FunctionType,
+        attributes::IdentifierAttr, op_interfaces::SymbolTableInterface, ops::FuncOp,
+        type_interfaces::FunctionTypeInterface, types::FunctionType,
     },
     common_traits::Verify,
     context::{Context, Ptr},
-    derive::{op_interface_impl, pliron_op},
     identifier::Identifier,
     op::{Op, op_cast},
     operation::Operation,
@@ -64,36 +62,28 @@ pub(crate) fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
         .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx)))
 }
 
-fn operand_types(ctx: &Context, op: Ptr<Operation>) -> Vec<TypeHandle> {
-    op.deref(ctx).operands().map(|v| v.get_type(ctx)).collect()
+op_schema! {
+    /// Synchronous call; results are the callee's results.
+    pub CallOp(.._operands) -> infallible;
+    name = "perry.call";
+    format = "attr($perry_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))";
+    attributes = (perry_callee: IdentifierAttr);
+    constructors {
+        pub new(callee: Identifier, args: Vec<Value>, results: Vec<TypeHandle>)
+            operands(args) => results(results);
+    }
+    attribute(callee, get_attr_perry_callee, set_attr_perry_callee) = IdentifierAttr::new(callee)
+        => CallErr::Unknown("<missing>".into());
+    prepare(this) {
+        let callee = callee.as_ref();
+        let (args, results) = callee_signature(ctx, this.get_operation(), callee)?;
+    }
+    result(ctx, args: Vec<TypeHandle>, results: Vec<TypeHandle>): impl OutputContract =
+        Signature { inputs: args, outputs: results };
+    error = CallErr::Signature(callee.to_string());
 }
-
-fn result_types(ctx: &Context, op: Ptr<Operation>) -> Vec<TypeHandle> {
-    op.deref(ctx).results().map(|v| v.get_type(ctx)).collect()
-}
-
-/// Synchronous call; results are the callee's results.
-#[pliron_op(
-    name = "perry.call",
-    format = "attr($perry_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
-    attributes = (perry_callee: IdentifierAttr)
-)]
-pub struct CallOp;
 
 impl CallOp {
-    pub fn new(
-        ctx: &mut Context,
-        callee: Identifier,
-        args: Vec<Value>,
-        results: Vec<TypeHandle>,
-    ) -> Self {
-        let op = CallOp {
-            op: Self::new_op(ctx, results, args),
-        };
-        op.set_attr_perry_callee(ctx, IdentifierAttr::new(callee));
-        op
-    }
-
     pub fn callee(&self, ctx: &Context) -> Identifier {
         self.get_attr_perry_callee(ctx)
             .expect("callee")
@@ -102,37 +92,32 @@ impl CallOp {
     }
 }
 
-impl Verify for CallOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let op = self.get_operation();
-        let callee = self.callee(ctx);
-        let (args, results) = callee_signature(ctx, op, &callee)?;
-        if args != operand_types(ctx, op) || results != result_types(ctx, op) {
-            verify_err!(self.loc(ctx), CallErr::Signature(callee.to_string()))?
-        }
-        Ok(())
+op_schema! {
+    /// Start an async function eagerly; it runs until its first pending `await` (D5).
+    pub AsyncCallOp(.._operands) -> infallible;
+    name = "perry.async_call";
+    format = "attr($perry_async_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` type($0)";
+    attributes = (perry_async_callee: IdentifierAttr);
+    constructors {
+        pub new(callee: Identifier, args: Vec<Value>, value: TypeHandle)
+            operands(args) => explicit(PromiseType::get(ctx, value).into());
     }
+    attribute(callee, get_attr_perry_async_callee, set_attr_perry_async_callee) = IdentifierAttr::new(callee)
+        => CallErr::Unknown("<missing>".into());
+    prepare(this) {
+        let callee = callee.as_ref();
+        let (args, results) = callee_signature(ctx, this.get_operation(), callee)?;
+    }
+    result(ctx, args: Vec<TypeHandle>, results: Vec<TypeHandle>): impl OutputContract =
+        Signature {
+            inputs: args,
+            outputs: results.into_iter().map(|ty| TypeHandle::from(PromiseType::get(ctx, ty))),
+        };
+    error = CallErr::Signature(callee.to_string());
+    check_before results.len() == 1 => CallErr::Signature(callee.to_string());
 }
 
-/// Start an async function eagerly; it runs until its first pending `await` (D5).
-#[pliron_op(
-    name = "perry.async_call",
-    format = "attr($perry_async_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` type($0)",
-    interfaces = [OneResultInterface],
-    attributes = (perry_async_callee: IdentifierAttr)
-)]
-pub struct AsyncCallOp;
-
 impl AsyncCallOp {
-    pub fn new(ctx: &mut Context, callee: Identifier, args: Vec<Value>, value: TypeHandle) -> Self {
-        let promise = PromiseType::get(ctx, value).into();
-        let op = AsyncCallOp {
-            op: Self::new_op(ctx, vec![promise], args),
-        };
-        op.set_attr_perry_async_callee(ctx, IdentifierAttr::new(callee));
-        op
-    }
-
     pub fn callee(&self, ctx: &Context) -> Identifier {
         self.get_attr_perry_async_callee(ctx)
             .expect("callee")
@@ -141,69 +126,20 @@ impl AsyncCallOp {
     }
 }
 
-impl Verify for AsyncCallOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let op = self.get_operation();
-        let callee = self.callee(ctx);
-        let (args, results) = callee_signature(ctx, op, &callee)?;
-        let promise =
-            TypedHandle::<PromiseType>::from_handle(self.get_result(ctx).get_type(ctx), ctx);
-        let matches = promise.is_ok_and(|p| results == [p.deref(ctx).value()]);
-        if args != operand_types(ctx, op) || !matches {
-            verify_err!(self.loc(ctx), CallErr::Signature(callee.to_string()))?
-        }
-        Ok(())
-    }
-}
-
-/// Wait for a promise. Before async split (P3.8) this is an ordinary op; the split turns each
-/// `await` into a state-machine suspension point. Awaiting a settled promise continues inline.
-#[pliron_op(
-    name = "perry.await",
-    format = "$0 ` : ` type($0)",
-    interfaces = [OneResultInterface]
-)]
-pub struct AwaitOp;
-
-impl AwaitOp {
-    pub fn new(ctx: &mut Context, promise: Value) -> Result<Self> {
-        let value = TypedHandle::<PromiseType>::from_handle(promise.get_type(ctx), ctx)?
+op_schema! {
+    /// Wait for a promise. Before async split (P3.8) this is an ordinary op; the split turns each
+    /// `await` into a state-machine suspension point. Awaiting a settled promise continues inline.
+    pub AwaitOp(promise) -> fallible;
+    name = "perry.await";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(promise: Value) => infer(promise); }
+    result(ctx, promise: Value): TypeHandle = Ok(
+        TypedHandle::<PromiseType>::from_handle(promise.get_type(ctx), ctx)?
             .deref(ctx)
-            .value();
-        Ok(AwaitOp {
-            op: Self::new_op(ctx, vec![value], vec![promise]),
-        })
-    }
-}
-
-impl Verify for AwaitOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let op = self.get_operation().deref(ctx);
-        if op.get_num_operands() != 1 {
-            verify_err!(self.loc(ctx), CallErr::Await)?
-        }
-        let promise = TypedHandle::<PromiseType>::from_handle(op.get_operand(0).get_type(ctx), ctx);
-        if !promise.is_ok_and(|p| p.deref(ctx).value() == self.get_result(ctx).get_type(ctx)) {
-            verify_err!(self.loc(ctx), CallErr::Await)?
-        }
-        Ok(())
-    }
-}
-
-side_effects!(true; AwaitOp);
-
-#[op_interface_impl]
-impl crate::exceptions::MayThrowInterface for CallOp {
-    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
-        crate::attrs::ErrorKind::Any
-    }
-}
-
-#[op_interface_impl]
-impl crate::exceptions::MayThrowInterface for AwaitOp {
-    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
-        crate::attrs::ErrorKind::Any
-    }
+            .value(),
+    );
+    error = CallErr::Await;
+    invalid_source = CallErr::Await;
 }
 
 pliron::dict_key!(FUNCTION_META, "perry_function_meta");
@@ -274,79 +210,33 @@ pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).asynchronous
 }
 
-pliron::dict_key!(JSON_DECODER_KIND, "perry_json_decoder_kind");
-
-/// Mark `function` as a compiler-generated JSON decoder with semantic `kind`.
-pub fn set_json_decoder(ctx: &mut Context, function: &FuncOp, kind: crate::attrs::JsonDecoderKind) {
-    function
-        .get_operation()
-        .deref_mut(ctx)
-        .attributes
-        .set(JSON_DECODER_KIND.clone(), kind);
-}
-
-/// The semantic kind of a compiler-generated JSON decoder, if `function` is one.
-pub(crate) fn json_decoder_kind(
-    ctx: &Context,
-    function: &FuncOp,
-) -> Option<crate::attrs::JsonDecoderKind> {
-    function
-        .get_operation()
-        .deref(ctx)
-        .attributes
-        .get::<crate::attrs::JsonDecoderKind>(&JSON_DECODER_KIND)
-        .copied()
-}
-
 #[derive(Debug, Error)]
 #[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
 pub(crate) struct TimerErr;
 
-/// `setTimeout(delay, value, { signal })` from `node:timers/promises`: a promise that settles
-/// with `value` once `delay` milliseconds (at least 1, as in Node) have passed on the host's
-/// monotonic clock. An optional third operand is the `AbortSignal` that rejects it early.
-#[pliron_op(
-    name = "perry.timer",
-    format = "operands(CharSpace(`,`)) ` : ` type($0)",
-    interfaces = [OneResultInterface]
-)]
-pub struct TimerOp;
-
-impl TimerOp {
-    pub fn new(ctx: &mut Context, delay: Value, value: Value, signal: Option<Value>) -> Self {
-        let promise = PromiseType::get(ctx, value.get_type(ctx)).into();
-        let mut operands = vec![delay, value];
-        operands.extend(signal);
-        TimerOp {
-            op: Self::new_op(ctx, vec![promise], operands),
-        }
+op_schema! {
+    /// `setTimeout(delay, value, { signal })` from `node:timers/promises`: a promise that settles
+    /// with `value` once `delay` milliseconds (at least 1, as in Node) have passed on the host's
+    /// monotonic clock. An optional third operand is the `AbortSignal` that rejects it early.
+    pub TimerOp(..operands) -> infallible;
+    name = "perry.timer";
+    format = "operands(CharSpace(`,`)) ` : ` type($0)";
+    constructors {
+        pub new(delay: Value, value: Value, signal: Option<Value>) operands({
+            let mut args = vec![delay, value];
+            args.extend(signal);
+            args
+        }) => infer(value.get_type(ctx));
     }
-}
-
-impl Verify for TimerOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let op = self.get_operation().deref(ctx);
-        if !(2..=3).contains(&op.get_num_operands()) {
-            verify_err!(self.loc(ctx), TimerErr)?
+    prepare(this) {
+        if !(2..=3).contains(&operands.get_num_operands()) {
+            return verify_err!(this.loc(ctx), TimerErr);
         }
-        if op.get_num_operands() == 3
-            && !op
-                .get_operand(2)
-                .get_type(ctx)
-                .deref(ctx)
-                .is::<crate::types::AbortType>()
-        {
-            verify_err!(self.loc(ctx), TimerErr)?
-        }
-        let delay = op.get_operand(0).get_type(ctx);
-        let value = op.get_operand(1).get_type(ctx);
-        let promise =
-            TypedHandle::<PromiseType>::from_handle(self.get_result(ctx).get_type(ctx), ctx);
-        if !delay.deref(ctx).is::<pliron::builtin::types::FP64Type>()
-            || !promise.is_ok_and(|p| p.deref(ctx).value() == value)
-        {
-            verify_err!(self.loc(ctx), TimerErr)?
-        }
-        Ok(())
+        let value = operands.get_operand(1).get_type(ctx);
     }
+    result(ctx, value: TypeHandle): TypeHandle = PromiseType::get(ctx, value).into();
+    error = TimerErr;
+    check_before Ty::Number.matches(ctx, operands.get_operand(0).get_type(ctx))
+        && (operands.get_num_operands() == 2 || Ty::Abort.matches(ctx, operands.get_operand(2).get_type(ctx)))
+        => TimerErr;
 }

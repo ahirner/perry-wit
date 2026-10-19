@@ -85,21 +85,15 @@ impl WasiHttpHooks for Documents {
 
 #[tokio::test(flavor = "current_thread")]
 async fn detached_fetch_is_cancelled_before_task_boundary_failure() -> Result<()> {
-    let (resolve, package) = perry_wit::component::wit::resolve_source(
-        "detached.wit",
+    let bytes = crate::world::Compiler::Standard.component(
         "package test:detached; world run {import wasi:http/client@0.3.0; export run:async func()->u32;}",
-    )?;
-    let world = resolve.select_world(&[package], Some("run"))?;
-    let compiled = perry_wit::compile_for_world(
-        "export async function run():Promise<number> {fetch('https://example.test/pending');return 7;}",
+        "run",
         "detached.ts",
-        &resolve,
-        world,
-        true,
+        "export async function run():Promise<number> {fetch('https://example.test/pending');return 7;}",
     )?;
     let (mut store, instance) = wasi_host::instantiate(
         &async_engine()?,
-        &compiled.component.unwrap().stripped,
+        &bytes,
         Host::default().with_hooks(Documents::default()),
     )
     .await?;

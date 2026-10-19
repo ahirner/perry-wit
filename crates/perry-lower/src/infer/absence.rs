@@ -37,50 +37,59 @@ pub(super) fn is_resolvable_type(ty: &HirType) -> bool {
     }
 }
 
-pub(super) fn strip_nullish(ty: HirType) -> (HirType, Vec<HirType>) {
+pub(super) fn strip_nullish(ty: HirType) -> (HirType, Option<Absence>) {
     match ty {
-        HirType::Null => (HirType::Void, vec![HirType::Null]),
-        HirType::Void => (HirType::Void, vec![HirType::Void]),
-        HirType::Union(items) => {
-            let mut defined = Vec::new();
-            let mut absences = Vec::new();
-            for item in items {
-                if matches!(item, HirType::Null | HirType::Void) {
-                    if !absences.contains(&item) {
-                        absences.push(item);
-                    }
-                } else {
-                    defined.push(item);
-                }
-            }
-            let inner = match defined.len() {
+        HirType::Null => (HirType::Void, Some(Absence::Null)),
+        HirType::Void => (HirType::Void, Some(Absence::Undefined)),
+        HirType::Union(mut items) => {
+            let mut absences = None;
+            items.retain(|item| {
+                let state = match item {
+                    HirType::Null => Some(Absence::Null),
+                    HirType::Void => Some(Absence::Undefined),
+                    _ => None,
+                };
+                absences = merge_absence(absences, state);
+                state.is_none()
+            });
+            let inner = match items.len() {
                 0 => HirType::Void,
-                1 => defined.swap_remove(0),
-                _ => HirType::Union(defined),
+                1 => items.swap_remove(0),
+                _ => HirType::Union(items),
             };
             (inner, absences)
         }
-        other => (other, Vec::new()),
+        other => (other, None),
     }
 }
 
-pub(super) fn with_absences(ty: HirType, absences: Vec<HirType>) -> HirType {
-    if absences.is_empty() {
+pub(super) fn without_undefined(states: Option<Absence>) -> Option<Absence> {
+    states
+        .filter(|state| state.admits_null())
+        .map(|_| Absence::Null)
+}
+
+pub(super) fn with_absences(ty: HirType, states: impl Into<Option<Absence>>) -> HirType {
+    let Some(states) = states.into() else {
         return ty;
-    }
-    let (inner, mut existing) = strip_nullish(ty);
-    for a in absences {
-        if !existing.contains(&a) {
-            existing.push(a);
-        }
-    }
+    };
+    let (inner, existing) = strip_nullish(ty);
     if matches!(inner, HirType::Any | HirType::Unknown | HirType::Void) {
         return inner;
     }
+    let states = match existing {
+        Some(existing) if existing != states => Absence::Both,
+        _ => states,
+    };
     let mut items = match inner {
         HirType::Union(members) => members,
         other => vec![other],
     };
-    items.extend(existing);
+    if states.admits_null() {
+        items.push(HirType::Null);
+    }
+    if states.admits_undefined() {
+        items.push(HirType::Void);
+    }
     HirType::Union(items)
 }

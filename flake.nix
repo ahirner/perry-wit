@@ -138,15 +138,9 @@
             mkdir -p "$out/share/doc"
             cp -r target/doc "$out/share/doc/perry-wit"
             mkdir -p "$out/lib/perry-wit-helpers"
-            for f in runtime.wasm runtime-collectible.wasm std.wasm fs.wasm web.wasm search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
-              wasm_file=$(find target -name "$f" -print -quit)
-              if [ -n "$wasm_file" ]; then
-                cp "$wasm_file" "$out/lib/perry-wit-helpers/"
-              else
-                echo "Error: could not find $f in target" >&2
-                exit 1
-              fi
-            done
+            helper_marker=$(find target -path '*/build/perry-wit-*/out/helpers/runtime.wasm' -print -quit)
+            test -n "$helper_marker"
+            cp "$(dirname "$helper_marker")"/*.wasm "$out/lib/perry-wit-helpers/"
           '';
         };
 

@@ -23,13 +23,13 @@ impl FunctionLowering<'_, '_> {
             return params
                 .iter()
                 .zip(mir)
-                .map(|(ty, mir)| self.lift_flat(ctx, ty, *mir, flat))
+                .map(|(ty, mir)| self.lift_abi(ctx, ty, *mir, Canonical::Flat(flat)))
                 .collect();
         }
         let area = flat.pop().context("missing indirect parameter record")?;
         let mut args = Vec::with_capacity(params.len());
         for ((ty, mir), offset) in params.iter().zip(mir).zip(record_offsets(params.iter())) {
-            args.push(self.lift_load(ctx, ty, *mir, area, offset)?);
+            args.push(self.lift_abi(ctx, ty, *mir, Canonical::Memory(area, offset))?);
         }
         if self.state.collectible {
             self.runtime_void(ctx, Runtime::CabiRelease, vec![area]);

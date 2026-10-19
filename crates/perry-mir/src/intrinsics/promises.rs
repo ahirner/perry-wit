@@ -1,5 +1,9 @@
 //! Promise construction, combination and settled-value projections.
 use super::*;
+use crate::operation_schema::op_schema;
+use crate::signatures::{Accepts, OutputContract};
+use crate::types::{PromiseType, SettledType};
+use pliron::r#type::{TypeHandle, TypedHandle};
 
 #[derive(Debug, Error)]
 #[error("perry.promise_combinator takes an array of promises of one type")]
@@ -17,25 +21,24 @@ pub enum Combinator {
     AllSettled,
 }
 
-/// `Promise.all`, `Promise.race` and `Promise.allSettled` of `perry.array<perry.promise<T>>`.
-#[pliron_op(
-    name = "perry.promise_combinator",
-    format = "attr($perry_combinator, $Combinator) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    attributes = (perry_combinator: Combinator)
-)]
-pub struct PromiseCombinatorOp;
-
-impl PromiseCombinatorOp {
-    /// `None` unless `promises` is an array of promises.
-    pub fn new(ctx: &mut Context, combinator: Combinator, promises: Value) -> Option<Self> {
-        use crate::types::PromiseType;
-        let element =
-            pliron::r#type::TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
-                .ok()?
-                .deref(ctx)
-                .element();
-        let value = pliron::r#type::TypedHandle::<PromiseType>::from_handle(element, ctx)
+op_schema! {
+    /// `Promise.all`, `Promise.race` and `Promise.allSettled` of `perry.array<perry.promise<T>>`.
+    pub PromiseCombinatorOp(promises) -> optional;
+    name = "perry.promise_combinator";
+    format = "attr($perry_combinator, $Combinator) ` ` $0 ` : ` type($0)";
+    attributes = (perry_combinator: Combinator);
+    constructors {
+        /// `None` unless `promises` is an array of promises.
+        pub new(combinator: Combinator, promises: Value) => infer(promises, combinator);
+    }
+    attribute(combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => CombinatorErr;
+    prepare(_this) { let combinator = *combinator; }
+    result(ctx, promises: Value, combinator: Combinator): TypeHandle = {
+        let element = TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
+            .ok()?
+            .deref(ctx)
+            .element();
+        let value = TypedHandle::<PromiseType>::from_handle(element, ctx)
             .ok()?
             .deref(ctx)
             .value();
@@ -43,73 +46,51 @@ impl PromiseCombinatorOp {
             Combinator::All => ArrayType::get(ctx, value).into(),
             Combinator::Race => value,
             Combinator::AllSettled => {
-                let settled = crate::types::SettledType::get(ctx, value).into();
+                let settled = SettledType::get(ctx, value).into();
                 ArrayType::get(ctx, settled).into()
             }
         };
-        let result = PromiseType::get(ctx, settled).into();
-        let op = PromiseCombinatorOp {
-            op: Self::new_op(ctx, vec![result], vec![promises]),
-        };
-        op.set_attr_perry_combinator(ctx, combinator);
-        Some(op)
-    }
+        Some(PromiseType::get(ctx, settled).into())
+    };
+    error = CombinatorErr;
+}
 
+impl PromiseCombinatorOp {
     pub fn combinator(&self, ctx: &Context) -> Combinator {
         *self.get_attr_perry_combinator(ctx).expect("combinator")
     }
 }
 
-impl Verify for PromiseCombinatorOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        use crate::types::PromiseType;
-        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
-        let ok = pliron::r#type::TypedHandle::<ArrayType>::from_handle(operand, ctx)
-            .is_ok_and(|a| a.deref(ctx).element().deref(ctx).is::<PromiseType>());
-        if !ok {
-            verify_err!(self.loc(ctx), CombinatorErr)?
-        }
-        Ok(())
-    }
+#[derive(Debug, Error)]
+#[error("{0} has an invalid promise result type")]
+struct PromiseResultErr(&'static str);
+
+op_schema! {
+    /// A promise fulfilled with its operand: a plain value among a combinator's inputs
+    /// (`Promise.all([pending, 1])`).
+    pub PromiseResolvedOp(value) -> infallible;
+    name = "perry.promise_resolved";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(value: Value) => infer(value); }
+    result(ctx, value: Value): TypeHandle =
+        PromiseType::get(ctx, value.get_type(ctx)).into();
+    error = PromiseResultErr("perry.promise_resolved");
 }
 
-/// A promise fulfilled with its operand: a plain value among a combinator's inputs
-/// (`Promise.all([pending, 1])`).
-#[pliron_op(
-    name = "perry.promise_resolved",
-    format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    verifier = "succ"
-)]
-pub struct PromiseResolvedOp;
-
-impl PromiseResolvedOp {
-    pub fn new(ctx: &mut Context, value: Value) -> Self {
-        let ty = value.get_type(ctx);
-        let result = crate::types::PromiseType::get(ctx, ty).into();
-        PromiseResolvedOp {
-            op: Self::new_op(ctx, vec![result], vec![value]),
-        }
+op_schema! {
+    /// A promise rejected with its operand (`Promise.reject(e)`), of `perry.promise<T>` for the
+    /// settled type `T` its context expects.
+    pub PromiseRejectedOp(_reason) -> infallible;
+    name = "perry.promise_rejected";
+    format = "$0 ` : ` type($0)";
+    constructors {
+        pub new(_reason: Value, settled: TypeHandle)
+            => explicit(PromiseType::get(ctx, settled).into());
     }
-}
-
-/// A promise rejected with its operand (`Promise.reject(e)`), of `perry.promise<T>` for the
-/// settled type `T` its context expects.
-#[pliron_op(
-    name = "perry.promise_rejected",
-    format = "$0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    verifier = "succ"
-)]
-pub struct PromiseRejectedOp;
-
-impl PromiseRejectedOp {
-    pub fn new(ctx: &mut Context, reason: Value, settled: pliron::r#type::TypeHandle) -> Self {
-        let result = crate::types::PromiseType::get(ctx, settled).into();
-        PromiseRejectedOp {
-            op: Self::new_op(ctx, vec![result], vec![reason]),
-        }
-    }
+    result(ctx): impl OutputContract = Accepts(|ctx: &Context, ty: TypeHandle| {
+        ty.deref(ctx).is::<PromiseType>()
+    });
+    error = PromiseResultErr("perry.promise_rejected");
 }
 
 #[derive(Debug, Error)]
@@ -128,52 +109,37 @@ pub enum SettledField {
     Reason,
 }
 
-/// `settled.status`, `settled.value` or `settled.reason`.
-#[pliron_op(
-    name = "perry.settled_field",
-    format = "attr($perry_settled_field, $SettledField) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
-    attributes = (perry_settled_field: SettledField)
-)]
-pub struct SettledFieldOp;
-
-impl SettledFieldOp {
-    /// `None` unless `settled` is a `perry.settled` value.
-    pub fn new(ctx: &mut Context, field: SettledField, settled: Value) -> Option<Self> {
-        use crate::types::SettledType;
-        let value =
-            pliron::r#type::TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
-                .ok()?
-                .deref(ctx)
-                .value();
-        let result = match field {
+op_schema! {
+    /// `settled.status`, `settled.value` or `settled.reason`.
+    pub SettledFieldOp(settled) -> optional;
+    name = "perry.settled_field";
+    format = "attr($perry_settled_field, $SettledField) ` ` $0 ` : ` type($0)";
+    attributes = (perry_settled_field: SettledField);
+    constructors {
+        /// `None` unless `settled` is a `perry.settled` value.
+        pub new(field: SettledField, settled: Value) => infer(settled, field);
+    }
+    attribute(field, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => SettledErr;
+    prepare(_this) { let field = *field; }
+    result(ctx, settled: Value, field: SettledField): TypeHandle = {
+        let value = TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
+            .ok()?
+            .deref(ctx)
+            .value();
+        Some(match field {
             SettledField::Status => StringType::get(ctx).into(),
             SettledField::Value => OptionalType::get(ctx, value).into(),
             SettledField::Reason => {
                 let exception = ExceptionType::get(ctx).into();
                 OptionalType::get(ctx, exception).into()
             }
-        };
-        let op = SettledFieldOp {
-            op: Self::new_op(ctx, vec![result], vec![settled]),
-        };
-        op.set_attr_perry_settled_field(ctx, field);
-        Some(op)
-    }
+        })
+    };
+    error = SettledErr;
+}
 
+impl SettledFieldOp {
     pub fn field(&self, ctx: &Context) -> SettledField {
         *self.get_attr_perry_settled_field(ctx).expect("field")
     }
 }
-
-impl Verify for SettledFieldOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
-        if !operand.deref(ctx).is::<crate::types::SettledType>() {
-            verify_err!(self.loc(ctx), SettledErr)?
-        }
-        Ok(())
-    }
-}
-
-side_effects!(false; SettledFieldOp);

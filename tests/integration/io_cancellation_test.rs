@@ -1,6 +1,6 @@
 //! Native filesystem operations retain their arguments and result storage across callbacks.
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
-use perry_wit::{compiler::compile_for_world_with_memory_checks, component::wit::resolve_wit};
 use wasmtime::component::Component;
 use wasmtime_wasi::{FsPerms, WasiCtx};
 
@@ -14,17 +14,14 @@ use crate::wasi_host::{self, Host};
 mod transfers;
 
 fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(
-        directory.path().join("world.wit"),
-        format!(
+    MemoryChecked.component(
+        &format!(
             "package test:filesystem; world filesystem {{ import wasi:filesystem/types@0.3.0; import wasi:filesystem/preopens@0.3.0; import wasi:cli/stderr@0.3.0; {exports} }}"
         ),
-    )?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("filesystem"))?;
-    let compiled = compile_for_world_with_memory_checks(source, "filesystem.ts", &resolve, world)?;
-    Ok(compiled.component.unwrap().stripped)
+        "filesystem",
+        "filesystem.ts",
+        source,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -186,22 +183,16 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
     use std::sync::atomic::Ordering;
     let engine = async_engine()?;
     for (channel, method) in [("stdout", "log"), ("stderr", "error")] {
-        let directory = tempfile::tempdir()?;
-        std::fs::write(
-            directory.path().join("world.wit"),
-            "package test:cancel; world worker { import wasi:cli/stdout@0.3.0; import wasi:cli/stderr@0.3.0; export run: async func(); }",
-        )?;
-        let (resolve, package) = resolve_wit(directory.path())?;
-        let world = resolve.select_world(&[package], Some("worker"))?;
         let source = format!(
             "export async function run(): Promise<void> {{ console.{method}('{}'); console.{method}('queued'); }}",
             "é🙂".repeat(20000)
         );
-        let worker =
-            compile_for_world_with_memory_checks(&source, "cancel-output.ts", &resolve, world)?
-                .component
-                .unwrap()
-                .stripped;
+        let worker = MemoryChecked.component(
+            "package test:cancel; world worker { import wasi:cli/stdout@0.3.0; import wasi:cli/stderr@0.3.0; export run: async func(); }",
+            "worker",
+            "cancel-output.ts",
+            &source,
+        )?;
         let caller = cancellation::cancellation_caller(&worker, false)?;
         wasmparser::Validator::new().validate_all(&caller)?;
         let component = Component::new(&engine, caller)?;

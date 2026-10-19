@@ -4,9 +4,7 @@ use perry_parser::swc_ecma_ast as ast;
 use swc_common::{DUMMY_SP, SyntaxContext};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-const PUSH: &str = "$$perryArrayPush";
-const CONCAT: &str = "$$perryArrayConcat";
-const METHOD_PREFIX: &str = "$$perryMethod_";
+use crate::methods::{CONCAT, METHOD_PREFIX, PUSH};
 
 fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
     Box::new(ast::Expr::Call(ast::CallExpr {
@@ -123,19 +121,13 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
             if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
+                && let Some(name) = crate::methods::Method::rewrite(
+                    method.sym.as_ref(),
+                    call.args.len(),
+                    call.args.iter().any(|argument| argument.spread.is_some()),
+                )
             {
-                if method.sym == "concat"
-                    || (method.sym == "push"
-                        && (call.args.len() != 1
-                            || call.args.iter().any(|argument| argument.spread.is_some())))
-                {
-                    method.sym = if method.sym == "concat" { CONCAT } else { PUSH }.into();
-                } else if crate::methods::Method::parse(method.sym.as_ref())
-                    .is_some_and(|method| method.preserve())
-                    || (method.sym.as_ref() == "toString" && !call.args.is_empty())
-                {
-                    method.sym = format!("{METHOD_PREFIX}{}", method.sym).into();
-                }
+                method.sym = name.into();
             }
         }
     }

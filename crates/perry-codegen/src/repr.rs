@@ -1,14 +1,7 @@
 //! How MIR types are represented in Wasm values and memory slots.
 pub(crate) use crate::values::Carriers;
 use anyhow::{Result, bail};
-use perry_mir::{
-    AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
-    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonType,
-    NumberStringType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,
-    ReadableType, ReaderType, RecordType, RegexType, RequestType, ResourceType, ResponseType,
-    SearchParamsType, SettledType, SlotType, StatsType, StringType, TransferType, UrlType,
-    VariantType, WritableType, WriterType,
-};
+use perry_mir::{ByteInputType, OptionalType, PromiseType, SlotType, TransferType, ValueKind};
 use pliron::{
     builtin::{
         attributes::FPDoubleAttr,
@@ -69,41 +62,9 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
             width => bail!("integers of width {width} are not supported"),
         };
     }
-    if deref.is::<InstantType>()
-        || deref.is::<PlainDateType>()
-        || deref.is::<PlainDateTimeType>()
-        || deref.is::<DateType>()
-        || deref.is::<RecordType>()
-        || deref.is::<VariantType>()
-        || deref.is::<ResourceType>()
-        || deref.is::<NumberStringType>()
-        || deref.is::<RegexType>()
-        || deref.is::<DecoderType>()
-        || deref.is::<BigIntType>()
-        || deref.is::<ArrayType>()
-        || deref.is::<StringType>()
+    if ValueKind::of(ctx, ty).is_some()
         || deref.is::<PromiseType>()
-        || deref.is::<SettledType>()
-        || deref.is::<StatsType>()
-        || deref.is::<HeadersType>()
-        || deref.is::<ResponseType>()
-        || deref.is::<RequestType>()
-        || deref.is::<WritableType>()
-        || deref.is::<WriterType>()
-        || deref.is::<ReadableType>()
-        || deref.is::<ReaderType>()
-        || deref.is::<ByobReaderType>()
-        || deref.is::<ByteBufferType>()
-        || deref.is::<ReadResultType>()
-        || deref.is::<IncomingType>()
-        || deref.is::<AbortType>()
-        || deref.is::<ExceptionType>()
-        || deref.is::<BytesType>()
         || deref.is::<ByteInputType>()
-        || deref.is::<UrlType>()
-        || deref.is::<SearchParamsType>()
-        || deref.is::<JsonType>()
-        || deref.is::<perry_mir::JsonCursorType>()
         || deref.is::<TransferType>()
         || deref.is::<SlotType>()
     {

@@ -1,75 +1,7 @@
 use super::*;
+use crate::inline::InlineResult;
 
 impl<'s> FunctionBuilder<'s> {
-    /// `return` inside the innermost array callback: store the result and leave for its `done`
-    /// block through the callback's own `finally` bodies.
-    pub(crate) fn callback_return(
-        &mut self,
-        ctx: &mut Context,
-        expression: Option<&'s Expr>,
-    ) -> Result<()> {
-        let Some(mut callback) = self.callback_returns.pop() else {
-            bail!("return outside an array callback")
-        };
-        // The frame is off the stack only while the result is stored: a `finally` body run
-        // below may itself `return` from this callback.
-        let stored = self.store_callback_result(ctx, &mut callback, expression);
-        let done = callback.done;
-        self.callback_returns.push(callback);
-        stored?;
-        self.run_finallies(ctx, |_| true)?;
-        self.jump(ctx, done);
-        self.after_terminator(ctx);
-        Ok(())
-    }
-
-    /// Store a returned value in the callback's slot, created by the first typed return.
-    /// An untyped `return;` before that is recorded and patched once the slot exists.
-    fn store_callback_result(
-        &mut self,
-        ctx: &mut Context,
-        callback: &mut CallbackReturn,
-        expression: Option<&'s Expr>,
-    ) -> Result<()> {
-        if callback.slot.is_none() && matches!(expression, None | Some(Expr::Undefined)) {
-            callback.empty_returns.push(self.block);
-            let finally = self.new_block(ctx, "callback_empty_return");
-            self.jump(ctx, finally);
-            self.switch_to(finally);
-            return Ok(());
-        }
-        let existing = callback
-            .slot
-            .map(|slot| self.slot_type(ctx, slot).map(|ty| (slot, ty)))
-            .transpose()?;
-        let expected = existing.map(|(_, ty)| ty);
-        let value = match (expression, expected) {
-            (Some(expression), _) => self.expression_with(ctx, expression, expected)?,
-            (None, Some(ty)) => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
-            (None, None) => {
-                let ty = FP64Type::get(ctx).into();
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-            }
-        };
-        let (slot, ty) = match existing {
-            Some(existing) => existing,
-            None => {
-                let value_type = value.get_type(ctx);
-                let ty = if callback.optional {
-                    OptionalType::get(ctx, value_type).into()
-                } else {
-                    value_type
-                };
-                let slot = self.entry_slot(ctx, ty);
-                callback.slot = Some(slot);
-                (slot, ty)
-            }
-        };
-        let value = self.fit(ctx, value, ty)?;
-        self.store(ctx, slot, value);
-        Ok(())
-    }
-
     /// Apply an array callback (a named function or an inline closure) to `arguments`; an
     /// inline closure's body is lowered in place, its `return`s leaving to a `done` block.
     pub(crate) fn array_callback(
@@ -85,13 +17,17 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::FuncRef(id) = callback {
             let signature = self.signatures.get(id).context("unknown callback")?;
             ensure!(
-                !signature.is_async && signature.params.len() <= arguments.len(),
-                "array callbacks require synchronous functions with at most three parameters"
+                !signature.is_async && signature.params.iter().all(|p| !p.source.is_rest),
+                "array callbacks require synchronous functions without rest parameters"
             );
-            let values = arguments
+            let values = signature
+                .params
                 .iter()
-                .zip(&signature.params)
-                .map(|(&v, param)| self.fit(ctx, v, param.binding.carrier))
+                .enumerate()
+                .map(|(index, param)| match arguments.get(index) {
+                    Some(&value) => self.fit(ctx, value, param.binding.carrier),
+                    None => self.bind_fixed_arg(ctx, param, None),
+                })
                 .collect::<Result<Vec<_>>>()?;
             let call = CallOp::new(
                 ctx,
@@ -119,60 +55,44 @@ impl<'s> FunctionBuilder<'s> {
             bail!("array callbacks require an inline closure or named function")
         };
         ensure!(
-            !is_async
-                && !is_generator
-                && params.len() <= arguments.len()
-                && params.iter().all(|p| !p.is_rest),
-            "array callbacks must be synchronous with at most three parameters; rest parameters are not supported"
+            !is_async && !is_generator && params.iter().all(|p| !p.is_rest),
+            "array callbacks must be synchronous; rest parameters are not supported"
         );
         let saved_locals = self.locals.scope();
         let saved_closures = self.closures.scope();
         // Guards only grow above this length inside the body; branches truncate back.
         let guards = self.variant_guards.len();
-        for (param, &value) in params.iter().zip(arguments) {
+        for (index, param) in params.iter().enumerate() {
+            let value = match arguments.get(index) {
+                Some(&value) => value,
+                None => {
+                    let ty = self.shapes.value_type(ctx, &param.ty)?;
+                    ensure!(
+                        param.default.is_some() || admits_undefined(ctx, ty),
+                        "missing required callback argument"
+                    );
+                    let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                }
+            };
             self.bind_inline_parameter(ctx, param, value, None)?;
         }
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
-        let done = self.new_block(ctx, "callback_done");
-        let optional = completions(body) & (FALLTHROUGH | EMPTY_RETURN) != 0;
         let declared = match return_type {
             HirType::Number | HirType::String | HirType::Boolean | HirType::Union(_) => {
                 self.shapes.value_type(ctx, return_type).ok()
             }
             _ => None,
         };
-        let slot = declared.map(|ty| {
-            let ty = if optional {
-                OptionalType::get(ctx, ty).into()
-            } else {
-                ty
-            };
-            self.entry_slot(ctx, ty)
-        });
-        self.callback_returns.push(CallbackReturn {
-            done,
-            slot,
-            optional,
-            empty_returns: Vec::new(),
-        });
-        let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
-        let mut result = self.statements(ctx, body);
-        if result.is_ok() && self.reachable(ctx, self.block) {
-            result = self.callback_return(ctx, None);
-        }
+        let result_type = declared.map_or(InlineResult::Inferred, InlineResult::Declared);
+        let result = self.inline_body(ctx, body, params, result_type);
         self.locals.restore(saved_locals);
         self.closures.restore(saved_closures);
         self.variant_guards.truncate(guards);
         self.finallies = finallies;
         self.controls = controls;
-        // Pushes and pops are balanced, so this is the frame pushed above.
-        let callback = self
-            .callback_returns
-            .pop()
-            .context("array callback frame")?;
-        result?;
-        let slot = self.finish_inline_return(ctx, callback, false)?;
+        let slot = result?;
         match slot {
             Some(slot) => self.load(ctx, slot),
             None => {

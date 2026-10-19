@@ -16,15 +16,23 @@ pub(super) fn rewrite_implementation(
     rewriter: &mut IRRewriter<DummyListener>,
     implementations: &Implementations,
     implementation: &Implementation,
+    plan: &ContextPlan,
 ) -> Result<()> {
     let id = implementation.primary_context;
     let mapping = &implementation.mapping;
     let state = &analysis.states[id];
     let body = &analysis.bodies[&analysis.keys[id].function];
-    retype_values(ctx, analysis, id, mapping)?;
+    for value in &plan.body.values {
+        if !body.parameters.contains(&value.value) {
+            mapping
+                .lookup_value(value.value)
+                .expect("cloned value")
+                .set_type(ctx, value.ty);
+        }
+    }
     let mut expected = Vec::new();
     for &constraint in &body.constraints {
-        let Constraint::Op { op: original, .. } = constraint else {
+        let Constraint::Op { op: original, kind } = constraint else {
             continue;
         };
         let op = mapping.lookup_op(original).expect("cloned operation");
@@ -45,51 +53,11 @@ pub(super) fn rewrite_implementation(
             state,
             implementations,
             implementation,
-            original,
+            (original, kind),
             op,
             &mut expected,
         )?;
         coerce_operands(ctx, rewriter, analysis, state, original, op, &expected);
-    }
-    Ok(())
-}
-
-/// Gives every cloned non-parameter value its integer representation or specialized type.
-fn retype_values(
-    ctx: &mut Context,
-    analysis: &ProgramFacts,
-    id: usize,
-    mapping: &IrMapping,
-) -> Result<()> {
-    let state = &analysis.states[id];
-    let body = &analysis.bodies[&analysis.keys[id].function];
-    let values = state.facts.keys().chain(
-        state
-            .heap_values
-            .keys()
-            .filter(|value| !state.facts.contains_key(value)),
-    );
-    for &value in values {
-        if body.parameters.contains(&value) {
-            continue;
-        }
-        if can_specialize_value(ctx, state, value)
-            && let Some(domain) = state.representation(value)
-        {
-            let cloned = mapping.lookup_value(value).expect("cloned value");
-            let scalar = domain.ty(ctx);
-            let ty = if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
-                PromiseType::get(ctx, scalar).into()
-            } else {
-                scalar
-            };
-            cloned.set_type(ctx, ty);
-        } else if !value.get_type(ctx).deref(ctx).is::<PromiseType>()
-            && let Some(spec_ty) = analysis.specialized_value_type(ctx, id, value)?
-        {
-            let cloned = mapping.lookup_value(value).expect("cloned value");
-            cloned.set_type(ctx, spec_ty);
-        }
     }
     Ok(())
 }
@@ -122,7 +90,7 @@ fn replace_with_scalar(
         && (Integer::from_type(ctx, value.get_type(ctx)).is_some()
             || state.representation(orig_arg).is_some())
         && (intrinsic == crate::intrinsics::Intrinsic::BigIntToNumber
-            || intrinsic.numeric_contract() == Some(crate::intrinsics::BuiltinContract::Round))
+            || intrinsic.policy().numeric == Some(crate::intrinsics::BuiltinContract::Round))
         && (intrinsic == crate::intrinsics::Intrinsic::BigIntToNumber
             || Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx)).is_some())
     {
@@ -253,7 +221,7 @@ fn operand_types(
     state: &super::super::State,
     implementations: &Implementations,
     implementation: &Implementation,
-    original: Ptr<Operation>,
+    (original, kind): (Ptr<Operation>, crate::semantics::OperationKind),
     op: Ptr<Operation>,
     expected: &mut Vec<TypeHandle>,
 ) -> Result<()> {
@@ -290,7 +258,7 @@ fn operand_types(
         let result = op.deref(ctx).get_result(0);
         result.set_type(ctx, payload);
         expected[0] = promise;
-    } else if let Some(index) = promise_payload(ctx, original) {
+    } else if let Some(index) = kind.promise_payload() {
         expected[index] = TypedHandle::<PromiseType>::from_handle(result_ty(ctx), ctx)?
             .deref(ctx)
             .value();

@@ -39,167 +39,29 @@ pub(super) fn admitting(
     perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
-    BigInt,
-    Url,
-    SearchParams,
-    Number,
-    Boolean,
-    String,
-    Record,
-    Variant,
-    NumberString,
-    Resource,
-    Array,
-    Exception,
-    Bytes,
-    ByteBuffer,
-    ByobReader,
-    Json,
-    Date,
-    Decoder,
-    Regex,
-    Settled,
-    Stats,
-    Headers,
-    Response,
-    Request,
-    Writable,
-    Writer,
-    Readable,
-    Reader,
-    ReadResult,
-    Incoming,
-    Abort,
-    Instant,
-    PlainDate,
-    PlainDateTime,
-}
-
-impl Kind {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Kind::BigInt => "bigint",
-            Kind::Url => "URL",
-            Kind::SearchParams => "URLSearchParams",
-            Kind::Number => "number",
-            Kind::Boolean => "boolean",
-            Kind::String => "string",
-            Kind::Record => "record",
-            Kind::Variant => "variant",
-            Kind::NumberString => "number | string",
-            Kind::Resource => "WIT resource",
-            Kind::Array => "array",
-            Kind::Exception => "Error",
-            Kind::Bytes => "Uint8Array",
-            Kind::ByteBuffer => "ArrayBuffer",
-            Kind::ByobReader => "ReadableStreamBYOBReader",
-            Kind::Json => "JSON value",
-            Kind::Date => "Date",
-            Kind::Decoder => "TextDecoder",
-            Kind::Regex => "RegExp",
-            Kind::Settled => "PromiseSettlementResult",
-            Kind::Stats => "Stats",
-            Kind::Headers => "Headers",
-            Kind::Response => "Response",
-            Kind::Request => "Request",
-            Kind::Writable => "WritableStream",
-            Kind::Writer => "WritableStreamDefaultWriter",
-            Kind::Readable => "ReadableStream",
-            Kind::Reader => "ReadableStreamDefaultReader",
-            Kind::ReadResult => "ReadableStreamReadResult",
-            Kind::Incoming => "IncomingRequest",
-            Kind::Abort => "AbortController",
-            Kind::Instant => "Temporal.Instant",
-            Kind::PlainDate => "Temporal.PlainDate",
-            Kind::PlainDateTime => "Temporal.PlainDateTime",
-        }
+pub(super) fn expression_hint(ctx: &mut Context, expr: &Expr, base: TypeHandle) -> TypeHandle {
+    match expr {
+        Expr::Null => admitting(ctx, base, perry_mir::Absence::Null),
+        Expr::Undefined => admitting(ctx, base, perry_mir::Absence::Undefined),
+        _ => base,
     }
 }
+
+pub(super) fn merged_type(
+    ctx: &Context,
+    base: TypeHandle,
+    left: TypeHandle,
+    right: TypeHandle,
+) -> TypeHandle {
+    merge_absence(absence(ctx, left), absence(ctx, right)).map_or(base, |states| {
+        perry_mir::OptionalType::get_with(ctx, present_type(ctx, base), states).into()
+    })
+}
+
+pub(super) use perry_mir::ValueKind as Kind;
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
-    let ty = value.get_type(ctx);
-    let ty = ty.deref(ctx);
-    if ty.is::<perry_mir::BigIntType>() {
-        Ok(Kind::BigInt)
-    } else if ty.is::<FP64Type>() {
-        Ok(Kind::Number)
-    } else if ty.is::<StringType>() {
-        Ok(Kind::String)
-    } else if ty.is::<perry_mir::ResourceType>() {
-        Ok(Kind::Resource)
-    } else if ty.is::<perry_mir::NumberStringType>() {
-        Ok(Kind::NumberString)
-    } else if ty.is::<perry_mir::VariantType>() {
-        Ok(Kind::Variant)
-    } else if ty.is::<RecordType>() {
-        Ok(Kind::Record)
-    } else if ty.is::<ArrayType>() {
-        Ok(Kind::Array)
-    } else if ty.is::<ExceptionType>() {
-        Ok(Kind::Exception)
-    } else if ty.is::<BytesType>() {
-        Ok(Kind::Bytes)
-    } else if ty.is::<perry_mir::UrlType>() {
-        Ok(Kind::Url)
-    } else if ty.is::<perry_mir::SearchParamsType>() {
-        Ok(Kind::SearchParams)
-    } else if ty.is::<JsonType>() {
-        Ok(Kind::Json)
-    } else if ty.is::<perry_mir::RegexType>() {
-        Ok(Kind::Regex)
-    } else if ty.is::<perry_mir::DecoderType>() {
-        Ok(Kind::Decoder)
-    } else if ty.is::<DateType>() {
-        Ok(Kind::Date)
-    } else if ty.is::<SettledType>() {
-        Ok(Kind::Settled)
-    } else if ty.is::<StatsType>() {
-        Ok(Kind::Stats)
-    } else if ty.is::<HeadersType>() {
-        Ok(Kind::Headers)
-    } else if ty.is::<ResponseType>() {
-        Ok(Kind::Response)
-    } else if ty.is::<RequestType>() {
-        Ok(Kind::Request)
-    } else if ty.is::<WritableType>() {
-        Ok(Kind::Writable)
-    } else if ty.is::<WriterType>() {
-        Ok(Kind::Writer)
-    } else if ty.is::<ReadableType>() {
-        Ok(Kind::Readable)
-    } else if ty.is::<perry_mir::ByteBufferType>() {
-        Ok(Kind::ByteBuffer)
-    } else if ty.is::<perry_mir::ByobReaderType>() {
-        Ok(Kind::ByobReader)
-    } else if ty.is::<ReaderType>() {
-        Ok(Kind::Reader)
-    } else if ty.is::<InstantType>() {
-        Ok(Kind::Instant)
-    } else if ty.is::<PlainDateType>() {
-        Ok(Kind::PlainDate)
-    } else if ty.is::<PlainDateTimeType>() {
-        Ok(Kind::PlainDateTime)
-    } else if ty.is::<AbortType>() {
-        Ok(Kind::Abort)
-    } else if ty.is::<IncomingType>() {
-        Ok(Kind::Incoming)
-    } else if ty.is::<ReadResultType>() {
-        Ok(Kind::ReadResult)
-    } else if ty
-        .downcast_ref::<IntegerType>()
-        .is_some_and(|int| int.width() == 64)
-    {
-        Ok(Kind::BigInt)
-    } else if ty
-        .downcast_ref::<IntegerType>()
-        .is_some_and(|int| int.width() == 1)
-    {
-        Ok(Kind::Boolean)
-    } else {
-        bail!("unsupported value type in expression")
-    }
+    Kind::of(ctx, value.get_type(ctx)).context("unsupported value type in expression")
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -242,6 +104,26 @@ impl<'s> FunctionBuilder<'s> {
         }
         let op = UnwrapOp::new(ctx, value)?;
         Ok(self.append_value(ctx, &op))
+    }
+
+    /// Dispatch an optional value, unwrapping only on its present branch.
+    pub(super) fn match_optional(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        target: TypeHandle,
+        undefined: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        null: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        present: impl FnOnce(&mut Self, &mut Context, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let is_undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+        self.choose(ctx, target, is_undefined, undefined, |b, ctx| {
+            let is_null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+            b.choose(ctx, target, is_null, null, |b, ctx| {
+                let defined = b.defined(ctx, value)?;
+                present(b, ctx, defined)
+            })
+        })
     }
 
     /// View `value` with `undefined` excluded from its absence states (after a `!== undefined` check).
@@ -313,56 +195,7 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         if ty.deref(ctx).is::<JsonType>() && ty != target {
-            if let Some((inner, states)) = optional_parts(ctx, target) {
-                let convert = |b: &mut Self, ctx: &mut Context| {
-                    let converted = b.fit(ctx, value, inner)?;
-                    b.fit(ctx, converted, target)
-                };
-                let null_or_value = |b: &mut Self, ctx: &mut Context| {
-                    if states.admits_null() {
-                        let null = b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![value]);
-                        b.choose(
-                            ctx,
-                            target,
-                            null,
-                            |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target))),
-                            convert,
-                        )
-                    } else {
-                        convert(b, ctx)
-                    }
-                };
-                return if states.admits_undefined() {
-                    let undefined = self.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![value]);
-                    self.choose(
-                        ctx,
-                        target,
-                        undefined,
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, target))),
-                        null_or_value,
-                    )
-                } else {
-                    null_or_value(self, ctx)
-                };
-            }
-            let intrinsic = if target.deref(ctx).is::<FP64Type>() {
-                Intrinsic::JsonRequireNumber
-            } else if target.deref(ctx).is::<StringType>() {
-                Intrinsic::JsonToString
-            } else if self.is_bool_type(ctx, target) {
-                Intrinsic::JsonToBool
-            } else if let Some(int) = target.deref(ctx).downcast_ref::<IntegerType>()
-                && int.width() == 64
-            {
-                if int.is_signed() {
-                    Intrinsic::JsonToI64
-                } else {
-                    Intrinsic::JsonToU64
-                }
-            } else {
-                return self.decode_aggregate(ctx, value, target);
-            };
-            return Ok(self.intrinsic(ctx, intrinsic, vec![value]));
+            return self.decode_json(ctx, value, target);
         }
         let thrown = present_type(ctx, ty);
         let wanted = present_type(ctx, target);
@@ -439,10 +272,11 @@ impl<'s> FunctionBuilder<'s> {
             let source = present_type(ctx, ty);
             let wanted = present_type(ctx, target);
             if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
-                && let Some((dst_rec, fields)) = record_projection(ctx, source, wanted)
-                && (!fields.is_empty() || self.shapes.class_of_type(ctx, wanted).is_some())
+                && let Some(dst_rec) = record_projection(ctx, source, wanted)
+                && (!dst_rec.deref(ctx).fields()?.is_empty()
+                    || self.shapes.class_of_type(ctx, wanted).is_some())
             {
-                return self.project_record(ctx, value, ty == source, dst_rec, fields, target);
+                return self.project_record(ctx, value, ty == source, dst_rec, target);
             }
             let code =
                 if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
@@ -462,58 +296,6 @@ impl<'s> FunctionBuilder<'s> {
             )
             .into())
         }
-    }
-
-    /// Build a `dst_rec` from the matching fields of record `value` (already defined when
-    /// `defined`); members outside the target's declaration carry over as JSON extras.
-    fn project_record(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        defined: bool,
-        dst_rec: TypedHandle<RecordType>,
-        fields: Vec<ProjectedField>,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        let rec_val = if defined {
-            value
-        } else {
-            self.defined(ctx, value)?
-        };
-        let mut projected = Vec::with_capacity(fields.len());
-        for (name, src_ty, dst_ty) in fields {
-            let field = if optional_value(ctx, src_ty).is_some() && admits_undefined(ctx, dst_ty) {
-                let present = perry_mir::FieldPresentOp::new(ctx, rec_val, name.clone())?;
-                let present = self.append_value(ctx, &present);
-                self.choose(
-                    ctx,
-                    dst_ty,
-                    present,
-                    |b, ctx| {
-                        let op = FieldGetOp::new(ctx, rec_val, name.clone())?;
-                        let raw = b.field_read(ctx, &op)?;
-                        b.fit(ctx, raw, dst_ty)
-                    },
-                    |b, ctx| {
-                        Ok(b.emit_value(ctx, |ctx| perry_mir::OmittedOp::with_type(ctx, dst_ty)))
-                    },
-                )
-            } else {
-                let op = FieldGetOp::new(ctx, rec_val, name.clone())?;
-                let raw = self.field_read(ctx, &op)?;
-                self.fit(ctx, raw, dst_ty)
-            };
-            projected.push(field.with_context(|| {
-                format!("record field {name} cannot become {}", dst_ty.disp(ctx))
-            })?);
-        }
-        let projected = self.emit_value(ctx, |ctx| {
-            let alloc = AllocOp::new(ctx, dst_rec, projected);
-            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
-            alloc
-        });
-        self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![projected, rec_val]);
-        self.fit(ctx, projected, target)
     }
 
     /// An expression that must be a string (`undefined` throws `TypeError`).
@@ -536,12 +318,6 @@ impl<'s> FunctionBuilder<'s> {
             "array indices must be numbers"
         );
         Ok(index)
-    }
-
-    pub(super) fn is_bool_type(&self, ctx: &Context, ty: TypeHandle) -> bool {
-        ty.deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|int| int.width() == 1)
     }
 
     /// An expression used as a number (`undefined` becomes `NaN`).
@@ -596,24 +372,14 @@ impl<'s> FunctionBuilder<'s> {
             if inner.deref(ctx).is::<StringType>() {
                 return Ok(self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value)));
             }
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-            return self.choose_string(
+            let ty = StringType::get(ctx).into();
+            return self.match_optional(
                 ctx,
-                undefined,
+                value,
+                ty,
                 |b, ctx| Ok(b.string(ctx, "undefined")),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
-                    b.choose_string(
-                        ctx,
-                        null,
-                        |b, ctx| Ok(b.string(ctx, "null")),
-                        |b, ctx| {
-                            let op = UnwrapOp::new(ctx, value)?;
-                            let defined = b.append_value(ctx, &op);
-                            b.display_as(ctx, defined, mode)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.string(ctx, "null")),
+                |b, ctx, defined| b.display_as(ctx, defined, mode),
             );
         }
         Ok(match kind(ctx, value)? {
@@ -666,23 +432,14 @@ impl<'s> FunctionBuilder<'s> {
     /// `typeof value`, including the active case of a closed primitive union.
     pub(super) fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if optional_value(ctx, value.get_type(ctx)).is_some() {
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-            return self.choose_string(
+            let ty = StringType::get(ctx).into();
+            return self.match_optional(
                 ctx,
-                undefined,
+                value,
+                ty,
                 |b, ctx| Ok(b.string(ctx, "undefined")),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
-                    b.choose_string(
-                        ctx,
-                        null,
-                        |b, ctx| Ok(b.string(ctx, "object")),
-                        |b, ctx| {
-                            let defined = b.defined(ctx, value)?;
-                            b.type_of(ctx, defined)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.string(ctx, "object")),
+                |b, ctx, defined| b.type_of(ctx, defined),
             );
         }
         let name = match kind(ctx, value)? {
@@ -702,36 +459,27 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-/// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
-/// A target record field: its name, its type in the source record and in the target.
-type ProjectedField = (String, TypeHandle, TypeHandle);
-
-/// The target record of a projection from record `source` to record `wanted` and each of its
-/// fields, when both are named records and the source has every target field.
+/// A named destination record whose fields all exist in the named source record.
 fn record_projection(
     ctx: &Context,
     source: TypeHandle,
     wanted: TypeHandle,
-) -> Option<(TypedHandle<RecordType>, Vec<ProjectedField>)> {
+) -> Option<TypedHandle<RecordType>> {
     let src_rec = TypedHandle::<RecordType>::from_handle(source, ctx).ok()?;
     let dst_rec = TypedHandle::<RecordType>::from_handle(wanted, ctx).ok()?;
     let (src, dst) = (src_rec.deref(ctx), dst_rec.deref(ctx));
     if src.is_tuple() || dst.is_tuple() {
         return None;
     }
-    let src_fields = src.fields().ok()?;
-    let fields = dst
-        .fields()
+    let fields = src.fields().ok()?;
+    dst.fields()
         .ok()?
         .iter()
-        .map(|(name, dst_ty)| {
-            let (_, src_ty) = src_fields.iter().find(|(s, _)| s == name)?;
-            Some((name.clone(), *src_ty, *dst_ty))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some((dst_rec, fields))
+        .all(|(name, _)| fields.iter().any(|(source, _)| source == name))
+        .then_some(dst_rec)
 }
 
+/// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
 pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
     let number = FP64Type::get(ctx).into();
     perry_mir::OptionalType::get(ctx, number).into()

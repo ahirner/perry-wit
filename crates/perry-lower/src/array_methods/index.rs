@@ -25,56 +25,53 @@ impl<'s> FunctionBuilder<'s> {
                 self.display(ctx, val)?
             }
         };
-        let len = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let str_ty = StringType::get(ctx).into();
         let empty = self.string(ctx, "");
         let acc_slot = self.entry_slot(ctx, str_ty);
         self.store(ctx, acc_slot, empty);
-        self.index_loop(ctx, "join", zero, len, |b, ctx, step, next, _| {
-            let available = b.array_length(ctx, array);
-            let present = b.compare(ctx, CompareKind::Lt, step, available);
-            let read = b.new_block(ctx, "join_read");
-            b.branch(ctx, present, read, next);
-            b.switch_to(read);
-            let item = b.element_at(ctx, array, step)?;
-            let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
-                let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
-                b.choose_string(
+        self.iterate(
+            ctx,
+            Input::Array(array, Holes::Skip),
+            |b, ctx, item, step, _, _| {
+                let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
+                    let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
+                    b.choose_string(
+                        ctx,
+                        undefined,
+                        |b, ctx| Ok(b.string(ctx, "")),
+                        |b, ctx| {
+                            let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, item));
+                            b.choose_string(
+                                ctx,
+                                null,
+                                |b, ctx| Ok(b.string(ctx, "")),
+                                |b, ctx| {
+                                    let defined = b.defined(ctx, item)?;
+                                    b.display(ctx, defined)
+                                },
+                            )
+                        },
+                    )?
+                } else {
+                    b.display(ctx, item)?
+                };
+                let gt_zero = b.compare(ctx, CompareKind::Gt, step, zero);
+                let prefix = b.choose(
                     ctx,
-                    undefined,
-                    |b, ctx| Ok(b.string(ctx, "")),
+                    str_ty,
+                    gt_zero,
                     |b, ctx| {
-                        let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, item));
-                        b.choose_string(
-                            ctx,
-                            null,
-                            |b, ctx| Ok(b.string(ctx, "")),
-                            |b, ctx| {
-                                let defined = b.defined(ctx, item)?;
-                                b.display(ctx, defined)
-                            },
-                        )
+                        let prev = b.load(ctx, acc_slot)?;
+                        Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prev, sep)))
                     },
-                )?
-            } else {
-                b.display(ctx, item)?
-            };
-            let gt_zero = b.compare(ctx, CompareKind::Gt, step, zero);
-            let prefix = b.choose(
-                ctx,
-                str_ty,
-                gt_zero,
-                |b, ctx| {
-                    let prev = b.load(ctx, acc_slot)?;
-                    Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prev, sep)))
-                },
-                |b, ctx| b.load(ctx, acc_slot),
-            )?;
-            let next_str = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prefix, elem_str));
-            b.store(ctx, acc_slot, next_str);
-            Ok(())
-        })?;
+                    |b, ctx| b.load(ctx, acc_slot),
+                )?;
+                let next_str = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prefix, elem_str));
+                b.store(ctx, acc_slot, next_str);
+                Ok(())
+            },
+        )?;
         self.load(ctx, acc_slot)
     }
 
@@ -109,7 +106,7 @@ impl<'s> FunctionBuilder<'s> {
         end: Option<&'s Expr>,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
-        let elem_ty = self.array_element(ctx, array)?;
+        self.array_element(ctx, array)?;
         let len = self.array_length(ctx, array);
         let norm_start = match start {
             None | Some(Expr::Undefined) => self.number(ctx, 0.0),
@@ -125,24 +122,19 @@ impl<'s> FunctionBuilder<'s> {
                 self.normalize_slice_bound(ctx, e, len)?
             }
         };
-        let result = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        self.index_loop(
+        self.collect_items(
             ctx,
-            "slice",
-            norm_start,
-            norm_end,
-            |b, ctx, step, next, _| {
-                let available = b.array_length(ctx, array);
-                let present = b.compare(ctx, CompareKind::Lt, step, available);
-                let read = b.new_block(ctx, "slice_read");
-                b.branch(ctx, present, read, next);
-                b.switch_to(read);
-                let item = b.element_at(ctx, array, step)?;
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, item));
-                Ok(())
-            },
-        )?;
-        Ok(result)
+            Input::Slice(
+                array,
+                Span {
+                    start: norm_start,
+                    limit: norm_end,
+                    direction: Direction::Forward,
+                },
+                Holes::Skip,
+            ),
+            |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
+        )
     }
 
     /// `array.at(index?)`.

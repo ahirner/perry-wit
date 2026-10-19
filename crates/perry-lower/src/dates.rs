@@ -7,7 +7,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Option<Value>> {
-        let (date, part) = match expr {
+        match expr {
             Expr::DateNew(args) => {
                 let time = match args.as_slice() {
                     [] => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
@@ -32,61 +32,15 @@ impl<'s> FunctionBuilder<'s> {
                     }
                     _ => self.date_utc(ctx, args)?,
                 };
-                return Ok(self.call_intrinsic(ctx, Intrinsic::DateFromTime, vec![time]));
+                Ok(self.call_intrinsic(ctx, Intrinsic::DateFromTime, vec![time]))
             }
             Expr::DateParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                return Ok(self.call_intrinsic(ctx, Intrinsic::DateParse, vec![text]));
+                Ok(self.call_intrinsic(ctx, Intrinsic::DateParse, vec![text]))
             }
-            Expr::DateUtc(args) => return self.date_utc(ctx, args).map(Some),
-            Expr::DateGetTime(date) | Expr::DateValueOf(date) => {
-                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-                return Ok(self.call_intrinsic(ctx, Intrinsic::DateTime, vec![date]));
-            }
-            Expr::DateToISOString(date) | Expr::DateToJSON(date) => {
-                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-                let intrinsic = if matches!(expr, Expr::DateToJSON(_)) {
-                    Intrinsic::DateJson
-                } else {
-                    Intrinsic::DateIso
-                };
-                return Ok(self.call_intrinsic(ctx, intrinsic, vec![date]));
-            }
-            Expr::DateGetUtcFullYear(date) | Expr::DateGetFullYear(date) => (date, 0),
-            Expr::DateGetUtcMonth(date) | Expr::DateGetMonth(date) => (date, 1),
-            Expr::DateGetUtcDate(date) | Expr::DateGetDate(date) => (date, 2),
-            Expr::DateGetUtcDay(date) | Expr::DateGetDay(date) => (date, 3),
-            Expr::DateGetUtcHours(date) | Expr::DateGetHours(date) => (date, 4),
-            Expr::DateGetUtcMinutes(date) | Expr::DateGetMinutes(date) => (date, 5),
-            Expr::DateGetUtcSeconds(date) | Expr::DateGetSeconds(date) => (date, 6),
-            Expr::DateGetUtcMilliseconds(date) | Expr::DateGetMilliseconds(date) => (date, 7),
-            Expr::DateGetTimezoneOffset(date) => (date, 8),
-            Expr::DateSetUtcFullYear { date, args } | Expr::DateSetFullYear { date, args } => {
-                return self.date_set(ctx, date, 0, args);
-            }
-            Expr::DateSetUtcMonth { date, args } | Expr::DateSetMonth { date, args } => {
-                return self.date_set(ctx, date, 1, args);
-            }
-            Expr::DateSetUtcDate { date, args } | Expr::DateSetDate { date, args } => {
-                return self.date_set(ctx, date, 2, args);
-            }
-            Expr::DateSetUtcHours { date, args } | Expr::DateSetHours { date, args } => {
-                return self.date_set(ctx, date, 3, args);
-            }
-            Expr::DateSetUtcMinutes { date, args } | Expr::DateSetMinutes { date, args } => {
-                return self.date_set(ctx, date, 4, args);
-            }
-            Expr::DateSetUtcSeconds { date, args } | Expr::DateSetSeconds { date, args } => {
-                return self.date_set(ctx, date, 5, args);
-            }
-            Expr::DateSetUtcMilliseconds { date, args }
-            | Expr::DateSetMilliseconds { date, args } => return self.date_set(ctx, date, 6, args),
-            Expr::DateSetTime { date, args } => return self.date_set(ctx, date, 7, args),
-            _ => return Ok(None),
-        };
-        let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-        let part = self.number(ctx, part as f64);
-        Ok(self.call_intrinsic(ctx, Intrinsic::DatePart, vec![date, part]))
+            Expr::DateUtc(args) => self.date_utc(ctx, args).map(Some),
+            _ => Ok(None),
+        }
     }
 
     fn date_utc(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
@@ -107,15 +61,14 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, Intrinsic::DateUtc, values))
     }
 
-    fn date_set(
+    pub(super) fn date_set(
         &mut self,
         ctx: &mut Context,
-        date: &'s Expr,
+        date: Value,
         part: u32,
+        maximum: usize,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-        let maximum = [3, 2, 1, 4, 3, 2, 1, 1][part as usize];
         let selector = self.number(ctx, part as f64);
         let count = self.number(ctx, args.len().min(maximum) as f64);
         let mut values = vec![date, selector, count];

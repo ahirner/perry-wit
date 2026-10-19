@@ -2,9 +2,9 @@
 //! response's status, headers and body read back through `text()`, `bytes()`, `json()` and
 //! readers.
 use crate::wasi_host::{self, Host};
+use crate::world::Compiler::Standard;
 use crate::{engine::async_engine, http_fixture};
 use anyhow::Result;
-use perry_wit::{compile_for_world, component::wit::resolve_wit};
 
 const WIT: &str = r#"
 package test:fetch;
@@ -52,11 +52,7 @@ async fn run(
     server: &http_fixture::HttpFixture,
     expects_json_parser: bool,
 ) -> Result<String> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("fetch"))?;
-    let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
+    let compiled = Standard.compile(WIT, "fetch", "fetch.ts", source)?;
     let has_json_parser = crate::world::function_names(&compiled.core)?
         .into_iter()
         .any(|name| matches!(name, "json_measure" | "json_populate_measured"));

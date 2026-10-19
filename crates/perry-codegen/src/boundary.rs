@@ -34,6 +34,7 @@ use pliron_wasm::{
     ops::{CallOp, set_export},
 };
 
+mod canonical;
 mod exports;
 mod imports;
 mod integers;
@@ -42,9 +43,11 @@ mod resources;
 mod scopes;
 mod sums;
 
+use canonical::Canonical;
 pub(super) use exports::export;
 pub(super) use resources::{emit_drain, used_keys};
 pub(super) use scopes::Scope;
+use sums::BoundaryValue;
 
 /// A WIT value type as the canonical ABI sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -411,87 +414,34 @@ impl FunctionLowering<'_, '_> {
         Ok(self.num(ctx, opcode, vec![raw]))
     }
 
-    /// Lift a value from flat core values (consumed from the end of `flat`).
-    fn lift_flat(
+    fn lift_abi(
         &mut self,
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
-        flat: &mut Vec<Value>,
+        mut source: Canonical<'_>,
     ) -> Result<Value> {
-        let mut next = || flat.pop().ok_or_else(|| anyhow!("too few flat values"));
         match ty {
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => self.lift_sum_flat(ctx, ty, mir_ty, flat),
-            AbiType::String => {
-                let (ptr, len) = (next()?, next()?);
-                self.lift_string(ctx, mir_ty, ptr, len)
-            }
-            AbiType::List(element) => {
-                let (ptr, len) = (next()?, next()?);
-                self.lift_list(ctx, element, mir_ty, ptr, len)
-            }
-            AbiType::ByteStream => {
-                let handle = next()?;
-                self.lift_stream(ctx, mir_ty, handle)
-            }
-            AbiType::Record(fields) => {
-                let record = self.record_type(ctx, mir_ty)?;
-                let mut values = Vec::new();
-                for (name, field_ty) in fields {
-                    let (_, field_mir) = record_field(ctx, record, name)?;
-                    let lift_mir = scalar_mir_type(ctx, field_mir);
-                    values.push((
-                        name.as_str(),
-                        self.lift_flat(ctx, field_ty, lift_mir, flat)?,
-                    ));
+            ty if ty.is_sum() => self.lift_sum(ctx, ty, mir_ty, source),
+            AbiType::String | AbiType::List(_) => {
+                let ptr = source.read(self, ctx, MemKind::I32, 0)?;
+                let len = source.read(self, ctx, MemKind::I32, 4)?;
+                match ty {
+                    AbiType::List(element) => self.lift_list(ctx, element, mir_ty, ptr, len),
+                    _ => self.lift_string(ctx, mir_ty, ptr, len),
                 }
-                self.build_record(ctx, mir_ty, values)
-            }
-            scalar => {
-                let raw = next()?;
-                self.lift_scalar(ctx, scalar, mir_ty, raw)
-            }
-        }
-    }
-
-    /// Lift a value stored at `address + offset` in canonical layout.
-    fn lift_load(
-        &mut self,
-        ctx: &mut Context,
-        ty: &AbiType,
-        mir_ty: TypeHandle,
-        address: Value,
-        offset: u32,
-    ) -> Result<Value> {
-        match ty {
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => self.lift_sum_load(ctx, ty, mir_ty, address, offset),
-            AbiType::String => {
-                let ptr = self.load(ctx, MemKind::I32, address, offset);
-                let len = self.load(ctx, MemKind::I32, address, offset + 4);
-                self.lift_string(ctx, mir_ty, ptr, len)
-            }
-            AbiType::List(element) => {
-                let ptr = self.load(ctx, MemKind::I32, address, offset);
-                let len = self.load(ctx, MemKind::I32, address, offset + 4);
-                self.lift_list(ctx, element, mir_ty, ptr, len)
             }
             AbiType::ByteStream => {
-                let handle = self.load(ctx, MemKind::I32, address, offset);
+                let handle = source.read(self, ctx, MemKind::I32, 0)?;
                 self.lift_stream(ctx, mir_ty, handle)
             }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
-                let mut values = Vec::new();
+                let mut values = Vec::with_capacity(fields.len());
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (_, field_mir) = record_field(ctx, record, name)?;
                     let lift_mir = scalar_mir_type(ctx, field_mir);
-                    let value = self.lift_load(ctx, field_ty, lift_mir, address, offset + at)?;
+                    let value = self.lift_abi(ctx, field_ty, lift_mir, source.at(at))?;
                     values.push((name.as_str(), value));
                 }
                 self.build_record(ctx, mir_ty, values)
@@ -500,7 +450,7 @@ impl FunctionLowering<'_, '_> {
                 let kind = scalar
                     .mem_kind()
                     .ok_or_else(|| anyhow!("{scalar:?} is not a scalar"))?;
-                let raw = self.load(ctx, kind, address, offset);
+                let raw = source.read(self, ctx, kind, 0)?;
                 self.lift_scalar(ctx, scalar, mir_ty, raw)
             }
         }
@@ -566,7 +516,7 @@ impl FunctionLowering<'_, '_> {
             let stride = b.i32_const(ctx, size);
             let offset = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let source = b.num(ctx, NumOpcode::I32Add, vec![ptr, offset]);
-            let value = b.lift_load(ctx, element, lift_mir, source, 0)?;
+            let value = b.lift_abi(ctx, element, lift_mir, Canonical::Memory(source, 0))?;
             let carriers = b.cast_value(ctx, Carriers::Scalar(value), lift_mir, element_mir)?;
             let slot = b.slot_address(ctx, data, i, element_mir);
             b.store_slot_value(ctx, slot, 0, element_mir, carriers)?;
@@ -652,14 +602,6 @@ impl FunctionLowering<'_, '_> {
                 value
             });
         }
-        if ty.is_sum() {
-            let mut flat = self.lower_sum_flat(ctx, ty, mir_ty, value)?;
-            ensure!(
-                flat.len() == 1,
-                "compound result requires an indirect return"
-            );
-            return Ok(flat.remove(0));
-        }
         let value = value.scalar()?;
         let opcode = match ty {
             AbiType::Resource { key, owned } => {
@@ -683,62 +625,6 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Store a MIR value at `address + offset` in canonical layout.
-    fn lower_store(
-        &mut self,
-        ctx: &mut Context,
-        ty: &AbiType,
-        mir_ty: TypeHandle,
-        value: Carriers<Value>,
-        address: Value,
-        offset: u32,
-    ) -> Result<()> {
-        match ty {
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => {
-                self.lower_sum_store(ctx, ty, mir_ty, value, address, offset)?
-            }
-            AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
-            AbiType::OkHandle { .. } => bail!("handle results are returned flat"),
-            AbiType::String => {
-                let value = value.scalar()?;
-                ensure!(
-                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-                    "WIT string needs a TypeScript string"
-                );
-                let data = self.load(ctx, MemKind::I32, value, strings::DATA);
-                let len = self.load(ctx, MemKind::I32, value, strings::LEN);
-                self.store(ctx, MemKind::I32, address, offset, data);
-                self.store(ctx, MemKind::I32, address, offset + 4, len);
-            }
-            AbiType::List(element) => {
-                let value = value.scalar()?;
-                let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
-                self.store(ctx, MemKind::I32, address, offset, buffer);
-                self.store(ctx, MemKind::I32, address, offset + 4, len);
-            }
-            AbiType::Record(fields) => {
-                let value = value.scalar()?;
-                let record = self.record_type(ctx, mir_ty)?;
-                for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
-                    let (field_offset, field_mir) =
-                        Self::record_type_field_slot(ctx, record, name)?;
-                    let field = self.load_slot_value(ctx, value, field_offset, field_mir)?;
-                    self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
-                }
-            }
-            scalar => {
-                let raw = self.lower_flat(ctx, scalar, mir_ty, value)?;
-                let kind = scalar
-                    .mem_kind()
-                    .ok_or_else(|| anyhow!("{scalar:?} is not a scalar"))?;
-                self.store(ctx, kind, address, offset, raw);
-            }
-        }
-        Ok(())
-    }
-
     /// Copy a MIR array into a canonical list buffer; returns (buffer, length).
     fn lower_list(
         &mut self,
@@ -784,7 +670,13 @@ impl FunctionLowering<'_, '_> {
             let stride = b.i32_const(ctx, size);
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
-            b.lower_store(ctx, element, element_mir, item, target, 0)
+            b.lower_abi(
+                ctx,
+                element,
+                element_mir,
+                item,
+                Canonical::Memory(target, 0),
+            )
         })?;
         Ok((buffer, len))
     }
@@ -811,21 +703,23 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    fn lower_flat_values(
+    fn lower_abi(
         &mut self,
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
         value: Carriers<Value>,
-        out: &mut Vec<Value>,
+        mut target: Canonical<'_>,
     ) -> Result<()> {
         match ty {
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => out.extend(self.lower_sum_flat(ctx, ty, mir_ty, value)?),
+            ty if ty.is_sum() => {
+                self.lower_sum(ctx, ty, BoundaryValue::Native(mir_ty, value), target)?
+            }
             AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
             AbiType::OkHandle { flat, .. } => {
+                let Canonical::Flat(out) = target else {
+                    bail!("handle results are returned flat");
+                };
                 // `ok` (0), the handle, and zeros for the rest of the error payload.
                 let f64_ty = FP64Type::get(ctx).into();
                 let value = if is_numeric_type(ctx, mir_ty) {
@@ -844,25 +738,34 @@ impl FunctionLowering<'_, '_> {
                     mir_ty.deref(ctx).is::<perry_mir::StringType>(),
                     "WIT string needs a TypeScript string"
                 );
-                out.push(self.load(ctx, MemKind::I32, value, strings::DATA));
-                out.push(self.load(ctx, MemKind::I32, value, strings::LEN));
+                let data = self.load(ctx, MemKind::I32, value, strings::DATA);
+                let len = self.load(ctx, MemKind::I32, value, strings::LEN);
+                target.write(self, ctx, MemKind::I32, 0, data)?;
+                target.write(self, ctx, MemKind::I32, 4, len)?;
             }
             AbiType::List(element) => {
                 let value = value.scalar()?;
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
-                out.extend([buffer, len]);
+                target.write(self, ctx, MemKind::I32, 0, buffer)?;
+                target.write(self, ctx, MemKind::I32, 4, len)?;
             }
             AbiType::Record(fields) => {
                 let value = value.scalar()?;
                 let record = self.record_type(ctx, mir_ty)?;
-                for (name, field_ty) in fields {
+                for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (field_offset, field_mir) =
                         Self::record_type_field_slot(ctx, record, name)?;
                     let field = self.load_slot_value(ctx, value, field_offset, field_mir)?;
-                    self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
+                    self.lower_abi(ctx, field_ty, field_mir, field, target.at(at))?;
                 }
             }
-            scalar => out.push(self.lower_flat(ctx, scalar, mir_ty, value)?),
+            scalar => {
+                let raw = self.lower_flat(ctx, scalar, mir_ty, value)?;
+                let kind = scalar
+                    .mem_kind()
+                    .ok_or_else(|| anyhow!("{scalar:?} is not a scalar"))?;
+                target.write(self, ctx, kind, 0, raw)?;
+            }
         }
         Ok(())
     }

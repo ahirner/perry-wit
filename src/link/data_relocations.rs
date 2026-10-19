@@ -3,19 +3,19 @@ use super::libraries::{Global, Library};
 use std::{borrow::Cow, collections::BTreeSet};
 use wasmparser::Operator;
 
-pub(super) struct RelocatedData {
+pub(super) struct RelocatedData<'a> {
     pub(super) functions: BTreeSet<u32>,
-    pub(super) segments: Vec<(u32, Cow<'static, [u8]>)>,
+    pub(super) segments: Vec<(u32, Cow<'a, [u8]>)>,
 }
 
 /// Evaluate constant initialization in order within the library's private data placement.
 /// Unsupported instructions or destinations preserve the entire runtime sequence.
-pub(super) fn fold(
-    lib: &Library,
+pub(super) fn fold<'a>(
+    lib: &Library<'a>,
     memory_base: u32,
     table_base: u32,
     heap_base: u32,
-) -> Option<RelocatedData> {
+) -> Option<RelocatedData<'a>> {
     let mut segments: Vec<_> = lib
         .data
         .iter()
@@ -36,8 +36,9 @@ pub(super) fn fold(
             continue;
         }
         let body = lib
+            .module
             .bodies
-            .get((function as usize).checked_sub(lib.imports.len())?)?;
+            .get((function as usize).checked_sub(lib.module.imports.len())?)?;
         let mut stack = Vec::<u32>::new();
         let mut reader = body.get_operators_reader().ok()?;
         while !reader.eof() {
@@ -105,7 +106,7 @@ pub(super) fn fold(
 mod tests {
     use super::*;
 
-    fn library(body: &str) -> Library {
+    fn library(body: &str) -> Library<'static> {
         let wasm = wat::parse_str(format!(
             r#"(module
             (import "env" "__memory_base" (global i32))
@@ -157,11 +158,15 @@ mod tests {
         assert_eq!(&folded.segments[0].1[..4], &[0; 4]);
         assert_eq!(&folded.segments[0].1[4..], &1031_u32.to_le_bytes());
         assert_eq!(lib.data[0].1, b"abcdefgh");
-        let reachable = lib.reachable(["read"], &folded.functions).unwrap();
+        let reachable = lib
+            .reachable(["read"], &folded.functions, &BTreeSet::new())
+            .unwrap();
         assert!(reachable.is_disjoint(&folded.functions));
-        let reachable = lib.reachable(["reset"], &folded.functions).unwrap();
+        let reachable = lib
+            .reachable(["reset"], &folded.functions, &BTreeSet::new())
+            .unwrap();
         assert!(reachable.contains(&lib.exports["__wasm_apply_data_relocs"]));
-        assert!(!reachable.contains(&lib.start.unwrap()));
+        assert!(!reachable.contains(&lib.module.start.unwrap()));
 
         // Zeroing outside private storage cannot be moved to static initialization.
         lib.data_size = 8;
@@ -170,7 +175,7 @@ mod tests {
         assert!(fold(&lib, u32::MAX - 8, 0, 4096).is_none());
 
         // An ordinary call in the initializer preserves the full runtime sequence.
-        lib.start = Some(lib.exports["reset"]);
+        lib.module.start = Some(lib.exports["reset"]);
         assert!(fold(&lib, 1024, 0, 4096).is_none());
     }
 }

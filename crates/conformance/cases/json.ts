@@ -306,3 +306,8 @@ class OrderedClass {
 }
 console.log("class-order", JSON.stringify(new OrderedClass()));
 
+
+const whitespace = "\t\n\u000b\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+for (const text of [`${whitespace}42${whitespace}`, "\u180e42", "\u200b42", ".5", "1.", "01", "1e+", "-0", "2.4703282292062328e-324", "1e9999999999999", "Infinitytail", "\uFEFF 42 \u2029", "\u008542"]) {
+  console.log("decimal-token", text, parseFloat(text), Number(text), text.trim(), text.trimStart(), text.trimEnd());
+}

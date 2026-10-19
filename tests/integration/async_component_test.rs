@@ -2,7 +2,6 @@
 //! `node:timers/promises` waits on WASI P3 `monotonic-clock.wait-for`, async functions await
 //! each other across host suspensions, and every call releases its task.
 use anyhow::Result;
-use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
     Store,
     component::{ComponentType, Instance, Lift},
@@ -129,8 +128,9 @@ export async function chains(n:number):Promise<number> {
 }
 async function failLater():Promise<number>{await setTimeout(1);throw 'no';}
 export async function combinations():Promise<number> {
- const loser=setTimeout(5,9);
- const first=await Promise.race([setTimeout(1,7),loser]);
+ const pending=setTimeout(1,7);
+ const loser=follow(pending,setTimeout(5,2));
+ const first=await Promise.race([pending,loser]);
  const original=setTimeout(1,2);const inputs:Promise<number>[]=[original];
  const copied=Promise.all(inputs);inputs[0]=Promise.resolve(99);inputs.push(Promise.resolve(100));
  if((await copied)[0]!==2)return -3;
@@ -188,27 +188,19 @@ struct Observation {
     trace: Vec<f64>,
 }
 
-fn compile(check_memory: bool) -> Result<Vec<u8>> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("timers"))?;
-    let compiled = if check_memory {
-        perry_wit::compiler::compile_for_world_with_memory_checks(
-            SOURCE,
-            "timers.ts",
-            &resolve,
-            world,
-        )?
-    } else {
-        compile_for_world(SOURCE, "timers.ts", &resolve, world, true)?
-    };
-    Ok(compiled.component.unwrap().stripped)
-}
-
 /// The timers world instantiated in a fresh store, optionally with memory checks.
 async fn instantiate(check_memory: bool) -> Result<(Store<Host>, Instance)> {
-    wasi_host::instantiate(&async_engine()?, &compile(check_memory)?, Host::default()).await
+    let compiler = if check_memory {
+        crate::world::Compiler::MemoryChecked
+    } else {
+        crate::world::Compiler::Standard
+    };
+    wasi_host::instantiate(
+        &async_engine()?,
+        &compiler.component(WIT, "timers", "timers.ts", SOURCE)?,
+        Host::default(),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]

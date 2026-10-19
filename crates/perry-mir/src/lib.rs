@@ -6,19 +6,6 @@
 //!
 //! The control-flow ops are adapted from `pliron-llvm`, which perry-wit must not depend on:
 //! that crate's default feature links `llvm-sys`, which the LLVM audit rejects.
-/// Implements pliron's `SideEffects` for op types whose effect is the same for every
-/// instance; `side_effects!(false; …)` lets DCE remove unused ones.
-macro_rules! side_effects {
-    ($value:expr; $($op:ty),+ $(,)?) => {$(
-        #[pliron::derive::op_interface_impl]
-        impl pliron::opts::dce::SideEffects for $op {
-            fn has_side_effects(&self, _: &pliron::context::Context) -> bool {
-                $value
-            }
-        }
-    )+};
-}
-
 mod aggregates;
 mod append;
 mod attrs;
@@ -43,11 +30,14 @@ mod json_schema;
 mod lifetimes;
 mod liveness;
 mod locals;
+mod operation_schema;
 mod optional;
 mod pipeline;
 mod ranges;
 mod regex;
 mod scalar;
+mod semantics;
+mod signatures;
 mod types;
 mod unwraps;
 mod variants;
@@ -60,27 +50,8 @@ use pliron::{
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
-    r#type::TypeHandle,
-    value::Value,
 };
 use std::{collections::HashSet, hash::Hash};
-
-/// Unlinked operation of `Self` without successors or regions, the shape of every perry op
-/// but the branches; pliron's `Operation::new` otherwise repeats both at each constructor.
-trait NewOp: Op + Sized {
-    fn new_op(ctx: &mut Context, results: Vec<TypeHandle>, operands: Vec<Value>) -> Ptr<Operation> {
-        Operation::new(
-            ctx,
-            Self::get_concrete_op_info(),
-            results,
-            operands,
-            vec![],
-            0,
-        )
-    }
-}
-
-impl<T: Op> NewOp for T {}
 
 /// A tuple of op types, so one [is_any] replaces a chain of `get_op` tests.
 trait OpSet {
@@ -126,12 +97,10 @@ where
     seen
 }
 
-pub use attrs::{
-    Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, JsonDecoderKind, NumericConstant, Tier,
-};
+pub use attrs::{Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, NumericConstant, Tier};
 pub use calls::{
     AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async,
-    set_atomic_construction, set_exported, set_json_decoder,
+    set_atomic_construction, set_exported,
 };
 pub use collections::{
     ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
@@ -154,8 +123,9 @@ pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
 pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp};
 pub use integers::BigIntConstOp;
 pub use intrinsics::{
-    Combinator, Intrinsic, IntrinsicOp, JsonCursorKeyOp, JsonStringifyOp, PromiseCombinatorOp,
-    PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
+    Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
+    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp,
+    may_throw,
 };
 pub use json_schema::JsonSchema;
 pub use liveness::{LiveAfter, LiveValues};
@@ -170,11 +140,11 @@ pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::{
     AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
-    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonCursorType,
-    JsonType, NumberStringType, NumericType, OptionalType, PlainDateTimeType, PlainDateType,
-    PromiseType, ReadResultType, ReadableType, ReaderType, RecordKind, RecordType, RegexType,
-    RequestType, ResourceType, ResponseType, SearchParamsType, SettledType, SlotType, StatsType,
-    StringType, TransferType, UrlType, VariantType, WritableType, WriterType,
+    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonType,
+    NumberStringType, NumericType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType,
+    ReadResultType, ReadableType, ReaderType, RecordKind, RecordType, RegexType, RequestType,
+    ResourceType, ResponseType, SearchParamsType, SettledType, SlotType, StatsType, StringType,
+    TransferType, UrlType, ValueKind, VariantType, WritableType, WriterType,
 };
 pub use variants::{VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, variant_cases};
 pub use views::{AggregateViewOp, can_widen};

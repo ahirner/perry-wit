@@ -104,8 +104,8 @@ impl<'s> FunctionBuilder<'s> {
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
-            Stmt::Return(value) if !self.callback_returns.is_empty() => {
-                self.callback_return(ctx, value.as_ref())?;
+            Stmt::Return(value) if !self.inline_returns.is_empty() => {
+                self.inline_return(ctx, value.as_ref())?;
             }
             Stmt::Return(value) => {
                 // An async function adopts a returned promise (and its result type) after

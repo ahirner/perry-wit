@@ -1,6 +1,7 @@
 //! Numeric constraints across calls, loops, ranges and bounded calling contexts.
 use super::compile;
 use crate::core_program::Program;
+use crate::world::Compiler::Standard;
 use anyhow::Result;
 use wasmtime::Val;
 
@@ -43,7 +44,7 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
         );
     }
     let source = include_str!("../../fixtures/optimization/shared.ts");
-    let component = crate::world::component(
+    let component = Standard.component(
         "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }",
         "test",
         "shared.ts",

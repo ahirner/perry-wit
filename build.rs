@@ -3,10 +3,44 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn main() {
+#[expect(dead_code, unreachable_pub)]
+#[path = "crates/perry-abi/src/layout.rs"]
+mod layout;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     embed_wasi(&manifest_dir, &out_dir);
+    let helpers = out_dir.join("helpers");
+    if helpers.exists() {
+        fs::remove_dir_all(&helpers)?;
+    }
+    fs::create_dir_all(&helpers)?;
+    let mut source = fs::read_to_string(manifest_dir.join("src/helpers/json/decode.wat"))?;
+    source = source.replace(
+        "@write@",
+        &fs::read_to_string(manifest_dir.join("src/helpers/json/write.wat"))?,
+    );
+    macro_rules! constants {
+        ($module:ident: $($name:ident),+ $(,)?) => { $(
+            source = source.replace(concat!("@", stringify!($module), ".", stringify!($name), "@"),
+                &layout::$module::$name.to_string());
+        )+ };
+    }
+    constants!(descriptor: NUMBER, BOOLEAN, STRING, RECORD, ARRAY, EXCEPTION, SIGNED_INT,
+        UNSIGNED_INT, JSON_VALUE, JSON_NUMERIC, JSON_TUPLE, JSON_VARIANT, JSON_NUMBER_STRING,
+        JSON_DICTIONARY, JSON_DATE, UNDEFINED_ALLOWED, NULL_ALLOWED, ABSENCE_MASK, SCHEMA_MASK, UNDEFINED_BITS,
+        UNDEFINED_BOOL, COPY_UNDEFINED, COPY_ABSENT,
+        COPY_NONFINITE, VARIANT_TAG);
+    constants!(numeric: UNDEFINED, NULL, OMITTED, SIGNED, UNSIGNED);
+    constants!(array: NUMERIC_ELEMENTS, SLOT, NUMERIC_SLOT, LEN, CAP, DATA);
+    constants!(json: NEXT);
+    constants!(record: JSON, HEADER, ORDER, PACKED_FIELDS);
+    constants!(variant: TAG, OWNER, VALUE, JSON, RETAINED_SIZE);
+    constants!(exception: TAG_STRING, TYPE_ERROR);
+    let codec = wat::parse_str(source)?;
+    wasmparser::Validator::new().validate_all(&codec)?;
+    fs::write(helpers.join("json-codec.wasm"), codec)?;
 
     for path in [
         "src/helpers",
@@ -20,7 +54,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PERRY_HELPER_TARGET_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
 
-    for helper in ["text", "fetch", "json", "time", "number"] {
+    for helper in [
+        "text",
+        "normalization",
+        "fetch",
+        "json",
+        "time",
+        "number",
+        "decimal",
+    ] {
         compile_cargo_helper(
             &manifest_dir,
             &out_dir,
@@ -50,6 +92,7 @@ fn main() {
         "crates/perry-runtime",
         "runtime-collectible",
     );
+    Ok(())
 }
 
 fn embed_wasi(manifest: &Path, output: &Path) {
@@ -149,7 +192,7 @@ fn compile_cargo_helper(
         "wasm32-unknown-unknown/release/{}.wasm",
         package.replace('-', "_")
     ));
-    let module = output.join(format!("{helper}.wasm"));
+    let module = output.join("helpers").join(format!("{helper}.wasm"));
     fs::copy(source, &module).expect("copy embedded Cargo helper");
     let wasm = fs::read(module).expect("read embedded Cargo helper");
     wasmparser::Validator::new()
