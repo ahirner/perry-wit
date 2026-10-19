@@ -164,7 +164,7 @@ pub mod roots {
 }
 
 /// Native storage descriptors shared by cause reflection and JSON.
-/// JSON references carry absence flags in their low bits; reflection keeps the OPTIONAL prefix.
+/// Descriptor references carry absence flags in their low bits.
 pub mod descriptor {
     pub const NUMBER: u32 = 1;
     pub const BOOLEAN: u32 = 2;
@@ -172,7 +172,6 @@ pub mod descriptor {
     pub const RECORD: u32 = 4;
     pub const ARRAY: u32 = 5;
     pub const EXCEPTION: u32 = 6;
-    pub const OPTIONAL: u32 = 7;
     pub const SIGNED_INT: u32 = 8;
     pub const UNSIGNED_INT: u32 = 9;
     pub const JSON_VALUE: u32 = 10;
@@ -196,6 +195,28 @@ pub mod descriptor {
     pub const COPY_NONFINITE: i32 = -3;
     pub const VARIANT_TAG: i32 = -4;
     pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
+
+    pub const FIELDS: u32 = 8;
+    pub const FIELD_SIZE: u32 = 12;
+    pub const FIELD_SCHEMA: u32 = 4;
+    pub const FIELD_OFFSET: u32 = 8;
+    pub const DICTIONARY_VALUE_SCHEMA: u32 = FIELDS + FIELD_SIZE + FIELD_SCHEMA;
+    pub const DICTIONARY_VALUE_OFFSET: u32 = FIELDS + FIELD_SIZE + FIELD_OFFSET;
+
+    pub const WRITE_NULL: u32 = 0;
+    pub const WRITE_TRUE: u32 = 4;
+    pub const WRITE_FALSE: u32 = 8;
+    pub const WRITE_EMPTY_OBJECT: u32 = 13;
+    pub const WRITE_COLON: u32 = 15;
+    pub const WRITE_QUOTE: u32 = 16;
+    pub const WRITE_TAG_KEY: u32 = 20;
+    pub const WRITE_VALUE_KEY: u32 = 24;
+    pub const WRITE_TAG_NAME: u32 = 28;
+    pub const WRITE_VALUE_NAME: u32 = 32;
+    pub const WRITE_RETAINS_JSON: u32 = 36;
+    pub const WRITE_DATE_BUFFER: u32 = 40;
+    pub const WRITE_DATE_CAPACITY: u32 = 32;
+    pub const WRITE_SIZE: u32 = WRITE_DATE_BUFFER + WRITE_DATE_CAPACITY;
 
     const _: () = {
         assert!(NULL_NUMBER_BITS == UNDEFINED_BITS + 1 && OMITTED_BITS == UNDEFINED_BITS + 2);

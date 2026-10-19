@@ -258,6 +258,13 @@ export function tuples():number {
  if(JSON.stringify(result)!=='{"tag":"ok","val":7,"extra":true}')return 4;
  const empty:{tag:'empty'}|{tag:'value';val:number}=JSON.parse('{"val":{"n":2},"tag":"empty","extra":7}');
  if(JSON.stringify(empty)!=='{"tag":"empty","val":{"n":2},"extra":7}')return 5;
+ const tupleError=new Error('tuple',{cause:tuple});
+ if(tupleError.cause._0!==1 || tupleError.cause._1!=='added' || tupleError.cause.length!==undefined)return 6;
+ if(JSON.stringify(tupleError.cause)!=='{"_0":1,"_1":"added"}')return 7;
+ const table:Record<string,string>={first:'one'};
+ const tableError=new Error('dictionary',{cause:table});
+ if(tableError.cause.length!==1 || tableError.cause[0]._0!=='first' || tableError.cause[0]._1!=='one')return 8;
+ if(JSON.stringify(table)!=='{"first":"one"}' || JSON.stringify(tableError.cause)!=='[{"_0":"first","_1":"one"}]')return 9;
  return 0;
 }
 export function warm():number {
@@ -312,6 +319,19 @@ export function mixed(x:number):number {
     let mut native = Program::checked(
         r#"
 interface Link {next?:Link}
+interface Reflected {missing?:string; nullable:string|null; both?:boolean|null; value?:number}
+export function reflection(n:number):number {
+ const value:Reflected={nullable:null,both:null,value:n};
+ const error=new Error('optional',{cause:value});
+ if(error.cause.missing!==undefined || error.cause.nullable!==null || error.cause.both!==null || error.cause.value!==n)return 1;
+ value.missing='';value.nullable='';value.both=false;delete value.value;
+ if(error.cause.missing!=='' || error.cause.nullable!=='' || error.cause.both!==false || error.cause.value!==undefined)return 2;
+ value.both=undefined;
+ if(error.cause.both!==undefined)return 3;
+ if(JSON.stringify(error.cause)!=='{"missing":"","nullable":""}' || JSON.stringify(value)!=='{"nullable":"","missing":""}')return 4;
+ const link:Link={};const recursive=new Error('recursive',{cause:link});link.next=link;
+ return recursive.cause.next===link?0:5;
+}
 export function dates():number {
  const dates=[new Date(NaN),new Date(253402300800000),new Date(-62198755200000)];
  return JSON.stringify(dates)==='[null,"+010000-01-01T00:00:00.000Z","-000001-01-01T00:00:00.000Z"]'?1:0;
@@ -333,6 +353,7 @@ export function depth(n:number):number {
         "native-json-writing.ts",
     );
     native.stress_collection(true);
+    assert_eq!(native.throwing("reflection", 0.5), (0.0, 0));
     assert_eq!(native.outcome("dates", &[]), (1.0, 0));
     assert_eq!(native.throwing("depth", 127.0), (0.0, 0));
     assert_eq!(native.throwing("depth", 128.0), (1.0, 0));

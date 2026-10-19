@@ -130,9 +130,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) uses_http_server: bool,
     /// Operations whose previous results are dead whenever they run again (`lease`).
     pub(crate) leased: HashSet<Ptr<Operation>>,
-    /// Generated `JSON.stringify` serializers by MIR type.
-    pub(crate) native_descriptors: HashMap<TypeHandle, u32>,
-    pub(crate) json_descriptors: HashMap<TypeHandle, u32>,
+    pub(crate) layout_descriptors: HashMap<TypeHandle, u32>,
     pub(crate) json_copy_plans: HashMap<(TypeHandle, TypeHandle), u32>,
     pub(crate) json_result: Option<u32>,
     pub(crate) json_write_data: Option<u32>,
@@ -240,12 +238,11 @@ pub(crate) fn lower(
         uses_fetch: false,
         uses_json_bodies: false,
         uses_http_server: false,
-        json_descriptors: HashMap::new(),
+        layout_descriptors: HashMap::new(),
         json_copy_plans: HashMap::new(),
         json_result: None,
         json_write_data: None,
         json_fields: HashMap::new(),
-        native_descriptors: HashMap::new(),
         retains_json: functions.iter().any(|function| {
             crate::analysis::function_ops(ctx, function)
                 .into_iter()

@@ -287,7 +287,12 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     match word(value, 0) {
         STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
         ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
-        NATIVE if word(node(word(value, 12)), 0) == descriptor::ARRAY => {
+        NATIVE
+            if matches!(
+                word(node(word(value, 12)), 0),
+                descriptor::ARRAY | descriptor::JSON_DICTIONARY
+            ) =>
+        {
             f64::from(word(node(word(value, 8)), 0)).to_bits()
         }
         _ => crate::runtime::UNDEFINED_BITS,

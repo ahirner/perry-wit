@@ -34,36 +34,42 @@ pub enum JsonSchema {
     Variant(TypedHandle<VariantType>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Usage {
+    Graph,
+    Cursor,
+    Reflection,
+}
+
 impl JsonSchema {
     pub fn supports_descriptor(ctx: &Context, root: TypeHandle) -> bool {
-        Self::supports_input(ctx, root, false)
+        Self::supports_input(ctx, root, Usage::Graph)
     }
 
-    fn supports_input(ctx: &Context, root: TypeHandle, cursor: bool) -> bool {
+    fn supports_input(ctx: &Context, root: TypeHandle, usage: Usage) -> bool {
         let mut pending = vec![root];
         let mut visited = HashSet::new();
         while let Some(ty) = pending.pop() {
             if !visited.insert(ty) {
                 continue;
             }
-            if ty.deref(ctx).is::<crate::NumericType>() {
+            if usage != Usage::Reflection && ty.deref(ctx).is::<crate::NumericType>() {
                 continue;
             }
             match Self::of(ctx, ty) {
-                Some(
-                    JsonSchema::Value
-                    | JsonSchema::Number
-                    | JsonSchema::Boolean
-                    | JsonSchema::String
-                    | JsonSchema::NumberString
-                    | JsonSchema::Integer { width: 64, .. },
-                ) => {}
+                Some(JsonSchema::Number | JsonSchema::Boolean | JsonSchema::String) => {}
+                Some(JsonSchema::Value | JsonSchema::NumberString)
+                    if usage != Usage::Reflection => {}
+                Some(JsonSchema::Integer { width, .. })
+                    if width == 64 || usage == Usage::Reflection => {}
                 Some(JsonSchema::Array(element) | JsonSchema::Optional(element)) => {
                     pending.push(element)
                 }
                 Some(JsonSchema::Record(record)) => {
                     let record = record.deref(ctx);
-                    if cursor && !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple) {
+                    if usage == Usage::Cursor
+                        && !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple)
+                    {
                         return false;
                     }
                     let Ok(fields) = record.fields() else {
@@ -71,8 +77,10 @@ impl JsonSchema {
                     };
                     pending.extend(fields.iter().map(|(_, ty)| *ty));
                 }
-                Some(JsonSchema::Dictionary { entry, .. }) if !cursor => pending.push(entry.into()),
-                Some(JsonSchema::Variant(variant)) => {
+                Some(JsonSchema::Dictionary { entry, .. }) if usage != Usage::Cursor => {
+                    pending.push(entry.into())
+                }
+                Some(JsonSchema::Variant(variant)) if usage != Usage::Reflection => {
                     for (_, payload) in variant.deref(ctx).cases() {
                         if let Some(payload) = payload {
                             // Variant payload storage has one scalar slot, unlike record/array slots.
@@ -86,6 +94,8 @@ impl JsonSchema {
                         }
                     }
                 }
+                None if usage == Usage::Reflection
+                    && ty.deref(ctx).is::<crate::ExceptionType>() => {}
                 _ => return false,
             }
         }
@@ -147,6 +157,11 @@ impl JsonSchema {
 
     /// Whether every reachable type can be built directly from the JSON lexer.
     pub fn supports_cursor(ctx: &Context, root: TypeHandle) -> bool {
-        Self::supports_input(ctx, root, true)
+        Self::supports_input(ctx, root, Usage::Cursor)
+    }
+
+    /// Whether native slots can be exposed through an Error cause's live JSON view.
+    pub fn supports_reflection(ctx: &Context, root: TypeHandle) -> bool {
+        Self::supports_input(ctx, root, Usage::Reflection)
     }
 }

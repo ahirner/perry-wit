@@ -155,7 +155,9 @@ macro_rules! intrinsic_catalog {
                 FsWriteBytes = "fs_write_bytes" [FsWriteBytes = "fs_write_bytes" (String, Bytes) -> (PromiseVoid), Effectful, Conservative;];
                 FsWriteText = "fs_write_text" [FsWriteText = "fs_write_text" (String, String) -> (PromiseVoid), Effectful, Conservative;];
                 JsonDescriptorStringify = "json_descriptor_stringify" (I32, I64, I32, I32) -> I32;
-                JsonDescriptorDecode = "json_descriptor_decode" (I32, I64, I32, I32, I32, I32) -> I32;
+                JsonDescriptorGraph = "json_descriptor_decode_graph" (I32, I64, I32, I32, I32, I32) -> I32;
+                JsonDescriptorCursor = "json_descriptor_decode_cursor" (I32, I64, I32, I32, I32, I32) -> I32;
+                JsonDescriptorCopy = "json_descriptor_copy" (I32, I64, I32, I32, I32, I32) -> I32;
                 JsonCursorBegin = "json_cursor_begin" (I32) -> I32;
                 JsonCursorFinish = "json_cursor_finish" (I32, I32);
                 JsonParseString = "json_parse_string" [JsonParse = "json_parse" (String) -> (Json), Throws, Atomic;];

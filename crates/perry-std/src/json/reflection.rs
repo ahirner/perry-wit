@@ -161,33 +161,34 @@ pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -
 }
 
 fn native_slot(bits: u64, desc: *mut u8) -> *mut u8 {
-    match word(desc, 0) {
+    let flags = address(desc) & descriptor::ABSENCE_MASK;
+    let desc = node(address(desc) & descriptor::SCHEMA_MASK as u32);
+    let kind = word(desc, 0);
+    if flags != 0 {
+        let undefined = match kind {
+            descriptor::NUMBER => descriptor::UNDEFINED_BITS,
+            descriptor::BOOLEAN => descriptor::UNDEFINED_BOOL as u64,
+            _ => 0,
+        };
+        let absence = bits.wrapping_sub(undefined);
+        if absence == 1 && flags & descriptor::NULL_ALLOWED != 0 {
+            return std_json_from_scalar(NULL, 0);
+        }
+        if absence <= 2 && absence != 1 && flags & descriptor::UNDEFINED_ALLOWED != 0 {
+            return core::ptr::null_mut();
+        }
+    }
+    match kind {
         descriptor::NUMBER => std_json_from_number(f64::from_bits(bits)),
         descriptor::BOOLEAN => std_json_from_scalar(BOOLEAN, bits as u32),
         descriptor::SIGNED_INT => std_json_from_i64(bits as i64),
         descriptor::UNSIGNED_INT => std_json_from_u64(bits),
         descriptor::STRING => unsafe { std_json_from_string(node(bits as u32)) },
-        descriptor::RECORD | descriptor::ARRAY => std_json_native(node(bits as u32), desc),
+        descriptor::RECORD
+        | descriptor::JSON_TUPLE
+        | descriptor::ARRAY
+        | descriptor::JSON_DICTIONARY => std_json_native(node(bits as u32), desc),
         descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),
-        descriptor::OPTIONAL => {
-            let inner = node(word(desc, 4));
-            let (undefined, omitted, null) = match word(inner, 0) {
-                descriptor::NUMBER => (
-                    crate::runtime::UNDEFINED_BITS,
-                    perry_abi::OMITTED_BITS,
-                    descriptor::NULL_NUMBER_BITS,
-                ),
-                descriptor::BOOLEAN => (2, 4, 3),
-                _ => (0, 2, 1),
-            };
-            if bits == undefined || bits == omitted {
-                core::ptr::null_mut()
-            } else if bits == null {
-                std_json_from_scalar(NULL, 0)
-            } else {
-                native_slot(bits, inner)
-            }
-        }
         _ => core::ptr::null_mut(),
     }
 }
@@ -195,18 +196,24 @@ fn native_slot(bits: u64, desc: *mut u8) -> *mut u8 {
 pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
     let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
     match word(desc, 0) {
-        descriptor::RECORD => {
+        descriptor::RECORD | descriptor::JSON_TUPLE => {
             for index in 0..word(desc, 4) {
-                let field = unsafe { desc.add(8 + index as usize * 12) };
+                let field = unsafe {
+                    desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize)
+                };
                 let key = unsafe { crate::runtime::bytes(node(word(field, 0))) };
                 if key == name {
-                    let slot = unsafe { *(origin.add(word(field, 8) as usize).cast::<u64>()) };
-                    return native_slot(slot, node(word(field, 4)));
+                    let slot = unsafe {
+                        *(origin
+                            .add(word(field, descriptor::FIELD_OFFSET as usize) as usize)
+                            .cast::<u64>())
+                    };
+                    return native_slot(slot, node(word(field, descriptor::FIELD_SCHEMA as usize)));
                 }
             }
             core::ptr::null_mut()
         }
-        descriptor::ARRAY => {
+        descriptor::ARRAY | descriptor::JSON_DICTIONARY => {
             let length = word(origin, 0);
             if name == b"length" {
                 return std_json_from_number(f64::from(length));
@@ -225,7 +232,10 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
 
 pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
     let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
-    let is_array = word(desc, 0) == descriptor::ARRAY;
+    let is_array = matches!(
+        word(desc, 0),
+        descriptor::ARRAY | descriptor::JSON_DICTIONARY
+    );
     let result = new_node(if is_array { ARRAY } else { OBJECT });
     let count = if is_array {
         word(origin, 0)
@@ -239,10 +249,15 @@ pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
             let item = native_slot(slot, node(word(desc, 4)));
             append(result, item, core::ptr::null_mut());
         } else {
-            let field = unsafe { desc.add(8 + index as usize * 12) };
+            let field =
+                unsafe { desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize) };
             let key = unsafe { std_json_from_string(node(word(field, 0))) };
-            let slot = unsafe { *origin.add(word(field, 8) as usize).cast::<u64>() };
-            let item = native_slot(slot, node(word(field, 4)));
+            let slot = unsafe {
+                *origin
+                    .add(word(field, descriptor::FIELD_OFFSET as usize) as usize)
+                    .cast::<u64>()
+            };
+            let item = native_slot(slot, node(word(field, descriptor::FIELD_SCHEMA as usize)));
             append(result, item, key);
         }
     }

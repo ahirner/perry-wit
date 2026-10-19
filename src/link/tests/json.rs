@@ -12,6 +12,71 @@ const INPUT: u32 = 262_144;
 const GRAPH: u32 = 327_680;
 
 #[test]
+fn descriptor_readers_link_only_their_input_mechanism() -> Result<()> {
+    use libraries::{Library, LibraryId};
+    use std::collections::BTreeSet;
+
+    for (entry, reader) in [
+        ("json_descriptor_copy", "copy"),
+        ("json_descriptor_decode_cursor", "cursor"),
+        ("json_descriptor_decode_graph", "graph"),
+    ] {
+        let library = Library::parse(LibraryId::for_entry(entry)?.bytes())?;
+        let reachable = library.reachable([entry], &BTreeSet::new(), &BTreeSet::new())?;
+        let imports: BTreeSet<_> = reachable
+            .iter()
+            .filter_map(|&index| {
+                library
+                    .module
+                    .imports
+                    .get(index as usize)
+                    .map(|&(_, name, _)| name)
+            })
+            .collect();
+        assert_eq!(
+            imports.iter().any(|name| name.starts_with("json_cursor_")),
+            reader == "cursor"
+        );
+        for name in [
+            "std_json_require_number",
+            "std_json_require_object",
+            "std_json_member",
+            "std_json_first",
+            "std_json_next",
+            "std_json_keys",
+        ] {
+            assert_eq!(
+                imports.contains(name),
+                reader == "graph",
+                "{reader}: {name}"
+            );
+        }
+        if reader == "copy" {
+            let mut pending = Vec::from_iter(imports);
+            let mut seen = BTreeSet::new();
+            while let Some(entry) = pending.pop() {
+                if !seen.insert(entry) {
+                    continue;
+                }
+                let id = LibraryId::for_entry(entry)?;
+                assert_ne!(
+                    id,
+                    LibraryId::Json,
+                    "native copy links parser through {entry}"
+                );
+                let library = Library::parse(id.bytes())?;
+                for index in library.reachable([entry], &BTreeSet::new(), &BTreeSet::new())? {
+                    if let Some(&(_, name, _)) = library.module.imports.get(index as usize) {
+                        pending.push(name);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<()> {
     let mut placement = libraries::HelperMemory::new(59_004);
     placement.place(&libraries::Library::parse(libraries::JSON)?, None)?;

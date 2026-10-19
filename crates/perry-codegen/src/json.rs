@@ -10,10 +10,8 @@ use perry_abi::layout::descriptor::{
     JSON_DATE, JSON_DICTIONARY, JSON_NUMBER_STRING, JSON_NUMERIC, JSON_TUPLE, JSON_VALUE,
     JSON_VARIANT, NULL_ALLOWED, UNDEFINED_ALLOWED,
 };
-use perry_abi::layout::record;
-use perry_mir::{
-    ArrayType, DateType, ExceptionType, JsonSchema, JsonType, OptionalType, RecordType, StringType,
-};
+use perry_abi::layout::{descriptor, record};
+use perry_mir::{ArrayType, DateType, ExceptionType, JsonSchema, JsonType, RecordType, StringType};
 use pliron::{
     builtin::types::{FP64Type, IntegerType},
     context::{Context, Ptr},
@@ -69,23 +67,14 @@ impl FunctionLowering<'_, '_> {
         Ok(table)
     }
 
-    pub(crate) fn layout_descriptor(
-        &mut self,
-        ctx: &Context,
-        ty: TypeHandle,
-        json: bool,
-    ) -> Result<u32> {
+    pub(crate) fn layout_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
         use perry_abi::layout::descriptor::{
-            ARRAY, BOOLEAN, EXCEPTION, NUMBER, OPTIONAL, RECORD, SIGNED_INT, STRING, UNSIGNED_INT,
+            ARRAY, BOOLEAN, EXCEPTION, NUMBER, RECORD, SIGNED_INT, STRING, UNSIGNED_INT,
         };
-        if let Some(&address) = if json {
-            self.state.json_descriptors.get(&ty)
-        } else {
-            self.state.native_descriptors.get(&ty)
-        } {
+        if let Some(&address) = self.state.layout_descriptors.get(&ty) {
             return Ok(address);
         }
-        if json && let Some(inner) = optional_inner(ctx, ty) {
+        if let Some(inner) = optional_inner(ctx, ty) {
             ensure!(
                 crate::values::is_numeric_type(ctx, inner)
                     || matches!(
@@ -96,9 +85,11 @@ impl FunctionLowering<'_, '_> {
             );
             let absence = perry_mir::absence(ctx, ty)
                 .ok_or_else(|| anyhow!("optional descriptor without absence states"))?;
-            return Ok(self.layout_descriptor(ctx, inner, true)?
+            let address = self.layout_descriptor(ctx, inner)?
                 | (u32::from(absence.admits_undefined()) * UNDEFINED_ALLOWED)
-                | (u32::from(absence.admits_null()) * NULL_ALLOWED));
+                | (u32::from(absence.admits_null()) * NULL_ALLOWED);
+            self.state.layout_descriptors.insert(ty, address);
+            return Ok(address);
         }
         let definition = ty.deref(ctx);
         let record_fields = definition
@@ -108,11 +99,9 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("unresolved native record"))?;
         let count = record_fields.map_or(0, <[_]>::len);
         let bytes = if record_fields.is_some() {
-            24 + 12 * count + if json { 4 + 8 * count } else { 0 }
+            28 + 20 * count
         } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
             16 + 12 * variant.cases().len()
-        } else if definition.is::<OptionalType>() {
-            8
         } else if definition.is::<perry_mir::NumberStringType>() {
             16
         } else if definition.is::<ArrayType>() {
@@ -121,24 +110,17 @@ impl FunctionLowering<'_, '_> {
             8
         };
         let address = self.state.data.append(4, &vec![0; bytes]);
-        if json {
-            self.state.json_descriptors.insert(ty, address);
-        } else {
-            self.state.native_descriptors.insert(ty, address);
-        }
+        self.state.layout_descriptors.insert(ty, address);
         let words = if let Some(fields) = record_fields {
             let mut words = Vec::with_capacity(bytes / 4);
             let tuple = TypedHandle::<RecordType>::from_handle(ty, ctx)?
                 .deref(ctx)
                 .is_tuple();
-            words.extend([
-                if json && tuple { JSON_TUPLE } else { RECORD },
-                count as u32,
-            ]);
+            words.extend([if tuple { JSON_TUPLE } else { RECORD }, count as u32]);
             let mut field_offset = record::HEADER;
             for (name, field_ty) in fields.iter() {
                 let name = self.state.data.string(name);
-                let field = self.layout_descriptor(ctx, *field_ty, json)?;
+                let field = self.layout_descriptor(ctx, *field_ty)?;
                 words.extend([name, field, field_offset]);
                 field_offset += slot_size(ctx, *field_ty);
             }
@@ -164,29 +146,26 @@ impl FunctionLowering<'_, '_> {
                 })
                 .count() as u32;
             words.extend([field_offset, shape, table, required]);
-            if json {
-                let mut numeric: Vec<_> = fields
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, (name, _))| {
-                        perry_abi::json::array_index(name.as_bytes()).map(|number| (number, index))
-                    })
-                    .collect();
-                numeric.sort_unstable();
-                let mut next = vec![u32::MAX; count];
-                for (position, &(_, index)) in numeric.iter().enumerate() {
-                    next[index] = numeric
-                        .get(position + 1)
-                        .map_or(0, |&(_, index)| index as u32 + 1);
-                }
-                words.push(numeric.first().map_or(0, |&(_, index)| index as u32 + 1));
-                for ((name, _), next) in fields.iter().zip(next) {
-                    words.extend([self.state.data.string(&json_key(name)), next]);
-                }
+            let mut numeric: Vec<_> = fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (name, _))| {
+                    perry_abi::json::array_index(name.as_bytes()).map(|number| (number, index))
+                })
+                .collect();
+            numeric.sort_unstable();
+            let mut next = vec![u32::MAX; count];
+            for (position, &(_, index)) in numeric.iter().enumerate() {
+                next[index] = numeric
+                    .get(position + 1)
+                    .map_or(0, |&(_, index)| index as u32 + 1);
+            }
+            words.push(numeric.first().map_or(0, |&(_, index)| index as u32 + 1));
+            for ((name, _), next) in fields.iter().zip(next) {
+                words.extend([self.state.data.string(&json_key(name)), next]);
             }
             words
         } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
-            ensure!(json, "unsupported native cause field type");
             let mut words = vec![JSON_VARIANT, variant.cases().len() as u32];
             for (name, payload) in variant.cases() {
                 ensure!(
@@ -195,7 +174,7 @@ impl FunctionLowering<'_, '_> {
                 );
                 let name = self.state.data.string(name);
                 let child = payload
-                    .map(|ty| self.layout_descriptor(ctx, ty, json))
+                    .map(|ty| self.layout_descriptor(ctx, ty))
                     .transpose()?
                     .unwrap_or(0);
                 let reference = payload.is_some_and(|ty| {
@@ -215,36 +194,24 @@ impl FunctionLowering<'_, '_> {
             let table = self.state.data.append(4, &table);
             words.extend([shape, table]);
             words
-        } else if let Some(inner) = optional_inner(ctx, ty) {
-            vec![OPTIONAL, self.layout_descriptor(ctx, inner, false)?]
         } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
             let element = array.deref(ctx).element();
             let kind = Self::array_element_kind(ctx, element)? as u32;
-            let element = self.layout_descriptor(ctx, element, json)?;
+            let element = self.layout_descriptor(ctx, element)?;
             let dictionary = matches!(JsonSchema::of(ctx, ty), Some(JsonSchema::Dictionary { .. }));
             vec![
-                if json && dictionary {
-                    JSON_DICTIONARY
-                } else {
-                    ARRAY
-                },
+                if dictionary { JSON_DICTIONARY } else { ARRAY },
                 element,
                 kind,
             ]
         } else {
-            ensure!(
-                json || !ty.deref(ctx).is::<perry_mir::NumberStringType>()
-                    && !ty.deref(ctx).is::<perry_mir::NumericType>()
-                    && !ty.deref(ctx).is::<JsonType>(),
-                "unsupported native cause field type"
-            );
             let kind = if ty.deref(ctx).is::<perry_mir::NumberStringType>() {
                 JSON_NUMBER_STRING
             } else if ty.deref(ctx).is::<perry_mir::NumericType>() {
                 JSON_NUMERIC
             } else if ty.deref(ctx).is::<JsonType>() {
                 JSON_VALUE
-            } else if json && ty.deref(ctx).is::<DateType>() {
+            } else if ty.deref(ctx).is::<DateType>() {
                 JSON_DATE
             } else if ty.deref(ctx).is::<FP64Type>() {
                 NUMBER
@@ -293,7 +260,7 @@ impl FunctionLowering<'_, '_> {
         let input = op.deref(ctx).get_operand(0);
         let value = self.mapped_value(ctx, input)?;
         let ty = input.get_type(ctx);
-        let schema = self.layout_descriptor(ctx, ty, true)?;
+        let schema = self.layout_descriptor(ctx, ty)?;
         let schema = self.i32_const(ctx, schema as i32);
         let (bits, tag) = match value {
             Carriers::Numeric { tag, payload } => (payload, tag),
@@ -310,13 +277,29 @@ impl FunctionLowering<'_, '_> {
         let data = if let Some(data) = self.state.json_write_data {
             data
         } else {
-            let mut bytes = b"nulltruefalse{}:\"".to_vec();
-            bytes.resize(20, 0);
-            for text in ["\"tag\":", "\"val\":", "tag", "val"] {
-                bytes.extend_from_slice(&self.state.data.string(text).to_le_bytes());
+            use descriptor::*;
+            let mut bytes = [0; WRITE_SIZE as usize];
+            for (offset, literal) in [
+                (WRITE_NULL, "null"),
+                (WRITE_TRUE, "true"),
+                (WRITE_FALSE, "false"),
+                (WRITE_EMPTY_OBJECT, "{}"),
+                (WRITE_COLON, ":"),
+                (WRITE_QUOTE, "\""),
+            ] {
+                let offset = offset as usize;
+                bytes[offset..offset + literal.len()].copy_from_slice(literal.as_bytes());
             }
-            bytes.extend_from_slice(&u32::from(self.state.retains_json).to_le_bytes());
-            bytes.resize(72, 0);
+            for (offset, word) in [
+                (WRITE_TAG_KEY, self.state.data.string("\"tag\":")),
+                (WRITE_VALUE_KEY, self.state.data.string("\"val\":")),
+                (WRITE_TAG_NAME, self.state.data.string("tag")),
+                (WRITE_VALUE_NAME, self.state.data.string("val")),
+                (WRITE_RETAINS_JSON, u32::from(self.state.retains_json)),
+            ] {
+                let offset = offset as usize;
+                bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            }
             let data = self.state.data.append(8, &bytes);
             self.state.json_write_data = Some(data);
             data

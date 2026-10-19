@@ -15,8 +15,9 @@ use wasmparser::{Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Ope
 pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/fetch.wasm"));
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/text.wasm"));
 pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/time.wasm"));
-pub(crate) const JSON_CODEC: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-codec.wasm"));
+const JSON_GRAPH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-graph.wasm"));
+const JSON_CURSOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-cursor.wasm"));
+const JSON_COPY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-copy.wasm"));
 pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json.wasm"));
 const NORMALIZATION: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/helpers/normalization.wasm"));
@@ -41,7 +42,9 @@ pub(crate) enum LibraryId {
     Text,
     Normalization,
     Json,
-    JsonCodec,
+    JsonGraph,
+    JsonCursor,
+    JsonCopy,
     Time,
     Number,
     Decimal,
@@ -60,7 +63,9 @@ impl LibraryId {
             | "fetch_header_value" | "fetch_header_name" => Self::Fetch,
             "str_case_convert" => Self::Text,
             "str_normalize" => Self::Normalization,
-            "json_descriptor_decode" | "json_descriptor_stringify" => Self::JsonCodec,
+            "json_descriptor_decode_graph" | "json_descriptor_stringify" => Self::JsonGraph,
+            "json_descriptor_decode_cursor" => Self::JsonCursor,
+            "json_descriptor_copy" => Self::JsonCopy,
             entry if entry.starts_with("json_") => Self::Json,
             // The time helper exports every `time_` entry, so new ones cannot drift out of a list.
             entry if entry.starts_with("time_") => Self::Time,
@@ -86,7 +91,9 @@ impl LibraryId {
             Self::Text => TEXT,
             Self::Normalization => NORMALIZATION,
             Self::Json => JSON,
-            Self::JsonCodec => JSON_CODEC,
+            Self::JsonGraph => JSON_GRAPH,
+            Self::JsonCursor => JSON_CURSOR,
+            Self::JsonCopy => JSON_COPY,
             Self::Time => TIME,
             Self::Number => NUMBER,
             Self::Decimal => DECIMAL,

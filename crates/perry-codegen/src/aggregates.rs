@@ -5,12 +5,12 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
     ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp,
-    FieldSetOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
+    FieldSetOp, JsonSchema, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -294,7 +294,11 @@ impl FunctionLowering<'_, '_> {
         if let Some(native) = Operation::get_op::<perry_mir::NativeJsonOp>(op, ctx) {
             use pliron::builtin::op_interfaces::OneOpdInterface;
             let source = native.get_operand(ctx);
-            let descriptor = self.layout_descriptor(ctx, source.get_type(ctx), false)?;
+            ensure!(
+                JsonSchema::supports_reflection(ctx, source.get_type(ctx)),
+                "unsupported native cause field type"
+            );
+            let descriptor = self.layout_descriptor(ctx, source.get_type(ctx))?;
             let descriptor = self.i32_const(ctx, descriptor as i32);
             let source = self.mapped(ctx, source)?;
             let value = self.runtime(ctx, Runtime::StdJsonNative, vec![source, descriptor]);

@@ -35,7 +35,7 @@ impl FunctionLowering<'_, '_> {
         } else {
             source.scalar()?
         };
-        let schema = self.layout_descriptor(ctx, ty, true)?;
+        let schema = self.layout_descriptor(ctx, ty)?;
         let (bits, failed, tag) = if copy {
             let plan = self.json_copy_plan(ctx, operand.get_type(ctx), ty)?;
             let plan = self.i32_const(ctx, plan as i32);
@@ -53,13 +53,22 @@ impl FunctionLowering<'_, '_> {
             };
             let position = self.i32_const(ctx, 0);
             let schema = self.i32_const(ctx, schema as i32);
-            self.call_json_engine(ctx, schema, bits, plan, tag, position)
+            self.call_json_engine(
+                ctx,
+                Runtime::JsonDescriptorCopy,
+                [schema, bits, plan, tag, position],
+            )
         } else {
             let schema = self.i32_const(ctx, schema as i32);
             let mode = self.i32_const(ctx, i32::from(text));
             let bits = self.slot_bits(ctx, input);
             let zero = self.i32_const(ctx, 0);
-            self.call_json_engine(ctx, schema, bits, mode, zero, zero)
+            let decoder = if text {
+                Runtime::JsonDescriptorCursor
+            } else {
+                Runtime::JsonDescriptorGraph
+            };
+            self.call_json_engine(ctx, decoder, [schema, bits, mode, zero, zero])
         };
         let status = if text {
             self.runtime_void(ctx, Runtime::JsonCursorFinish, vec![input, failed]);
@@ -88,11 +97,8 @@ impl FunctionLowering<'_, '_> {
     fn call_json_engine(
         &mut self,
         ctx: &mut Context,
-        schema: Value,
-        bits: Value,
-        mode: Value,
-        tag: Value,
-        position: Value,
+        decoder: Runtime,
+        input: [Value; 5],
     ) -> (Value, Value, Value) {
         let address = if let Some(address) = self.state.json_result {
             address
@@ -111,11 +117,7 @@ impl FunctionLowering<'_, '_> {
             address
         };
         let out = self.i32_const(ctx, address as i32);
-        let failed = self.runtime(
-            ctx,
-            Runtime::JsonDescriptorDecode,
-            vec![schema, bits, mode, tag, position, out],
-        );
+        let failed = self.runtime(ctx, decoder, input.into_iter().chain([out]).collect());
         (
             self.load(ctx, MemKind::I64, out, 0),
             failed,
@@ -132,8 +134,8 @@ impl FunctionLowering<'_, '_> {
         if let Some(&plan) = self.state.json_copy_plans.get(&(source, target)) {
             return Ok(plan);
         }
-        let target_desc = self.layout_descriptor(ctx, target, true)?;
-        let source_desc = self.layout_descriptor(ctx, source, true)?;
+        let target_desc = self.layout_descriptor(ctx, target)?;
+        let source_desc = self.layout_descriptor(ctx, source)?;
         let source_inner = optional_inner(ctx, source).unwrap_or(source);
         let target_inner = optional_inner(ctx, target).unwrap_or(target);
         let count = match JsonSchema::of(ctx, target_inner) {

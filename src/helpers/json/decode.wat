@@ -1,6 +1,6 @@
 ;; Descriptor decoding is atomic: allocations do not collect, and the caller owns the safepoint.
 ;; Decode returns payload bits, delayed failure/status, and a NumericType tag.
-;; Input mode is graph=0, cursor=1, or a paired native-copy plan address.
+;; Input sections are selected before parsing; mode carries the native-copy plan address.
 (module
   (import "env" "memory" (memory 0))
   (import "__perry_helper" "perry_alloc_shaped" (func $allocate (param i32 i32) (result i32)))
@@ -49,7 +49,7 @@
 
   (func $slot (param $data i32) (param $index i32) (param $elements i32) (result i32)
     (i32.add (local.get $data) (i32.mul (local.get $index)
-      (select (i32.const @array.NUMERIC_SLOT@) (i32.const @array.SLOT@) (i32.eq (local.get $elements) (i32.const @array.NUMERIC_ELEMENTS@))))))
+        (select (i32.const @array.NUMERIC_SLOT@) (i32.const @array.SLOT@) (i32.eq (local.get $elements) (i32.const @array.NUMERIC_ELEMENTS@))))))
 
   (func $store (param $schema i32) (param $slot i32) (param $bits i64) (param $tag i32)
     (local.set $schema (i32.and (local.get $schema) (i32.const @descriptor.SCHEMA_MASK@)))
@@ -71,7 +71,7 @@
         (local.set $shift (i64.extend_i32_u (i32.sub (i32.const 64) (i32.load offset=4 (local.get $schema)))))
         (local.set $bits (i64.shl (local.get $bits) (local.get $shift)))
         (local.set $bits (select (i64.shr_s (local.get $bits) (local.get $shift))
-          (i64.shr_u (local.get $bits) (local.get $shift)) (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@)))))
+            (i64.shr_u (local.get $bits) (local.get $shift)) (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@)))))
       (else
         (if (i32.ne (local.get $kind) (i32.const @descriptor.NUMBER@))
           (then (local.set $bits (i64.extend_i32_u (i32.wrap_i64 (local.get $bits))))))))
@@ -90,15 +90,15 @@
     (local $metadata i32) (local $object i32)
     (local.set $metadata (call $metadata (local.get $schema)))
     (local.set $object (call $allocate
-      (i32.add (i32.load (local.get $metadata)) (select (i32.load offset=4 (local.get $schema)) (i32.const 0) (local.get $flags)))
-      (i32.load offset=4 (local.get $metadata))))
+        (i32.add (i32.load (local.get $metadata)) (select (i32.load offset=4 (local.get $schema)) (i32.const 0) (local.get $flags)))
+        (i32.load offset=4 (local.get $metadata))))
     (i64.store (local.get $object) (i64.const 0))
     (local.get $object))
 
   (func $finite (param $kind i32) (param $bits i64) (param $tag i32) (result i32)
     (i32.or
       (i32.eqz (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.NUMBER@))
-        (i32.and (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@)) (i32.eqz (local.get $tag)))))
+          (i32.and (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@)) (i32.eqz (local.get $tag)))))
       (f64.lt (f64.abs (f64.reinterpret_i64 (local.get $bits))) (f64.const inf))))
 
   (func $number (param $kind i32) (param $bits i64) (param $tag i32) (result f64)
@@ -106,7 +106,7 @@
       (then
         (if (i32.eqz (local.get $tag)) (then (return (f64.reinterpret_i64 (local.get $bits)))))
         (return (select (f64.convert_i64_s (local.get $bits)) (f64.convert_i64_u (local.get $bits))
-          (i32.and (local.get $tag) (i32.const 1))))))
+            (i32.and (local.get $tag) (i32.const 1))))))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@)) (then (return (f64.convert_i64_s (local.get $bits)))))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.UNSIGNED_INT@)) (then (return (f64.convert_i64_u (local.get $bits)))))
     (f64.reinterpret_i64 (local.get $bits)))
@@ -129,26 +129,26 @@
             (local.set $null (i32.eq (local.get $undefined) (i32.const 2)))
             (local.set $undefined (i32.eq (local.get $undefined) (i32.const 1)))))
         (local.set $nonfinite (i32.and (i32.eqz (i32.or (local.get $undefined) (local.get $null)))
-          (i32.eqz (call $finite (local.get $source-kind) (local.get $bits) (local.get $tag)))))
+            (i32.eqz (call $finite (local.get $source-kind) (local.get $bits) (local.get $tag)))))
         (local.set $null (i32.or (local.get $null) (local.get $nonfinite)))
         (if (i32.or (local.get $undefined) (local.get $null))
           (then
             (if (local.get $target-flags)
               (then
                 (local.set $omitted (i32.and (i32.and (local.get $undefined) (i32.eq (local.get $position) (i32.const 1)))
-                  (i32.and (local.get $target-flags) (i32.const @descriptor.UNDEFINED_ALLOWED@))))
+                    (i32.and (local.get $target-flags) (i32.const @descriptor.UNDEFINED_ALLOWED@))))
                 (local.set $null (i32.and
-                  (i32.or (local.get $null) (i32.and (local.get $undefined) (i32.eq (local.get $position) (i32.const 2))))
-                  (i32.ne (i32.and (local.get $target-flags) (i32.const @descriptor.NULL_ALLOWED@)) (i32.const 0))))
+                    (i32.or (local.get $null) (i32.and (local.get $undefined) (i32.eq (local.get $position) (i32.const 2))))
+                    (i32.ne (i32.and (local.get $target-flags) (i32.const @descriptor.NULL_ALLOWED@)) (i32.const 0))))
                 (if (i32.or (local.get $omitted) (local.get $null))
                   (then (return
-                    (call $absent-bits (local.get $schema) (select (i32.const @numeric.OMITTED@) (i32.const @numeric.NULL@) (local.get $omitted)))
-                    (i32.const 0) (select (i32.const @numeric.OMITTED@) (i32.const @numeric.NULL@) (local.get $omitted)) (i32.const 1))))))
+                      (call $absent-bits (local.get $schema) (select (i32.const @numeric.OMITTED@) (i32.const @numeric.NULL@) (local.get $omitted)))
+                      (i32.const 0) (select (i32.const @numeric.OMITTED@) (i32.const @numeric.NULL@) (local.get $omitted)) (i32.const 1))))))
             (return (i64.const 0) (select (i32.const @descriptor.COPY_NONFINITE@)
-              (select (i32.const @descriptor.COPY_UNDEFINED@) (i32.const @descriptor.COPY_ABSENT@)
-                (i32.and (local.get $undefined) (i32.and (local.get $target-flags) (i32.const @descriptor.UNDEFINED_ALLOWED@))))
-              (local.get $nonfinite)) (i32.const 0) (i32.const 1))))
-      ))
+                (select (i32.const @descriptor.COPY_UNDEFINED@) (i32.const @descriptor.COPY_ABSENT@)
+                  (i32.and (local.get $undefined) (i32.and (local.get $target-flags) (i32.const @descriptor.UNDEFINED_ALLOWED@))))
+                (local.get $nonfinite)) (i32.const 0) (i32.const 1))))
+    ))
     (if (i32.or (i32.eq (local.get $target-kind) (i32.const @descriptor.NUMBER@)) (i32.eq (local.get $target-kind) (i32.const @descriptor.JSON_NUMERIC@)))
       (then
         (if (i32.eqz (call $finite (local.get $source-kind) (local.get $bits) (local.get $tag)))
@@ -161,43 +161,44 @@
 
   (func $scalar (param $kind i32) (param $source i32) (param $mode i32) (result i64 i32 i32)
     (local $bits i64)
-    (if (local.get $mode)
-      (then
-        (if (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.NUMBER@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@)))
-          (then (local.set $bits (i64.reinterpret_f64 (call $cursor-number (local.get $source)))))
-          (else (if (i32.eq (local.get $kind) (i32.const @descriptor.BOOLEAN@))
-            (then (local.set $bits (i64.extend_i32_u (call $cursor-bool (local.get $source)))))
-            (else (if (i32.eq (local.get $kind) (i32.const @descriptor.STRING@))
+    @input.CURSOR@
+    (if (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.NUMBER@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@)))
+      (then (local.set $bits (i64.reinterpret_f64 (call $cursor-number (local.get $source)))))
+      (else (if (i32.eq (local.get $kind) (i32.const @descriptor.BOOLEAN@))
+          (then (local.set $bits (i64.extend_i32_u (call $cursor-bool (local.get $source)))))
+          (else (if (i32.eq (local.get $kind) (i32.const @descriptor.STRING@))
               (then (local.set $bits (i64.extend_i32_u (call $cursor-string (local.get $source)))))
               (else (if (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@))
-                (then (local.set $bits (call $cursor-i64 (local.get $source))))
-                (else (if (i32.eq (local.get $kind) (i32.const @descriptor.UNSIGNED_INT@))
-                  (then (local.set $bits (call $cursor-u64 (local.get $source))))
-                  (else (local.set $bits (i64.extend_i32_u (call $cursor-value (local.get $source))))))))))))))
-        (return (local.get $bits) (call $cursor-failed (local.get $source)) (i32.const 0))))
+                  (then (local.set $bits (call $cursor-i64 (local.get $source))))
+                  (else (if (i32.eq (local.get $kind) (i32.const @descriptor.UNSIGNED_INT@))
+                      (then (local.set $bits (call $cursor-u64 (local.get $source))))
+                      (else (local.set $bits (i64.extend_i32_u (call $cursor-value (local.get $source))))))))))))))
+    (return (local.get $bits) (call $cursor-failed (local.get $source)) (i32.const 0))
+    @input.END_CURSOR@
+    @input.GRAPH@
     (if (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.NUMBER@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@)))
       (then (local.set $bits (i64.reinterpret_f64 (call $graph-number (local.get $source)))))
       (else (if (i32.eq (local.get $kind) (i32.const @descriptor.BOOLEAN@))
-        (then (local.set $bits (i64.extend_i32_u (call $graph-bool (local.get $source)))))
-        (else (if (i32.eq (local.get $kind) (i32.const @descriptor.STRING@))
-          (then (local.set $bits (i64.extend_i32_u (call $graph-string (local.get $source)))))
-          (else (if (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@))
-            (then (local.set $bits (call $graph-i64 (local.get $source))))
-            (else (if (i32.eq (local.get $kind) (i32.const @descriptor.UNSIGNED_INT@))
-              (then (local.set $bits (call $graph-u64 (local.get $source))))
-              (else (local.set $bits (i64.extend_i32_u (local.get $source)))))))))))))
+          (then (local.set $bits (i64.extend_i32_u (call $graph-bool (local.get $source)))))
+          (else (if (i32.eq (local.get $kind) (i32.const @descriptor.STRING@))
+              (then (local.set $bits (i64.extend_i32_u (call $graph-string (local.get $source)))))
+              (else (if (i32.eq (local.get $kind) (i32.const @descriptor.SIGNED_INT@))
+                  (then (local.set $bits (call $graph-i64 (local.get $source))))
+                  (else (if (i32.eq (local.get $kind) (i32.const @descriptor.UNSIGNED_INT@))
+                      (then (local.set $bits (call $graph-u64 (local.get $source))))
+                      (else (local.set $bits (i64.extend_i32_u (local.get $source)))))))))))))
+    @input.END_GRAPH@
     (local.get $bits) (call $status) (i32.const 0))
 
   (func $field (param $schema i32) (param $index i32) (result i32)
-    (i32.add (local.get $schema) (i32.add (i32.const 8) (i32.mul (local.get $index) (i32.const 12)))))
+    (i32.add (local.get $schema) (i32.add (i32.const @descriptor.FIELDS@) (i32.mul (local.get $index) (i32.const @descriptor.FIELD_SIZE@)))))
 
   (func $record (param $schema i32) (param $source i32) (param $mode i32) (param $first i32) (param $tuple i32)
     (result i64 i32 i32)
     (local $count i32) (local $metadata i32) (local $table i32) (local $object i32) (local $errors i32)
     (local $index i32) (local $field i32) (local $child i32) (local $slot i32) (local $plan i32)
     (local $bits i64) (local $tag i32) (local $failed i32) (local $remaining i32) (local $residue i32)
-    (local $native i32) (local $input i32) (local $entry i32) (local $source-schema i32) (local $present i32)
-    (local.set $native (i32.gt_u (local.get $mode) (i32.const 1)))
+    (local $input i32) (local $entry i32) (local $source-schema i32) (local $present i32)
     (local.set $count (i32.load offset=4 (local.get $schema)))
     (local.set $metadata (call $metadata (local.get $schema)))
     (local.set $table (i32.load offset=8 (local.get $metadata)))
@@ -207,15 +208,16 @@
       (loop $initialize
         (br_if $initialized (i32.ge_u (local.get $index) (local.get $count)))
         (local.set $field (call $field (local.get $schema) (local.get $index)))
-        (local.set $child (i32.load offset=4 (local.get $field)))
+        (local.set $child (i32.load offset=@descriptor.FIELD_SCHEMA@ (local.get $field)))
         (call $missing (local.get $child) (i32.const 1))
         local.set $tag local.set $failed local.set $bits
-        (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=8 (local.get $field))) (local.get $bits) (local.get $tag))
+        (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=@descriptor.FIELD_OFFSET@ (local.get $field))) (local.get $bits) (local.get $tag))
         (if (i32.eqz (local.get $tuple))
           (then (i32.store8 (i32.add (local.get $errors) (local.get $index)) (local.get $failed))))
         (local.set $index (i32.add (local.get $index) (i32.const 1)))
         (br $initialize)))
-    (if (i32.and (i32.eq (local.get $mode) (i32.const 1)) (i32.eqz (local.get $tuple)))
+    @input.CURSOR@
+    (if (i32.eqz (local.get $tuple))
       (then
         (local.set $remaining (i32.load offset=12 (local.get $metadata)))
         (block $close
@@ -225,10 +227,10 @@
             (if (i32.lt_u (local.get $index) (local.get $count))
               (then
                 (local.set $field (call $field (local.get $schema) (local.get $index)))
-                (local.set $child (i32.load offset=4 (local.get $field)))
+                (local.set $child (i32.load offset=@descriptor.FIELD_SCHEMA@ (local.get $field)))
                 (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 1))
                 local.set $tag local.set $failed local.set $bits
-                (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=8 (local.get $field))) (local.get $bits) (local.get $tag))
+                (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=@descriptor.FIELD_OFFSET@ (local.get $field))) (local.get $bits) (local.get $tag))
                 (local.set $slot (i32.add (local.get $errors) (local.get $index)))
                 (local.set $remaining (i32.add (i32.sub (local.get $remaining) (i32.load8_u (local.get $slot))) (local.get $failed)))
                 (i32.store8 (local.get $slot) (local.get $failed)))
@@ -239,138 +241,164 @@
         (call $cursor-record (local.get $source) (local.get $object))
         (call $cursor-consume (local.get $source) (i32.const 125))
         (return (i64.extend_i32_u (local.get $object)) (i32.ne (local.get $remaining) (i32.const 0)) (i32.const 0))))
+    @input.END_CURSOR@
     (local.set $index (i32.const 0))
     (block $fields-done
       (loop $fields
         (br_if $fields-done (i32.ge_u (local.get $index) (local.get $count)))
         (local.set $field (call $field (local.get $schema) (local.get $index)))
-        (local.set $child (i32.load offset=4 (local.get $field)))
+        (local.set $child (i32.load offset=@descriptor.FIELD_SCHEMA@ (local.get $field)))
         (block $decoded (result i64 i32 i32)
-          (if (local.get $native)
-            (then
-              (local.set $entry (i32.add (local.get $mode) (i32.add (i32.const 8) (i32.mul (local.get $index) (i32.const 8)))))
-              (local.set $plan (i32.load (local.get $entry)))
-              (if (i32.eqz (local.get $plan)) (then (call $missing (local.get $child) (i32.const 1)) (br $decoded)))
-              (call $load (i32.load offset=4 (local.get $plan)) (i32.add (local.get $source) (i32.load offset=4 (local.get $entry))))
-              local.set $tag local.set $bits
-              (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag)
-                (select (i32.const 2) (i32.const 1) (local.get $tuple)))
-              (br $decoded)))
-          (if (i32.eq (local.get $mode) (i32.const 1))
-            (then
-              (if (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93))
-                (then (call $missing (local.get $child) (i32.const 0)) (br $decoded)))
-              (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 2))
-              (if (i32.eq (call $cursor-byte (local.get $source)) (i32.const 44))
-                (then (call $cursor-consume (local.get $source) (i32.const 44))))
-              (br $decoded)))
+          @input.NATIVE@
+          (local.set $entry (i32.add (local.get $mode) (i32.add (i32.const 8) (i32.mul (local.get $index) (i32.const 8)))))
+          (local.set $plan (i32.load (local.get $entry)))
+          (if (i32.eqz (local.get $plan)) (then (call $missing (local.get $child) (i32.const 1)) (br $decoded)))
+          (call $load (i32.load offset=4 (local.get $plan)) (i32.add (local.get $source) (i32.load offset=4 (local.get $entry))))
+          local.set $tag local.set $bits
+          (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag)
+            (select (i32.const 2) (i32.const 1) (local.get $tuple)))
+          (br $decoded)
+          @input.END_NATIVE@
+          @input.CURSOR@
+          (if (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93))
+            (then (call $missing (local.get $child) (i32.const 0)) (br $decoded)))
+          (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 2))
+          (if (i32.eq (call $cursor-byte (local.get $source)) (i32.const 44))
+            (then (call $cursor-consume (local.get $source) (i32.const 44))))
+          (br $decoded)
+          @input.END_CURSOR@
+          @input.GRAPH@
           (local.set $input (local.get $first))
           (if (i32.eqz (local.get $tuple))
             (then (local.set $input (call $graph-member (local.get $source) (i32.load (local.get $field))))))
-          (call $decode (local.get $child) (i64.extend_i32_u (local.get $input)) (local.get $mode) (i32.const 0) (i32.const 0)))
+          (call $decode (local.get $child) (i64.extend_i32_u (local.get $input)) (local.get $mode) (i32.const 0) (i32.const 0))
+          (br $decoded)
+          @input.END_GRAPH@
+          (i64.const 0) (i32.const 0) (i32.const 0))
         local.set $tag local.set $failed local.set $bits
-        (if (i32.and (i32.ne (local.get $mode) (i32.const 1)) (i32.ne (local.get $failed) (i32.const 0)))
+        @input.IMMEDIATE@
+        (if (local.get $failed)
           (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+        @input.END_IMMEDIATE@
         (local.set $remaining (i32.or (local.get $remaining) (local.get $failed)))
-        (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=8 (local.get $field))) (local.get $bits) (local.get $tag))
-        (if (i32.and (i32.eqz (local.get $mode)) (local.get $tuple))
+        (call $store (local.get $child) (i32.add (local.get $object) (i32.load offset=@descriptor.FIELD_OFFSET@ (local.get $field))) (local.get $bits) (local.get $tag))
+        @input.GRAPH@
+        (if (local.get $tuple)
           (then (local.set $first (call $graph-next (local.get $first)))))
+        @input.END_GRAPH@
         (local.set $index (i32.add (local.get $index) (i32.const 1)))
         (br $fields)))
-    (if (i32.eq (local.get $mode) (i32.const 1))
+    @input.CURSOR@
+    (block $tail-done
+      (br_if $tail-done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
+      (loop $tail
+        (local.set $residue (call $cursor-tail (local.get $source) (local.get $residue) (local.get $count)))
+        (br_if $tail-done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
+        (call $cursor-consume (local.get $source) (i32.const 44))
+        (br $tail)))
+    (i32.store offset=@record.JSON@ (local.get $object) (local.get $residue))
+    (call $cursor-consume (local.get $source) (i32.const 93))
+    @input.END_CURSOR@
+    @input.NATIVE@
+    (if (i32.eqz (local.get $tuple))
       (then
-        (block $tail-done
-          (br_if $tail-done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
-          (loop $tail
-            (local.set $residue (call $cursor-tail (local.get $source) (local.get $residue) (local.get $count)))
-            (br_if $tail-done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
-            (call $cursor-consume (local.get $source) (i32.const 44))
-            (br $tail)))
-        (i32.store offset=@record.JSON@ (local.get $object) (local.get $residue))
-        (call $cursor-consume (local.get $source) (i32.const 93))))
-    (if (local.get $native)
-      (then
-        (if (i32.eqz (local.get $tuple))
-          (then
-            (local.set $source-schema (i32.and (i32.load offset=4 (local.get $mode)) (i32.const @descriptor.SCHEMA_MASK@)))
-            (call $record-copy-order (local.get $object) (local.get $source) (local.get $table) (local.get $count)
-              (i32.load offset=8 (call $metadata (local.get $source-schema))) (i32.load offset=4 (local.get $source-schema)))
-            (local.set $index (i32.const 0))
-            (block $order-done
-              (loop $order
-                (br_if $order-done (i32.ge_u (local.get $index) (local.get $count)))
-                (local.set $field (call $field (local.get $schema) (local.get $index)))
-                (local.set $child (i32.load offset=4 (local.get $field)))
-                (if (i32.and (local.get $child) (i32.const @descriptor.UNDEFINED_ALLOWED@))
-                  (then
-                    (call $load (local.get $child) (i32.add (local.get $object) (i32.load offset=8 (local.get $field))))
-                    local.set $tag local.set $bits
-                    (local.set $present (i32.ne (call $native-absence (local.get $child) (local.get $bits) (local.get $tag)) (i32.const 1)))
-                    (call $record-field (local.get $object) (local.get $table) (local.get $count) (i32.load (local.get $field)) (local.get $present))))
-                (local.set $index (i32.add (local.get $index) (i32.const 1)))
-                (br $order))))))
-      (else
-        (if (i32.eqz (local.get $mode))
-          (then
-            (if (local.get $tuple)
-              (then (i32.store offset=@record.JSON@ (local.get $object) (local.get $source)))
-              (else (call $record-retain (local.get $object) (local.get $source) (local.get $table) (local.get $count))))))))
+        (local.set $source-schema (i32.and (i32.load offset=4 (local.get $mode)) (i32.const @descriptor.SCHEMA_MASK@)))
+        (call $record-copy-order (local.get $object) (local.get $source) (local.get $table) (local.get $count)
+          (i32.load offset=8 (call $metadata (local.get $source-schema))) (i32.load offset=4 (local.get $source-schema)))
+        (local.set $index (i32.const 0))
+        (block $order-done
+          (loop $order
+            (br_if $order-done (i32.ge_u (local.get $index) (local.get $count)))
+            (local.set $field (call $field (local.get $schema) (local.get $index)))
+            (local.set $child (i32.load offset=@descriptor.FIELD_SCHEMA@ (local.get $field)))
+            (if (i32.and (local.get $child) (i32.const @descriptor.UNDEFINED_ALLOWED@))
+              (then
+                (call $load (local.get $child) (i32.add (local.get $object) (i32.load offset=@descriptor.FIELD_OFFSET@ (local.get $field))))
+                local.set $tag local.set $bits
+                (local.set $present (i32.ne (call $native-absence (local.get $child) (local.get $bits) (local.get $tag)) (i32.const 1)))
+                (call $record-field (local.get $object) (local.get $table) (local.get $count) (i32.load (local.get $field)) (local.get $present))))
+            (local.set $index (i32.add (local.get $index) (i32.const 1)))
+            (br $order)))))
+    @input.END_NATIVE@
+    @input.PARSED@
+    @input.GRAPH@
+    (if (local.get $tuple)
+      (then (i32.store offset=@record.JSON@ (local.get $object) (local.get $source)))
+      (else (call $record-retain (local.get $object) (local.get $source) (local.get $table) (local.get $count))))
+    @input.END_GRAPH@
+    @input.END_PARSED@
     (i64.extend_i32_u (local.get $object)) (local.get $remaining) (i32.const 0))
 
   (func $array (param $schema i32) (param $source i32) (param $mode i32) (param $first i32) (param $dictionary i32)
     (result i64 i32 i32)
     (local $child i32) (local $elements i32) (local $array i32) (local $keys i32) (local $index i32)
-    (local $plan i32) (local $source-schema i32) (local $slot i32) (local $key i32) (local $object i32)
+    (local $plan i32) (local $source-schema i32) (local $source-elements i32) (local $source-data i32)
+    (local $slot i32) (local $key i32) (local $object i32) (local $value-schema i32)
     (local $bits i64) (local $tag i32) (local $failed i32) (local $errors i32) (local $length i32)
-    (local $native i32) (local $value-schema i32)
-    (local.set $native (i32.gt_u (local.get $mode) (i32.const 1)))
     (local.set $child (i32.load offset=4 (local.get $schema)))
     (local.set $elements (i32.load offset=8 (local.get $schema)))
     (local.set $array (call $array-new (i32.const 0) (local.get $elements)))
-    (if (i32.and (local.get $dictionary) (i32.eqz (local.get $mode)))
-      (then (local.set $keys (call $graph-keys (local.get $source)))))
-    (if (i32.eqz (i32.or (local.get $native) (local.get $dictionary)))
-      (then (local.set $index (local.get $first))))
+    @input.NATIVE@
+    (local.set $plan (i32.load offset=8 (local.get $mode)))
+    (local.set $source-schema (i32.load offset=4 (local.get $plan)))
+    (local.set $source-elements (i32.load offset=8 (i32.and (i32.load offset=4 (local.get $mode)) (i32.const @descriptor.SCHEMA_MASK@))))
+    (local.set $source-data (i32.load offset=@array.DATA@ (local.get $source)))
+    @input.END_NATIVE@
+    @input.GRAPH@
+    (if (local.get $dictionary)
+      (then
+        (local.set $keys (call $graph-keys (local.get $source)))
+        (local.set $value-schema (i32.load offset=@descriptor.DICTIONARY_VALUE_SCHEMA@ (local.get $child))))
+      (else (local.set $index (local.get $first))))
+    @input.END_GRAPH@
+    @input.CURSOR@
+    (local.set $index (local.get $source))
+    @input.END_CURSOR@
     (block $done
       (loop $head
-        (if (local.get $native)
-          (then (br_if $done (i32.ge_u (local.get $index) (i32.load offset=@array.LEN@ (local.get $source)))))
-          (else
-            (if (i32.eq (local.get $mode) (i32.const 1))
-              (then (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93))))
-              (else
-                (if (local.get $dictionary)
-                  (then (br_if $done (i32.ge_u (local.get $index) (i32.load offset=@array.LEN@ (local.get $keys)))))
-                  (else (br_if $done (i32.eqz (local.get $index)))))))))
+        @input.NATIVE@
+        (br_if $done (i32.ge_u (local.get $index) (i32.load offset=@array.LEN@ (local.get $source))))
+        @input.END_NATIVE@
+        @input.CURSOR@
+        (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
+        @input.END_CURSOR@
+        @input.GRAPH@
+        (if (local.get $dictionary)
+          (then (br_if $done (i32.ge_u (local.get $index) (i32.load offset=@array.LEN@ (local.get $keys)))))
+          (else (br_if $done (i32.eqz (local.get $index)))))
+        @input.END_GRAPH@
         (loop $item
-          (if (local.get $native)
-            (then
-              (local.set $plan (i32.load offset=8 (local.get $mode)))
-              (local.set $source-schema (i32.and (i32.load offset=4 (local.get $mode)) (i32.const @descriptor.SCHEMA_MASK@)))
-              (local.set $slot (call $slot (i32.load offset=@array.DATA@ (local.get $source)) (local.get $index) (i32.load offset=8 (local.get $source-schema))))
-              (call $load (i32.load offset=4 (local.get $plan)) (local.get $slot))
-              local.set $tag local.set $bits
-              (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag) (i32.const 2))
-              local.set $tag local.set $failed local.set $bits)
-            (else
-              (if (local.get $dictionary)
-                (then
-                  (local.set $key (i32.load (i32.add (i32.load offset=@array.DATA@ (local.get $keys)) (i32.mul (local.get $index) (i32.const 8)))))
-                  (local.set $value-schema (i32.load offset=24 (local.get $child)))
-                  (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-member (local.get $source) (local.get $key)))
-                    (local.get $mode) (i32.const 0) (i32.const 0))
-                  local.set $tag local.set $failed local.set $bits
-                  (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
-                  (local.set $object (call $record-new (local.get $child) (i32.const 0)))
-                  (i64.store offset=@record.HEADER@ (local.get $object) (i64.extend_i32_u (local.get $key)))
-                  (call $store (local.get $value-schema) (i32.add (local.get $object) (i32.load offset=28 (local.get $child))) (local.get $bits) (local.get $tag))
-                  (local.set $bits (i64.extend_i32_u (local.get $object)))
-                  (local.set $tag (i32.const 0)))
-                (else
-                  (call $decode (local.get $child) (i64.extend_i32_u (local.get $index)) (local.get $mode) (i32.const 0) (i32.const 0))
-                  local.set $tag local.set $failed local.set $bits))))
-          (if (i32.and (i32.ne (local.get $mode) (i32.const 1)) (i32.ne (local.get $failed) (i32.const 0)))
-            (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+          (block $read
+            @input.NATIVE@
+            (local.set $slot (call $slot (local.get $source-data) (local.get $index) (local.get $source-elements)))
+            (call $load (local.get $source-schema) (local.get $slot))
+            local.set $tag local.set $bits
+            (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag) (i32.const 2))
+            local.set $tag local.set $failed local.set $bits
+            (br $read)
+            @input.END_NATIVE@
+            @input.GRAPH@
+            (if (local.get $dictionary)
+              (then
+                (local.set $key (i32.load (i32.add (i32.load offset=@array.DATA@ (local.get $keys)) (i32.mul (local.get $index) (i32.const 8)))))
+                (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-member (local.get $source) (local.get $key)))
+                  (local.get $mode) (i32.const 0) (i32.const 0))
+                local.set $tag local.set $failed local.set $bits
+                (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+                (local.set $object (call $record-new (local.get $child) (i32.const 0)))
+                (i64.store offset=@record.HEADER@ (local.get $object) (i64.extend_i32_u (local.get $key)))
+                (call $store (local.get $value-schema) (i32.add (local.get $object) (i32.load offset=@descriptor.DICTIONARY_VALUE_OFFSET@ (local.get $child))) (local.get $bits) (local.get $tag))
+                (local.set $bits (i64.extend_i32_u (local.get $object)))
+                (local.set $tag (i32.const 0))
+                (br $read)))
+            @input.END_GRAPH@
+            @input.PARSED@
+            (call $decode (local.get $child) (i64.extend_i32_u (local.get $index)) (local.get $mode) (i32.const 0) (i32.const 0))
+            local.set $tag local.set $failed local.set $bits
+            @input.END_PARSED@)
+          @input.IMMEDIATE@
+          (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+          @input.END_IMMEDIATE@
           (local.set $errors (i32.or (local.get $errors) (local.get $failed)))
           (local.set $length (i32.load offset=@array.LEN@ (local.get $array)))
           (if (i32.eq (local.get $length) (i32.load offset=@array.CAP@ (local.get $array)))
@@ -378,17 +406,23 @@
           (call $store (local.get $child) (call $slot (i32.load offset=@array.DATA@ (local.get $array)) (local.get $length) (local.get $elements))
             (local.get $bits) (local.get $tag))
           (i32.store offset=@array.LEN@ (local.get $array) (i32.add (local.get $length) (i32.const 1)))
-          (if (i32.eq (local.get $mode) (i32.const 1))
-            (then
-              (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
-              (call $cursor-consume (local.get $source) (i32.const 44))
-              (br $item)))
-          (if (i32.or (local.get $native) (local.get $dictionary))
+          @input.CURSOR@
+          (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
+          (call $cursor-consume (local.get $source) (i32.const 44))
+          (br $item)
+          @input.END_CURSOR@
+          @input.NATIVE@
+          (local.set $index (i32.add (local.get $index) (i32.const 1)))
+          @input.END_NATIVE@
+          @input.GRAPH@
+          (if (local.get $dictionary)
             (then (local.set $index (i32.add (local.get $index) (i32.const 1))))
             (else (local.set $index (call $graph-next (local.get $index)))))
+          @input.END_GRAPH@
           (br $head))))
-    (if (i32.eq (local.get $mode) (i32.const 1))
-      (then (call $cursor-consume (local.get $source) (i32.const 93))))
+    @input.CURSOR@
+    (call $cursor-consume (local.get $source) (i32.const 93))
+    @input.END_CURSOR@
     (i64.extend_i32_u (local.get $array)) (local.get $errors) (i32.const 0))
 
   (func $case (param $schema i32) (param $name i32) (result i32)
@@ -418,83 +452,89 @@
     (local $key i32) (local $saved i32) (local $plan i32) (local $input i32)
     (local.set $metadata (call $metadata (local.get $schema)))
     (local.set $table (i32.load offset=4 (local.get $metadata)))
-    (if (i32.eq (local.get $mode) (i32.const 1))
-      (then
-        ;; The final tag owns validation; only a payload decoded for that case is reusable.
-        (block $close
-          (br_if $close (i32.eq (call $cursor-byte (local.get $source)) (i32.const 125)))
-          (loop $members
-            (local.set $key (call $cursor-key (local.get $source) (local.get $table) (i32.const 2) (i32.const 0)))
-            (if (i32.eqz (local.get $key))
-              (then
-                (local.set $tag (call $cursor-string (local.get $source)))
-                (local.set $case (i32.const 0))
-                (if (i32.eqz (call $cursor-failed (local.get $source)))
-                  (then (local.set $case (call $case (local.get $schema) (local.get $tag))))))
-              (else
-                (local.set $child (i32.const 0))
-                (if (i32.eq (local.get $key) (i32.const 1))
-                  (then
-                    (local.set $position (call $cursor-seek (local.get $source) (i32.const -1)))
-                    (if (local.get $case) (then (local.set $child (i32.load offset=4 (local.get $case)))))))
-                (if (local.get $child)
-                  (then
-                    (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 1))
-                    drop local.set $failed local.set $bits
-                    (local.set $cached (local.get $case)))
-                  (else
-                    (local.set $residue (call $cursor-member (local.get $source) (local.get $residue)))
-                    (if (i32.eq (local.get $key) (i32.const 1))
-                      (then (local.set $cached (i32.const 0)) (local.set $bits (i64.const 0)) (local.set $failed (i32.const 0))))))))
-            (br_if $close (i32.eq (call $cursor-byte (local.get $source)) (i32.const 125)))
-            (call $cursor-consume (local.get $source) (i32.const 44))
-            (br $members)))
-        (if (local.get $case)
+    @input.CURSOR@
+    ;; The final tag owns validation; only a payload decoded for that case is reusable.
+    (block $close
+      (br_if $close (i32.eq (call $cursor-byte (local.get $source)) (i32.const 125)))
+      (loop $members
+        (local.set $key (call $cursor-key (local.get $source) (local.get $table) (i32.const 2) (i32.const 0)))
+        (if (i32.eqz (local.get $key))
           (then
-            (local.set $child (i32.load offset=4 (local.get $case)))
+            (local.set $tag (call $cursor-string (local.get $source)))
+            (local.set $case (i32.const 0))
+            (if (i32.eqz (call $cursor-failed (local.get $source)))
+              (then (local.set $case (call $case (local.get $schema) (local.get $tag))))))
+          (else
+            (local.set $child (i32.const 0))
+            (if (i32.eq (local.get $key) (i32.const 1))
+              (then
+                (local.set $position (call $cursor-seek (local.get $source) (i32.const -1)))
+                (if (local.get $case) (then (local.set $child (i32.load offset=4 (local.get $case)))))))
             (if (local.get $child)
               (then
-                (if (i32.ne (local.get $case) (local.get $cached))
-                  (then
-                    (if (local.get $position)
-                      (then
-                        (local.set $saved (call $cursor-seek (local.get $source) (local.get $position)))
-                        (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 1))
-                        drop local.set $failed local.set $bits
-                        (drop (call $cursor-seek (local.get $source) (local.get $saved))))
-                      (else
-                        (call $missing (local.get $child) (i32.const 0))
-                        drop local.set $failed local.set $bits)))))
-              (else (local.set $bits (i64.const 0)) (local.set $failed (i32.const 0)))))
-          (else (local.set $failed (i32.const 1))))
-        (call $cursor-consume (local.get $source) (i32.const 125)))
-      (else
-        (if (local.get $mode)
-          (then (local.set $tag (i32.load (local.get $source))))
-          (else
-            (local.set $tag (call $graph-string (call $graph-member (local.get $source) (i32.load (local.get $table)))))
-            (local.set $failed (call $status))
-            (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))))
-        (local.set $case (call $case (local.get $schema) (local.get $tag)))
-        (if (i32.eqz (local.get $case))
-          (then (return (i64.const 0) (i32.const @descriptor.VARIANT_TAG@) (i32.const 0))))
+                (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 1))
+                drop local.set $failed local.set $bits
+                (local.set $cached (local.get $case)))
+              (else
+                (local.set $residue (call $cursor-member (local.get $source) (local.get $residue)))
+                (if (i32.eq (local.get $key) (i32.const 1))
+                  (then (local.set $cached (i32.const 0)) (local.set $bits (i64.const 0)) (local.set $failed (i32.const 0))))))))
+        (br_if $close (i32.eq (call $cursor-byte (local.get $source)) (i32.const 125)))
+        (call $cursor-consume (local.get $source) (i32.const 44))
+        (br $members)))
+    (if (local.get $case)
+      (then
         (local.set $child (i32.load offset=4 (local.get $case)))
         (if (local.get $child)
           (then
-            (local.set $plan (local.get $mode))
-            (if (local.get $mode)
+            (if (i32.ne (local.get $case) (local.get $cached))
               (then
-                (local.set $plan (i32.load (i32.add (local.get $mode) (i32.add (i32.const 8)
-                  (i32.mul (i32.div_u (i32.sub (i32.sub (local.get $case) (local.get $schema)) (i32.const 8)) (i32.const 12)) (i32.const 8))))))
-                (call $load (i32.load offset=4 (local.get $plan)) (i32.add (local.get $source) (i32.const 8)))
-                local.set $tag local.set $bits)
-              (else
-                (local.set $bits (i64.extend_i32_u (call $graph-member (local.get $source) (i32.load offset=8 (local.get $table)))))
-                (local.set $tag (i32.const 0))))
-            (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag) (i32.const 1))
-            drop local.set $failed local.set $bits
-            (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))))
-        (if (i32.eqz (local.get $mode)) (then (local.set $residue (local.get $source))))))
+                (if (local.get $position)
+                  (then
+                    (local.set $saved (call $cursor-seek (local.get $source) (local.get $position)))
+                    (call $decode (local.get $child) (i64.extend_i32_u (local.get $source)) (local.get $mode) (i32.const 0) (i32.const 1))
+                    drop local.set $failed local.set $bits
+                    (drop (call $cursor-seek (local.get $source) (local.get $saved))))
+                  (else
+                    (call $missing (local.get $child) (i32.const 0))
+                    drop local.set $failed local.set $bits)))))
+          (else (local.set $bits (i64.const 0)) (local.set $failed (i32.const 0)))))
+      (else (local.set $failed (i32.const 1))))
+    (call $cursor-consume (local.get $source) (i32.const 125))
+    @input.END_CURSOR@
+    @input.IMMEDIATE@
+    @input.NATIVE@
+    (local.set $tag (i32.load (local.get $source)))
+    @input.END_NATIVE@
+    @input.GRAPH@
+    (local.set $tag (call $graph-string (call $graph-member (local.get $source) (i32.load (local.get $table)))))
+    (local.set $failed (call $status))
+    (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+    @input.END_GRAPH@
+    (local.set $case (call $case (local.get $schema) (local.get $tag)))
+    (if (i32.eqz (local.get $case))
+      (then (return (i64.const 0) (i32.const @descriptor.VARIANT_TAG@) (i32.const 0))))
+    (local.set $child (i32.load offset=4 (local.get $case)))
+    (if (local.get $child)
+      (then
+        (local.set $plan (local.get $mode))
+        @input.NATIVE@
+        (local.set $plan (i32.load (i32.add (local.get $mode) (i32.add (i32.const 8)
+                (i32.mul (i32.div_u (i32.sub (i32.sub (local.get $case) (local.get $schema)) (i32.const 8)) (i32.const 12)) (i32.const 8))))))
+        (call $load (i32.load offset=4 (local.get $plan)) (i32.add (local.get $source) (i32.const 8)))
+        local.set $tag local.set $bits
+        @input.END_NATIVE@
+        @input.GRAPH@
+        (local.set $bits (i64.extend_i32_u (call $graph-member (local.get $source) (i32.load offset=8 (local.get $table)))))
+        (local.set $tag (i32.const 0))
+        @input.END_GRAPH@
+        (call $decode (local.get $child) (local.get $bits) (local.get $plan) (local.get $tag) (i32.const 1))
+        drop local.set $failed local.set $bits
+        (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))))
+    @input.GRAPH@
+    (local.set $residue (local.get $source))
+    @input.END_GRAPH@
+    @input.END_IMMEDIATE@
     (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
     (call $variant-object (i32.load (local.get $metadata)) (i32.load (local.get $case)) (local.get $bits)
       (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (i32.load offset=8 (local.get $case))) (local.get $residue))
@@ -505,63 +545,74 @@
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
     (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $string i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
-    (if (i32.gt_u (local.get $mode) (i32.const 1))
-      (then
-        (call $native (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
-        local.set $done local.set $tag local.set $failed local.set $bits
-        (if (local.get $done) (then (return (local.get $bits) (local.get $failed) (local.get $tag))))))
+    @input.NATIVE@
+    (call $native (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
+    local.set $done local.set $tag local.set $failed local.set $bits
+    (if (local.get $done) (then (return (local.get $bits) (local.get $failed) (local.get $tag))))
+    @input.END_NATIVE@
     (local.set $flags (i32.and (local.get $schema) (i32.const @descriptor.ABSENCE_MASK@)))
     (local.set $schema (i32.and (local.get $schema) (i32.const @descriptor.SCHEMA_MASK@)))
     (local.set $kind (i32.load (local.get $schema)))
-    (if (i32.and (i32.ne (local.get $flags) (i32.const 0)) (i32.lt_u (local.get $mode) (i32.const 2)))
+    @input.PARSED@
+    (if (local.get $flags)
       (then
         (if (i32.and (i32.and (i32.eqz (local.get $mode)) (i32.eqz (local.get $source))) (i32.and (local.get $flags) (i32.const @descriptor.UNDEFINED_ALLOWED@)))
           (then (return (call $absent-bits (local.get $schema) (i32.const @numeric.OMITTED@)) (i32.const 0) (i32.const @numeric.OMITTED@))))
-        (if (local.get $mode)
-          (then (local.set $null (i32.eq (call $cursor-byte (local.get $source)) (i32.const 110))))
-          (else (local.set $null (call $graph-null (local.get $source)))))
+        @input.CURSOR@
+        (local.set $null (i32.eq (call $cursor-byte (local.get $source)) (i32.const 110)))
+        @input.END_CURSOR@
+        @input.GRAPH@
+        (local.set $null (call $graph-null (local.get $source)))
+        @input.END_GRAPH@
         (if (i32.and (local.get $null) (i32.ne (i32.and (local.get $flags) (i32.const @descriptor.NULL_ALLOWED@)) (i32.const 0)))
           (then
-            (if (local.get $mode) (then (call $cursor-discard (local.get $source))))
+            @input.CURSOR@
+            (call $cursor-discard (local.get $source))
+            @input.END_CURSOR@
             (return (call $absent-bits (local.get $schema) (i32.const @numeric.NULL@)) (i32.const 0) (i32.const @numeric.NULL@))))
-      ))
+    ))
     (if (i32.or (i32.le_u (local.get $kind) (i32.const @descriptor.STRING@))
-      (i32.and (i32.ge_u (local.get $kind) (i32.const @descriptor.SIGNED_INT@)) (i32.le_u (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@))))
+        (i32.and (i32.ge_u (local.get $kind) (i32.const @descriptor.SIGNED_INT@)) (i32.le_u (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@))))
       (then (return (call $scalar (local.get $kind) (local.get $source) (local.get $mode)))))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMBER_STRING@))
       (then
-        (if (local.get $mode)
-          (then (local.set $string (i32.eq (call $cursor-byte (local.get $source)) (i32.const 34))))
-          (else (local.set $string (call $string-compare (call $graph-type (local.get $source)) (i32.load offset=8 (local.get $schema))))))
+        @input.CURSOR@
+        (local.set $string (i32.eq (call $cursor-byte (local.get $source)) (i32.const 34)))
+        @input.END_CURSOR@
+        @input.GRAPH@
+        (local.set $string (call $string-compare (call $graph-type (local.get $source)) (i32.load offset=8 (local.get $schema))))
+        @input.END_GRAPH@
         (call $scalar (select (i32.const @descriptor.STRING@) (i32.const @descriptor.NUMBER@) (local.get $string)) (local.get $source) (local.get $mode))
         drop local.set $failed local.set $bits
         (return (call $variant-object (i32.load offset=4 (local.get $schema))
-          (i32.load (i32.add (local.get $schema) (select (i32.const 12) (i32.const 8) (local.get $string))))
-          (local.get $bits) (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (local.get $string)) (i32.const 0))
+            (i32.load (i32.add (local.get $schema) (select (i32.const 12) (i32.const 8) (local.get $string))))
+            (local.get $bits) (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (local.get $string)) (i32.const 0))
           (local.get $failed) (i32.const 0))))
+    @input.END_PARSED@
     (local.set $array (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.ARRAY@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_TUPLE@))))
     (local.set $first (local.get $source))
-    (if (i32.eq (local.get $mode) (i32.const 1))
-      (then
-        (local.set $open (select (i32.const 91) (i32.const 123) (local.get $array)))
-        (if (i32.ne (call $cursor-byte (local.get $source)) (local.get $open))
-          (then (call $cursor-discard (local.get $source)) (return (i64.const 0) (i32.const 1) (i32.const 0))))
-        (call $cursor-consume (local.get $source) (local.get $open)))
-      (else
-        (if (i32.eqz (local.get $mode))
-          (then
-            (if (local.get $array)
-              (then (local.set $first (call $graph-first (local.get $source))))
-              (else (call $graph-object (local.get $source))))
-            (local.set $failed (call $status))
-            (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))))))
+    @input.CURSOR@
+    (local.set $open (select (i32.const 91) (i32.const 123) (local.get $array)))
+    (if (i32.ne (call $cursor-byte (local.get $source)) (local.get $open))
+      (then (call $cursor-discard (local.get $source)) (return (i64.const 0) (i32.const 1) (i32.const 0))))
+    (call $cursor-consume (local.get $source) (local.get $open))
+    @input.END_CURSOR@
+    @input.IMMEDIATE@
+    @input.GRAPH@
+    (if (local.get $array)
+      (then (local.set $first (call $graph-first (local.get $source))))
+      (else (call $graph-object (local.get $source))))
+    (local.set $failed (call $status))
+    (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+    @input.END_GRAPH@
+    @input.END_IMMEDIATE@
     (if (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.RECORD@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_TUPLE@)))
       (then (return (call $record (local.get $schema) (local.get $source) (local.get $mode) (local.get $first) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_TUPLE@))))))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_VARIANT@))
       (then (return (call $variant (local.get $schema) (local.get $source) (local.get $mode)))))
     (call $array (local.get $schema) (local.get $source) (local.get $mode) (local.get $first) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_DICTIONARY@))))
 
-  (func (export "json_descriptor_decode") (param $schema i32) (param $bits i64) (param $mode i32)
+  (func (export "json_descriptor_@input.NAME@") (param $schema i32) (param $bits i64) (param $mode i32)
     (param $tag i32) (param $position i32) (param $out i32) (result i32)
     (local $failed i32)
     (call $decode (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
@@ -569,7 +620,7 @@
     (if (i32.lt_s (local.get $failed) (i32.const 0))
       (then
         (local.set $failed (call $raise (call $exception (i32.const @exception.TYPE_ERROR@) (i32.const @exception.TAG_STRING@)
-          (i64.extend_i32_u (i32.load (i32.add (local.get $out) (i32.sub (i32.const 12) (i32.mul (local.get $failed) (i32.const 4)))))))))))
+              (i64.extend_i32_u (i32.load (i32.add (local.get $out) (i32.sub (i32.const 12) (i32.mul (local.get $failed) (i32.const 4)))))))))))
     (i64.store (local.get $out) (local.get $bits))
     (i32.store offset=8 (local.get $out) (local.get $tag))
     (local.get $failed))
