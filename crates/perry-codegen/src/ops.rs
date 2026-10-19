@@ -196,11 +196,8 @@ impl FunctionLowering<'_, '_> {
                     CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
                     other => bail!("ordered comparison {other:?} on number | undefined"),
                 }
-            } else if mir_ty.deref(ctx).is::<StringType>()
-                || optional_inner(ctx, mir_ty).is_some_and(|t| t.deref(ctx).is::<StringType>())
-                || mir_ty.deref(ctx).is::<perry_mir::BigIntType>()
-                || optional_inner(ctx, mir_ty)
-                    .is_some_and(|t| t.deref(ctx).is::<perry_mir::BigIntType>())
+            } else if inner.deref(ctx).is::<StringType>()
+                || inner.deref(ctx).is::<perry_mir::BigIntType>()
             {
                 let join = if optional_inner(ctx, mir_ty).is_some() {
                     let a = self.is_absent(ctx, operands[0], mir_ty)?;
@@ -217,7 +214,6 @@ impl FunctionLowering<'_, '_> {
                 } else {
                     None
                 };
-                let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
                 let order = if inner.deref(ctx).is::<perry_mir::BigIntType>() {
                     self.runtime(ctx, Runtime::StdBigintCompare, operands)
                 } else {

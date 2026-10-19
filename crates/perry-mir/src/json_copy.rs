@@ -146,28 +146,21 @@ fn match_unwrapped_stringify(
     text_val: Value,
 ) -> Option<(Ptr<Operation>, Option<Ptr<Operation>>, Value)> {
     let def_op = text_val.defining_op()?;
-    if Operation::get_op::<JsonStringifyOp>(def_op, ctx).is_some() {
-        if def_op.deref(ctx).get_num_operands() != 1 {
-            return None;
-        }
-        return Some((def_op, None, def_op.deref(ctx).get_operand(0)));
-    }
-    if Operation::get_op::<UnwrapOp>(def_op, ctx).is_some() {
-        if def_op.deref(ctx).get_num_operands() != 1 {
-            return None;
-        }
-        let stringify_op = def_op.deref(ctx).get_operand(0).defining_op()?;
-        Operation::get_op::<JsonStringifyOp>(stringify_op, ctx)?;
-        if stringify_op.deref(ctx).get_num_operands() != 1 {
-            return None;
-        }
-        return Some((
-            stringify_op,
-            Some(def_op),
-            stringify_op.deref(ctx).get_operand(0),
-        ));
-    }
-    None
+    let (stringify_op, unwrap_op) =
+        if Operation::is_op::<UnwrapOp>(def_op, ctx) && def_op.deref(ctx).get_num_operands() == 1 {
+            (def_op.deref(ctx).get_operand(0).defining_op()?, Some(def_op))
+        } else {
+            (def_op, None)
+        };
+    (Operation::is_op::<JsonStringifyOp>(stringify_op, ctx)
+        && stringify_op.deref(ctx).get_num_operands() == 1)
+        .then(|| {
+            (
+                stringify_op,
+                unwrap_op,
+                stringify_op.deref(ctx).get_operand(0),
+            )
+        })
 }
 
 fn can_rewrite_parse_stringify(
@@ -178,21 +171,16 @@ fn can_rewrite_parse_stringify(
     source_ty: TypeHandle,
     target_ty: TypeHandle,
 ) -> bool {
-    let stringify_res = site.stringify_op.deref(ctx).get_result(0);
-    if stringify_res.uses(ctx).len() != 1 {
+    if [
+        Some(site.stringify_op),
+        site.unwrap_op,
+        site.intermediate_parse_op,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|op| op.deref(ctx).get_result(0).uses(ctx).len() != 1)
+    {
         return false;
-    }
-    if let Some(unwrap_op) = site.unwrap_op {
-        let unwrap_res = unwrap_op.deref(ctx).get_result(0);
-        if unwrap_res.uses(ctx).len() != 1 {
-            return false;
-        }
-    }
-    if let Some(parse_op) = site.intermediate_parse_op {
-        let parse_res = parse_op.deref(ctx).get_result(0);
-        if parse_res.uses(ctx).len() != 1 {
-            return false;
-        }
     }
 
     let consumer_res = site.consumer_op.deref(ctx).get_result(0);
@@ -264,48 +252,33 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
     let mut worklist = vec![root];
     let mut visited = HashSet::new();
     while let Some(val) = worklist.pop() {
-        if !visited.insert(val) {
-            continue;
-        }
-        if !may_contain_record(val.get_type(ctx)) {
+        if !visited.insert(val) || !may_contain_record(val.get_type(ctx)) {
             continue;
         }
         for use_site in val.uses(ctx) {
             let user = use_site.user_op();
-            if Operation::get_op::<JsonStringifyOp>(user, ctx).is_some() {
-                return true;
-            }
-            if let Some(Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy) = intrinsic_of(ctx, user)
+            if Operation::get_op::<JsonStringifyOp>(user, ctx).is_some()
+                || Operation::get_op::<CallOp>(user, ctx).is_some()
             {
-                let op_ref = user.deref(ctx);
-                if op_ref.get_num_operands() >= 2 && val == op_ref.get_operand(1) {
-                    worklist.push(op_ref.get_operand(0));
-                }
-            }
-            if Operation::get_op::<CallOp>(user, ctx).is_some() {
                 return true;
+            }
+            let op_ref = user.deref(ctx);
+            if matches!(
+                intrinsic_of(ctx, user),
+                Some(Intrinsic::JsonSpread | Intrinsic::JsonOrderCopy)
+            ) && op_ref.get_num_operands() >= 2
+                && val == op_ref.get_operand(1)
+            {
+                worklist.push(op_ref.get_operand(0));
             }
             if Operation::get_op::<BrOp>(user, ctx).is_some()
                 || Operation::get_op::<CondBrOp>(user, ctx).is_some()
             {
-                for succ_idx in 0..user.deref(ctx).get_num_successors() {
-                    let dest = user.deref(ctx).get_successor(succ_idx);
-                    let arg_count = dest.deref(ctx).get_num_arguments();
-                    for idx in 0..arg_count {
-                        let arg = dest.deref(ctx).get_argument(idx);
-                        if may_contain_record(arg.get_type(ctx)) {
-                            worklist.push(arg);
-                        }
-                    }
+                for dest in op_ref.successors() {
+                    worklist.extend(dest.deref(ctx).arguments());
                 }
             }
-            let num_res = user.deref(ctx).get_num_results();
-            for idx in 0..num_res {
-                let res = user.deref(ctx).get_result(idx);
-                if may_contain_record(res.get_type(ctx)) {
-                    worklist.push(res);
-                }
-            }
+            worklist.extend(op_ref.results());
         }
     }
     false
@@ -547,13 +520,16 @@ fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
     // Keep any CaughtOp immediately following `site.consumer_op` intact so it now
     // checks whether normalization raised an exception inside a try block.
     rewriter.replace_operation(ctx, site.consumer_op, call.get_operation());
-    if let Some(parse_op) = site.intermediate_parse_op {
-        erase_op_and_caught(ctx, &mut rewriter, parse_op);
+    for op in [
+        site.intermediate_parse_op,
+        site.unwrap_op,
+        Some(site.stringify_op),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        erase_op_and_caught(ctx, &mut rewriter, op);
     }
-    if let Some(unwrap_op) = site.unwrap_op {
-        erase_op_and_caught(ctx, &mut rewriter, unwrap_op);
-    }
-    erase_op_and_caught(ctx, &mut rewriter, site.stringify_op);
 }
 
 fn erase_op_and_caught(

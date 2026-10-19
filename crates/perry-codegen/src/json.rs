@@ -92,12 +92,12 @@ impl FunctionLowering<'_, '_> {
             return Ok(address);
         }
         let definition = ty.deref(ctx);
-        let record_fields = definition
-            .downcast_ref::<RecordType>()
-            .map(RecordType::fields)
+        let record = definition.downcast_ref::<RecordType>();
+        let record_fields = record
+            .map(|r| Ok::<_, anyhow::Error>((r.is_tuple(), r.fields()?)))
             .transpose()
             .map_err(|_| anyhow!("unresolved native record"))?;
-        let count = record_fields.map_or(0, <[_]>::len);
+        let count = record_fields.map_or(0, |(_, fields)| fields.len());
         let bytes = if record_fields.is_some() {
             28 + 20 * count
         } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
@@ -111,48 +111,35 @@ impl FunctionLowering<'_, '_> {
         };
         let address = self.state.data.append(4, &vec![0; bytes]);
         self.state.layout_descriptors.insert(ty, address);
-        let words = if let Some(fields) = record_fields {
+        let words = if let Some((tuple, fields)) = record_fields {
             let mut words = Vec::with_capacity(bytes / 4);
-            let tuple = TypedHandle::<RecordType>::from_handle(ty, ctx)?
-                .deref(ctx)
-                .is_tuple();
             words.extend([if tuple { JSON_TUPLE } else { RECORD }, count as u32]);
             let mut field_offset = record::HEADER;
-            for (name, field_ty) in fields.iter() {
-                let name = self.state.data.string(name);
-                let field = self.layout_descriptor(ctx, *field_ty)?;
-                words.extend([name, field, field_offset]);
-                field_offset += slot_size(ctx, *field_ty);
+            let mut offsets = Vec::with_capacity(count + 1);
+            let mut required = 0u32;
+            let mut numeric = Vec::new();
+            for (index, (name, field_ty)) in fields.iter().enumerate() {
+                let field_ty = *field_ty;
+                let name_addr = self.state.data.string(name);
+                let field = self.layout_descriptor(ctx, field_ty)?;
+                words.extend([name_addr, field, field_offset]);
+                if crate::repr::repr(ctx, field_ty).ok() == Some(crate::repr::Repr::Ref) {
+                    offsets.push(field_offset);
+                }
+                if !perry_mir::admits_undefined(ctx, field_ty)
+                    && !field_ty.deref(ctx).is::<JsonType>()
+                {
+                    required += 1;
+                }
+                if let Some(number) = perry_abi::json::array_index(name.as_bytes()) {
+                    numeric.push((number, index));
+                }
+                field_offset += slot_size(ctx, field_ty);
             }
-            let offsets: Vec<_> = fields
-                .iter()
-                .scan(record::HEADER, |offset, (_, ty)| {
-                    let current = *offset;
-                    *offset += slot_size(ctx, *ty);
-                    Some((current, *ty))
-                })
-                .filter_map(|(offset, ty)| {
-                    (crate::repr::repr(ctx, ty).ok() == Some(crate::repr::Repr::Ref))
-                        .then_some(offset)
-                })
-                .chain(std::iter::once(record::JSON))
-                .collect();
+            offsets.push(record::JSON);
             let shape = self.pointer_shape(&offsets);
             let (table, _) = self.json_field_table(ctx, ty)?;
-            let required = fields
-                .iter()
-                .filter(|(_, ty)| {
-                    !perry_mir::admits_undefined(ctx, *ty) && !ty.deref(ctx).is::<JsonType>()
-                })
-                .count() as u32;
             words.extend([field_offset, shape, table, required]);
-            let mut numeric: Vec<_> = fields
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (name, _))| {
-                    perry_abi::json::array_index(name.as_bytes()).map(|number| (number, index))
-                })
-                .collect();
             numeric.sort_unstable();
             let mut next = vec![u32::MAX; count];
             for (position, &(_, index)) in numeric.iter().enumerate() {

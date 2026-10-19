@@ -551,12 +551,9 @@ impl Solver {
             if *count >= max_precise_contexts() {
                 self.analysis.summarized_contexts += 1;
                 let summary = self.summary_key(ctx, &key);
-                let id = if let Some(&id) = self.contexts.get(&summary) {
-                    id
-                } else {
-                    let id = self.allocate_context(ctx, summary.clone())?;
-                    self.contexts.insert(summary, id);
-                    id
+                let id = match self.contexts.get(&summary).copied() {
+                    Some(id) => id,
+                    None => self.allocate_context(ctx, summary)?,
                 };
                 self.summary_contexts.insert(key.function.clone(), id);
                 self.contexts.insert(key, id);
@@ -564,13 +561,12 @@ impl Solver {
             }
             *count += 1;
         }
-        let id = self.allocate_context(ctx, key.clone())?;
-        self.contexts.insert(key, id);
-        Ok(id)
+        self.allocate_context(ctx, key)
     }
 
     fn allocate_context(&mut self, ctx: &Context, key: Key) -> Result<usize> {
         let id = self.analysis.keys.len();
+        self.contexts.insert(key.clone(), id);
         let body = &self.analysis.bodies[&key.function];
         let mut state = State {
             results: vec![ResultFact::default(); key.results.len()],

@@ -74,32 +74,26 @@ pub(crate) fn export(
         b.task_enter(ctx);
     }
     let initialization = b.initialization_status(ctx);
-    let mut joined_types = mir_results
+    let mut call_results = mir_results
         .iter()
         .map(|&ty| wasm_type(ctx, ty))
         .collect::<Result<Vec<_>>>()?;
-    joined_types.push(i32_type(ctx));
     let joined = initialization.map(|status| {
         let active = b.new_block(ctx, vec![]);
         let failed = b.new_block(ctx, vec![]);
-        let joined = b.new_block(ctx, joined_types.clone());
+        let mut values: Vec<_> = call_results.iter().map(|&ty| b.zero(ctx, ty)).collect();
+        values.push(status);
+        let mut joined_types = call_results.clone();
+        joined_types.push(i32_type(ctx));
+        let joined = b.new_block(ctx, joined_types);
         b.cond_br(ctx, status, (failed, vec![]), (active, vec![]));
         b.block = failed;
-        let mut values: Vec<_> = joined_types[..joined_types.len() - 1]
-            .iter()
-            .map(|&ty| b.zero(ctx, ty))
-            .collect();
-        values.push(status);
         b.br(ctx, joined, values);
         b.block = active;
         joined
     });
     let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
     let throws = b.state.may_throw(&function.get_symbol_name(ctx));
-    let mut call_results = mir_results
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
     if throws {
         call_results.push(i32_type(ctx));
     }

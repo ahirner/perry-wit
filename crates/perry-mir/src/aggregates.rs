@@ -193,11 +193,8 @@ fn inline_call(ctx: &mut Context, call: Ptr<Operation>, callee: &FuncOp) {
         .lookup_block(body[0])
         .expect("the callee's entry is cloned");
     // The copy's returns continue after the call.
-    let cloned: Vec<Ptr<BasicBlock>> = body
-        .iter()
-        .map(|block| mapper.lookup_block(*block).expect("cloned block"))
-        .collect();
-    for block in cloned {
+    for &block in &body {
+        let block = mapper.lookup_block(block).expect("cloned block");
         let terminator = block.deref(ctx).get_terminator(ctx).expect("terminated");
         if Operation::get_op::<ReturnOp>(terminator, ctx).is_some() {
             let values: Vec<Value> = terminator.deref(ctx).operands().collect();
@@ -290,7 +287,7 @@ pub(crate) fn promote_arguments(
                 function,
                 index,
                 &fields,
-                sites.entry(name.clone()).or_default(),
+                sites.get_mut(&name).map_or(&mut [][..], Vec::as_mut_slice),
             )?;
             status = IRStatus::Changed;
         }
@@ -404,16 +401,19 @@ impl MatchRewrite for DecomposeRecords {
         let record = TypedHandle::<RecordType>::from_handle(reference.get_type(ctx), ctx)?;
         let fields = record.deref(ctx).fields()?.to_vec();
         let initial: Vec<_> = allocation.get_operation().deref(ctx).operands().collect();
-        let mut slots = HashMap::new();
+        let mut slots = HashMap::with_capacity(fields.len());
+        let mut ordered_slots = Vec::with_capacity(fields.len());
         rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));
-        for (name, ty) in &fields {
-            let slot = LocalOp::new(ctx, *ty);
+        for (name, ty) in fields {
+            let slot = LocalOp::new(ctx, ty);
             rewriter.insert_op(ctx, &slot);
-            slots.insert(name.clone(), slot.get_result(ctx));
+            let slot_val = slot.get_result(ctx);
+            ordered_slots.push(slot_val);
+            slots.insert(name, slot_val);
         }
         rewriter.set_insertion_point_before_operation(allocation.get_operation());
-        for ((name, _), value) in fields.into_iter().zip(initial) {
-            let store = StoreOp::new(ctx, slots[&name], value);
+        for (slot, value) in ordered_slots.into_iter().zip(initial) {
+            let store = StoreOp::new(ctx, slot, value);
             rewriter.insert_op(ctx, &store);
         }
         for use_ in uses {

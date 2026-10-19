@@ -130,6 +130,7 @@ fn reuse_candidates(
                 }
             }
             let mut aliases: HashMap<Value, HashSet<Value>> = HashMap::new();
+            let mut returns = Vec::new();
             for &op in &ops {
                 if Operation::get_op::<AggregateViewOp>(op, ctx).is_some() {
                     let (source, view) =
@@ -138,13 +139,10 @@ fn reuse_candidates(
                         aliases.entry(source).or_default().insert(view);
                         aliases.entry(view).or_default().insert(source);
                     }
+                } else if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
+                    returns.push(op);
                 }
             }
-            let returns = ops
-                .iter()
-                .copied()
-                .filter(|&op| Operation::get_op::<ReturnOp>(op, ctx).is_some())
-                .collect();
             FunctionCfg {
                 name: function.get_symbol_name(ctx),
                 blocks,
@@ -328,11 +326,12 @@ fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
             let mut erased = Vec::new();
             for source in op.deref(ctx).operands() {
                 let prior = source.defining_op().filter(|&prior| {
-                    Operation::get_op::<ConcatOp>(prior, ctx).is_some()
-                        && source.uses(ctx).len() == 1
-                        && prior.deref(ctx).get_parent_block() == op.deref(ctx).get_parent_block()
-                });
-                let prior = prior.filter(|&prior| {
+                    if Operation::get_op::<ConcatOp>(prior, ctx).is_none()
+                        || source.uses(ctx).len() != 1
+                        || prior.deref(ctx).get_parent_block() != op.deref(ctx).get_parent_block()
+                    {
+                        return false;
+                    }
                     let mut next = prior.deref(ctx).get_next();
                     while let Some(intermediate) = next {
                         if intermediate == op {
