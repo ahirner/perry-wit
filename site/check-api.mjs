@@ -77,8 +77,9 @@ for (const [domain, result, args, expected] of [
   ['u64', 'u64', [9007199254740993n, 2n], 9007199254740995n],
   ['u8', 'u32', [255, 255], 510],
 ]) {
-  const type = domain.endsWith('64') ? 'bigint' : 'number';
-  const source = `function add(a: ${type}, b: ${type}): ${type} { return a + b; } export function run(a: ${type}, b: ${type}): ${type} { return add(a, b); }`;
+  const imports = domain.endsWith('64') ? "import type { s64, u64 } from 'perry:types'; " : '';
+  const type = domain.endsWith('64') ? domain : 'number';
+  const source = `${imports}function add(a: ${type}, b: ${type}): ${type} { return a + b; } export function run(a: ${type}, b: ${type}): ${type} { return add(a, b); }`;
   const contract = `package test:integer; world app { export run: func(a: ${domain}, b: ${domain}) -> ${result}; }`;
   const program = { source: { contents: encode(source) }, modules: [] };
   const wit = { application: { tag: 'sources', val: [{ contents: encode(contract) }] }, dependencies: [] };
