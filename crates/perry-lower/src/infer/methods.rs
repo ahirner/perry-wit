@@ -32,16 +32,7 @@ pub(super) fn call(
         let [items, callback] = args else {
             return HirType::Any;
         };
-        let source = strip_nullish(expression(items, env)).0;
-        let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
-        let key = match infer_array_closure_return(items, callback, env, true) {
-            HirType::Any | HirType::Unknown => HirType::String,
-            other => other,
-        };
-        return HirType::Generic {
-            base: "Map".into(),
-            type_args: vec![key, HirType::Array(Box::new(element))],
-        };
+        return map_group_by(items, callback, env);
     }
     if let Some(result) = env.class_method_return_type(object, name) {
         return result;
@@ -216,6 +207,19 @@ pub(super) fn result<'s>(
             }
             _ => perry_hir::infer_expr_type(expr, env),
         },
+    }
+}
+
+pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
+    let source = strip_nullish(expression(items, env)).0;
+    let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
+    let key = match infer_array_closure_return(items, key_fn, env, true) {
+        HirType::Any | HirType::Unknown => HirType::String,
+        other => other,
+    };
+    HirType::Generic {
+        base: "Map".into(),
+        type_args: vec![key, HirType::Array(Box::new(element))],
     }
 }
 

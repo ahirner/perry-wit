@@ -12,12 +12,16 @@ pub(super) fn is_resolvable_type(ty: &HirType) -> bool {
         HirType::Array(inner) | HirType::Promise(inner) => is_resolvable_type(inner),
         HirType::Tuple(items) => items.iter().all(is_resolvable_type),
         HirType::Union(items) => {
-            items
-                .iter()
-                .any(|item| !matches!(item, HirType::Void | HirType::Null))
-                && items.iter().all(|item| {
-                    matches!(item, HirType::Void | HirType::Null) || is_resolvable_type(item)
-                })
+            let mut has_defined = false;
+            for item in items {
+                if !matches!(item, HirType::Void | HirType::Null) {
+                    if !is_resolvable_type(item) {
+                        return false;
+                    }
+                    has_defined = true;
+                }
+            }
+            has_defined
         }
         HirType::Generic { base, type_args } => {
             !matches!(base.as_str(), "Map" | "Set" | "Record" if type_args.is_empty())
@@ -77,10 +81,7 @@ pub(super) fn with_absences(ty: HirType, states: impl Into<Option<Absence>>) -> 
     if matches!(inner, HirType::Any | HirType::Unknown | HirType::Void) {
         return inner;
     }
-    let states = match existing {
-        Some(existing) if existing != states => Absence::Both,
-        _ => states,
-    };
+    let states = merge_absence(existing, Some(states)).unwrap_or(states);
     let mut items = match inner {
         HirType::Union(members) => members,
         other => vec![other],

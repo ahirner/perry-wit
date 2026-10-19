@@ -83,17 +83,15 @@ impl<'a> FunctionEnv<'a> {
                         .map(|m| self.normalize_owned(m.return_type.clone()))
                 });
         }
-        match strip_nullish(expression(object, self)).0 {
-            HirType::Named(base) => match self.class_member_type(&base, &[], name)? {
-                HirType::Function(ft) => Some(*ft.return_type),
-                _ => None,
-            },
+        let member = match strip_nullish(expression(object, self)).0 {
+            HirType::Named(base) => self.class_member_type(&base, &[], name)?,
             HirType::Generic { base, type_args } => {
-                match self.class_member_type(&base, &type_args, name)? {
-                    HirType::Function(ft) => Some(*ft.return_type),
-                    _ => None,
-                }
+                self.class_member_type(&base, &type_args, name)?
             }
+            _ => return None,
+        };
+        match member {
+            HirType::Function(ft) => Some(*ft.return_type),
             _ => None,
         }
     }

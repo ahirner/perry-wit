@@ -272,7 +272,7 @@ pub(crate) struct Declarations<'h> {
     pub(super) foreign: &'h HashMap<String, crate::hir::Foreign>,
     pub(super) integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(super) imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
-    pub(super) foreign_functions: HashMap<&'h str, (String, &'h perry_hir::types::FunctionType)>,
+    pub(super) foreign_functions: HashMap<&'h str, (&'h str, &'h perry_hir::types::FunctionType)>,
 }
 
 impl<'h> Declarations<'h> {
@@ -317,8 +317,10 @@ impl<'h> Declarations<'h> {
                     continue;
                 }
                 let binding = format!("{source}#{imported}");
-                if let Some(crate::hir::Foreign::Function(signature)) = foreign.get(&binding) {
-                    foreign_functions.insert(local.as_str(), (binding.clone(), signature));
+                if let Some((key, crate::hir::Foreign::Function(signature))) =
+                    foreign.get_key_value(&binding)
+                {
+                    foreign_functions.insert(local.as_str(), (key.as_str(), signature));
                 }
                 if let Some(entry) = [binding.as_str(), imported.as_str()]
                     .into_iter()
@@ -436,7 +438,7 @@ impl<'h> Declarations<'h> {
 
 pub(super) struct Shapes<'h> {
     pub(super) module: pliron::builtin::ops::ModuleOp,
-    pub(super) foreign_wrappers: RefCell<HashMap<(String, Vec<TypeHandle>), Identifier>>,
+    pub(super) foreign_wrappers: RefCell<HashMap<(&'h str, Vec<TypeHandle>), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
     pub(super) type_env: perry_hir::HirTypeEnv,
@@ -571,11 +573,8 @@ impl<'h> Shapes<'h> {
     pub(super) fn foreign_function(
         &self,
         local: &str,
-    ) -> Option<(String, &perry_hir::types::FunctionType)> {
-        self.decls
-            .foreign_functions
-            .get(local)
-            .map(|(binding, sig)| (binding.clone(), *sig))
+    ) -> Option<(&'h str, &'h perry_hir::types::FunctionType)> {
+        self.decls.foreign_functions.get(local).copied()
     }
 
     pub(super) fn input_type(&self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {

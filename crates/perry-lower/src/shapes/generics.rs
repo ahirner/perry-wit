@@ -95,57 +95,35 @@ fn check_subst(
     bindings: &HashMap<&str, TypeId>,
     remaining: &mut usize,
 ) -> Result<bool> {
-    ensure!(*remaining > 1, "generic type arguments expand indefinitely");
-    *remaining -= 1;
-    match ty {
-        HirType::Named(name) | HirType::TypeVar(name) => match bindings.get(name.as_str()) {
-            Some(&bound) => {
-                charge_budget(bound.hir(ctx), remaining)?;
-                Ok(true)
-            }
-            None => {
-                if matches!(ty, HirType::TypeVar(_)) {
-                    bail!("unresolved type argument {name}");
+    let mut subst = false;
+    let mut err = None;
+    let _ = ty.any(&mut |node| {
+        if *remaining <= 1 {
+            err = Some(anyhow!("generic type arguments expand indefinitely"));
+            return true;
+        }
+        *remaining -= 1;
+        if let HirType::Named(name) | HirType::TypeVar(name) = node {
+            match bindings.get(name.as_str()) {
+                Some(&bound) => {
+                    if let Err(e) = charge_budget(bound.hir(ctx), remaining) {
+                        err = Some(e);
+                        return true;
+                    }
+                    subst = true;
                 }
-                Ok(false)
+                None if matches!(node, HirType::TypeVar(_)) => {
+                    err = Some(anyhow!("unresolved type argument {name}"));
+                    return true;
+                }
+                None => {}
             }
-        },
-        HirType::Array(inner) | HirType::Promise(inner) => {
-            check_subst(ctx, inner, bindings, remaining)
         }
-        HirType::Tuple(items) | HirType::Union(items) => {
-            let mut subst = false;
-            for item in items {
-                subst |= check_subst(ctx, item, bindings, remaining)?;
-            }
-            Ok(subst)
-        }
-        HirType::Object(obj) => {
-            let mut subst = false;
-            for prop in obj.properties.values() {
-                subst |= check_subst(ctx, &prop.ty, bindings, remaining)?;
-            }
-            if let Some(idx) = &obj.index_signature {
-                subst |= check_subst(ctx, idx, bindings, remaining)?;
-            }
-            Ok(subst)
-        }
-        HirType::Function(func) => {
-            let mut subst = false;
-            for (_, param_ty, _) in &func.params {
-                subst |= check_subst(ctx, param_ty, bindings, remaining)?;
-            }
-            subst |= check_subst(ctx, &func.return_type, bindings, remaining)?;
-            Ok(subst)
-        }
-        HirType::Generic { type_args, .. } => {
-            let mut subst = false;
-            for arg in type_args {
-                subst |= check_subst(ctx, arg, bindings, remaining)?;
-            }
-            Ok(subst)
-        }
-        _ => Ok(false),
+        false
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(subst),
     }
 }
 
@@ -160,17 +138,14 @@ pub(super) fn substitute_id(
     bindings: &HashMap<&str, TypeId>,
     remaining: &mut usize,
 ) -> Result<TypeId> {
-    if let HirType::Named(name) | HirType::TypeVar(name) = ty
-        && let Some(&bound) = bindings.get(name.as_str())
-    {
-        ensure!(*remaining > 1, "generic type arguments expand indefinitely");
-        *remaining -= 1;
-        charge_budget(bound.hir(ctx), remaining)?;
-        return Ok(bound);
-    }
     let needs_subst = check_subst(ctx, ty, bindings, remaining)?;
     if !needs_subst {
         return Ok(TypeId::intern(ctx, ty));
+    }
+    if let HirType::Named(name) | HirType::TypeVar(name) = ty
+        && let Some(&bound) = bindings.get(name.as_str())
+    {
+        return Ok(bound);
     }
     let mut out = ty.clone();
     out.transform(&mut |node| {

@@ -65,14 +65,14 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
     accepts(ctx, expected, actual, &mut HashSet::new())
 }
 
-pub(super) fn wrapper(
+pub(super) fn wrapper<'h>(
     ctx: &mut Context,
-    shapes: &Shapes<'_>,
-    binding: &str,
+    shapes: &Shapes<'h>,
+    binding: &'h str,
     params: Vec<TypeHandle>,
     result: TypeHandle,
 ) -> Result<Identifier> {
-    let key = (binding.to_owned(), params.clone());
+    let key = (binding, params.clone());
     if let Some(name) = shapes.foreign_wrappers.borrow().get(&key) {
         return Ok(name.clone());
     }

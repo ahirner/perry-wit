@@ -257,12 +257,12 @@ impl<'s> FunctionBuilder<'s> {
             if signature.is_async {
                 let payload = self.shapes.settled_type(ctx, &signature.return_type)?;
                 let params = values.iter().map(|v| v.get_type(ctx)).collect();
-                let wrapper = foreign::wrapper(ctx, self.shapes, &binding, params, payload)?;
+                let wrapper = foreign::wrapper(ctx, self.shapes, binding, params, payload)?;
                 let op = AsyncCallOp::new(ctx, wrapper, values, payload);
                 return Ok(Some(self.append_value(ctx, &op)));
             }
             let op =
-                perry_mir::ForeignOp::new(ctx, perry_mir::Phase::Call, &binding, values, results);
+                perry_mir::ForeignOp::new(ctx, perry_mir::Phase::Call, binding, values, results);
             self.append(ctx, &op);
             return Ok(op.get_operation().deref(ctx).results().next());
         }

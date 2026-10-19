@@ -244,18 +244,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             infer_closure_return(element, map_fn, env, false)
         }
         Expr::StructuredClone { value, .. } => expression(value, env),
-        Expr::MapGroupBy { items, key_fn } => {
-            let src_ty = strip_nullish(expression(items, env)).0;
-            let elem_ty = shapes::generics::iterated_element(src_ty).unwrap_or(HirType::Any);
-            let key_ty = match infer_array_closure_return(items, key_fn, env, true) {
-                HirType::Any | HirType::Unknown => HirType::String,
-                other => other,
-            };
-            HirType::Generic {
-                base: String::from("Map"),
-                type_args: vec![key_ty, HirType::Array(Box::new(elem_ty))],
-            }
-        }
+        Expr::MapGroupBy { items, key_fn } => methods::map_group_by(items, key_fn, env),
         Expr::Call {
             callee,
             args,
@@ -431,33 +420,24 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             for (key, val_expr) in parts {
                 if let Some(key) = key {
                     let val_ty = expression(val_expr, env);
-                    if matches!(val_expr, Expr::Null | Expr::Undefined)
-                        && let Some(existing) = props.remove(key)
-                    {
-                        let abs = if matches!(val_expr, Expr::Null) {
-                            Absence::Null
-                        } else {
-                            Absence::Undefined
-                        };
-                        let widened = with_absences(existing.ty, abs);
-                        props.insert(
-                            key.clone(),
-                            perry_hir::types::PropertyInfo {
-                                ty: widened,
-                                optional: existing.optional,
-                                readonly: false,
-                            },
-                        );
-                    } else {
-                        props.insert(
-                            key.clone(),
-                            perry_hir::types::PropertyInfo {
-                                ty: val_ty,
-                                optional: false,
-                                readonly: false,
-                            },
-                        );
-                    }
+                    let (ty, optional) = match (val_expr, props.remove(key)) {
+                        (Expr::Null, Some(existing)) => {
+                            (with_absences(existing.ty, Absence::Null), existing.optional)
+                        }
+                        (Expr::Undefined, Some(existing)) => (
+                            with_absences(existing.ty, Absence::Undefined),
+                            existing.optional,
+                        ),
+                        _ => (val_ty, false),
+                    };
+                    props.insert(
+                        key.clone(),
+                        perry_hir::types::PropertyInfo {
+                            ty,
+                            optional,
+                            readonly: false,
+                        },
+                    );
                 } else {
                     spread_count += 1;
                     let src_ty = strip_nullish(expression(val_expr, env)).0;

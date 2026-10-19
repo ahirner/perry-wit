@@ -183,105 +183,111 @@ impl Shapes<'_> {
         {
             return Ok(StringType::get(ctx).into());
         }
-        if !members.is_empty()
-            && members.iter().all(|&ty| {
-                resolver.record(ty, 0).is_some_and(|props| {
-                    props.iter().any(|(name, prop_ty, _)| {
-                        name == "ok" && matches!(prop_ty.hir(ctx), HirType::Boolean)
-                    })
+        let mut defined = Vec::with_capacity(members.len());
+        let mut absence = None;
+        let mut has_num = false;
+        let mut has_str = false;
+        let mut all_num_or_str = true;
+        for &ty in members {
+            match ty.hir(ctx) {
+                HirType::Null => {
+                    absence =
+                        crate::coerce::merge_absence(absence, Some(perry_mir::Absence::Null));
+                }
+                HirType::Void => {
+                    absence =
+                        crate::coerce::merge_absence(absence, Some(perry_mir::Absence::Undefined));
+                }
+                HirType::String => {
+                    has_str = true;
+                    defined.push(ty);
+                }
+                hir => {
+                    if matches!(hir, HirType::Number)
+                        || self
+                            .integer_type(ctx, hir)
+                            .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
+                    {
+                        has_num = true;
+                    } else {
+                        all_num_or_str = false;
+                    }
+                    defined.push(ty);
+                }
+            }
+        }
+        if let Some(absence) = absence {
+            let inner = match defined.as_slice() {
+                [defined] => self.value_type(ctx, defined.hir(ctx))?,
+                [] => bail!("an absence-only union needs a declared value type"),
+                defined => self.union_type_ids(ctx, defined)?,
+            };
+            return Ok(OptionalType::get_with(ctx, inner, absence).into());
+        }
+        if has_num && has_str && all_num_or_str {
+            return Ok(perry_mir::NumberStringType::get(ctx).into());
+        }
+        let records = members
+            .iter()
+            .map(|&ty| {
+                resolver
+                    .record(ty, 0)
+                    .context("unions other than tagged object types are not supported yet")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !records.is_empty()
+            && records.iter().all(|props| {
+                props.iter().any(|(name, prop_ty, _)| {
+                    name == "ok" && matches!(prop_ty.hir(ctx), HirType::Boolean)
                 })
             })
         {
-            return self.result(ctx, members);
+            return self.result(ctx, &records);
         }
-        if members.iter().any(|ty| {
-            let hir = ty.hir(ctx);
-            matches!(hir, HirType::Number)
-                || self
-                    .integer_type(ctx, hir)
-                    .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
-        }) && members
-            .iter()
-            .any(|ty| matches!(ty.hir(ctx), HirType::String))
-            && members.iter().all(|ty| {
-                let hir = ty.hir(ctx);
-                matches!(hir, HirType::Number | HirType::String)
-                    || self
-                        .integer_type(ctx, hir)
-                        .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
-            })
-        {
-            return Ok(perry_mir::NumberStringType::get(ctx).into());
-        }
-        let defined: Vec<TypeId> = members
-            .iter()
-            .copied()
-            .filter(|ty| !matches!(ty.hir(ctx), HirType::Void | HirType::Null))
-            .collect();
-        if defined.len() == members.len() {
-            return self.variant(ctx, members);
-        }
-        let inner = match defined.as_slice() {
-            [defined] => self.value_type(ctx, defined.hir(ctx))?,
-            [] => bail!("an absence-only union needs a declared value type"),
-            defined => self.union_type_ids(ctx, defined)?,
-        };
-        let absence = match (
-            members
-                .iter()
-                .any(|ty| matches!(ty.hir(ctx), HirType::Null)),
-            members
-                .iter()
-                .any(|ty| matches!(ty.hir(ctx), HirType::Void)),
-        ) {
-            (true, true) => perry_mir::Absence::Both,
-            (true, false) => perry_mir::Absence::Null,
-            _ => perry_mir::Absence::Undefined,
-        };
-        Ok(OptionalType::get_with(ctx, inner, absence).into())
+        self.variant(ctx, &records)
     }
 
     /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
-    fn result(&self, ctx: &Context, alternatives: &[TypeId]) -> Result<TypeHandle> {
-        let resolver = Resolver::new(ctx, self);
+    fn result(
+        &self,
+        ctx: &Context,
+        alternatives: &[Vec<(String, TypeId, bool)>],
+    ) -> Result<TypeHandle> {
         ensure!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
-                    && resolver
-                        .record(alternatives[0], 0)
-                        .is_some_and(|props| props.len() == 1 && props[0].0 == "ok")),
+                    && alternatives[0].len() == 1
+                    && alternatives[0][0].0 == "ok"),
             "a tagged result needs exactly two alternatives"
         );
+        let mut value_arg = None;
+        let mut error_arg = None;
+        for properties in alternatives {
+            for (p_name, prop_ty, _) in properties {
+                match p_name.as_str() {
+                    "ok" => {}
+                    "value" => {
+                        ensure!(
+                            value_arg.replace(*prop_ty).is_none(),
+                            "result payload value appears in both alternatives"
+                        );
+                    }
+                    "error" => {
+                        ensure!(
+                            error_arg.replace(*prop_ty).is_none(),
+                            "result payload error appears in both alternatives"
+                        );
+                    }
+                    _ => bail!("result alternatives only contain ok, value and error"),
+                }
+            }
+        }
         let mut fields = vec![(
             "ok".to_string(),
             IntegerType::get(ctx, 1, Signedness::Signless).into(),
         )];
-        for name in ["value", "error"] {
-            let mut payload_arg = None;
-            for &object in alternatives {
-                let Some(properties) = resolver.record(object, 0) else {
-                    bail!("result alternatives only contain ok, value and error");
-                };
-                let valid_keys = properties
-                    .iter()
-                    .all(|(p_name, _, _)| ["ok", "value", "error"].contains(&p_name.as_str()));
-                let found = properties
-                    .into_iter()
-                    .find(|(p_name, _, _)| p_name == name)
-                    .map(|(_, ty, _)| ty);
-                ensure!(
-                    valid_keys,
-                    "result alternatives only contain ok, value and error"
-                );
-                if let Some(prop_ty) = found {
-                    ensure!(
-                        payload_arg.is_none(),
-                        "result payload {name} appears in both alternatives"
-                    );
-                    payload_arg = Some(prop_ty);
-                }
-            }
-            if let Some(prop_ty) = payload_arg {
+        for (name, arg) in [("value", value_arg), ("error", error_arg)] {
+            if let Some(prop_ty) = arg {
                 let ty = self.value_type(ctx, prop_ty.hir(ctx))?;
                 fields.push((name.to_string(), OptionalType::get(ctx, ty).into()));
             }
@@ -289,31 +295,30 @@ impl Shapes<'_> {
         Ok(self.mir_record(ctx, fields)?.into())
     }
 
-    fn variant(&self, ctx: &Context, members: &[TypeId]) -> Result<TypeHandle> {
-        let resolver = Resolver::new(ctx, self);
-        let mut cases = Vec::new();
-        for &member in members {
-            let Some(properties) = resolver.record(member, 0) else {
-                bail!("unions other than tagged object types are not supported yet");
-            };
-            let Some((_, tag_ty, _)) = properties.iter().find(|(p_name, _, _)| p_name == "tag")
-            else {
-                bail!("union members need a literal `tag`");
-            };
-            let HirType::StringLiteral(tag) = tag_ty.hir(ctx) else {
-                bail!("union members need a literal `tag`");
-            };
-            let tag = tag.clone();
-            let val_arg = properties
-                .iter()
-                .find(|(p_name, _, _)| p_name == "val")
-                .map(|(_, ty, _)| *ty);
-            ensure!(
-                properties
-                    .iter()
-                    .all(|(p_name, _, _)| p_name == "tag" || p_name == "val"),
-                "union members have `tag` and `val` only"
-            );
+    fn variant(
+        &self,
+        ctx: &Context,
+        members: &[Vec<(String, TypeId, bool)>],
+    ) -> Result<TypeHandle> {
+        let mut cases = Vec::with_capacity(members.len());
+        for properties in members {
+            let mut tag = None;
+            let mut val_arg = None;
+            let mut invalid = false;
+            for (p_name, ty, _) in properties {
+                match p_name.as_str() {
+                    "tag" => {
+                        let HirType::StringLiteral(lit) = ty.hir(ctx) else {
+                            bail!("union members need a literal `tag`");
+                        };
+                        tag = Some(lit.clone());
+                    }
+                    "val" => val_arg = Some(*ty),
+                    _ => invalid = true,
+                }
+            }
+            let tag = tag.context("union members need a literal `tag`")?;
+            ensure!(!invalid, "union members have `tag` and `val` only");
             ensure!(
                 !cases.iter().any(|(name, _)| name == &tag),
                 "variant tags must be distinct"

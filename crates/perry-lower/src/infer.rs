@@ -91,33 +91,20 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Decla
     if matches!(ty, HirType::Never) {
         return;
     }
-    if let HirType::Union(members) = ty {
-        if members
-            .iter()
-            .any(|m| matches!(m, HirType::Null | HirType::Void))
-        {
-            let mut defined = Vec::new();
-            let mut absences = Vec::new();
-            for member in members {
-                if matches!(member, HirType::Null | HirType::Void) {
-                    absences.push(member);
-                } else {
-                    defined.push(member);
-                }
+    if let HirType::Union(_) = ty {
+        let (defined, absences) = strip_nullish(ty);
+        if let Some(absence) = absences {
+            if defined != HirType::Void {
+                push_return_type(types, defined, decls);
             }
-            match defined.len() {
-                0 => {}
-                1 => push_return_type(types, defined.swap_remove(0), decls),
-                _ => push_return_type(types, HirType::Union(defined), decls),
+            if absence.admits_null() {
+                push_return_type(types, HirType::Null, decls);
             }
-            for absence in absences {
-                push_return_type(types, absence, decls);
+            if absence.admits_undefined() {
+                push_return_type(types, HirType::Void, decls);
             }
-            return;
-        }
-        let union = HirType::Union(members);
-        if !types.contains(&union) {
-            types.push(union);
+        } else if !types.contains(&defined) {
+            types.push(defined);
         }
         return;
     }
@@ -159,11 +146,12 @@ fn infer_params(params: &mut [perry_hir::ir::Param], is_exported: bool, env: &mu
         } else if let Some(default_expr) = &param.default
             && is_resolvable_type(&param.ty)
         {
-            if matches!(default_expr, Expr::Null) {
-                param.ty = with_absences(param.ty.clone(), Absence::Null);
-            } else if matches!(default_expr, Expr::Undefined) && !is_exported {
-                param.ty = with_absences(param.ty.clone(), Absence::Undefined);
-            }
+            let absence = match default_expr {
+                Expr::Null => Some(Absence::Null),
+                Expr::Undefined if !is_exported => Some(Absence::Undefined),
+                _ => None,
+            };
+            param.ty = with_absences(std::mem::replace(&mut param.ty, HirType::Void), absence);
         }
         env.locals.insert(param.id, param.ty.clone());
     }
