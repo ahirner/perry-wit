@@ -157,12 +157,7 @@ impl<'s> FunctionBuilder<'s> {
             .context("Object.fromEntries requires an iterable of [key, value] pairs")?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
-            None => self.shapes.mir_record_prefix(
-                ctx,
-                vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
-                Some("dict_tuple"),
-                RecordKind::DictionaryEntry,
-            )?,
+            None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
         self.populate_from_entries(ctx, entries_val, dict)

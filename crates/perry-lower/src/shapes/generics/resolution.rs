@@ -49,7 +49,7 @@ pub(in crate::shapes) struct Resolver<'a, L> {
     lookup: &'a L,
 }
 
-impl<'a, L: DeclarationLookup> Resolver<'a, L> {
+impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
     pub(in crate::shapes) fn new(ctx: &'a Context, lookup: &'a L) -> Self {
         Self { ctx, lookup }
     }

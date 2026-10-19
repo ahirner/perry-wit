@@ -9,31 +9,31 @@ pub(super) use resolution::Resolver;
 const RESOLUTION_DEPTH: usize = 32;
 const ARGUMENT_LIMIT: usize = 4096;
 
-pub(super) trait DeclarationLookup {
-    fn interface(&self, name: &str) -> Option<(usize, &Interface)>;
-    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)>;
-    fn class(&self, _name: &str) -> Option<(usize, &Class)> {
+pub(super) trait DeclarationLookup<'h> {
+    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)>;
+    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)>;
+    fn class(&self, _name: &str) -> Option<(usize, &'h Class)> {
         None
     }
 }
 
-impl DeclarationLookup for Declarations<'_> {
-    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
+impl<'h> DeclarationLookup<'h> for Declarations<'h> {
+    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
         self.interfaces.get(name).copied()
     }
-    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
+    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)> {
         self.type_aliases.get(name).copied()
     }
 }
 
-impl DeclarationLookup for Shapes<'_> {
-    fn interface(&self, name: &str) -> Option<(usize, &Interface)> {
+impl<'h> DeclarationLookup<'h> for Shapes<'h> {
+    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
         self.decls.interface(name)
     }
-    fn type_alias(&self, name: &str) -> Option<(usize, &TypeAlias)> {
+    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)> {
         self.decls.type_alias(name)
     }
-    fn class(&self, name: &str) -> Option<(usize, &Class)> {
+    fn class(&self, name: &str) -> Option<(usize, &'h Class)> {
         self.classes.get(name).copied()
     }
 }
@@ -184,7 +184,7 @@ pub(super) fn substitute_id(
 }
 
 impl<'a> Declaration<'a> {
-    fn find<L: DeclarationLookup>(lookup: &'a L, base: &str) -> Option<(DeclarationId, Self)> {
+    fn find<L: DeclarationLookup<'a>>(lookup: &L, base: &str) -> Option<(DeclarationId, Self)> {
         if let Some((index, interface)) = lookup.interface(base) {
             return Some((DeclarationId::Interface(index), Self::Interface(interface)));
         }
@@ -315,6 +315,7 @@ impl<'s> Shapes<'s> {
                     .source_record(
                         ctx,
                         Some(&key),
+                        false,
                         properties
                             .iter()
                             .map(|(n, ty, opt)| (n.as_str(), ty.hir(ctx), *opt))
@@ -360,14 +361,11 @@ impl<'s> Shapes<'s> {
                         "interface {base}: methods are not supported yet"
                     );
                 }
-                let prefix = match declaration {
-                    Declaration::Class(class) => Some(format!("class_{}", class.name)),
-                    _ => None,
-                };
+                let nominal = matches!(declaration, Declaration::Class(_));
                 let properties = resolver
                     .fields(declaration, &bindings, 0)
                     .with_context(|| {
-                        let subject = if prefix.is_some() {
+                        let subject = if nominal {
                             "fields of class"
                         } else {
                             "inherited properties of interface"
@@ -375,10 +373,10 @@ impl<'s> Shapes<'s> {
                         format!("failed to resolve {subject} {base}")
                     })?;
                 let ty: TypeHandle = self
-                    .source_record_prefix(
+                    .source_record(
                         ctx,
                         Some(&key),
-                        prefix.as_deref(),
+                        nominal,
                         properties
                             .iter()
                             .map(|(name, ty, optional)| (name.as_str(), ty.hir(ctx), *optional))
@@ -388,7 +386,7 @@ impl<'s> Shapes<'s> {
                 if let Declaration::Class(class) = declaration {
                     self.class_records
                         .borrow_mut()
-                        .insert(ty, (class.name.clone(), key.1.clone()));
+                        .insert(ty, (class.name.as_str(), key.1.clone()));
                 }
                 ty
             }
@@ -401,6 +399,7 @@ impl<'s> Shapes<'s> {
                     self.source_record(
                         ctx,
                         Some(&key),
+                        false,
                         obj.properties
                             .iter()
                             .map(|(name, p)| (name.as_str(), &p.ty, p.optional))

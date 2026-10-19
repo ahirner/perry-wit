@@ -100,16 +100,24 @@ export function run(input:string):string {
     const empty = index<{id:string,name:string}>([]);
     const names = unique([input]);
     const lookup = (xs:{id:string,name:string}[]):Map<string,{id:string,name:string}> => index(xs);
+    const collided = ({x: 1}.x + {x: input}.x) + {x_2: 2}.x_2;
     return (fromMap(named)?.name ?? "missing") + counted.get("a")?.count
         + empty.size + names.has(input) + new Catalog().find(input)
         + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted()
-        + (new Catalog().value() ?? 0);
+        + (new Catalog().value() ?? 0) + collided;
 }
 "#;
     let module = lower_without_foreign(ctx, source, "generic-collections.ts")?;
     pliron::common_traits::Verify::verify(&*module.get_operation().deref(ctx), ctx)?;
     let printed = module.disp(ctx).to_string();
-    assert!(printed.contains("shape_id_name"), "{printed}");
-    assert!(printed.contains("shape_count_id"), "{printed}");
+    for expected in [
+        "{ id: perry.string , name: perry.string  }",
+        "{ count: builtin.fp64 , id: perry.string  }",
+        "{ x: builtin.fp64  }",
+        "{ x: perry.string  }",
+        "{ x_2: builtin.fp64  }",
+    ] {
+        assert!(printed.contains(expected), "missing {expected} in:\n{printed}");
+    }
     Ok(())
 }

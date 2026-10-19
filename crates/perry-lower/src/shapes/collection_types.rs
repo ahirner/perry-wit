@@ -10,11 +10,9 @@ impl Shapes<'_> {
         first: TypeHandle,
         second: TypeHandle,
     ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_prefix(
+        self.mir_tuple(
             ctx,
             vec![("_0".to_string(), first), ("_1".to_string(), second)],
-            Some("tuple"),
-            RecordKind::Tuple,
         )
     }
 
@@ -27,16 +25,15 @@ impl Shapes<'_> {
     ) -> Result<TypedHandle<RecordType>> {
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let f64_ty = FP64Type::get(ctx).into();
-        self.mir_record_prefix(
+        self.mir_record_kind(
             ctx,
+            RecordKind::MapEntry,
             vec![
                 ("_0".to_string(), k_ty),
                 ("_1".to_string(), v_ty),
                 ("_2".to_string(), i1_ty),
                 ("_3".to_string(), f64_ty),
             ],
-            Some("map_tuple"),
-            RecordKind::MapEntry,
         )
     }
 
@@ -48,30 +45,27 @@ impl Shapes<'_> {
     ) -> Result<TypedHandle<RecordType>> {
         let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let f64_ty = FP64Type::get(ctx).into();
-        self.mir_record_prefix(
+        self.mir_record_kind(
             ctx,
+            RecordKind::SetEntry,
             vec![
                 ("_0".to_string(), elem_ty),
                 ("_1".to_string(), i1_ty),
                 ("_2".to_string(), f64_ty),
             ],
-            Some("set_tuple"),
-            RecordKind::SetEntry,
         )
     }
 
     /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
     pub(crate) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        self.mir_record_prefix(
+        self.mir_tuple(
             ctx,
             vec![
                 (Field::CursorIndex.name().to_owned(), f64_ty),
                 (Field::CursorSequence.name().to_owned(), f64_ty),
                 (Field::CursorEpoch.name().to_owned(), f64_ty),
             ],
-            Some("cursor_tuple"),
-            RecordKind::Tuple,
         )
     }
 
@@ -84,16 +78,15 @@ impl Shapes<'_> {
     ) -> Result<TypedHandle<RecordType>> {
         let entries_arr = ArrayType::get(ctx, entry.into()).into();
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        self.mir_record_prefix(
+        self.mir_record_kind(
             ctx,
+            kind.box_kind(),
             vec![
                 (Field::BoxEntries.name().to_owned(), entries_arr),
                 (Field::BoxLength.name().to_owned(), f64_ty),
                 (Field::BoxSequence.name().to_owned(), f64_ty),
                 (Field::BoxEpoch.name().to_owned(), f64_ty),
             ],
-            Some(kind.box_kind().name()),
-            kind.box_kind(),
         )
     }
 
@@ -105,14 +98,13 @@ impl Shapes<'_> {
         view: CollectionViewKind,
     ) -> Result<TypedHandle<RecordType>> {
         let cursor_rec = self.cursor_tuple_type(ctx)?;
-        self.mir_record_prefix(
+        self.mir_record_kind(
             ctx,
+            view.record_kind(),
             vec![
                 (Field::ViewBox.name().to_owned(), box_ty),
                 (Field::ViewCursor.name().to_owned(), cursor_rec.into()),
             ],
-            Some(view.record_kind().name()),
-            view.record_kind(),
         )
     }
 
@@ -144,6 +136,20 @@ impl Shapes<'_> {
         self.collection_box_type(ctx, entry, EntryKind::Set)
     }
 
+    /// A `Record<K, V>` dictionary entry `{ _0: K, _1: V }`.
+    pub(crate) fn dict_tuple_type(
+        &self,
+        ctx: &Context,
+        k_ty: TypeHandle,
+        v_ty: TypeHandle,
+    ) -> Result<TypedHandle<RecordType>> {
+        self.mir_record_kind(
+            ctx,
+            RecordKind::DictionaryEntry,
+            vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
+        )
+    }
+
     /// A `Record<K, V>` dictionary from source types.
     pub(super) fn dict_source_type(
         &self,
@@ -153,9 +159,7 @@ impl Shapes<'_> {
     ) -> Result<TypeHandle> {
         let k_ty = self.value_type(ctx, k)?;
         let v_ty = self.value_type(ctx, v)?;
-        let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
-        let entry =
-            self.mir_record_prefix(ctx, fields, Some("dict_tuple"), RecordKind::DictionaryEntry)?;
+        let entry = self.dict_tuple_type(ctx, k_ty, v_ty)?;
         Ok(ArrayType::get(ctx, entry.into()).into())
     }
 
