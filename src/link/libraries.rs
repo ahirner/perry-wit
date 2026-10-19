@@ -873,6 +873,15 @@ mod tests {
         }
     }
 
+    fn bound_for(body: &str) -> Option<u32> {
+        let bytes = wat::parse_str(format!(
+            "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
+        ))
+        .unwrap();
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        Library::parse(&bytes).unwrap().fixed_stack_bound(None)
+    }
+
     #[test]
     fn unbounded_or_unbalanced_helpers_keep_the_full_stack_reservation() {
         for body in [
@@ -884,12 +893,7 @@ mod tests {
             // A branch out of the block reaches the end with the frame in place.
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 block i32.const 1 br_if 0 local.get 0 i32.const 16 i32.add global.set 0 return end)",
         ] {
-            let bytes = wat::parse_str(format!(
-                "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
-            ))
-            .unwrap();
-            let library = Library::parse(&bytes).unwrap();
-            assert_eq!(library.fixed_stack_bound(None), None, "{body}");
+            assert_eq!(bound_for(body), None, "{body}");
         }
     }
 
@@ -906,13 +910,12 @@ mod tests {
                 "(func (local i32) global.get 0 i32.const 2048 i32.sub local.tee 0 global.set 0 call 1 local.get 0 i32.const 2048 i32.add global.set 0) (func call 2) (func call 1 call 3) (func (local i32) global.get 0 i32.const 4096 i32.sub local.tee 0 global.set 0 local.get 0 i32.const 4096 i32.add global.set 0)",
                 6144,
             ),
+            (
+                "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 loop i32.const 1 if local.get 0 i32.const 16 i32.add global.set 0 return end br 0 end)",
+                16,
+            ),
         ] {
-            let bytes = wat::parse_str(format!(
-                "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
-            ))
-            .unwrap();
-            let library = Library::parse(&bytes).unwrap();
-            assert_eq!(library.fixed_stack_bound(None), Some(bound), "{body}");
+            assert_eq!(bound_for(body), Some(bound), "{body}");
         }
     }
 
@@ -929,34 +932,14 @@ mod tests {
                 "local.get 0 i64.const 56 i64.shl i64.const 56 i64.shr_s",
             ),
         ] {
-            let bytes = wat::parse_str(format!(
-                "(module (import \"env\" \"__stack_pointer\" (global (mut i32)))
-                  (func (param {parameter} i32) (result {parameter}) (local i32)
-                    global.get 0 i32.const 16 i32.sub local.tee 2 global.set 0
-                    local.get 1 if
-                      local.get 2 i32.const 16 i32.add global.set 0
-                      {computation} return
-                    end
-                    local.get 2 i32.const 16 i32.add global.set 0
-                    local.get 0))"
-            ))
-            .unwrap();
-            wasmparser::Validator::new().validate_all(&bytes).unwrap();
-            let library = Library::parse(&bytes).unwrap();
-            assert_eq!(library.fixed_stack_bound(None), Some(16), "{computation}");
+            let body = format!(
+                "(func (param {parameter} i32) (result {parameter}) (local i32)
+                  global.get 0 i32.const 16 i32.sub local.tee 2 global.set 0
+                  local.get 1 if local.get 2 i32.const 16 i32.add global.set 0 {computation} return end
+                  local.get 2 i32.const 16 i32.add global.set 0 local.get 0)"
+            );
+            assert_eq!(bound_for(&body), Some(16), "{computation}");
         }
-    }
-
-    #[test]
-    fn a_loop_left_only_through_restoring_returns_is_bounded() {
-        let body = "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 \
-            loop i32.const 1 if local.get 0 i32.const 16 i32.add global.set 0 return end br 0 end)";
-        let bytes = wat::parse_str(format!(
-            "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
-        ))
-        .unwrap();
-        let library = Library::parse(&bytes).unwrap();
-        assert_eq!(library.fixed_stack_bound(None), Some(16));
     }
 
     #[test]
@@ -980,17 +963,11 @@ mod tests {
             ),
             ("global.get 0 local.set 0", None),
         ] {
-            let bytes = wat::parse_str(format!(
-                "(module (import \"env\" \"__stack_pointer\" (global (mut i32)))
-                (func (local i32)
-                    global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0
-                    call 1 local.get 0 i32.const 16 i32.add global.set 0)
-                (func (local i32) {scratch}) (func))"
-            ))
-            .unwrap();
-            wasmparser::Validator::new().validate_all(&bytes).unwrap();
-            let library = Library::parse(&bytes).unwrap();
-            assert_eq!(library.fixed_stack_bound(None), bound, "{scratch}");
+            let body = format!(
+                "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 call 1 local.get 0 i32.const 16 i32.add global.set 0)
+                 (func (local i32) {scratch}) (func)"
+            );
+            assert_eq!(bound_for(&body), bound, "{scratch}");
         }
     }
 }

@@ -25,10 +25,9 @@ impl Headers {
             .as_chunks::<16>()
             .0
             .iter()
-            .map(|field| {
-                let word = |at: usize| u32::from_le_bytes(field[at..at + 4].try_into().unwrap());
-                // SAFETY: fields point at bytes in the task region.
-                unsafe { (slice(word(0), word(4)), slice(word(8), word(12))) }
+            .map(|field| unsafe {
+                let [n, nl, v, vl] = *(field.as_ptr() as *const [u32; 4]);
+                (slice(n, nl), slice(v, vl))
             })
     }
 

@@ -32,10 +32,12 @@ fn root_heap_cells(ctx: &Context, state: &State, value: Value) -> (Vec<usize>, b
             return (vec![cell], false);
         }
         let wrapper = current.defining_op().filter(|&op| {
-            (Operation::get_op::<WrapOp>(op, ctx).is_some()
-                || Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-                || Operation::get_op::<OptionalCastOp>(op, ctx).is_some()
-                || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some())
+            crate::is_any::<(
+                WrapOp,
+                UnwrapOp,
+                OptionalCastOp,
+                crate::variants::VariantNewOp,
+            )>(ctx, op)
                 && op.deref(ctx).get_num_operands() == 1
                 && visited.insert(op)
         });

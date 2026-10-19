@@ -27,7 +27,6 @@ use pliron::{
     context::{Context, Ptr},
     identifier::{Identifier, Legaliser},
     irbuild::{
-        IRStatus,
         cloning::{IrMapping, clone_operation},
         inserter::{Inserter, OpInsertionPoint},
         listener::DummyListener,
@@ -36,7 +35,7 @@ use pliron::{
     linked_list::ContainsLinkedList,
     op::{Op, op_cast},
     operation::Operation,
-    pass::{AnalysisManager, Pass, PassResult},
+    pass::{AnalysisManager, PassResult},
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::{APInt, bw},
@@ -47,50 +46,37 @@ mod operands;
 mod plan;
 use plan::{BodyPlan, ContextPlan};
 
-pub(crate) struct Specialize;
-
-impl Pass for Specialize {
-    fn name(&self) -> &str {
-        "specialize-numeric-domains"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let analysis = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
-        let specializations = if analysis.roots.is_empty() {
-            0
-        } else {
-            let count = rewrite(ctx, &analysis)?;
-            verify_lossless_module(root, ctx, &analysis)?;
-            count
-        };
-        let previous = crate::pipeline::optimization_statistics(root, ctx);
-        root.deref_mut(ctx).attributes.set(
-            crate::pipeline::STATISTICS.clone(),
-            crate::attrs::OptimizationStatistics {
-                numeric_contexts: analysis.keys.len() as u64,
-                constraint_visits: analysis.constraint_visits as u64,
-                summarized_heap_sets: analysis.summarized_heap_sets as u64,
-                summarized_contexts: analysis.summarized_contexts as u64,
-                range_widenings: analysis.range_widenings as u64,
-                specializations: specializations as u64,
-                cleanup_rounds: 0,
-                parse_stringify_rewrites: previous.parse_stringify_rewrites,
-                parse_stringify_missed: previous.parse_stringify_missed,
-            },
-        );
-        let mut result = PassResult::default();
-        result.ir_changed = if specializations == 0 {
-            IRStatus::Unchanged
-        } else {
-            IRStatus::Changed
-        };
-        Ok(result)
-    }
+pub(crate) fn specialize(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<PassResult> {
+    let analysis = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
+    let specializations = if analysis.roots.is_empty() {
+        0
+    } else {
+        let count = rewrite(ctx, &analysis)?;
+        verify_lossless_module(root, ctx, &analysis)?;
+        count
+    };
+    let previous = crate::pipeline::optimization_statistics(root, ctx);
+    root.deref_mut(ctx).attributes.set(
+        crate::pipeline::STATISTICS.clone(),
+        crate::attrs::OptimizationStatistics {
+            numeric_contexts: analysis.keys.len() as u64,
+            constraint_visits: analysis.constraint_visits as u64,
+            summarized_heap_sets: analysis.summarized_heap_sets as u64,
+            summarized_contexts: analysis.summarized_contexts as u64,
+            range_widenings: analysis.range_widenings as u64,
+            specializations: specializations as u64,
+            cleanup_rounds: 0,
+            parse_stringify_rewrites: previous.parse_stringify_rewrites,
+            parse_stringify_missed: previous.parse_stringify_missed,
+        },
+    );
+    let mut result = PassResult::default();
+    result.ir_changed = (specializations != 0).into();
+    Ok(result)
 }
 
 /// One emitted function body, shared by every context whose `BodyPlan` matches.
@@ -365,7 +351,7 @@ fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
 
 /// Verifies that no specialized function in `root` backs a `Fact::Numeric` or 64-bit integer
 /// value or aggregate slot with a lossy `builtin.fp64` carrier.
-pub fn verify_lossless_module(
+pub(crate) fn verify_lossless_module(
     root: Ptr<Operation>,
     ctx: &Context,
     analysis: &ProgramFacts,
@@ -398,7 +384,7 @@ pub fn verify_lossless_module(
 /// Verifies that no active function in `root` contains an operation whose lossless
 /// (`perry.numeric` or 64-bit integer) result or field/element projection was degraded
 /// to a `builtin.fp64` carrier after all MIR passes complete.
-pub fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result<()> {
+pub(crate) fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result<()> {
     let functions = crate::aggregates::functions(root, ctx);
     let by_name: HashMap<Identifier, FuncOp> = functions
         .iter()

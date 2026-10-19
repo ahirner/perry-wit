@@ -19,7 +19,6 @@ use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        type_interfaces::FunctionTypeInterface,
         types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::Context,
@@ -30,7 +29,6 @@ use pliron::{
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::{ReturnOp, UnreachableOp},
     ops::{CallOp, set_export},
 };
 
@@ -365,8 +363,7 @@ impl FunctionLowering<'_, '_> {
         if free_task {
             self.task_free(ctx);
         }
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, unreachable);
+        self.trap(ctx);
         self.block = valid;
     }
 

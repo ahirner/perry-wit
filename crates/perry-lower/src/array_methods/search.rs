@@ -73,16 +73,7 @@ impl<'s> FunctionBuilder<'s> {
         let zero = self.number(ctx, 0.0);
         let len = self.array_length(ctx, array);
         let (start, limit) = if let Some(from) = from {
-            let number = FP64Type::get(ctx).into();
-            let from = self.integer_or_infinity(ctx, from)?;
-            let negative = self.compare(ctx, CompareKind::Lt, from, zero);
-            let from = self.choose(
-                ctx,
-                number,
-                negative,
-                |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, from)),
-                |_, _| Ok(from),
-            )?;
+            let from = self.resolve_relative_index(ctx, from, len)?;
             match direction {
                 Direction::Forward => (
                     self.intrinsic(ctx, Intrinsic::MathMax, vec![from, zero]),

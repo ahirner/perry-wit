@@ -188,18 +188,7 @@ fn end(stream: &mut Readable) {
         unsafe { canon::drop_readable(stream.handle) };
         stream.handle = 0;
     }
-    let this = stream as *mut Readable;
-    let mut link: *mut *mut Readable = &mut lists().readables;
-    // SAFETY: the list holds live streams.
-    unsafe {
-        while !(*link).is_null() {
-            if *link == this {
-                *link = (*this).next;
-                break;
-            }
-            link = &mut (**link).next;
-        }
-    }
+    unsafe { crate::unlink_node!(&mut lists().readables, stream as *mut Readable) };
 }
 
 /// `stream.locked`.
@@ -512,18 +501,11 @@ pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
 
 /// Unlink `r` from the readers waiting on the host.
 fn unwait(r: *mut Reader) {
-    let mut link: *mut *mut Reader = &mut lists().waiting;
     // SAFETY: the list holds live readers.
     unsafe {
         perry_abi::unpin(core::mem::take(&mut (*r).pin));
         (*r).copying = 0;
-        while !(*link).is_null() {
-            if *link == r {
-                *link = (*r).next;
-                break;
-            }
-            link = &mut (**link).next;
-        }
+        crate::unlink_node!(&mut lists().waiting, r);
     }
 }
 
@@ -690,7 +672,7 @@ pub(crate) enum Form {
 /// without `json()` do not link the JSON parser.)
 pub(crate) fn settle_body(promise: *mut u8, form: Form, contents: &[u8]) {
     let value = if form == Form::Text {
-        decode(contents)
+        perry_abi::from_utf8_lossy(contents, true)
     } else {
         bytes_view(contents.len() as u32, contents.as_ptr() as *mut u8)
     };
@@ -706,21 +688,6 @@ pub(crate) fn take_parsed(mut each: impl FnMut(*mut u8, &[u8])) {
         each(drain.promise, drain.contents.as_slice());
         perry_abi::unpin(core::mem::take(&mut drain.pin));
     }
-}
-
-/// The text of a body: UTF-8 with the BOM removed and invalid bytes replaced.
-pub(crate) fn decode(contents: &[u8]) -> *mut u8 {
-    let contents = contents.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(contents);
-    let mut text = Buffer::new();
-    for chunk in contents.utf8_chunks() {
-        text.extend_from_slice(chunk.valid().as_bytes());
-        if !chunk.invalid().is_empty() {
-            text.extend_from_slice("\u{FFFD}".as_bytes());
-        }
-    }
-    let bytes = text.as_slice();
-    // SAFETY: decoding completed valid UTF-8 in task storage; the buffer is never mutated again.
-    unsafe { perry_abi::adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
 /// Whether a final read awaits acknowledgement without a completed combinator owning it.

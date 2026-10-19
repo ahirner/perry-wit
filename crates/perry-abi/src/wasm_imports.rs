@@ -3,6 +3,17 @@
 /// Declare each external signature once for Wasm and native builds.
 #[macro_export]
 macro_rules! wasm_imports {
+    ($module:literal => $host:path; $(
+        fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $result:ty)?;
+    )*) => {
+        #[cfg(target_arch = "wasm32")]
+        #[link(wasm_import_module = $module)]
+        unsafe extern "C" {
+            $(pub(super) fn $name($($arg: $ty),*) $(-> $result)?;)*
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        pub(super) use $host::{$($name),*};
+    };
     ($module:literal; $(
         $(#[$attr:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),* $(,)?)
         $(-> $result:ty)? $(=> $native:block)?;

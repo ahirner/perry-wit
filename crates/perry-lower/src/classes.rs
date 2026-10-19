@@ -1,10 +1,6 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
-use crate::{
-    builder::LocalBinding,
-    inline::InlineResult,
-    shapes::{Argument, ArgumentId, Kind as ArgKind},
-};
+use crate::{builder::LocalBinding, inline::InlineResult, shapes::TypeId};
 use perry_mir::OptionalType;
 
 enum ClassArguments<'a, 's> {
@@ -35,16 +31,12 @@ impl<'s> FunctionBuilder<'s> {
             .with_context(|| format!("unknown class {class_name}"))?;
         let mut pre_evaluated: Option<Vec<Value>> = None;
         let (rec_ty, effective_args) = if !type_args.is_empty() {
-            let arg_ids: Vec<ArgumentId> = type_args
-                .iter()
-                .map(|t| Argument::intern_hir(ctx, t))
-                .collect::<Result<_>>()?;
-            let ty = self.shapes.generic(ctx, class_name, &arg_ids)?;
+            let ty = self.shapes.generic(ctx, class_name, type_args)?;
             let effective = self
                 .shapes
                 .class_of_type(ctx, ty)
                 .map(|(_, a)| a)
-                .unwrap_or(arg_ids);
+                .unwrap_or_else(|| TypeId::intern_slice(ctx, type_args));
             (ty, effective)
         } else if class.type_params.is_empty() {
             (self.shapes.named(ctx, class_name)?, Vec::new())
@@ -58,39 +50,35 @@ impl<'s> FunctionBuilder<'s> {
             for arg in args {
                 vals.push(self.expression(ctx, arg)?);
             }
-            let mut arg_ids = Vec::with_capacity(class.type_params.len());
+            let mut arg_tys = Vec::with_capacity(class.type_params.len());
             for tp in &class.type_params {
                 let inferred = class.constructor.as_ref().and_then(|ctor| {
                     ctor.params.iter().enumerate().find_map(|(idx, p)| {
                         if matches!(&p.ty, HirType::TypeVar(n) | HirType::Named(n) if n == &tp.name)
                             && let Some(&val) = vals.get(idx)
                         {
-                            mir_type_to_argument(ctx, self.shapes, val.get_type(ctx))
+                            mir_type_to_hir(ctx, self.shapes, val.get_type(ctx))
                         } else {
                             None
                         }
                     })
                 });
-                let arg_id = match inferred {
-                    Some(id) => id,
-                    None => {
-                        let fallback = tp
-                            .default
-                            .as_deref()
-                            .or(tp.constraint.as_deref())
-                            .unwrap_or(&HirType::Any);
-                        Argument::intern_hir(ctx, fallback)?
-                    }
-                };
-                arg_ids.push(arg_id);
+                let arg_ty = inferred.unwrap_or_else(|| {
+                    tp.default
+                        .as_deref()
+                        .or(tp.constraint.as_deref())
+                        .unwrap_or(&HirType::Any)
+                        .clone()
+                });
+                arg_tys.push(arg_ty);
             }
             pre_evaluated = Some(vals);
-            let ty = self.shapes.generic(ctx, class_name, &arg_ids)?;
+            let ty = self.shapes.generic(ctx, class_name, &arg_tys)?;
             let effective = self
                 .shapes
                 .class_of_type(ctx, ty)
                 .map(|(_, a)| a)
-                .unwrap_or(arg_ids);
+                .unwrap_or_else(|| TypeId::intern_slice(ctx, &arg_tys));
             (ty, effective)
         };
 
@@ -158,11 +146,8 @@ impl<'s> FunctionBuilder<'s> {
             .is_ok_and(|int| int.deref(ctx).width() == 1)
         {
             Ok(self.boolean(ctx, false))
-        } else if ty.deref(ctx).is::<StringType>() {
-            Ok(self.string(ctx, ""))
-        } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
-            let element = array.deref(ctx).element();
-            Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![])))
+        } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
+            Ok(zero)
         } else {
             bail!(
                 "class {class_name} field {field} has no placeholder before its constructor assignment"
@@ -174,7 +159,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         class_name: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         args: ClassArguments<'_, 's>,
         this_slot: Value,
     ) -> Result<()> {
@@ -183,7 +168,7 @@ impl<'s> FunctionBuilder<'s> {
             .classes
             .get_key_value(class_name)
             .with_context(|| format!("unknown class {class_name}"))?;
-        self.init_own_class_fields(ctx, class_name, type_args, this_slot)?;
+        self.init_own_class_fields(ctx, class_name, this_slot)?;
         if let Some(ctor) = &class.constructor {
             self.inline_class_callable(
                 ctx,
@@ -197,11 +182,10 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    pub(super) fn init_own_class_fields(
+    fn init_own_class_fields(
         &mut self,
         ctx: &mut Context,
         class_name: &'s str,
-        type_args: &[ArgumentId],
         this_slot: Value,
     ) -> Result<()> {
         let (&class_name, &(_, class)) = self
@@ -212,9 +196,7 @@ impl<'s> FunctionBuilder<'s> {
         let rec_val = self.load(ctx, this_slot)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_val.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected class record"))?;
-        let saved_this = self
-            .this_slot
-            .replace((this_slot, class_name, type_args.to_vec()));
+        let saved_this = self.this_slot.replace(this_slot);
         let res = (|| -> Result<()> {
             for field in &class.fields {
                 let Some(init_expr) = &field.init else {
@@ -238,10 +220,10 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn class_this(&mut self, ctx: &mut Context) -> Result<Value> {
-        let (slot, _, _) = self.this_slot.as_ref().context(
+        let slot = self.this_slot.context(
             "'this' is only supported inside class constructors, methods, and accessors",
         )?;
-        self.load(ctx, *slot)
+        self.load(ctx, slot)
     }
 
     pub(super) fn class_static_method_call(
@@ -297,7 +279,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         func: &'s Function,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
@@ -318,7 +300,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         getter: &'s Function,
     ) -> Result<Value> {
         let slot = self.entry_slot(ctx, receiver.get_type(ctx));
@@ -339,7 +321,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         setter: &'s Function,
         value: &'s Expr,
     ) -> Result<Value> {
@@ -366,7 +348,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         setter: &'s Function,
         val: Value,
     ) -> Result<Value> {
@@ -387,7 +369,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         owner_class: &'s str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         func: &'s Function,
         args: ClassArguments<'_, 's>,
         receiver: ClassReceiver,
@@ -469,9 +451,7 @@ impl<'s> FunctionBuilder<'s> {
         let controls = std::mem::take(&mut self.controls);
         self.this_slot = match receiver {
             ClassReceiver::Static => None,
-            ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => {
-                Some((slot, owner_class, type_args.to_vec()))
-            }
+            ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => Some(slot),
         };
 
         for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
@@ -540,54 +520,46 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-fn mir_type_to_argument(ctx: &Context, shapes: &Shapes<'_>, ty: TypeHandle) -> Option<ArgumentId> {
+fn mir_type_to_hir(ctx: &Context, shapes: &Shapes<'_>, ty: TypeHandle) -> Option<HirType> {
     if let Some((inner, states)) = optional_parts(ctx, ty) {
-        let mut members = vec![mir_type_to_argument(ctx, shapes, inner)?];
+        let mut members = vec![mir_type_to_hir(ctx, shapes, inner)?];
         if states.admits_null() {
-            members.push(Argument::from_kind(ctx, ArgKind::Null));
+            members.push(HirType::Null);
         }
         if states.admits_undefined() {
-            members.push(Argument::from_kind(ctx, ArgKind::Void));
+            members.push(HirType::Void);
         }
-        return Some(Argument::from_kind(ctx, ArgKind::Union(members)));
-    }
-    if ty == FP64Type::get(ctx).into() {
-        return Some(Argument::from_kind(ctx, ArgKind::Number));
-    }
-    if let Some(int_ty) = ty.deref(ctx).downcast_ref::<IntegerType>() {
-        return Some(Argument::from_kind(
-            ctx,
-            if int_ty.width() == 1 {
-                ArgKind::Boolean
-            } else if int_ty.width() == 64 {
-                ArgKind::BigInt
-            } else {
-                ArgKind::Number
-            },
-        ));
-    }
-    if ty == BigIntType::get(ctx).into() {
-        return Some(Argument::from_kind(ctx, ArgKind::BigInt));
-    }
-    if ty == StringType::get(ctx).into() {
-        return Some(Argument::from_kind(ctx, ArgKind::String));
-    }
-    if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
-        let elem = mir_type_to_argument(ctx, shapes, arr.deref(ctx).element())?;
-        return Some(Argument::from_kind(ctx, ArgKind::Array(elem)));
+        return Some(HirType::Union(members));
     }
     if let Some((c_name, c_args)) = shapes.class_of_type(ctx, ty) {
         return Some(if c_args.is_empty() {
-            Argument::from_kind(ctx, ArgKind::Named(c_name.to_string()))
+            HirType::Named(c_name.to_string())
         } else {
-            Argument::from_kind(
-                ctx,
-                ArgKind::Generic {
-                    base: c_name.to_string(),
-                    arguments: c_args,
-                },
-            )
+            HirType::Generic {
+                base: c_name.to_string(),
+                type_args: c_args.into_iter().map(|id| id.hir(ctx).clone()).collect(),
+            }
         });
+    }
+    if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        let elem = mir_type_to_hir(ctx, shapes, arr.deref(ctx).element())?;
+        return Some(HirType::Array(Box::new(elem)));
+    }
+    if ty == FP64Type::get(ctx).into() {
+        return Some(HirType::Number);
+    }
+    if let Some(int_ty) = ty.deref(ctx).downcast_ref::<IntegerType>() {
+        return Some(match int_ty.width() {
+            1 => HirType::Boolean,
+            64 => HirType::BigInt,
+            _ => HirType::Number,
+        });
+    }
+    if ty == BigIntType::get(ctx).into() {
+        return Some(HirType::BigInt);
+    }
+    if ty == StringType::get(ctx).into() {
+        return Some(HirType::String);
     }
     None
 }

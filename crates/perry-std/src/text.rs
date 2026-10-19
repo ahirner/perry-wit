@@ -341,14 +341,9 @@ pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, 
     u32::from(head(view.text, to).ends_with(needle.as_bytes()))
 }
 
-/// `s.trim()`.
-///
-/// # Safety
-/// `string` is a live immutable UTF-8 string.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
+unsafe fn trim_with(string: *mut u8, f: fn(&[u8]) -> &[u8]) -> *mut u8 {
     let text = unsafe { crate::runtime::bytes(string) };
-    let trimmed = trim_bytes(text);
+    let trimmed = f(text);
     if trimmed.len() == text.len() {
         return string;
     }
@@ -356,33 +351,22 @@ pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
     unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
+/// `s.trim()`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
+    unsafe { trim_with(string, trim_bytes) }
+}
+
 /// `s.trimStart()`.
-///
-/// # Safety
-/// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
-    let text = unsafe { crate::runtime::bytes(string) };
-    let trimmed = trim_start_bytes(text);
-    if trimmed.len() == text.len() {
-        return string;
-    }
-    let from = text.len() - trimmed.len();
-    unsafe { crate::runtime::string_view(string, from as u32, text.len() as u32) }
+    unsafe { trim_with(string, trim_start_bytes) }
 }
 
 /// `s.trimEnd()`.
-///
-/// # Safety
-/// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
-    let text = unsafe { crate::runtime::bytes(string) };
-    let trimmed = trim_end_bytes(text);
-    if trimmed.len() == text.len() {
-        return string;
-    }
-    unsafe { crate::runtime::string_view(string, 0, trimmed.len() as u32) }
+    unsafe { trim_with(string, trim_end_bytes) }
 }
 
 fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> *mut u8 {
@@ -555,24 +539,13 @@ pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut 
     unsafe { crate::runtime::adopt(data, total as u32) }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AsciiString {
-    len: u32,
-    scalars: u32,
-    data: *const u8,
-    buffer: *const u8,
-    owner: *const u8,
-    offset: u32,
-    cursor_scalar: u32,
-    cursor_byte: u32,
-}
+use perry_abi::layout::string::Header as AsciiString;
 static mut ASCII_STRINGS: [AsciiString; 128] = [AsciiString {
     len: 0,
     scalars: 0,
-    data: core::ptr::null(),
-    buffer: core::ptr::null(),
-    owner: core::ptr::null(),
+    data: core::ptr::null_mut(),
+    buffer: core::ptr::null_mut(),
+    owner: core::ptr::null_mut(),
     offset: 0,
     cursor_scalar: 0,
     cursor_byte: 0,
@@ -587,13 +560,13 @@ pub(crate) extern "C" fn std_ascii_strings() -> *const u8 {
             let mut index = 0usize;
             while index < 128 {
                 let entry = base.add(index);
-                let byte_ptr = (&raw const (*entry).cursor_byte).cast::<u8>();
+                let byte_ptr = (&raw mut (*entry).cursor_byte).cast::<u8>();
                 entry.write(AsciiString {
                     len: 1,
                     scalars: 1,
                     data: byte_ptr,
-                    buffer: core::ptr::null(),
-                    owner: core::ptr::null(),
+                    buffer: core::ptr::null_mut(),
+                    owner: core::ptr::null_mut(),
                     offset: 0,
                     cursor_scalar: 0,
                     cursor_byte: index as u32,

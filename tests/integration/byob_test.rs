@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::mpsc;
 use wasmtime::{
-    Store, StoreLimits, StoreLimitsBuilder,
+    Engine, Store, StoreLimits, StoreLimitsBuilder,
     component::{Component, ComponentType, Lift, Linker, StreamProducer, StreamReader, TypedFunc},
 };
 #[path = "../support/p3_input.rs"]
@@ -13,28 +13,170 @@ mod input;
 use crate::engine::async_engine;
 use input::{ControlledProducer, Observations};
 
+const WIT: &str = r#"
+package test:byob;
+world run {
+    export sum-bytes: async func(input: stream<u8>) -> result<f64>;
+    export short-eof: async func(input: stream<u8>) -> result<list<u8>>;
+    export pending-release: async func(input: stream<u8>) -> result<list<u8>>;
+    export cancel-pending: async func(input: stream<u8>) -> result<f64>;
+    export validate: async func(input: stream<u8>) -> result<f64>;
+    export wait-min: async func(input: stream<u8>) -> result<list<u8>>;
+    export buffered-queue: async func(input: stream<u8>) -> result<f64>;
+    export recheck-aliases: async func(input: stream<u8>) -> result<f64>;
+}
+"#;
+
+const SOURCE: &str = r#"
+export async function sumBytes(input: ReadableStream<Uint8Array>): Promise<number> {
+    const reader: ReadableStreamBYOBReader = input.getReader({mode: "byob"});
+    let buffer = new Uint8Array(8196); buffer[0] = 19; buffer[8195] = 23; let total = 0;
+    let done = false;
+    while (!done) {
+        const original = buffer.buffer; const alias = buffer.subarray(1, 2);
+        const view = buffer.subarray(2, 8194);
+        const pending = reader.read(view);
+        if (buffer.length !== 0 || alias.length !== 0 || view.length !== 0 || original.byteLength !== 0) throw 91;
+        let detached = false; try { new Uint8Array(original); } catch { detached = true; }
+        if (!detached) throw 92;
+        const result = await pending; const bytes = result.value;
+        if (bytes === undefined) throw 93;
+        if (bytes.byteOffset !== 2 || bytes.buffer.byteLength !== 8196) throw 94;
+        for (let index = 0; index < bytes.length; index++) total += bytes[index];
+        buffer = new Uint8Array(bytes.buffer);
+        if (buffer[0] !== 19 || buffer[8195] !== 23) throw 95;
+        done = result.done;
+    }
+    reader.releaseLock(); return total;
+}
+
+export async function shortEof(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+    const reader = input.getReader({mode: "byob"});
+    const result = await reader.read(new Uint8Array(8), {min: 8});
+    const bytes = result.value; if (bytes === undefined) throw 1;
+    const output = new Uint8Array(10); output[0] = result.done ? 1 : 0; output[1] = bytes.length;
+    output.set(bytes, 2); await reader.cancel(); reader.releaseLock(); return output;
+}
+
+export async function pendingRelease(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+    const reader = input.getReader({mode: "byob"});
+    const view = new Uint8Array(8); const pending = reader.read(view, {min: 8});
+    const queued = reader.read(new Uint8Array(8)); reader.releaseLock();
+    let rejected = 0; try { await pending; } catch { rejected++; }
+    try { await queued; } catch { rejected++; }
+    if (rejected !== 2 || view.length !== 0 || input.locked) throw 91;
+    const next = input.getReader({mode: "byob"});
+    const first = await next.read(new Uint8Array(2), {min: 2});
+    const last = await next.read(new Uint8Array(6), {min: 6});
+    const a = first.value; const b = last.value;
+    if (a === undefined || b === undefined || first.done || !last.done) throw 92;
+    const output = new Uint8Array(a.length + b.length); output.set(a); output.set(b, a.length);
+    next.releaseLock(); return output;
+}
+
+export async function cancelPending(input: ReadableStream<Uint8Array>): Promise<number> {
+    const reader = input.getReader({mode: "byob"}); const bytes = new Uint8Array(8);
+    const pending = reader.read(bytes); const queued = reader.read(new Uint8Array(8)); await reader.cancel();
+    const result = await pending;
+    if (!result.done || result.value !== undefined || bytes.length !== 0) throw 91;
+    const other = await queued; if (!other.done || other.value !== undefined) throw 93;
+    const end = await reader.read(new Uint8Array(8)); const empty = end.value;
+    if (!end.done || empty === undefined || empty.length !== 0) throw 92;
+    reader.releaseLock(); return 1;
+}
+
+export async function validate(input: ReadableStream<Uint8Array>): Promise<number> {
+    const reader = input.getReader({mode: "byob"}); const bytes = new Uint8Array(8);
+    let failures = 0;
+    try { await reader.read(new Uint8Array(0)); } catch { failures++; }
+    try { await reader.read(bytes, {min: 0}); } catch { failures++; }
+    try { await reader.read(bytes, {min: -1}); } catch { failures++; }
+    try { await reader.read(bytes, {min: 9}); } catch { failures++; }
+    try { await reader.read(bytes, {min: Infinity}); } catch { failures++; }
+    try { await reader.read(bytes, {min: NaN}); } catch { failures++; }
+    if (bytes.length !== 8) throw 91;
+    reader.releaseLock();
+    try { await reader.read(bytes); } catch { failures++; }
+    if (bytes.length !== 8) throw 92;
+    return failures;
+}
+
+export async function waitMin(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+    const reader = input.getReader({mode: "byob"});
+    const result = await reader.read(new Uint8Array(8), {min: 4.9});
+    const bytes = result.value; if (result.done || bytes === undefined) throw 91;
+    await reader.cancel(); reader.releaseLock(); return bytes;
+}
+
+export async function bufferedQueue(input: ReadableStream<Uint8Array>): Promise<number> {
+    const body = new Response(new Uint8Array([3, 7, 11, 19, 23])).body;
+    if (body === null) throw 90;
+    const reader = body.getReader({mode: "byob"});
+    const a = await reader.read(new Uint8Array(2));
+    const b = await reader.read(new Uint8Array(8), {min: 3});
+    const first = a.value; const last = b.value;
+    if (first === undefined || last === undefined || a.done || b.done) throw 91;
+    if (first.length !== 2 || last.length !== 3 || first[1] !== 7 || last[2] !== 23) throw 92;
+    const end = await reader.read(new Uint8Array(8));
+    const empty = end.value; if (!end.done || empty === undefined || empty.length !== 0) throw 93;
+    reader.releaseLock();
+    const shortBody = new Response(new Uint8Array([1, 2, 3, 4, 5])).body;
+    if (shortBody === null) throw 94;
+    const shortReader = shortBody.getReader({mode: "byob"});
+    await shortReader.read(new Uint8Array(2));
+    let rejected = false; try { await shortReader.read(new Uint8Array(8), {min: 8}); } catch { rejected = true; }
+    if (!rejected) throw 95;
+    shortReader.releaseLock(); return 1;
+}
+
+async function consume(reader: ReadableStreamBYOBReader, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+    await reader.read(bytes);
+}
+
+export async function recheckAliases(input: ReadableStream<Uint8Array>): Promise<number> {
+    const reader = input.getReader({mode: "byob"});
+    const first = new Uint8Array(8);
+    const alias = first.subarray(0);
+    for (let i = 0; i < first.length; i++) {
+        const pending = consume(reader, alias);
+        if (first[i] !== undefined) throw 1;
+        await pending;
+        if (first[i] !== undefined) throw 2;
+        break;
+    }
+    const second = new Uint8Array(8);
+    const other = second.subarray(0);
+    for (let i = 0; i < second.length; i++) {
+        const pending = reader.read(other);
+        if (second[i] !== undefined) throw 3;
+        await pending;
+        if (second[i] !== undefined) throw 4;
+        break;
+    }
+    await reader.cancel(); reader.releaseLock(); return 7;
+}
+"#;
+
 struct Byob<R> {
     store: Store<StoreLimits>,
     run: TypedFunc<(StreamReader<u8>,), (Result<R, ()>,)>,
 }
 
 impl<R: ComponentType + Lift + 'static> Byob<R> {
-    async fn compile(source: &str, result: &str) -> Result<Self> {
-        let wit = format!(
-            "package test:byob; world run {{ export run: async func(input: stream<u8>) -> result<{result}>; }}"
-        );
-        let bytes = MemoryChecked.component(&wit, "run", "byob.ts", source)?;
-        let engine = async_engine()?;
-        let component = Component::new(&engine, bytes)?;
+    async fn instantiate(
+        engine: &Engine,
+        component: &Component,
+        linker: &Linker<StoreLimits>,
+        export: &str,
+        memory_size: usize,
+    ) -> Result<Self> {
         let mut store = Store::new(
-            &engine,
-            StoreLimitsBuilder::new().memory_size(65536).build(),
+            engine,
+            StoreLimitsBuilder::new().memory_size(memory_size).build(),
         );
         store.limiter(|limits| limits);
-        let instance = Linker::new(&engine)
-            .instantiate_async(&mut store, &component)
-            .await?;
-        let run = instance.get_typed_func(&mut store, "run")?;
+        let instance = linker.instantiate_async(&mut store, component).await?;
+        let run = instance.get_typed_func(&mut store, export)?;
         Ok(Self { store, run })
     }
 
@@ -64,101 +206,52 @@ fn check_typescript(source: &str) -> Result<()> {
     Ok(())
 }
 
-const SUM_BYTES: &str = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
-        const reader:ReadableStreamBYOBReader=input.getReader({mode:"byob"});
-        let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;let total=0;
-        let done=false;
-        while(!done) {
-            const original=buffer.buffer;const alias=buffer.subarray(1,2);
-            const view=buffer.subarray(2,8194);
-            const pending=reader.read(view);
-            if(buffer.length!==0 || alias.length!==0 || view.length!==0 || original.byteLength!==0)throw 91;
-            let detached=false;try {new Uint8Array(original);}catch {detached=true;}
-            if(!detached)throw 92;
-            const result=await pending;const bytes=result.value;
-            if(bytes===undefined)throw 93;
-            if(bytes.byteOffset!==2 || bytes.buffer.byteLength!==8196)throw 94;
-            for(let index=0;index<bytes.length;index++)total+=bytes[index];
-            buffer=new Uint8Array(bytes.buffer);
-            if(buffer[0]!==19 || buffer[8195]!==23)throw 95;
-            done=result.done;
-        }
-        reader.releaseLock();return total;
-    }
-    "#;
-
 #[tokio::test(flavor = "current_thread")]
-async fn byob_reuses_transferred_buffers_with_offsets_and_bounded_memory() -> Result<()> {
-    let source = SUM_BYTES;
-    check_typescript(source)?;
-    let mut guest = Byob::<f64>::compile(source, "f64").await?;
+async fn byob_transferred_storage_queued_reads_and_cancellation() -> Result<()> {
+    check_typescript(SOURCE)?;
+    let bytes = MemoryChecked.component(WIT, "run", "byob.ts", SOURCE)?;
+    let engine = async_engine()?;
+    let component = Component::new(&engine, bytes)?;
+    let linker = Linker::new(&engine);
+
+    // 1. Reused transferred buffers with offsets and bounded memory
+    let mut sum_guest =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "sum-bytes", 65536).await?;
     for size in [0, 1, 8191, 8192, 8193, 4 * 1024 * 1024, 37] {
         let bytes: Vec<u8> = (0..size).map(|i| (i * 37 + i / 251) as u8).collect();
         let expected = bytes.iter().map(|&b| f64::from(b)).sum::<f64>();
-        assert_eq!(guest.read(bytes).await?, expected);
+        assert_eq!(sum_guest.read(bytes).await?, expected);
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn byob_minimum_and_short_eof_preserve_transferred_bytes() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
-        const reader=input.getReader({mode:"byob"});
-        const result=await reader.read(new Uint8Array(8),{min:8});
-        const bytes=result.value;if(bytes===undefined)throw 1;
-        const output=new Uint8Array(10);output[0]=result.done ? 1 : 0;output[1]=bytes.length;
-        output.set(bytes,2);await reader.cancel();reader.releaseLock();return output;
-    }
-    "#;
-    check_typescript(source)?;
-    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
+    // 2. Minimum and short EOF preserve transferred bytes
+    let mut short_guest =
+        Byob::<Vec<u8>>::instantiate(&engine, &component, &linker, "short-eof", 65536).await?;
     for size in [0, 1, 7, 8, 9] {
         let bytes: Vec<u8> = (1..=size).collect();
         let read = usize::from(size.min(8));
         let mut expected = vec![u8::from(size < 8), size.min(8)];
         expected.extend_from_slice(&bytes[..read]);
         expected.resize(10, 0);
-        assert_eq!(guest.read(bytes).await?, expected);
+        assert_eq!(short_guest.read(bytes).await?, expected);
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
-        const reader=input.getReader({mode:"byob"});
-        const view=new Uint8Array(8);const pending=reader.read(view,{min:8});
-        const queued=reader.read(new Uint8Array(8));reader.releaseLock();
-        let rejected=0;try {await pending;}catch {rejected++;}
-        try {await queued;}catch {rejected++;}
-        if(rejected!==2 || view.length!==0 || input.locked)throw 91;
-        const next=input.getReader({mode:"byob"});
-        const first=await next.read(new Uint8Array(2),{min:2});
-        const last=await next.read(new Uint8Array(6),{min:6});
-        const a=first.value;const b=last.value;
-        if(a===undefined || b===undefined || first.done || !last.done)throw 92;
-        const output=new Uint8Array(a.length+b.length);output.set(a);output.set(b,a.length);
-        next.releaseLock();return output;
-    }
-    "#;
-    check_typescript(source)?;
-    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
+    // 3. Pending release requeues bytes for a new reader
+    let mut release_guest =
+        Byob::<Vec<u8>>::instantiate(&engine, &component, &linker, "pending-release", 65536)
+            .await?;
     for prefix in [0, 2] {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
         if prefix == 2 {
             sender.send(Ok(vec![3, 7])).await?;
         }
-        let mut invocation = Box::pin(guest.read(ControlledProducer {
+        let mut invocation = Box::pin(release_guest.read(ControlledProducer {
             receiver,
             observations: observations.clone(),
         }));
         tokio::select! {
-            result=&mut invocation=>panic!("completed before input: {result:?}"),
-            ()=observations.pending.notified()=>{}
+            result = &mut invocation => panic!("completed before input: {result:?}"),
+            () = observations.pending.notified() => {}
         }
         let feed = async move {
             sender
@@ -177,32 +270,17 @@ async fn byob_pending_release_requeues_bytes_for_a_new_reader() -> Result<()> {
         assert_eq!(result?, [3, 7, 11, 19, 23]);
         assert!(observations.dropped.load(Ordering::SeqCst));
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
-        const reader=input.getReader({mode:"byob"});const bytes=new Uint8Array(8);
-        const pending=reader.read(bytes);const queued=reader.read(new Uint8Array(8));await reader.cancel();
-        const result=await pending;
-        if(!result.done || result.value!==undefined || bytes.length!==0)throw 91;
-        const other=await queued;if(!other.done || other.value!==undefined)throw 93;
-        const end=await reader.read(new Uint8Array(8));const empty=end.value;
-        if(!end.done || empty===undefined || empty.length!==0)throw 92;
-        reader.releaseLock();return 1;
-    }
-    "#;
-    check_typescript(source)?;
-    let mut guest = Byob::<f64>::compile(source, "f64").await?;
+    // 4. Cancel settles pending reads without a view
+    let mut cancel_guest =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "cancel-pending", 65536).await?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (_sender, receiver) = mpsc::channel(1);
         assert_eq!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                guest.read(ControlledProducer {
+                cancel_guest.read(ControlledProducer {
                     receiver,
                     observations: observations.clone(),
                 })
@@ -212,57 +290,28 @@ async fn byob_cancel_settles_pending_reads_without_a_view() -> Result<()> {
         );
         assert!(observations.dropped.load(Ordering::SeqCst));
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn byob_validation_rejects_without_transferring_the_buffer() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
-        const reader=input.getReader({mode:"byob"});const bytes=new Uint8Array(8);
-        let failures=0;
-        try {await reader.read(new Uint8Array(0));}catch {failures++;}
-        try {await reader.read(bytes,{min:0});}catch {failures++;}
-        try {await reader.read(bytes,{min:-1});}catch {failures++;}
-        try {await reader.read(bytes,{min:9});}catch {failures++;}
-        try {await reader.read(bytes,{min:Infinity});}catch {failures++;}
-        try {await reader.read(bytes,{min:NaN});}catch {failures++;}
-        if(bytes.length!==8)throw 91;
-        reader.releaseLock();
-        try {await reader.read(bytes);}catch {failures++;}
-        if(bytes.length!==8)throw 92;
-        return failures;
-    }
-    "#;
-    check_typescript(source)?;
-    let mut guest = Byob::<f64>::compile(source, "f64").await?;
+    // 5. Validation rejects without transferring the buffer
+    let mut validate_guest =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "validate", 65536).await?;
     for _ in 0..3 {
-        assert_eq!(guest.read(vec![1, 2, 3]).await?, 7.0);
+        assert_eq!(validate_guest.read(vec![1, 2, 3]).await?, 7.0);
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn byob_minimum_waits_across_host_releases() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
-        const reader=input.getReader({mode:"byob"});
-        const result=await reader.read(new Uint8Array(8),{min:4.9});
-        const bytes=result.value;if(result.done || bytes===undefined)throw 91;
-        await reader.cancel();reader.releaseLock();return bytes;
-    }"#;
-    let mut guest = Byob::<Vec<u8>>::compile(source, "list<u8>").await?;
+    // 6. Minimum waits across host releases
+    let mut wait_min_guest =
+        Byob::<Vec<u8>>::instantiate(&engine, &component, &linker, "wait-min", 65536).await?;
     for _ in 0..3 {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(1);
         sender.send(Ok(vec![1, 2])).await?;
-        let mut invocation = Box::pin(guest.read(ControlledProducer {
+        let mut invocation = Box::pin(wait_min_guest.read(ControlledProducer {
             receiver,
             observations: observations.clone(),
         }));
         tokio::select! {
-            result=&mut invocation=>panic!("completed below minimum: {result:?}"),
-            ()=observations.pending.notified()=>{}
+            result = &mut invocation => panic!("completed below minimum: {result:?}"),
+            () = observations.pending.notified() => {}
         }
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), &mut invocation)
@@ -275,45 +324,17 @@ async fn byob_minimum_waits_across_host_releases() -> Result<()> {
             [1, 2, 3, 4]
         );
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn buffered_byob_reads_keep_offsets_and_reject_short_closed_queues() -> Result<()> {
-    let source = r#"
-    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
-        const body=new Response(new Uint8Array([3,7,11,19,23])).body;
-        if(body===null)throw 90;
-        const reader=body.getReader({mode:"byob"});
-        const a=await reader.read(new Uint8Array(2));
-        const b=await reader.read(new Uint8Array(8),{min:3});
-        const first=a.value;const last=b.value;
-        if(first===undefined||last===undefined||a.done||b.done)throw 91;
-        if(first.length!==2||last.length!==3||first[1]!==7||last[2]!==23)throw 92;
-        const end=await reader.read(new Uint8Array(8));
-        const empty=end.value;if(!end.done||empty===undefined||empty.length!==0)throw 93;
-        reader.releaseLock();
-        const shortBody=new Response(new Uint8Array([1,2,3,4,5])).body;
-        if(shortBody===null)throw 94;
-        const shortReader=shortBody.getReader({mode:"byob"});
-        await shortReader.read(new Uint8Array(2));
-        let rejected=false;try{await shortReader.read(new Uint8Array(8),{min:8});}catch{rejected=true;}
-        if(!rejected)throw 95;
-        shortReader.releaseLock();return 1;
-    }
-    "#;
-    check_typescript(source)?;
-    let mut guest = Byob::<f64>::compile(source, "f64").await?;
+    // 7. Buffered BYOB reads keep offsets and reject short closed queues
+    let mut buffered_guest =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "buffered-queue", 65536).await?;
     for _ in 0..10 {
-        assert_eq!(guest.read(Vec::<u8>::new()).await?, 1.0);
+        assert_eq!(buffered_guest.read(Vec::<u8>::new()).await?, 1.0);
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> Result<()> {
-    let Byob { mut store, run } = Byob::<f64>::compile(SUM_BYTES, "f64").await?;
-    *store.data_mut() = StoreLimitsBuilder::new().memory_size(512 * 1024).build();
+    // 8. Overlapping BYOB tasks keep independent buffers under collection
+    let Byob { mut store, run } =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "sum-bytes", 512 * 1024).await?;
     for _ in 0..10 {
         let left = StreamReader::new(&mut store, vec![3u8; 65_539])?;
         let right = StreamReader::new(&mut store, vec![7u8; 131_079])?;
@@ -329,42 +350,13 @@ async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> R
         assert_eq!((left, right), (65_539.0 * 3.0, 131_079.0 * 7.0));
         store.assert_concurrent_state_empty();
     }
-    Ok(())
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn indexed_reads_recheck_aliases_after_transfer_and_suspension() -> Result<()> {
-    let source = r#"
-async function consume(reader: ReadableStreamBYOBReader, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
-  await reader.read(bytes);
-}
-export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
-  const reader = input.getReader({mode:"byob"});
-  const first = new Uint8Array(8);
-  const alias = first.subarray(0);
-  for (let i = 0; i < first.length; i++) {
-    const pending = consume(reader, alias);
-    if (first[i] !== undefined) throw 1;
-    await pending;
-    if (first[i] !== undefined) throw 2;
-    break;
-  }
-  const second = new Uint8Array(8);
-  const other = second.subarray(0);
-  for (let i = 0; i < second.length; i++) {
-    const pending = reader.read(other);
-    if (second[i] !== undefined) throw 3;
-    await pending;
-    if (second[i] !== undefined) throw 4;
-    break;
-  }
-  await reader.cancel(); reader.releaseLock(); return 7;
-}
-"#;
-    check_typescript(source)?;
-    let mut guest = Byob::<f64>::compile(source, "f64").await?;
+    // 9. Indexed reads recheck aliases after transfer and suspension
+    let mut alias_guest =
+        Byob::<f64>::instantiate(&engine, &component, &linker, "recheck-aliases", 65536).await?;
     for _ in 0..3 {
-        assert_eq!(guest.read(vec![9u8; 32]).await?, 7.0);
+        assert_eq!(alias_guest.read(vec![9u8; 32]).await?, 7.0);
     }
+
     Ok(())
 }

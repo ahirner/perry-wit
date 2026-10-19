@@ -42,16 +42,11 @@ struct Parts {
 }
 
 fn parts(href: &[u8]) -> Parts {
-    let scheme = href
+    let scheme = href.iter().position(|b| *b == b':').unwrap_or(href.len());
+    let path = href[scheme + 3..]
         .iter()
-        .position(|b| *b == b':')
-        .expect("normalized scheme");
-    let path = scheme
-        + 3
-        + href[scheme + 3..]
-            .iter()
-            .position(|b| *b == b'/')
-            .expect("normalized path");
+        .position(|b| *b == b'/')
+        .map_or(href.len(), |p| scheme + 3 + p);
     let hash = href.iter().position(|b| *b == b'#').unwrap_or(href.len());
     let query = href[..hash].iter().position(|b| *b == b'?').unwrap_or(hash);
     Parts {

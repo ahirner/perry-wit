@@ -3,6 +3,10 @@
 
 use icu_properties::{CodePointMapData, props::CanonicalCombiningClass};
 
+#[path = "guest_memory.rs"]
+mod guest_memory;
+use guest_memory::OutSink;
+
 struct CanonicalPairRange {
     start: char,
     end: char,
@@ -56,22 +60,12 @@ pub(crate) extern "C" fn str_normalize(
         return 0;
     }
     // SAFETY: compiled callers supply valid UTF-8 and a separate output allocation.
-    let input = unsafe {
-        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-            src_ptr as *const u8,
-            src_byte_len as usize,
-        ))
-    };
+    let input = unsafe { guest_memory::str_from_raw(src_ptr, src_byte_len) };
     normalize_utf8(input, out_ptr, (mode & 1) != 0, (mode & 2) != 0)
 }
 
 fn normalize_utf8(input: &str, out_ptr: u32, compose: bool, compat: bool) -> u64 {
-    let mut sink = OutSink {
-        out_ptr,
-        byte_len: 0,
-        scalar_len: 0,
-        overflow: false,
-    };
+    let mut sink = OutSink::new(out_ptr);
     let mut run = CharRun {
         buf: [('\0', 0); 64],
         len: 0,
@@ -101,43 +95,7 @@ fn normalize_utf8(input: &str, out_ptr: u32, compose: bool, compat: bool) -> u64
         run.compose();
     }
     run.emit(&mut sink);
-    if sink.overflow {
-        u64::MAX
-    } else {
-        u64::from(sink.byte_len) | (u64::from(sink.scalar_len) << 32)
-    }
-}
-
-struct OutSink {
-    out_ptr: u32,
-    byte_len: u32,
-    scalar_len: u32,
-    overflow: bool,
-}
-
-impl OutSink {
-    fn emit(&mut self, ch: char) {
-        if self.overflow {
-            return;
-        }
-        let width = ch.len_utf8() as u32;
-        let Some(next_len) = self.byte_len.checked_add(width) else {
-            self.overflow = true;
-            return;
-        };
-        if self.out_ptr != 0 {
-            let Some(dest) = self.out_ptr.checked_add(self.byte_len) else {
-                self.overflow = true;
-                return;
-            };
-            // SAFETY: measurement reserved the complete output, including this scalar.
-            let output =
-                unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, width as usize) };
-            ch.encode_utf8(output);
-        }
-        self.byte_len = next_len;
-        self.scalar_len += 1;
-    }
+    sink.finish()
 }
 
 struct CharRun {
@@ -194,7 +152,7 @@ impl CharRun {
 
     fn emit(&mut self, out: &mut OutSink) {
         for &(ch, _) in &self.buf[..self.len] {
-            out.emit(ch);
+            let _ = out.emit(ch);
         }
         self.len = 0;
     }

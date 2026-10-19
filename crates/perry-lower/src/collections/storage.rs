@@ -378,7 +378,11 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A reference-free placeholder of `ty`; `None` for types holding nothing to release.
-    fn zero_value_for_type(&mut self, ctx: &mut Context, ty: TypeHandle) -> Option<Value> {
+    pub(crate) fn zero_value_for_type(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+    ) -> Option<Value> {
         let inner = present_type(ctx, ty);
         if inner.deref(ctx).is::<FP64Type>()
             || inner.deref(ctx).is::<IntegerType>()

@@ -16,15 +16,11 @@ use pliron::{
     basic_block::BasicBlock,
     builtin::types::FP64Type,
     context::{Context, Ptr},
-    op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed},
     value::Value,
 };
-use pliron_wasm::{
-    attrs::{MemKind, NumOpcode},
-    control::ReturnOp,
-};
+use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
     /// Lower an exception op; `false` if `op` is none.
@@ -140,17 +136,16 @@ impl FunctionLowering<'_, '_> {
         }
         let i32 = i32_type(ctx);
         let block = self.new_block(ctx, vec![i32]);
-        let saved = std::mem::replace(&mut self.block, block);
-        let mut values = Vec::with_capacity(self.results.len() + 1);
-        for index in 0..self.results.len() {
-            let zero = self.zero(ctx, self.results[index]);
-            values.push(zero);
-        }
-        values.push(block.deref(ctx).get_argument(0));
-        self.leave_roots(ctx);
-        let op = ReturnOp::new(ctx, values).get_operation();
-        self.insert(ctx, op);
-        self.block = saved;
+        self.in_block(block, |b| {
+            let mut values = Vec::with_capacity(b.results.len() + 1);
+            for index in 0..b.results.len() {
+                let zero = b.zero(ctx, b.results[index]);
+                values.push(zero);
+            }
+            values.push(block.deref(ctx).get_argument(0));
+            b.leave_roots(ctx);
+            b.ret(ctx, values);
+        });
         self.throw_block = Some(block);
         block
     }

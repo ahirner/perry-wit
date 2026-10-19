@@ -25,12 +25,8 @@ use perry_mir::{
 };
 use pliron::{
     basic_block::BasicBlock,
-    builtin::{
-        op_interfaces::{BranchOpInterface, OneRegionInterface},
-        ops::FuncOp,
-    },
+    builtin::{op_interfaces::BranchOpInterface, ops::FuncOp},
     context::{Context, Ptr},
-    linked_list::ContainsLinkedList,
     op::op_cast,
     operation::Operation,
     value::Value,
@@ -51,12 +47,7 @@ pub(crate) fn leased(
     function: &FuncOp,
     live: &perry_mir::LiveValues,
 ) -> HashSet<Ptr<Operation>> {
-    let ops: Vec<Ptr<Operation>> = function
-        .get_region(ctx)
-        .deref(ctx)
-        .iter(ctx)
-        .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-        .collect();
+    let ops = crate::analysis::function_ops(ctx, function);
     let mut leased = HashSet::new();
     for class in CLASSES {
         let members: Vec<_> = ops
@@ -109,16 +100,9 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
             let user = r#use.user_op();
             let operation = user.deref(ctx);
             let result = || operation.get_result(0);
-            if Operation::get_op::<AwaitOp>(user, ctx).is_some()
-                || Operation::get_op::<UnwrapOp>(user, ctx).is_some()
-                || Operation::get_op::<WrapOp>(user, ctx).is_some()
-                || Operation::get_op::<OptionalCastOp>(user, ctx).is_some()
-            {
+            if perry_mir::is_any::<(AwaitOp, UnwrapOp, WrapOp, OptionalCastOp)>(ctx, user) {
                 work.push(result());
-            } else if Operation::get_op::<IsUndefinedOp>(user, ctx).is_some()
-                || Operation::get_op::<IsNullOp>(user, ctx).is_some()
-                || Operation::get_op::<CompareOp>(user, ctx).is_some()
-            {
+            } else if perry_mir::is_any::<(IsUndefinedOp, IsNullOp, CompareOp)>(ctx, user) {
                 // Tests read the value.
             } else if let Some(builtin) = intrinsic(ctx, user) {
                 match builtin {

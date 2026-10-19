@@ -1,10 +1,7 @@
 //! Pooled graph storage for dynamic JSON and undeclared typed members.
 use super::{Error, reader::Reader, storage::GraphStorage};
 use perry_abi as runtime;
-use perry_abi::json::{NODE_BYTES, kind};
-fn set_word(value: *mut u8, offset: usize, word: u32) {
-    unsafe { value.add(offset).cast::<u32>().write(word) }
-}
+use perry_abi::json::{NODE_BYTES, kind, set_word};
 
 #[derive(Clone, Copy)]
 pub(super) struct Text<'a> {
@@ -59,28 +56,27 @@ impl Text<'_> {
             .scalars
             .unwrap()
     }
-    pub(super) fn compare(self, expected: &[u8]) -> core::cmp::Ordering {
-        use core::cmp::Ordering;
+    pub(super) fn compare(self, mut expected: &[u8]) -> core::cmp::Ordering {
         let length = (self.bytes as usize).cmp(&expected.len());
-        if length != Ordering::Equal {
+        if !length.is_eq() {
             return length;
         }
         if !self.escaped {
             return self.raw().as_bytes().cmp(expected);
         }
-        let mut at = 0;
-        let mut order = Ordering::Equal;
+        let mut ordering = core::cmp::Ordering::Equal;
         let mut reader = Reader::new(self.literal);
         reader
-            .string::<false>(|bytes| {
-                if order == Ordering::Equal {
-                    order = bytes.cmp(&expected[at..at + bytes.len()]);
+            .string::<false>(|chunk| {
+                let (head, rest) = expected.split_at(chunk.len());
+                expected = rest;
+                if ordering.is_eq() {
+                    ordering = chunk.cmp(head);
                 }
-                at += bytes.len();
                 Ok(())
             })
             .expect("key was validated");
-        order
+        ordering
     }
 }
 
@@ -126,11 +122,13 @@ impl Residue {
                 .max(self.hint)
                 .max(self.capacity.saturating_mul(2));
             let data = unsafe { runtime::alloc_shaped(capacity, &OWNER) };
-            set_word(data, 0, 0);
-            set_word(data, 4, 0);
-            set_word(data, 8, self.data as usize as u32);
-            if !self.data.is_null() {
-                set_word(self.data, 4, data as usize as u32);
+            unsafe {
+                set_word(data, 0, 0);
+                set_word(data, 4, 0);
+                set_word(data, 8, self.data as usize as u32);
+                if !self.data.is_null() {
+                    set_word(self.data, 4, data as usize as u32);
+                }
             }
             self.data = data;
             self.capacity = capacity;
@@ -143,8 +141,10 @@ impl Residue {
 }
 pub(super) fn json_node(kind: u32, residue: &mut Residue) -> *mut u8 {
     let node = residue.alloc(NODE_BYTES, 8);
-    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
-    set_word(node, 0, kind);
+    unsafe {
+        core::ptr::write_bytes(node, 0, NODE_BYTES as usize);
+        set_word(node, 0, kind);
+    }
     node
 }
 pub(super) fn json_text(value: Text<'_>, residue: &mut Residue) -> *mut u8 {
@@ -152,14 +152,16 @@ pub(super) fn json_text(value: Text<'_>, residue: &mut Residue) -> *mut u8 {
         .checked_add(if value.escaped { value.bytes } else { 0 })
         .expect("string size");
     let node = residue.alloc(size, 8);
-    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
-    set_word(node, 0, kind::STRING);
     let data = value.data_in(|_| unsafe { node.add(NODE_BYTES as usize) });
-    set_word(node, 8, data as usize as u32);
-    set_word(node, 12, value.bytes);
-    set_word(node, 16, value.scalar_count());
-    if !value.escaped && value.bytes != 0 {
-        set_word(residue.data, 0, residue.input as usize as u32);
+    unsafe {
+        core::ptr::write_bytes(node, 0, NODE_BYTES as usize);
+        set_word(node, 0, kind::STRING);
+        set_word(node, 8, data as usize as u32);
+        set_word(node, 12, value.bytes);
+        set_word(node, 16, value.scalar_count());
+        if !value.escaped && value.bytes != 0 {
+            set_word(residue.data, 0, residue.input as usize as u32);
+        }
     }
     node
 }
@@ -187,6 +189,15 @@ impl GraphStorage for Pooled<'_> {
     }
 }
 
+pub(super) fn raise_error(input: &str, error: Error) {
+    let offset = match error {
+        Error::Syntax(i) | Error::UnpairedSurrogate(i) | Error::Depth(i) => i,
+        Error::Capacity => 0,
+    };
+    let message = runtime::json_syntax_message(input.as_bytes(), offset as u32);
+    runtime::raise_string(runtime::SYNTAX_ERROR, message);
+}
+
 /// # Safety
 /// `string` is a live Perry string with immutable UTF-8 bytes.
 #[unsafe(no_mangle)]
@@ -196,12 +207,7 @@ pub(crate) unsafe extern "C" fn json_parse_string(string: *mut u8) -> u32 {
     match super::parse::pooled(input, 0, true, 0, &mut residue) {
         Ok((value, _)) => value,
         Err(error) => {
-            let offset = match error {
-                Error::Syntax(i) | Error::UnpairedSurrogate(i) | Error::Depth(i) => i,
-                Error::Capacity => 0,
-            };
-            let message = runtime::json_syntax_message(input.as_bytes(), offset as u32);
-            runtime::raise_string(runtime::SYNTAX_ERROR, message);
+            raise_error(input, error);
             0
         }
     }

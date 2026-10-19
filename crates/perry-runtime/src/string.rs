@@ -3,7 +3,6 @@
 //! transfers direct; a scalar-position cursor makes sequential non-ASCII indexing linear.
 use crate::layout::string::AppendBuffer as Buffer;
 pub(crate) use crate::layout::string::Header as Str;
-pub use crate::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
 use crate::region::perry_alloc;
 // The bounded runtime favours code size; collectible programs scan bulk JSON text.
 #[cfg(not(feature = "collectible"))]
@@ -16,6 +15,7 @@ const MIN_BUFFER: u32 = 32;
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {
+    use crate::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
     assert!(core::mem::size_of::<Str>() == SIZE as usize);
     assert!(core::mem::offset_of!(Str, len) == LEN as usize);
     assert!(core::mem::offset_of!(Str, scalars) == SCALARS as usize);
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn perry_string_adopt_counted(
 fn append_buffer(len: u32) -> *mut Buffer {
     assert!(len <= (u32::MAX - 8) / 2, "string too long");
     let cap = (len * 2).max(MIN_BUFFER);
-    let buffer = perry_alloc(crate::sequence::byte_size(cap, 1, 8)) as *mut Buffer;
+    let buffer = perry_alloc(crate::byte_size(cap, 1, 8)) as *mut Buffer;
     // SAFETY: the allocation reserves the header and its capacity; no collection occurs here.
     unsafe { buffer.write(Buffer { cap, used: len }) };
     buffer
@@ -185,7 +185,7 @@ pub(crate) unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *
 #[inline(always)]
 unsafe fn append_text<const REUSE: bool>(s: *mut Str, suffix: *const Str) -> *mut u8 {
     unsafe {
-        let len = crate::sequence::length((*s).len, (*suffix).len);
+        let len = crate::sequence_length((*s).len, (*suffix).len);
         let scalars = (*s).scalars + (*suffix).scalars;
         let buffer = (*s).buffer;
         if !buffer.is_null() {

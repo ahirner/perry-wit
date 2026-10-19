@@ -1,18 +1,16 @@
 use std::collections::HashSet;
 
-use pliron::builtin::op_interfaces::SingleBlockRegionInterface;
-use pliron::builtin::ops::{FuncOp, ModuleOp};
+use pliron::builtin::ops::FuncOp;
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::{
-    IRStatus,
     inserter::{Inserter, OpInsertionPoint},
     listener::DummyListener,
     rewriter::{IRRewriter, Rewriter},
 };
-use pliron::linked_list::{ContainsLinkedList, LinkedList};
+use pliron::linked_list::LinkedList;
 use pliron::op::Op;
 use pliron::operation::Operation;
-use pliron::pass::{AnalysisManager, Pass, PassResult};
+use pliron::pass::{AnalysisManager, PassResult};
 use pliron::result::Result;
 use pliron::r#type::{TypeHandle, Typed};
 use pliron::value::Value;
@@ -36,65 +34,39 @@ use pliron::utils::apint::{APInt, bw};
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy/normalization helper
 /// without constructing intermediate JSON text or a JSON cursor.
-pub(crate) struct NormalizeJsonCopy;
+pub(crate) fn normalize_json_copy(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<PassResult> {
+    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
+    let mut rewrites = 0u64;
+    let mut missed = 0u64;
 
-impl Pass for NormalizeJsonCopy {
-    fn name(&self) -> &str {
-        "normalize-json-copy"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let Some(module) = Operation::get_op::<ModuleOp>(root, ctx) else {
-            return Ok(PassResult::default());
-        };
-        let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
-
-        let mut rewrites = 0u64;
-        let mut missed = 0u64;
-
-        let funcs: Vec<FuncOp> = module
-            .get_body(ctx, 0)
-            .deref(ctx)
-            .iter(ctx)
-            .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-            .collect();
-
-        for func in funcs {
-            let sites = find_parse_stringify_sites(func, ctx);
-            for site in sites {
-                let source_ty = site.source_value.get_type(ctx);
-                let target_ty = site.target_ty;
-                if can_rewrite_parse_stringify(ctx, &facts, func, &site, source_ty, target_ty) {
-                    rewrite_site(ctx, &site);
-                    rewrites += 1;
-                } else {
-                    missed += 1;
-                }
+    for func in crate::aggregates::functions(root, ctx) {
+        for site in find_parse_stringify_sites(func, ctx) {
+            let source_ty = site.source_value.get_type(ctx);
+            if can_rewrite_parse_stringify(ctx, &facts, func, &site, source_ty, site.target_ty) {
+                rewrite_site(ctx, &site);
+                rewrites += 1;
+            } else {
+                missed += 1;
             }
         }
-
-        if rewrites > 0 || missed > 0 {
-            let mut stats = crate::pipeline::optimization_statistics(root, ctx);
-            stats.parse_stringify_rewrites += rewrites;
-            stats.parse_stringify_missed += missed;
-            root.deref_mut(ctx)
-                .attributes
-                .set(crate::pipeline::STATISTICS.clone(), stats);
-        }
-
-        let mut result = PassResult::default();
-        result.ir_changed = if rewrites == 0 {
-            IRStatus::Unchanged
-        } else {
-            IRStatus::Changed
-        };
-        Ok(result)
     }
+
+    if rewrites > 0 || missed > 0 {
+        let mut stats = crate::pipeline::optimization_statistics(root, ctx);
+        stats.parse_stringify_rewrites += rewrites;
+        stats.parse_stringify_missed += missed;
+        root.deref_mut(ctx)
+            .attributes
+            .set(crate::pipeline::STATISTICS.clone(), stats);
+    }
+
+    let mut result = PassResult::default();
+    result.ir_changed = (rewrites != 0).into();
+    Ok(result)
 }
 
 struct ParseStringifySite {

@@ -137,6 +137,45 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
+    pub(super) fn resolve_relative_index(
+        &mut self,
+        ctx: &mut Context,
+        raw_idx: Value,
+        len: Value,
+    ) -> Result<Value> {
+        let idx = self.integer_or_infinity(ctx, raw_idx)?;
+        let zero = self.number(ctx, 0.0);
+        let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
+        let num_ty = FP64Type::get(ctx).into();
+        self.choose(
+            ctx,
+            num_ty,
+            is_neg,
+            |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, idx)),
+            |_, _| Ok(idx),
+        )
+    }
+
+    fn resolve_checked_index(
+        &mut self,
+        ctx: &mut Context,
+        raw_idx: Value,
+        len: Value,
+    ) -> Result<(Value, Value)> {
+        let resolved_idx = self.resolve_relative_index(ctx, raw_idx, len)?;
+        let zero = self.number(ctx, 0.0);
+        let ge_zero = self.compare(ctx, CompareKind::Ge, resolved_idx, zero);
+        let lt_len = self.compare(ctx, CompareKind::Lt, resolved_idx, len);
+        let in_bounds = self.choose(
+            ctx,
+            ge_zero.get_type(ctx),
+            ge_zero,
+            |_, _| Ok(lt_len),
+            |b, ctx| Ok(b.boolean(ctx, false)),
+        )?;
+        Ok((resolved_idx, in_bounds))
+    }
+
     /// `array.at(index?)`.
     pub(crate) fn array_at(
         &mut self,
@@ -147,27 +186,8 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.defined(ctx, array)?;
         let element = self.array_element(ctx, array)?;
         let raw_idx = self.number_or(ctx, index, 0.0)?;
-        let idx = self.integer_or_infinity(ctx, raw_idx)?;
         let len = self.array_length(ctx, array);
-        let zero = self.number(ctx, 0.0);
-        let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
-        let num_ty = FP64Type::get(ctx).into();
-        let resolved_idx = self.choose(
-            ctx,
-            num_ty,
-            is_neg,
-            |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, idx)),
-            |_, _| Ok(idx),
-        )?;
-        let ge_zero = self.compare(ctx, CompareKind::Ge, resolved_idx, zero);
-        let lt_len = self.compare(ctx, CompareKind::Lt, resolved_idx, len);
-        let in_bounds = self.choose(
-            ctx,
-            ge_zero.get_type(ctx),
-            ge_zero,
-            |_, _| Ok(lt_len),
-            |b, ctx| Ok(b.boolean(ctx, false)),
-        )?;
+        let (resolved_idx, in_bounds) = self.resolve_checked_index(ctx, raw_idx, len)?;
         let opt_ty = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
         self.choose(
             ctx,
@@ -217,38 +237,15 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.defined(ctx, array)?;
         let elem_ty = self.array_element(ctx, array)?;
         let raw_idx = self.number_operand(ctx, index)?;
-        let idx = self.integer_or_infinity(ctx, raw_idx)?;
         let val = self.expression_with(ctx, value, Some(elem_ty))?;
         let val = self.fit(ctx, val, elem_ty)?;
         let len = self.array_length(ctx, array);
-        let zero = self.number(ctx, 0.0);
-        let is_neg = self.compare(ctx, CompareKind::Lt, idx, zero);
-        let num_ty = FP64Type::get(ctx).into();
-        let resolved_idx = self.choose(
-            ctx,
-            num_ty,
-            is_neg,
-            |b, ctx| Ok(b.binary(ctx, BinaryKind::Add, len, idx)),
-            |_, _| Ok(idx),
-        )?;
-        let ge_zero = self.compare(ctx, CompareKind::Ge, resolved_idx, zero);
-        let lt_len = self.compare(ctx, CompareKind::Lt, resolved_idx, len);
-        let in_bounds = self.choose(
-            ctx,
-            ge_zero.get_type(ctx),
-            ge_zero,
-            |_, _| Ok(lt_len),
-            |b, ctx| Ok(b.boolean(ctx, false)),
-        )?;
+        let (resolved_idx, in_bounds) = self.resolve_checked_index(ctx, raw_idx, len)?;
         let ok_b = self.new_block(ctx, "with_ok");
         let err_b = self.new_block(ctx, "with_err");
         self.branch(ctx, in_bounds, ok_b, err_b);
         self.switch_to(err_b);
-        let msg = self.string(ctx, "Invalid index for Array.prototype.with");
-        let err = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::RangeError, msg));
-        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, err));
-        self.propagate(ctx, status);
-        self.after_terminator(ctx);
+        self.raise_range_error(ctx, "Invalid index for Array.prototype.with");
         self.switch_to(ok_b);
         let cloned = self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]));
         self.emit(ctx, |ctx| ArraySetOp::new(ctx, cloned, resolved_idx, val));

@@ -13,7 +13,7 @@ const NODE_BYTES: usize = 32;
 const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub(crate) enum Kind {
     Null = 1,
     Boolean = 2,
     Number = 3,

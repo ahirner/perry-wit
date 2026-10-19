@@ -59,36 +59,12 @@ export function run():number {
 
 #[test]
 fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
-    for expression in [
-        "owned.concat(borrowed)",
-        "borrowed.concat(owned)",
-        "owned.concat([2,3])",
-    ] {
-        let source = format!(
-            "export function run(n:number):number{{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){{const owned:number[]=[1];const joined={expression};total+=joined.length+joined[0];}}return total;}}"
-        );
-        let mut program = Program::checked(&source, "concat-capacity.ts");
-        program.stress_collection(true);
-        let expected = if expression.starts_with("borrowed") {
-            5000.0
-        } else {
-            4000.0
-        };
-        assert_eq!(program.number("run", 1000.0), expected);
-        assert!(
-            program.counter(Counter::Allocations)
-                < if expression.ends_with("[2,3])") {
-                    4100
-                } else {
-                    2100
-                },
-            "{expression}: {} allocations",
-            program.counter(Counter::Allocations)
-        );
-    }
     let source = r#"
 interface Cell { value: number }
-export function run(n: number): number {
+export function left(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat(borrowed);total+=joined.length+joined[0];}return total;}
+export function right(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=borrowed.concat(owned);total+=joined.length+joined[0];}return total;}
+export function literal(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat([2,3]);total+=joined.length+joined[0];}return total + borrowed[0] - 2;}
+export function loopJoin(n: number): number {
   let numbers: number[] = [];
   let cells: Cell[] = [];
   for (let i = 0; i < n; i++) {
@@ -99,10 +75,21 @@ export function run(n: number): number {
   return numbers.length + numbers[0] + cells.length + cells[0].value + cells[cells.length - 1].value;
 }
 "#;
-    let mut program = Program::checked(source, "concat-join.ts");
+    let mut program = Program::checked(source, "concat-capacity.ts");
     program.stress_collection(true);
-    assert_eq!(program.throwing("run", 1000.0), (3997.0, 0));
-    assert!(program.counter(Counter::Allocations) < 5400);
+    for (export, expected, limit) in [
+        ("left", 4000.0, 2100),
+        ("right", 5000.0, 2100),
+        ("literal", 4000.0, 4100),
+    ] {
+        let before = program.counter(Counter::Allocations);
+        assert_eq!(program.number(export, 1000.0), expected);
+        let allocations = program.counter(Counter::Allocations) - before;
+        assert!(allocations < limit, "{export}: {allocations} allocations");
+    }
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.throwing("loopJoin", 1000.0), (3997.0, 0));
+    assert!(program.counter(Counter::Allocations) - before < 5400);
 }
 
 #[test]
@@ -631,30 +618,12 @@ export async function run(n:number):Promise<number> {
 }
 
 #[test]
-fn nonthrowing_intrinsics_allow_temporary_record_elimination() {
-    let mut program = Program::checked(
-        r#"
-        interface Cell { value: number }
-        function rounded(n:number):Cell { return { value:Math.floor(n) }; }
-        export function run(n:number):number {
-            let sum = 0;
-            for(let i=0;i<n;i++) sum += rounded(i - 0.25).value;
-            return sum;
-        }
-        "#,
-        "intrinsic-leaf.ts",
-    );
-    program.stress_collection(true);
-    assert_eq!(program.number("run", 1000.0), 498_500.0);
-    assert_eq!(program.counter(Counter::Allocations), 0);
-}
-
-#[test]
-fn promoted_record_arguments_stay_fresh_when_aliases_can_mutate() {
+fn promoted_record_arguments_eliminate_temporaries_and_stay_fresh_when_aliases_mutate() {
     let mut program = Program::checked(
         r#"
 interface Cell { value: number }
 let saved: Cell = { value: 0 };
+function rounded(n: number): Cell { return { value: Math.floor(n) }; }
 function change(): number { saved.value += 10; return 3; }
 function read(cell: Cell, n: number): number {
   if (n < 0) return cell.value - n;
@@ -666,7 +635,12 @@ function mutated(cell: Cell): number {
   return before + middle + cell.value;
 }
 function escaped(cell: Cell): Cell { saved = cell; return cell; }
-export function run(n: number): number {
+export function intrinsic(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += rounded(i - 0.25).value;
+  return sum;
+}
+export function promoted(n: number): number {
   let sum = 0;
   for (let i = 0; i < n; i++) {
     const cell: Cell = { value: i };
@@ -680,8 +654,12 @@ export function run(n: number): number {
         "promoted-record.ts",
     );
     program.stress_collection(true);
-    assert_eq!(program.number("run", 1000.0), 999_027.0);
-    assert!(program.counter(Counter::Allocations) < 10);
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("promoted", 1000.0), 999_027.0);
+    assert!(program.counter(Counter::Allocations) - before < 10);
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("intrinsic", 1000.0), 498_500.0);
+    assert_eq!(program.counter(Counter::Allocations) - before, 0);
 }
 
 #[test]
@@ -879,4 +857,63 @@ export function run(): number {
         assert_eq!(program.outcome("run", &[]), (21.0, 0));
         assert_eq!(program.counter(Counter::LiveBytes), 0);
     }
+}
+
+#[test]
+fn temporal_field_objects_and_legacy_date_parse_survive_collection() {
+    let source = r#"
+interface Fields {
+    year: number; month: number; day: number;
+    hour?: number; minute?: number; second?: number;
+    millisecond?: number; microsecond?: number; nanosecond?: number;
+}
+function convert(fields: Fields, options: {overflow?: 'constrain'|'reject'}): string {
+    return Temporal.PlainDateTime.from(fields, options).toString();
+}
+function parse(input: string): number { return Date.parse(input); }
+export function fields(): number {
+    if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:12}, {overflow:'reject'}).toString() !== '2024-02-29T12:00:00') return 1;
+    if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:undefined}).toString() !== '2024-02-29T00:00:00') return 2;
+    if (convert({year:2024, month:2, day:29, minute:undefined}, {}) !== '2024-02-29T00:00:00') return 3;
+    if (convert({year:2024, month:2, day:31, hour:24, minute:-1, second:61, millisecond:1000, microsecond:-1, nanosecond:1001}, {overflow:undefined}) !== '2024-02-29T23:00:59.999000999') return 4;
+    if (convert({year:2024.9, month:2.9, day:29.9, hour:12.9, minute:34.9, second:56.9, millisecond:123.9, microsecond:456.9, nanosecond:789.9}, {overflow:'reject'}) !== '2024-02-29T12:34:56.123456789') return 5;
+    let errors=0;
+    try { convert({year:2024, month:2, day:31}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, hour:24}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, minute:-1}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, nanosecond:NaN}, {}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, second:Infinity}, {}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { Temporal.PlainDateTime.from('2024-02-29', {overflow:'bad'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { Temporal.PlainDate.from('2024-02-29', {overflow:'bad'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    if(errors!==7) return 6;
+    if(Temporal.PlainDateTime.from('2024-02-29T12:34:56.123456789', {overflow:'reject'}).toString() !== '2024-02-29T12:34:56.123456789') return 7;
+    const trace:number[]=[];
+    function mark(n:number):number { trace.push(n); return n; }
+    const value=Temporal.PlainDateTime.from({year:mark(2024), ignored:mark(9), month:mark(2), day:mark(31), hour:mark(25), hour:mark(23)}, {ignored:mark(8), overflow:'reject', overflow:'constrain'});
+    if(value.toString()!=='2024-02-29T23:00:00' || trace.join(',')!=='2024,9,2,31,25,23,8') return 8;
+    return 0;
+}
+export function legacy(): number {
+    let errors=0;
+    try { Date.parse('Sun, 06 Nov 1994 08:49:37 GMT'); } catch(e) {
+        if(e instanceof RangeError && e.message.includes('Unsupported legacy Date string format')) errors++;
+    }
+    for(const text of ['Sun, 06 Nov 1994 08:49:37 GMT', '11/06/1994', 'November 6, 1994', 'invalid', '']) {
+        try { parse(text); } catch(e) { if(e instanceof RangeError && e.message.includes('use an ISO date')) errors++; }
+        try { new Date(text); } catch(e) { if(e instanceof RangeError && e.message.includes('use an ISO date')) errors++; }
+    }
+    if(errors!==11) return 1;
+    for(const text of ['2024-13-01', '2024-01-32', '2024-02-', '2024-01-01T25:00Z', '+275760-09-14']) {
+        if(!Number.isNaN(parse(text)) || !Number.isNaN(new Date(text).getTime())) return 2;
+    }
+    if(parse('1994-11-06T08:49:37Z')!==784111777000) return 3;
+    if(new Date('1970-01-01T01:00+01:00').getTime()!==0) return 4;
+    if(parse('1970')!==0 || parse('1970-01')!==0 || parse('+001970-01-01')!==0) return 5;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "date-temporal.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("fields", &[]), (0.0, 0));
+    assert_eq!(program.outcome("legacy", &[]), (0.0, 0));
 }

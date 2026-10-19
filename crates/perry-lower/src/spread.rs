@@ -175,23 +175,16 @@ impl<'s> FunctionBuilder<'s> {
         else {
             bail!("spread calls require a dense array push receiver")
         };
-        if matches!(hir_compat::method(property).name(), "max" | "min") {
-            let is_max = hir_compat::method(property).name() == "max";
-            let init = self.number(
-                ctx,
-                if is_max {
-                    f64::NEG_INFINITY
-                } else {
-                    f64::INFINITY
-                },
-            );
+        let method_name = hir_compat::method(property).name();
+        if matches!(method_name, "max" | "min") {
+            let (init_val, op) = if method_name == "max" {
+                (f64::NEG_INFINITY, Intrinsic::MathMax)
+            } else {
+                (f64::INFINITY, Intrinsic::MathMin)
+            };
+            let init = self.number(ctx, init_val);
             let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
             self.store(ctx, acc_slot, init);
-            let op = if is_max {
-                Intrinsic::MathMax
-            } else {
-                Intrinsic::MathMin
-            };
             for argument in args {
                 match argument {
                     perry_hir::CallArg::Expr(expr) => {
@@ -201,32 +194,17 @@ impl<'s> FunctionBuilder<'s> {
                         self.store(ctx, acc_slot, next);
                     }
                     perry_hir::CallArg::Spread(expr) => {
-                        let arr = self.expression(ctx, expr)?;
-                        let arr = self.defined(ctx, arr)?;
-                        ensure!(
-                            kind(ctx, arr)? == Kind::Array,
-                            "Math.max/min spread requires an array"
-                        );
-                        let len = self.array_length(ctx, arr);
-                        let zero = self.number(ctx, 0.0);
-                        self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
-                            let item = b.element_at(ctx, arr, idx)?;
-                            let val = b.arithmetic(ctx, item);
-                            let cur = b.load(ctx, acc_slot)?;
-                            let next = b.intrinsic(ctx, op, vec![cur, val]);
-                            b.store(ctx, acc_slot, next);
-                            Ok(())
-                        })?;
+                        self.fold_math_spread(ctx, op, acc_slot, expr)?;
                     }
                 }
             }
             return self.load(ctx, acc_slot);
         }
         ensure!(
-            matches!(hir_compat::method(property).name(), "push" | "concat"),
+            matches!(method_name, "push" | "concat"),
             "spread calls are supported for dense array push"
         );
-        if hir_compat::method(property).name() == "concat" {
+        if method_name == "concat" {
             return self.concat_call_spread(ctx, object, args);
         }
         let receiver = self.expression(ctx, object)?;
@@ -236,24 +214,8 @@ impl<'s> FunctionBuilder<'s> {
             "push requires a dense array receiver"
         );
         let element = self.array_element(ctx, receiver)?;
-        let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-        for argument in args {
-            match argument {
-                perry_hir::CallArg::Expr(expression) => {
-                    let value = self.expression_with(ctx, expression, Some(element))?;
-                    let value = self.fit(ctx, value, element)?;
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, values, value));
-                }
-                perry_hir::CallArg::Spread(expression) => {
-                    let source = self.spread_value(ctx, expression, Some(element))?;
-                    let source = self.defined(ctx, source)?;
-                    let target = ArrayType::get(ctx, element).into();
-                    let source = self.fit(ctx, source, target)?;
-                    self.append_array(ctx, values, source)?;
-                }
-            }
-        }
-        self.append_array(ctx, receiver, values)?;
+        let values = self.collect_spread_args(ctx, args, element)?;
+        self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, receiver, values));
         Ok(self.array_length(ctx, receiver))
     }
 
@@ -308,13 +270,16 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [perry_hir::CallArg],
     ) -> Result<Value> {
         let text = StringType::get(ctx).into();
-        let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, text, vec![]));
+        let result = self.entry_slot(ctx, text);
+        self.store(ctx, result, receiver);
         for argument in args {
             match argument {
                 perry_hir::CallArg::Expr(expression) => {
                     let value = self.expression(ctx, expression)?;
                     let value = self.display(ctx, value)?;
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, value));
+                    let previous = self.load(ctx, result)?;
+                    let joined = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
+                    self.store(ctx, result, joined);
                 }
                 perry_hir::CallArg::Spread(expression) => {
                     let source = self.spread_value(ctx, expression, Some(text))?;
@@ -330,37 +295,43 @@ impl<'s> FunctionBuilder<'s> {
                         |b, ctx, current, _, _| {
                             let value = b.element_at(ctx, source, current)?;
                             let value = b.display(ctx, value)?;
-                            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, value));
+                            let previous = b.load(ctx, result)?;
+                            let joined =
+                                b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
+                            b.store(ctx, result, joined);
                             Ok(())
                         },
                     )?;
                 }
             }
         }
-        let result = self.entry_slot(ctx, text);
-        self.store(ctx, result, receiver);
-        let limit = self.array_length(ctx, sources);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(
-            ctx,
-            "string_concat_segments",
-            zero,
-            limit,
-            |b, ctx, current, _, _| {
-                let previous = b.load(ctx, result)?;
-                let value = b.element_at(ctx, sources, current)?;
-                let joined = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
-                b.store(ctx, result, joined);
-                Ok(())
-            },
-        )?;
         self.load(ctx, result)
     }
 
-    /// Push every element of `source` onto `target`.
-    fn append_array(&mut self, ctx: &mut Context, target: Value, source: Value) -> Result<()> {
-        self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, target, source));
-        Ok(())
+    fn collect_spread_args(
+        &mut self,
+        ctx: &mut Context,
+        args: &'s [perry_hir::CallArg],
+        elem_ty: TypeHandle,
+    ) -> Result<Value> {
+        let arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
+        for argument in args {
+            match argument {
+                perry_hir::CallArg::Expr(expr) => {
+                    let v = self.expression_with(ctx, expr, Some(elem_ty))?;
+                    let v = self.fit(ctx, v, elem_ty)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, v));
+                }
+                perry_hir::CallArg::Spread(expr) => {
+                    let src = self.spread_value(ctx, expr, Some(elem_ty))?;
+                    let src = self.defined(ctx, src)?;
+                    let target_arr_ty = ArrayType::get(ctx, elem_ty).into();
+                    let src = self.fit(ctx, src, target_arr_ty)?;
+                    self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, arr, src));
+                }
+            }
+        }
+        Ok(arr)
     }
 
     fn func_call_spread(
@@ -421,24 +392,7 @@ impl<'s> FunctionBuilder<'s> {
                 TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx)
                     .context("rest parameter must have an array type")?;
             let elem_ty = rest_arr_ty.deref(ctx).element();
-            let rest_arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-            for argument in &args[arg_idx..] {
-                match argument {
-                    perry_hir::CallArg::Expr(expr) => {
-                        let v = self.expression_with(ctx, expr, Some(elem_ty))?;
-                        let v = self.fit(ctx, v, elem_ty)?;
-                        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, rest_arr, v));
-                    }
-                    perry_hir::CallArg::Spread(expr) => {
-                        let src = self.spread_value(ctx, expr, Some(elem_ty))?;
-                        let src = self.defined(ctx, src)?;
-                        let target_arr_ty = ArrayType::get(ctx, elem_ty).into();
-                        let src = self.fit(ctx, src, target_arr_ty)?;
-                        self.append_array(ctx, rest_arr, src)?;
-                    }
-                }
-            }
-            values.push(rest_arr);
+            values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);
         }
         Ok(self
             .emit_signature_call(ctx, signature, values)?

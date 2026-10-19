@@ -37,7 +37,6 @@ impl Fields {
         }
     }
 
-    // The first choice supplies the missing/undefined option default.
     fn choices(self) -> &'static [(u32, &'static [&'static str])] {
         match self {
             Self::Overflow => &[
@@ -84,6 +83,16 @@ enum FieldValue<'s> {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn raise_range_error(&mut self, ctx: &mut Context, msg: &str) {
+        let message = self.string(ctx, msg);
+        let error = self.emit_value(ctx, |ctx| {
+            ErrorNewOp::new(ctx, ErrorKind::RangeError, message)
+        });
+        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
+        self.propagate(ctx, status);
+        self.after_terminator(ctx);
+    }
+
     fn object_literal_pairs(
         &self,
         expr: &'s Expr,
@@ -103,15 +112,14 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    fn temporal_fields<const N: usize>(
+    fn temporal_fields(
         &mut self,
         ctx: &mut Context,
         input: Option<FieldValue<'s>>,
         schema: Fields,
-    ) -> Result<[Option<Value>; N]> {
+    ) -> Result<Vec<Option<Value>>> {
         let names = schema.names();
-        ensure!(N == names.len(), "Temporal field schema arity mismatch");
-        let mut fields = [None; N];
+        let mut fields = vec![None; names.len()];
         let mut literal = false;
         let record = match input {
             Some(FieldValue::Literal(expr)) if self.object_literal_pairs(expr).is_some() => {
@@ -167,7 +175,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let choices = schema.choices();
         let option = !choices.is_empty();
-        let mut values = [None; N];
+        let mut values = vec![None; names.len()];
         for (index, field) in fields.into_iter().enumerate() {
             let default_time = matches!(schema, Fields::DateTime) && index >= 3;
             let field = field.filter(|field| {
@@ -268,22 +276,16 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        let [value] =
-            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?;
-        let value = value.context("overflow field default missing")?;
+        let value =
+            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?[0]
+                .context("overflow field default missing")?;
         let constrain = self.number(ctx, Overflow::Constrain as u32 as f64);
         let valid = self.compare(ctx, CompareKind::Le, value, constrain);
         let done = self.new_block(ctx, "overflow_valid");
         let failed = self.new_block(ctx, "overflow_invalid");
         self.branch(ctx, valid, done, failed);
         self.switch_to(failed);
-        let message = self.string(ctx, "Temporal overflow must be constrain or reject");
-        let error = self.emit_value(ctx, |ctx| {
-            ErrorNewOp::new(ctx, ErrorKind::RangeError, message)
-        });
-        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
-        self.propagate(ctx, status);
-        self.after_terminator(ctx);
+        self.raise_range_error(ctx, "Temporal overflow must be constrain or reject");
         self.switch_to(done);
         Ok(value)
     }
@@ -297,7 +299,12 @@ impl<'s> FunctionBuilder<'s> {
         self.coerce_plain(ctx, item, options, Kind::PlainDate)
     }
 
-    fn compare_sign(&mut self, ctx: &mut Context, left: Value, right: Value) -> Result<Value> {
+    pub(super) fn compare_sign(
+        &mut self,
+        ctx: &mut Context,
+        left: Value,
+        right: Value,
+    ) -> Result<Value> {
         let lt = self.compare(ctx, CompareKind::Lt, left, right);
         let f64_ty = FP64Type::get(ctx).into();
         self.choose(
@@ -357,15 +364,7 @@ impl<'s> FunctionBuilder<'s> {
             );
             FieldValue::Loaded(value)
         };
-        let fields: Vec<_> = if date_time {
-            self.temporal_fields::<9>(ctx, Some(input), schema)?
-                .into_iter()
-                .collect()
-        } else {
-            self.temporal_fields::<3>(ctx, Some(input), schema)?
-                .into_iter()
-                .collect()
-        };
+        let fields = self.temporal_fields(ctx, Some(input), schema)?;
         ensure!(
             fields[..3].iter().all(Option::is_some),
             "{}",
@@ -467,8 +466,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             ("Instant", "from") => (Intrinsic::InstantFrom, Kind::String, "an ISO string"),
             _ => bail!(
-                "Temporal.{class}.{factory} is not supported; use Instant.from, \
-                 Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now"
+                "Temporal.{class}.{factory} is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now"
             ),
         };
         let [arg] = args else {
@@ -498,12 +496,10 @@ impl<'s> FunctionBuilder<'s> {
             "millisecond" if !date => DatePart::Millisecond,
             "microsecond" if !date => DatePart::Microsecond,
             "nanosecond" if !date => DatePart::Nanosecond,
-            other => {
-                bail!(
-                    "property {other} is not supported on {} yet",
-                    receiver_kind.label()
-                )
-            }
+            other => bail!(
+                "property {other} is not supported on {} yet",
+                receiver_kind.label()
+            ),
         };
         let part = self.number(ctx, f64::from(part as u32));
         let intrinsic = if date {
@@ -521,9 +517,9 @@ impl<'s> FunctionBuilder<'s> {
         end: Value,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
-        let [unit] =
-            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::LargestUnit)?;
-        let unit = unit.context("largestUnit field default missing")?;
+        let unit =
+            self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::LargestUnit)?[0]
+                .context("largestUnit field default missing")?;
         let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![start]);
         let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![end]);
         let diff = self.binary(ctx, BinaryKind::Sub, db, da);
@@ -592,12 +588,12 @@ impl<'s> FunctionBuilder<'s> {
         let record = self.shapes.mir_record(
             ctx,
             vec![
-                (String::from("blank"), bool_ty),
-                (String::from("days"), f64_ty),
-                (String::from("months"), f64_ty),
-                (String::from("sign"), f64_ty),
-                (String::from("weeks"), f64_ty),
-                (String::from("years"), f64_ty),
+                ("blank".into(), bool_ty),
+                ("days".into(), f64_ty),
+                ("months".into(), f64_ty),
+                ("sign".into(), f64_ty),
+                ("weeks".into(), f64_ty),
+                ("years".into(), f64_ty),
             ],
         )?;
         Ok(self.emit_value(ctx, |ctx| {
@@ -615,52 +611,51 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let receiver_kind = kind(ctx, receiver)?;
         let method = if subtract { "subtract" } else { "add" };
-        Ok({
-            let [years, months, weeks, days] = self.temporal_fields(
-                ctx,
-                Some(FieldValue::Literal(duration)),
-                Fields::Duration(method),
-            )?;
-            ensure!(
-                years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
-                "Temporal {method} requires at least one of years, months, weeks, or days"
-            );
-            if years.is_none()
-                && months.is_none()
-                && weeks.is_none()
-                && options.is_none()
-                && let Some(mut d) = days
-            {
-                if subtract {
-                    let zero = self.number(ctx, 0.0);
-                    d = self.binary(ctx, BinaryKind::Sub, zero, d);
-                }
-                let intrinsic = if receiver_kind == Kind::PlainDate {
-                    Intrinsic::PlainDateAddDays
-                } else {
-                    Intrinsic::PlainDateTimeAddDays
-                };
-                return Ok(self.call_intrinsic(ctx, intrinsic, vec![receiver, d]));
+        let fields = self.temporal_fields(
+            ctx,
+            Some(FieldValue::Literal(duration)),
+            Fields::Duration(method),
+        )?;
+        let (years, months, weeks, days) = (fields[0], fields[1], fields[2], fields[3]);
+        ensure!(
+            years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
+            "Temporal {method} requires at least one of years, months, weeks, or days"
+        );
+        if years.is_none()
+            && months.is_none()
+            && weeks.is_none()
+            && options.is_none()
+            && let Some(mut d) = days
+        {
+            if subtract {
+                let zero = self.number(ctx, 0.0);
+                d = self.binary(ctx, BinaryKind::Sub, zero, d);
             }
-            let zero = self.number(ctx, 0.0);
-            let mut negate_if_sub = |v: Option<Value>| -> Value {
-                match v {
-                    Some(val) if subtract => self.binary(ctx, BinaryKind::Sub, zero, val),
-                    Some(val) => val,
-                    None => zero,
-                }
-            };
-            let y = negate_if_sub(years);
-            let m = negate_if_sub(months);
-            let w = negate_if_sub(weeks);
-            let d = negate_if_sub(days);
-            let constrain = self.overflow_constrain(ctx, options)?;
             let intrinsic = if receiver_kind == Kind::PlainDate {
-                Intrinsic::PlainDateAddCalendar
+                Intrinsic::PlainDateAddDays
             } else {
-                Intrinsic::PlainDateTimeAddCalendar
+                Intrinsic::PlainDateTimeAddDays
             };
-            self.call_intrinsic(ctx, intrinsic, vec![receiver, y, m, w, d, constrain])
-        })
+            return Ok(self.call_intrinsic(ctx, intrinsic, vec![receiver, d]));
+        }
+        let zero = self.number(ctx, 0.0);
+        let mut negate_if_sub = |v: Option<Value>| -> Value {
+            match v {
+                Some(val) if subtract => self.binary(ctx, BinaryKind::Sub, zero, val),
+                Some(val) => val,
+                None => zero,
+            }
+        };
+        let y = negate_if_sub(years);
+        let m = negate_if_sub(months);
+        let w = negate_if_sub(weeks);
+        let d = negate_if_sub(days);
+        let constrain = self.overflow_constrain(ctx, options)?;
+        let intrinsic = if receiver_kind == Kind::PlainDate {
+            Intrinsic::PlainDateAddCalendar
+        } else {
+            Intrinsic::PlainDateTimeAddCalendar
+        };
+        Ok(self.call_intrinsic(ctx, intrinsic, vec![receiver, y, m, w, d, constrain]))
     }
 }

@@ -202,74 +202,76 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
     }
     let mut stack = arrayvec::ArrayVec::<Open, { MAX_DEPTH as usize + 1 }>::new();
     let mut current = value;
-    loop {
-        if depth + stack.len() as u32 > MAX_DEPTH {
-            return false;
-        }
-        if let Some(number) = json_number(current) {
-            append_number(text, number);
-        } else {
-            match word(current, 0) {
-                NATIVE | VIEW => {
-                    current = if word(current, 0) == VIEW {
-                        super::view::std_json_snapshot(super::view::to_json(current))
+    unsafe {
+        loop {
+            if depth + stack.len() as u32 > MAX_DEPTH {
+                return false;
+            }
+            if let Some(number) = json_number(current) {
+                append_number(text, number);
+            } else {
+                match word(current, 0) {
+                    NATIVE | VIEW => {
+                        current = if word(current, 0) == VIEW {
+                            super::view::std_json_snapshot(super::view::to_json(current))
+                        } else {
+                            native_snapshot(current)
+                        };
+                        continue;
+                    }
+                    BIGINT => {
+                        raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
+                        return true;
+                    }
+                    EXCEPTION => text.extend_from_slice(b"{}"),
+                    NULL | UNDEFINED => text.extend_from_slice(b"null"),
+                    BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
+                        b"true"
                     } else {
-                        native_snapshot(current)
-                    };
+                        b"false"
+                    }),
+                    STRING => quote(text, string_bytes(current)),
+                    kind @ (ARRAY | OBJECT) => {
+                        if kind == OBJECT {
+                            current = canonical(current);
+                        }
+                        text.push(if kind == ARRAY { b'[' } else { b'{' });
+                        stack.push(Open {
+                            node: current,
+                            next: word(current, 16),
+                            written: false,
+                        });
+                    }
+                    _ => return false,
+                }
+            }
+            // The next member to write, closing the containers that are done.
+            loop {
+                let Some(container) = stack.last_mut() else {
+                    return true;
+                };
+                let object = word(container.node, 0) == OBJECT;
+                let mut member = container.next;
+                while object && member != 0 && word(node(member), 0) == UNDEFINED {
+                    member = word(node(member), 4);
+                }
+                if member == 0 {
+                    text.push(if object { b'}' } else { b']' });
+                    stack.pop();
                     continue;
                 }
-                BIGINT => {
-                    raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
-                    return true;
+                if container.written {
+                    text.push(b',');
                 }
-                EXCEPTION => text.extend_from_slice(b"{}"),
-                NULL | UNDEFINED => text.extend_from_slice(b"null"),
-                BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
-                    b"true"
-                } else {
-                    b"false"
-                }),
-                STRING => quote(text, string_bytes(current)),
-                kind @ (ARRAY | OBJECT) => {
-                    if kind == OBJECT {
-                        current = canonical(current);
-                    }
-                    text.push(if kind == ARRAY { b'[' } else { b'{' });
-                    stack.push(Open {
-                        node: current,
-                        next: word(current, 16),
-                        written: false,
-                    });
+                if object {
+                    quote(text, string_bytes(node(word(node(member), 24))));
+                    text.push(b':');
                 }
-                _ => return false,
+                container.next = word(node(member), 4);
+                container.written = true;
+                current = node(member);
+                break;
             }
-        }
-        // The next member to write, closing the containers that are done.
-        loop {
-            let Some(container) = stack.last_mut() else {
-                return true;
-            };
-            let object = word(container.node, 0) == OBJECT;
-            let mut member = container.next;
-            while object && member != 0 && word(node(member), 0) == UNDEFINED {
-                member = word(node(member), 4);
-            }
-            if member == 0 {
-                text.push(if object { b'}' } else { b']' });
-                stack.pop();
-                continue;
-            }
-            if container.written {
-                text.push(b',');
-            }
-            if object {
-                quote(text, string_bytes(node(word(node(member), 24))));
-                text.push(b':');
-            }
-            container.next = word(node(member), 4);
-            container.written = true;
-            current = node(member);
-            break;
         }
     }
 }
@@ -294,7 +296,7 @@ pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_write_member(w: *mut u8, member: *mut u8) {
     let w = writer(w);
-    if w.failed || word(member, 0) == UNDEFINED {
+    if w.failed || unsafe { word(member, 0) } == UNDEFINED {
         return;
     }
     separate(w);
@@ -322,42 +324,43 @@ pub(crate) unsafe extern "C" fn std_json_extras(
     if graph.is_null() || w.failed {
         return;
     }
-    let object = word(graph, 0) == OBJECT;
-    let graph = if object { canonical(graph) } else { graph };
-    // SAFETY: compiled serializers supply the declared object's static field names.
-    let keys = if object && count != 0 {
-        unsafe { core::slice::from_raw_parts(keys, count as usize) }
-    } else {
-        &[]
-    };
-    let mut member = word(graph, 16);
-    let mut index = if object { 0 } else { word(graph, 28) };
-    while member != 0 {
-        let value = node(member);
-        let keep = if object {
-            let name = key_bytes(member);
-            keys.binary_search_by(|&key| {
-                // SAFETY: every table entry is a static string header.
-                let key = unsafe { crate::runtime::bytes(node(key)) };
-                key.len().cmp(&name.len()).then_with(|| key.cmp(name))
-            })
-            .is_err()
-                && word(value, 0) != UNDEFINED
+    unsafe {
+        let object = word(graph, 0) == OBJECT;
+        let graph = if object { canonical(graph) } else { graph };
+        // SAFETY: compiled serializers supply the declared object's static field names.
+        let keys = if object && count != 0 {
+            core::slice::from_raw_parts(keys, count as usize)
         } else {
-            index >= count
+            &[]
         };
-        if keep {
-            separate(w);
-            if object {
-                quote(&mut w.text, key_bytes(member));
-                w.text.push(b':');
+        let mut member = word(graph, 16);
+        let mut index = if object { 0 } else { word(graph, 28) };
+        while member != 0 {
+            let value = node(member);
+            let keep = if object {
+                let name = key_bytes(member);
+                keys.binary_search_by(|&key| {
+                    // SAFETY: every table entry is a static string header.
+                    perry_abi::json::key_cmp(crate::runtime::bytes(node(key)), name)
+                })
+                .is_err()
+                    && word(value, 0) != UNDEFINED
+            } else {
+                index >= count
+            };
+            if keep {
+                separate(w);
+                if object {
+                    quote(&mut w.text, key_bytes(member));
+                    w.text.push(b':');
+                }
+                if !value_text(&mut w.text, value, w.depth) {
+                    w.failed = true;
+                    return;
+                }
             }
-            if !value_text(&mut w.text, value, w.depth) {
-                w.failed = true;
-                return;
-            }
+            index += 1;
+            member = word(value, 4);
         }
-        index += 1;
-        member = word(value, 4);
     }
 }

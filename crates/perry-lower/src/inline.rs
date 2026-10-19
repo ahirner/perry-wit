@@ -216,12 +216,11 @@ fn completions(statements: &[Stmt]) -> u8 {
                 condition, body, ..
             } => {
                 let body = completions(body);
+                let inf = condition
+                    .as_ref()
+                    .is_none_or(|c| matches!(c, Expr::Bool(true)));
                 (body & (RETURN | EMPTY_RETURN | LABELLED))
-                    | if condition
-                        .as_ref()
-                        .is_none_or(|c| matches!(c, Expr::Bool(true)))
-                        && body & BREAK == 0
-                    {
+                    | if inf && body & BREAK == 0 {
                         0
                     } else {
                         FALLTHROUGH

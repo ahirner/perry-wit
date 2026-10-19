@@ -64,7 +64,32 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
                             init: Some(slice_call(init, 0)),
                             definite: false,
                         });
-                    } else if let ast::Expr::Ident(src_ident) = *init {
+                    } else {
+                        let src_ident = match *init {
+                            ast::Expr::Ident(src_ident) => src_ident,
+                            other => {
+                                self.rest_counter += 1;
+                                let temp_ident = ast::Ident::new(
+                                    format!("__perry_arr_rest_{}", self.rest_counter).into(),
+                                    DUMMY_SP,
+                                    SyntaxContext::empty(),
+                                );
+                                let type_ann = match &mut decl.name {
+                                    ast::Pat::Array(arr_pat) => arr_pat.type_ann.take(),
+                                    _ => None,
+                                };
+                                new_decls.push(ast::VarDeclarator {
+                                    span: DUMMY_SP,
+                                    name: ast::Pat::Ident(ast::BindingIdent {
+                                        id: temp_ident.clone(),
+                                        type_ann,
+                                    }),
+                                    init: Some(Box::new(other)),
+                                    definite: false,
+                                });
+                                temp_ident
+                            }
+                        };
                         decl.init = Some(Box::new(ast::Expr::Ident(src_ident.clone())));
                         new_decls.push(decl);
                         new_decls.push(ast::VarDeclarator {
@@ -72,37 +97,6 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
                             name: rest_name,
                             init: Some(slice_call(
                                 Box::new(ast::Expr::Ident(src_ident)),
-                                rest_index,
-                            )),
-                            definite: false,
-                        });
-                    } else {
-                        self.rest_counter += 1;
-                        let temp_ident = ast::Ident::new(
-                            format!("__perry_arr_rest_{}", self.rest_counter).into(),
-                            DUMMY_SP,
-                            SyntaxContext::empty(),
-                        );
-                        let temp_type_ann = match &mut decl.name {
-                            ast::Pat::Array(arr_pat) => arr_pat.type_ann.take(),
-                            _ => None,
-                        };
-                        new_decls.push(ast::VarDeclarator {
-                            span: DUMMY_SP,
-                            name: ast::Pat::Ident(ast::BindingIdent {
-                                id: temp_ident.clone(),
-                                type_ann: temp_type_ann,
-                            }),
-                            init: Some(init),
-                            definite: false,
-                        });
-                        decl.init = Some(Box::new(ast::Expr::Ident(temp_ident.clone())));
-                        new_decls.push(decl);
-                        new_decls.push(ast::VarDeclarator {
-                            span: DUMMY_SP,
-                            name: rest_name,
-                            init: Some(slice_call(
-                                Box::new(ast::Expr::Ident(temp_ident)),
                                 rest_index,
                             )),
                             definite: false,
@@ -151,7 +145,7 @@ pub(crate) fn method(name: &str) -> Method<'_> {
         streams::ITERATION => Method::Iteration,
         PUSH => Method::Push,
         CONCAT => Method::Concat,
-        decoder::DECODE => Method::Decode,
+        streams::DECODE => Method::Decode,
         name => Method::Ordinary(name),
     }
 }

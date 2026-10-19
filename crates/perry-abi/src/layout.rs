@@ -1,4 +1,5 @@
 //! Wasm32 aggregate layouts shared by generated code and linked helpers.
+#[macro_use]
 #[path = "layout/time.rs"]
 pub mod time;
 
@@ -25,8 +26,8 @@ pub mod array {
     pub const DATA: u32 = 8;
     pub const SLOT: u32 = 8;
     pub const NUMERIC_SLOT: u32 = 16;
-    pub const SCALAR_ELEMENTS: u32 = 0;
-    pub const REFERENCE_ELEMENTS: u32 = 1;
+    const SCALAR_ELEMENTS: u32 = 0;
+    const REFERENCE_ELEMENTS: u32 = 1;
     pub const NUMERIC_ELEMENTS: u32 = 2;
 
     /// The element representation of an array, decoded from the `references` flag compiled code
@@ -94,6 +95,7 @@ pub mod string {
         pub used: u32,
     }
 
+    #[derive(Clone, Copy)]
     #[repr(C)]
     pub struct Header {
         pub len: u32,
@@ -195,7 +197,6 @@ pub mod descriptor {
     pub const COPY_ABSENT: i32 = -2;
     pub const COPY_NONFINITE: i32 = -3;
     pub const VARIANT_TAG: i32 = -4;
-    pub const NULL_NUMBER_BITS: u64 = 0x7ff0_0000_0000_0002;
 
     pub const FIELDS: u32 = 8;
     pub const FIELD_SIZE: u32 = 12;
@@ -220,7 +221,7 @@ pub mod descriptor {
     pub const WRITE_SIZE: u32 = WRITE_DATE_BUFFER + WRITE_DATE_CAPACITY;
 
     const _: () = {
-        assert!(NULL_NUMBER_BITS == UNDEFINED_BITS + 1 && OMITTED_BITS == UNDEFINED_BITS + 2);
+        assert!(OMITTED_BITS == UNDEFINED_BITS + 2);
         assert!(OMITTED_BOOL == UNDEFINED_BOOL + 2 && OMITTED_REF == 2);
         assert!(super::numeric::NULL == super::numeric::UNDEFINED + 1);
         assert!(super::numeric::OMITTED == super::numeric::UNDEFINED + 2);

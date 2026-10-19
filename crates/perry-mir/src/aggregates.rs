@@ -49,7 +49,7 @@ const SMALL: usize = 25;
 /// No callee above this size is inlined.
 const LIMIT: usize = 64;
 
-pub(crate) fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
+pub fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
     let Some(module) = Operation::get_op::<ModuleOp>(module, ctx) else {
         return Vec::new();
     };
@@ -62,7 +62,7 @@ pub(crate) fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
         .collect()
 }
 
-pub(crate) fn operations(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
+pub fn operations(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
     use pliron::builtin::op_interfaces::OneRegionInterface;
     let region = function.get_region(ctx);
     let mut operations = Vec::new();
@@ -406,19 +406,13 @@ impl MatchRewrite for DecomposeRecords {
         let initial: Vec<_> = allocation.get_operation().deref(ctx).operands().collect();
         let mut slots = HashMap::new();
         rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));
-        for (name, ty) in fields {
-            let slot = LocalOp::new(ctx, ty);
+        for (name, ty) in &fields {
+            let slot = LocalOp::new(ctx, *ty);
             rewriter.insert_op(ctx, &slot);
-            slots.insert(name, slot.get_result(ctx));
+            slots.insert(name.clone(), slot.get_result(ctx));
         }
         rewriter.set_insertion_point_before_operation(allocation.get_operation());
-        let names: Vec<_> = record
-            .deref(ctx)
-            .fields()?
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect();
-        for (name, value) in names.into_iter().zip(initial) {
+        for ((name, _), value) in fields.into_iter().zip(initial) {
             let store = StoreOp::new(ctx, slots[&name], value);
             rewriter.insert_op(ctx, &store);
         }

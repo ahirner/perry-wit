@@ -1,16 +1,13 @@
 //! Bounded frame storage for closed scalar records with no escaping aliases.
 use crate::{
+    aggregates::{functions, operations},
     attrs::Tier,
     heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
 };
 use pliron::{
-    builtin::{
-        op_interfaces::{OneRegionInterface, OneResultInterface},
-        ops::FuncOp,
-    },
+    builtin::{op_interfaces::OneResultInterface, ops::FuncOp},
     context::{Context, Ptr},
     irbuild::IRStatus,
-    linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
     r#type::{Typed, TypedHandle},
@@ -28,11 +25,8 @@ fn frame_candidates(
         return vec![];
     }
     let mut bytes = 0;
-    function
-        .get_region(ctx)
-        .deref(ctx)
-        .iter(ctx)
-        .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
+    operations(ctx, function)
+        .into_iter()
         .filter_map(|op| Operation::get_op::<AllocOp>(op, ctx))
         .filter(|allocation| {
             let value = allocation.get_result(ctx);
@@ -66,9 +60,7 @@ fn frame_candidates(
                 let op = usage.user_op();
                 let operand = usage.find_index(ctx);
                 if operand == 0
-                    && (Operation::get_op::<FieldGetOp>(op, ctx).is_some()
-                        || Operation::get_op::<FieldPresentOp>(op, ctx).is_some()
-                        || Operation::get_op::<FieldSetOp>(op, ctx).is_some())
+                    && crate::is_any::<(FieldGetOp, FieldPresentOp, FieldSetOp)>(ctx, op)
                 {
                     return true;
                 }
@@ -90,32 +82,30 @@ pub(crate) fn assign(
     summaries: &crate::facts::ProgramFacts,
 ) -> IRStatus {
     let mut status = IRStatus::Unchanged;
-    for function in crate::aggregates::functions(root, ctx) {
+    for function in functions(root, ctx) {
         let frame: std::collections::HashSet<_> = frame_candidates(ctx, &function, summaries)
             .into_iter()
             .map(|allocation| allocation.get_operation())
             .collect();
-        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            for op in block.deref(ctx).iter(ctx) {
-                if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
-                    let tier = if frame.contains(&op) {
-                        Tier::Frame
-                    } else {
-                        Tier::Instance
-                    };
-                    if allocation.tier(ctx) != tier {
-                        allocation.set_tier(ctx, tier);
-                        status = IRStatus::Changed;
-                    }
-                }
-                if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx)
-                    && array
-                        .get_attr_perry_array_tier(ctx)
-                        .is_none_or(|tier| *tier != Tier::Instance)
-                {
-                    array.set_attr_perry_array_tier(ctx, Tier::Instance);
+        for op in operations(ctx, &function) {
+            if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
+                let tier = if frame.contains(&op) {
+                    Tier::Frame
+                } else {
+                    Tier::Instance
+                };
+                if allocation.tier(ctx) != tier {
+                    allocation.set_tier(ctx, tier);
                     status = IRStatus::Changed;
                 }
+            }
+            if let Some(array) = Operation::get_op::<crate::collections::ArrayNewOp>(op, ctx)
+                && array
+                    .get_attr_perry_array_tier(ctx)
+                    .is_none_or(|tier| *tier != Tier::Instance)
+            {
+                array.set_attr_perry_array_tier(ctx, Tier::Instance);
+                status = IRStatus::Changed;
             }
         }
     }

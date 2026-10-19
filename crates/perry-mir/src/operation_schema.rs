@@ -7,8 +7,7 @@ macro_rules! op_schema {
         $(interfaces = [$($interface:path),* $(,)?];)?
         $(attributes = ($($attributes:tt)*);)?
         constructors { $($constructors:tt)* }
-        $(attribute($attr:ident, $get:ident, $set:ident) = $value:expr => $missing:expr;)*
-        $(initialize($created:ident) $initialize:block)?
+        $(attribute($attr:ident $(: $attr_ty:ty)?, $get:ident, $set:ident) = $value:expr $(=> $missing:expr)?;)*
         $(prepare($this:ident) { $($prepare:tt)* })?
         result($ctx:ident $(, $input:ident : $input_ty:ty)*) : $ty:ty = $result:expr;
         error = $error:expr;
@@ -23,20 +22,19 @@ macro_rules! op_schema {
             [$($($interface,)*)?] ([$($operands)*] [$($source_error)?]); $($constructors)*
         );
         impl $op {
+            $(op_schema!(@accessor $attr, $get $(: $attr_ty)?);)*
             fn result_contract($ctx: &Context, $($input: $input_ty),*) -> op_schema!(@type $mode, $ty) {
                 let _ = $ctx;
                 $result
             }
             op_schema!(@construct $ctx, $mode, [$($operands)*],
-                [$(attribute($set) = $value;)* $(initialize($created) $initialize)?]; $($constructors)*
+                [$(attribute($set) = $value;)*]; $($constructors)*
             );
         }
         impl Verify for $op {
             fn verify(&self, $ctx: &Context) -> Result<()> {
                 op_schema!(@bind self, $ctx, [$($operands)*] $(, $source_error)?);
-                $(let Some($attr) = self.$get($ctx) else {
-                    return pliron::verify_err!(self.loc($ctx), $missing);
-                };)*
+                $(op_schema!(@check_attr self, $ctx, $attr, $get $(=> $missing)?);)*
                 $(let $this = self; $($prepare)*)?
                 $(let _ = $required;)*
                 $(if !$precondition {
@@ -57,6 +55,19 @@ macro_rules! op_schema {
             }
         }
     };
+    (@accessor $attr:ident, $get:ident : $attr_ty:ty) => {
+        pub fn $attr(&self, ctx: &Context) -> $attr_ty {
+            self.$get(ctx).expect(stringify!($attr)).clone().into()
+        }
+    };
+    (@accessor $attr:ident, $get:ident) => {};
+    (@check_attr $op:ident, $ctx:ident, $attr:ident, $get:ident => $missing:expr) => {
+        #[allow(unused_variables)]
+        let Some($attr) = $op.$get($ctx) else {
+            return pliron::verify_err!($op.loc($ctx), $missing);
+        };
+    };
+    (@check_attr $op:ident, $ctx:ident, $attr:ident, $get:ident) => {};
     // Constructor result policies determine cardinality; operand names determine arity.
     (@definition $item:tt $metadata:tt $interfaces:tt $operands:tt;
         $(#[$meta:meta])* $vis:vis $name:ident($($param:tt)*) $(operands($values:expr))?
@@ -133,10 +144,6 @@ macro_rules! op_schema {
     (@initialize $ctx:ident, $op:ident; attribute($set:ident) = $value:expr; $($rest:tt)*) => {
         $op.$set($ctx, $value);
         op_schema!(@initialize $ctx, $op; $($rest)*);
-    };
-    (@initialize $ctx:ident, $op:ident; initialize($created:ident) $body:block) => {
-        let $created = &$op;
-        $body
     };
     (@initialize $ctx:ident, $op:ident;) => {};
     (@results $ctx:ident, $mode:ident, infer($($input:expr),*)) => {

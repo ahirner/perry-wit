@@ -380,26 +380,6 @@ struct ReusableSequences {
     candidates: HashMap<Ptr<Operation>, crate::attrs::ReuseOperands>,
 }
 
-struct ReusePass;
-
-impl Pass for ReusePass {
-    fn name(&self) -> &str {
-        "owned-append"
-    }
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let candidates = {
-            let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
-            reuse_candidates(root, ctx, &live)
-        };
-        PassWrapper::new("owned-append", ReusableSequences { candidates }).run(root, ctx, analyses)
-    }
-}
-
 impl MatchRewrite for ReusableSequences {
     fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
         self.candidates.contains_key(&op)
@@ -424,41 +404,30 @@ impl MatchRewrite for ReusableSequences {
     }
 }
 
-struct ArrayFusion;
-
-impl Pass for ArrayFusion {
-    fn name(&self) -> &str {
-        "fuse-array-concats"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        _: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let mut result = PassResult::default();
-        result.ir_changed = fuse_arrays(root, ctx).into();
-        Ok(result)
-    }
-}
-
-pub(crate) struct AppendPass;
-
-impl Pass for AppendPass {
-    fn name(&self) -> &str {
-        "owned-append"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let mut passes = Passes::default();
-        passes.add_pass(ArrayFusion);
-        passes.add_pass(ReusePass);
-        passes.run(root, ctx, analyses)
-    }
+pub(crate) fn run(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<PassResult> {
+    let mut passes = Passes::default();
+    passes.add_pass(crate::pipeline::FnPass(
+        "fuse-array-concats",
+        |root, ctx, _| {
+            let mut result = PassResult::default();
+            result.ir_changed = fuse_arrays(root, ctx).into();
+            Ok(result)
+        },
+    ));
+    passes.add_pass(crate::pipeline::FnPass(
+        "owned-append",
+        |root, ctx, analyses| {
+            let candidates = {
+                let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+                reuse_candidates(root, ctx, &live)
+            };
+            PassWrapper::new("owned-append", ReusableSequences { candidates })
+                .run(root, ctx, analyses)
+        },
+    ));
+    passes.run(root, ctx, analyses)
 }

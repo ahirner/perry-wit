@@ -7,21 +7,20 @@ use crate::{
     repr::i32_type,
     values::{self, Carriers},
 };
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use perry_mir::CaughtOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
         op_interfaces::{OneRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
     context::{Context, Ptr},
     linked_list::ContainsLinkedList,
     operation::Operation,
     region::Region,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
     value::Value,
 };
 use std::collections::HashMap;
@@ -104,12 +103,7 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
         let symbol = mir.get_symbol_name(ctx);
         let throws = state.may_throw(&symbol);
         let effects = state.program_facts.function_summary(ctx, mir)?.effects;
-        let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("function type"))?;
-        let (mir_params, mir_results) = {
-            let ty = ty.deref(ctx);
-            (ty.arg_types(), ty.res_types())
-        };
+        let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
         let params = values::signature(ctx, mir_params)?;
         let results = values::signature(ctx, mir_results)?;
         let mut signature_results = results.clone();

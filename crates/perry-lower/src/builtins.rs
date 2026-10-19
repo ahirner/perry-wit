@@ -258,23 +258,19 @@ impl<'s> FunctionBuilder<'s> {
         Ok(result)
     }
 
-    /// `Math.min(...array)` or `Math.max(...array)`.
-    pub(super) fn math_extremum_spread(
+    pub(super) fn fold_math_spread(
         &mut self,
         ctx: &mut Context,
         intrinsic: Intrinsic,
-        empty: f64,
+        acc_slot: Value,
         array: &'s Expr,
-    ) -> Result<Value> {
+    ) -> Result<()> {
         let arr = self.expression(ctx, array)?;
         let arr = self.defined(ctx, arr)?;
         ensure!(
             kind(ctx, arr)? == Kind::Array,
             "Math.max/min spread requires an array"
         );
-        let init = self.number(ctx, empty);
-        let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
-        self.store(ctx, acc_slot, init);
         let len = self.array_length(ctx, arr);
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
@@ -284,7 +280,21 @@ impl<'s> FunctionBuilder<'s> {
             let next = b.intrinsic(ctx, intrinsic, vec![cur, val]);
             b.store(ctx, acc_slot, next);
             Ok(())
-        })?;
+        })
+    }
+
+    /// `Math.min(...array)` or `Math.max(...array)`.
+    pub(super) fn math_extremum_spread(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        empty: f64,
+        array: &'s Expr,
+    ) -> Result<Value> {
+        let init = self.number(ctx, empty);
+        let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
+        self.store(ctx, acc_slot, init);
+        self.fold_math_spread(ctx, intrinsic, acc_slot, array)?;
         self.load(ctx, acc_slot)
     }
 
@@ -343,6 +353,31 @@ impl<'s> FunctionBuilder<'s> {
             self.intrinsic_void(ctx, Intrinsic::DecoderValidateLabel, vec![label]);
         }
         Ok(self.intrinsic(ctx, Intrinsic::DecoderNew, vec![fatal, ignore_bom]))
+    }
+
+    pub(super) fn decode(
+        &mut self,
+        ctx: &mut Context,
+        decoder: Value,
+        input: Option<&'s Expr>,
+        options: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let bytes = match input {
+            None | Some(Expr::Undefined) => {
+                let zero = self.number(ctx, 0.0);
+                self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
+            }
+            Some(input) => self.typed_operand(ctx, input, Kind::Bytes, "a Uint8Array")?,
+        };
+        let mut stream = self.boolean(ctx, false);
+        for (name, value) in self.init_fields(options)? {
+            ensure!(
+                name == "stream",
+                "unsupported TextDecoder.decode option {name}"
+            );
+            stream = self.condition(ctx, value)?;
+        }
+        Ok(self.intrinsic(ctx, Intrinsic::TextDecode, vec![decoder, bytes, stream]))
     }
 
     /// `console.log(a, b, …)`: the arguments' strings joined by spaces.

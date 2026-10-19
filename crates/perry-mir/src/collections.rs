@@ -84,7 +84,7 @@ op_schema! {
         pub new(element: TypeHandle, items: Vec<Value>) operands(items)
             => explicit(ArrayType::get(ctx, element).into());
     }
-    initialize(op) { op.set_attr_perry_array_tier(ctx, Tier::Unassigned); }
+    attribute(_tier, get_attr_perry_array_tier, set_attr_perry_array_tier) = Tier::Unassigned;
     prepare(this) {
         <Self as OneResultInterface>::verify(this, ctx)?;
         let element = element(ctx, this.get_result(ctx), "perry.array_new")?;
@@ -174,7 +174,7 @@ op_schema! {
     format = "attr($perry_string_value, $StringAttr) ` : ` type($0)";
     attributes = (perry_string_value: StringAttr);
     constructors { pub new(text: &str) => infer(); }
-    initialize(op) { op.set_attr_perry_string_value(ctx, StringAttr::new(text.into())); }
+    attribute(_value, get_attr_perry_string_value, set_attr_perry_string_value) = StringAttr::new(text.into());
     result(ctx): Ty = Ty::String;
     error = CollectionErr::NotString("perry.string_const");
 }
@@ -275,24 +275,16 @@ op_schema! {
         pub(crate) from_sources(sources: Vec<Value>, reuse: ReuseOperands) operands(sources)
             => explicit(sequence_type(ctx, &sources));
     }
-    attribute(reuse, get_attr_perry_concat_reuse, set_attr_perry_concat_reuse) = reuse
+    attribute(candidates: ReuseOperands, get_attr_perry_concat_reuse, set_attr_perry_concat_reuse) = reuse
         => CollectionErr::Sequence("perry.concat_reuse");
     result(ctx): Sequence = Sequence;
     error = CollectionErr::Sequence("perry.concat_reuse");
-    check !reuse.0.is_empty()
-        && reuse.0.windows(2).all(|pair| pair[0] < pair[1])
-        && (!Ty::String.matches(ctx, sources.get_result(0).get_type(ctx)) || reuse.0 == [0])
-        && reuse.0.iter().all(|&index| (index as usize) < sources.get_num_operands()
+    check !candidates.0.is_empty()
+        && candidates.0.windows(2).all(|pair| pair[0] < pair[1])
+        && (!Ty::String.matches(ctx, sources.get_result(0).get_type(ctx)) || candidates.0 == [0])
+        && candidates.0.iter().all(|&index| (index as usize) < sources.get_num_operands()
             && sources.operands().filter(|v| *v == sources.get_operand(index as usize)).count() == 1)
         => CollectionErr::Sequence("perry.concat_reuse");
-}
-
-impl ConcatReuseOp {
-    pub fn candidates(&self, ctx: &Context) -> ReuseOperands {
-        self.get_attr_perry_concat_reuse(ctx)
-            .expect("concat reuse candidates")
-            .clone()
-    }
 }
 
 op_schema! {

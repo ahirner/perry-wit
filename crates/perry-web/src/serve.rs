@@ -105,11 +105,6 @@ fn current() -> Option<&'static mut Serve> {
     None
 }
 
-fn word(area: *const u8, offset: usize) -> u32 {
-    // SAFETY: callers read result areas the host wrote.
-    unsafe { *(area.add(offset) as *const u32) }
-}
-
 /// A string the host allocated (`cabi_realloc`, in the task region) at `area + offset`.
 fn host_string(area: *const u8, offset: usize) -> *mut u8 {
     // SAFETY: the host wrote a string's data and length.

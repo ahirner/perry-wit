@@ -9,13 +9,13 @@ use crate::{
     control::ReturnOp,
     effects::Failure,
     facts::{
-        ProgramFacts, Specialize, constrain_signature, specialized_implementation,
+        ProgramFacts, constrain_signature, specialize, specialized_implementation,
         verify_lossless_module, with_fact_limits,
     },
     heap::FieldGetOp,
     intrinsics::{Combinator, IntrinsicOp, PromiseCombinatorOp},
     liveness::LiveValues,
-    pipeline::canonicalize,
+    pipeline::{FnPass, canonicalize},
     scalar::{BinaryOp, CompareOp},
 };
 use pliron::{

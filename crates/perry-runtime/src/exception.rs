@@ -13,9 +13,9 @@
 use crate::region::current;
 use core::ptr;
 
-pub use crate::layout::exception::{
-    CAUSE, ERROR, KIND, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR, TAG, TAG_BIGINT, TAG_BOOLEAN,
-    TAG_JSON, TAG_NULL, TAG_NUMBER, TAG_STRING, TAG_UNDEFINED, THROWN_VALUE, TYPE_ERROR, VALUE,
+pub(crate) use crate::layout::exception::{
+    ERROR, KIND, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR, TAG, TAG_BIGINT, TAG_BOOLEAN,
+    TAG_JSON, TAG_NULL, TAG_NUMBER, TAG_STRING, TAG_UNDEFINED, TYPE_ERROR, VALUE,
 };
 
 pub(crate) const EXIT: u32 = 5;

@@ -1,17 +1,22 @@
-//! Source diagnostics before HIR can erase unsupported string representations.
-use crate::hir_compat::locations::Locations;
-use anyhow::{Result, anyhow};
+//! Parse TypeScript with diagnostics before HIR lowering.
+use super::*;
 use perry_parser::swc_ecma_ast as ast;
+use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
-pub(crate) fn validate(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
+/// Validate string literals / `String.fromCodePoint` and collect untyped variable bindings in one pass.
+pub(crate) fn validate(
+    module: &ast::Module,
+    locations: &locations::Locations<'_>,
+) -> Result<HashSet<(u32, u32)>> {
     #[derive(Default)]
-    struct Strings {
+    struct Analyzer {
         invalid: Option<Span>,
         code_point_arity: Option<Span>,
+        bindings: HashSet<(u32, u32)>,
     }
-    impl Visit for Strings {
+    impl Visit for Analyzer {
         fn visit_str(&mut self, string: &ast::Str) {
             if string.value.as_str().is_none() {
                 self.invalid.get_or_insert(string.span);
@@ -34,10 +39,16 @@ pub(crate) fn validate(module: &ast::Module, locations: &Locations<'_>) -> Resul
             }
             call.visit_children_with(self);
         }
+        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
+            if declaration.init.is_some() {
+                collect_pat(&declaration.name, &mut self.bindings);
+            }
+            declaration.visit_children_with(self);
+        }
     }
-    let mut strings = Strings::default();
-    module.visit_with(&mut strings);
-    if let Some(span) = strings.invalid {
+    let mut analyzer = Analyzer::default();
+    module.visit_with(&mut analyzer);
+    if let Some(span) = analyzer.invalid {
         return Err(locations.annotate(
             anyhow!(
                 "lone UTF-16 surrogate in a string literal; Perry strings contain Unicode scalars only"
@@ -45,55 +56,38 @@ pub(crate) fn validate(module: &ast::Module, locations: &Locations<'_>) -> Resul
             span,
         ));
     }
-    if let Some(span) = strings.code_point_arity {
+    if let Some(span) = analyzer.code_point_arity {
         return Err(locations.annotate(
             anyhow!("String.fromCodePoint currently requires exactly one scalar argument"),
             span,
         ));
     }
-    Ok(())
+    Ok(analyzer.bindings)
 }
 
-/// Bindings with no declared type may keep the initializer's absence states.
-pub(super) fn inferred_bindings(module: &ast::Module) -> std::collections::HashSet<(u32, u32)> {
-    fn collect_pat(pat: &ast::Pat, out: &mut std::collections::HashSet<(u32, u32)>) {
-        match pat {
-            ast::Pat::Ident(binding) if binding.type_ann.is_none() => {
-                out.insert((binding.id.span.lo.0, binding.id.span.hi.0));
+fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
+    match pat {
+        ast::Pat::Ident(binding) if binding.type_ann.is_none() => {
+            out.insert((binding.id.span.lo.0, binding.id.span.hi.0));
+        }
+        ast::Pat::Array(arr) if arr.type_ann.is_none() => {
+            for elem in arr.elems.iter().flatten() {
+                collect_pat(elem, out);
             }
-            ast::Pat::Array(arr) if arr.type_ann.is_none() => {
-                for elem in arr.elems.iter().flatten() {
-                    collect_pat(elem, out);
-                }
-            }
-            ast::Pat::Object(obj) if obj.type_ann.is_none() => {
-                for prop in &obj.props {
-                    match prop {
-                        ast::ObjectPatProp::KeyValue(kv) => collect_pat(&kv.value, out),
-                        ast::ObjectPatProp::Assign(assign) => {
-                            out.insert((assign.key.span.lo.0, assign.key.span.hi.0));
-                        }
-                        ast::ObjectPatProp::Rest(rest) => collect_pat(&rest.arg, out),
+        }
+        ast::Pat::Object(obj) if obj.type_ann.is_none() => {
+            for prop in &obj.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => collect_pat(&kv.value, out),
+                    ast::ObjectPatProp::Assign(assign) => {
+                        out.insert((assign.key.span.lo.0, assign.key.span.hi.0));
                     }
+                    ast::ObjectPatProp::Rest(rest) => collect_pat(&rest.arg, out),
                 }
             }
-            ast::Pat::Rest(rest) if rest.type_ann.is_none() => collect_pat(&rest.arg, out),
-            ast::Pat::Assign(assign) => collect_pat(&assign.left, out),
-            _ => {}
         }
+        ast::Pat::Rest(rest) if rest.type_ann.is_none() => collect_pat(&rest.arg, out),
+        ast::Pat::Assign(assign) => collect_pat(&assign.left, out),
+        _ => {}
     }
-
-    #[derive(Default)]
-    struct Bindings(std::collections::HashSet<(u32, u32)>);
-    impl Visit for Bindings {
-        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            if declaration.init.is_some() {
-                collect_pat(&declaration.name, &mut self.0);
-            }
-            declaration.visit_children_with(self);
-        }
-    }
-    let mut bindings = Bindings::default();
-    module.visit_with(&mut bindings);
-    bindings.0
 }

@@ -37,8 +37,9 @@ use domains::{
     Fact, Integer, Interval, Range, ResultDomain, arithmetic_range, comparison_domain,
     constant_range, integer_arithmetic, literal,
 };
-pub(crate) use rewrite::Specialize;
-pub use rewrite::{verify_lossless_module, verify_lossless_operations};
+#[cfg(test)]
+pub(crate) use rewrite::verify_lossless_module;
+pub(crate) use rewrite::{specialize, verify_lossless_operations};
 mod value;
 use value::{Representation, ValueFacts};
 mod outcomes;

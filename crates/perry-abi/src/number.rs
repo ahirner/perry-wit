@@ -118,7 +118,7 @@ impl Number {
         }
     }
 
-    pub fn to_int32(self) -> i32 {
+    fn to_int32(self) -> i32 {
         match self {
             Number::Signed(value) => value as i32,
             Number::Unsigned(value) => value as i32,

@@ -126,24 +126,7 @@ fn resolve_packages(
     resolve: &mut Resolve,
     deps: &mut Vec<UnresolvedPackageGroup>,
 ) -> Result<PackageId> {
-    let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
-    for group in std::iter::once(&main).chain(deps.iter()) {
-        available.insert(group.main.name.clone());
-        available.extend(group.nested.iter().map(|package| package.name.clone()));
-    }
-
-    if let Some(ambient) = std::env::var_os("WASI_WIT_PATH").map(PathBuf::from) {
-        for mut group in read_dependencies(&ambient, resolve)? {
-            if available.insert(group.main.name.clone()) {
-                group
-                    .nested
-                    .retain(|package| available.insert(package.name.clone()));
-                deps.push(group);
-            }
-        }
-    }
-
-    resolve_embedded(main, resolve, deps)
+    resolve_with(main, resolve, deps, true)
 }
 
 fn resolve_embedded(
@@ -151,25 +134,44 @@ fn resolve_embedded(
     resolve: &mut Resolve,
     deps: &mut Vec<UnresolvedPackageGroup>,
 ) -> Result<PackageId> {
+    resolve_with(main, resolve, deps, false)
+}
+
+fn resolve_with(
+    main: UnresolvedPackageGroup,
+    resolve: &mut Resolve,
+    deps: &mut Vec<UnresolvedPackageGroup>,
+    ambient: bool,
+) -> Result<PackageId> {
     let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
     for group in std::iter::once(&main).chain(deps.iter()) {
         available.insert(group.main.name.clone());
         available.extend(group.nested.iter().map(|package| package.name.clone()));
     }
-    for files in embedded::PACKAGES {
-        let mut map = SourceMap::new();
-        for (name, source) in *files {
-            map.push_str(name, *source);
-        }
-        let mut group = map
-            .parse()
-            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let ambient_groups = match ambient.then(|| std::env::var_os("WASI_WIT_PATH")).flatten() {
+        Some(path) => read_dependencies(&PathBuf::from(path), resolve)?,
+        None => Vec::new(),
+    };
+    let mut push_unique = |mut group: UnresolvedPackageGroup| {
         if available.insert(group.main.name.clone()) {
             group
                 .nested
                 .retain(|package| available.insert(package.name.clone()));
             deps.push(group);
         }
+    };
+    for group in ambient_groups {
+        push_unique(group);
+    }
+    for files in embedded::PACKAGES {
+        let mut map = SourceMap::new();
+        for (name, source) in *files {
+            map.push_str(name, *source);
+        }
+        push_unique(
+            map.parse()
+                .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?,
+        );
     }
     Ok(resolve.push_groups(main, std::mem::take(deps))?)
 }

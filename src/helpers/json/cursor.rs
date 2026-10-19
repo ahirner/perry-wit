@@ -10,7 +10,7 @@ use arrayvec::ArrayVec;
 use core::mem::offset_of;
 use perry_abi as runtime;
 use perry_abi::json::{
-    KEY, METADATA, PACKED_FIELDS, append_field, field_index, field_name, kind, link_child,
+    KEY, METADATA, PACKED_FIELDS, append_field, field_index, field_name, kind, link_child, set_word,
 };
 
 struct Container {
@@ -123,9 +123,6 @@ impl Cursor {
 }
 unsafe fn cursor<'a>(value: u32) -> &'a mut Cursor {
     unsafe { &mut *(value as usize as *mut Cursor) }
-}
-fn set_word(value: *mut u8, offset: usize, data: u32) {
-    unsafe { value.add(offset).cast::<u32>().write(data) }
 }
 
 /// # Safety
@@ -261,20 +258,24 @@ pub(crate) unsafe extern "C" fn json_cursor_key(
                     let field = (frame.order & 15) - 1;
                     let name = pool::json_node(kind::STRING, &mut c.residue);
                     let bytes = unsafe { runtime::bytes(field_name(table, count, field)) };
-                    set_word(name, 8, bytes.as_ptr() as usize as u32);
-                    set_word(name, 12, bytes.len() as u32);
-                    set_word(name, 16, runtime::scalars_length(bytes));
                     let item = pool::json_node(kind::UNDEFINED, &mut c.residue);
-                    set_word(item, KEY, name as usize as u32);
-                    unsafe { link_child(frame.graph, item) };
+                    unsafe {
+                        set_word(name, 8, bytes.as_ptr() as usize as u32);
+                        set_word(name, 12, bytes.len() as u32);
+                        set_word(name, 16, runtime::scalars_length(bytes));
+                        set_word(item, KEY, name as usize as u32);
+                        link_child(frame.graph, item);
+                    }
                     frame.order >>= 4;
                 }
             }
             if index < count {
                 let name = pool::json_text(key, &mut c.residue);
                 let item = pool::json_node(kind::UNDEFINED, &mut c.residue);
-                set_word(item, KEY, name as usize as u32);
-                unsafe { link_child(frame.graph, item) };
+                unsafe {
+                    set_word(item, KEY, name as usize as u32);
+                    link_child(frame.graph, item);
+                }
             }
         }
     }
@@ -302,12 +303,14 @@ pub(crate) unsafe extern "C" fn json_cursor_extra(value: u32) {
 pub(crate) unsafe extern "C" fn json_cursor_record(value: u32, native: *mut u8) {
     let c = unsafe { cursor(value) };
     let frame = c.containers.last_mut().expect("record frame");
-    set_word(native, runtime::layout::record::ORDER as usize, frame.order);
-    set_word(
-        native,
-        runtime::layout::record::JSON as usize,
-        frame.graph as usize as u32,
-    );
+    unsafe {
+        set_word(native, runtime::layout::record::ORDER as usize, frame.order);
+        set_word(
+            native,
+            runtime::layout::record::JSON as usize,
+            frame.graph as usize as u32,
+        );
+    }
 }
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_cursor_value(value: u32) -> u32 {
@@ -326,14 +329,16 @@ pub(crate) unsafe extern "C" fn json_cursor_member(value: u32, graph: *mut u8) -
         return graph as usize as u32;
     }
     let key = pool::json_text(key.expect("successful current member key"), &mut c.residue);
-    set_word(item, KEY, key as usize as u32);
     let graph = if graph.is_null() {
         pool::json_node(kind::OBJECT, &mut c.residue)
     } else {
         graph
     };
     // The cursor owns this unpublished graph and parsed member.
-    unsafe { link_child(graph, item) };
+    unsafe {
+        set_word(item, KEY, key as usize as u32);
+        link_child(graph, item);
+    }
     graph as usize as u32
 }
 #[unsafe(no_mangle)]
@@ -347,12 +352,7 @@ pub(crate) unsafe extern "C" fn json_cursor_finish(value: u32, failed: u32) {
         }
     }
     if let Some(error) = c.error {
-        let at = match error {
-            Error::Syntax(at) | Error::UnpairedSurrogate(at) | Error::Depth(at) => at,
-            Error::Capacity => 0,
-        };
-        let message = runtime::json_syntax_message(c.text().as_bytes(), at as u32);
-        runtime::raise_string(runtime::SYNTAX_ERROR, message);
+        pool::raise_error(c.text(), error);
     } else if failed != 0 {
         runtime::raise(
             runtime::TYPE_ERROR,
@@ -369,7 +369,7 @@ pub(crate) unsafe extern "C" fn json_cursor_tail(value: u32, graph: *mut u8, sta
     }
     let graph = if graph.is_null() {
         let g = pool::json_node(kind::ARRAY, &mut c.residue);
-        set_word(g, METADATA, start);
+        unsafe { set_word(g, METADATA, start) };
         g
     } else {
         graph

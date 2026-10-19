@@ -16,23 +16,6 @@ pub const RESULT_NEXT: usize = 24;
 pub const RESULT_INPUT: usize = 32;
 pub const RESULT_BYTES: u32 = 40;
 
-macro_rules! codes {
-    ($name:ident { $($variant:ident = $code:literal),+ $(,)? }) => {
-        #[derive(Clone, Copy)]
-        #[repr(u8)]
-        pub enum $name { $($variant = $code),+ }
-
-        impl $name {
-            pub fn decode(code: u8) -> Self {
-                match code {
-                    $($code => Self::$variant,)+
-                    _ => panic!(concat!("invalid regex ", stringify!($name))),
-                }
-            }
-        }
-    };
-}
-
 codes!(NfaOp { Fail = 0, Range = 1, Sparse = 2, Look = 3, Union = 4, Capture = 5, Match = 6 });
 codes!(LookCode {
     Start = 1, End = 2, StartLine = 3, EndLine = 4,
@@ -84,7 +67,7 @@ impl<'a> NfaTable<'a> {
             .map_or(self.body.len(), |&end| u16::from_le_bytes(end) as usize);
         let bytes = &self.body[offset..end];
         let args = &bytes[1..];
-        match NfaOp::decode(bytes[0]) {
+        match NfaOp::try_from(u32::from(bytes[0])).expect("invalid regex NfaOp") {
             NfaOp::Fail => NfaState::Fail,
             NfaOp::Range => NfaState::Ranges(args[..4].as_chunks().0),
             NfaOp::Sparse => {
@@ -92,7 +75,7 @@ impl<'a> NfaTable<'a> {
                 NfaState::Ranges(args[2..2 + count * 4].as_chunks().0)
             }
             NfaOp::Look => NfaState::Look(
-                LookCode::decode(args[0]),
+                LookCode::try_from(u32::from(args[0])).expect("invalid regex LookCode"),
                 u16::from_le_bytes([args[1], args[2]]),
             ),
             NfaOp::Union => {

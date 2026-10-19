@@ -467,16 +467,21 @@ impl<'s> FunctionBuilder<'s> {
             None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
         };
         let map = self.alloc_collection_box(ctx, map_tuple, EntryKind::Map)?;
-        self.iterate(
-            ctx,
-            Input::Collection(entries_val),
-            |b, ctx, entry, _, _, _| {
-                let (k, v) = b.entry_fields(ctx, entry)?;
-                b.kv_set(ctx, map, k, v)?;
-                Ok(())
-            },
-        )?;
-        Ok(map)
+        self.populate_from_entries(ctx, entries_val, map)
+    }
+
+    pub(super) fn populate_from_entries(
+        &mut self,
+        ctx: &mut Context,
+        entries: Value,
+        target: Value,
+    ) -> Result<Value> {
+        self.iterate(ctx, Input::Collection(entries), |b, ctx, entry, _, _, _| {
+            let (k, v) = b.entry_fields(ctx, entry)?;
+            b.kv_set(ctx, target, k, v)?;
+            Ok(())
+        })?;
+        Ok(target)
     }
 
     fn empty_set(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {

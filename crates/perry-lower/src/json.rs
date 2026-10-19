@@ -68,6 +68,19 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, Intrinsic::JsonReplacerFinish, vec![traversal]))
     }
 
+    pub(super) fn decode_json(
+        &mut self,
+        ctx: &mut Context,
+        input: Value,
+        target: TypeHandle,
+    ) -> Result<Value> {
+        ensure!(
+            JsonSchema::supports_descriptor(ctx, target),
+            "unsupported JSON schema"
+        );
+        Ok(self.emit_value(ctx, |ctx| perry_mir::JsonDecodeOp::new(ctx, input, target)))
+    }
+
     /// Unsupported cursor targets retain the JSON value for later coercion.
     pub(super) fn parse_json_text(
         &mut self,
@@ -130,9 +143,6 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| Ok(b.boolean(ctx, false)),
         )
     }
-}
-
-impl<'s> FunctionBuilder<'s> {
     pub(super) fn object_spread(
         &mut self,
         ctx: &mut Context,

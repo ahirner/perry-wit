@@ -12,9 +12,7 @@ op_schema! {
     format = "attr($perry_integer_value, $StringAttr) ` : ` type($0)";
     attributes = (perry_integer_value: StringAttr);
     constructors { pub new(magnitude: u64) => infer(); }
-    initialize(op) {
-        op.set_attr_perry_integer_value(ctx, StringAttr::new(magnitude.to_string()));
-    }
+    attribute(_value, get_attr_perry_integer_value, set_attr_perry_integer_value) = StringAttr::new(magnitude.to_string());
     prepare(this) {}
     result(ctx): Ty = Ty::BigInt;
     error = InvalidConstant;

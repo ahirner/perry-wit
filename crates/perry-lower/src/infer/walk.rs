@@ -179,9 +179,9 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
     let _ = visit_body(statements, &mut Locals(visit));
 }
 
-pub(super) fn resolve_locals(statements: &mut [Stmt], env: &mut FunctionEnv<'_>) {
+pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
     let mut bindings = HashMap::new();
-    scan(statements, env, &mut ScanMode::ResolveLocals(&mut bindings));
+    scan(statements, &mut env, None, Some(&mut bindings));
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
             *ty = inferred;
@@ -189,7 +189,12 @@ pub(super) fn resolve_locals(statements: &mut [Stmt], env: &mut FunctionEnv<'_>)
     });
 }
 
-pub(super) fn scan(statements: &[Stmt], env: &mut FunctionEnv<'_>, mode: &mut ScanMode<'_>) {
+pub(super) fn scan(
+    statements: &[Stmt],
+    env: &mut FunctionEnv<'_>,
+    mut returned: Option<&mut Vec<HirType>>,
+    mut bindings: Option<&mut HashMap<LocalId, HirType>>,
+) {
     for statement in statements {
         match statement {
             Stmt::Let {
@@ -206,7 +211,7 @@ pub(super) fn scan(statements: &[Stmt], env: &mut FunctionEnv<'_>, mode: &mut Sc
                 && !matches!(init, Expr::Undefined) =>
             {
                 let inferred = expression(init, env);
-                if let ScanMode::ResolveLocals(bindings) = mode
+                if let Some(bindings) = bindings.as_deref_mut()
                     && is_resolvable_type(&inferred)
                 {
                     bindings.insert(*id, inferred.clone());
@@ -214,11 +219,6 @@ pub(super) fn scan(statements: &[Stmt], env: &mut FunctionEnv<'_>, mode: &mut Sc
                 if !matches!(inferred, HirType::Any | HirType::Unknown) {
                     env.locals.insert(*id, inferred);
                 }
-            }
-            Stmt::Let {
-                init: Some(init), ..
-            } => {
-                let _ = expression(init, env);
             }
             Stmt::Expr(Expr::LocalSet(id, value))
                 if env
@@ -232,75 +232,80 @@ pub(super) fn scan(statements: &[Stmt], env: &mut FunctionEnv<'_>, mode: &mut Sc
                     env.locals.insert(*id, inferred);
                 }
             }
-            Stmt::Expr(expr) | Stmt::Throw(expr) => {
-                let _ = expression(expr, env);
-            }
             Stmt::Return(value) => {
-                let ret_ty = value
-                    .as_ref()
-                    .map_or(HirType::Void, |value| expression(value, env));
-                if let ScanMode::Returns(returned) = mode {
-                    returned.push(ret_ty);
+                if let Some(returned) = returned.as_deref_mut() {
+                    returned.push(
+                        value
+                            .as_ref()
+                            .map_or(HirType::Void, |value| expression(value, env)),
+                    );
                 }
             }
             Stmt::If {
-                condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
-                let _ = expression(condition, env);
-                scan(then_branch, env, mode);
+                scan(
+                    then_branch,
+                    env,
+                    returned.as_deref_mut(),
+                    bindings.as_deref_mut(),
+                );
                 if let Some(body) = else_branch {
-                    scan(body, env, mode);
+                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                let _ = expression(condition, env);
-                scan(body, env, mode);
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
             }
-            Stmt::For {
-                init,
-                condition,
-                update,
-                body,
-            } => {
+            Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
-                    scan(std::slice::from_ref(init), env, mode);
+                    scan(
+                        std::slice::from_ref(init),
+                        env,
+                        returned.as_deref_mut(),
+                        bindings.as_deref_mut(),
+                    );
                 }
-                if let Some(condition) = condition {
-                    let _ = expression(condition, env);
-                }
-                if let Some(update) = update {
-                    let _ = expression(update, env);
-                }
-                scan(body, env, mode);
+                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
             }
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                scan(body, env, mode);
+                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 if let Some(catch) = catch {
-                    scan(&catch.body, env, mode);
+                    scan(
+                        &catch.body,
+                        env,
+                        returned.as_deref_mut(),
+                        bindings.as_deref_mut(),
+                    );
                 }
                 if let Some(body) = finally {
-                    scan(body, env, mode);
+                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 }
             }
-            Stmt::Switch {
-                discriminant,
-                cases,
-            } => {
-                let _ = expression(discriminant, env);
+            Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    if let Some(test) = &case.test {
-                        let _ = expression(test, env);
-                    }
-                    scan(&case.body, env, mode);
+                    scan(
+                        &case.body,
+                        env,
+                        returned.as_deref_mut(),
+                        bindings.as_deref_mut(),
+                    );
                 }
             }
-            Stmt::Labeled { body, .. } => scan(std::slice::from_ref(body), env, mode),
+            Stmt::Labeled { body, .. } => {
+                scan(
+                    std::slice::from_ref(body),
+                    env,
+                    returned.as_deref_mut(),
+                    bindings.as_deref_mut(),
+                );
+            }
             _ => {}
         }
     }

@@ -28,45 +28,16 @@ impl<'s> FunctionBuilder<'s> {
         }
         let object = self.expression(ctx, object)?;
         let object = self.defined(ctx, object)?;
-        if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, object.get_type(ctx))
-            && (self.shapes.class_getter(class_name, property).is_some()
-                || self.shapes.class_setter(class_name, property).is_some())
+        let class_info = self.shapes.class_of_type(ctx, object.get_type(ctx));
+        let previous = if let Some((class_name, ref type_args)) = class_info
+            && let Some((owner_class, getter)) = self.shapes.class_getter(class_name, property)
         {
-            let previous = if let Some((owner_class, getter)) =
-                self.shapes.class_getter(class_name, property)
-            {
-                self.class_getter_call(ctx, object, owner_class, &type_args, getter)?
-            } else {
-                let get = FieldGetOp::new(ctx, object, property.to_string())
-                    .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
-                self.append_value(ctx, &get)
-            };
-            let field_type = previous.get_type(ctx);
-            let old = self.arithmetic(ctx, previous);
-            ensure!(
-                kind(ctx, old)? == Kind::Number,
-                "property update needs a numeric field"
-            );
-            let one = self.number(ctx, 1.0);
-            let kind = match op {
-                BinaryOp::Add => BinaryKind::Add,
-                BinaryOp::Sub => BinaryKind::Sub,
-                _ => bail!("invalid property update"),
-            };
-            let next = self.binary(ctx, kind, old, one);
-            let stored = self.fit(ctx, next, field_type)?;
-            if let Some((owner_class, setter)) = self.shapes.class_setter(class_name, property) {
-                self.class_setter_call_value(ctx, object, owner_class, &type_args, setter, stored)?;
-            } else {
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, object, property.to_string(), stored)
-                });
-            }
-            return Ok(if prefix { next } else { old });
-        }
-        let get = FieldGetOp::new(ctx, object, property.to_string())
-            .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
-        let previous = self.append_value(ctx, &get);
+            self.class_getter_call(ctx, object, owner_class, type_args, getter)?
+        } else {
+            let get = FieldGetOp::new(ctx, object, property.to_string())
+                .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
+            self.append_value(ctx, &get)
+        };
         let field_type = previous.get_type(ctx);
         let old = self.arithmetic(ctx, previous);
         ensure!(
@@ -81,9 +52,15 @@ impl<'s> FunctionBuilder<'s> {
         };
         let next = self.binary(ctx, kind, old, one);
         let stored = self.fit(ctx, next, field_type)?;
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, object, property.to_string(), stored)
-        });
+        if let Some((class_name, ref type_args)) = class_info
+            && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, property)
+        {
+            self.class_setter_call_value(ctx, object, owner_class, type_args, setter, stored)?;
+        } else {
+            self.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, object, property.to_string(), stored)
+            });
+        }
         Ok(if prefix { next } else { old })
     }
 

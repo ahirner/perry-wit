@@ -1,7 +1,6 @@
 //! `Record<K, V>` dictionaries and closed records: `Object.*`, `Array.isArray`, `in`, `delete`.
 
 use super::*;
-use crate::control_flow::Input;
 
 impl<'s> FunctionBuilder<'s> {
     /// A read of an optional that admits `undefined`, normalized to the type's `undefined`.
@@ -166,16 +165,7 @@ impl<'s> FunctionBuilder<'s> {
             )?,
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
-        self.iterate(
-            ctx,
-            Input::Collection(entries_val),
-            |b, ctx, entry, _, _, _| {
-                let (k, v) = b.entry_fields(ctx, entry)?;
-                b.kv_set(ctx, dict, k, v)?;
-                Ok(())
-            },
-        )?;
-        Ok(dict)
+        self.populate_from_entries(ctx, entries_val, dict)
     }
 
     /// `Object.is(a, b)` — SameValue equality (`NaN` equals `NaN`, `+0` does not equal `-0`).
@@ -294,45 +284,42 @@ impl<'s> FunctionBuilder<'s> {
 
     /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
     pub(super) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
-        match inner {
-            Expr::IndexGet { object, index } => {
-                let obj = self.expression(ctx, object)?;
-                let obj = self.defined(ctx, obj)?;
-                if let Some((k_ty, _, _)) = dict_entry_types(ctx, obj.get_type(ctx)) {
-                    let k = self.expression_with(ctx, index, Some(k_ty))?;
-                    self.kv_delete(ctx, obj, k, k_ty)?;
-                    return Ok(self.boolean(ctx, true));
-                }
-                bail!("delete operator is only supported on Record<K, V> dictionary types")
-            }
+        let (object, prop_or_idx) = match inner {
+            Expr::IndexGet { object, index } => (object, Ok(index)),
             Expr::PropertyGet {
                 object, property, ..
-            } => {
-                let obj = self.expression(ctx, object)?;
-                let obj = self.defined(ctx, obj)?;
-                let ty = obj.get_type(ctx);
-                if let Some((k_ty, _, _)) = dict_entry_types(ctx, ty) {
-                    let k = self.string(ctx, property);
-                    self.kv_delete(ctx, obj, k, k_ty)?;
-                    return Ok(self.boolean(ctx, true));
-                }
-                let opt_field = TypedHandle::<RecordType>::from_handle(ty, ctx)
-                    .ok()
-                    .and_then(|rec| rec.deref(ctx).field(property).map(|(_, t)| t));
-                if let Some(field_ty) = opt_field
-                    && admits_undefined(ctx, field_ty)
-                {
-                    let omitted = self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, field_ty));
-                    self.emit(ctx, |ctx| {
-                        FieldSetOp::new(ctx, obj, property.clone(), omitted)
-                    });
-                    return Ok(self.boolean(ctx, true));
-                }
-                bail!(
-                    "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
-                )
-            }
+            } => (object, Err(property)),
             _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
+        };
+        let obj = self.expression(ctx, object)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if let Some((k_ty, _, _)) = dict_entry_types(ctx, ty) {
+            let k = match prop_or_idx {
+                Ok(index) => self.expression_with(ctx, index, Some(k_ty))?,
+                Err(property) => self.string(ctx, property),
+            };
+            self.kv_delete(ctx, obj, k, k_ty)?;
+            return Ok(self.boolean(ctx, true));
         }
+        if let Err(property) = prop_or_idx
+            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        {
+            let field_ty = rec.deref(ctx).field(property).map(|(_, t)| t);
+            if let Some(field_ty) = field_ty
+                && admits_undefined(ctx, field_ty)
+            {
+                let omitted = self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, field_ty));
+                self.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, obj, property.clone(), omitted)
+                });
+                return Ok(self.boolean(ctx, true));
+            }
+        }
+        bail!(if prop_or_idx.is_ok() {
+            "delete operator is only supported on Record<K, V> dictionary types"
+        } else {
+            "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
+        })
     }
 }

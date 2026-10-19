@@ -39,18 +39,7 @@ impl FunctionLowering<'_, '_> {
         let (bits, failed, tag) = if copy {
             let plan = self.json_copy_plan(ctx, operand.get_type(ctx), ty)?;
             let plan = self.i32_const(ctx, plan as i32);
-            let (bits, tag) = match source {
-                crate::repr::Carriers::Numeric { tag, payload } => (payload, tag),
-                crate::repr::Carriers::Scalar(value) => {
-                    let bits = if matches!(crate::numeric::integer(ctx, operand.get_type(ctx)), Some((width, true)) if width <= 32)
-                    {
-                        self.num(ctx, NumOpcode::I64ExtendI32S, vec![value])
-                    } else {
-                        self.slot_bits(ctx, value)
-                    };
-                    (bits, self.i32_const(ctx, 0))
-                }
-            };
+            let (bits, tag) = self.json_carrier_bits(ctx, operand.get_type(ctx), source);
             let position = self.i32_const(ctx, 0);
             let schema = self.i32_const(ctx, schema as i32);
             self.call_json_engine(
@@ -180,11 +169,7 @@ impl FunctionLowering<'_, '_> {
                 ]);
             }
         }
-        let offset = (plan - crate::DATA_BASE) as usize;
-        for (index, word) in words.into_iter().enumerate() {
-            self.state.data.bytes[offset + index * 4..offset + index * 4 + 4]
-                .copy_from_slice(&word.to_le_bytes());
-        }
+        self.write_data_words(plan, words);
         Ok(plan)
     }
 }

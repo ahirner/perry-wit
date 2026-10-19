@@ -6,12 +6,15 @@ mod url;
 #[cfg(test)]
 use url::normalize_request;
 
-fn header(input: &[u8]) -> Result<u32, ()> {
-    if input.is_empty()
-        || !input
+fn is_token(input: &[u8]) -> bool {
+    !input.is_empty()
+        && input
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
-    {
+}
+
+fn header(input: &[u8]) -> Result<u32, ()> {
+    if !is_token(input) {
         return Err(());
     }
     Ok(u32::from(input.eq_ignore_ascii_case(b"content-type")))
@@ -46,21 +49,15 @@ fn status_text(input: &[u8]) -> Result<u32, ()> {
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_status_text(input: u32, length: u32) -> u32 {
+pub(crate) extern "C" fn fetch_status_text(input: u32, length: u32) -> u32 {
     borrow(input, length, 0, 0, |input, _| status_text(input))
 }
 
 fn method(input: &[u8]) -> Result<u32, ()> {
-    if input.is_empty()
-        || !input
+    if !is_token(input)
+        || [b"CONNECT".as_slice(), b"TRACE", b"TRACK"]
             .iter()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
-    {
-        return Err(());
-    }
-    if [b"CONNECT".as_slice(), b"TRACE", b"TRACK"]
-        .iter()
-        .any(|name| input.eq_ignore_ascii_case(name))
+            .any(|name| input.eq_ignore_ascii_case(name))
     {
         return Err(());
     }
@@ -107,7 +104,7 @@ fn borrow(
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         if output.len() < 32 {
             return Err(());
@@ -122,7 +119,12 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_url_value(
+    input: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         Ok(url::normalize_url(input, output)?[5])
     })
@@ -130,7 +132,7 @@ pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
+pub(crate) extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
     let result = (|| {
         let input = guest_memory::GuestRange::new(input, length)?;
         // SAFETY: validated initialized guest input, read without allocation or suspension.
@@ -141,7 +143,12 @@ pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_header_value(
+    input: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         header_value(input, output).map(|length| length as u32)
     })
@@ -155,7 +162,12 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_name(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_header_name(
+    input: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         header(input)?;
         let target = output.get_mut(..input.len()).ok_or(())?;
@@ -206,6 +218,21 @@ mod tests {
                 "http://example.com/?q=hello%20world",
             ),
             ("https://[::1]:8443/é", "https://[::1]:8443/%C3%A9"),
+            ("http://[0:0:0:0:0:0:0:1]:80/a", "http://[::1]/a"),
+            ("http://[::ffff:192.0.2.1]/", "http://[::ffff:c000:201]/"),
+            ("http://[1:0:0:2:0:0:3:4]/", "http://[1::2:0:0:3:4]/"),
+            ("http://127.1/", "http://127.0.0.1/"),
+            ("http://0x7f000001/", "http://127.0.0.1/"),
+            ("http://0177.0.0.1/", "http://127.0.0.1/"),
+            (
+                "http://example.com/a/./b/../%2e/%2e%2E/c\\..\\d?k=\\v",
+                "http://example.com/d?k=\\v",
+            ),
+            ("http://example.com/../../x", "http://example.com/x"),
+            (
+                "  http://exa\tmple.com/a\r/b\n?q=a b  ",
+                "http://example.com/a/b?q=a%20b",
+            ),
         ] {
             let mut output = [0; 512];
             let metadata = normalize_request(input.as_bytes(), &mut output).unwrap();
@@ -215,15 +242,33 @@ mod tests {
             "file:///a",
             "http://",
             "http://host:99999",
+            "http://host:x",
             "http://[wrong]/",
+            "http://[::1",
+            "http://[::1]tail",
+            "http://[1::2::3]/",
             "http://user@host/",
+            "http://host|name/",
+            "http://a%2fb/",
+            "http://a%00b/",
+            "http://a%zzb/",
+            "http://1.2.3.256/",
+            "http://test.42/",
+            "http://1.2.3.4.5/",
+            "http://09/",
         ] {
             assert!(normalize_request(input.as_bytes(), &mut [0; 512]).is_err());
         }
         let mut output = [0; 512];
-        let input = b"https://user:pass@example.com/#fragment";
-        let metadata = url::normalize_url(input, &mut output).unwrap();
-        assert_eq!(&output[..metadata[5] as usize], input);
-        assert!(normalize_request(input, &mut output).is_err());
+        let input = "HTTP://alice:p@ss@EXAMPLE.com:80/a^b?q=x#é\ny";
+        let metadata = url::normalize_url(input.as_bytes(), &mut output).unwrap();
+        assert_eq!(
+            &output[..metadata[5] as usize],
+            b"http://alice:p%40ss@example.com/a%5Eb?q=x#%C3%A9y"
+        );
+        assert!(normalize_request(input.as_bytes(), &mut output).is_err());
+        let metadata = normalize_request(b"http://example.com/a#x\ny", &mut output).unwrap();
+        assert_eq!(&output[..metadata[4] as usize], b"http://example.com/a");
+        assert_eq!(&output[..metadata[5] as usize], b"http://example.com/a#xy");
     }
 }

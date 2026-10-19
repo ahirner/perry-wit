@@ -101,51 +101,30 @@ pub(crate) unsafe extern "C" fn web_fetch(
     text: u32,
 ) -> *mut u8 {
     let promise = promise_new();
-    // SAFETY: compiled code passes strings.
-    let input = unsafe { bytes(url) };
-    let capacity = 32 + input.len() as u32 * 3 + 16;
-    let output = alloc(capacity);
-    // SAFETY: helper call with an input string and a fresh disjoint output.
-    let status = unsafe { helper::fetch_url(input.as_ptr(), input.len() as u32, output, capacity) };
-    if status != 0 {
-        let mut message = Buffer::new();
-        message.extend_from_slice(b"Failed to parse URL from ");
-        message.extend_from_slice(input);
-        reject_with(promise, TYPE_ERROR, from_bytes(message.as_slice()));
-        return promise;
-    }
-    // SAFETY: the helper wrote [secure, authority, path, path, length, length+fragment].
-    let word = |index: usize| unsafe { *(output.add(index * 4) as *const u32) };
-    let (secure, authority, path, end) = (word(0), word(1), word(2), word(4));
-    // SAFETY: compiled code passes strings.
-    let name = unsafe { bytes(method) };
-    // SAFETY: helper call on an input string.
-    let tag = unsafe { helper::fetch_method(name.as_ptr(), name.len() as u32) };
-    if tag == u32::MAX {
-        let mut message = Buffer::new();
-        for part in [b"'".as_slice(), name, b"' is not a valid HTTP method."] {
-            message.extend_from_slice(part);
-        }
-        reject_with(promise, TYPE_ERROR, from_bytes(message.as_slice()));
-        return promise;
-    }
     let body = if view.is_null() {
         &[][..]
     } else {
         // SAFETY: compiled code passes a `Uint8Array`.
         unsafe { view_bytes(view) }
     };
-    if !body.is_empty() && matches!(tag, 0 | 1) {
-        reject_with(
-            promise,
-            TYPE_ERROR,
-            from_static("Request with GET/HEAD method cannot have body."),
-        );
-        return promise;
-    }
-    if text != 0 {
-        crate::headers::set_default(h, b"content-type", b"text/plain;charset=UTF-8");
-    }
+    let (output, tag) =
+        match unsafe { validate_request_init(url, method, !body.is_empty(), text, h) } {
+            Ok(ok) => ok,
+            Err(msg) => {
+                reject_with(promise, TYPE_ERROR, msg);
+                return promise;
+            }
+        };
+    // SAFETY: the helper wrote [secure, authority, path, path, length, length+fragment].
+    let (secure, authority, path, end) = unsafe {
+        (
+            word(output, 0),
+            word(output, 4),
+            word(output, 8),
+            word(output, 16),
+        )
+    };
+    let name = unsafe { bytes(method) };
     let mut copy = Buffer::new();
     copy.extend_from_slice(body);
 
@@ -166,10 +145,7 @@ pub(crate) unsafe extern "C" fn web_fetch(
             );
             if *area != 0 {
                 http::fields_drop(fields);
-                let mut message = Buffer::new();
-                message.extend_from_slice(b"Invalid header: ");
-                message.extend_from_slice(key);
-                reject_with(promise, TYPE_ERROR, from_bytes(message.as_slice()));
+                reject_with(promise, TYPE_ERROR, join_bytes(&[b"Invalid header: ", key]));
                 return promise;
             }
         }
@@ -235,16 +211,11 @@ fn sent(op: &mut Fetch) {
     if failed {
         op.exchange.cancel_writes();
         let category = unsafe { error_category(*op.sent.add(8)) };
-        let mut message = Buffer::new();
-        message.extend_from_slice(b"fetch failed: ");
-        message.extend_from_slice(category.as_bytes());
         let url = unsafe { bytes(op.url) };
-        message.extend_from_slice(b": ");
-        message.extend_from_slice(url);
         perry_abi::reject_native(
             op.promise,
             TYPE_ERROR,
-            from_bytes(message.as_slice()),
+            join_bytes(&[b"fetch failed: ", category.as_bytes(), b": ", url]),
             category,
             category,
             "url",
@@ -279,18 +250,7 @@ fn finish_if_idle(op: &mut Fetch) {
         return;
     }
     perry_abi::unpin(core::mem::take(&mut op.pin));
-    let this = op as *mut Fetch;
-    let mut link: *mut *mut Fetch = ops();
-    // SAFETY: the list holds live operations.
-    unsafe {
-        while !(*link).is_null() {
-            if *link == this {
-                *link = (*this).next;
-                break;
-            }
-            link = &mut (**link).next;
-        }
-    }
+    unsafe { unlink_node!(ops(), op as *mut Fetch) };
 }
 
 /// A callback event of the current task: advance the fetch waiting on `handle`. Returns 1 if

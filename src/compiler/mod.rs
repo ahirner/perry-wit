@@ -163,12 +163,42 @@ pub(crate) fn compile_sources(
     bind::check_main(ctx, &mir, &exports).map_err(|error| {
         crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
     })?;
+    emit_component(
+        ctx,
+        &mir,
+        &mut analyses,
+        resolve,
+        world,
+        memory_checks,
+        componentize,
+        exports,
+        bindings,
+        resources,
+        true,
+    )
+    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_component(
+    ctx: &mut Context,
+    mir: &pliron::builtin::ops::ModuleOp,
+    analyses: &mut AnalysisManager,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    memory_checks: bool,
+    componentize: bool,
+    exports: Vec<perry_codegen::boundary::Export>,
+    bindings: Vec<perry_codegen::boundary::Import>,
+    resources: Vec<perry_codegen::boundary::ResourceDefinition>,
+    strip_unused_stdio: bool,
+) -> Result<Compiled> {
     let imports = bind::imports(resolve, world);
     let streams = bind::stream_anchor(resolve, world);
     let stdout = imports
         .iter()
         .any(|name| name.starts_with("wasi:cli/stdout@"))
-        && uses_stdout(ctx, &mir);
+        && uses_stdout(ctx, mir);
     let stderr = imports
         .iter()
         .any(|name| name.starts_with("wasi:cli/stderr@"));
@@ -179,29 +209,20 @@ pub(crate) fn compile_sources(
         bindings,
         resources,
     };
-    let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)
-        .map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-        })?;
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
-    let (core, helpers) = finish(
+    let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let (mut core, helpers) = finish(
         core,
         streams.as_ref(),
         &link::canonical::Requirements::for_world(resolve, world),
-    )
-    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))?;
-    let core = link::raw::available_stdio(core, stdout, stderr).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
+    )?;
+    if strip_unused_stdio {
+        core = link::raw::available_stdio(core, stdout, stderr)?;
+    }
     allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
     let component = componentize
         .then(|| ComponentOutput::encode(&core, resolve, world))
-        .transpose()
-        .map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-        })?;
+        .transpose()?;
     Ok(Compiled {
         core,
         component,
@@ -287,21 +308,10 @@ fn finish(
 
 fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
     use perry_mir::{Intrinsic, IntrinsicOp};
-    use pliron::{
-        builtin::{
-            op_interfaces::{OneRegionInterface, SingleBlockRegionInterface},
-            ops::FuncOp,
-        },
-        linked_list::ContainsLinkedList,
-        operation::Operation,
-    };
-    mir.get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .flat_map(|f| f.get_region(ctx).deref(ctx).iter(ctx).collect::<Vec<_>>())
-        .flat_map(|b| b.deref(ctx).iter(ctx).collect::<Vec<_>>())
-        .filter_map(|op| Operation::get_op::<IntrinsicOp>(op, ctx))
+    perry_mir::functions(mir.get_operation(), ctx)
+        .iter()
+        .flat_map(|f| perry_mir::operations(ctx, f))
+        .filter_map(|op| pliron::operation::Operation::get_op::<IntrinsicOp>(op, ctx))
         .any(|op| {
             matches!(
                 op.intrinsic(ctx),

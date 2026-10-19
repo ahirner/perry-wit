@@ -4,7 +4,7 @@ use super::{
     storage::{GraphStorage, Storage},
 };
 use arrayvec::ArrayVec;
-use perry_abi::json::MEMBER_COUNT;
+use perry_abi::json::{FIRST, KEY, MEMBER_COUNT, METADATA, NEXT};
 
 /// Validates a document and computes its exact node/data storage requirement.
 pub fn measure(input: &str) -> Result<usize, Error> {
@@ -107,11 +107,11 @@ impl<S: GraphStorage> Parser<'_, S> {
                     return Ok(node);
                 };
                 if open.object {
-                    self.pointer(node + 24, open.key)?;
+                    self.pointer(node + KEY, open.key)?;
                 }
                 match open.previous {
-                    Some(previous) => self.pointer(previous + 4, node)?,
-                    None => self.pointer(open.node + 16, node)?,
+                    Some(previous) => self.pointer(previous + NEXT, node)?,
+                    None => self.pointer(open.node + FIRST, node)?,
                 }
                 let count = open.count.checked_add(1).ok_or(Error::Capacity)?;
                 open.previous = Some(node);
@@ -155,7 +155,7 @@ impl<S: GraphStorage> Parser<'_, S> {
             return Ok((self.output.string(&mut self.reader)?, None));
         }
         let node = self.output.reserve(NODE_BYTES, 8)?;
-        self.word(node + 28, 0)?;
+        self.word(node + METADATA, 0)?;
         match self.reader.peek() {
             Some(b'n') => {
                 self.reader.keyword(b"null")?;

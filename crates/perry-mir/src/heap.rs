@@ -64,7 +64,7 @@ op_schema! {
         pub new(record: TypedHandle<RecordType>, fields: Vec<Value>) operands(fields)
             -> infallible => explicit(record.into());
     }
-    attribute(tier, get_attr_perry_tier, set_attr_perry_tier) =
+    attribute(tier: Tier, get_attr_perry_tier, set_attr_perry_tier) =
         Tier::Unassigned => HeapErr::MissingTier;
     prepare(this) {
         // A scalar-tier record has been replaced by its fields; the op must be gone.
@@ -112,10 +112,6 @@ op_schema! {
 }
 
 impl AllocOp {
-    pub fn tier(&self, ctx: &Context) -> Tier {
-        *self.get_attr_perry_tier(ctx).expect("alloc tier")
-    }
-
     pub(crate) fn set_tier(&self, ctx: &Context, tier: Tier) {
         self.set_attr_perry_tier(ctx, tier);
     }
@@ -148,7 +144,7 @@ op_schema! {
     format = "$0 `.` attr($perry_get_field, $StringAttr) ` : ` type($0)";
     attributes = (perry_get_field: StringAttr);
     constructors { pub new(reference: Value, field: String) => infer(reference, field.as_str()); }
-    attribute(field, get_attr_perry_get_field, set_attr_perry_get_field) =
+    attribute(field: String, get_attr_perry_get_field, set_attr_perry_get_field) =
         StringAttr::new(field) => MissingProjectionField;
     prepare(_this) { let field = field.as_str(); }
     result(ctx, reference: Value, field: &str): TypeHandle = {
@@ -160,15 +156,6 @@ op_schema! {
     };
 }
 
-impl FieldGetOp {
-    pub fn field(&self, ctx: &Context) -> String {
-        self.get_attr_perry_get_field(ctx)
-            .expect("field name")
-            .clone()
-            .into()
-    }
-}
-
 op_schema! {
     /// Test whether one field of a record is present (not omitted).
     pub FieldPresentOp(reference) -> fallible;
@@ -176,7 +163,7 @@ op_schema! {
     format = "$0 `.` attr($perry_present_field, $StringAttr) ` : ` type($0)";
     attributes = (perry_present_field: StringAttr);
     constructors { pub new(reference: Value, field: String) => infer(reference, field.as_str()); }
-    attribute(field, get_attr_perry_present_field, set_attr_perry_present_field) =
+    attribute(field: String, get_attr_perry_present_field, set_attr_perry_present_field) =
         StringAttr::new(field) => MissingProjectionField;
     prepare(_this) { let field = field.as_str(); }
     result(ctx, reference: Value, field: &str): Ty = {
@@ -189,15 +176,6 @@ op_schema! {
     };
 }
 
-impl FieldPresentOp {
-    pub fn field(&self, ctx: &Context) -> String {
-        self.get_attr_perry_present_field(ctx)
-            .expect("field name")
-            .clone()
-            .into()
-    }
-}
-
 op_schema! {
     /// Write one field of a record.
     pub FieldSetOp(reference, value) -> infallible;
@@ -205,7 +183,7 @@ op_schema! {
     format = "$0 `.` attr($perry_set_field, $StringAttr) ` = ` $1";
     attributes = (perry_set_field: StringAttr);
     constructors { pub new(reference: Value, field: String, value: Value) => empty(); }
-    attribute(field, get_attr_perry_set_field, set_attr_perry_set_field) =
+    attribute(field: String, get_attr_perry_set_field, set_attr_perry_set_field) =
         StringAttr::new(field) => MissingProjectionField;
     prepare(_this) { let field = field.as_str(); }
     result(ctx): () = ();
@@ -215,13 +193,4 @@ op_schema! {
             record: record(ctx, reference.get_type(ctx), "perry.field_set")?.name().to_string(),
             field: field.to_owned(),
         };
-}
-
-impl FieldSetOp {
-    pub fn field(&self, ctx: &Context) -> String {
-        self.get_attr_perry_set_field(ctx)
-            .expect("field name")
-            .clone()
-            .into()
-    }
 }

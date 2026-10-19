@@ -120,12 +120,26 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     });
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
-    preparation.add_pass(crate::json_copy::NormalizeJsonCopy);
-    preparation.add_pass(crate::facts::Specialize);
-    preparation.add_pass(Transform("inline-leaves", |root, ctx| {
-        Ok(crate::aggregates::inline_leaves(root, ctx))
+    preparation.add_pass(FnPass(
+        "normalize-json-copy",
+        crate::json_copy::normalize_json_copy,
+    ));
+    preparation.add_pass(FnPass(
+        "specialize-numeric-domains",
+        crate::facts::specialize,
+    ));
+    preparation.add_pass(FnPass("inline-leaves", |root, ctx, _| {
+        let mut result = PassResult::default();
+        result.ir_changed = crate::aggregates::inline_leaves(root, ctx);
+        Ok(result)
     }));
-    preparation.add_pass(PromoteArguments);
+    preparation.add_pass(FnPass("promote-arguments", |root, ctx, analyses| {
+        let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
+        let mut result = PassResult::default();
+        result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects)?;
+        result.set_preserved::<crate::facts::ProgramFacts>();
+        Ok(result)
+    }));
     preparation.run(root, ctx, &mut analyses)?;
 
     let mut cleanup = Passes::default();
@@ -134,8 +148,10 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         crate::fold::Canonicalize,
     ));
     cleanup.add_pass(SCCPPass);
-    cleanup.add_pass(Transform("unused-block-arguments", |root, ctx| {
-        Ok(crate::constants::remove_unused_block_arguments(root, ctx))
+    cleanup.add_pass(FnPass("unused-block-arguments", |root, ctx, _| {
+        let mut result = PassResult::default();
+        result.ir_changed = crate::constants::remove_unused_block_arguments(root, ctx);
+        Ok(result)
     }));
     cleanup.add_pass(PassWrapper::new(
         "decompose-records",
@@ -147,48 +163,8 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     let mut rounds = run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
     let mut bounds = Passes::default();
-    bounds.add_pass(crate::unwraps::ReuseUnwraps);
-    bounds.add_pass(ProveBounds);
-    bounds.run(root, ctx, &mut analyses)?;
-    rounds += run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
-
-    let mut ownership = Passes::default();
-    ownership.add_pass(crate::append::AppendPass);
-    ownership.add_pass(PassWrapper::new(
-        "scalar-characters",
-        crate::characters::ScalarizeCharacters::default(),
-    ));
-    ownership.add_pass(DCEPass);
-    ownership.add_pass(PassWrapper::new(
-        "expand-append",
-        crate::fast_paths::ExpandAppends::default(),
-    ));
-    ownership.add_pass(AssignLifetimes);
-    ownership.run(root, ctx, &mut analyses)?;
-    let mut measured = optimization_statistics(root, ctx);
-    measured.cleanup_rounds = rounds;
-    root.deref_mut(ctx)
-        .attributes
-        .set(STATISTICS.clone(), measured);
-    verify_operation(root, ctx)?;
-    crate::facts::verify_lossless_operations(root, ctx)?;
-    Ok(analyses)
-}
-
-struct PromoteArguments;
-
-struct ProveBounds;
-
-impl Pass for ProveBounds {
-    fn name(&self) -> &str {
-        "prove-bounds"
-    }
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
+    bounds.add_pass(FnPass("reuse-unwraps", crate::unwraps::reuse_unwraps));
+    bounds.add_pass(FnPass("prove-bounds", |root, ctx, analyses| {
         use pliron::graph::dominance::DomInfo;
         analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         analyses.get_analysis::<DomInfo>(root, ctx)?;
@@ -203,41 +179,22 @@ impl Pass for ProveBounds {
         result.set_preserved::<crate::facts::ProgramFacts>();
         result.set_preserved::<DomInfo>();
         Ok(result)
-    }
-}
+    }));
+    bounds.run(root, ctx, &mut analyses)?;
+    rounds += run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
-impl Pass for PromoteArguments {
-    fn name(&self) -> &str {
-        "promote-arguments"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
-        let mut result = PassResult::default();
-        result.ir_changed = crate::aggregates::promote_arguments(root, ctx, &effects)?;
-        result.set_preserved::<crate::facts::ProgramFacts>();
-        Ok(result)
-    }
-}
-
-struct AssignLifetimes;
-
-impl Pass for AssignLifetimes {
-    fn name(&self) -> &str {
-        "assign-lifetimes"
-    }
-
-    fn run(
-        &mut self,
-        root: Ptr<Operation>,
-        ctx: &mut Context,
-        analyses: &mut AnalysisManager,
-    ) -> Result<PassResult> {
+    let mut ownership = Passes::default();
+    ownership.add_pass(FnPass("owned-append", crate::append::run));
+    ownership.add_pass(PassWrapper::new(
+        "scalar-characters",
+        crate::characters::ScalarizeCharacters::default(),
+    ));
+    ownership.add_pass(DCEPass);
+    ownership.add_pass(PassWrapper::new(
+        "expand-append",
+        crate::fast_paths::ExpandAppends::default(),
+    ));
+    ownership.add_pass(FnPass("assign-lifetimes", |root, ctx, analyses| {
         let effects = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
         let mut result = PassResult::default();
         result.ir_changed = crate::lifetimes::assign(root, ctx, &effects);
@@ -246,16 +203,25 @@ impl Pass for AssignLifetimes {
         result.set_preserved::<pliron::analyses::liveness::Liveness<pliron::analyses::liveness::LivenessTq>>();
         result.set_preserved::<pliron::graph::dominance::DomInfo>();
         Ok(result)
-    }
+    }));
+    ownership.run(root, ctx, &mut analyses)?;
+    let mut measured = optimization_statistics(root, ctx);
+    measured.cleanup_rounds = rounds;
+    root.deref_mut(ctx)
+        .attributes
+        .set(STATISTICS.clone(), measured);
+    verify_operation(root, ctx)?;
+    crate::facts::verify_lossless_operations(root, ctx)?;
+    Ok(analyses)
 }
 
 /// Adapt Perry-specific transformations to the shared verifier and analysis invalidation.
-struct Transform(
-    &'static str,
-    fn(Ptr<Operation>, &mut Context) -> Result<IRStatus>,
+pub(crate) struct FnPass(
+    pub(crate) &'static str,
+    pub(crate) fn(Ptr<Operation>, &mut Context, &mut AnalysisManager) -> Result<PassResult>,
 );
 
-impl Pass for Transform {
+impl Pass for FnPass {
     fn name(&self) -> &str {
         self.0
     }
@@ -264,10 +230,8 @@ impl Pass for Transform {
         &mut self,
         root: Ptr<Operation>,
         ctx: &mut Context,
-        _: &mut AnalysisManager,
+        analyses: &mut AnalysisManager,
     ) -> Result<PassResult> {
-        let mut result = PassResult::default();
-        result.ir_changed = (self.1)(root, ctx)?;
-        Ok(result)
+        (self.1)(root, ctx, analyses)
     }
 }

@@ -1,4 +1,4 @@
-use perry_time_helper::{CalendarError, Error, Instant, PlainDateTime, shift_iso_date};
+use crate::{CalendarError, Error, Instant, PlainDateTime, shift_iso_date};
 
 #[test]
 fn standalone_calendar_contract_rejects_normalization_and_offset_overflow() {
@@ -318,7 +318,7 @@ fn date_time_fields_regulate_each_time_component_after_date_coercion() {
 
 #[test]
 fn legacy_date_formats_are_distinct_from_invalid_iso_dates() {
-    use perry_time_helper::parse_date_milliseconds;
+    use crate::parse_date_milliseconds;
     for input in [
         "Sun, 06 Nov 1994 08:49:37 GMT",
         "11/06/1994",

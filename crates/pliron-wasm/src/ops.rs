@@ -149,10 +149,23 @@ fn offset_attr(ctx: &mut Context, offset: u32) -> IntegerAttr {
     integer_attr(ctx, I32_BITS, offset.into())
 }
 
-/// The `u32` offset of a memory access.
-fn offset_of(attr: &IntegerAttr) -> u32 {
-    let value: APInt = attr.clone().into();
-    value.to_u64() as u32
+macro_rules! mem_accessors {
+    ($op:ty, $kind:ident, $offset:ident) => {
+        impl $op {
+            pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
+                *self.$kind(ctx).expect("set by constructor or parser")
+            }
+
+            pub(crate) fn offset(&self, ctx: &Context) -> u32 {
+                APInt::from(
+                    self.$offset(ctx)
+                        .expect("set by constructor or parser")
+                        .clone(),
+                )
+                .to_u64() as u32
+            }
+        }
+    };
 }
 
 /// A linear-memory load from `address + offset` in memory 0, naturally aligned.
@@ -173,21 +186,9 @@ impl LoadOp {
         op.set_attr_wasm_load_offset(ctx, offset);
         op
     }
-
-    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
-        *self
-            .get_attr_wasm_load_kind(ctx)
-            .expect("wasm.load gets its kind from LoadOp::new or its parsed format")
-    }
-
-    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(
-            &self
-                .get_attr_wasm_load_offset(ctx)
-                .expect("wasm.load gets its offset from LoadOp::new or its parsed format"),
-        )
-    }
 }
+
+mem_accessors!(LoadOp, get_attr_wasm_load_kind, get_attr_wasm_load_offset);
 
 impl Verify for LoadOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
@@ -224,21 +225,13 @@ impl StoreOp {
         op.set_attr_wasm_store_offset(ctx, offset);
         op
     }
-
-    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
-        *self
-            .get_attr_wasm_store_kind(ctx)
-            .expect("wasm.store gets its kind from StoreOp::new or its parsed format")
-    }
-
-    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(
-            &self
-                .get_attr_wasm_store_offset(ctx)
-                .expect("wasm.store gets its offset from StoreOp::new or its parsed format"),
-        )
-    }
 }
+
+mem_accessors!(
+    StoreOp,
+    get_attr_wasm_store_kind,
+    get_attr_wasm_store_offset
+);
 
 impl Verify for StoreOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
@@ -427,17 +420,12 @@ impl Verify for CallOp {
     }
 }
 
-/// The function attribute naming its export.
-fn export_key() -> Identifier {
-    "wasm_export"
-        .try_into()
-        .expect("wasm_export is a valid identifier")
-}
+pliron::dict_key!(EXPORT_KEY, "wasm_export");
 
 /// Add an export of `function` under `name`. Several exports may share one implementation.
 pub fn set_export(ctx: &mut Context, function: &FuncOp, name: &str) {
     let mut op = function.get_operation().deref_mut(ctx);
-    if let Some(names) = op.attributes.get_mut::<VecAttr>(&export_key()) {
+    if let Some(names) = op.attributes.get_mut::<VecAttr>(&EXPORT_KEY) {
         if !names.0.iter().any(|attr| {
             attr.downcast_ref::<StringAttr>()
                 .is_some_and(|existing| AsRef::<str>::as_ref(existing) == name)
@@ -446,7 +434,7 @@ pub fn set_export(ctx: &mut Context, function: &FuncOp, name: &str) {
         }
     } else {
         op.attributes.set(
-            export_key(),
+            EXPORT_KEY.clone(),
             VecAttr::new(vec![Box::new(StringAttr::new(name.to_owned()))]),
         );
     }
@@ -458,7 +446,7 @@ pub(crate) fn export_names(ctx: &Context, function: &FuncOp) -> Vec<String> {
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<VecAttr>(&export_key())
+        .get::<VecAttr>(&EXPORT_KEY)
         .map(|names| {
             names
                 .0

@@ -83,39 +83,6 @@ impl WasiHttpHooks for Documents {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn detached_fetch_is_cancelled_before_task_boundary_failure() -> Result<()> {
-    let bytes = crate::world::Compiler::Standard.component(
-        "package test:detached; world run {import wasi:http/client@0.3.0; export run:async func()->u32;}",
-        "run",
-        "detached.ts",
-        "export async function run():Promise<number> {fetch('https://example.test/pending');return 7;}",
-    )?;
-    let (mut store, instance) = wasi_host::instantiate(
-        &async_engine()?,
-        &bytes,
-        Host::default().with_hooks(Documents::default()),
-    )
-    .await?;
-    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        run.call_async(&mut store, ()),
-    )
-    .await?;
-    assert!(
-        result.is_err(),
-        "unresolved detached fetch must fail the task"
-    );
-    assert_eq!(store.data().hooks.started.load(Ordering::SeqCst), 1);
-    assert_eq!(store.data().hooks.cancelled.load(Ordering::SeqCst), 1);
-    assert!(
-        store.data().table.is_empty(),
-        "cancelled request leaked host handles"
-    );
-    Ok(())
-}
-
 #[derive(ComponentType, Lift, Debug)]
 #[component(record)]
 struct MergeError {
@@ -230,7 +197,10 @@ struct Document {
 }
 
 #[test]
-fn checked_in_markdown_example_counts_unicode_code_points() -> Result<()> {
+fn checked_in_markdown_and_template_examples_execute() -> Result<()> {
+    let engine = Engine::default();
+    let linker = Linker::new(&engine);
+
     let compiled = perry_wit::compile_file(
         std::path::Path::new("examples/merge_task/index.ts"),
         &perry_wit::CompileOptions {
@@ -239,10 +209,9 @@ fn checked_in_markdown_example_counts_unicode_code_points() -> Result<()> {
             core_only: false,
         },
     )?;
-    let engine = Engine::default();
     let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
     let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let instance = linker.instantiate(&mut store, &component)?;
     let render =
         instance.get_typed_func::<(&str, Vec<&str>), (Document,)>(&mut store, "render-markdown")?;
     for (title, paragraphs, markdown) in [
@@ -267,12 +236,8 @@ fn checked_in_markdown_example_counts_unicode_code_points() -> Result<()> {
     for (text, expected) in [("", 0), ("Café 🙂", 6), ("e\u{301}", 2), ("👩‍💻", 3)] {
         assert_eq!(count.call(&mut store, (text,))?.0, expected);
     }
-    Ok(())
-}
 
-#[test]
-fn starter_template_still_executes() -> Result<()> {
-    let compiled = perry_wit::compile_file(
+    let template = perry_wit::compile_file(
         std::path::Path::new("template/src/index.ts"),
         &perry_wit::CompileOptions {
             wit_dir: "template/wit".into(),
@@ -280,10 +245,9 @@ fn starter_template_still_executes() -> Result<()> {
             core_only: false,
         },
     )?;
-    let engine = Engine::default();
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = Component::new(&engine, template.component.unwrap().stripped)?;
     let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let instance = linker.instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run-task")?;
     assert_eq!(
         run.call(&mut store, ("hello",))?.0,

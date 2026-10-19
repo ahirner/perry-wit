@@ -9,7 +9,7 @@
 //! retain their storage until task completion.
 use crate::region::perry_alloc;
 
-pub use crate::layout::array::*;
+pub(crate) use crate::layout::array::*;
 const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
@@ -37,7 +37,7 @@ impl Array {
 impl Elements {
     /// Byte size of `cap` slots; traps when it exceeds the 32-bit address space.
     fn bytes(self, cap: u32) -> u32 {
-        crate::sequence::byte_size(cap, self.stride(), 0)
+        crate::byte_size(cap, self.stride(), 0)
     }
 
     /// Twice `cap`, with the byte size of that many slots; traps when either overflows.
@@ -225,27 +225,21 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
             core::slice::from_raw_parts(candidates, candidate_count as usize)
         };
         let sources = core::slice::from_raw_parts(sources, count as usize);
-        let len = sources
-            .iter()
-            .try_fold(0u32, |len, &array| {
-                len.checked_add((*array.cast::<Array>()).len)
-            })
-            .expect("array length overflow");
+        let len = total_len(sources.iter().map(|&a| a.cast::<Array>().cast_const()));
         elements.bytes(len.max(MIN_CAPACITY));
-        let eligible = |index: usize, array: *mut u8| {
-            reuse.contains(&(index as u32))
-                && sources.iter().filter(|&&other| other == array).count() == 1
-        };
-        let candidates = || {
-            sources
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|&(index, array)| eligible(index, array))
-        };
-        let selected = candidates()
-            .find(|&(_, array)| (*array.cast::<Array>()).cap >= len)
-            .or_else(|| candidates().next());
+        let mut selected = None;
+        for (index, &array) in sources.iter().enumerate() {
+            if reuse.contains(&(index as u32))
+                && !sources[..index].contains(&array)
+                && !sources[index + 1..].contains(&array)
+            {
+                selected.get_or_insert((index, array));
+                if (*array.cast::<Array>()).cap >= len {
+                    selected = Some((index, array));
+                    break;
+                }
+            }
+        }
         let target = selected
             .map_or_else(
                 || perry_array_new_typed(len, references),
@@ -264,20 +258,12 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
                 (*target).len as usize * words,
             );
         }
-        let mut offset = 0;
-        for &source in sources {
-            let source = source.cast::<Array>();
-            if source != target {
-                core::ptr::copy_nonoverlapping(
-                    (*source).data,
-                    (*target).data.add(offset * words),
-                    (*source).len as usize * words,
-                );
-            }
-            offset += (*source).len as usize;
-        }
-        (*target).len = len;
-        target.cast()
+        copy_segments(
+            target,
+            len,
+            words,
+            sources.iter().map(|&a| a.cast::<Array>().cast_const()),
+        )
     }
 }
 
@@ -321,7 +307,7 @@ pub(crate) unsafe extern "C" fn perry_array_extend(
         let words = elements.words();
         let (target, source) = (target.cast::<Array>(), source.cast::<Array>());
         let (before, added) = ((*target).len, (*source).len);
-        let len = crate::sequence::length(before, added);
+        let len = crate::sequence_length(before, added);
         elements.bytes(len);
         reserve(target, len, elements);
         core::ptr::copy(
@@ -337,6 +323,39 @@ pub(crate) unsafe extern "C" fn perry_array_extend(
 ///
 /// # Safety
 /// `segments` is an array of live arrays with the requested element representation.
+unsafe fn total_len(sources: impl IntoIterator<Item = *const Array>) -> u32 {
+    sources
+        .into_iter()
+        .try_fold(0u32, |len, source| unsafe {
+            len.checked_add((*source).len)
+        })
+        .expect("array length overflow")
+}
+
+unsafe fn copy_segments(
+    target: *mut Array,
+    len: u32,
+    words: usize,
+    sources: impl IntoIterator<Item = *const Array>,
+) -> *mut u8 {
+    unsafe {
+        let mut offset = 0;
+        for source in sources {
+            let count = (*source).len as usize;
+            if source != target {
+                core::ptr::copy_nonoverlapping(
+                    (*source).data,
+                    (*target).data.add(offset * words),
+                    count * words,
+                );
+            }
+            offset += count;
+        }
+        (*target).len = len;
+        target.cast()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_array_concat_segments(
     segments: *mut u8,
@@ -345,27 +364,12 @@ pub(crate) unsafe extern "C" fn perry_array_concat_segments(
     let words = Elements::decode(references).words();
     unsafe {
         let segments = &*segments.cast::<Array>();
-        let sources = core::slice::from_raw_parts(segments.data, segments.len as usize);
-        let len = sources
+        let sources = core::slice::from_raw_parts(segments.data, segments.len as usize)
             .iter()
-            .try_fold(0u32, |len, &source| {
-                len.checked_add((*(source as usize as *const Array)).len)
-            })
-            .expect("array length overflow");
-        // `perry_array_new_typed` checks that `len` slots fit before allocating.
+            .map(|&source| source as usize as *const Array);
+        let len = total_len(sources.clone());
         let result = perry_array_new_typed(len, references).cast::<Array>();
-        let mut offset = 0;
-        for &source in sources {
-            let source = &*(source as usize as *const Array);
-            core::ptr::copy_nonoverlapping(
-                source.data,
-                (*result).data.add(offset * words),
-                source.len as usize * words,
-            );
-            offset += source.len as usize;
-        }
-        (*result).len = len;
-        result.cast()
+        copy_segments(result, len, words, sources)
     }
 }
 

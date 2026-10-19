@@ -27,21 +27,21 @@ pub(crate) struct ParsedRecord {
     pub(crate) offset: Option<Offset>,
 }
 
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    pos: usize,
+pub(crate) struct Cursor<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) pos: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
 
-    fn peek(&self) -> Option<u8> {
+    pub(crate) fn peek(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn eat(&mut self, expected: u8) -> bool {
+    pub(crate) fn eat(&mut self, expected: u8) -> bool {
         if self.peek() == Some(expected) {
             self.pos += 1;
             true
@@ -50,7 +50,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn digits(&mut self, count: usize) -> Result<u32, Error> {
+    pub(crate) fn digits(&mut self, count: usize) -> Result<u32, Error> {
         let end = self.pos.checked_add(count).ok_or(Error::Syntax)?;
         let slice = self.bytes.get(self.pos..end).ok_or(Error::Syntax)?;
         let mut value = 0u32;
@@ -62,6 +62,24 @@ impl<'a> Cursor<'a> {
         }
         self.pos = end;
         Ok(value)
+    }
+
+    pub(crate) fn year(&mut self) -> Result<i32, Error> {
+        match self.peek() {
+            Some(sign @ (b'+' | b'-')) => {
+                self.pos += 1;
+                let raw = self.digits(6)? as i32;
+                if sign == b'-' {
+                    if raw == 0 {
+                        return Err(Error::Syntax);
+                    }
+                    Ok(-raw)
+                } else {
+                    Ok(raw)
+                }
+            }
+            _ => Ok(self.digits(4)? as i32),
+        }
     }
 
     fn fraction_nanos(&mut self) -> Result<u32, Error> {
@@ -110,32 +128,15 @@ pub(crate) fn record(input: &[u8]) -> Result<ParsedRecord, Error> {
         return Err(Error::UnsupportedAnnotation);
     }
     let mut cur = Cursor::new(input);
-    let year = match cur.peek() {
-        Some(sign @ (b'+' | b'-')) => {
-            cur.pos += 1;
-            let raw = cur.digits(6)? as i32;
-            if sign == b'-' {
-                if raw == 0 {
-                    return Err(Error::Syntax);
-                }
-                -raw
-            } else {
-                raw
-            }
-        }
-        _ => cur.digits(4)? as i32,
-    };
+    let year = cur.year()?;
     let (month, day) = if cur.eat(b'-') {
         let month = cur.digits(2)? as u8;
         if !cur.eat(b'-') {
             return Err(Error::Syntax);
         }
-        let day = cur.digits(2)? as u8;
-        (month, day)
+        (month, cur.digits(2)? as u8)
     } else {
-        let month = cur.digits(2)? as u8;
-        let day = cur.digits(2)? as u8;
-        (month, day)
+        (cur.digits(2)? as u8, cur.digits(2)? as u8)
     };
     let date = DateRecord { year, month, day };
     if cur.pos == input.len() {
@@ -221,6 +222,7 @@ pub(crate) fn offset_nanoseconds(offset: Offset) -> i64 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn strict_utc(input: &[u8]) -> Result<(), Error> {
     if !(20..=30).contains(&input.len()) || input.last() != Some(&b'Z') {
         return Err(Error::Syntax);

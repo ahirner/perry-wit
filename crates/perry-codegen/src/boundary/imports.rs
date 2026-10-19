@@ -272,8 +272,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, clear, vec![]);
             self.block = other;
         }
-        let trap = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, trap);
+        self.trap(ctx);
         self.block = clear;
         self.finish_transfer_scope(ctx, transfer);
         let zero = self.i32_const(ctx, 0);

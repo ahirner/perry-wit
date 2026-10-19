@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result, anyhow};
 use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
 use pliron::{
     builtin::{
-        op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::{OneRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
     },
     context::{Context, Ptr},
@@ -50,20 +50,11 @@ pub(super) fn module_analyses<'a>(
 }
 
 pub(crate) fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
-    module
-        .get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect()
+    perry_mir::functions(module.get_operation(), ctx)
 }
 
 pub(crate) fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
-    let mut ops = Vec::new();
-    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        ops.extend(block.deref(ctx).iter(ctx));
-    }
-    ops
+    perry_mir::operations(ctx, function)
 }
 
 /// MIR calls name their targets directly; only boundary exports and module initialization
@@ -114,18 +105,40 @@ pub(crate) fn reachable_functions(
         .collect()
 }
 
-/// Definition order, independent of arena addresses and allocation history.
-pub(crate) fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, usize> {
-    let mut order = HashMap::new();
+pub(crate) fn function_values(ctx: &Context, function: &FuncOp) -> Vec<Value> {
+    let mut values = Vec::new();
     for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        for value in block.deref(ctx).arguments() {
-            order.insert(value, order.len());
-        }
-        for op in block.deref(ctx).iter(ctx) {
-            for value in op.deref(ctx).results() {
-                order.insert(value, order.len());
-            }
+        let block = block.deref(ctx);
+        values.extend(block.arguments());
+        for op in block.iter(ctx) {
+            values.extend(op.deref(ctx).results());
         }
     }
-    order
+    values
+}
+
+pub(crate) fn function_signature(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Result<(
+    Vec<pliron::r#type::TypeHandle>,
+    Vec<pliron::r#type::TypeHandle>,
+)> {
+    use pliron::builtin::type_interfaces::FunctionTypeInterface;
+    let ty = pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
+        pliron::r#type::Typed::get_type(function, ctx),
+        ctx,
+    )
+    .map_err(|_| anyhow::anyhow!("function type"))?;
+    let ty = ty.deref(ctx);
+    Ok((ty.arg_types(), ty.res_types()))
+}
+
+/// Definition order, independent of arena addresses and allocation history.
+pub(crate) fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, usize> {
+    function_values(ctx, function)
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (value, index))
+        .collect()
 }

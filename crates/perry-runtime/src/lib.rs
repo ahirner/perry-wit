@@ -14,7 +14,6 @@ pub mod array;
 mod buffers;
 mod collectible;
 pub mod exception;
-pub mod foreign;
 pub mod host;
 mod instance;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,7 +24,6 @@ pub mod region;
 #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
 mod resources;
 pub mod roots;
-mod sequence;
 pub mod string;
 // `perry-abi` owns these shared sources; this dependency-free crate compiles its own copy.
 // They stay public: their `pub` items serve `perry-abi`'s API, and this crate uses only a
@@ -51,6 +49,19 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 /// Bits of `undefined` in a `number | undefined` slot (`perry_abi::UNDEFINED_BITS`), the
 /// value of `Promise<void>`.
 pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+
+#[inline(always)]
+pub(crate) fn byte_size(elements: u32, stride: u32, overhead: u32) -> u32 {
+    elements
+        .checked_mul(stride)
+        .and_then(|bytes| bytes.checked_add(overhead))
+        .expect("sequence capacity overflow")
+}
+
+#[inline(always)]
+pub(crate) fn sequence_length(left: u32, right: u32) -> u32 {
+    left.checked_add(right).expect("sequence length overflow")
+}
 
 /// ECMAScript `%` on numbers: the IEEE remainder truncated toward zero (C `fmod`).
 #[unsafe(no_mangle)]

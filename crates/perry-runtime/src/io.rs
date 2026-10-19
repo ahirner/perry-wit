@@ -543,19 +543,9 @@ pub(crate) unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
         return outcome;
     }
     // SAFETY: guaranteed by the caller.
-    let (state, status, value) = unsafe {
-        (
-            *(promise as *const u32),
-            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
-            *(promise.add(crate::promise::VALUE as usize) as *const u64),
-        )
-    };
+    let (state, status, exception) = unsafe { rejection_fields(promise) };
     if state == crate::promise::REJECTED && status != EXIT {
-        let mut text = Bytes::new();
-        text.push_str("Uncaught ");
-        // SAFETY: a rejection's value is its exception object or null.
-        unsafe { describe(&mut text, status, value as usize as *mut u8) };
-        print_bytes(1, text.as_slice(), true);
+        unsafe { print_uncaught(status, exception) };
         process().exit_code = 1;
     }
     let outcome = u32::from(process().exit_code != 0);
@@ -572,16 +562,11 @@ pub(crate) unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
     if current().outcome.is_some() {
         return;
     }
-    let mut text = Bytes::new();
-    text.push_str("Uncaught ");
     unsafe {
         crate::promise::perry_promise_rethrow(promise);
-        let status = *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32;
-        let exception =
-            *(promise.add(crate::promise::VALUE as usize) as *const u64) as usize as *mut u8;
-        describe(&mut text, status, exception);
+        let (_, status, exception) = rejection_fields(promise);
+        print_uncaught(status, exception);
     }
-    print_bytes(1, text.as_slice(), true);
     current().outcome = Some(0);
 }
 
@@ -592,20 +577,31 @@ pub(crate) unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
 /// `promise` must be a rejected promise of the current task.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
-    // SAFETY: guaranteed by the caller.
-    let (status, value) = unsafe {
-        crate::promise::perry_promise_rethrow(promise);
-        (
-            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
-            *(promise.add(crate::promise::VALUE as usize) as *const u64),
-        )
-    };
     let mut text = Bytes::new();
-    // SAFETY: a rejection's value is its exception object or null.
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        describe(&mut text, status, value as usize as *mut u8);
+        crate::promise::perry_promise_rethrow(promise);
+        let (_, status, exception) = rejection_fields(promise);
+        describe(&mut text, status, exception);
         crate::string::perry_string_adopt(text.ptr, text.len as u32)
     }
+}
+
+unsafe fn rejection_fields(promise: *mut u8) -> (u32, u32, *mut u8) {
+    unsafe {
+        (
+            *(promise as *const u32),
+            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
+            *(promise.add(crate::promise::VALUE as usize) as *const u64) as usize as *mut u8,
+        )
+    }
+}
+
+unsafe fn print_uncaught(status: u32, exception: *mut u8) {
+    let mut text = Bytes::new();
+    text.push_str("Uncaught ");
+    unsafe { describe(&mut text, status, exception) };
+    print_bytes(1, text.as_slice(), true);
 }
 
 #[inline(never)]
@@ -758,6 +754,7 @@ pub(crate) unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
             unsafe { core::slice::from_raw_parts(*key as usize as *const u8, *key_len as usize) };
         if key == name {
             found = adopt(*value, *value_len);
+            break;
         }
     }
     release_environment(entries);

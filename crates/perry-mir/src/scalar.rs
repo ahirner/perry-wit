@@ -87,17 +87,9 @@ op_schema! {
     interfaces = [SameOperandsType];
     attributes = (perry_compare_kind: CompareKind);
     constructors { pub new(kind: CompareKind, _lhs: Value, _rhs: Value) => infer(); }
-    initialize(op) {
-        op.set_attr_perry_compare_kind(ctx, kind);
-    }
+    attribute(kind: CompareKind, get_attr_perry_compare_kind, set_attr_perry_compare_kind) = kind;
     result(ctx): Ty = Ty::Predicate;
     error = CompareResultErr;
-}
-
-impl CompareOp {
-    pub fn kind(&self, ctx: &Context) -> CompareKind {
-        *self.get_attr_perry_compare_kind(ctx).expect("compare kind")
-    }
 }
 
 #[derive(Debug, Error)]

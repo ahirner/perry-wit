@@ -87,11 +87,13 @@ function defaulted<T>(value:T):T {
 class Catalog {
     cached: string = first(["cached"]);
     static cached: number = first([7]);
+    value() { return [1, 2].at(0); }
     defaulted(values: Map<string,{id:string,name:string}> = index([{id:"a",name:"default"}])): string {
         return values.get("a")?.name ?? "";
     }
     find(input:string):string { return index([{id:"a",name:input}]).get("a")?.name ?? ""; }
 }
+export function catalogValue() { return new Catalog().value(); }
 export function run(input:string):string {
     const named = index([{id:"a",name:defaulted(input)}]);
     const counted = forward([{id:"a",count:defaulted(7)}]);
@@ -100,7 +102,8 @@ export function run(input:string):string {
     const lookup = (xs:{id:string,name:string}[]):Map<string,{id:string,name:string}> => index(xs);
     return (fromMap(named)?.name ?? "missing") + counted.get("a")?.count
         + empty.size + names.has(input) + new Catalog().find(input)
-        + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted();
+        + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted()
+        + (new Catalog().value() ?? 0);
 }
 "#;
     let module = lower_without_foreign(ctx, source, "generic-collections.ts")?;

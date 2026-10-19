@@ -337,19 +337,11 @@ pub(crate) extern "C" fn fs_close() -> u32 {
                     Wait::Nothing => {}
                 }
                 if op.stream != 0 {
-                    match op.kind {
-                        Kind::Write => wasi::bytes_write_drop(op.stream),
-                        Kind::Readdir => wasi::entries_read_drop(op.stream),
-                        _ => wasi::bytes_read_drop(op.stream),
-                    }
+                    drop_stream(op.kind, op.stream);
                     op.stream = 0;
                 }
                 if op.future != 0 {
-                    match op.kind {
-                        Kind::Write => wasi::bytes_write_result_drop(op.future),
-                        Kind::Readdir => wasi::entries_read_result_drop(op.future),
-                        _ => wasi::bytes_read_result_drop(op.future),
-                    }
+                    drop_future(op.kind, op.future);
                     op.future = 0;
                 }
                 op.wait = Wait::Nothing;
@@ -361,6 +353,26 @@ pub(crate) extern "C" fn fs_close() -> u32 {
         }
     }
     cancelled
+}
+
+unsafe fn drop_stream(kind: Kind, stream: u32) {
+    unsafe {
+        match kind {
+            Kind::Write => wasi::bytes_write_drop(stream),
+            Kind::Readdir => wasi::entries_read_drop(stream),
+            _ => wasi::bytes_read_drop(stream),
+        }
+    }
+}
+
+unsafe fn drop_future(kind: Kind, future: u32) {
+    unsafe {
+        match kind {
+            Kind::Write => wasi::bytes_write_result_drop(future),
+            Kind::Readdir => wasi::entries_read_result_drop(future),
+            _ => wasi::bytes_read_result_drop(future),
+        }
+    }
 }
 
 /// Wait for an async-lowered call that returned `status`; false if it already returned.
@@ -481,52 +493,44 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     }
                 }
             }
-            Stage::Reading => {
+            Stage::Reading | Stage::Listing => {
+                let listing = op.stage == Stage::Listing;
+                let stride = if listing { wasi::ENTRY_SIZE } else { 1 };
                 let result = match code.take() {
                     Some(result) => result,
                     None => {
-                        op.contents.reserve(CHUNK);
+                        op.contents.reserve(if listing {
+                            ENTRIES * wasi::ENTRY_SIZE
+                        } else {
+                            CHUNK
+                        });
                         let (spare, room) = op.contents.spare();
-                        // SAFETY: the reserved bytes stay valid until the copy completes.
-                        let result = unsafe { wasi::bytes_read(op.stream, spare, room as u32) };
+                        let count = (room / stride) as u32;
+                        // SAFETY: the reserved storage stays valid until the copy completes.
+                        let result = unsafe {
+                            if listing {
+                                wasi::entries_read(op.stream, spare, count)
+                            } else {
+                                wasi::bytes_read(op.stream, spare, count)
+                            }
+                        };
                         if result == BLOCKED {
                             return blocked(op, Wait::Stream(op.stream));
                         }
                         result
                     }
                 };
-                op.contents.advance((result >> 4) as usize);
+                op.contents.advance((result >> 4) as usize * stride);
                 if result & 0xF == DROPPED {
                     unjoin(op.stream);
-                    // SAFETY: the readable end this operation owns.
-                    unsafe { wasi::bytes_read_drop(op.stream) };
+                    unsafe { drop_stream(op.kind, op.stream) };
                     op.stream = 0;
-                    op.stage = Stage::ReadResult;
+                    op.stage = if listing {
+                        Stage::ListResult
+                    } else {
+                        Stage::ReadResult
+                    };
                 }
-            }
-            Stage::ReadResult => {
-                if code.take().is_none() {
-                    // SAFETY: the future of `read-via-stream`, read into the result area.
-                    let result = unsafe { wasi::bytes_read_result(op.future, op.area) };
-                    if result == BLOCKED {
-                        return blocked(op, Wait::Future(op.future));
-                    }
-                }
-                unjoin(op.future);
-                // SAFETY: the readable end this operation owns.
-                unsafe { wasi::bytes_read_result_drop(op.future) };
-                op.future = 0;
-                canonical::release_result(op);
-                if byte(op.area, 0) != 0 {
-                    return fail(op, byte(op.area, 4));
-                }
-                let contents = op.contents.as_slice();
-                let value = if op.kind == Kind::ReadText {
-                    text(contents)
-                } else {
-                    bytes_view(contents.len() as u32, contents.as_ptr() as *mut u8)
-                };
-                return succeed(op, value as usize as u64);
             }
             Stage::Writing => {
                 if let Some(result) = code.take() {
@@ -547,92 +551,72 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     continue;
                 }
                 unjoin(op.stream);
-                // SAFETY: the writable end this operation owns.
-                unsafe { wasi::bytes_write_drop(op.stream) };
+                unsafe { drop_stream(op.kind, op.stream) };
                 op.stream = 0;
                 op.stage = Stage::WriteResult;
             }
-            Stage::WriteResult => {
+            Stage::ReadResult | Stage::WriteResult | Stage::ListResult => {
                 if code.take().is_none() {
-                    // SAFETY: the future of `write-via-stream`, read into the result area.
-                    let result = unsafe { wasi::bytes_write_result(op.future, op.area) };
-                    if result == BLOCKED {
-                        return blocked(op, Wait::Future(op.future));
-                    }
-                }
-                unjoin(op.future);
-                // SAFETY: the readable end this operation owns.
-                unsafe { wasi::bytes_write_result_drop(op.future) };
-                op.future = 0;
-                canonical::release_result(op);
-                if byte(op.area, 0) != 0 {
-                    return fail(op, byte(op.area, 4));
-                }
-                if op.written < op.data.len() {
-                    return fail(op, wasi::ERROR_OTHER);
-                }
-                return succeed(op, UNDEFINED_BITS);
-            }
-            Stage::Listing => {
-                let result = match code.take() {
-                    Some(result) => result,
-                    None => {
-                        op.contents.reserve(ENTRIES * wasi::ENTRY_SIZE);
-                        let (spare, room) = op.contents.spare();
-                        let count = (room / wasi::ENTRY_SIZE) as u32;
-                        // SAFETY: the reserved entries stay valid until the copy completes.
-                        let result = unsafe { wasi::entries_read(op.stream, spare, count) };
-                        if result == BLOCKED {
-                            return blocked(op, Wait::Stream(op.stream));
+                    // SAFETY: the operation's result future, read into the result area.
+                    let result = unsafe {
+                        match op.stage {
+                            Stage::WriteResult => wasi::bytes_write_result(op.future, op.area),
+                            Stage::ListResult => wasi::entries_read_result(op.future, op.area),
+                            _ => wasi::bytes_read_result(op.future, op.area),
                         }
-                        result
-                    }
-                };
-                op.contents
-                    .advance((result >> 4) as usize * wasi::ENTRY_SIZE);
-                if result & 0xF == DROPPED {
-                    unjoin(op.stream);
-                    // SAFETY: the readable end this operation owns.
-                    unsafe { wasi::entries_read_drop(op.stream) };
-                    op.stream = 0;
-                    op.stage = Stage::ListResult;
-                }
-            }
-            Stage::ListResult => {
-                if code.take().is_none() {
-                    // SAFETY: the future of `read-directory`, read into the result area.
-                    let result = unsafe { wasi::entries_read_result(op.future, op.area) };
+                    };
                     if result == BLOCKED {
                         return blocked(op, Wait::Future(op.future));
                     }
                 }
                 unjoin(op.future);
-                // SAFETY: the readable end this operation owns.
-                unsafe { wasi::entries_read_result_drop(op.future) };
+                unsafe { drop_future(op.kind, op.future) };
                 op.future = 0;
                 canonical::release_result(op);
                 if byte(op.area, 0) != 0 {
                     return fail(op, byte(op.area, 4));
                 }
-                let entries = op.contents.as_slice();
-                let mut names = Buffer::new();
-                for entry in entries.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
-                    let at = entry.as_ptr() as *mut u8;
-                    let (data, len) = (word(at, wasi::ENTRY_NAME), word(at, wasi::ENTRY_NAME + 4));
-                    // SAFETY: the host lowered the name into this task's region as UTF-8.
-                    let name = unsafe { adopt(data as usize as *mut u8, len) };
-                    if matches!(unsafe { bytes(name) }, b"." | b"..") {
-                        continue;
+                match op.stage {
+                    Stage::ReadResult => {
+                        let contents = op.contents.as_slice();
+                        let value = if op.kind == Kind::ReadText {
+                            perry_abi::from_utf8_lossy(contents, false)
+                        } else {
+                            bytes_view(contents.len() as u32, contents.as_ptr() as *mut u8)
+                        };
+                        return succeed(op, value as usize as u64);
                     }
-                    names.extend_from_slice(&(name as usize as u64).to_le_bytes());
+                    Stage::WriteResult => {
+                        if op.written < op.data.len() {
+                            return fail(op, wasi::ERROR_OTHER);
+                        }
+                        return succeed(op, UNDEFINED_BITS);
+                    }
+                    _ => {
+                        let entries = op.contents.as_slice();
+                        let mut names = Buffer::new();
+                        for entry in entries.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
+                            let at = entry.as_ptr() as *mut u8;
+                            let (data, len) =
+                                (word(at, wasi::ENTRY_NAME), word(at, wasi::ENTRY_NAME + 4));
+                            // SAFETY: the host lowered the name into this task's region as UTF-8.
+                            let name = unsafe { adopt(data as usize as *mut u8, len) };
+                            if matches!(unsafe { bytes(name) }, b"." | b"..") {
+                                continue;
+                            }
+                            names.extend_from_slice(&(name as usize as u64).to_le_bytes());
+                        }
+                        let slots = names.as_slice();
+                        // SAFETY: 8-byte slots written above, in a block from the task region.
+                        let slots = unsafe {
+                            core::slice::from_raw_parts(
+                                slots.as_ptr() as *const u64,
+                                slots.len() / 8,
+                            )
+                        };
+                        return succeed(op, perry_abi::array(slots) as usize as u64);
+                    }
                 }
-                let slots = names.as_slice();
-                // SAFETY: 8-byte slots written above, in a block from the task region.
-                let slots = unsafe {
-                    core::slice::from_raw_parts(slots.as_ptr() as *const u64, slots.len() / 8)
-                };
-                let array = perry_abi::array(slots);
-                return succeed(op, array as usize as u64);
             }
             Stage::Finished => {
                 canonical::release_result(op);
@@ -670,35 +654,6 @@ fn start_listing(op: &mut Op, fd: u32) {
     // SAFETY: the result area holds the stream and future handles.
     unsafe { wasi::read_directory(fd, ends.as_mut_ptr()) };
     (op.stream, op.future) = (ends[0], ends[1]);
-}
-
-/// Contents as a string, replacing invalid UTF-8 as `TextDecoder` does.
-fn text(contents: &[u8]) -> *mut u8 {
-    let mut out = Buffer::new();
-    let mut rest = contents;
-    loop {
-        match core::str::from_utf8(rest) {
-            Ok(valid) => {
-                let slice = if out.is_empty() {
-                    contents
-                } else {
-                    out.extend_from_slice(valid.as_bytes());
-                    out.as_slice()
-                };
-                // SAFETY: valid UTF-8 in the task region.
-                return unsafe { adopt(slice.as_ptr() as *mut u8, slice.len() as u32) };
-            }
-            Err(err) => {
-                let valid = err.valid_up_to();
-                out.extend_from_slice(&rest[..valid]);
-                out.extend_from_slice("\u{FFFD}".as_bytes());
-                rest = match err.error_len() {
-                    Some(len) => &rest[valid + len..],
-                    None => &[],
-                };
-            }
-        }
-    }
 }
 
 /// Take preopen handles, keep the one whose name is the longest prefix of the path, drop the

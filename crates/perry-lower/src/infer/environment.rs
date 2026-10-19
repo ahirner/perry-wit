@@ -30,23 +30,15 @@ impl<'a> FunctionEnv<'a> {
         }
     }
 
-    pub(super) fn normalize_owned(&self, ty: HirType) -> HirType {
-        match ty {
-            HirType::Named(name) => self
-                .integer_aliases
-                .get(&name)
-                .cloned()
-                .unwrap_or(HirType::Named(name)),
-            HirType::Array(inner) => HirType::Array(Box::new(self.normalize_owned(*inner))),
-            HirType::Promise(inner) => HirType::Promise(Box::new(self.normalize_owned(*inner))),
-            HirType::Tuple(items) => {
-                HirType::Tuple(items.into_iter().map(|t| self.normalize_owned(t)).collect())
+    pub(super) fn normalize_owned(&self, mut ty: HirType) -> HirType {
+        ty.transform(&mut |node| {
+            if let HirType::Named(name) = node
+                && let Some(alias) = self.integer_aliases.get(name.as_str())
+            {
+                *node = alias.clone();
             }
-            HirType::Union(items) => {
-                HirType::Union(items.into_iter().map(|t| self.normalize_owned(t)).collect())
-            }
-            ty => ty,
-        }
+        });
+        ty
     }
 
     pub(super) fn resolve_foreign_type(&self, type_name: &str) -> Option<&'a HirType> {

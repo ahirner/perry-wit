@@ -112,12 +112,12 @@ pub(crate) const ERROR_OTHER: u8 = 36;
 /// Parameters of the async-lowered `open-at` (more than four flat values).
 #[repr(C)]
 pub(crate) struct OpenAt {
-    pub fd: u32,
-    pub path_flags: u8,
-    pub path: *const u8,
-    pub len: u32,
-    pub open_flags: u8,
-    pub flags: u8,
+    pub(crate) fd: u32,
+    pub(crate) path_flags: u8,
+    pub(crate) path: *const u8,
+    pub(crate) len: u32,
+    pub(crate) open_flags: u8,
+    pub(crate) flags: u8,
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -7,27 +7,7 @@ use perry_mir::Absence;
 use std::collections::HashMap;
 
 pub(super) fn contains_type_var(ty: &HirType) -> bool {
-    match ty {
-        HirType::TypeVar(_) => true,
-        HirType::Array(inner) | HirType::Promise(inner) => contains_type_var(inner),
-        HirType::Tuple(items) | HirType::Union(items) => items.iter().any(contains_type_var),
-        HirType::Generic { type_args, .. } => type_args.iter().any(contains_type_var),
-        HirType::Object(object) => {
-            object.properties.values().any(|p| contains_type_var(&p.ty))
-                || object
-                    .index_signature
-                    .as_deref()
-                    .is_some_and(contains_type_var)
-        }
-        HirType::Function(function) => {
-            function
-                .params
-                .iter()
-                .any(|(_, ty, _)| contains_type_var(ty))
-                || contains_type_var(&function.return_type)
-        }
-        _ => false,
-    }
+    ty.any(&mut |node| matches!(node, HirType::TypeVar(_)))
 }
 
 mod absence;
@@ -93,40 +73,27 @@ impl Inference<'_> {
 
 use expressions::*;
 
-enum ScanMode<'a> {
-    Returns(&'a mut Vec<HirType>),
-    ResolveLocals(&'a mut HashMap<LocalId, HirType>),
-}
-
 fn collect_foreign_imports(
     hir: &HirModule,
     foreign: &HashMap<String, crate::hir::Foreign>,
 ) -> (HashMap<String, HirType>, HashMap<String, String>) {
-    let mut names: HashMap<String, HirType> = [
-        ("perry:types/u8", HirType::Number),
-        ("perry:types/s8", HirType::Number),
-        ("perry:types/u16", HirType::Number),
-        ("perry:types/s16", HirType::Number),
-        ("perry:types/u32", HirType::Number),
-        ("perry:types/s32", HirType::Number),
-        ("perry:types/u64", HirType::BigInt),
-        ("perry:types/s64", HirType::BigInt),
-    ]
-    .into_iter()
-    .map(|(k, v)| (String::from(k), v))
-    .collect();
-    for (key, entry) in foreign {
-        if let crate::hir::Foreign::Integer { width, .. } = entry {
-            names.insert(
-                key.clone(),
-                if *width == 64 {
-                    HirType::BigInt
-                } else {
-                    HirType::Number
-                },
-            );
-        }
-    }
+    let mut names: HashMap<String, HirType> =
+        ["u8", "s8", "u16", "s16", "u32", "s32", "u64", "s64"]
+            .into_iter()
+            .filter_map(|tag| {
+                let (width, _) = shapes::perry_integer_spec(tag)?;
+                Some((
+                    format!("perry:types/{tag}"),
+                    shapes::integer_hir_carrier(width),
+                ))
+            })
+            .chain(foreign.iter().filter_map(|(key, entry)| match entry {
+                crate::hir::Foreign::Integer { width, .. } => {
+                    Some((key.clone(), shapes::integer_hir_carrier(*width)))
+                }
+                _ => None,
+            }))
+            .collect();
     let user_types: HashSet<&str> = hir
         .interfaces
         .iter()
@@ -147,67 +114,46 @@ fn collect_foreign_imports(
             if user_types.contains(local.as_str()) {
                 continue;
             }
-            if import.source == "perry:types" {
-                match imported.as_str() {
-                    "u8" | "s8" | "u16" | "s16" | "u32" | "s32" => {
-                        names.insert(local.clone(), HirType::Number);
-                        continue;
-                    }
-                    "u64" | "s64" => {
-                        names.insert(local.clone(), HirType::BigInt);
-                        continue;
-                    }
-                    _ => {}
-                }
+            if import.source == "perry:types"
+                && let Some((width, _)) = shapes::perry_integer_spec(imported)
+            {
+                names.insert(local.clone(), shapes::integer_hir_carrier(width));
+                continue;
             }
-            for candidate in [format!("{source_module}#{imported}"), imported.clone()] {
-                match foreign.get(&candidate) {
-                    Some(crate::hir::Foreign::Integer { width, .. }) => {
-                        names.insert(
-                            local.clone(),
-                            if *width == 64 {
-                                HirType::BigInt
-                            } else {
-                                HirType::Number
-                            },
-                        );
-                        imported_types.insert(local.clone(), candidate);
-                        break;
+            if let Some((candidate, entry)) =
+                [format!("{source_module}#{imported}"), imported.clone()]
+                    .into_iter()
+                    .find_map(|c| foreign.get(&c).map(|e| (c, e)))
+            {
+                match entry {
+                    crate::hir::Foreign::Integer { width, .. } => {
+                        names.insert(local.clone(), shapes::integer_hir_carrier(*width));
                     }
-                    Some(crate::hir::Foreign::Type(HirType::Named(target))) => {
+                    crate::hir::Foreign::Type(HirType::Named(target)) => {
                         if let Some(carrier) = names.get(target).cloned() {
                             names.insert(local.clone(), carrier);
                         }
-                        imported_types.insert(local.clone(), candidate);
-                        break;
                     }
-                    Some(
-                        crate::hir::Foreign::Type(_)
-                        | crate::hir::Foreign::Resource(_)
-                        | crate::hir::Foreign::Input(_),
-                    ) => {
-                        imported_types.insert(local.clone(), candidate);
-                        break;
-                    }
-                    _ => {}
+                    crate::hir::Foreign::Type(_)
+                    | crate::hir::Foreign::Resource(_)
+                    | crate::hir::Foreign::Input(_) => {}
+                    crate::hir::Foreign::Function(_) => continue,
                 }
+                imported_types.insert(local.clone(), candidate);
             }
         }
     }
-    loop {
-        let mut added = false;
+    while hir.type_aliases.iter().any(|alias| {
+        alias.type_params.is_empty()
+            && matches!(&alias.ty, HirType::Named(target) if names.contains_key(target) && !names.contains_key(&alias.name))
+    }) {
         for alias in &hir.type_aliases {
             if alias.type_params.is_empty()
                 && let HirType::Named(target) = &alias.ty
                 && let Some(carrier) = names.get(target).cloned()
-                && !names.contains_key(&alias.name)
             {
-                names.insert(alias.name.clone(), carrier);
-                added = true;
+                names.entry(alias.name.clone()).or_insert(carrier);
             }
-        }
-        if !added {
-            break;
         }
     }
     (names, imported_types)
@@ -289,39 +235,13 @@ fn push_return_type(
 }
 
 fn substitute_type_vars(ty: &mut HirType, bounds: &HashMap<&str, &HirType>) {
-    match ty {
-        HirType::TypeVar(name) | HirType::Named(name) => {
-            if let Some(bound) = bounds.get(name.as_str()) {
-                *ty = (*bound).clone();
-            }
+    ty.transform(&mut |node| {
+        if let HirType::TypeVar(name) | HirType::Named(name) = node
+            && let Some(bound) = bounds.get(name.as_str())
+        {
+            *node = (*bound).clone();
         }
-        HirType::Array(inner) | HirType::Promise(inner) => substitute_type_vars(inner, bounds),
-        HirType::Tuple(items) | HirType::Union(items) => {
-            for item in items {
-                substitute_type_vars(item, bounds);
-            }
-        }
-        HirType::Generic { type_args, .. } => {
-            for arg in type_args {
-                substitute_type_vars(arg, bounds);
-            }
-        }
-        HirType::Object(object) => {
-            for prop in object.properties.values_mut() {
-                substitute_type_vars(&mut prop.ty, bounds);
-            }
-            if let Some(index) = &mut object.index_signature {
-                substitute_type_vars(index, bounds);
-            }
-        }
-        HirType::Function(function) => {
-            for (_, param, _) in &mut function.params {
-                substitute_type_vars(param, bounds);
-            }
-            substitute_type_vars(&mut function.return_type, bounds);
-        }
-        _ => {}
-    }
+    });
 }
 
 fn infer_params(params: &mut [perry_hir::ir::Param], is_exported: bool, env: &mut FunctionEnv<'_>) {
@@ -356,7 +276,7 @@ fn infer_body_return(
     integer_aliases: &HashMap<String, HirType>,
 ) -> bool {
     let mut returned = Vec::new();
-    walk::scan(body, env, &mut ScanMode::Returns(&mut returned));
+    walk::scan(body, env, Some(&mut returned), None);
     if is_async {
         for ty in &mut returned {
             while let HirType::Promise(inner) = ty {
@@ -448,7 +368,7 @@ pub(super) fn unresolved_types(
         );
     }
     for class in &mut hir.classes {
-        for function in functions::class_functions(class) {
+        for function in shapes::class_functions_mut(class) {
             clear_inferred_type_vars(
                 &mut function.body,
                 inferred,
@@ -473,67 +393,79 @@ pub(super) fn unresolved_types(
         let mut env = inference.function(&module_env, &hir.classes, &mut locals);
         infer_params(&mut function.params, function.is_exported, &mut env);
     }
-    let classes_snapshot = hir.classes.clone();
-    for class in &mut hir.classes {
-        module_env.set_current_class(Some(class.name.clone()));
-        for sfield in &mut class.static_fields {
-            if matches!(sfield.ty, HirType::Any | HirType::Unknown)
-                && let Some(init) = &sfield.init
-            {
-                let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-                let def_ty = expression(init, &mut env);
-                if is_resolvable_type(&def_ty) {
-                    sfield.ty = def_ty;
+    for class_idx in 0..hir.classes.len() {
+        module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
+        for sf_idx in 0..hir.classes[class_idx].static_fields.len() {
+            let def_ty = {
+                let sfield = &hir.classes[class_idx].static_fields[sf_idx];
+                if !matches!(sfield.ty, HirType::Any | HirType::Unknown) {
+                    None
+                } else {
+                    sfield.init.as_ref().map(|init| {
+                        let mut env = inference.function(&module_env, &hir.classes, &mut locals);
+                        expression(init, &mut env)
+                    })
                 }
+            };
+            if let Some(def_ty) = def_ty.filter(is_resolvable_type) {
+                hir.classes[class_idx].static_fields[sf_idx].ty = def_ty;
             }
         }
-        for function in functions::class_functions(class) {
-            let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-            infer_params(&mut function.params, false, &mut env);
+        let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
+        for fn_idx in 0..fn_count {
+            let mut params = std::mem::take(
+                &mut shapes::class_functions_mut(&mut hir.classes[class_idx])
+                    .nth(fn_idx)
+                    .unwrap()
+                    .params,
+            );
+            let mut env = inference.function(&module_env, &hir.classes, &mut locals);
+            infer_params(&mut params, false, &mut env);
+            shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .nth(fn_idx)
+                .unwrap()
+                .params = params;
         }
-        for field in &mut class.fields {
-            if !matches!(field.ty, HirType::Any | HirType::Unknown) {
-                continue;
-            }
-            if let Some(init) = &field.init {
-                let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-                let def_ty = expression(init, &mut env);
-                if is_resolvable_type(&def_ty) {
-                    field.ty = def_ty;
-                    continue;
-                }
-            }
-            if let Some(ctor) = &class.constructor {
-                let mut env = inference.function_with_params(
-                    &module_env,
-                    &classes_snapshot,
-                    &mut locals,
-                    &ctor.params,
-                );
-                for stmt in &ctor.body {
-                    if let Stmt::Expr(Expr::PropertySet {
-                        object,
-                        property,
-                        value,
-                    }) = stmt
-                        && matches!(object.as_ref(), Expr::This)
-                        && *property == field.name
-                    {
-                        let val_ty = expression(value, &mut env);
-                        if is_resolvable_type(&val_ty) {
-                            field.ty = val_ty;
-                            break;
+        for f_idx in 0..hir.classes[class_idx].fields.len() {
+            let inferred_ty = {
+                let class = &hir.classes[class_idx];
+                let field = &class.fields[f_idx];
+                if !matches!(field.ty, HirType::Any | HirType::Unknown) {
+                    None
+                } else if let Some(init) = &field.init {
+                    let mut env = inference.function(&module_env, &hir.classes, &mut locals);
+                    Some(expression(init, &mut env)).filter(is_resolvable_type)
+                } else if let Some(ctor) = &class.constructor {
+                    let mut env = inference.function_with_params(
+                        &module_env,
+                        &hir.classes,
+                        &mut locals,
+                        &ctor.params,
+                    );
+                    ctor.body.iter().find_map(|stmt| match stmt {
+                        Stmt::Expr(Expr::PropertySet {
+                            object,
+                            property,
+                            value,
+                        }) if matches!(object.as_ref(), Expr::This) && *property == field.name => {
+                            Some(expression(value, &mut env)).filter(is_resolvable_type)
                         }
-                    }
+                        _ => None,
+                    })
+                } else {
+                    None
                 }
+            };
+            if let Some(ty) = inferred_ty {
+                hir.classes[class_idx].fields[f_idx].ty = ty;
             }
         }
     }
     module_env.set_current_class(None);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
-        let mut env = inference.function(&module_env, &hir.classes, &mut locals);
-        walk::resolve_locals(&mut hir.init, &mut env);
+        let env = inference.function(&module_env, &hir.classes, &mut locals);
+        walk::resolve_locals(&mut hir.init, env);
     }
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     let max_iters = hir.functions.len() + hir.classes.len();
@@ -559,69 +491,88 @@ pub(super) fn unresolved_types(
                 changed = true;
             }
         }
-        if !hir.classes.is_empty() {
-            let classes_snapshot = hir.classes.clone();
-            for class in &mut hir.classes {
-                module_env.set_current_class(Some(class.name.clone()));
-                for method in class
-                    .methods
-                    .iter_mut()
-                    .chain(class.getters.iter_mut().map(|(_, f)| f))
-                    .chain(class.static_methods.iter_mut())
-                {
-                    if !matches!(method.return_type, HirType::Any | HirType::Unknown) {
-                        continue;
+        for class_idx in 0..hir.classes.len() {
+            module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
+            let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
+            for fn_idx in 0..fn_count {
+                let updated = {
+                    let class = &hir.classes[class_idx];
+                    let method = shapes::class_functions(class).nth(fn_idx).unwrap();
+                    if class
+                        .constructor
+                        .as_ref()
+                        .is_some_and(|c| std::ptr::eq(c, method))
+                        || class.setters.iter().any(|(_, s)| std::ptr::eq(s, method))
+                        || !matches!(method.return_type, HirType::Any | HirType::Unknown)
+                    {
+                        None
+                    } else {
+                        let mut ret = method.return_type.clone();
+                        let mut env = inference.function_with_params(
+                            &module_env,
+                            &hir.classes,
+                            &mut locals,
+                            &method.params,
+                        );
+                        infer_body_return(
+                            &method.body,
+                            method.is_async,
+                            &mut ret,
+                            &mut env,
+                            &integer_aliases,
+                        )
+                        .then_some(ret)
                     }
-                    let mut env = inference.function_with_params(
-                        &module_env,
-                        &classes_snapshot,
-                        &mut locals,
-                        &method.params,
-                    );
-                    if infer_body_return(
-                        &method.body,
-                        method.is_async,
-                        &mut method.return_type,
-                        &mut env,
-                        &integer_aliases,
-                    ) {
-                        changed = true;
-                    }
+                };
+                if let Some(ret) = updated {
+                    shapes::class_functions_mut(&mut hir.classes[class_idx])
+                        .nth(fn_idx)
+                        .unwrap()
+                        .return_type = ret;
+                    changed = true;
                 }
             }
-            module_env.set_current_class(None);
         }
+        module_env.set_current_class(None);
         if !changed {
             break;
         }
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
-    let mut env = inference.function(&module_env, &hir.classes, &mut locals);
-    walk::resolve_locals(&mut hir.init, &mut env);
+    let env = inference.function(&module_env, &hir.classes, &mut locals);
+    walk::resolve_locals(&mut hir.init, env);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
-        let mut env = inference.function_with_params(
+        let env = inference.function_with_params(
             &module_env,
             &hir.classes,
             &mut locals,
             &function.params,
         );
-        walk::resolve_locals(&mut function.body, &mut env);
+        walk::resolve_locals(&mut function.body, env);
     }
-    if !hir.classes.is_empty() {
-        let classes_snapshot = hir.classes.clone();
-        for class in &mut hir.classes {
-            module_env.set_current_class(Some(class.name.clone()));
-            for function in functions::class_functions(class) {
-                let mut env = inference.function_with_params(
-                    &module_env,
-                    &classes_snapshot,
-                    &mut locals,
-                    &function.params,
-                );
-                walk::resolve_locals(&mut function.body, &mut env);
-            }
+    for class_idx in 0..hir.classes.len() {
+        module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
+        let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
+        for fn_idx in 0..fn_count {
+            let mut body = std::mem::take(
+                &mut shapes::class_functions_mut(&mut hir.classes[class_idx])
+                    .nth(fn_idx)
+                    .unwrap()
+                    .body,
+            );
+            let params = &shapes::class_functions(&hir.classes[class_idx])
+                .nth(fn_idx)
+                .unwrap()
+                .params;
+            let env =
+                inference.function_with_params(&module_env, &hir.classes, &mut locals, params);
+            walk::resolve_locals(&mut body, env);
+            shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .nth(fn_idx)
+                .unwrap()
+                .body = body;
         }
-        module_env.set_current_class(None);
     }
+    module_env.set_current_class(None);
 }

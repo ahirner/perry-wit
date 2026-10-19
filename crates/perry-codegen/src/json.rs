@@ -250,21 +250,25 @@ impl FunctionLowering<'_, '_> {
                 vec![kind, width]
             }
         };
+        self.write_data_words(address, words);
+        Ok(address)
+    }
+
+    pub(super) fn write_data_words(&mut self, address: u32, words: Vec<u32>) {
         let offset = (address - crate::DATA_BASE) as usize;
         for (index, word) in words.into_iter().enumerate() {
             self.state.data.bytes[offset + index * 4..offset + index * 4 + 4]
                 .copy_from_slice(&word.to_le_bytes());
         }
-        Ok(address)
     }
 
-    pub(super) fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        let input = op.deref(ctx).get_operand(0);
-        let value = self.mapped_value(ctx, input)?;
-        let ty = input.get_type(ctx);
-        let schema = self.layout_descriptor(ctx, ty)?;
-        let schema = self.i32_const(ctx, schema as i32);
-        let (bits, tag) = match value {
+    pub(super) fn json_carrier_bits(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        value: Carriers<pliron::value::Value>,
+    ) -> (pliron::value::Value, pliron::value::Value) {
+        match value {
             Carriers::Numeric { tag, payload } => (payload, tag),
             Carriers::Scalar(value) => {
                 let bits = if matches!(crate::numeric::integer(ctx, ty), Some((width, true)) if width <= 32)
@@ -275,7 +279,16 @@ impl FunctionLowering<'_, '_> {
                 };
                 (bits, self.i32_const(ctx, 0))
             }
-        };
+        }
+    }
+
+    pub(super) fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        let input = op.deref(ctx).get_operand(0);
+        let value = self.mapped_value(ctx, input)?;
+        let ty = input.get_type(ctx);
+        let schema = self.layout_descriptor(ctx, ty)?;
+        let schema = self.i32_const(ctx, schema as i32);
+        let (bits, tag) = self.json_carrier_bits(ctx, ty, value);
         if Operation::get_op::<perry_mir::JsonBoxOp>(op, ctx).is_some() {
             let value = self.runtime(ctx, Runtime::StdJsonBox, vec![bits, tag, schema]);
             self.define(ctx, op, value);

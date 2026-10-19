@@ -25,7 +25,7 @@ op_schema! {
         pub new(name: Identifier, value: TypeHandle) -> infallible
             => explicit(SlotType::get(ctx, value).into());
     }
-    initialize(op) { op.set_attr_perry_global(ctx, IdentifierAttr::new(name)); }
+    attribute(name: Identifier, get_attr_perry_global, set_attr_perry_global) = IdentifierAttr::new(name);
     prepare(this) {
         <Self as OneResultInterface>::verify(this, ctx)?;
         let value = this.get_result(ctx).get_type(ctx);
@@ -33,15 +33,6 @@ op_schema! {
     result(ctx, value: TypeHandle): TypeHandle =
         Ok(TypedHandle::<SlotType>::from_handle(value, ctx)?.into());
     error = crate::locals::LocalErr::NotSlot("perry.global");
-}
-
-impl GlobalOp {
-    pub fn name(&self, ctx: &Context) -> Identifier {
-        self.get_attr_perry_global(ctx)
-            .expect("global name")
-            .clone()
-            .into()
-    }
 }
 
 op_schema! {

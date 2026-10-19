@@ -24,7 +24,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
         builtin::{op_interfaces::SingleBlockRegionInterface, ops::FuncOp, types::FunctionType},
         op::Op,
     };
-    use pliron_wasm::{control::ReturnOp, ops::set_export};
+    use pliron_wasm::ops::set_export;
     for runtime in [Runtime::GcDebug, Runtime::GcCounter] {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
@@ -55,8 +55,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
             b.runtime_void(ctx, runtime, args);
             vec![]
         };
-        let ret = ReturnOp::new(ctx, value).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, value);
         b.state
             .wasm
             .append_operation(ctx, function.get_operation(), 0);
@@ -126,16 +125,15 @@ pub fn explain_tiers(
     for function in &functions {
         let name = function.get_symbol_name(ctx);
         let summary = summaries.function_summary(ctx, function)?;
-        let ops = crate::analysis::function_ops(ctx, function);
-        let sites = ops
-            .iter()
-            .filter(|&&op| perry_mir::allocates(ctx, op))
-            .count();
-        let frames = ops
-            .into_iter()
-            .filter_map(|op| Operation::get_op::<perry_mir::AllocOp>(op, ctx))
-            .filter(|allocation| allocation.tier(ctx) == perry_mir::Tier::Frame)
-            .count();
+        let mut sites = 0;
+        let mut frames = 0;
+        for op in crate::analysis::function_ops(ctx, function) {
+            sites += usize::from(perry_mir::allocates(ctx, op));
+            frames += usize::from(
+                Operation::get_op::<perry_mir::AllocOp>(op, ctx)
+                    .is_some_and(|allocation| allocation.tier(ctx) == perry_mir::Tier::Frame),
+            );
+        }
         let leases = crate::lease::leased(ctx, function, &live).len();
         writeln!(
             report,
@@ -194,7 +192,6 @@ impl FunctionLowering<'_, '_> {
     /// Run synchronous module initialization once. A failed or reentrant initializer traps
     /// consistently instead of exposing partially initialized typed values.
     pub(super) fn initialize_module(&mut self, ctx: &mut Context) {
-        use pliron_wasm::control::UnreachableOp;
         let Some(status) = self.initialization_status(ctx) else {
             return;
         };
@@ -203,8 +200,7 @@ impl FunctionLowering<'_, '_> {
         self.cond_br(ctx, status, (failed, vec![]), (ready, vec![]));
         self.block = failed;
         self.task_free(ctx);
-        let trap = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, trap);
+        self.trap(ctx);
         self.block = ready;
     }
 

@@ -204,21 +204,11 @@ op_schema! {
         pub new(intrinsic: Intrinsic, args: Vec<Value>) operands(args)
             => results(intrinsic.types().1.iter().map(|ty| ty.get(ctx)).collect());
     }
-    attribute(intrinsic, get_attr_perry_intrinsic, set_attr_perry_intrinsic) =
+    attribute(intrinsic: Intrinsic, get_attr_perry_intrinsic, set_attr_perry_intrinsic) =
         intrinsic => IntrinsicErr::Missing;
     prepare(_this) { let intrinsic = *intrinsic; }
     result(ctx, intrinsic: Intrinsic): Intrinsic = intrinsic;
     error = IntrinsicErr::Signature(intrinsic.name().into());
-}
-
-impl IntrinsicOp {
-    /// The service; the verifier rejects an op without one.
-    pub fn intrinsic(&self, ctx: &Context) -> Intrinsic {
-        // pliron models every attribute as optional; construction always sets this one.
-        *self
-            .get_attr_perry_intrinsic(ctx)
-            .expect("verified perry.intrinsic has its service")
-    }
 }
 
 impl OutputContract for Intrinsic {

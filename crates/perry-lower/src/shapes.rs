@@ -29,18 +29,240 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-mod arguments;
 mod collection_types;
 mod globals;
-mod representation;
-pub(crate) use arguments::{Argument, ArgumentId, Kind};
+pub(crate) use globals::{class_functions, class_functions_mut};
 pub(super) mod generics;
+mod representation;
+pub(crate) use representation::{integer_hir_carrier, integer_mir_carrier, perry_integer_spec};
+
+#[derive(Clone, Debug, PartialEq)]
+struct TypeKey(HirType);
+
+impl Eq for TypeKey {}
+
+impl std::hash::Hash for TypeKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        hash_hir_type(&self.0, state);
+    }
+}
+
+pliron::dict_key!(HIR_TYPE_INTERNER, "perry_hir_type_interner");
+pliron::context_registration!(register_hir_type_interner);
+
+struct TypeInterner(std::sync::Mutex<HashMap<u64, Vec<TypeId>>>);
+
+fn register_hir_type_interner(ctx: &mut Context) {
+    let idx = ctx
+        .aux_data
+        .insert(Box::new(TypeInterner(std::sync::Mutex::new(HashMap::new()))));
+    ctx.aux_data_map.insert(HIR_TYPE_INTERNER.clone(), idx);
+}
+
+fn hir_type_hash(ty: &HirType) -> u64 {
+    use std::hash::Hasher as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_hir_type(ty, &mut hasher);
+    hasher.finish()
+}
+
+/// An interned [`HirType`] handle backed by [`Context`]'s [`pliron::uniqued_any::UniqueStore`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct TypeId(pliron::uniqued_any::Uniqued<TypeKey>);
+
+impl TypeId {
+    fn interner(ctx: &Context) -> &TypeInterner {
+        let idx = ctx.aux_data_map[&HIR_TYPE_INTERNER];
+        ctx.aux_data[idx]
+            .downcast_ref::<TypeInterner>()
+            .expect("type interner registered on Context")
+    }
+
+    fn lookup(ctx: &Context, interner: &TypeInterner, hash: u64, ty: &HirType) -> Option<Self> {
+        let map = interner.0.lock().expect("type interner lock");
+        map.get(&hash)?
+            .iter()
+            .copied()
+            .find(|id| id.hir(ctx) == ty)
+    }
+
+    fn insert_miss(ctx: &Context, interner: &TypeInterner, hash: u64, ty: HirType) -> Self {
+        let id = Self(pliron::uniqued_any::Uniqued::new(ctx, TypeKey(ty)));
+        interner
+            .0
+            .lock()
+            .expect("type interner lock")
+            .entry(hash)
+            .or_default()
+            .push(id);
+        id
+    }
+
+    pub(crate) fn intern(ctx: &Context, ty: &HirType) -> Self {
+        let interner = Self::interner(ctx);
+        let hash = hir_type_hash(ty);
+        Self::lookup(ctx, interner, hash, ty)
+            .unwrap_or_else(|| Self::insert_miss(ctx, interner, hash, ty.clone()))
+    }
+
+    pub(crate) fn from_owned(ctx: &Context, ty: HirType) -> Self {
+        let interner = Self::interner(ctx);
+        let hash = hir_type_hash(&ty);
+        if let Some(id) = Self::lookup(ctx, interner, hash, &ty) {
+            return id;
+        }
+        Self::insert_miss(ctx, interner, hash, ty)
+    }
+
+    pub(crate) fn hir(self, ctx: &Context) -> &HirType {
+        &self.0.get(ctx).0
+    }
+
+    pub(crate) fn intern_slice(ctx: &Context, types: &[HirType]) -> Vec<Self> {
+        if types.is_empty() {
+            return Vec::new();
+        }
+        let interner = Self::interner(ctx);
+        types
+            .iter()
+            .map(|ty| {
+                let hash = hir_type_hash(ty);
+                Self::lookup(ctx, interner, hash, ty)
+                    .unwrap_or_else(|| Self::insert_miss(ctx, interner, hash, ty.clone()))
+            })
+            .collect()
+    }
+}
+
+fn hash_hir_type<H: std::hash::Hasher>(ty: &HirType, state: &mut H) {
+    use std::hash::{Hash as _, Hasher as _};
+    std::mem::discriminant(ty).hash(state);
+    match ty {
+        HirType::StringLiteral(s) | HirType::Named(s) | HirType::TypeVar(s) => s.hash(state),
+        HirType::Array(inner) | HirType::Promise(inner) => hash_hir_type(inner, state),
+        HirType::Tuple(items) | HirType::Union(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_hir_type(item, state);
+            }
+        }
+        HirType::Object(obj) => {
+            obj.name.hash(state);
+            obj.property_order.hash(state);
+            obj.properties.len().hash(state);
+            let mut sum = 0u64;
+            let mut xor = 0u64;
+            for (k, v) in &obj.properties {
+                let mut entry = std::collections::hash_map::DefaultHasher::new();
+                k.hash(&mut entry);
+                v.optional.hash(&mut entry);
+                v.readonly.hash(&mut entry);
+                hash_hir_type(&v.ty, &mut entry);
+                let h = entry.finish();
+                sum = sum.wrapping_add(h);
+                xor ^= h;
+            }
+            sum.hash(state);
+            xor.hash(state);
+            obj.index_signature.is_some().hash(state);
+            if let Some(idx) = &obj.index_signature {
+                hash_hir_type(idx, state);
+            }
+        }
+        HirType::Function(f) => {
+            f.is_async.hash(state);
+            f.is_generator.hash(state);
+            f.params.len().hash(state);
+            for (name, pty, opt) in &f.params {
+                name.hash(state);
+                opt.hash(state);
+                hash_hir_type(pty, state);
+            }
+            hash_hir_type(&f.return_type, state);
+        }
+        HirType::Generic { base, type_args } => {
+            base.hash(state);
+            type_args.len().hash(state);
+            for arg in type_args {
+                hash_hir_type(arg, state);
+            }
+        }
+        HirType::Any
+        | HirType::Unknown
+        | HirType::Void
+        | HirType::Never
+        | HirType::Null
+        | HirType::Boolean
+        | HirType::Number
+        | HirType::Int32
+        | HirType::BigInt
+        | HirType::String
+        | HirType::Symbol => {}
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum ShapeKey {
     Named(String),
-    Generic(generics::DeclarationId, Vec<ArgumentId>),
-    Utility(String, Vec<ArgumentId>),
+    Generic(generics::DeclarationId, Vec<TypeId>),
+    Utility(String, Vec<TypeId>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ShapeKeyRef<'a> {
+    Named(&'a str),
+    Generic(generics::DeclarationId, &'a [TypeId]),
+    Utility(&'a str, &'a [TypeId]),
+}
+
+impl ShapeKeyRef<'_> {
+    fn to_owned(self) -> ShapeKey {
+        match self {
+            Self::Named(name) => ShapeKey::Named(name.to_owned()),
+            Self::Generic(id, args) => ShapeKey::Generic(id, args.to_vec()),
+            Self::Utility(name, args) => ShapeKey::Utility(name.to_owned(), args.to_vec()),
+        }
+    }
+}
+
+trait ShapeLookup {
+    fn as_ref(&self) -> ShapeKeyRef<'_>;
+}
+
+impl ShapeLookup for ShapeKey {
+    fn as_ref(&self) -> ShapeKeyRef<'_> {
+        match self {
+            Self::Named(name) => ShapeKeyRef::Named(name),
+            Self::Generic(id, args) => ShapeKeyRef::Generic(*id, args),
+            Self::Utility(name, args) => ShapeKeyRef::Utility(name, args),
+        }
+    }
+}
+
+impl ShapeLookup for ShapeKeyRef<'_> {
+    fn as_ref(&self) -> ShapeKeyRef<'_> {
+        *self
+    }
+}
+
+impl PartialEq for dyn ShapeLookup + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for dyn ShapeLookup + '_ {}
+
+impl std::hash::Hash for dyn ShapeLookup + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
+    }
+}
+
+impl<'a> std::borrow::Borrow<dyn ShapeLookup + 'a> for ShapeKey {
+    fn borrow(&self) -> &(dyn ShapeLookup + 'a) {
+        self
+    }
 }
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
@@ -87,7 +309,7 @@ pub(super) struct Shapes<'h> {
     pub(super) classes: HashMap<&'h str, (usize, &'h perry_hir::ir::Class)>,
     pub(super) static_fields:
         HashMap<(&'h str, &'h str), (perry_hir::types::LocalId, &'h perry_hir::ir::ClassField)>,
-    pub(super) class_records: RefCell<HashMap<TypeHandle, (String, Vec<ArgumentId>)>>,
+    pub(super) class_records: RefCell<HashMap<TypeHandle, (String, Vec<TypeId>)>>,
     object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
     function_names: HashSet<&'h str>,
     local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
@@ -146,7 +368,7 @@ impl<'h> Shapes<'h> {
                     continue;
                 };
                 if import.source == "perry:types"
-                    && let Some(spec) = Self::perry_integer_spec(imported)
+                    && let Some(spec) = perry_integer_spec(imported)
                 {
                     integer_imports.insert(local.as_str(), spec);
                     continue;
@@ -352,11 +574,12 @@ impl<'h> Shapes<'h> {
         &self,
         ctx: &Context,
         ty: TypeHandle,
-    ) -> Option<(&'h str, Vec<ArgumentId>)> {
+    ) -> Option<(&'h str, Vec<TypeId>)> {
         let inner = crate::present_type(ctx, ty);
-        let (name, args) = self.class_records.borrow().get(&inner)?.clone();
+        let borrow = self.class_records.borrow();
+        let (name, args) = borrow.get(&inner)?;
         let (&class_name, _) = self.classes.get_key_value(name.as_str())?;
-        Some((class_name, args))
+        Some((class_name, args.clone()))
     }
 
     pub(super) fn static_field(
@@ -367,15 +590,22 @@ impl<'h> Shapes<'h> {
         self.static_fields.get(&(class_name, field_name)).copied()
     }
 
+    fn class_member(
+        &self,
+        class_name: &str,
+        find: impl FnOnce(&'h perry_hir::ir::Class) -> Option<&'h perry_hir::ir::Function>,
+    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        Some((owner_name, find(class)?))
+    }
+
     pub(super) fn class_method(
         &self,
         class_name: &str,
         method_name: &str,
     ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
         let norm = crate::hir_compat::method(method_name).name();
-        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
-        let func = class.methods.iter().find(|m| m.name == norm)?;
-        Some((owner_name, func))
+        self.class_member(class_name, |c| c.methods.iter().find(|m| m.name == norm))
     }
 
     pub(super) fn class_static_method(
@@ -384,9 +614,9 @@ impl<'h> Shapes<'h> {
         method_name: &str,
     ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
         let norm = crate::hir_compat::method(method_name).name();
-        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
-        let func = class.static_methods.iter().find(|m| m.name == norm)?;
-        Some((owner_name, func))
+        self.class_member(class_name, |c| {
+            c.static_methods.iter().find(|m| m.name == norm)
+        })
     }
 
     pub(super) fn class_getter(
@@ -394,9 +624,12 @@ impl<'h> Shapes<'h> {
         class_name: &str,
         prop_name: &str,
     ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
-        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
-        let (_, func) = class.getters.iter().find(|(n, _)| n == prop_name)?;
-        Some((owner_name, func))
+        self.class_member(class_name, |c| {
+            c.getters
+                .iter()
+                .find(|(n, _)| n == prop_name)
+                .map(|(_, f)| f)
+        })
     }
 
     pub(super) fn class_setter(
@@ -404,14 +637,17 @@ impl<'h> Shapes<'h> {
         class_name: &str,
         prop_name: &str,
     ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
-        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
-        let (_, func) = class.setters.iter().find(|(n, _)| n == prop_name)?;
-        Some((owner_name, func))
+        self.class_member(class_name, |c| {
+            c.setters
+                .iter()
+                .find(|(n, _)| n == prop_name)
+                .map(|(_, f)| f)
+        })
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        let key = ShapeKey::Named(name.to_owned());
-        if let Some(ty) = self.named.borrow().get(&key) {
+        let key = ShapeKeyRef::Named(name);
+        if let Some(ty) = self.named.borrow().get(&key as &dyn ShapeLookup) {
             return Ok(*ty);
         }
         let ty = self
@@ -419,7 +655,7 @@ impl<'h> Shapes<'h> {
             .map_err(|error| self.metadata.locations.annotate_type(error, name))?;
         // A re-entrant reference returns the opaque record; only the outermost call caches.
         if self.pending.borrow().is_empty() {
-            self.named.borrow_mut().insert(key, ty);
+            self.named.borrow_mut().insert(key.to_owned(), ty);
         }
         Ok(ty)
     }
@@ -427,23 +663,15 @@ impl<'h> Shapes<'h> {
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
         if let Some((width, _)) = name
             .strip_prefix("perry:types/")
-            .and_then(Self::perry_integer_spec)
+            .and_then(perry_integer_spec)
         {
-            return Ok(if width == 64 {
-                perry_mir::BigIntType::get(ctx).into()
-            } else {
-                FP64Type::get(ctx).into()
-            });
+            return Ok(integer_mir_carrier(ctx, width));
         }
         // Built-in classes the subset models (a user type or explicit import takes precedence).
         let user = self.is_user_type(name);
         if !user {
             if let Some(&(width, _)) = self.integer_imports.get(name) {
-                return Ok(if width == 64 {
-                    perry_mir::BigIntType::get(ctx).into()
-                } else {
-                    FP64Type::get(ctx).into()
-                });
+                return Ok(integer_mir_carrier(ctx, width));
             }
             if let Some(entry) = self.imported_types.get(name) {
                 return self.foreign_value_type(ctx, entry);
@@ -465,8 +693,8 @@ impl<'h> Shapes<'h> {
     fn source_record(
         &self,
         ctx: &Context,
-        named: Option<&ShapeKey>,
-        fields: Vec<(&str, ArgumentId, bool)>,
+        named: Option<ShapeKeyRef<'_>>,
+        fields: Vec<(&str, &HirType, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         self.source_record_prefix(ctx, named, None, fields)
     }
@@ -474,13 +702,13 @@ impl<'h> Shapes<'h> {
     fn source_record_prefix(
         &self,
         ctx: &Context,
-        named: Option<&ShapeKey>,
+        named: Option<ShapeKeyRef<'_>>,
         prefix: Option<&str>,
-        mut fields: Vec<(&str, ArgumentId, bool)>,
+        mut fields: Vec<(&str, &HirType, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
         if let Some(named) = named {
-            let reentry = self.pending.borrow().get(named).cloned();
+            let reentry = self.pending.borrow().get(&named as &dyn ShapeLookup).cloned();
             match reentry {
                 Some(PendingShape::Recursive(reserved)) => {
                     return RecordType::get(ctx, identifier(&reserved)?, None)
@@ -493,14 +721,14 @@ impl<'h> Shapes<'h> {
                     let reserved = format!("{base}_rec{}", *count);
                     self.pending
                         .borrow_mut()
-                        .insert(named.clone(), PendingShape::Recursive(reserved.clone()));
+                        .insert(named.to_owned(), PendingShape::Recursive(reserved.clone()));
                     return RecordType::get(ctx, identifier(&reserved)?, None)
                         .map_err(|e| anyhow!("{}", e.disp(ctx)));
                 }
                 None => {
                     self.pending
                         .borrow_mut()
-                        .insert(named.clone(), PendingShape::Resolving);
+                        .insert(named.to_owned(), PendingShape::Resolving);
                 }
             }
         }
@@ -508,12 +736,12 @@ impl<'h> Shapes<'h> {
             .iter()
             .map(|(field, ty, optional)| {
                 let ty = if !*optional
-                    && let Some(int_ty) = self.source_integer_type(ctx, *ty)
+                    && let Some(int_ty) = self.integer_type(ctx, ty)
                     && int_ty.deref(ctx).width() == 64
                 {
                     int_ty.into()
                 } else {
-                    self.source_type(ctx, *ty)
+                    self.value_type(ctx, ty)
                         .with_context(|| format!("field {field}"))?
                 };
                 let ty = if *optional {
@@ -524,9 +752,11 @@ impl<'h> Shapes<'h> {
                 Ok((field.to_string(), ty))
             })
             .collect::<Result<Vec<_>>>();
-        let reserved = named.and_then(|named| match self.pending.borrow_mut().remove(named) {
-            Some(PendingShape::Recursive(name)) => Some(name),
-            _ => None,
+        let reserved = named.and_then(|named| {
+            match self.pending.borrow_mut().remove(&named as &dyn ShapeLookup) {
+                Some(PendingShape::Recursive(name)) => Some(name),
+                _ => None,
+            }
         });
         let typed = typed?;
         match reserved {
@@ -599,5 +829,65 @@ impl<'h> Shapes<'h> {
         self.object_literal_shapes
             .get(class_name)
             .map(Vec::as_slice)
+    }
+}
+
+pub(crate) trait HirTypeExt {
+    fn any(&self, f: &mut impl FnMut(&HirType) -> bool) -> bool;
+    fn transform(&mut self, f: &mut impl FnMut(&mut HirType));
+}
+
+impl HirTypeExt for HirType {
+    fn any(&self, f: &mut impl FnMut(&HirType) -> bool) -> bool {
+        if f(self) {
+            return true;
+        }
+        match self {
+            HirType::Array(inner) | HirType::Promise(inner) => inner.any(f),
+            HirType::Tuple(elements) | HirType::Union(elements) => {
+                elements.iter().any(|item| item.any(f))
+            }
+            HirType::Generic { type_args, .. } => type_args.iter().any(|arg| arg.any(f)),
+            HirType::Object(obj) => {
+                obj.properties.values().any(|p| p.ty.any(f))
+                    || obj.index_signature.as_ref().is_some_and(|idx| idx.any(f))
+            }
+            HirType::Function(func) => {
+                func.params.iter().any(|(_, ty, _)| ty.any(f)) || func.return_type.any(f)
+            }
+            _ => false,
+        }
+    }
+
+    fn transform(&mut self, f: &mut impl FnMut(&mut HirType)) {
+        match self {
+            HirType::Array(inner) | HirType::Promise(inner) => inner.transform(f),
+            HirType::Tuple(elements) | HirType::Union(elements) => {
+                for item in elements {
+                    item.transform(f);
+                }
+            }
+            HirType::Generic { type_args, .. } => {
+                for arg in type_args {
+                    arg.transform(f);
+                }
+            }
+            HirType::Object(obj) => {
+                for p in obj.properties.values_mut() {
+                    p.ty.transform(f);
+                }
+                if let Some(idx) = &mut obj.index_signature {
+                    idx.transform(f);
+                }
+            }
+            HirType::Function(func) => {
+                for (_, ty, _) in &mut func.params {
+                    ty.transform(f);
+                }
+                func.return_type.transform(f);
+            }
+            _ => {}
+        }
+        f(self);
     }
 }

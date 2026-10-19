@@ -27,12 +27,7 @@ pub(crate) fn export(
     {
         return async_export(ctx, state, function, export, task_return, *command);
     }
-    let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -142,12 +137,10 @@ pub(crate) fn export(
                 BoundaryValue::Completion { case: 1, payload },
                 flat_result_len != 1,
             )?;
-            let ret = ReturnOp::new(ctx, returned).get_operation();
-            b.insert(ctx, ret);
+            b.ret(ctx, returned);
         } else {
             b.task_free(ctx);
-            let unreachable = UnreachableOp::new(ctx).get_operation();
-            b.insert(ctx, unreachable);
+            b.trap(ctx);
         }
         b.block = normal;
     }
@@ -178,8 +171,7 @@ pub(crate) fn export(
     };
     b.commit_resources(ctx);
     b.finish_resources(ctx);
-    let ret = ReturnOp::new(ctx, returned).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, returned);
     let state = b.state;
     crate::module::append_export(ctx, state, &glue, lowered, &export.core_name);
 
@@ -193,8 +185,7 @@ pub(crate) fn export(
     set_export(ctx, &post, &post_name);
     let mut b = FunctionLowering::glue(state, ctx, &post);
     b.task_free(ctx);
-    let ret = ReturnOp::new(ctx, vec![]).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, vec![]);
     b.state.wasm.append_operation(ctx, post.get_operation(), 0);
     Ok(())
 }
@@ -213,12 +204,7 @@ fn async_export(
     (module, wit_name): &(String, String),
     command: bool,
 ) -> Result<()> {
-    let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     let completion = export
         .result
         .as_ref()
@@ -282,8 +268,7 @@ fn async_export(
         let shifted = b.num(ctx, NumOpcode::I32Shl, vec![set, four]);
         let wait_code = b.i32_const(ctx, WAIT);
         let code = b.num(ctx, NumOpcode::I32Or, vec![shifted, wait_code]);
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
 
         // Settled: a rejection without a WIT error type traps (a command reports it and
         // fails); otherwise return the value once the output reached the host.
@@ -397,8 +382,7 @@ fn async_export(
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.task_free(ctx);
                 let exit = b.i32_const(ctx, EXIT);
-                let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-                b.insert(ctx, ret);
+                b.ret(ctx, vec![exit]);
             } else {
                 if uses_io || b.state.reports_rejection {
                     b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
@@ -411,8 +395,7 @@ fn async_export(
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.return_resources(ctx);
                 b.task_free(ctx);
-                let unreachable = UnreachableOp::new(ctx).get_operation();
-                b.insert(ctx, unreachable);
+                b.trap(ctx);
             }
             b.block = fulfilled;
             None
@@ -472,8 +455,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
         b.task_free(ctx);
         let exit = b.i32_const(ctx, EXIT);
-        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![exit]);
         b.state
             .wasm
             .append_operation(ctx, finish.get_operation(), 0);
@@ -515,8 +497,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
         let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
         b.state.wasm.append_operation(ctx, lift.get_operation(), 0);
     }
 
@@ -544,8 +525,7 @@ fn async_export(
         b.abort_task(ctx)?;
         b.host_void(ctx, EffectHost::TaskCancel, vec![]);
         let exit = b.i32_const(ctx, EXIT);
-        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![exit]);
         b.block = active;
         let next = b.new_block(ctx, vec![]);
         let completion = b.runtime(ctx, Runtime::PromiseEvent, vec![event, handle]);
@@ -561,41 +541,18 @@ fn async_export(
         b.insert(ctx, call.get_operation());
         b.br(ctx, observe, vec![]);
         b.block = host_event;
-        if b.state.uses_streams {
-            // Reads of `stream<u8>`s take their stream events.
-            let handled = b.runtime(ctx, Runtime::WebEvent, vec![event, handle, subtask_state]);
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_http_server {
-            // The served exchange takes its stream and future events.
-            let handled = b.runtime(
-                ctx,
-                Runtime::WebServeEvent,
-                vec![event, handle, subtask_state],
-            );
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_fetch {
-            // Fetches take their subtask, stream and future events.
-            let handled = b.runtime(
-                ctx,
-                Runtime::WebFetchEvent,
-                vec![event, handle, subtask_state],
-            );
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_fs {
-            // `node:fs` operations take their own subtask, stream and future events.
-            let handled = b.runtime(ctx, Runtime::FsEvent, vec![event, handle, subtask_state]);
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
+        for (used, handler) in [
+            (b.state.uses_streams, Runtime::WebEvent),
+            (b.state.uses_http_server, Runtime::WebServeEvent),
+            (b.state.uses_fetch, Runtime::WebFetchEvent),
+            (b.state.uses_fs, Runtime::FsEvent),
+        ] {
+            if used {
+                let handled = b.runtime(ctx, handler, vec![event, handle, subtask_state]);
+                let unhandled = b.new_block(ctx, vec![]);
+                b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+                b.block = unhandled;
+            }
         }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
@@ -618,8 +575,7 @@ fn async_export(
         }
         let call = CallOp::new(ctx, finish_name, vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
         b.state
             .wasm
             .append_operation(ctx, callback.get_operation(), 0);

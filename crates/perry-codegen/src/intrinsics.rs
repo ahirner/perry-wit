@@ -144,29 +144,9 @@ impl FunctionLowering<'_, '_> {
                 let x = args[0];
                 Some(self.num(ctx, NumOpcode::F64Ne, vec![x, x]))
             }
-            Intrinsic::NumberIsFinite => {
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![args[0]]);
-                let inf = self.f64_const(ctx, f64::INFINITY);
-                Some(self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]))
-            }
-            Intrinsic::NumberIsInteger => {
-                let x = args[0];
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
-                let inf = self.f64_const(ctx, f64::INFINITY);
-                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
-                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
-                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
-                Some(self.num(ctx, NumOpcode::I32And, vec![finite, integral]))
-            }
-            Intrinsic::NumberIsSafeInteger => {
-                let x = args[0];
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
-                let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
-                let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
-                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
-                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
-                Some(self.num(ctx, NumOpcode::I32And, vec![in_range, integral]))
-            }
+            Intrinsic::NumberIsFinite => Some(self.f64_is_finite(ctx, args[0])),
+            Intrinsic::NumberIsInteger => Some(self.f64_is_integer(ctx, args[0], false)),
+            Intrinsic::NumberIsSafeInteger => Some(self.f64_is_integer(ctx, args[0], true)),
             Intrinsic::DateFromTime
             | Intrinsic::DateTime
             | Intrinsic::DateParse
@@ -504,28 +484,16 @@ impl FunctionLowering<'_, '_> {
             }
             NumberPredicate::Finite => {
                 let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
-                let inf = self.f64_const(ctx, f64::INFINITY);
-                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
+                let finite = self.f64_is_finite(ctx, f);
                 self.num(ctx, NumOpcode::I32Or, vec![not_float, finite])
             }
             NumberPredicate::Integer => {
                 let not_float = self.num(ctx, NumOpcode::I32Ne, vec![tag, float_tag]);
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
-                let inf = self.f64_const(ctx, f64::INFINITY);
-                let finite = self.num(ctx, NumOpcode::F64Lt, vec![abs, inf]);
-                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
-                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
-                let float_int = self.num(ctx, NumOpcode::I32And, vec![finite, integral]);
+                let float_int = self.f64_is_integer(ctx, f, false);
                 self.num(ctx, NumOpcode::I32Or, vec![not_float, float_int])
             }
             NumberPredicate::SafeInteger => {
-                let abs = self.num(ctx, NumOpcode::F64Abs, vec![f]);
-                let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
-                let in_range = self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe]);
-                let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![f]);
-                let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, f]);
-                let float_safe = self.num(ctx, NumOpcode::I32And, vec![in_range, integral]);
+                let float_safe = self.f64_is_integer(ctx, f, true);
                 let min_i64 = self.i64_const(ctx, (-9_007_199_254_740_991i64) as u64);
                 let max_i64 = self.i64_const(ctx, 9_007_199_254_740_991);
                 let ge_min = self.num(ctx, NumOpcode::I64GeS, vec![payload, min_i64]);
@@ -539,6 +507,25 @@ impl FunctionLowering<'_, '_> {
                 self.select(ctx, is_float, float_safe, int_safe)
             }
         })
+    }
+
+    fn f64_is_finite(&mut self, ctx: &mut Context, x: Value) -> Value {
+        let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+        let inf = self.f64_const(ctx, f64::INFINITY);
+        self.num(ctx, NumOpcode::F64Lt, vec![abs, inf])
+    }
+
+    fn f64_is_integer(&mut self, ctx: &mut Context, x: Value, safe: bool) -> Value {
+        let in_range = if safe {
+            let abs = self.num(ctx, NumOpcode::F64Abs, vec![x]);
+            let max_safe = self.f64_const(ctx, 9_007_199_254_740_991.0);
+            self.num(ctx, NumOpcode::F64Le, vec![abs, max_safe])
+        } else {
+            self.f64_is_finite(ctx, x)
+        };
+        let trunc = self.num(ctx, NumOpcode::F64Trunc, vec![x]);
+        let integral = self.num(ctx, NumOpcode::F64Eq, vec![trunc, x]);
+        self.num(ctx, NumOpcode::I32And, vec![in_range, integral])
     }
 }
 

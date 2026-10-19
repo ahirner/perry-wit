@@ -7,7 +7,6 @@ use swc_ecma_visit::VisitMutWith;
 mod calls;
 mod constructors;
 pub(crate) use calls::{RuntimeCall, runtime_call};
-mod decoder;
 mod defaults;
 pub(super) use defaults::strip_synthetic_default_guards;
 pub(crate) mod locations;
@@ -36,14 +35,13 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
     locations.collect(&ast);
-    source::validate(&ast, &locations)?;
-    let spans = source::inferred_bindings(&ast);
+    let spans = source::validate(&ast, &locations)?;
     let mut constructors = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
-        decoder::preserve_options(&mut ast, unresolved)?;
+        streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, anyhow::Error>(constructors)
     })?;
     streams::lower(&mut ast)?;

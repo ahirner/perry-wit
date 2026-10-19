@@ -350,7 +350,7 @@ export function encode(text: string): Payload { return { text, parts: [text, "é
     Ok(())
 }
 
-/// A WIT record value from `(field, value)` pairs.
+/// A WIT record value from `(field, value)` pairs, and repeated calls on one instance release their memory.
 #[test]
 fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
     let mut component = Instance::new()?;
@@ -388,13 +388,6 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
         (&[vec![1.0, 2.0], vec![], vec![-3.0]][..],),
         &vec![3.0, 0.0, -3.0],
     )?;
-    Ok(())
-}
-
-/// Every call is one task: repeated calls on one instance release their memory.
-#[test]
-fn repeated_calls_do_not_grow_memory() -> Result<()> {
-    let mut component = Instance::new()?;
     let numbers: Vec<_> = (0..20_000).map(f64::from).collect();
     for _ in 0..3 {
         component.call::<_, Summary>("describe", ("warm", &numbers))?;
@@ -836,23 +829,12 @@ export function truncation(value: bigint): string {
 
 #[test]
 fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
-    for (name, ty, expression) in [
-        ("unsigned", "u64", "value + 1n"),
-        ("signed", "s64", "value - 1n"),
-    ] {
-        let mut instance = Instance::compile(
-            &format!(
-                "package test:bigint-overflow; world boundary {{ export {name}: func(value: {ty}) -> {ty}; }}"
-            ),
-            &format!("export function {name}(value: bigint): bigint {{ return {expression}; }}"),
-        )?;
-        let failed = if name == "unsigned" {
-            instance.call::<_, u64>(name, (u64::MAX,)).is_err()
-        } else {
-            instance.call::<_, i64>(name, (i64::MIN,)).is_err()
-        };
-        assert!(failed, "{name} silently truncated an out-of-range bigint");
-    }
+    let mut instance = Instance::compile(
+        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; }",
+        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; }",
+    )?;
+    assert!(instance.call::<_, u64>("unsigned", (u64::MAX,)).is_err());
+    assert!(instance.call::<_, i64>("signed", (i64::MIN,)).is_err());
     Ok(())
 }
 
@@ -940,5 +922,36 @@ export function stringify(value:Page<number>):string {return JSON.stringify(valu
         (&page,),
         &Ok::<_, ()>("{\"data\":[1,2],\"next\":null}".to_owned()),
     )?;
+    Ok(())
+}
+
+#[test]
+fn static_modules_resolve_aliases_namespaces_and_reexports() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("left.ts"),
+        "export function value(x: number): number { const values = new Map<string, number>(); values.set('x', x); return values.get('x') + 1; }",
+    )?;
+    std::fs::write(
+        directory.path().join("right.ts"),
+        "export function value(x: number): number { const values = new Set<number>([x]); return values.size * x * 2; }",
+    )?;
+    let entry = directory.path().join("main.ts");
+    let entry = entry.to_string_lossy();
+    let source = "import { value as left } from './left'; import * as right from './right.js'; \
+                  export function run(x: number): number { return right.value(left(x)); } \
+                  export { value as reexported } from './left.js';";
+    let mut program =
+        crate::core_program::Program::from_wasm(perry_wit::compile_core(source, &entry)?);
+    for marker in ["perry_constructor:", "$$perry", "arrayRecord"] {
+        assert!(
+            !program
+                .wasm
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+        );
+    }
+    assert_eq!(program.number("run", 5.0), 12.0);
+    assert_eq!(program.number("reexported", 5.0), 6.0);
     Ok(())
 }

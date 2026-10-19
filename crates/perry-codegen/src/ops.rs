@@ -28,7 +28,6 @@ use pliron::{
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::ReturnOp,
     ops::CallOp,
 };
 
@@ -287,8 +286,7 @@ impl FunctionLowering<'_, '_> {
                 values.push(self.i32_const(ctx, 0));
             }
             self.leave_roots(ctx);
-            let ret = ReturnOp::new(ctx, values).get_operation();
-            self.insert(ctx, ret);
+            self.ret(ctx, values);
             return Ok(());
         }
         if let Some(call) = Operation::get_op::<perry_mir::ForeignOp>(op, ctx) {

@@ -301,19 +301,13 @@ builtin.module @atomic {
         assert!(error.contains(operation), "{error}");
         assert!(analyses.try_get_analysis::<ProgramFacts>(module).is_none());
     }
-}
-
-#[test]
-fn atomic_construction_rejects_async_function_scope() {
     let ctx = &mut Context::new();
     let module = parse(ctx, ASYNC_STEP);
     let step = function(ctx, module, "step");
     set_async(ctx, &step);
     set_atomic_construction(ctx, &step);
-    let mut analyses = AnalysisManager::default();
-    let error = match analyses.get_analysis::<ProgramFacts>(module, ctx) {
-        Ok(_) => panic!("accepted an asynchronous construction scope"),
-        Err(error) => error.disp(ctx).to_string(),
+    let Err(error) = AnalysisManager::default().get_analysis::<ProgramFacts>(module, ctx) else {
+        panic!("accepted an asynchronous construction scope");
     };
-    assert!(error.contains("async function"), "{error}");
+    assert!(error.disp(ctx).to_string().contains("async function"));
 }

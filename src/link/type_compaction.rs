@@ -141,13 +141,12 @@ mod tests {
         )?;
         let compact = compact(&core)?;
         assert!(compact.len() < core.len());
-        let count = Parser::new(0)
-            .parse_all(&compact)
-            .filter_map(|p| match p.unwrap() {
-                Payload::TypeSection(s) => Some(s.count()),
-                _ => None,
-            })
-            .sum::<u32>();
+        let mut count = 0;
+        for payload in Parser::new(0).parse_all(&compact) {
+            if let Payload::TypeSection(s) = payload? {
+                count += s.count();
+            }
+        }
         assert_eq!(count, 2);
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, compact)?;

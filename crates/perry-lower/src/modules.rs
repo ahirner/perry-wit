@@ -305,26 +305,25 @@ impl Graph<'_> {
         let index = self.next;
         self.next += 1;
         module.visit_mut_with(&mut resolver(Mark::new(), Mark::new(), true));
-        let imports = module.body.iter().filter_map(|item| match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import))
-                if local(&import.src.value.to_string_lossy()) =>
-            {
-                Some(import.src.as_ref())
-            }
-            _ => None,
-        });
-        let reexports = module.body.iter().filter_map(|item| match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export)) => {
-                export.src.as_deref()
-            }
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportAll(export)) => {
-                Some(export.src.as_ref())
-            }
-            _ => None,
-        });
         let mut dependencies = HashMap::new();
-        for source in imports.chain(reexports) {
-            dependencies.insert(&source.value, self.dependency(path, source)?);
+        for item in &module.body {
+            let source = match item {
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import))
+                    if local(&import.src.value.to_string_lossy()) =>
+                {
+                    Some(import.src.as_ref())
+                }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export)) => {
+                    export.src.as_deref()
+                }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportAll(export)) => {
+                    Some(export.src.as_ref())
+                }
+                _ => None,
+            };
+            if let Some(source) = source {
+                dependencies.insert(&source.value, self.dependency(path, source)?);
+            }
         }
         let (mut renamer, exports) = bind_module(&module, index, |source| {
             &self.loaded[&dependencies[&source.value]]
@@ -387,58 +386,65 @@ fn bind_module<'a>(
     let mut namespaces = HashMap::new();
     let mut exports = Exports::new();
     for item in &module.body {
-        let declaration = match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => Some(&export.decl),
-            ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => Some(decl),
-            _ => None,
-        };
-        if let Some(decl) = declaration {
-            for id in declared(decl)? {
-                ensure!(
-                    !id.sym.starts_with("__perry_"),
-                    "Reserved compiler name in source"
-                );
-                names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                for id in declared(&export.decl)? {
+                    ensure!(
+                        !id.sym.starts_with("__perry_"),
+                        "Reserved compiler name in source"
+                    );
+                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+                }
             }
-        }
-    }
-    for item in &module.body {
-        if let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item {
-            if local(&import.src.value.to_string_lossy()) {
-                let dependency = dependency_exports(&import.src);
-                for specifier in &import.specifiers {
-                    match specifier {
-                        ast::ImportSpecifier::Named(named) => {
-                            let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
-                            let original: &str = imported.as_deref().unwrap_or(&named.local.sym);
-                            names.insert(
-                                named.local.to_id(),
-                                dependency
-                                    .get(original)
-                                    .with_context(|| {
-                                        format!(
-                                            "Module '{}' has no export '{original}'",
-                                            import.src.value.to_string_lossy()
-                                        )
-                                    })?
-                                    .clone(),
-                            );
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
+                for id in declared(decl)? {
+                    ensure!(
+                        !id.sym.starts_with("__perry_"),
+                        "Reserved compiler name in source"
+                    );
+                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+                }
+            }
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
+                if local(&import.src.value.to_string_lossy()) {
+                    let dependency = dependency_exports(&import.src);
+                    for specifier in &import.specifiers {
+                        match specifier {
+                            ast::ImportSpecifier::Named(named) => {
+                                let imported =
+                                    named.imported.as_ref().map(ast::ModuleExportName::atom);
+                                let original: &str =
+                                    imported.as_deref().unwrap_or(&named.local.sym);
+                                names.insert(
+                                    named.local.to_id(),
+                                    dependency
+                                        .get(original)
+                                        .with_context(|| {
+                                            format!(
+                                                "Module '{}' has no export '{original}'",
+                                                import.src.value.to_string_lossy()
+                                            )
+                                        })?
+                                        .clone(),
+                                );
+                            }
+                            ast::ImportSpecifier::Namespace(namespace) => {
+                                namespaces.insert(namespace.local.to_id(), dependency);
+                            }
+                            _ => bail!("Local modules require named imports"),
                         }
-                        ast::ImportSpecifier::Namespace(namespace) => {
-                            namespaces.insert(namespace.local.to_id(), dependency);
-                        }
-                        _ => bail!("Local modules require named imports"),
+                    }
+                } else {
+                    for specifier in &import.specifiers {
+                        let binding = specifier.local();
+                        names.insert(
+                            binding.to_id(),
+                            format!("__perry_module_{index}_{}", binding.sym),
+                        );
                     }
                 }
-            } else {
-                for specifier in &import.specifiers {
-                    let binding = specifier.local();
-                    names.insert(
-                        binding.to_id(),
-                        format!("__perry_module_{index}_{}", binding.sym),
-                    );
-                }
             }
+            _ => {}
         }
     }
     for item in &module.body {

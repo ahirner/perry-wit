@@ -534,41 +534,53 @@ impl Solver {
         &self,
         ctx: &Context,
         id: usize,
-        inputs: impl Iterator<Item = Value> + Clone,
+        inputs: impl Iterator<Item = Value>,
         result: Value,
     ) -> Fact {
-        let state = &self.analysis.states[id];
-        let facts = || inputs.clone().map(|value| state.fact(value));
         if let Some(integer) = Integer::from_type(ctx, result.get_type(ctx)) {
             return Fact::Integer(integer);
         }
-        if facts().any(|fact| fact == Fact::Bottom) {
-            return Fact::Bottom;
+        let state = &self.analysis.states[id];
+        let (mut has_numeric, mut has_original, mut has_64bit, mut all_literal, mut negative) =
+            (false, false, false, true, false);
+        let mut common_int: Option<Integer> = None;
+        for v in inputs {
+            let fact = state.fact(v);
+            negative |= matches!(fact, Fact::Literal { negative: true })
+                || matches!(state.range(v), Range::Bounds(i) if i.lower < 0);
+            match fact {
+                Fact::Bottom => return Fact::Bottom,
+                Fact::Numeric => {
+                    has_numeric = true;
+                    all_literal = false;
+                }
+                Fact::Original => {
+                    has_original = true;
+                    all_literal = false;
+                }
+                Fact::Integer(int) => {
+                    has_64bit |= int.bits == 64;
+                    all_literal = false;
+                    common_int = Some(common_int.map_or(int, |acc| acc.common(int)));
+                }
+                Fact::Literal { .. } => {}
+            }
         }
-        let required = state.required.get(&result).copied();
-        if self.analysis.keys[id].specialize
-            && (facts().any(|fact| fact == Fact::Numeric)
-                || (facts().any(|fact| fact == Fact::Original)
-                    && facts().any(|fact| fact.integer().is_some_and(|int| int.bits == 64))))
-        {
+        let specialize = self.analysis.keys[id].specialize;
+        if specialize && (has_numeric || (has_original && has_64bit)) {
             return Fact::Numeric;
         }
-        if facts().any(|fact| fact == Fact::Original) {
+        if has_original {
             return Fact::Original;
         }
-        let negative = inputs.clone().any(|v| {
-            matches!(state.fact(v), Fact::Literal { negative: true })
-                || matches!(state.range(v), Range::Bounds(i) if i.lower < 0)
-        });
-        if !self.analysis.keys[id].specialize {
-            return if facts().all(|fact| matches!(fact, Fact::Literal { .. })) {
+        if !specialize {
+            return if all_literal {
                 Fact::Literal { negative }
             } else {
                 Fact::Original
             };
         }
-        let input = facts().filter_map(Fact::integer).reduce(Integer::common);
-        match (input, required) {
+        match (common_int, state.required.get(&result).copied()) {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
             (Some(input), None) => Fact::Integer(input),
             (None, Some(required)) => Fact::Integer(required),

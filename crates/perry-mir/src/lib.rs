@@ -54,7 +54,7 @@ use pliron::{
 use std::{collections::HashSet, hash::Hash};
 
 /// A tuple of op types, so one [is_any] replaces a chain of `get_op` tests.
-trait OpSet {
+pub trait OpSet {
     fn contains(ctx: &Context, op: Ptr<Operation>) -> bool;
 }
 
@@ -74,7 +74,7 @@ macro_rules! op_sets {
 op_sets!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 /// Whether `op` is an instance of any op type in the tuple `S`.
-fn is_any<S: OpSet>(ctx: &Context, op: Ptr<Operation>) -> bool {
+pub fn is_any<S: OpSet>(ctx: &Context, op: Ptr<Operation>) -> bool {
     S::contains(ctx, op)
 }
 
@@ -97,10 +97,10 @@ where
     seen
 }
 
+pub use aggregates::{functions, operations};
 pub use attrs::{Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, NumericConstant, Tier};
 pub use calls::{
-    AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async,
-    set_atomic_construction, set_exported,
+    AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async, set_exported,
 };
 pub use collections::{
     ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
@@ -115,8 +115,7 @@ pub use exceptions::{
     set_exit_only,
 };
 pub use facts::{
-    ProgramFacts, constrain_signature, specialized_implementation, verify_lossless_module,
-    verify_lossless_operations, wit_signature, with_fact_limits,
+    ProgramFacts, constrain_signature, specialized_implementation, wit_signature, with_fact_limits,
 };
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
@@ -138,13 +137,6 @@ pub use optional::{
 pub use pipeline::{canonicalize, optimization_statistics};
 pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
-pub use types::{
-    AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
-    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType,
-    JsonTraversalType, JsonType, NumberStringType, NumericType, OptionalType, PlainDateTimeType,
-    PlainDateType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordKind, RecordType,
-    RegexType, RequestType, ResourceType, ResponseType, SearchParamsType, SettledType, SlotType,
-    StatsType, StringType, TransferType, UrlType, ValueKind, VariantType, WritableType, WriterType,
-};
+pub use types::*;
 pub use variants::{VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, variant_cases};
 pub use views::{AggregateViewOp, can_widen};

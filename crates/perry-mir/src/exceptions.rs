@@ -48,18 +48,10 @@ op_schema! {
     format = "attr($perry_error_kind, $ErrorKind) ` ` $0";
     attributes = (perry_error_kind: ErrorKind);
     constructors { pub new(kind: ErrorKind, message: Value) => infer(); }
-    initialize(op) {
-        op.set_attr_perry_error_kind(ctx, kind);
-    }
+    attribute(kind: ErrorKind, get_attr_perry_error_kind, set_attr_perry_error_kind) = kind;
     result(ctx): Ty = Ty::Exception;
     error = ExceptionErr::Result("perry.error_new");
     check_before Ty::String.matches(ctx, message.get_type(ctx)) => ExceptionErr::Message;
-}
-
-impl ErrorNewOp {
-    pub fn kind(&self, ctx: &Context) -> ErrorKind {
-        *self.get_attr_perry_error_kind(ctx).expect("error kind")
-    }
 }
 
 op_schema! {
@@ -133,19 +125,11 @@ op_schema! {
     format = "attr($perry_instance_kind, $ErrorKind) ` ` $0";
     attributes = (perry_instance_kind: ErrorKind);
     constructors { pub new(kind: ErrorKind, exception: Value) => infer(); }
-    initialize(op) {
-        op.set_attr_perry_instance_kind(ctx, kind);
-    }
+    attribute(kind: ErrorKind, get_attr_perry_instance_kind, set_attr_perry_instance_kind) = kind;
     result(ctx): Ty = Ty::Predicate;
     error = ExceptionErr::Result("perry.exception_is");
     check_before Ty::Exception.matches(ctx, exception.get_type(ctx))
         => ExceptionErr::Exception("perry.exception_is");
-}
-
-impl ExceptionIsOp {
-    pub fn kind(&self, ctx: &Context) -> ErrorKind {
-        *self.get_attr_perry_instance_kind(ctx).expect("error kind")
-    }
 }
 
 op_schema! {

@@ -21,28 +21,25 @@ use crate::{
     runtime::Runtime,
     values::{self, Carriers},
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use perry_abi::layout::promise as promises;
 use perry_mir::AwaitOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        type_interfaces::FunctionTypeInterface,
         types::{FP64Type, FunctionType, IntegerType},
     },
     context::{Context, Ptr},
     identifier::Identifier,
-    linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
-    r#type::{Typed, TypedHandle},
+    r#type::Typed,
     value::Value,
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::{ReturnOp, UnreachableOp},
     ops::CallOp,
 };
 use std::collections::{HashMap, HashSet};
@@ -73,27 +70,23 @@ fn live_across_awaits(
     liveness: &perry_mir::LiveValues,
 ) -> Vec<Value> {
     let order = crate::analysis::value_order(ctx, function);
-    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
     let mut across: Vec<Value> = Vec::new();
     let mut seen = HashSet::new();
-    for &block in &blocks {
-        let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-        for op in ops {
-            if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
-                continue;
-            }
-            let result = op.deref(ctx).get_result(0);
-            let mut live: Vec<_> = liveness
-                .after(op)
-                .values()
-                .filter(|value| *value != result)
-                .collect();
-            // Order by definition position for deterministic frame layouts.
-            live.sort_unstable_by_key(|value| order[value]);
-            for value in live {
-                if seen.insert(value) {
-                    across.push(value);
-                }
+    for op in crate::analysis::function_ops(ctx, function) {
+        if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
+            continue;
+        }
+        let result = op.deref(ctx).get_result(0);
+        let mut live: Vec<_> = liveness
+            .after(op)
+            .values()
+            .filter(|value| *value != result)
+            .collect();
+        // Order by definition position for deterministic frame layouts.
+        live.sort_unstable_by_key(|value| order[value]);
+        for value in live {
+            if seen.insert(value) {
+                across.push(value);
             }
         }
     }
@@ -108,12 +101,7 @@ pub(crate) fn lower(
     kind: i32,
 ) -> Result<()> {
     let name = mir.get_symbol_name(ctx);
-    let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
     let entry = mir.get_entry_block(ctx);
     let params: Vec<Value> = entry.deref(ctx).arguments().collect();
 
@@ -186,8 +174,7 @@ pub(crate) fn lower(
         }
         let call = CallOp::new(ctx, step_name(&name), vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
-        let ret = ReturnOp::new(ctx, vec![promise]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![promise]);
         b.state.wasm.append_operation(ctx, ramp.get_operation(), 0);
     }
 
@@ -215,32 +202,32 @@ pub(crate) fn lower(
     // Every await is lowered; the resume targets are complete.
     let resumes = std::mem::take(&mut b.step_frame_mut().resumes);
     let mut targets = vec![start];
-    for take in &resumes {
+    for &take in &resumes {
         let resume = b.new_block(ctx, vec![]);
-        let saved = std::mem::replace(&mut b.block, resume);
-        let awaited = b.load(ctx, MemKind::I32, frame, AWAITED);
-        b.br(ctx, *take, vec![awaited]);
-        b.block = saved;
+        b.in_block(resume, |b| {
+            let awaited = b.load(ctx, MemKind::I32, frame, AWAITED);
+            b.br(ctx, take, vec![awaited]);
+        });
         targets.push(resume);
     }
     // State 0 enters the body with the parameters loaded from the frame.
     let begin = b.new_block(ctx, vec![]);
-    let saved = std::mem::replace(&mut b.block, begin);
-    let mut loaded = Vec::new();
-    for param in &params {
-        let slot = b.step_frame().slots[param];
-        for (at, access) in slot.iter() {
-            loaded.push(b.load(ctx, access, frame, at));
+    let first = targets[0];
+    b.in_block(begin, |b| {
+        let mut loaded = Vec::new();
+        for param in &params {
+            let slot = b.step_frame().slots[param];
+            for (at, access) in slot.iter() {
+                loaded.push(b.load(ctx, access, frame, at));
+            }
         }
-    }
-    b.br(ctx, targets[0], loaded);
-    b.block = saved;
+        b.br(ctx, first, loaded);
+    });
     targets[0] = begin;
     let invalid = b.new_block(ctx, vec![]);
     b.br_table(ctx, current, targets, invalid);
     b.block = invalid;
-    let unreachable = UnreachableOp::new(ctx).get_operation();
-    b.insert(ctx, unreachable);
+    b.trap(ctx);
     b.state.wasm.append_operation(ctx, step.get_operation(), 0);
     Ok(())
 }
@@ -254,11 +241,7 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     let frame = function.get_entry_block(ctx).deref(ctx).get_argument(0);
     let mut b = FunctionLowering::glue(state, ctx, &function);
     let done = b.new_block(ctx, vec![]);
-    let entry = b.block;
-    b.block = done;
-    let ret = ReturnOp::new(ctx, vec![]).get_operation();
-    b.insert(ctx, ret);
-    b.block = entry;
+    b.in_block(done, |b| b.ret(ctx, vec![]));
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
     for (frame_kind, handler) in runtime_frames {
         let frame_kind = b.i32_const(ctx, frame_kind as i32);
@@ -275,18 +258,17 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     for index in 0..b.state.async_functions.len() {
         let step = step_name(&b.state.async_functions[index]);
         let call_block = b.new_block(ctx, vec![]);
-        let saved = std::mem::replace(&mut b.block, call_block);
-        let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
-        b.insert(ctx, call);
-        b.br(ctx, done, vec![]);
-        b.block = saved;
+        b.in_block(call_block, |b| {
+            let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
+            b.insert(ctx, call);
+            b.br(ctx, done, vec![]);
+        });
         calls.push(call_block);
     }
     let invalid = b.new_block(ctx, vec![]);
     b.br_table(ctx, kind, calls, invalid);
     b.block = invalid;
-    let unreachable = UnreachableOp::new(ctx).get_operation();
-    b.insert(ctx, unreachable);
+    b.trap(ctx);
     b.state
         .wasm
         .append_operation(ctx, function.get_operation(), 0);
@@ -332,8 +314,7 @@ impl FunctionLowering<'_, '_> {
         let observer = self.num(ctx, NumOpcode::I32Add, vec![frame, offset]);
         self.runtime_void(ctx, Runtime::PromiseWait, vec![promise, frame, observer]);
         self.leave_roots(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
+        self.ret(ctx, vec![]);
 
         self.block = take;
         let promise = take.deref(ctx).get_argument(0);
@@ -385,8 +366,7 @@ impl FunctionLowering<'_, '_> {
         };
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.finish_frame(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
+        self.ret(ctx, vec![]);
     }
 
     fn finish_frame(&mut self, ctx: &mut Context) {
@@ -403,14 +383,13 @@ impl FunctionLowering<'_, '_> {
         let frame = self.step_frame().frame;
         let i32 = i32_type(ctx);
         let block = self.new_block(ctx, vec![i32]);
-        let saved = std::mem::replace(&mut self.block, block);
-        let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
-        let status = block.deref(ctx).get_argument(0);
-        self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
-        self.finish_frame(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
-        self.block = saved;
+        self.in_block(block, |b| {
+            let promise = b.load(ctx, MemKind::I32, frame, PROMISE);
+            let status = block.deref(ctx).get_argument(0);
+            b.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
+            b.finish_frame(ctx);
+            b.ret(ctx, vec![]);
+        });
         block
     }
 

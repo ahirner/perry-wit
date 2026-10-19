@@ -24,28 +24,14 @@ op_schema! {
         pub new(phase: Phase, binding: &str, args: Vec<Value>, results: Vec<TypeHandle>)
             operands(args) => results(results);
     }
-    attribute(phase, get_attr_perry_foreign_phase, set_attr_perry_foreign_phase) =
+    attribute(phase: Phase, get_attr_perry_foreign_phase, set_attr_perry_foreign_phase) =
         phase => InvalidForeign;
-    attribute(binding, get_attr_perry_foreign_binding, set_attr_perry_foreign_binding) =
+    attribute(binding: String, get_attr_perry_foreign_binding, set_attr_perry_foreign_binding) =
         StringAttr::new(binding.to_owned()) => InvalidForeign;
     prepare(_this) { let phase = *phase; }
     result(ctx, phase: Phase): Phase = phase;
     error = InvalidForeign;
     check binding.as_str().contains('#') => InvalidForeign;
-}
-
-impl ForeignOp {
-    pub fn binding(&self, ctx: &Context) -> String {
-        self.get_attr_perry_foreign_binding(ctx)
-            .expect("foreign binding")
-            .as_str()
-            .to_owned()
-    }
-    pub fn phase(&self, ctx: &Context) -> Phase {
-        *self
-            .get_attr_perry_foreign_phase(ctx)
-            .expect("foreign phase")
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

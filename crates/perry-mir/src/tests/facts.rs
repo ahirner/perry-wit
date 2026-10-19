@@ -763,7 +763,7 @@ builtin.module @lossless_check { ^module():
     verify_operation(module, ctx)?;
 
     let mut analyses = AnalysisManager::default();
-    Specialize.run(module, ctx, &mut analyses)?;
+    specialize(module, ctx, &mut analyses)?;
     verify_operation(module, ctx)?;
     let facts = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
     verify_lossless_module(module, ctx, &facts)?;
@@ -809,7 +809,7 @@ builtin.module @lossless_check { ^module():
     let module = parse(ctx, text);
     set_exported(ctx, &function(ctx, module, "run"));
     RecordType::get(ctx, layout_name, Some(Vec::new()))?;
-    let result = Specialize.run(module, ctx, &mut AnalysisManager::default());
+    let result = specialize(module, ctx, &mut AnalysisManager::default());
     assert!(
         matches!(result, Err(error) if error.to_string().contains("already exists with different fields"))
     );

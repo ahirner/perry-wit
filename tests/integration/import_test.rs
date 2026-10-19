@@ -1,5 +1,5 @@
 //! Application imports use the same checked canonical values as component exports.
-use crate::world::Compiler::{MemoryChecked, Standard};
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
 use wasmtime::{
     Engine, Store,
@@ -24,12 +24,28 @@ struct CompletionError {
 }
 
 #[test]
-fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<()> {
-    let component = Standard.component(
-        "package test:initialization; world app { export run: func() -> result<f64>; }",
-        "app",
-        "initialization.ts",
+fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()> {
+    let bytes = MemoryChecked.component(
         r#"
+        package test:imports;
+        interface service {
+            record packet { label: string, bytes: list<u8>, values: list<f64> }
+            initialize: func() -> u32;
+            exchange: func(input: packet) -> result<packet, string>;
+            wide: func(value: s64) -> s64;
+            observe: func(value: string);
+        }
+        world app {
+            import service;
+            export guards: func() -> result<f64>;
+            export run: func(n: u32) -> result<string>;
+        }
+    "#,
+        "app",
+        "imports.ts",
+        r#"
+        import { initialize, exchange, wide, observe } from 'test:imports/service';
+        const initial = initialize();
         let effects = 0;
         const step = 1;
         class Step { amount = step; }
@@ -42,38 +58,10 @@ fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<(
             try { cell = value(); } catch { failures++; }
             return failures;
         }
-        export function run(): number {
+        export function guards(): number {
             const absent = cell === undefined;
             return (cell = 5, failures * 100 + effects * 10 + (absent ? 1 : 0) + cell);
         }
-        "#,
-    )?;
-    let (mut store, instance) = crate::world::instantiate(&Engine::default(), &component)?;
-    let run = instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "run")?;
-    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 216.0);
-    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 215.0);
-    Ok(())
-}
-
-#[test]
-fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()> {
-    let bytes = MemoryChecked.component(
-        r#"
-        package test:imports;
-        interface service {
-            record packet { label: string, bytes: list<u8>, values: list<f64> }
-            initialize: func() -> u32;
-            exchange: func(input: packet) -> result<packet, string>;
-            wide: func(value: s64) -> s64;
-            observe: func(value: string);
-        }
-        world app { import service; export run: func(n: u32) -> result<string>; }
-    "#,
-        "app",
-        "imports.ts",
-        r#"
-        import { initialize, exchange, wide, observe } from 'test:imports/service';
-        const initial = initialize();
         export function run(n: number): string {
             let text = '';
             for (let i = 0; i < n; i++) {
@@ -114,6 +102,10 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
     })?;
     let mut store = Store::new(&engine, (0, String::new()));
     let instance = linker.instantiate(&mut store, &component)?;
+    let guards =
+        instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "guards")?;
+    assert_eq!(guards.call(&mut store, ())?.0.unwrap(), 216.0);
+    assert_eq!(guards.call(&mut store, ())?.0.unwrap(), 215.0);
     let run =
         instance.get_typed_func::<(u32,), (std::result::Result<String, ()>,)>(&mut store, "run")?;
     for (n, expected) in [(2, "failure"), (1000, "hé😀:7")] {

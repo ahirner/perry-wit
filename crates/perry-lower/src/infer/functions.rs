@@ -2,7 +2,6 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
-use shapes::{Argument, ArgumentId};
 
 pub(super) fn arguments(
     function: &Function,
@@ -21,9 +20,11 @@ pub(super) fn arguments(
         .zip(explicit)
         .map(|(param, argument)| (param.name.as_str(), argument.clone()))
         .collect();
-    for (parameter, argument) in function.params.iter().zip(args) {
-        let actual = expression(argument, env);
-        unify(&parameter.ty, actual, &function.type_params, &mut bindings);
+    if bindings.len() < function.type_params.len() {
+        for (parameter, argument) in function.params.iter().zip(args) {
+            let actual = expression(argument, env);
+            unify(&parameter.ty, actual, &function.type_params, &mut bindings);
+        }
     }
     function
         .type_params
@@ -138,7 +139,7 @@ fn unify<'a>(
 
 struct Instances<'a> {
     templates: &'a HashMap<FuncId, Function>,
-    keys: HashMap<(FuncId, Vec<ArgumentId>), FuncId>,
+    keys: HashMap<(FuncId, Vec<shapes::TypeId>), FuncId>,
     pending: Vec<Function>,
     next_function: FuncId,
     next_local: LocalId,
@@ -153,10 +154,7 @@ impl Instances<'_> {
     ) -> Result<FuncId> {
         let key = (
             function.id,
-            arguments
-                .iter()
-                .map(|ty| Argument::intern_hir(env.ctx, ty))
-                .collect::<Result<Vec<_>>>()?,
+            shapes::TypeId::intern_slice(env.ctx, &arguments),
         );
         if let Some(id) = self.keys.get(&key) {
             return Ok(*id);
@@ -249,7 +247,7 @@ impl Instances<'_> {
             }
             Ok(())
         })?;
-        walk::scan(body, env, &mut ScanMode::Returns(&mut Vec::new()));
+        walk::scan(body, env, None, None);
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
                 self.call(expr, env)?;
@@ -342,18 +340,6 @@ fn materialize_constructor(
     };
 }
 
-pub(super) fn class_functions(
-    class: &mut perry_hir::ir::Class,
-) -> impl Iterator<Item = &mut Function> {
-    class
-        .constructor
-        .iter_mut()
-        .chain(&mut class.methods)
-        .chain(class.getters.iter_mut().map(|(_, function)| function))
-        .chain(class.setters.iter_mut().map(|(_, function)| function))
-        .chain(&mut class.static_methods)
-}
-
 fn class_initializers(class: &mut perry_hir::ir::Class) -> impl Iterator<Item = &mut Expr> {
     class
         .fields
@@ -393,7 +379,7 @@ pub(crate) fn specialize_functions(
     };
     walk::visit_body(&mut hir.init, &mut collect_local)?;
     for class in &mut hir.classes {
-        for function in class_functions(class) {
+        for function in shapes::class_functions_mut(class) {
             next_function = next_function.max(function.id);
             walk::function(function, &mut collect_local)?;
         }
@@ -440,28 +426,41 @@ pub(crate) fn specialize_functions(
         instances.body(&mut hir.init, &mut env)?;
     }
     instances.append(&mut hir.functions, &mut base);
-    if !hir.classes.is_empty() {
-        let classes_snapshot = hir.classes.clone();
-        for class in &mut hir.classes {
-            base.set_current_class(Some(class.name.clone()));
-            for initializer in class_initializers(class) {
-                let mut env = inference.function(&base, &classes_snapshot, &mut locals);
-                instances.expression(initializer, &mut env)?;
-                instances.append(&mut hir.functions, &mut base);
-            }
-            for function in class_functions(class) {
-                let mut env = inference.function_with_params(
-                    &base,
-                    &classes_snapshot,
-                    &mut locals,
-                    &function.params,
-                );
-                instances.callable(function, &mut env)?;
-                instances.append(&mut hir.functions, &mut base);
-            }
+    for class_idx in 0..hir.classes.len() {
+        base.set_current_class(Some(hir.classes[class_idx].name.clone()));
+        let mut inits: Vec<Expr> = class_initializers(&mut hir.classes[class_idx])
+            .map(|init| std::mem::replace(init, Expr::Undefined))
+            .collect();
+        for init in &mut inits {
+            let mut env = inference.function(&base, &hir.classes, &mut locals);
+            instances.expression(init, &mut env)?;
+            instances.append(&mut hir.functions, &mut base);
         }
-        base.set_current_class(None);
+        for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
+            *dst = src;
+        }
+        let fn_count = shapes::class_functions(&hir.classes[class_idx]).count();
+        for fn_idx in 0..fn_count {
+            let mut func = {
+                let target = shapes::class_functions_mut(&mut hir.classes[class_idx])
+                    .nth(fn_idx)
+                    .unwrap();
+                let body = std::mem::take(&mut target.body);
+                Function {
+                    body,
+                    ..target.clone()
+                }
+            };
+            let mut env =
+                inference.function_with_params(&base, &hir.classes, &mut locals, &func.params);
+            instances.callable(&mut func, &mut env)?;
+            *shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .nth(fn_idx)
+                .unwrap() = func;
+            instances.append(&mut hir.functions, &mut base);
+        }
     }
+    base.set_current_class(None);
     let mut cursor = 0;
     loop {
         instances.append(&mut hir.functions, &mut base);

@@ -59,8 +59,7 @@ impl FunctionLowering<'_, '_> {
         let trap = self.new_block(ctx, vec![]);
         self.cond_br(ctx, invalid, (trap, vec![]), (valid, vec![]));
         self.block = trap;
-        let op = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, op);
+        self.trap(ctx);
         self.block = valid;
         let zero = self.i64_const(ctx, 0);
         let inverted = self.num(ctx, NumOpcode::I64Sub, vec![zero, magnitude]);

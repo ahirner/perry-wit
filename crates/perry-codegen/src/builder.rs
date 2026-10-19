@@ -24,7 +24,7 @@ use pliron::{
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::{BrOp, BrTableOp, CondBrOp},
+    control::{BrOp, BrTableOp, CondBrOp, ReturnOp, UnreachableOp},
     ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
 };
 use std::num::NonZeroUsize;
@@ -198,6 +198,27 @@ impl FunctionLowering<'_, '_> {
         let op =
             CondBrOp::new(ctx, condition, then.0, then.1, otherwise.0, otherwise.1).get_operation();
         self.insert(ctx, op);
+    }
+
+    pub(crate) fn ret(&mut self, ctx: &mut Context, values: Vec<Value>) {
+        let op = ReturnOp::new(ctx, values).get_operation();
+        self.insert(ctx, op);
+    }
+
+    pub(crate) fn trap(&mut self, ctx: &mut Context) {
+        let op = UnreachableOp::new(ctx).get_operation();
+        self.insert(ctx, op);
+    }
+
+    pub(crate) fn in_block<T>(
+        &mut self,
+        block: Ptr<BasicBlock>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = std::mem::replace(&mut self.block, block);
+        let out = f(self);
+        self.block = saved;
+        out
     }
 
     /// The Wasm value of MIR `value`; frame-resident values are loaded from the frame.

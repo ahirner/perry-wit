@@ -7,34 +7,44 @@ use wasmtime::Val;
 
 #[test]
 fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
-    for source in [
-        "export function run(a:number,b:number):number { return a+b; }",
-        "function add(a:number,b:number):number { return a+b; } export function run(a:number,b:number):number { return add(a,b); }",
-        "function identity(a:number):number { return a; } export function run(a:number,b:number):number { return identity(a+b); }",
-        "export function run(a:number,b:number):number { let value=a; for(let i=0;i<b;i++) value+=1; return value; }",
-    ] {
-        let compiled = compile(source, "func(a:u8,b:u8)->u32")
-            .map_err(|error| anyhow::anyhow!("{source}\n{error:#}"))?;
-        let engine = wasmtime::Engine::default();
-        let (mut store, instance) =
-            crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
-        let run = instance.get_typed_func::<(u8, u8), (u32,)>(&mut store, "run")?;
-        assert_eq!(run.call(&mut store, (255, 255))?, (510,), "{source}");
-    }
+    let source = r#"
+        function add(a:number,b:number):number { return a+b; }
+        function identity(a:number):number { return a; }
+        export function run(a:number,b:number):number { return a+b; }
+        export function called(a:number,b:number):number { return add(a,b); }
+        export function ident(a:number,b:number):number { return identity(a+b); }
+        export function looped(a:number,b:number):number { let value=a; for(let i=0;i<b;i++) value+=1; return value; }
+        export function recur(n:number):number { if(n<=0)return 0; return n+recur(n-1); }
+    "#;
     let compiled = compile(
-        "export function run(n:number):number { if(n<=0)return 0; return n+run(n-1); }",
-        "func(n:s32)->s32",
+        source,
+        "func(a:u8,b:u8)->u32; \
+         export called: func(a:u8,b:u8)->u32; \
+         export ident: func(a:u8,b:u8)->u32; \
+         export looped: func(a:u8,b:u8)->u32; \
+         export recur: func(n:s32)->s32",
     )?;
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) =
+        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+    for export in ["run", "called", "ident", "looped"] {
+        let run = instance.get_typed_func::<(u8, u8), (u32,)>(&mut store, export)?;
+        assert_eq!(run.call(&mut store, (255, 255))?, (510,), "{export}");
+    }
     let mut program = Program::from_wasm(compiled.core);
-    assert_eq!(program.call("run", &[Val::I32(20)]).0[0].unwrap_i32(), 210);
+    assert_eq!(
+        program.call("recur", &[Val::I32(20)]).0[0].unwrap_i32(),
+        210
+    );
     Ok(())
 }
 
 #[test]
 fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Result<()> {
     let compiled = compile(
-        "export function run(a:number,b:number):number { return a/b + a%b; }",
-        "func(a:s32,b:s32)->f64",
+        "export function run(a:number,b:number):number { return a/b + a%b; } \
+         export function half(x:number):number { return x+0.5; }",
+        "func(a:s32,b:s32)->f64; export half: func(x:f64)->f64",
     )?;
     let mut program = Program::from_wasm(compiled.core);
     for (a, b) in [(5, 2), (-5, 2), (7, -3)] {
@@ -43,6 +53,7 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
             a as f64 / b as f64 + a as f64 % b as f64
         );
     }
+    assert_eq!(program.number("half", 0.25), 0.75);
     let source = include_str!("../../fixtures/optimization/shared.ts");
     let component = Standard.component(
         "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }",
@@ -69,10 +80,6 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
             .get_typed_func::<(f64, f64), (f64,)>(&mut store, "floating")?
             .call(&mut store, (0.25, 0.5))?,
         (0.75,)
-    );
-    assert_eq!(
-        Program::new("export function run(x:number):number { return x+0.5; }").number("run", 0.25),
-        0.75
     );
     Ok(())
 }
@@ -222,21 +229,25 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
     // Nullable conversions and nested layouts of an exact 64-bit value compile under default
     // and fully summarized limits.
     let exact = "parseInt(x===0?'9007199254740993':'bad')";
-    let nullable = [
-        "function f(n:number|null):number|undefined{return n===null?undefined:n;}",
-        "function f(n:number|undefined):number|null{return n===undefined?null:n;}",
-        "function f(n:number|null):number{return n===null?0.5:n;}",
-        "function f(n:number):number|undefined{return n===0?undefined:n;}",
-    ]
-    .map(|helper| format!("{helper} export function run(x:number):string{{const n=f({exact});return JSON.stringify(n??0.5);}}"));
     let (a, b) = (
         "const a:S={inner:{a:w,b:0.5},opt:w};",
         "const b:S={inner:{a:w,b:w},opt:0.5};",
     );
-    let nested = [format!("{a}{b}"), format!("{b}{a}")].map(|decls| format!("interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} export function run(x:number):string{{const w={exact};{decls}return JSON.stringify(a)+','+JSON.stringify(b);}}"));
-    for source in nullable.iter().chain(&nested) {
-        compile(source, "func(x:f64)->string")?;
-        perry_mir::with_fact_limits(1, 1, || compile(source, "func(x:f64)->string"))?;
-    }
+    let source = format!(
+        "interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} \
+         function f1(n:number|null):number|undefined{{return n===null?undefined:n;}} \
+         function f2(n:number|undefined):number|null{{return n===undefined?null:n;}} \
+         function f3(n:number|null):number{{return n===null?0.5:n;}} \
+         function f4(n:number):number|undefined{{return n===0?undefined:n;}} \
+         export function run(x:number):string{{return JSON.stringify(f1({exact})??0.5);}} \
+         export function r2(x:number):string{{return JSON.stringify(f2({exact})??0.5);}} \
+         export function r3(x:number):string{{return JSON.stringify(f3({exact})??0.5);}} \
+         export function r4(x:number):string{{return JSON.stringify(f4({exact})??0.5);}} \
+         export function n1(x:number):string{{const w={exact};{a}{b}return JSON.stringify(a)+','+JSON.stringify(b);}} \
+         export function n2(x:number):string{{const w={exact};{b}{a}return JSON.stringify(a)+','+JSON.stringify(b);}}"
+    );
+    let sig = "func(x:f64)->string; export r2:func(x:f64)->string; export r3:func(x:f64)->string; export r4:func(x:f64)->string; export n1:func(x:f64)->string; export n2:func(x:f64)->string";
+    compile(&source, sig)?;
+    perry_mir::with_fact_limits(1, 1, || compile(&source, sig))?;
     Ok(())
 }

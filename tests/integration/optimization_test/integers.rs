@@ -124,25 +124,26 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
 
 #[test]
 fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
-    for expression in [
-        "value < 256",
-        "value > -1",
-        "value < (128+128)",
-        "value !== 511",
-    ] {
-        let compiled = compile(
-            &format!("export function run(value:number):boolean {{ return {expression}; }}"),
-            "func(value:u8)->bool",
-        )?;
-        let engine = wasmtime::Engine::default();
-        let (mut store, instance) =
-            crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
-        let run = instance.get_typed_func::<(u8,), (bool,)>(&mut store, "run")?;
+    let compiled = compile(
+        "export function run(value:number):boolean { return value < 256; } \
+         export function gt(value:number):boolean { return value > -1; } \
+         export function sum(value:number):boolean { return value < (128+128); } \
+         export function neq(value:number):boolean { return value !== 511; }",
+        "func(value:u8)->bool; \
+         export gt: func(value:u8)->bool; \
+         export sum: func(value:u8)->bool; \
+         export neq: func(value:u8)->bool",
+    )?;
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) =
+        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
+    for export in ["run", "gt", "sum", "neq"] {
+        let run = instance.get_typed_func::<(u8,), (bool,)>(&mut store, export)?;
         for value in [0, 1, 254, 255] {
             assert_eq!(
                 run.call(&mut store, (value,))?,
                 (true,),
-                "{expression}: {value}"
+                "{export}: {value}"
             );
         }
     }
@@ -151,48 +152,38 @@ fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
 
 #[test]
 fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
-    const ADD: &str = "export function run(a:number,b:number):number { return a+b; }";
-    const ADD_BIG: &str = "export function run(a:bigint,b:bigint):bigint { return a+b; }";
+    let compiled = compile(
+        "function add(a:number,b:number):number { return a+b; } \
+         export function run(a:number,b:number):number { return a+b; } \
+         export function wide(a:number,b:number):number { return a+b; } \
+         export function chained(a:number,b:number):number { return add(a+b,b); } \
+         export function big(a:bigint,b:bigint):bigint { return a+b; } \
+         export function neg(value:bigint):bigint { return -value; }",
+        "func(a:s8,b:u8)->s16; \
+         export wide: func(a:u32,b:u32)->f64; \
+         export chained: func(a:u32,b:u32)->f64; \
+         export big: func(a:s64,b:u64)->u64; \
+         export neg: func(value:u64)->s64",
+    )?;
+    let mut program = Program::from_wasm(compiled.core);
     let unary = [Val::I64(1)];
-    for (source, signature, args, expected) in [
+    for (export, args, expected) in [
+        ("run", &[Val::I32(-1), Val::I32(255)][..], Val::I32(254)),
         (
-            ADD,
-            "func(a:s8,b:u8)->s16",
-            &[Val::I32(-1), Val::I32(255)][..],
-            Val::I32(254),
-        ),
-        (
-            ADD,
-            "func(a:u32,b:u32)->f64",
+            "wide",
             &[Val::I32(-1), Val::I32(-1)],
             Val::F64(8589934590f64.to_bits()),
         ),
         (
-            "function add(a:number,b:number):number { return a+b; } export function run(a:number,b:number):number { return add(a+b,b); }",
-            "func(a:u32,b:u32)->f64",
+            "chained",
             &[Val::I32(-1), Val::I32(-1)],
             Val::F64(12884901885f64.to_bits()),
         ),
-        (
-            ADD_BIG,
-            "func(a:s64,b:u64)->u64",
-            &[Val::I64(-1), Val::I64(-1)],
-            Val::I64(-2),
-        ),
-        (
-            "export function run(value:bigint):bigint { return -value; }",
-            "func(value:u64)->s64",
-            &unary,
-            Val::I64(-1),
-        ),
+        ("big", &[Val::I64(-1), Val::I64(-1)], Val::I64(-2)),
+        ("neg", &unary, Val::I64(-1)),
     ] {
-        let mut program = Program::from_wasm(compile(source, signature)?.core);
-        let actual = program.call("run", args).0[0];
-        assert_eq!(
-            format!("{actual:?}"),
-            format!("{expected:?}"),
-            "{signature}: {source}"
-        );
+        let actual = program.call(export, args).0[0];
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{export}");
     }
     Ok(())
 }
@@ -240,14 +231,26 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
 
 #[test]
 fn exact_64_bit_integers_and_parse_int_preserve_precision() -> Result<()> {
-    let mut roundtrip = Program::from_wasm(
+    // Exact parseInt values in aggregates, comparisons, helpers, runtime text/radix and JSON
+    // are the `ecma.aggregate.specialization` contract; this checks lexical edge cases,
+    // overflow, 64-bit remainder, Math intrinsics, multiplication and alias identity.
+    let mut program = Program::from_wasm(
         compile(
             r#"
 import type { u64, s64 } from "perry:types";
 interface Packet { id: u64; delta: s64 }
 type ArithRec = { v: number; opt?: number };
+interface Cell { value: number }
+interface Node { value: number; next?: Node }
 function id(x: u64): u64 { return x; }
 function makeArith(x: number): ArithRec { return { v: x * 2, opt: x * 3 }; }
+function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
+function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
+function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
+function relation(a: number, b: number): number {
+    return (a === b ? 1 : 0) + (a !== b ? 2 : 0) + (a < b ? 4 : 0) +
+        (a <= b ? 8 : 0) + (a > b ? 16 : 0) + (a >= b ? 32 : 0);
+}
 export function run(rawId: u64, delta: s64, u: number): number {
     const input: Packet = { id: id(rawId), delta };
     const parsed = JSON.parse<Packet>(JSON.stringify(input));
@@ -265,37 +268,7 @@ export function run(rawId: u64, delta: s64, u: number): number {
         JSON.stringify(parsed.id) === "9007199254740993";
     return ok && parsed.id === rawId && parsed.delta === delta ? 1 : 0;
 }
-"#,
-            "func(raw-id:u64,delta:s64,u:u32)->s32",
-        )?
-        .core,
-    );
-    let (res, _) = roundtrip.call(
-        "run",
-        &[
-            Val::I64(9007199254740993),
-            Val::I64(-9007199254740993),
-            Val::I32(3_000_000_000u32 as i32),
-        ],
-    );
-    assert_eq!(res[0].unwrap_i32(), 1);
-
-    // Exact parseInt values in aggregates, comparisons, helpers, runtime text/radix and JSON
-    // are the `ecma.aggregate.specialization` contract; this checks lexical edge cases,
-    // overflow, 64-bit remainder, Math intrinsics, multiplication and alias identity.
-    let mut parse_int = Program::from_wasm(
-        compile(
-            r#"
-interface Cell { value: number }
-interface Node { value: number; next?: Node }
-function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
-function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
-function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
-function relation(a: number, b: number): number {
-    return (a === b ? 1 : 0) + (a !== b ? 2 : 0) + (a < b ? 4 : 0) +
-        (a <= b ? 8 : 0) + (a > b ? 16 : 0) + (a >= b ? 32 : 0);
-}
-export function run(flag: number): number {
+export function parse(flag: number): number {
     const s = choose(flag);
     const a = parseInt("9007199254740993");
     const mul = JSON.stringify(a * 2) === "18014398509481986";
@@ -345,11 +318,20 @@ export function run(flag: number): number {
     return mul && overflow && nonJsWs && numRem && numMath && aliasIdentity ? 1 : 0;
 }
 "#,
-            "func(flag:s32)->s32",
+            "func(raw-id:u64,delta:s64,u:u32)->s32; export parse: func(flag:s32)->s32",
         )?
         .core,
     );
-    assert_eq!(parse_int.call("run", &[Val::I32(1)]).0[0].unwrap_i32(), 1);
+    let (res, _) = program.call(
+        "run",
+        &[
+            Val::I64(9007199254740993),
+            Val::I64(-9007199254740993),
+            Val::I32(3_000_000_000u32 as i32),
+        ],
+    );
+    assert_eq!(res[0].unwrap_i32(), 1);
+    assert_eq!(program.call("parse", &[Val::I32(1)]).0[0].unwrap_i32(), 1);
 
     // Specialized aggregate results (records and lists with perry.numeric fields/elements) lower cleanly across WIT boundaries.
     let wit_src = r#"

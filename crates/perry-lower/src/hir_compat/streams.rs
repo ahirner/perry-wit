@@ -2,7 +2,7 @@
 use anyhow::{Result, anyhow, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use std::collections::HashSet;
-use swc_common::{DUMMY_SP, Span};
+use swc_common::{DUMMY_SP, Span, SyntaxContext};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 /// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
@@ -207,4 +207,92 @@ impl VisitMut for Fill {
             statement.visit_mut_children_with(self);
         }
     }
+}
+
+pub(super) const DECODE: &str = "$$perryDecodeOptions";
+
+pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxContext) -> Result<()> {
+    struct Options {
+        error: Option<anyhow::Error>,
+        unresolved: SyntaxContext,
+    }
+    impl VisitMut for Options {
+        fn visit_mut_new_expr(&mut self, new: &mut ast::NewExpr) {
+            new.visit_mut_children_with(self);
+            if matches!(&*new.callee, ast::Expr::Ident(name) if name.sym == "TextDecoder" && name.ctxt == self.unresolved)
+                && let Err(error) = normalize_decoder_constructor(new)
+                && self.error.is_none()
+            {
+                self.error = Some(error);
+            }
+        }
+        fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
+            call.visit_mut_children_with(self);
+            if call.args.len() > 1
+                && let ast::Callee::Expr(callee) = &mut call.callee
+                && let ast::Expr::Member(member) = &mut **callee
+                && let ast::MemberProp::Ident(method) = &mut member.prop
+                && method.sym == "decode"
+            {
+                method.sym = DECODE.into();
+            }
+        }
+    }
+    let mut options = Options {
+        error: None,
+        unresolved,
+    };
+    module.visit_mut_with(&mut options);
+    options.error.map_or(Ok(()), Err)
+}
+
+fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
+    let Some(args) = new.args.as_mut() else {
+        return Ok(());
+    };
+    ensure!(
+        args.len() <= 2 && args.iter().all(|a| a.spread.is_none()),
+        "TextDecoder takes a literal UTF-8 label and inline options"
+    );
+    let Some(options) = args.get_mut(1) else {
+        return Ok(());
+    };
+    if matches!(&*options.expr, ast::Expr::Ident(i) if i.sym == "undefined") {
+        return Ok(());
+    }
+    let ast::Expr::Object(options) = &mut *options.expr else {
+        bail!("TextDecoder options must be an inline object");
+    };
+    let mut names = HashSet::new();
+    for property in &mut options.props {
+        let ast::PropOrSpread::Prop(property) = property else {
+            bail!("TextDecoder option spreads are unsupported");
+        };
+        if let ast::Prop::Shorthand(id) = &**property {
+            **property = ast::Prop::KeyValue(ast::KeyValueProp {
+                key: ast::PropName::Ident(ast::IdentName::new(id.sym.clone(), id.span)),
+                value: Box::new(ast::Expr::Ident(id.clone())),
+            });
+        }
+        let ast::Prop::KeyValue(field) = &**property else {
+            bail!("TextDecoder options need ordinary fields");
+        };
+        let name = match &field.key {
+            ast::PropName::Ident(id) => id.sym.as_ref(),
+            ast::PropName::Str(text) => text.value.as_str().unwrap_or(""),
+            _ => bail!("TextDecoder option keys must be literal"),
+        };
+        ensure!(
+            matches!(name, "fatal" | "ignoreBOM") && names.insert(name.to_owned()),
+            "unknown or repeated TextDecoder option {name}"
+        );
+        ensure!(
+            matches!(
+                &*field.value,
+                ast::Expr::Ident(_) | ast::Expr::Lit(ast::Lit::Bool(_))
+            ),
+            "TextDecoder constructor flags must be booleans or local bindings"
+        );
+    }
+    Ok(())
 }

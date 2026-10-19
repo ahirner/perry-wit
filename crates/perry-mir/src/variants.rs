@@ -47,7 +47,7 @@ op_schema! {
         pub new(ty: TypeHandle, tag: &str, payload: Option<Value>)
             operands(payload.into_iter().collect()) => explicit(ty);
     }
-    attribute(tag, get_attr_perry_variant_tag, set_attr_perry_variant_tag) =
+    attribute(tag: String, get_attr_perry_variant_tag, set_attr_perry_variant_tag) =
         StringAttr::from(tag) => InvalidVariant;
     prepare(this) {
         <Self as OneResultInterface>::verify(this, ctx)?;
@@ -61,14 +61,6 @@ op_schema! {
             && (Signature { inputs: payload.iter().copied(), outputs: [ty] })
                 .accepts(ctx, operands)
     }) => InvalidVariant;
-}
-impl VariantNewOp {
-    pub fn tag(&self, ctx: &Context) -> String {
-        self.get_attr_perry_variant_tag(ctx)
-            .expect("tag")
-            .as_str()
-            .to_owned()
-    }
 }
 
 op_schema! {

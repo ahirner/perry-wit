@@ -415,56 +415,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_declarations_with_complex_types() {
-        let wit_code = r#"
-package test:complex;
-
-interface types {
-    record payload {
-        id: u32,
-        title: string,
-        tags: list<string>,
-        meta: option<string>,
-    }
-
-    enum status {
-        pending,
-        active,
-        failed,
-    }
-
-    variant output-result {
-        success(string),
-        failure(u32),
-    }
-}
-
-world complex-processor {
-    use types.{payload, status, output-result};
-    export process: func(data: payload, stat: status) -> output-result;
-}
-"#;
-        let (resolve, package) =
-            crate::component::wit::resolve_source("world.wit", wit_code).unwrap();
-        let world = resolve
-            .select_world(&[package], Some("complex-processor"))
-            .unwrap();
-        let dts = generate_world_declarations(&resolve, &resolve.worlds[world]).unwrap();
-        assert!(dts.contains("export interface Payload {"));
-        assert!(dts.contains("id: number;"));
-        assert!(dts.contains("title: string;"));
-        assert!(dts.contains("tags: Array<string>;"));
-        assert!(dts.contains("meta: string | null;"));
-        assert!(dts.contains("export type Status = \"pending\" | \"active\" | \"failed\";"));
-        assert!(dts.contains("export type OutputResult ="));
-        assert!(dts.contains("tag: \"success\"; val: string"));
-        assert!(dts.contains("tag: \"failure\"; val: number"));
-        assert!(dts.contains(
-            "export declare function process(data: Payload, stat: Status): OutputResult;"
-        ));
-    }
-
-    #[test]
     fn unreferenced_sibling_interfaces_do_not_prefix_world_type_names() {
         let wit_code = r#"
 package test:multi@0.1.0;

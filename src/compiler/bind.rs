@@ -1,20 +1,16 @@
 //! Binding WIT world exports to exported TypeScript functions.
+use crate::abi::export_names::core_export_name;
 use crate::abi::types::{Contract, Input, convert, primitive};
-use crate::{
-    abi::export_names::{core_export_name, interface_implementation_name},
-    sdk::to_camel_case,
-};
 use anyhow::{Result, bail, ensure};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_mir::is_exported;
 use pliron::{
     builtin::{
-        op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::SymbolOpInterface,
         ops::{FuncOp, ModuleOp},
     },
     context::Context,
-    linked_list::ContainsLinkedList,
-    operation::Operation,
+    op::Op,
 };
 use std::collections::BTreeMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
@@ -107,39 +103,22 @@ pub(crate) fn exports(
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
-    let mut exported: BTreeMap<String, FuncOp> = mir
-        .get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+    let mut exported: BTreeMap<String, FuncOp> = module_functions(ctx, mir)
+        .into_iter()
         .filter(|function| is_exported(ctx, function))
         .map(|function| (function.get_symbol_name(ctx).to_string(), function))
         .collect();
 
     let mut bound = Vec::new();
-    for (key, item) in &world.exports {
-        let functions: Vec<_> = match item {
-            WorldItem::Function(function) => {
-                vec![(
-                    to_camel_case(&function.name),
-                    function.name.clone(),
-                    function,
-                )]
-            }
-            WorldItem::Interface { id, .. } => resolve.interfaces[*id]
-                .functions
-                .values()
-                .map(|function| {
-                    (
-                        interface_implementation_name(resolve, world, key, function),
-                        core_export_name(resolve, key, function),
-                        function,
-                    )
-                })
-                .collect(),
-            WorldItem::Type { .. } => continue,
+    for entry in crate::abi::world_functions(resolve, world.exports.iter()) {
+        let function = entry.function;
+        let implementation = entry.implementation_name(resolve, world);
+        let core_name = if entry.interface.is_some() {
+            core_export_name(resolve, entry.key, function)
+        } else {
+            function.name.clone()
         };
-        for (implementation, core_name, function) in functions {
+        {
             let found = exported.remove(&implementation).is_some();
             // A command's `wasi:cli/run.run` may be the module's top-level statements.
             let command = !found && is_cli_run(&core_name) && has_main(ctx, mir);
@@ -155,7 +134,7 @@ pub(crate) fn exports(
                     result: None,
                     kind: ExportKind::Async {
                         task_return: (
-                            format!("[export]{}", resolve.name_world_key(key)),
+                            format!("[export]{}", resolve.name_world_key(entry.key)),
                             function.name.clone(),
                         ),
                         command: true,
@@ -175,11 +154,9 @@ pub(crate) fn exports(
                 .transpose()?;
             // Async exports return through `task.return`, imported from `[export]<interface>`.
             let kind = if function.kind.is_async() {
-                let module = match item {
-                    WorldItem::Interface { .. } => {
-                        format!("[export]{}", resolve.name_world_key(key))
-                    }
-                    _ => "[export]$root".to_string(),
+                let module = match entry.interface {
+                    Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
+                    None => "[export]$root".to_string(),
                 };
                 ExportKind::Async {
                     task_return: (module, function.name.clone()),
@@ -212,11 +189,7 @@ fn has_main(ctx: &Context, mir: &ModuleOp) -> bool {
 }
 
 fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
-    mir.get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect()
+    perry_mir::functions(mir.get_operation(), ctx)
 }
 
 /// Top-level statements only run as a command; elsewhere they are an error, not dead code.
@@ -256,34 +229,23 @@ fn stream_functions<'a>(
     items: impl Iterator<Item = (&'a wit_parser::WorldKey, &'a WorldItem)> + 'a,
     export: bool,
 ) -> impl Iterator<Item = crate::link::StreamAnchor> + 'a {
-    items.flat_map(move |(key, item)| {
-        let (module, functions): (String, Vec<&wit_parser::Function>) = match item {
-            WorldItem::Function(function) => (
-                if export { "[export]$root" } else { "$root" }.to_string(),
-                vec![function],
-            ),
-            WorldItem::Interface { id, .. } => (
-                format!(
-                    "{}{}",
-                    if export { "[export]" } else { "" },
-                    resolve.name_world_key(key)
-                ),
-                resolve.interfaces[*id].functions.values().collect(),
-            ),
-            WorldItem::Type { .. } => (String::new(), Vec::new()),
+    let prefix = if export { "[export]" } else { "" };
+    crate::abi::world_functions(resolve, items).filter_map(move |entry| {
+        let index = entry
+            .function
+            .find_futures_and_streams(resolve)
+            .iter()
+            .position(|id| {
+                matches!(resolve.types[*id].kind, TypeDefKind::Stream(Some(Type::U8)))
+            })?;
+        let module = match entry.interface {
+            Some(_) => format!("{prefix}{}", resolve.name_world_key(entry.key)),
+            None => format!("{prefix}$root"),
         };
-        functions.into_iter().filter_map(move |function| {
-            let index = function
-                .find_futures_and_streams(resolve)
-                .iter()
-                .position(|id| {
-                    matches!(resolve.types[*id].kind, TypeDefKind::Stream(Some(Type::U8)))
-                })?;
-            Some(crate::link::StreamAnchor {
-                module: module.clone(),
-                function: function.name.clone(),
-                index: index as u32,
-            })
+        Some(crate::link::StreamAnchor {
+            module,
+            function: entry.function.name.clone(),
+            index: index as u32,
         })
     })
 }

@@ -31,7 +31,7 @@ op_schema! {
         /// `None` unless `promises` is an array of promises.
         pub new(combinator: Combinator, promises: Value) => infer(promises, combinator);
     }
-    attribute(combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => CombinatorErr;
+    attribute(combinator: Combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => CombinatorErr;
     prepare(_this) { let combinator = *combinator; }
     result(ctx, promises: Value, combinator: Combinator): TypeHandle = {
         let element = TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
@@ -53,12 +53,6 @@ op_schema! {
         Some(PromiseType::get(ctx, settled).into())
     };
     error = CombinatorErr;
-}
-
-impl PromiseCombinatorOp {
-    pub fn combinator(&self, ctx: &Context) -> Combinator {
-        *self.get_attr_perry_combinator(ctx).expect("combinator")
-    }
 }
 
 #[derive(Debug, Error)]
@@ -119,7 +113,7 @@ op_schema! {
         /// `None` unless `settled` is a `perry.settled` value.
         pub new(field: SettledField, settled: Value) => infer(settled, field);
     }
-    attribute(field, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => SettledErr;
+    attribute(field: SettledField, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => SettledErr;
     prepare(_this) { let field = *field; }
     result(ctx, settled: Value, field: SettledField): TypeHandle = {
         let value = TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
@@ -136,10 +130,4 @@ op_schema! {
         })
     };
     error = SettledErr;
-}
-
-impl SettledFieldOp {
-    pub fn field(&self, ctx: &Context) -> SettledField {
-        *self.get_attr_perry_settled_field(ctx).expect("field")
-    }
 }

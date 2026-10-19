@@ -74,9 +74,7 @@ impl FunctionLowering<'_, '_> {
             self.define_value(ctx, op, value);
             return Ok(true);
         }
-        if Operation::get_op::<WrapOp>(op, ctx).is_some()
-            || Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
-        {
+        if perry_mir::is_any::<(WrapOp, AggregateViewOp)>(ctx, op) {
             let mir = op.deref(ctx).get_operand(0);
             let value = self.mapped_value(ctx, mir)?;
             self.define_value(ctx, op, value);
@@ -91,9 +89,7 @@ impl FunctionLowering<'_, '_> {
             self.define_value(ctx, op, value);
             return Ok(true);
         }
-        if Operation::get_op::<IsUndefinedOp>(op, ctx).is_some()
-            || Operation::get_op::<IsNullOp>(op, ctx).is_some()
-        {
+        if perry_mir::is_any::<(IsUndefinedOp, IsNullOp)>(ctx, op) {
             let mir = op.deref(ctx).get_operand(0);
             let value = self.mapped_value(ctx, mir)?;
             let null = Operation::get_op::<IsNullOp>(op, ctx).is_some();

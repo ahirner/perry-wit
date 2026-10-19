@@ -16,7 +16,6 @@ use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
-        type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
     context::{Context, Ptr},
@@ -253,8 +252,7 @@ pub(crate) fn lower(
                     {
                         return true;
                     }
-                    Operation::is_op::<perry_mir::JsonDecodeOp>(op, ctx)
-                        || Operation::is_op::<perry_mir::JsonCopyOp>(op, ctx)
+                    perry_mir::is_any::<(perry_mir::JsonDecodeOp, perry_mir::JsonCopyOp)>(ctx, op)
                         || Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
                             matches!(
                                 op.intrinsic(ctx),
@@ -332,8 +330,9 @@ pub(crate) fn lower(
                 crate::analysis::function_ops(ctx, function)
                     .into_iter()
                     .any(|op| {
-                        Operation::get_op::<pliron_wasm::ops::LoadOp>(op, ctx).is_some()
-                            || Operation::get_op::<pliron_wasm::ops::StoreOp>(op, ctx).is_some()
+                        perry_mir::is_any::<(pliron_wasm::ops::LoadOp, pliron_wasm::ops::StoreOp)>(
+                            ctx, op,
+                        )
                     })
             });
     // The imports come last: every function above may still add to them.
@@ -521,12 +520,9 @@ fn export_wrapper(
     inner: &FuncOp,
     name: &Identifier,
 ) -> Result<FuncOp> {
+    let (params, results) = crate::analysis::function_signature(ctx, inner)?;
     let ty = TypedHandle::<FunctionType>::from_handle(inner.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
-    let (params, results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
     let wrapper = FuncOp::new(ctx, ident!("export_") + name.clone(), ty);
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
@@ -543,8 +539,7 @@ fn export_wrapper(
     if scope == boundary::Scope::Task {
         b.task_free(ctx);
     }
-    let ret = ReturnOp::new(ctx, values).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, values);
     for param in params {
         ensure!(
             repr(ctx, param)? != Repr::Ref,
@@ -562,12 +557,7 @@ fn async_export_wrapper(
     mir: &FuncOp,
     name: &Identifier,
 ) -> Result<FuncOp> {
-    let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (params, results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (params, results) = crate::analysis::function_signature(ctx, mir)?;
     let &[value_ty] = results.as_slice() else {
         bail!("async function {name} returns {} values", results.len());
     };
@@ -619,7 +609,6 @@ fn async_export_wrapper(
         perry_abi::layout::promise::VALUE,
     );
     b.task_free(ctx);
-    let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, vec![value, status]);
     Ok(wrapper)
 }

@@ -166,6 +166,7 @@ impl<'s> Locations<'s> {
     pub(crate) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
             locations: &'a mut Locations<'s>,
+            in_fn: bool,
         }
         impl Visit for Collector<'_, '_> {
             fn visit_fn_decl(&mut self, function: &ast::FnDecl) {
@@ -240,18 +241,26 @@ impl<'s> Locations<'s> {
                     .imports
                     .insert(import.src.value.to_string_lossy().into_owned(), import.span);
             }
-        }
-        module.visit_with(&mut Collector { locations: self });
-        struct TopLevelAwait(bool);
-        impl Visit for TopLevelAwait {
-            fn visit_await_expr(&mut self, _: &ast::AwaitExpr) {
-                self.0 = true;
+            fn visit_await_expr(&mut self, expr: &ast::AwaitExpr) {
+                if !self.in_fn {
+                    self.locations.async_init = true;
+                }
+                expr.visit_children_with(self);
             }
-            fn visit_function(&mut self, _: &ast::Function) {}
-            fn visit_arrow_expr(&mut self, _: &ast::ArrowExpr) {}
+            fn visit_function(&mut self, func: &ast::Function) {
+                let prev = std::mem::replace(&mut self.in_fn, true);
+                func.visit_children_with(self);
+                self.in_fn = prev;
+            }
+            fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
+                let prev = std::mem::replace(&mut self.in_fn, true);
+                arrow.visit_children_with(self);
+                self.in_fn = prev;
+            }
         }
-        let mut awaits = TopLevelAwait(false);
-        module.visit_with(&mut awaits);
-        self.async_init |= awaits.0;
+        module.visit_with(&mut Collector {
+            locations: self,
+            in_fn: false,
+        });
     }
 }

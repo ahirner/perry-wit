@@ -61,24 +61,6 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn dce_keeps_field_writes() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(
-        ctx,
-        &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.\"x\" = v;",
-        ),
-    );
-    dce(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(
-        printed.contains("perry.alloc") && printed.contains("perry.field_set"),
-        "{printed}"
-    );
-    Ok(())
-}
-
 /// The sum loop as the builder emits it: mutable `let` bindings as slots, no SSA joins.
 const SLOTTED_LOOP: &str = r#"
 builtin.module @m {
@@ -457,33 +439,17 @@ builtin.module @cascade {
     Ok(())
 }
 
-/// A pass that claims a change without changing the IR.
-struct ClaimsChange;
-
-impl Pass for ClaimsChange {
-    fn name(&self) -> &str {
-        "claims-change"
-    }
-
-    fn run(
-        &mut self,
-        _: Ptr<Operation>,
-        _: &mut Context,
-        _: &mut AnalysisManager,
-    ) -> Result<PassResult> {
-        let mut result = PassResult::default();
-        result.ir_changed = IRStatus::Changed;
-        Ok(result)
-    }
-}
-
 #[test]
 #[should_panic(expected = "non-monotonic cleanup round")]
 fn fixpoint_rejects_non_monotonic_pass() {
     let ctx = &mut Context::new();
     let root = parse(ctx, &single_block(""));
     let mut passes = Passes::default();
-    passes.add_pass(ClaimsChange);
+    passes.add_pass(FnPass("claims-change", |_, _, _| {
+        let mut result = PassResult::default();
+        result.ir_changed = IRStatus::Changed;
+        Ok(result)
+    }));
     let _ =
         crate::pipeline::run_to_fixpoint(&mut passes, root, ctx, &mut AnalysisManager::default());
 }

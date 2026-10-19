@@ -4,7 +4,7 @@ use crate::sdk::to_camel_case;
 use perry_codegen::boundary::Import;
 use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
 use std::collections::HashMap;
-use wit_parser::{Resolve, WorldId, WorldItem};
+use wit_parser::{Resolve, WorldId};
 
 pub(super) fn bindings(
     resolve: &Resolve,
@@ -12,16 +12,14 @@ pub(super) fn bindings(
     foreign: &mut HashMap<String, Foreign>,
 ) -> Vec<Import> {
     let mut imports = Vec::new();
-    for (key, item) in &resolve.worlds[world].imports {
-        let (module, functions): (String, Vec<_>) = match item {
-            WorldItem::Interface { id, .. } => (
-                resolve.name_world_key(key),
-                resolve.interfaces[*id].functions.values().collect(),
-            ),
-            WorldItem::Function(function) => ("$root".into(), vec![function]),
-            WorldItem::Type { .. } => continue,
+    for entry in crate::abi::world_functions(resolve, resolve.worlds[world].imports.iter()) {
+        let module = if entry.interface.is_some() {
+            resolve.name_world_key(entry.key)
+        } else {
+            "$root".into()
         };
-        for function in functions {
+        let function = entry.function;
+        {
             // Unsupported signatures remain unavailable at the source boundary; unrelated
             // imports such as WASI resources must not prevent compilation of a world.
             let Some(params) = function

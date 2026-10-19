@@ -21,7 +21,6 @@ mod coerce;
 mod collections;
 mod control_flow;
 mod dates;
-mod decoder;
 mod expressions;
 mod foreign;
 mod hir_compat;
@@ -29,7 +28,6 @@ mod host;
 mod infer;
 mod inline;
 mod json;
-mod json_decode;
 mod methods;
 mod modules;
 mod operators;
@@ -84,7 +82,7 @@ use pliron::{
     utils::apint::{APInt, bw},
     value::Value,
 };
-use shapes::{BindingType, Shapes, identifier};
+use shapes::{BindingType, HirTypeExt, Shapes, identifier};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// HIR types and structural foreign (WIT) symbol descriptors.

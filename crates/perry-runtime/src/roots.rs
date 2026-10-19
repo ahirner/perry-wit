@@ -12,10 +12,9 @@ struct Pin {
     task: *mut crate::region::Task,
 }
 
-pub use crate::layout::roots::{CAPACITY, DATA, LENGTH};
-
 #[cfg(target_arch = "wasm32")]
 const _: () = {
+    use crate::layout::roots::{CAPACITY, DATA, LENGTH};
     assert!(core::mem::offset_of!(RootStack, data) == DATA as usize);
     assert!(core::mem::offset_of!(RootStack, length) == LENGTH as usize);
     assert!(core::mem::offset_of!(RootStack, capacity) == CAPACITY as usize);

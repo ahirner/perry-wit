@@ -72,7 +72,7 @@ op_schema! {
         pub new(callee: Identifier, args: Vec<Value>, results: Vec<TypeHandle>)
             operands(args) => results(results);
     }
-    attribute(callee, get_attr_perry_callee, set_attr_perry_callee) = IdentifierAttr::new(callee)
+    attribute(callee: Identifier, get_attr_perry_callee, set_attr_perry_callee) = IdentifierAttr::new(callee)
         => CallErr::Unknown("<missing>".into());
     prepare(this) {
         let callee = callee.as_ref();
@@ -81,15 +81,6 @@ op_schema! {
     result(ctx, args: Vec<TypeHandle>, results: Vec<TypeHandle>): impl OutputContract =
         Signature { inputs: args, outputs: results };
     error = CallErr::Signature(callee.to_string());
-}
-
-impl CallOp {
-    pub fn callee(&self, ctx: &Context) -> Identifier {
-        self.get_attr_perry_callee(ctx)
-            .expect("callee")
-            .clone()
-            .into()
-    }
 }
 
 op_schema! {
@@ -102,7 +93,7 @@ op_schema! {
         pub new(callee: Identifier, args: Vec<Value>, value: TypeHandle)
             operands(args) => explicit(PromiseType::get(ctx, value).into());
     }
-    attribute(callee, get_attr_perry_async_callee, set_attr_perry_async_callee) = IdentifierAttr::new(callee)
+    attribute(callee: Identifier, get_attr_perry_async_callee, set_attr_perry_async_callee) = IdentifierAttr::new(callee)
         => CallErr::Unknown("<missing>".into());
     prepare(this) {
         let callee = callee.as_ref();
@@ -115,15 +106,6 @@ op_schema! {
         };
     error = CallErr::Signature(callee.to_string());
     check_before results.len() == 1 => CallErr::Signature(callee.to_string());
-}
-
-impl AsyncCallOp {
-    pub fn callee(&self, ctx: &Context) -> Identifier {
-        self.get_attr_perry_async_callee(ctx)
-            .expect("callee")
-            .clone()
-            .into()
-    }
 }
 
 op_schema! {
@@ -191,7 +173,8 @@ pub(crate) fn is_specialized_entry(ctx: &Context, function: &FuncOp) -> bool {
 
 /// Request one uninterrupted construction scope. ProgramFacts verifies the closed
 /// synchronous call group and each operation before codegen omits internal safe points.
-pub fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
+#[cfg(test)]
+pub(crate) fn set_atomic_construction(ctx: &mut Context, function: &FuncOp) {
     update_meta(ctx, function, |m| m.atomic_construction = true);
 }
 

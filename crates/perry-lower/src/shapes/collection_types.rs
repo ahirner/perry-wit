@@ -144,37 +144,19 @@ impl Shapes<'_> {
         self.collection_box_type(ctx, entry, EntryKind::Set)
     }
 
-    /// A `Record<K, V>` dictionary from argument types.
+    /// A `Record<K, V>` dictionary from source types.
     pub(super) fn dict_source_type(
         &self,
         ctx: &Context,
-        k: ArgumentId,
-        v: ArgumentId,
+        k: &HirType,
+        v: &HirType,
     ) -> Result<TypeHandle> {
-        let k_ty = self.source_type(ctx, k)?;
-        let v_ty = self.source_type(ctx, v)?;
+        let k_ty = self.value_type(ctx, k)?;
+        let v_ty = self.value_type(ctx, v)?;
         let fields = vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)];
         let entry =
             self.mir_record_prefix(ctx, fields, Some("dict_tuple"), RecordKind::DictionaryEntry)?;
         Ok(ArrayType::get(ctx, entry.into()).into())
-    }
-
-    /// `Map<K, V>` from argument types.
-    pub(super) fn map_source_type(
-        &self,
-        ctx: &Context,
-        k: ArgumentId,
-        v: ArgumentId,
-    ) -> Result<TypeHandle> {
-        let k_ty = self.source_type(ctx, k)?;
-        let v_ty = self.source_type(ctx, v)?;
-        Ok(self.map_box_type(ctx, k_ty, v_ty)?.into())
-    }
-
-    /// `Set<T>` from an argument type.
-    pub(super) fn set_source_type(&self, ctx: &Context, elem: ArgumentId) -> Result<TypeHandle> {
-        let elem_ty = self.source_type(ctx, elem)?;
-        Ok(self.set_box_type(ctx, elem_ty)?.into())
     }
 
     /// A live `view` from its generic arguments: `[K, V]` over a `Map`, `[T]` over a `Set`.
@@ -182,11 +164,11 @@ impl Shapes<'_> {
         &self,
         ctx: &Context,
         view: CollectionViewKind,
-        arguments: &[ArgumentId],
+        arguments: &[HirType],
     ) -> Result<TypeHandle> {
         let box_rec = match (view.source(), arguments) {
-            (EntryKind::Map, &[k, v]) => self.map_source_type(ctx, k, v)?,
-            (EntryKind::Set, &[element]) => self.set_source_type(ctx, element)?,
+            (EntryKind::Map, [k, v]) => self.map_type(ctx, k, v)?,
+            (EntryKind::Set, [element]) => self.set_type(ctx, element)?,
             (EntryKind::Map, _) => bail!("{} needs key and value type arguments", view.type_name()),
             (EntryKind::Set, _) => bail!("{} needs one element type argument", view.type_name()),
         };

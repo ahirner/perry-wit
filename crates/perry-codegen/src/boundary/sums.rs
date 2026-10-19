@@ -257,8 +257,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, join, values);
             self.block = next;
         }
-        let trap = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, trap);
+        self.trap(ctx);
         self.block = join;
         Ok(join.deref(ctx).arguments().collect())
     }
@@ -544,8 +543,7 @@ impl FunctionLowering<'_, '_> {
             let present = self.new_block(ctx, vec![]);
             self.cond_br(ctx, absent, (trap, vec![]), (present, vec![]));
             self.block = trap;
-            let unreachable = UnreachableOp::new(ctx).get_operation();
-            self.insert(ctx, unreachable);
+            self.trap(ctx);
             self.block = present;
         }
         Ok((payload.mir, value))

@@ -7,13 +7,10 @@
 //! `wasi:http` response from the returned one through the services of `perry:http-server`
 //! (`perry-web`'s `serve` module). The response body is written after `task.return`, so the
 //! export runs until the host has read it.
-use super::{Compiled, ComponentOutput, bind, finish, lower, wit_types};
+use super::{Compiled, emit_component, lower, wit_types};
 use crate::component;
 use anyhow::{Context as _, Result};
-use perry_codegen::{
-    Exports,
-    boundary::{AbiType, Export, ExportKind, Flat},
-};
+use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
 use pliron::context::Context;
 use wit_parser::{
     Resolve, Type, TypeDefKind, WorldId, WorldItem,
@@ -144,31 +141,19 @@ pub(crate) fn compile(
             command: false,
         },
     }];
-    let imports = bind::imports(&resolve, world);
-    let streams = bind::stream_anchor(&resolve, world);
-    let exports = Exports::Canonical {
+    emit_component(
+        ctx,
+        &mir,
+        &mut analyses,
+        &resolve,
+        world,
         memory_checks,
+        componentize,
         exports,
-        imports,
-        bindings: vec![],
-        resources: vec![],
-    };
-    let mut allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports, &mut analyses)?;
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-    let (core, helpers) = finish(
-        core,
-        streams.as_ref(),
-        &crate::link::canonical::Requirements::for_world(&resolve, world),
-    )?;
-    allocation_report.push_str(&format!("Linked helper functions: {helpers}\n"));
-    let component = componentize
-        .then(|| ComponentOutput::encode(&core, &resolve, world))
-        .transpose()?;
-    Ok(Compiled {
-        core,
-        component,
-        allocation_report,
-    })
+        vec![],
+        vec![],
+        false,
+    )
 }
 
 /// The flat core types of `ty` (at most the 16 that `task.return` takes directly).

@@ -41,7 +41,7 @@ pub(super) fn infer_closure_return(
         saved.push((second.id, prev));
     }
     let mut returned = Vec::new();
-    walk::scan(body, env, &mut ScanMode::Returns(&mut returned));
+    walk::scan(body, env, Some(&mut returned), None);
     for (id, prev) in saved.into_iter().rev() {
         if let Some(prev) = prev {
             env.locals.insert(id, prev);

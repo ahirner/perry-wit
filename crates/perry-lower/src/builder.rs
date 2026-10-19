@@ -115,7 +115,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) is_async: bool,
     pub(super) labels: usize,
     pub(super) rest_excluded_keys: &'s [String],
-    pub(super) this_slot: Option<(Value, &'s str, Vec<shapes::ArgumentId>)>,
+    pub(super) this_slot: Option<Value>,
 }
 
 impl<'s> FunctionBuilder<'s> {

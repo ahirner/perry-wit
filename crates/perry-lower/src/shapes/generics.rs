@@ -1,4 +1,4 @@
-//! Instantiation of generic interfaces, type aliases, and classes using interned source types.
+//! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
 use perry_hir::ir::{Class, Interface, TypeAlias};
 
@@ -85,6 +85,115 @@ enum Declaration<'a> {
     Class(&'a Class),
 }
 
+fn charge_budget(ty: &HirType, remaining: &mut usize) -> Result<()> {
+    let mut exceeded = false;
+    let _ = ty.any(&mut |_| {
+        if *remaining <= 1 {
+            exceeded = true;
+            true
+        } else {
+            *remaining -= 1;
+            false
+        }
+    });
+    ensure!(!exceeded, "generic type arguments expand indefinitely");
+    Ok(())
+}
+
+fn check_subst(
+    ctx: &Context,
+    ty: &HirType,
+    bindings: &HashMap<&str, TypeId>,
+    remaining: &mut usize,
+) -> Result<bool> {
+    ensure!(*remaining > 1, "generic type arguments expand indefinitely");
+    *remaining -= 1;
+    match ty {
+        HirType::Named(name) | HirType::TypeVar(name) => match bindings.get(name.as_str()) {
+            Some(&bound) => {
+                charge_budget(bound.hir(ctx), remaining)?;
+                Ok(true)
+            }
+            None => {
+                if matches!(ty, HirType::TypeVar(_)) {
+                    bail!("unresolved type argument {name}");
+                }
+                Ok(false)
+            }
+        },
+        HirType::Array(inner) | HirType::Promise(inner) => {
+            check_subst(ctx, inner, bindings, remaining)
+        }
+        HirType::Tuple(items) | HirType::Union(items) => {
+            let mut subst = false;
+            for item in items {
+                subst |= check_subst(ctx, item, bindings, remaining)?;
+            }
+            Ok(subst)
+        }
+        HirType::Object(obj) => {
+            let mut subst = false;
+            for prop in obj.properties.values() {
+                subst |= check_subst(ctx, &prop.ty, bindings, remaining)?;
+            }
+            if let Some(idx) = &obj.index_signature {
+                subst |= check_subst(ctx, idx, bindings, remaining)?;
+            }
+            Ok(subst)
+        }
+        HirType::Function(func) => {
+            let mut subst = false;
+            for (_, param_ty, _) in &func.params {
+                subst |= check_subst(ctx, param_ty, bindings, remaining)?;
+            }
+            subst |= check_subst(ctx, &func.return_type, bindings, remaining)?;
+            Ok(subst)
+        }
+        HirType::Generic { type_args, .. } => {
+            let mut subst = false;
+            for arg in type_args {
+                subst |= check_subst(ctx, arg, bindings, remaining)?;
+            }
+            Ok(subst)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_id(ctx: &Context, id: TypeId, remaining: &mut usize) -> Result<TypeId> {
+    check_subst(ctx, id.hir(ctx), &HashMap::new(), remaining)?;
+    Ok(id)
+}
+
+pub(super) fn substitute_id(
+    ctx: &Context,
+    ty: &HirType,
+    bindings: &HashMap<&str, TypeId>,
+    remaining: &mut usize,
+) -> Result<TypeId> {
+    if let HirType::Named(name) | HirType::TypeVar(name) = ty
+        && let Some(&bound) = bindings.get(name.as_str())
+    {
+        ensure!(*remaining > 1, "generic type arguments expand indefinitely");
+        *remaining -= 1;
+        charge_budget(bound.hir(ctx), remaining)?;
+        return Ok(bound);
+    }
+    let needs_subst = check_subst(ctx, ty, bindings, remaining)?;
+    if !needs_subst {
+        return Ok(TypeId::intern(ctx, ty));
+    }
+    let mut out = ty.clone();
+    out.transform(&mut |node| {
+        if let HirType::Named(name) | HirType::TypeVar(name) = node
+            && let Some(&bound) = bindings.get(name.as_str())
+        {
+            *node = bound.hir(ctx).clone();
+        }
+    });
+    Ok(TypeId::from_owned(ctx, out))
+}
+
 impl<'a> Declaration<'a> {
     fn find<L: DeclarationLookup>(lookup: &'a L, base: &str) -> Option<(DeclarationId, Self)> {
         if let Some((index, interface)) = lookup.interface(base) {
@@ -109,8 +218,8 @@ impl<'a> Declaration<'a> {
         self,
         ctx: &Context,
         base: &str,
-        arguments: &[ArgumentId],
-    ) -> Result<HashMap<&'a str, ArgumentId>> {
+        arguments: &[TypeId],
+    ) -> Result<HashMap<&'a str, TypeId>> {
         let parameters = self.parameters();
         ensure!(
             arguments.len() <= parameters.len(),
@@ -120,8 +229,8 @@ impl<'a> Declaration<'a> {
         let mut remaining = ARGUMENT_LIMIT;
         for (index, parameter) in parameters.iter().enumerate() {
             let argument = match arguments.get(index) {
-                Some(argument) => *argument,
-                None => Argument::from_hir(
+                Some(&argument) => validate_id(ctx, argument, &mut remaining)?,
+                None => substitute_id(
                     ctx,
                     parameter
                         .default
@@ -140,19 +249,22 @@ impl<'a> Declaration<'a> {
     }
 }
 
-fn generic_parts(kind: &Kind) -> Option<(&str, &[ArgumentId])> {
-    match kind {
-        Kind::Named(name) => Some((name, &[])),
-        Kind::Generic { base, arguments } => Some((base, arguments)),
+fn generic_parts(ty: &HirType) -> Option<(&str, &[HirType])> {
+    match ty {
+        HirType::Named(name) => Some((name, &[])),
+        HirType::Generic { base, type_args } => Some((base, type_args)),
         _ => None,
     }
 }
 
-fn union_of(ctx: &Context, members: Vec<ArgumentId>) -> ArgumentId {
-    match members.as_slice() {
-        [] => Argument::from_kind(ctx, Kind::Never),
-        [single] => *single,
-        _ => Argument::from_kind(ctx, Kind::Union(members)),
+fn union_of(ctx: &Context, members: Vec<TypeId>) -> TypeId {
+    match members.len() {
+        0 => TypeId::intern(ctx, &HirType::Never),
+        1 => members[0],
+        _ => TypeId::from_owned(
+            ctx,
+            HirType::Union(members.into_iter().map(|m| m.hir(ctx).clone()).collect()),
+        ),
     }
 }
 
@@ -161,7 +273,7 @@ impl<'s> Shapes<'s> {
         &self,
         ctx: &Context,
         class_name: &str,
-        type_args: &[ArgumentId],
+        type_args: &[TypeId],
         ty: &HirType,
     ) -> Result<TypeHandle> {
         let Some((_, class)) = self.classes.get(class_name) else {
@@ -172,8 +284,8 @@ impl<'s> Shapes<'s> {
         }
         let bindings = Declaration::Class(class).bind(ctx, class_name, type_args)?;
         let mut remaining = ARGUMENT_LIMIT;
-        let arg = Argument::from_hir(ctx, ty, &bindings, &mut remaining)?;
-        self.source_type(ctx, arg)
+        let arg = substitute_id(ctx, ty, &bindings, &mut remaining)?;
+        self.value_type(ctx, arg.hir(ctx))
     }
 
     /// The MIR type of `base<arguments>`: missing arguments take their declared defaults,
@@ -182,29 +294,31 @@ impl<'s> Shapes<'s> {
         &self,
         ctx: &Context,
         base: &str,
-        arguments: &[ArgumentId],
+        arguments: &[HirType],
     ) -> Result<TypeHandle> {
+        if !self.is_user_type(base)
+            && base == "Readonly"
+            && let [inner] = arguments
+        {
+            return self.value_type(ctx, inner);
+        }
         let lookup = (&self.interfaces, &self.type_aliases, &self.classes);
         let resolver = Resolver::new(ctx, &lookup);
+        let arg_ids = TypeId::intern_slice(ctx, arguments);
         if !self.is_user_type(base) {
-            if base == "Readonly"
-                && let [inner] = arguments
-            {
-                return self.source_type(ctx, *inner);
-            }
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
-                let expanded = resolver.utility_type(base, arguments, 0).with_context(|| {
+                let expanded = resolver.utility_type(base, &arg_ids, 0).with_context(|| {
                     format!("MIR backend could not resolve utility type {base}")
                 })?;
-                return self.source_type(ctx, expanded);
+                return self.value_type(ctx, expanded.hir(ctx));
             }
             if matches!(base, "Partial" | "Required" | "Pick" | "Omit") {
-                let key = ShapeKey::Utility(base.to_owned(), arguments.to_vec());
-                if let Some(ty) = self.named.borrow().get(&key) {
+                let key = ShapeKeyRef::Utility(base, &arg_ids);
+                if let Some(ty) = self.named.borrow().get(&key as &dyn ShapeLookup) {
                     return Ok(*ty);
                 }
                 let properties = resolver
-                    .named(base, arguments, false, Query::Record, 0)
+                    .named(base, &arg_ids, false, Query::Record, 0)
                     .and_then(|(view, _)| view.properties(ctx))
                     .with_context(|| {
                         format!("MIR backend could not resolve utility type {base}")
@@ -212,15 +326,15 @@ impl<'s> Shapes<'s> {
                 let ty: TypeHandle = self
                     .source_record(
                         ctx,
-                        Some(&key),
+                        Some(key),
                         properties
                             .iter()
-                            .map(|(n, ty, opt)| (n.as_str(), *ty, *opt))
+                            .map(|(n, ty, opt)| (n.as_str(), ty.hir(ctx), *opt))
                             .collect(),
                     )?
                     .into();
-                if !self.pending.borrow().contains_key(&key) {
-                    self.named.borrow_mut().insert(key, ty);
+                if !self.pending.borrow().contains_key(&key as &dyn ShapeLookup) {
+                    self.named.borrow_mut().insert(key.to_owned(), ty);
                 }
                 return Ok(ty);
             }
@@ -228,14 +342,20 @@ impl<'s> Shapes<'s> {
         let (identity, declaration) = Declaration::find(&lookup, base).with_context(|| {
             format!("MIR backend does not support unresolved generic type {base}")
         })?;
-        let bindings = declaration.bind(ctx, base, arguments)?;
-        let effective_args: Vec<ArgumentId> = declaration
+        if arg_ids.len() == declaration.parameters().len() {
+            let fast_key = ShapeKeyRef::Generic(identity, &arg_ids);
+            if let Some(ty) = self.named.borrow().get(&fast_key as &dyn ShapeLookup) {
+                return Ok(*ty);
+            }
+        }
+        let bindings = declaration.bind(ctx, base, &arg_ids)?;
+        let effective_args: Vec<TypeId> = declaration
             .parameters()
             .iter()
             .map(|parameter| bindings[parameter.name.as_str()])
             .collect();
-        let key = ShapeKey::Generic(identity, effective_args);
-        if let Some(ty) = self.named.borrow().get(&key) {
+        let key = ShapeKeyRef::Generic(identity, &effective_args);
+        if let Some(ty) = self.named.borrow().get(&key as &dyn ShapeLookup) {
             return Ok(*ty);
         }
         ensure!(
@@ -268,80 +388,79 @@ impl<'s> Shapes<'s> {
                 let ty: TypeHandle = self
                     .source_record_prefix(
                         ctx,
-                        Some(&key),
+                        Some(key),
                         prefix.as_deref(),
                         properties
                             .iter()
-                            .map(|(name, ty, optional)| (name.as_str(), *ty, *optional))
+                            .map(|(name, ty, optional)| (name.as_str(), ty.hir(ctx), *optional))
                             .collect(),
                     )?
                     .into();
-                if let Declaration::Class(class) = declaration
-                    && let ShapeKey::Generic(_, arguments) = &key
-                {
+                if let Declaration::Class(class) = declaration {
                     self.class_records
                         .borrow_mut()
-                        .insert(ty, (class.name.clone(), arguments.clone()));
+                        .insert(ty, (class.name.clone(), effective_args.clone()));
                 }
                 ty
             }
             Declaration::Alias(alias) => {
-                let value = Argument::from_hir(ctx, &alias.ty, &bindings, &mut remaining)?;
-                let value_ref = value.deref(ctx);
-                if let Kind::Object {
-                    properties,
-                    index_signature: None,
-                    ..
-                } = value_ref.kind()
+                let value = substitute_id(ctx, &alias.ty, &bindings, &mut remaining)?;
+                let value_hir = value.hir(ctx);
+                if let HirType::Object(obj) = value_hir
+                    && obj.index_signature.is_none()
                 {
                     self.source_record(
                         ctx,
-                        Some(&key),
-                        properties
+                        Some(key),
+                        obj.properties
                             .iter()
-                            .map(|p| (p.name.as_str(), p.ty, p.optional))
+                            .map(|(name, p)| (name.as_str(), &p.ty, p.optional))
                             .collect(),
                     )?
                     .into()
                 } else {
                     ensure!(
-                        !self.pending.borrow().contains_key(&key),
+                        !self.pending.borrow().contains_key(&key as &dyn ShapeLookup),
                         "nonproductive recursive type alias {base}"
                     );
                     self.pending
                         .borrow_mut()
-                        .insert(key.clone(), PendingShape::Resolving);
-                    let value = self.source_type(ctx, value);
-                    self.pending.borrow_mut().remove(&key);
+                        .insert(key.to_owned(), PendingShape::Resolving);
+                    let value = self.value_type(ctx, value_hir);
+                    self.pending.borrow_mut().remove(&key as &dyn ShapeLookup);
                     value?
                 }
             }
         };
-        if !self.pending.borrow().contains_key(&key) {
-            self.named.borrow_mut().insert(key, ty);
+        if !self.pending.borrow().contains_key(&key as &dyn ShapeLookup) {
+            self.named
+                .borrow_mut()
+                .insert(ShapeKey::Generic(identity, effective_args), ty);
         }
         Ok(ty)
     }
 }
 
-fn strip_void_arg(ctx: &Context, ty: ArgumentId) -> ArgumentId {
-    let argument = ty.deref(ctx);
-    let Kind::Union(items) = argument.kind() else {
+fn strip_void(ctx: &Context, ty: TypeId) -> TypeId {
+    let HirType::Union(items) = ty.hir(ctx) else {
         return ty;
     };
-    let filtered: Vec<ArgumentId> = items
+    if !items.contains(&HirType::Void) {
+        return ty;
+    }
+    let filtered: Vec<TypeId> = items
         .iter()
-        .copied()
-        .filter(|item| !matches!(item.deref(ctx).kind(), Kind::Void))
+        .filter(|item| !matches!(item, HirType::Void))
+        .map(|item| TypeId::intern(ctx, item))
         .collect();
     if filtered.is_empty() {
-        Argument::from_kind(ctx, Kind::Void)
+        TypeId::intern(ctx, &HirType::Void)
     } else {
         union_of(ctx, filtered)
     }
 }
 
-/// HIR compatibility result for a selected member; intermediate alias expansions stay interned.
+/// HIR compatibility result for a selected member.
 pub(crate) fn property_type(
     ctx: &Context,
     interfaces: &[Interface],
@@ -350,15 +469,16 @@ pub(crate) fn property_type(
     arguments: &[HirType],
     property: &str,
 ) -> Option<HirType> {
-    let mut remaining = ARGUMENT_LIMIT;
-    let arguments = arguments
+    if arguments
         .iter()
-        .map(|ty| Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining))
-        .collect::<Result<Vec<_>>>()
-        .ok()?;
+        .any(|ty| ty.any(&mut |n| matches!(n, HirType::TypeVar(_))))
+    {
+        return None;
+    }
     let lookup = (interfaces, type_aliases);
-    let (ty, optional) = Resolver::new(ctx, &lookup).property(base, &arguments, property)?;
-    Some(optional_property(ty.deref(ctx).to_hir(ctx), optional))
+    let arg_ids = TypeId::intern_slice(ctx, arguments);
+    let (ty, optional) = Resolver::new(ctx, &lookup).property(base, &arg_ids, property)?;
+    Some(optional_property(ty.hir(ctx).clone(), optional))
 }
 
 pub(crate) fn optional_property(ty: HirType, optional: bool) -> HirType {
@@ -399,25 +519,6 @@ pub(crate) fn iterated_element(ty: HirType) -> Result<HirType, HirType> {
     picked.map_err(|type_args| HirType::Generic { base, type_args })
 }
 
-fn optional_property_arg(ctx: &Context, ty: ArgumentId, optional: bool) -> ArgumentId {
-    if !optional {
-        return ty;
-    }
-    let void_arg = Argument::from_kind(ctx, Kind::Void);
-    let items = match ty.deref(ctx).kind() {
-        Kind::Union(items) => {
-            if items.contains(&void_arg) {
-                return ty;
-            }
-            let mut items = items.clone();
-            items.push(void_arg);
-            items
-        }
-        _ => vec![ty, void_arg],
-    };
-    Argument::from_kind(ctx, Kind::Union(items))
-}
-
 /// Extract `(key_ty, value_ty)` if `ty` resolves to `Record<K, V>`, `{ [key: string]: V }`, or a
 /// closed record/interface whose properties share a uniform value type.
 pub(crate) fn dict_entry_types(
@@ -426,11 +527,12 @@ pub(crate) fn dict_entry_types(
     type_aliases: &[TypeAlias],
     ty: &HirType,
 ) -> Option<(HirType, HirType)> {
-    let mut remaining = ARGUMENT_LIMIT;
-    let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
+    if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
+        return None;
+    }
     let lookup = (interfaces, type_aliases);
-    let (k, v) = Resolver::new(ctx, &lookup).dictionary(arg)?;
-    Some((k.deref(ctx).to_hir(ctx), v.deref(ctx).to_hir(ctx)))
+    let id = TypeId::intern(ctx, ty);
+    Resolver::new(ctx, &lookup).dictionary(id)
 }
 
 pub(crate) fn object_properties(
@@ -439,14 +541,16 @@ pub(crate) fn object_properties(
     type_aliases: &[TypeAlias],
     ty: &HirType,
 ) -> Option<Vec<(String, HirType, bool)>> {
-    let mut remaining = ARGUMENT_LIMIT;
-    let arg = Argument::from_hir(ctx, ty, &HashMap::new(), &mut remaining).ok()?;
+    if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
+        return None;
+    }
     let lookup = (interfaces, type_aliases);
-    let props = Resolver::new(ctx, &lookup).record(arg, 0)?;
+    let id = TypeId::intern(ctx, ty);
     Some(
-        props
+        Resolver::new(ctx, &lookup)
+            .record(id, 0)?
             .into_iter()
-            .map(|(name, prop_arg, opt)| (name, prop_arg.deref(ctx).to_hir(ctx), opt))
+            .map(|(name, ty, optional)| (name, ty.hir(ctx).clone(), optional))
             .collect(),
     )
 }
