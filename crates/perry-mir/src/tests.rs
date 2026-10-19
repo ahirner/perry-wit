@@ -142,25 +142,30 @@ fn normalized(text: &str) -> String {
         .join("\n")
 }
 
+fn round_trip(ctx: &Context, module: Ptr<Operation>) -> Result<String> {
+    verify_operation(module, ctx)?;
+    let printed = print(ctx, module);
+    let reparsed_ctx = &mut Context::new();
+    let reparsed = parse(reparsed_ctx, &normalized(&printed));
+    verify_operation(reparsed, reparsed_ctx)?;
+    assert_eq!(
+        normalized(&printed),
+        normalized(&print(reparsed_ctx, reparsed))
+    );
+    Ok(printed)
+}
+
 #[test]
 fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, TEMPORARY_RECORDS);
-    walk_op(
+    let alloc = Operation::get_op::<crate::AllocOp>(
+        first::<crate::AllocOp>(ctx, &function(ctx, module, "run")),
         ctx,
-        &mut (),
-        &WALKCONFIG_PREORDER_FORWARD,
-        module,
-        |ctx, _, node| {
-            if let IRNode::Operation(op) = node
-                && let Some(alloc) = Operation::get_op::<crate::AllocOp>(op, ctx)
-            {
-                alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
-            }
-        },
-    );
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
+    )
+    .unwrap();
+    alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
+    let printed = round_trip(ctx, module)?;
     for expected in [
         "perry.alloc Unassigned (",
         "perry.record <Point { x: builtin.fp64",
@@ -173,14 +178,6 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
             "missing {expected} in\n{printed}"
         );
     }
-    let reparsed_ctx = &mut Context::new();
-    // Printed `!N` location references point into an outline table that `disp` omits.
-    let reparsed = parse(reparsed_ctx, &normalized(&printed));
-    verify_operation(reparsed, reparsed_ctx)?;
-    assert_eq!(
-        normalized(&printed),
-        normalized(&print(reparsed_ctx, reparsed))
-    );
     let invalid = TEMPORARY_RECORDS.replace(
         "more = perry.compare Lt i, n : builtin.integer i1;",
         "more = builtin.constant <builtin.integer <1: i32>> : builtin.integer i32;",
@@ -285,25 +282,18 @@ fn verifier_rejects_ill_typed_heap_ops() {
             assert!(error.contains("json_copy"), "{error}");
         }
     }
-    for mut fields in [vec![0, 0], vec![2]] {
+    for fields in [vec![0, 0], vec![2]] {
         let ctx = &mut Context::new();
         let module = parse(
             ctx,
             &single_block(&format!("p = perry.alloc Task (v, v) : {POINT};")),
         );
-        walk_op(
+        let alloc = Operation::get_op::<crate::AllocOp>(
+            first::<crate::AllocOp>(ctx, &function(ctx, module, "f")),
             ctx,
-            &mut fields,
-            &WALKCONFIG_PREORDER_FORWARD,
-            module,
-            |ctx, fields, node| {
-                if let IRNode::Operation(op) = node
-                    && let Some(alloc) = Operation::get_op::<crate::AllocOp>(op, ctx)
-                {
-                    alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(fields.clone()));
-                }
-            },
-        );
+        )
+        .unwrap();
+        alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(fields));
         let error = verify_operation(module, ctx).expect_err("invalid field order");
         assert!(
             error
@@ -441,15 +431,7 @@ fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
     ] {
         let ctx = &mut Context::new();
         let module = parse(ctx, input);
-        verify_operation(module, ctx)?;
-        let printed = print(ctx, module);
-        let reparsed_ctx = &mut Context::new();
-        let reparsed = parse(reparsed_ctx, &normalized(&printed));
-        verify_operation(reparsed, reparsed_ctx)?;
-        assert_eq!(
-            normalized(&printed),
-            normalized(&print(reparsed_ctx, reparsed))
-        );
+        round_trip(ctx, module)?;
     }
     Ok(())
 }
@@ -761,12 +743,7 @@ fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     ));
     let ctx = &mut Context::new();
     let module = parse(ctx, &input);
-    verify_operation(module, ctx)?;
-    let printed = normalized(&print(ctx, module));
-    let ctx = &mut Context::new();
-    let reparsed = parse(ctx, &printed);
-    verify_operation(reparsed, ctx)?;
-    assert_eq!(printed, normalized(&print(ctx, reparsed)));
+    round_trip(ctx, module)?;
     let invalid = single_block(&format!(
         r#"value = perry.variant_new "text" (v) : {variant};"#
     ));

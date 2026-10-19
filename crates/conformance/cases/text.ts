@@ -96,3 +96,7 @@ for (let byte = 0; byte < 128; byte++) {
   casing.push(`A${scalar}Σ`, `AΣ${scalar}A`, `Σ${scalar}`);
 }
 for (const input of casing) console.log("case", JSON.stringify([input.toLowerCase(), input.toUpperCase()]));
+
+const replacementTable: Record<string,string> = {a:"A", b:"B"};
+console.log("callback-replace", "abba".replace(/[ab]/g, ch => replacementTable[ch]));
+console.log("named-capture", /(?<word>a)/.exec("abc")?.groups?.word ?? "missing");

@@ -341,7 +341,7 @@ let saved: Temporal.Instant = Temporal.Instant.fromEpochMilliseconds(-1);
 export async function run(n: number): Promise<number> {
     const original = saved;
     const values: CalendarValues = { date: Temporal.PlainDate.from('2024-02-28'),
-        time: Temporal.PlainDateTime.from('2024-02-28T12:30:00.123456789') };
+        time: Temporal.PlainDateTime.from({year:2024, month:2, day:28, hour:12, minute:30, millisecond:123, microsecond:456, nanosecond:789}, {overflow:'reject'}) };
     const dates: Temporal.PlainDate[] = [values.date];
     for (let i = 0; i < n; i++) {
         saved = Temporal.Instant.fromEpochMilliseconds(i);

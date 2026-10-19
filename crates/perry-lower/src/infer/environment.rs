@@ -1,6 +1,8 @@
 use super::*;
 
 pub(super) struct FunctionEnv<'a> {
+    pub(super) generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
+    pub(super) instantiated_returns: HashMap<FuncId, HirType>,
     pub(super) ctx: &'a Context,
     pub(super) base: &'a perry_hir::HirTypeEnv,
     pub(super) interfaces: &'a [perry_hir::ir::Interface],
@@ -135,8 +137,9 @@ impl HirTypeFacts for FunctionEnv<'_> {
     }
 
     fn function_return_type(&self, id: FuncId) -> Option<&HirType> {
-        self.base
-            .function_return_type(id)
+        self.instantiated_returns
+            .get(&id)
+            .or_else(|| self.base.function_return_type(id))
             .map(|ty| self.normalize(ty))
     }
 

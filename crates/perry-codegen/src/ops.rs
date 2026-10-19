@@ -480,7 +480,9 @@ impl FunctionLowering<'_, '_> {
         {
             return self.json_decode(ctx, op);
         }
-        if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some() {
+        if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some()
+            || Operation::get_op::<perry_mir::JsonBoxOp>(op, ctx).is_some()
+        {
             return self.json_stringify(ctx, op);
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {

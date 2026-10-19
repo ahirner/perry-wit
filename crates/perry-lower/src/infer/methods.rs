@@ -160,9 +160,10 @@ pub(super) fn result<'s>(
         MethodResult::Void => HirType::Void,
         MethodResult::String => HirType::String,
         MethodResult::Strings => HirType::Array(Box::new(HirType::String)),
-        MethodResult::NullableStrings => {
-            with_absences(HirType::Array(Box::new(HirType::String)), Absence::Null)
-        }
+        MethodResult::NullableStrings => with_absences(
+            HirType::Array(Box::new(with_absences(HirType::String, Absence::Undefined))),
+            Absence::Null,
+        ),
         MethodResult::OptionalNumber => with_absences(HirType::Number, Absence::Undefined),
         MethodResult::NullableString => with_absences(HirType::String, Absence::Null),
         MethodResult::IteratorKeys

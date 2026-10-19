@@ -356,6 +356,12 @@ fn operand_types(
         ];
         if let Some(domain) = comparison_domain(state, &inputs) {
             expected.fill(domain.ty(ctx));
+        } else if inputs[0]
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::types::BigIntType>()
+        {
+            expected.fill(inputs[0].get_type(ctx));
         } else {
             let (l_ty, r_ty) = (operand_ty(ctx, 0), operand_ty(ctx, 1));
             let is_num = |t: TypeHandle| {

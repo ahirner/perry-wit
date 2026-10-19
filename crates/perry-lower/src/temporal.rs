@@ -5,6 +5,7 @@ use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as Calendar
 #[derive(Clone, Copy)]
 enum Fields {
     Date,
+    DateTime,
     Duration(&'static str),
     Overflow,
     LargestUnit,
@@ -13,10 +14,17 @@ enum Fields {
 impl Fields {
     fn names(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Self::Date => &[
+            Self::Date => &Self::DateTime.names()[..3],
+            Self::DateTime => &[
                 ("year", "a year number"),
                 ("month", "a month number"),
                 ("day", "a day number"),
+                ("hour", "an hour number"),
+                ("minute", "a minute number"),
+                ("second", "a second number"),
+                ("millisecond", "a millisecond number"),
+                ("microsecond", "a microsecond number"),
+                ("nanosecond", "a nanosecond number"),
             ],
             Self::Duration(_) => &[
                 ("years", "a number of years"),
@@ -46,11 +54,20 @@ impl Fields {
         }
     }
 
+    fn class(self) -> &'static str {
+        match self {
+            Self::Date => "PlainDate",
+            Self::DateTime => "PlainDateTime",
+            _ => "",
+        }
+    }
+
     fn object_error(self) -> String {
         match self {
-            Self::Date => {
-                "Temporal.PlainDate.from fields object requires year, month, and day".into()
-            }
+            Self::Date | Self::DateTime => format!(
+                "Temporal.{}.from fields object requires year, month, and day",
+                self.class()
+            ),
             Self::Duration(method) => format!(
                 "Temporal {method} takes a duration object {{ years?, months?, weeks?, days? }}"
             ),
@@ -152,10 +169,12 @@ impl<'s> FunctionBuilder<'s> {
         let option = !choices.is_empty();
         let mut values = [None; N];
         for (index, field) in fields.into_iter().enumerate() {
-            let field = field
-                .filter(|field| !option || !matches!(field, FieldValue::Literal(Expr::Undefined)));
+            let default_time = matches!(schema, Fields::DateTime) && index >= 3;
+            let field = field.filter(|field| {
+                !(option || default_time) || !matches!(field, FieldValue::Literal(Expr::Undefined))
+            });
             let Some(field) = field else {
-                if !literal && matches!(schema, Fields::Date) {
+                if !literal && index < 3 && matches!(schema, Fields::Date | Fields::DateTime) {
                     bail!("{}", schema.object_error());
                 }
                 values[index] = choices
@@ -181,7 +200,7 @@ impl<'s> FunctionBuilder<'s> {
                 FieldValue::Loaded(value) => value,
             };
             if self.is_optional(ctx, value)
-                && (option || !literal && matches!(schema, Fields::Duration(_)))
+                && (option || default_time || !literal && matches!(schema, Fields::Duration(_)))
             {
                 let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
                 let default = if let Some((_, names)) = choices.first() {
@@ -210,7 +229,9 @@ impl<'s> FunctionBuilder<'s> {
                     format!("{what} is required here")
                 } else {
                     match schema {
-                        Fields::Date => format!("Temporal.PlainDate.from {name} must be a number"),
+                        Fields::Date | Fields::DateTime => {
+                            format!("Temporal.{}.from {name} must be a number", schema.class())
+                        }
                         Fields::Duration(method) => {
                             format!("Temporal {method} {name} field must be a number")
                         }
@@ -249,7 +270,22 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let [value] =
             self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?;
-        value.context("overflow field default missing")
+        let value = value.context("overflow field default missing")?;
+        let constrain = self.number(ctx, Overflow::Constrain as u32 as f64);
+        let valid = self.compare(ctx, CompareKind::Le, value, constrain);
+        let done = self.new_block(ctx, "overflow_valid");
+        let failed = self.new_block(ctx, "overflow_invalid");
+        self.branch(ctx, valid, done, failed);
+        self.switch_to(failed);
+        let message = self.string(ctx, "Temporal overflow must be constrain or reject");
+        let error = self.emit_value(ctx, |ctx| {
+            ErrorNewOp::new(ctx, ErrorKind::RangeError, message)
+        });
+        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
+        self.propagate(ctx, status);
+        self.after_terminator(ctx);
+        self.switch_to(done);
+        Ok(value)
     }
 
     pub(super) fn coerce_plain_date(
@@ -258,41 +294,99 @@ impl<'s> FunctionBuilder<'s> {
         item: &'s Expr,
         options: Option<&'s Expr>,
     ) -> Result<Value> {
+        self.coerce_plain(ctx, item, options, Kind::PlainDate)
+    }
+
+    fn compare_sign(&mut self, ctx: &mut Context, left: Value, right: Value) -> Result<Value> {
+        let lt = self.compare(ctx, CompareKind::Lt, left, right);
+        let f64_ty = FP64Type::get(ctx).into();
+        self.choose(
+            ctx,
+            f64_ty,
+            lt,
+            |b, ctx| Ok(b.number(ctx, -1.0)),
+            |b, ctx| {
+                let gt = b.compare(ctx, CompareKind::Gt, left, right);
+                b.choose(
+                    ctx,
+                    f64_ty,
+                    gt,
+                    |b, ctx| Ok(b.number(ctx, 1.0)),
+                    |b, ctx| Ok(b.number(ctx, 0.0)),
+                )
+            },
+        )
+    }
+
+    fn coerce_plain(
+        &mut self,
+        ctx: &mut Context,
+        item: &'s Expr,
+        options: Option<&'s Expr>,
+        target: Kind,
+    ) -> Result<Value> {
+        let date_time = target == Kind::PlainDateTime;
+        let schema = if date_time {
+            Fields::DateTime
+        } else {
+            Fields::Date
+        };
+        let class = schema.class();
         let input = if self.object_literal_pairs(item).is_some() {
             FieldValue::Literal(item)
         } else {
             let value = self.expression(ctx, item)?;
-            match kind(ctx, value)? {
-                Kind::PlainDate | Kind::String => {
-                    self.overflow_constrain(ctx, options)?;
-                    return Ok(if kind(ctx, value)? == Kind::PlainDate {
-                        value
+            let input_kind = kind(ctx, value)?;
+            if input_kind == target || input_kind == Kind::String {
+                self.overflow_constrain(ctx, options)?;
+                return Ok(if input_kind == target {
+                    value
+                } else {
+                    let intrinsic = if date_time {
+                        Intrinsic::PlainDateTimeFrom
                     } else {
-                        self.intrinsic(ctx, Intrinsic::PlainDateFrom, vec![value])
-                    });
-                }
-                Kind::Record => FieldValue::Loaded(value),
-                other => bail!(
-                    "Temporal.PlainDate.from expects an ISO string, PlainDate, or {{ year, month, day }}, got {}",
-                    other.label()
-                ),
+                        Intrinsic::PlainDateFrom
+                    };
+                    self.intrinsic(ctx, intrinsic, vec![value])
+                });
             }
+            ensure!(
+                input_kind == Kind::Record,
+                "Temporal.{class}.from expects an ISO string, {class}, or {{ year, month, day }}, got {}",
+                input_kind.label()
+            );
+            FieldValue::Loaded(value)
         };
-        let [Some(year), Some(month), Some(day)] =
-            self.temporal_fields(ctx, Some(input), Fields::Date)?
-        else {
-            bail!("Temporal.PlainDate.from fields object requires year, month, and day");
+        let fields: Vec<_> = if date_time {
+            self.temporal_fields::<9>(ctx, Some(input), schema)?
+                .into_iter()
+                .collect()
+        } else {
+            self.temporal_fields::<3>(ctx, Some(input), schema)?
+                .into_iter()
+                .collect()
         };
-        let constrain = self.overflow_constrain(ctx, options)?;
-        Ok(self.intrinsic(
-            ctx,
-            Intrinsic::PlainDateFromFields,
-            vec![year, month, day, constrain],
-        ))
+        ensure!(
+            fields[..3].iter().all(Option::is_some),
+            "{}",
+            schema.object_error()
+        );
+        let zero = self.number(ctx, 0.0);
+        let mut values: Vec<_> = fields
+            .into_iter()
+            .map(|value| value.unwrap_or(zero))
+            .collect();
+        values.push(self.overflow_constrain(ctx, options)?);
+        let intrinsic = if date_time {
+            Intrinsic::PlainDateTimeFromFields
+        } else {
+            Intrinsic::PlainDateFromFields
+        };
+        Ok(self.intrinsic(ctx, intrinsic, values))
     }
 
     /// `Temporal.Instant.from(string)`, `Instant.fromEpochMilliseconds(number)`,
-    /// `PlainDate.from(item, options?)`, `PlainDate.compare(a, b)`, `PlainDateTime.from(string)` and `Temporal.Now.*`.
+    /// `PlainDate.from(item, options?)`, `PlainDate.compare(a, b)`, `PlainDateTime.from(item, options?)` and `Temporal.Now.*`.
     pub(super) fn temporal_factory(
         &mut self,
         ctx: &mut Context,
@@ -342,12 +436,17 @@ impl<'s> FunctionBuilder<'s> {
                 let local_iso = self.intrinsic(ctx, Intrinsic::StringSlice, vec![iso, start, end]);
                 return Ok(self.intrinsic(ctx, Intrinsic::PlainDateTimeFrom, vec![local_iso]));
             }
-            ("PlainDate", "from") => {
+            ("PlainDate" | "PlainDateTime", "from") => {
                 ensure!(
                     (1..=2).contains(&args.len()),
-                    "Temporal.PlainDate.from takes one or two arguments"
+                    "Temporal.{class}.from takes one or two arguments"
                 );
-                return self.coerce_plain_date(ctx, &args[0], args.get(1));
+                let target = if class == "PlainDate" {
+                    Kind::PlainDate
+                } else {
+                    Kind::PlainDateTime
+                };
+                return self.coerce_plain(ctx, &args[0], args.get(1), target);
             }
             ("PlainDate", "compare") => {
                 ensure!(
@@ -358,24 +457,7 @@ impl<'s> FunctionBuilder<'s> {
                 let b = self.coerce_plain_date(ctx, &args[1], None)?;
                 let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![a]);
                 let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![b]);
-                let lt = self.compare(ctx, CompareKind::Lt, da, db);
-                let f64_ty = FP64Type::get(ctx).into();
-                return self.choose(
-                    ctx,
-                    f64_ty,
-                    lt,
-                    |b, ctx| Ok(b.number(ctx, -1.0)),
-                    |b, ctx| {
-                        let gt = b.compare(ctx, CompareKind::Gt, da, db);
-                        b.choose(
-                            ctx,
-                            f64_ty,
-                            gt,
-                            |b, ctx| Ok(b.number(ctx, 1.0)),
-                            |b, ctx| Ok(b.number(ctx, 0.0)),
-                        )
-                    },
-                );
+                return self.compare_sign(ctx, da, db);
             }
             _ => {}
         }
@@ -384,9 +466,6 @@ impl<'s> FunctionBuilder<'s> {
                 (Intrinsic::InstantFromMs, Kind::Number, "a number")
             }
             ("Instant", "from") => (Intrinsic::InstantFrom, Kind::String, "an ISO string"),
-            ("PlainDateTime", "from") => {
-                (Intrinsic::PlainDateTimeFrom, Kind::String, "an ISO string")
-            }
             _ => bail!(
                 "Temporal.{class}.{factory} is not supported; use Instant.from, \
                  Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now"
@@ -450,24 +529,8 @@ impl<'s> FunctionBuilder<'s> {
         let diff = self.binary(ctx, BinaryKind::Sub, db, da);
         let zero = self.number(ctx, 0.0);
         let blank = self.compare(ctx, CompareKind::Eq, diff, zero);
-        let lt = self.compare(ctx, CompareKind::Lt, diff, zero);
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        let sign = self.choose(
-            ctx,
-            f64_ty,
-            lt,
-            |b, ctx| Ok(b.number(ctx, -1.0)),
-            |b, ctx| {
-                let gt = b.compare(ctx, CompareKind::Gt, diff, zero);
-                b.choose(
-                    ctx,
-                    f64_ty,
-                    gt,
-                    |b, ctx| Ok(b.number(ctx, 1.0)),
-                    |b, ctx| Ok(b.number(ctx, 0.0)),
-                )
-            },
-        )?;
+        let sign = self.compare_sign(ctx, diff, zero)?;
         let month = self.number(ctx, CalendarUnit::Month as u32 as f64);
         let calendar = self.compare(ctx, CompareKind::Ge, unit, month);
         let week = self.number(ctx, CalendarUnit::Week as u32 as f64);

@@ -293,6 +293,7 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::InstantFromMs
             | Intrinsic::InstantFrom
             | Intrinsic::PlainDateFrom
+            | Intrinsic::PlainDateTimeFromFields
             | Intrinsic::PlainDateFromFields
             | Intrinsic::PlainDateTimeFrom
             | Intrinsic::PlainDateAddDays

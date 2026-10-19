@@ -226,6 +226,9 @@ impl<'s> FunctionBuilder<'s> {
         val_expr: &'s Expr,
     ) -> Result<Value> {
         let val = self.expression(ctx, val_expr)?;
+        if let Some(json) = self.json_operand(ctx, val)? {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonIsArray, vec![json]));
+        }
         let ty = val.get_type(ctx);
         let inner = present_type(ctx, ty);
         let is_plain_array = inner.deref(ctx).is::<ArrayType>()

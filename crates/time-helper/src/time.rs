@@ -17,6 +17,7 @@ pub enum Error {
     Syntax,
     Range,
     UnsupportedAnnotation,
+    UnsupportedDateFormat,
     Capacity,
 }
 
@@ -145,6 +146,10 @@ impl PlainDateTime {
 
     /// Temporal.PlainDate.from({ year, month, day }, { overflow }) construction.
     pub fn from_fields(year: f64, month: f64, day: f64, constrain: bool) -> Result<Self, Error> {
+        Self::calendar_fields(year, month, day, constrain)?.checked()
+    }
+
+    fn calendar_fields(year: f64, month: f64, day: f64, constrain: bool) -> Result<Self, Error> {
         if !year.is_finite() || !month.is_finite() || !day.is_finite() {
             return Err(Error::Range);
         }
@@ -175,11 +180,49 @@ impl PlainDateTime {
         } else {
             return Err(Error::Range);
         };
-        Self {
+        Ok(Self {
             day: datealgo::date_to_rd((y, month, day)),
             nanosecond: 0,
+        })
+    }
+
+    pub fn from_date_time_fields(fields: [f64; 9], constrain: bool) -> Result<Self, Error> {
+        let [
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            millisecond,
+            microsecond,
+            nanosecond,
+        ] = fields;
+        let mut value = Self::calendar_fields(year, month, day, constrain)?;
+        let mut parts = [0; 6];
+        for ((part, field), maximum) in parts
+            .iter_mut()
+            .zip([hour, minute, second, millisecond, microsecond, nanosecond])
+            .zip([23, 59, 59, 999, 999, 999])
+        {
+            if !field.is_finite() {
+                return Err(Error::Range);
+            }
+            let integer = field as i64;
+            *part = if constrain {
+                integer.clamp(0, maximum)
+            } else if (0..=maximum).contains(&integer) {
+                integer
+            } else {
+                return Err(Error::Range);
+            } as u64;
         }
-        .checked()
+        let [hour, minute, second, millisecond, microsecond, nanosecond] = parts;
+        value.nanosecond = ((hour * 60 + minute) * 60 + second) * 1_000_000_000
+            + millisecond * 1_000_000
+            + microsecond * 1_000
+            + nanosecond;
+        value.checked()
     }
 
     /// The supported Temporal.add({days}) operation, preserving all time fields.

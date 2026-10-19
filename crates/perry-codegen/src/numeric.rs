@@ -516,6 +516,17 @@ impl FunctionLowering<'_, '_> {
         operands: Vec<Value>,
         divisor: Option<i32>,
     ) -> Result<Value> {
+        if ty.deref(ctx).is::<perry_mir::BigIntType>() {
+            let runtime = match kind {
+                BinaryKind::Add => Runtime::StdBigintAdd,
+                BinaryKind::Sub => Runtime::StdBigintSub,
+                _ => bail!("bigint {kind:?} is not supported yet"),
+            };
+            let value = self.runtime(ctx, runtime, operands);
+            let status = self.runtime(ctx, Runtime::Status, vec![]);
+            self.throw_status_if(ctx, status, status);
+            return Ok(value);
+        }
         if let Some((bits, signed)) = integer(ctx, ty) {
             let opcode = match (kind, bits == 64, signed) {
                 (BinaryKind::Add, false, _) => NumOpcode::I32Add,

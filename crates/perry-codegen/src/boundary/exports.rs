@@ -277,14 +277,7 @@ fn async_export(
         // Pending: leave the task and wait on its subtasks (none would wait forever).
         b.block = wait;
         let set = b.runtime(ctx, Runtime::TaskSuspend, vec![]);
-        let stuck = b.num(ctx, NumOpcode::I32Eqz, vec![set]);
-        let trap = b.new_block(ctx, vec![]);
-        let suspend = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, stuck, (trap, vec![]), (suspend, vec![]));
-        b.block = trap;
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        b.insert(ctx, unreachable);
-        b.block = suspend;
+        b.trap_unless(ctx, set, false);
         let four = b.i32_const(ctx, 4);
         let shifted = b.num(ctx, NumOpcode::I32Shl, vec![set, four]);
         let wait_code = b.i32_const(ctx, WAIT);
@@ -399,15 +392,7 @@ fn async_export(
                     let case = b.i32_const(ctx, *error_case as i32);
                     b.flat_i32s(ctx, flat, &[one, case, one, data, len], &mut values)?;
                 }
-                if b.state.uses_http_server {
-                    b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
-                }
-                if b.state.uses_fetch {
-                    b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-                }
-                if b.state.uses_streams {
-                    b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-                }
+                b.close_web_handles(ctx, true);
                 b.host_void(ctx, task_return.clone(), values);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.task_free(ctx);
@@ -422,15 +407,7 @@ fn async_export(
                     b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
                     b.block = closed;
                 }
-                if b.state.uses_http_server {
-                    b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
-                }
-                if b.state.uses_fetch {
-                    b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-                }
-                if b.state.uses_streams {
-                    b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-                }
+                b.close_web_handles(ctx, true);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.return_resources(ctx);
                 b.task_free(ctx);
@@ -486,14 +463,7 @@ fn async_export(
             b.block = done;
             b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
         }
-        if b.state.uses_fetch {
-            // No request or response handle outlives the export call.
-            b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-        }
-        if b.state.uses_streams {
-            // No stream end outlives the export call.
-            b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-        }
+        b.close_web_handles(ctx, false);
         b.commit_resources(ctx);
         b.finish_resources(ctx);
         if !b.state.uses_http_server {

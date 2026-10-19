@@ -26,6 +26,7 @@ mod command_test;
 mod component_budget_test;
 mod component_test;
 mod content_api_test;
+mod date_temporal_test;
 mod decoder_test;
 mod diagnostics_test;
 mod examples_test;

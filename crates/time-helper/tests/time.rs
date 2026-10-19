@@ -266,3 +266,102 @@ fn plain_date_discards_time_but_preserves_offset_validation() {
         );
     }
 }
+
+#[test]
+fn date_time_fields_regulate_each_time_component_after_date_coercion() {
+    let fields = [2024.9, 2.9, 29.9, 12.9, 34.9, 56.9, 123.9, 456.9, 789.9];
+    assert_eq!(
+        PlainDateTime::from_date_time_fields(fields, false).unwrap(),
+        PlainDateTime::parse(b"2024-02-29T12:34:56.123456789").unwrap()
+    );
+    let overflow = [2024.0, 2.0, 31.0, 24.0, -1.0, 61.0, 1000.0, -1.0, 1001.0];
+    assert_eq!(
+        PlainDateTime::from_date_time_fields(overflow, true).unwrap(),
+        PlainDateTime::parse(b"2024-02-29T23:00:59.999000999").unwrap()
+    );
+    assert_eq!(
+        PlainDateTime::from_date_time_fields(
+            [-271821.0, 4.0, 19.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            false
+        )
+        .unwrap(),
+        PlainDateTime::parse(b"-271821-04-19T00:00:00.000000001").unwrap()
+    );
+    let base = [2024.0, 2.0, 29.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for index in 3..9 {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut fields = base;
+            fields[index] = invalid;
+            for constrain in [false, true] {
+                assert_eq!(
+                    PlainDateTime::from_date_time_fields(fields, constrain),
+                    Err(Error::Range)
+                );
+            }
+        }
+        for invalid in [-1.0, 1000.0] {
+            let mut fields = base;
+            fields[index] = invalid;
+            assert_eq!(
+                PlainDateTime::from_date_time_fields(fields, false),
+                Err(Error::Range)
+            );
+        }
+        let mut fields = base;
+        fields[index] = -0.9;
+        assert_eq!(
+            PlainDateTime::from_date_time_fields(fields, false),
+            PlainDateTime::from_date_time_fields(base, false)
+        );
+    }
+}
+
+#[test]
+fn legacy_date_formats_are_distinct_from_invalid_iso_dates() {
+    use perry_time_helper::parse_date_milliseconds;
+    for input in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "11/06/1994",
+        "November 6, 1994",
+        "invalid",
+        "",
+    ] {
+        assert_eq!(
+            parse_date_milliseconds(input.as_bytes()),
+            Err(Error::UnsupportedDateFormat),
+            "{input}"
+        );
+    }
+    for input in [
+        "2024-13-01",
+        "2024-01-32",
+        "2024-02-",
+        "2024-01-01T25:00Z",
+        "+275760-09-14",
+        "-000000-01-01",
+    ] {
+        assert!(
+            matches!(
+                parse_date_milliseconds(input.as_bytes()),
+                Err(Error::Syntax | Error::Range)
+            ),
+            "{input}"
+        );
+    }
+    for (input, expected) in [
+        ("1970", 0.0),
+        ("1970-01", 0.0),
+        ("1970-01-01", 0.0),
+        ("1970-01-01T00:00", 0.0),
+        ("1970-01-01T00:00:00.000Z", 0.0),
+        ("1970-01-01T01:00+01:00", 0.0),
+        ("+001970-01-01", 0.0),
+        ("1994-11-06T08:49:37Z", 784_111_777_000.0),
+    ] {
+        assert_eq!(
+            parse_date_milliseconds(input.as_bytes()),
+            Ok(expected),
+            "{input}"
+        );
+    }
+}

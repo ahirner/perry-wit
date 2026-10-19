@@ -15,7 +15,7 @@ enum ConstructorTypes {
 
 pub(crate) enum Constructor<'a> {
     Map {
-        types: Option<&'a (HirType, HirType)>,
+        types: Option<(&'a HirType, &'a HirType)>,
         init: Option<&'a Expr>,
     },
     Set {
@@ -63,6 +63,29 @@ impl Constructors {
     }
 
     pub(crate) fn get<'a>(&'a self, expr: &'a Expr) -> Option<Constructor<'a>> {
+        if let Expr::New {
+            class_name,
+            type_args,
+            args,
+            ..
+        } = expr
+        {
+            match (class_name.as_str(), type_args.as_slice()) {
+                ("\0perry_Map", [key, value]) => {
+                    return Some(Constructor::Map {
+                        types: Some((key, value)),
+                        init: args.first(),
+                    });
+                }
+                ("\0perry_Set", [element]) => {
+                    return Some(Constructor::Set {
+                        element: Some(element),
+                        init: args.first(),
+                    });
+                }
+                _ => {}
+            }
+        }
         let argument = match expr {
             Expr::NewDynamic { callee, args, .. }
                 if matches!(&**callee, Expr::PropertyGet { object, property, .. }
@@ -88,7 +111,7 @@ impl Constructors {
             .filter(|expr| !matches!(expr, Expr::Undefined | Expr::Null));
         Some(match self.0.get(id)? {
             ConstructorTypes::Map(types) => Constructor::Map {
-                types: types.as_ref(),
+                types: types.as_ref().map(|(key, value)| (key, value)),
                 init,
             },
             ConstructorTypes::Set(element) => Constructor::Set {

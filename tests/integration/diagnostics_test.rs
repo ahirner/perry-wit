@@ -125,7 +125,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "UnsupportedExpression: class B extends A: class inheritance is not supported yet".into()),
         (regex("/a/g"), format!("case.ts:1:55: UnsupportedExpression: Regex search supports only the u and s flags{IN_TEST}")),
         (regex("/\\u{61}/"), format!("{REGEX_CONST}Braced Unicode regex escapes require the u flag")),
-        (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround, named groups, and inline flags are unsupported")),
+        (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround and inline flags are unsupported")),
         (regex("/(a)\\1/"), format!("{REGEX_CONST}Unsupported regex escape: \\1")),
         (regex("/(a)(b)(c)(d)(e)(f)(g)(h)(i)/"), format!("{REGEX_CONST}Regex has 9 capture groups; at most 8 are supported")),
         (regex("/(a{300})/"), format!("{REGEX_CONST}Regex capture program exceeds 256 states")),

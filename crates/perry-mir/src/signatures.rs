@@ -78,10 +78,9 @@ type_kinds! {
     NullString = OptionalType::get_with(ctx, Ty::String.get(ctx), crate::attrs::Absence::Null).into();
     OptNumber = OptionalType::get(ctx, Ty::Number.get(ctx)).into(),
         accepts optional_of(ctx, ty, Ty::Number);
+    OptStringArray = ArrayType::get(ctx, Ty::OptString.get(ctx)).into();
+    NullOptStringArray = OptionalType::get_with(ctx, Ty::OptStringArray.get(ctx), crate::attrs::Absence::Null).into();
     StringArray = ArrayType::get(ctx, Ty::String.get(ctx)).into();
-    NullStringArray = OptionalType::get_with(
-        ctx, Ty::StringArray.get(ctx), crate::attrs::Absence::Null
-    ).into();
     NumberArray = ArrayType::get(ctx, Ty::Number.get(ctx)).into();
     Bytes = BytesType::get(ctx).into();
     ByteBuffer = crate::types::ByteBufferType::get(ctx).into();
@@ -90,6 +89,7 @@ type_kinds! {
     Url = crate::types::UrlType::get(ctx).into();
     SearchParams = crate::types::SearchParamsType::get(ctx).into();
     Json = JsonType::get(ctx).into();
+    JsonTraversal = crate::types::JsonTraversalType::get(ctx).into();
     Date = DateType::get(ctx).into();
     Decoder = crate::types::DecoderType::get(ctx).into();
     Regex = crate::types::RegexType::get(ctx).into();

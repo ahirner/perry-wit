@@ -118,6 +118,18 @@ impl<'s> FunctionBuilder<'s> {
                     NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
                 })
             }
+            (Kind::Array, "groups" | "index" | "input") if dict_entry_types(ctx, ty).is_none() => {
+                ensure!(
+                    Self::regex_result(ctx, value),
+                    "regex result metadata requires an exec result or a non-global match result"
+                );
+                let intrinsic = match property {
+                    "groups" => Intrinsic::RegexGroups,
+                    "index" => Intrinsic::RegexIndex,
+                    _ => Intrinsic::RegexInput,
+                };
+                self.intrinsic(ctx, intrinsic, vec![value])
+            }
             (Kind::Array, "length") => self.array_length(ctx, value),
             (Kind::Array, "size") => self.collection_size(ctx, value)?,
             (Kind::Array, field) if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) => {

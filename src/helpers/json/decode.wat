@@ -10,6 +10,7 @@
   (import "__perry_helper" "perry_string_compare" (func $string-compare (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_new_typed" (func $array-new (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_grow_typed" (func $array-grow (param i32 i32)))
+  (import "__perry_helper" "std_json_snapshot" (func $graph-snapshot (param i32) (result i32)))
   (import "__perry_helper" "std_json_require_number" (func $graph-number (param i32) (result f64)))
   (import "__perry_helper" "std_json_to_bool" (func $graph-bool (param i32) (result i32)))
   (import "__perry_helper" "std_json_to_string" (func $graph-string (param i32) (result i32)))
@@ -545,6 +546,14 @@
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
     (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $string i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
+    @input.GRAPH@
+    (local.set $tag (i32.const @numeric.OMITTED@))
+    (if (local.get $source)
+      (then (if (i32.eqz (i32.load (local.get $source)))
+        (then
+          (local.set $source (i32.const 0))
+          (local.set $tag (i32.const @numeric.UNDEFINED@))))))
+    @input.END_GRAPH@
     @input.NATIVE@
     (call $native (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
     local.set $done local.set $tag local.set $failed local.set $bits
@@ -557,7 +566,7 @@
     (if (local.get $flags)
       (then
         (if (i32.and (i32.and (i32.eqz (local.get $mode)) (i32.eqz (local.get $source))) (i32.and (local.get $flags) (i32.const @descriptor.UNDEFINED_ALLOWED@)))
-          (then (return (call $absent-bits (local.get $schema) (i32.const @numeric.OMITTED@)) (i32.const 0) (i32.const @numeric.OMITTED@))))
+          (then (return (call $absent-bits (local.get $schema) (local.get $tag)) (i32.const 0) (local.get $tag))))
         @input.CURSOR@
         (local.set $null (i32.eq (call $cursor-byte (local.get $source)) (i32.const 110)))
         @input.END_CURSOR@
@@ -599,6 +608,7 @@
     @input.END_CURSOR@
     @input.IMMEDIATE@
     @input.GRAPH@
+    (local.set $source (call $graph-snapshot (local.get $source)))
     (if (local.get $array)
       (then (local.set $first (call $graph-first (local.get $source))))
       (else (call $graph-object (local.get $source))))

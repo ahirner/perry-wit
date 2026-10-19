@@ -2,10 +2,11 @@
 mod syntax;
 use anyhow::{Context, Result, bail, ensure};
 use perry_abi::layout::regex::{
-    FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_STATES, NFA_HEADER, NfaOp, REVERSE_ROWS,
+    FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_STATES, NAMES_OFFSET, NFA_HEADER, NfaOp,
+    REVERSE_ROWS,
 };
 use regex_automata::{
-    Anchored, Input, MatchKind,
+    Anchored, Input, MatchKind, PatternID,
     dfa::{Automaton, StartKind, dense},
     nfa::thompson::{self, State},
     util::{look::Look, primitives::StateID},
@@ -90,6 +91,7 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     bytes.extend(reverse.end_column.to_le_bytes());
     bytes.extend(group_count.to_le_bytes());
     bytes.extend(fwd_header.to_le_bytes());
+    bytes.extend(0u32.to_le_bytes());
     bytes.extend(reverse.classes);
     bytes.extend(reverse.rows.into_iter().flat_map(u16::to_le_bytes));
     bytes.resize(bytes.len() + rev_padding, 0);
@@ -102,6 +104,16 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     if let Some(nfa_blob) = nfa_bytes {
         bytes.extend(nfa_blob);
     }
+    let names_offset = u32::try_from(bytes.len())?;
+    bytes[NAMES_OFFSET..NAMES_OFFSET + 4].copy_from_slice(&names_offset.to_le_bytes());
+    for (index, name) in nfa.group_info().pattern_names(PatternID::ZERO).enumerate() {
+        if let Some(name) = name {
+            bytes.extend(u16::try_from(index)?.to_le_bytes());
+            bytes.extend(u16::try_from(name.len())?.to_le_bytes());
+            bytes.extend(name.as_bytes());
+        }
+    }
+    bytes.extend(0u16.to_le_bytes());
     Ok(bytes)
 }
 

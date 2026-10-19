@@ -14,6 +14,8 @@
 //! the same step, so duplicate and numeric keys come out as in Node.
 mod order;
 mod reflection;
+mod replacer;
+mod view;
 mod writer;
 
 use perry_abi::number::Number;
@@ -92,7 +94,7 @@ fn json_integer<T: TryFrom<i64> + TryFrom<u64>>(value: *mut u8) -> Option<T> {
 fn new_node(kind: u32) -> *mut u8 {
     let shape: &'static [u32] = match kind {
         STRING => &[0, 3, 4, 8, 24],
-        EXCEPTION | NATIVE | ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
+        EXCEPTION | NATIVE | VIEW | BIGINT | ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
         _ => &[0, 2, 4, 24],
     };
     // SAFETY: tags select exact pointer fields; scalar payload bits remain opaque.
@@ -143,6 +145,7 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     }
     match word(value, 0) {
         NATIVE => return native_property(value, name),
+        VIEW => return view::property(value, name),
         EXCEPTION => {
             let error = node(word(value, 8));
             return match name {
@@ -182,6 +185,10 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
         OBJECT => {}
         _ => return core::ptr::null_mut(),
     }
+    object_member(value, name)
+}
+
+fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
     let mut found = core::ptr::null_mut();
     let mut child = word(value, 16);
     while child != 0 {
@@ -239,6 +246,9 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
     if !checked(value) {
         return crate::runtime::array(&[]);
     }
+    if word(value, 0) == VIEW {
+        return view::keys(value);
+    }
     let value = if word(value, 0) == NATIVE {
         reflection::native_snapshot(value)
     } else {
@@ -269,6 +279,10 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         STRING => scalars_length(string_bytes(value)),
         _ => 0,
     };
+    index_keys(count)
+}
+
+fn index_keys(count: u32) -> *mut u8 {
     let (array, slots) = crate::runtime::array_storage(count as usize);
     for (index, slot) in slots.iter_mut().enumerate() {
         let mut text = [0; 40];
@@ -285,6 +299,8 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
         return 0;
     }
     match word(value, 0) {
+        VIEW => view::array_length(value)
+            .map_or(crate::runtime::UNDEFINED_BITS, |n| f64::from(n).to_bits()),
         STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
         ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
         NATIVE
@@ -405,7 +421,10 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
         }
         INT64 | UINT64 => u32::from(word(value, 8) != 0 || word(value, 12) != 0),
         STRING => u32::from(word(value, 12) != 0),
-        ARRAY | OBJECT | EXCEPTION | NATIVE => 1,
+        BIGINT => u32::from(
+            !unsafe { &*node(word(value, 8)).cast::<crate::integers::Integer>() }.is_zero(),
+        ),
+        ARRAY | OBJECT | EXCEPTION | NATIVE | VIEW => 1,
         _ => unreachable!("JSON tag"),
     }
 }
@@ -420,8 +439,14 @@ pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
         BOOLEAN => "boolean",
         NUMBER | INT64 | UINT64 => "number",
         STRING => "string",
+        BIGINT => "bigint",
         _ => "object",
     })
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_is_array(value: *mut u8) -> u32 {
+    u32::from(view::array_length(value).is_some())
 }
 
 /// Whether a JSON node is the explicit `null` value, distinct from an absent property.
@@ -603,10 +628,10 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
     if source.is_null() {
         return;
     }
-    let source = if word(source, 0) == NATIVE {
-        reflection::native_snapshot(source)
-    } else {
-        source
+    let source = match word(source, 0) {
+        NATIVE => reflection::native_snapshot(source),
+        VIEW => view::std_json_snapshot(source),
+        _ => source,
     };
     match word(source, 0) {
         OBJECT => {

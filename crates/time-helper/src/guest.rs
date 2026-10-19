@@ -1,7 +1,7 @@
 //! Checked time-codec ABI. Values occupy 16 bytes; results pack status above length.
 //! Instant stores little-endian i128 epoch nanoseconds. PlainDateTime stores an i32
 //! epoch day, four padding bytes, and u64 nanoseconds within that day.
-//! Status: 0 success, 1 syntax, 2 range, 3 annotation, 4 capacity, 6 memory/overlap.
+//! Status: 0 success, 1 syntax, 2 range, 3 annotation, 4 capacity, 5 unsupported Date format, 6 memory/overlap.
 //! Scalar accessors write eight bytes on success and use the same status convention.
 
 use crate::{Error, Instant, PlainDateTime};
@@ -16,14 +16,20 @@ mod memory;
 use memory::GuestRange;
 
 /// # Safety
-/// Input must be initialized immutable guest-owned storage outside helper stack/data.
+/// Input/output must be guest-owned, initialized/exclusive respectively, and disjoint.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32) -> f64 {
-    let Ok(input) = GuestRange::new(input, length) else {
-        return f64::NAN;
-    };
-    // SAFETY: checked bounds and caller's immutable ownership contract.
-    crate::parse_date_milliseconds(unsafe { input.bytes() }).unwrap_or(f64::NAN)
+pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32, output: u32) -> u64 {
+    unsafe {
+        scalar(
+            [(input, length)],
+            output,
+            |[input]| match crate::parse_date_milliseconds(input) {
+                Ok(value) => Ok(value),
+                Err(Error::UnsupportedDateFormat) => Err(Error::UnsupportedDateFormat),
+                Err(_) => Ok(f64::NAN),
+            },
+        )
+    }
 }
 
 /// # Safety
@@ -117,6 +123,42 @@ pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
     unsafe {
         store([], output, |[]| {
             PlainDateTime::from_fields(year, month, day, constrain(overflow)?)
+        })
+    }
+}
+
+/// # Safety
+/// Output must be exclusively guest-owned outside helper stack/data during this call.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn time_plain_date_time_from_fields(
+    year: f64,
+    month: f64,
+    day: f64,
+    hour: f64,
+    minute: f64,
+    second: f64,
+    millisecond: f64,
+    microsecond: f64,
+    nanosecond: f64,
+    overflow: u32,
+    output: u32,
+) -> u64 {
+    unsafe {
+        store([], output, |[]| {
+            PlainDateTime::from_date_time_fields(
+                [
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    millisecond,
+                    microsecond,
+                    nanosecond,
+                ],
+                constrain(overflow)?,
+            )
         })
     }
 }
@@ -327,6 +369,7 @@ unsafe fn transform<const N: usize>(
                 Error::Range => 2,
                 Error::UnsupportedAnnotation => 3,
                 Error::Capacity => 4,
+                Error::UnsupportedDateFormat => 5,
             }) << 32
         }
     }

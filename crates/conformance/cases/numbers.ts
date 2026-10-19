@@ -46,3 +46,7 @@ function scalarLoops(x: number): number {
   return acc;
 }
 for (const x of [0, 1, 10, 1000, 7.5]) console.log("scalar-loops", x, scalarLoops(x));
+
+let exactInteger = 1n;
+for(let i=0;i<80;i++) exactInteger += exactInteger;
+console.log("bigint-arithmetic", String(exactInteger + 1n), String(exactInteger - 1n), String(1n - exactInteger));

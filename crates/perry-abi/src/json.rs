@@ -11,6 +11,8 @@ pub mod kind {
     pub const NATIVE: u32 = 8;
     pub const INT64: u32 = 9;
     pub const UINT64: u32 = 10;
+    pub const VIEW: u32 = 11;
+    pub const BIGINT: u32 = 12;
 }
 pub const MAX_DEPTH: u32 = 128;
 pub use crate::layout::json::NEXT;

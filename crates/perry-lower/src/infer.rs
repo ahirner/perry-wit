@@ -12,7 +12,20 @@ pub(super) fn contains_type_var(ty: &HirType) -> bool {
         HirType::Array(inner) | HirType::Promise(inner) => contains_type_var(inner),
         HirType::Tuple(items) | HirType::Union(items) => items.iter().any(contains_type_var),
         HirType::Generic { type_args, .. } => type_args.iter().any(contains_type_var),
-        HirType::Object(object) => object.properties.values().any(|p| contains_type_var(&p.ty)),
+        HirType::Object(object) => {
+            object.properties.values().any(|p| contains_type_var(&p.ty))
+                || object
+                    .index_signature
+                    .as_deref()
+                    .is_some_and(contains_type_var)
+        }
+        HirType::Function(function) => {
+            function
+                .params
+                .iter()
+                .any(|(_, ty, _)| contains_type_var(ty))
+                || contains_type_var(&function.return_type)
+        }
         _ => false,
     }
 }
@@ -20,8 +33,10 @@ pub(super) fn contains_type_var(ty: &HirType) -> bool {
 mod absence;
 mod closures;
 mod environment;
+mod functions;
 use absence::*;
 use closures::{infer_array_closure_return, infer_closure_return};
+pub(super) use functions::specialize_functions;
 mod expressions;
 mod methods;
 mod walk;
@@ -35,6 +50,7 @@ struct Inference<'a> {
     imported_types: &'a HashMap<String, String>,
     foreign: &'a HashMap<String, crate::hir::Foreign>,
     metadata: &'a hir_compat::Metadata<'a>,
+    generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
 }
 
 impl Inference<'_> {
@@ -44,6 +60,20 @@ impl Inference<'_> {
         classes: &'a [perry_hir::ir::Class],
         locals: &'a mut HashMap<LocalId, HirType>,
     ) -> FunctionEnv<'a> {
+        self.function_with_params(base, classes, locals, &[])
+    }
+
+    fn function_with_params<'a>(
+        &'a self,
+        base: &'a perry_hir::HirTypeEnv,
+        classes: &'a [perry_hir::ir::Class],
+        locals: &'a mut HashMap<LocalId, HirType>,
+        params: &[perry_hir::ir::Param],
+    ) -> FunctionEnv<'a> {
+        locals.clear();
+        for param in params {
+            locals.insert(param.id, param.ty.clone());
+        }
         FunctionEnv {
             ctx: self.ctx,
             base,
@@ -55,6 +85,8 @@ impl Inference<'_> {
             imported_types: self.imported_types,
             foreign: self.foreign,
             metadata: self.metadata,
+            generic_functions: self.generic_functions,
+            instantiated_returns: HashMap::new(),
         }
     }
 }
@@ -278,6 +310,9 @@ fn substitute_type_vars(ty: &mut HirType, bounds: &HashMap<&str, &HirType>) {
             for prop in object.properties.values_mut() {
                 substitute_type_vars(&mut prop.ty, bounds);
             }
+            if let Some(index) = &mut object.index_signature {
+                substitute_type_vars(index, bounds);
+            }
         }
         HirType::Function(function) => {
             for (_, param, _) in &mut function.params {
@@ -413,23 +448,9 @@ pub(super) fn unresolved_types(
         );
     }
     for class in &mut hir.classes {
-        if let Some(ctor) = &mut class.constructor {
+        for function in functions::class_functions(class) {
             clear_inferred_type_vars(
-                &mut ctor.body,
-                inferred,
-                &hir.local_source_spans,
-                &integer_aliases,
-            );
-        }
-        for method in class
-            .methods
-            .iter_mut()
-            .chain(class.getters.iter_mut().map(|(_, f)| f))
-            .chain(class.setters.iter_mut().map(|(_, f)| f))
-            .chain(class.static_methods.iter_mut())
-        {
-            clear_inferred_type_vars(
-                &mut method.body,
+                &mut function.body,
                 inferred,
                 &hir.local_source_spans,
                 &integer_aliases,
@@ -444,11 +465,11 @@ pub(super) fn unresolved_types(
         imported_types: &imported_types,
         foreign,
         metadata,
+        generic_functions: None,
     };
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
-        locals.clear();
         let mut env = inference.function(&module_env, &hir.classes, &mut locals);
         infer_params(&mut function.params, function.is_exported, &mut env);
     }
@@ -459,7 +480,6 @@ pub(super) fn unresolved_types(
             if matches!(sfield.ty, HirType::Any | HirType::Unknown)
                 && let Some(init) = &sfield.init
             {
-                locals.clear();
                 let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
                 let def_ty = expression(init, &mut env);
                 if is_resolvable_type(&def_ty) {
@@ -467,27 +487,15 @@ pub(super) fn unresolved_types(
                 }
             }
         }
-        if let Some(ctor) = &mut class.constructor {
-            locals.clear();
+        for function in functions::class_functions(class) {
             let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-            infer_params(&mut ctor.params, false, &mut env);
-        }
-        for method in class
-            .methods
-            .iter_mut()
-            .chain(class.setters.iter_mut().map(|(_, f)| f))
-            .chain(class.static_methods.iter_mut())
-        {
-            locals.clear();
-            let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-            infer_params(&mut method.params, false, &mut env);
+            infer_params(&mut function.params, false, &mut env);
         }
         for field in &mut class.fields {
             if !matches!(field.ty, HirType::Any | HirType::Unknown) {
                 continue;
             }
             if let Some(init) = &field.init {
-                locals.clear();
                 let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
                 let def_ty = expression(init, &mut env);
                 if is_resolvable_type(&def_ty) {
@@ -496,11 +504,12 @@ pub(super) fn unresolved_types(
                 }
             }
             if let Some(ctor) = &class.constructor {
-                locals.clear();
-                for param in &ctor.params {
-                    locals.insert(param.id, param.ty.clone());
-                }
-                let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
+                let mut env = inference.function_with_params(
+                    &module_env,
+                    &classes_snapshot,
+                    &mut locals,
+                    &ctor.params,
+                );
                 for stmt in &ctor.body {
                     if let Stmt::Expr(Expr::PropertySet {
                         object,
@@ -521,7 +530,6 @@ pub(super) fn unresolved_types(
         }
     }
     module_env.set_current_class(None);
-    locals.clear();
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let mut env = inference.function(&module_env, &hir.classes, &mut locals);
@@ -535,11 +543,12 @@ pub(super) fn unresolved_types(
             if locations.has_explicit_return(&function.name) {
                 continue;
             }
-            locals.clear();
-            for param in &function.params {
-                locals.insert(param.id, param.ty.clone());
-            }
-            let mut env = inference.function(&module_env, &hir.classes, &mut locals);
+            let mut env = inference.function_with_params(
+                &module_env,
+                &hir.classes,
+                &mut locals,
+                &function.params,
+            );
             if infer_body_return(
                 &function.body,
                 function.is_async,
@@ -563,11 +572,12 @@ pub(super) fn unresolved_types(
                     if !matches!(method.return_type, HirType::Any | HirType::Unknown) {
                         continue;
                     }
-                    locals.clear();
-                    for param in &method.params {
-                        locals.insert(param.id, param.ty.clone());
-                    }
-                    let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
+                    let mut env = inference.function_with_params(
+                        &module_env,
+                        &classes_snapshot,
+                        &mut locals,
+                        &method.params,
+                    );
                     if infer_body_return(
                         &method.body,
                         method.is_async,
@@ -586,43 +596,30 @@ pub(super) fn unresolved_types(
         }
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
-    locals.clear();
     let mut env = inference.function(&module_env, &hir.classes, &mut locals);
     walk::resolve_locals(&mut hir.init, &mut env);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
-        locals.clear();
-        for param in &function.params {
-            locals.insert(param.id, param.ty.clone());
-        }
-        let mut env = inference.function(&module_env, &hir.classes, &mut locals);
+        let mut env = inference.function_with_params(
+            &module_env,
+            &hir.classes,
+            &mut locals,
+            &function.params,
+        );
         walk::resolve_locals(&mut function.body, &mut env);
     }
     if !hir.classes.is_empty() {
         let classes_snapshot = hir.classes.clone();
         for class in &mut hir.classes {
             module_env.set_current_class(Some(class.name.clone()));
-            if let Some(ctor) = &mut class.constructor {
-                locals.clear();
-                for param in &ctor.params {
-                    locals.insert(param.id, param.ty.clone());
-                }
-                let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-                walk::resolve_locals(&mut ctor.body, &mut env);
-            }
-            for method in class
-                .methods
-                .iter_mut()
-                .chain(class.getters.iter_mut().map(|(_, f)| f))
-                .chain(class.setters.iter_mut().map(|(_, f)| f))
-                .chain(class.static_methods.iter_mut())
-            {
-                locals.clear();
-                for param in &method.params {
-                    locals.insert(param.id, param.ty.clone());
-                }
-                let mut env = inference.function(&module_env, &classes_snapshot, &mut locals);
-                walk::resolve_locals(&mut method.body, &mut env);
+            for function in functions::class_functions(class) {
+                let mut env = inference.function_with_params(
+                    &module_env,
+                    &classes_snapshot,
+                    &mut locals,
+                    &function.params,
+                );
+                walk::resolve_locals(&mut function.body, &mut env);
             }
         }
         module_env.set_current_class(None);

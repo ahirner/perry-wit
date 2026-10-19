@@ -28,7 +28,7 @@ macro_rules! intrinsic_catalog {
                 NumberIsSafeInteger = "number_is_safe_integer" (Numeric) -> (Bool), Pure, None => Predicate;
                 DateFromTime = "date_from_time" (Number) -> (Date), Effectful, Conservative;
                 DateTime = "date_time" (Date) -> (Number), Effectful, None;
-                DateParse = "date_parse" (String) -> (Number), Pure, None;
+                DateParse = "date_parse" (String) -> (Number), Throws, None;
                 DatePart = "date_part" (Date, Number) -> (Number), Effectful, None;
                 DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number), Effectful, None;
                 DateIso = "date_iso" (Date) -> (String), Throws, Conservative;
@@ -60,6 +60,7 @@ macro_rules! intrinsic_catalog {
                 InstantMs = "instant_ms" (Instant) -> (Number), Throws, None;
                 InstantString = "instant_string" (Instant) -> (String), Pure, Atomic;
                 PlainDateFrom = "plain_date_from" (String) -> (PlainDate), Throws, Atomic;
+                PlainDateTimeFromFields = "plain_date_time_from_fields" (Number, Number, Number, Number, Number, Number, Number, Number, Number, Number) -> (PlainDateTime), Throws, Atomic;
                 PlainDateFromFields = "plain_date_from_fields" (Number, Number, Number, Number) -> (PlainDate), Throws, Atomic;
                 PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), Throws, Atomic;
                 PlainDateAddCalendar = "plain_date_add_calendar" (PlainDate, Number, Number, Number, Number, Number) -> (PlainDate), Throws, Atomic;
@@ -208,6 +209,8 @@ macro_rules! intrinsic_catalog {
                 TaskCancel = "perry_task_cancel" () -> I32;
                 TaskCurrent = "perry_task_current" () -> I32;
                 TaskDetached = "perry_task_detached" (I32, I32);
+                StdBigintAdd = "std_bigint_add" (I32, I32) -> I32;
+                StdBigintSub = "std_bigint_sub" (I32, I32) -> I32;
                 StdBigintCompare = "std_bigint_compare" (I32, I32) -> I32;
                 StdBigintFromNumber = "std_bigint_from_number" [BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), Throws, Atomic;];
                 StdBigintNegate = "std_bigint_negate" [BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), Pure, Atomic;];
@@ -242,6 +245,12 @@ macro_rules! intrinsic_catalog {
                 StdJsonAssign = "std_json_assign" [JsonAssign = "json_assign" (Json, Json) -> (), Effectful, Conservative;];
                 StdJsonRecordSpread = "std_json_record_spread" (I32, I32, I32, I32, I32, I32);
                 StdJsonRecordField = "std_json_record_field" (I32, I32, I32, I32, I32);
+                StdJsonBox = "std_json_box" (I64, I32, I32) -> I32;
+                StdJsonReplacerBegin = "std_json_replacer_begin" [JsonReplacerBegin = "json_replacer_begin" (Json, Json) -> (JsonTraversal), Effectful, Conservative;];
+                StdJsonReplacerKey = "std_json_replacer_key" [JsonReplacerKey = "json_replacer_key" (JsonTraversal) -> (String), Effectful, None;];
+                StdJsonReplacerValue = "std_json_replacer_value" [JsonReplacerValue = "json_replacer_value" (JsonTraversal) -> (Json), Effectful, Conservative;];
+                StdJsonReplacerNext = "std_json_replacer_next" [JsonReplacerNext = "json_replacer_next" (JsonTraversal, Json) -> (Bool), Throws, Conservative;];
+                StdJsonReplacerFinish = "std_json_replacer_finish" [JsonReplacerFinish = "json_replacer_finish" (JsonTraversal) -> (OptString), Effectful, Conservative;];
                 StdJsonNative = "std_json_native" (I32, I32) -> I32;
                 StdJsonStrictEqual = "std_json_strict_equal" [JsonStrictEqual = "json_strict_equal" (Json, Json) -> (Bool), Pure, None;];
                 StdJsonExceptionEqual = "std_json_exception_equal" [JsonExceptionEqual = "json_exception_equal" (Json, Exception) -> (Bool), Pure, None;];
@@ -253,6 +262,7 @@ macro_rules! intrinsic_catalog {
                 StdJsonFromScalar = "std_json_from_scalar" (I32, I32) -> I32;
                 StdJsonFromString = "std_json_from_string" [JsonFromString = "json_from_string" (String) -> (Json), Pure, Conservative;];
                 StdJsonIndex = "std_json_index" [JsonIndex = "json_index" (Json, Number) -> (Json), Throws, Conservative;];
+                StdJsonIsArray = "std_json_is_array" [JsonIsArray = "json_is_array" (Json) -> (Bool), Pure, None;];
                 StdJsonIsNull = "std_json_is_null" [JsonIsNull = "json_is_null" (Json) -> (Bool), Pure, None;];
                 StdJsonKeys = "std_json_keys" [JsonKeys = "json_keys" (Json) -> (StringArray), Throws, Conservative;];
                 StdJsonLength = "std_json_length" [JsonLength = "json_length" (Json) -> (OptNumber), Throws, Conservative;] -> F64Bits;
@@ -271,8 +281,13 @@ macro_rules! intrinsic_catalog {
                 StdParseInt = "std_parse_int" (I32, I32, I64, I32) -> I32;
                 StdRaiseInvalidDate = "std_raise_invalid_date" () -> I32;
                 StdRandomUuid = "std_random_uuid" [RandomUuid = "random_uuid" () -> (String), Effectful, Conservative;];
-                StdRegexExec = "std_regex_exec" [RegexExec = "regex_exec" (String, Regex) -> (NullStringArray), Pure, Atomic;];
-                StdRegexMatch = "std_regex_match" [RegexMatch = "regex_match" (String, Regex) -> (NullStringArray), Pure, Atomic;];
+                StdRegexExecFrom = "std_regex_exec_from" [RegexExecFrom = "regex_exec_from" (String, Regex, Number) -> (NullOptStringArray), Pure, Atomic;];
+                StdRegexGroups = "std_regex_groups" [RegexGroups = "regex_groups" (OptStringArray) -> (Json), Pure, None;];
+                StdRegexIndex = "std_regex_index" [RegexIndex = "regex_index" (OptStringArray) -> (Number), Pure, None;];
+                StdRegexNext = "std_regex_next" [RegexNext = "regex_next" (OptStringArray) -> (Number), Pure, None;];
+                StdRegexInput = "std_regex_input" [RegexInput = "regex_input" (OptStringArray) -> (String), Pure, None;];
+                StdRegexExec = "std_regex_exec" [RegexExec = "regex_exec" (String, Regex) -> (NullOptStringArray), Pure, Atomic;];
+                StdRegexMatch = "std_regex_match" [RegexMatch = "regex_match" (String, Regex) -> (NullOptStringArray), Pure, Atomic;];
                 StdRegexReplace = "std_regex_replace" [RegexReplace = "regex_replace" (String, Regex, String) -> (String), Pure, Atomic;];
                 StdRegexSearch = "std_regex_search" [RegexSearch = "regex_search" (String, Regex) -> (Number), Pure, None;];
                 StdRegexSplit = "std_regex_split" [RegexSplit = "regex_split" (String, Regex) -> (StringArray), Pure, Atomic;];
@@ -303,7 +318,7 @@ macro_rules! intrinsic_catalog {
                 StdTextEncode = "std_text_encode" [TextEncode = "text_encode" (String) -> (Bytes), Effectful, Conservative;];
                 StrCaseConvert = "str_case_convert" (I32, I32, I32, I32) -> I64;
                 TimeDateIso = "time_date_iso" (F64, I32, I32) -> I64;
-                TimeDateParse = "time_date_parse" (I32, I32) -> F64;
+                TimeDateParse = "time_date_parse" (I32, I32, I32) -> I64;
                 TimeDatePart = "time_date_part" (F64, I32) -> F64;
                 TimeDateSet = "time_date_set" (F64, I32, I32, F64, F64, F64, F64) -> F64;
                 TimeDateUtc = "time_date_utc" [DateUtc = "date_utc" (Number, Number, Number, Number, Number, Number, Number) -> (Number), Pure, None;];
@@ -314,6 +329,7 @@ macro_rules! intrinsic_catalog {
                 TimePlainAddCalendar = "time_plain_add_calendar" (I32, F64, F64, F64, F64, I32, I32) -> I64;
                 TimePlainAddDays = "time_plain_add_days" (I32, F64, I32) -> I64;
                 TimePlainDateFormat = "time_plain_date_format" (I32, I32, I32) -> I64;
+                TimePlainDateTimeFromFields = "time_plain_date_time_from_fields" (F64, F64, F64, F64, F64, F64, F64, F64, F64, I32, I32) -> I64;
                 TimePlainDateFromFields = "time_plain_date_from_fields" (F64, F64, F64, I32, I32) -> I64;
                 TimePlainDateParse = "time_plain_date_parse" (I32, I32, I32) -> I64;
                 TimePlainFormat = "time_plain_format" (I32, I32, I32) -> I64;

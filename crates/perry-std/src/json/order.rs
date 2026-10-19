@@ -66,7 +66,7 @@ pub(crate) unsafe extern "C" fn std_json_record_retain(
 }
 
 /// Materialize keys only when a record outgrows compact order or carries extra members.
-unsafe fn order_graph(native: *mut u8, table: *const u32, count: u32) -> *mut u8 {
+pub(super) unsafe fn order_graph(native: *mut u8, table: *const u32, count: u32) -> *mut u8 {
     let graph = node(word(native, record::JSON as usize));
     if !graph.is_null() {
         return graph;

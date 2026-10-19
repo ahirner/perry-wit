@@ -342,6 +342,34 @@ pub(super) fn scalar_mir_type(ctx: &mut Context, mir_ty: TypeHandle) -> TypeHand
 }
 
 impl FunctionLowering<'_, '_> {
+    pub(super) fn close_web_handles(&mut self, ctx: &mut Context, include_serve: bool) {
+        for (used, function) in [
+            (
+                include_serve && self.state.uses_http_server,
+                Runtime::WebServeClose,
+            ),
+            (self.state.uses_fetch, Runtime::WebFetchClose),
+            (self.state.uses_streams, Runtime::WebStreamsClose),
+        ] {
+            if used {
+                self.runtime_void(ctx, function, vec![]);
+            }
+        }
+    }
+
+    pub(super) fn trap_unless(&mut self, ctx: &mut Context, cond: Value, free_task: bool) {
+        let valid = self.new_block(ctx, vec![]);
+        let trap = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, cond, (valid, vec![]), (trap, vec![]));
+        self.block = trap;
+        if free_task {
+            self.task_free(ctx);
+        }
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        self.insert(ctx, unreachable);
+        self.block = valid;
+    }
+
     /// Acknowledge every outstanding host transfer before releasing a cancelled task.
     fn abort_task(&mut self, ctx: &mut Context) -> Result<()> {
         self.runtime(ctx, Runtime::TaskCancel, vec![]);
@@ -349,18 +377,9 @@ impl FunctionLowering<'_, '_> {
         if self.state.uses_fs {
             self.runtime(ctx, Runtime::FsClose, vec![]);
         }
-        for (used, function) in [
-            (self.state.uses_http_server, Runtime::WebServeClose),
-            (self.state.uses_fetch, Runtime::WebFetchClose),
-            (self.state.uses_streams, Runtime::WebStreamsClose),
-            (
-                self.state.uses_io || self.state.reports_rejection,
-                Runtime::IoCancel,
-            ),
-        ] {
-            if used {
-                self.runtime_void(ctx, function, vec![]);
-            }
+        self.close_web_handles(ctx, true);
+        if self.state.uses_io || self.state.reports_rejection {
+            self.runtime_void(ctx, Runtime::IoCancel, vec![]);
         }
         self.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
         self.return_resources(ctx);

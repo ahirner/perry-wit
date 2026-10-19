@@ -181,14 +181,7 @@ impl FunctionLowering<'_, '_> {
             let two = self.i32_const(ctx, 2);
             let native = self.num(ctx, NumOpcode::I32LtU, vec![offset, two]);
             let matches = self.num(ctx, NumOpcode::I32Or, vec![basic, native]);
-            let valid = self.new_block(ctx, vec![]);
-            let invalid = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));
-            self.block = invalid;
-            self.task_free(ctx);
-            let trap = UnreachableOp::new(ctx).get_operation();
-            self.insert(ctx, trap);
-            self.block = valid;
+            self.trap_unless(ctx, matches, true);
             let string = perry_mir::StringType::get(ctx).into();
             let mir = RecordType::get(
                 ctx,
@@ -237,14 +230,7 @@ impl FunctionLowering<'_, '_> {
         let tag = self.load(ctx, MemKind::I32, exception, exception_layout::TAG);
         let expected = self.i32_const(ctx, expected as i32);
         let matches = self.num(ctx, NumOpcode::I32Eq, vec![tag, expected]);
-        let valid = self.new_block(ctx, vec![]);
-        let invalid = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));
-        self.block = invalid;
-        self.task_free(ctx);
-        let trap = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, trap);
-        self.block = valid;
+        self.trap_unless(ctx, matches, true);
         let value = self.load(ctx, kind, exception, exception_layout::VALUE);
         if self.state.collectible && repr(ctx, mir)? == Repr::Ref {
             self.runtime(ctx, Runtime::GcPin, vec![value]);

@@ -10,6 +10,16 @@ impl<'s> FunctionBuilder<'s> {
         callback: &'s Expr,
         arguments: &[Value],
     ) -> Result<Value> {
+        self.inline_callback(ctx, callback, arguments, None)
+    }
+
+    pub(crate) fn inline_callback(
+        &mut self,
+        ctx: &mut Context,
+        callback: &'s Expr,
+        arguments: &[Value],
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
         let callback = match callback {
             Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
             _ => callback,
@@ -85,7 +95,9 @@ impl<'s> FunctionBuilder<'s> {
             }
             _ => None,
         };
-        let result_type = declared.map_or(InlineResult::Inferred, InlineResult::Declared);
+        let result_type = expected
+            .or(declared)
+            .map_or(InlineResult::Inferred, InlineResult::Declared);
         let result = self.inline_body(ctx, body, params, result_type);
         self.locals.restore(saved_locals);
         self.closures.restore(saved_closures);

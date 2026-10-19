@@ -59,3 +59,5 @@ try {
 } catch (e) {
   console.log("fractional days", e instanceof RangeError);
 }
+
+console.log("date-time-object", Temporal.PlainDateTime.from({year:2024,month:2,day:29,hour:12}, {overflow:"reject"}).toString());

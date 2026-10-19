@@ -71,7 +71,7 @@ value_types! {
     opaque {
         /// An immutable, validated UTF-8 string indexed by Unicode scalar values.
         String => StringType("perry.string", "string", []);
-        /// Immutable sign and 64-bit magnitude, preserving every WIT s64/u64 value.
+        /// Immutable arbitrary-precision signed integer, preserving every WIT s64/u64 value.
         BigInt => BigIntType("perry.bigint", "bigint", []);
         /// A `Uint8Array`: a view `{ length, data }` over bytes in the task region; `subarray`
         /// views share their bytes.
@@ -132,6 +132,8 @@ value_types! {
         NumberString => NumberStringType("perry.number_string", "number | string", []);
     }
     internal {
+        /// Suspended JSON serialization between replacer calls.
+        JsonTraversalType => "perry.json_traversal";
         /// A numeric value retaining an exact signed/unsigned 64-bit integer or IEEE double.
         /// Converting a narrower integer into this type explicitly widens its domain.
         NumericType => "perry.numeric";

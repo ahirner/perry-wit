@@ -68,6 +68,85 @@ export function run(n: number): number {
 }
 
 #[test]
+fn replacement_callbacks_preserve_captures_order_and_abrupt_completion() {
+    let mut program = Program::checked(
+        r#"
+let calls = 0;
+function replacement(match: string, first: string | undefined, second: string | undefined, offset: number, input: string): string {
+  calls++;
+  return '[' + match + ':' + first + ':' + second + ':' + offset + ':' + input.length + ']';
+}
+export function run(n: number): number {
+  const map: Record<string, string> = {a: 'A', b: 'B'};
+  if ('caba'.replace(/[ab]/g, ch => map[ch]) !== 'cABA') return -1;
+  calls = 0;
+  if ('ab a'.replace(/(a)(b)?/g, replacement) !== '[ab:a:b:0:4] [a:a:undefined:3:4]' || calls !== 2) return -2;
+  const alias = (match: string, offset: number, input: string) => '$&' + offset + input.length;
+  if ('aba'.replace('a', alias) !== '$&03ba') return -3;
+  if ('aba'.replaceAll('a', alias) !== '$&03b$&23') return -4;
+  if ('ab'.replaceAll('', (_, offset) => String(offset)) !== '0a1b2') return -5;
+  if ('ab'.replace(/(?:)/g, (_, offset) => String(offset)) !== '0a1b2') return -6;
+  if (''.replace(/(?:)/g, () => 'x') !== 'x') return -7;
+  if ('aéa'.replace(/a/g, (_, offset) => String(offset)) !== '0é2') return -8;
+  calls = 0;
+  if ('xxx'.replace(/a/g, () => { calls++; return '!'; }) !== 'xxx' || calls !== 0) return -9;
+  let source = 'aba';
+  const result = source.replace(/a/g, (_, offset, original) => {
+    source = 'changed';
+    return String(offset) + original;
+  });
+  if (source !== 'changed' || result !== '0abab2aba') return -10;
+  calls = 0;
+  try { 'aaa'.replaceAll(/a/g, () => { calls++; if (calls === 2) throw new Error('stop'); return 'x'; }); }
+  catch (error) { if (error.message !== 'stop' || calls !== 2) return -11; }
+  if (calls !== 2) return -12;
+  if ('ab'.replace(/[ab]/g, () => 7) !== '77') return -13;
+  return n;
+}
+"#,
+        "replace-callbacks.ts",
+    );
+    program.stress_collection(true);
+    assert_eq!(program.throwing("run", 17.0), (17.0, 0));
+}
+
+#[test]
+fn named_captures_keep_groups_separate_from_numbered_array_mutation() {
+    let mut program = Program::checked(
+        r#"
+function probe(text: string): string {
+  const match = /(?<word>a)/.exec(text);
+  return match?.groups?.word ?? 'missing';
+}
+export function run(n: number): number {
+  if (probe('a') !== 'a' || probe('b') !== 'missing') return -1;
+  const result = /(?<word>a)(?<tail>b)?/.exec('xa');
+  if (result === null || result.groups === undefined) return -2;
+  const groups = result.groups;
+  if (groups.word !== 'a' || groups.tail !== undefined || result[2] !== undefined) return -3;
+  if (result.index !== 1 || result.input !== 'xa' || result.length !== 3 || result.join('|') !== 'a|a|') return -4;
+  result[1] = 'changed';
+  for (let i = 0; i < 20; i++) result.push('padding');
+  if (groups.word !== 'a' || result.groups.word !== 'a') return -5;
+  const unnamed = /(a)/.exec('a');
+  if (unnamed?.groups !== undefined) return -6;
+  const matched = 'zab'.match(/(?<letter>a)(?<tail>b)/);
+  if (matched?.groups?.letter !== 'a') return -7;
+  const regex = /(?<letter>a)(b)?/g;
+  if ('ab a'.replace(regex, (match, first, second, offset, input, groups) =>
+      groups.letter + ':' + second + ':' + offset + ':' + input.length) !== 'a:b:0:4 a:undefined:3:4') return -8;
+  if ('ab a'.replace(/(?<first>a)(?<last>b)?/g, '$<last>:$<first>:$<missing>') !== 'b:a: :a:') return -9;
+  if ('a'.replace(/(a)/, '$<first>') !== '$<first>') return -10;
+  return n;
+}
+"#,
+        "named-regex-captures.ts",
+    );
+    program.stress_collection(true);
+    assert_eq!(program.throwing("run", 23.0), (23.0, 0));
+}
+
+#[test]
 fn owned_appends_preserve_observers_and_scalar_cursors() {
     let mut program = Program::checked(
         r#"

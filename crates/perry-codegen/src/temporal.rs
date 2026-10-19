@@ -40,12 +40,12 @@ impl FunctionLowering<'_, '_> {
             args.push(size);
         }
         let packed = self.runtime(ctx, function, args);
-        self.check_time_status(ctx, packed);
+        self.check_time_status(ctx, packed, "Invalid time value for Temporal");
         let len = self.num(ctx, NumOpcode::I32WrapI64, vec![packed]);
         (out, len)
     }
 
-    fn check_time_status(&mut self, ctx: &mut Context, packed: Value) {
+    pub(super) fn check_time_status(&mut self, ctx: &mut Context, packed: Value, message: &str) {
         let thirty_two = self.i64_const(ctx, 32);
         let status = self.num(ctx, NumOpcode::I64ShrU, vec![packed, thirty_two]);
         let status = self.num(ctx, NumOpcode::I32WrapI64, vec![status]);
@@ -53,7 +53,7 @@ impl FunctionLowering<'_, '_> {
         let done = self.new_block(ctx, vec![]);
         self.cond_br(ctx, status, (failed, vec![]), (done, vec![]));
         self.block = failed;
-        let message = self.state.data.string("Invalid time value for Temporal");
+        let message = self.state.data.string(message);
         let message = self.i64_const(ctx, u64::from(message));
         let kind = self.i32_const(ctx, perry_abi::layout::exception::RANGE_ERROR as i32);
         let tag = self.i32_const(ctx, perry_abi::layout::exception::TAG_STRING as i32);
@@ -68,7 +68,7 @@ impl FunctionLowering<'_, '_> {
         let out = self.numeric_result_slot(ctx);
         args.push(out);
         let packed = self.runtime(ctx, function, args);
-        self.check_time_status(ctx, packed);
+        self.check_time_status(ctx, packed, "Invalid time value for Temporal");
         self.load(ctx, MemKind::F64, out, 0)
     }
 
@@ -107,6 +107,11 @@ impl FunctionLowering<'_, '_> {
                     Runtime::TimePlainDateFromFields,
                     vec![args[0], args[1], args[2], constrain],
                 )
+            }
+            Intrinsic::PlainDateTimeFromFields => {
+                let mut args = args;
+                args[9] = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[9]]);
+                self.time_value(ctx, Runtime::TimePlainDateTimeFromFields, args)
             }
             Intrinsic::PlainDateTimeFrom => {
                 let args = self.string_parts(ctx, args[0]);

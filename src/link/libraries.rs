@@ -378,8 +378,35 @@ impl<'a> Library<'a> {
                 }
                 reachable = Control::step(&mut controls, op, reachable);
             }
+            let frame_bytes = if let Some((_, size)) = frame {
+                size as u32
+            } else if ops
+                .iter()
+                .any(|op| matches!(op, Op::GlobalGet { global_index } if *global_index == stack))
+            {
+                // LLVM leaf functions may reserve scratch below the stack pointer without
+                // publishing it. No call can use that unpublished space concurrently.
+                let [
+                    Op::GlobalGet { global_index },
+                    Op::I32Const { value },
+                    Op::I32Sub,
+                    Op::LocalSet { .. } | Op::LocalTee { .. },
+                ] = ops.get(..4)?
+                else {
+                    return None;
+                };
+                if *global_index != stack || *value <= 0 || ops[4..].iter().any(|op| {
+                    matches!(op, Op::Call { .. })
+                        || matches!(op, Op::GlobalGet { global_index } if *global_index == stack)
+                }) {
+                    return None;
+                }
+                *value as u32
+            } else {
+                0
+            };
             graph.push(calls);
-            frames.push(frame.map_or(0, |(_, size)| size as u32));
+            frames.push(frame_bytes);
         }
         let graph = HelperCalls::new(&graph);
         let mut depths = vec![0_u32; frames.len()];
@@ -401,7 +428,7 @@ impl<'a> Library<'a> {
             }
         }
         let deepest = depths.into_iter().max().unwrap_or(0);
-        Some(deepest.max(1024))
+        Some(deepest)
     }
 
     pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self> {
@@ -869,8 +896,8 @@ mod tests {
     #[test]
     fn zero_frame_recursion_preserves_callee_and_caller_depths() {
         for (body, bound) in [
-            ("(func call 0)", 1024),
-            ("(func call 1) (func call 0)", 1024),
+            ("(func call 0)", 0),
+            ("(func call 1) (func call 0)", 0),
             (
                 "(func call 1) (func call 0 call 2) (func (local i32) global.get 0 i32.const 4096 i32.sub local.tee 0 global.set 0 local.get 0 i32.const 4096 i32.add global.set 0)",
                 4096,
@@ -916,7 +943,7 @@ mod tests {
             .unwrap();
             wasmparser::Validator::new().validate_all(&bytes).unwrap();
             let library = Library::parse(&bytes).unwrap();
-            assert_eq!(library.fixed_stack_bound(None), Some(1024), "{computation}");
+            assert_eq!(library.fixed_stack_bound(None), Some(16), "{computation}");
         }
     }
 
@@ -929,6 +956,41 @@ mod tests {
         ))
         .unwrap();
         let library = Library::parse(&bytes).unwrap();
-        assert_eq!(library.fixed_stack_bound(None), Some(1024));
+        assert_eq!(library.fixed_stack_bound(None), Some(16));
+    }
+
+    #[test]
+    fn unpublished_leaf_scratch_contributes_to_caller_depth() {
+        for (scratch, bound) in [
+            (
+                "global.get 0 i32.const 1536 i32.sub local.set 0",
+                Some(1552),
+            ),
+            (
+                "global.get 0 i32.const 1536 i32.sub local.tee 0 drop",
+                Some(1552),
+            ),
+            (
+                "global.get 0 i32.const 1536 i32.sub local.set 0 call 2",
+                None,
+            ),
+            (
+                "global.get 0 i32.const 1536 i32.sub local.set 0 global.get 0 drop",
+                None,
+            ),
+            ("global.get 0 local.set 0", None),
+        ] {
+            let bytes = wat::parse_str(format!(
+                "(module (import \"env\" \"__stack_pointer\" (global (mut i32)))
+                (func (local i32)
+                    global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0
+                    call 1 local.get 0 i32.const 16 i32.add global.set 0)
+                (func (local i32) {scratch}) (func))"
+            ))
+            .unwrap();
+            wasmparser::Validator::new().validate_all(&bytes).unwrap();
+            let library = Library::parse(&bytes).unwrap();
+            assert_eq!(library.fixed_stack_bound(None), bound, "{scratch}");
+        }
     }
 }

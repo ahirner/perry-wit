@@ -216,6 +216,16 @@ op_schema! {
 }
 
 op_schema! {
+    /// A dynamic JSON value backed by its original native storage.
+    pub JsonBoxOp(_value) -> infallible;
+    name = "perry.json_box";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(_value: Value) => infer(); }
+    result(ctx): Ty = Ty::Json;
+    error = CollectionErr::Sequence("perry.json_box");
+}
+
+op_schema! {
     /// Dynamic argument spreads normalize to a sequence of typed dense segments.
     pub ConcatSegmentsOp(sources) -> fallible;
     name = "perry.concat_segments";

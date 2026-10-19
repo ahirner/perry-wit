@@ -7,7 +7,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         use hir_compat::Constructor;
         return match constructor {
             Constructor::Map { types, init } => {
-                let types = types.cloned();
+                let types = types.map(|(key, value)| (key.clone(), value.clone()));
                 let inferred = init.map(|init| {
                     if let Expr::Array(entries) = init
                         && let Some(Expr::Array(pair)) = entries.first()
@@ -198,21 +198,29 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             _ => HirType::Any,
         },
         Expr::Array(elements) => {
-            if let [first, second] = elements.as_slice() {
-                let first_ty = expression(first, env);
-                let second_ty = expression(second, env);
-                if first_ty != second_ty
-                    && !matches!(first_ty, HirType::Any | HirType::Unknown)
-                    && !matches!(second_ty, HirType::Any | HirType::Unknown)
+            let mut types = elements.iter().map(|element| expression(element, env));
+            let first = types.next().unwrap_or(HirType::Any);
+            let second = types.next();
+            match second {
+                Some(second)
+                    if elements.len() == 2
+                        && first != second
+                        && !matches!(first, HirType::Any | HirType::Unknown)
+                        && !matches!(second, HirType::Any | HirType::Unknown) =>
                 {
-                    HirType::Tuple(vec![first_ty, second_ty])
-                } else {
-                    perry_hir::infer_expr_type(expr, env)
+                    HirType::Tuple(vec![first, second])
                 }
-            } else {
-                perry_hir::infer_expr_type(expr, env)
+                second => {
+                    let uniform = second.into_iter().chain(types).all(|ty| ty == first);
+                    if uniform {
+                        HirType::Array(Box::new(first))
+                    } else {
+                        perry_hir::infer_expr_type(expr, env)
+                    }
+                }
             }
         }
+
         Expr::ArrayFrom(source) => {
             if let Expr::Object(props) = source.as_ref()
                 && props.iter().any(|(k, _)| k == "length")
@@ -246,7 +254,31 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 type_args: vec![key_ty, HirType::Array(Box::new(elem_ty))],
             }
         }
-        Expr::Call { callee, args, .. } => methods::call(expr, callee, args, env),
+        Expr::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
+            if let Expr::FuncRef(id) = callee.as_ref()
+                && let Some(function) = env
+                    .generic_functions
+                    .and_then(|functions| functions.get(id))
+                && let Ok(arguments) = functions::arguments(function, args, type_args, env)
+            {
+                let bindings = function
+                    .type_params
+                    .iter()
+                    .zip(&arguments)
+                    .map(|(parameter, argument)| (parameter.name.as_str(), argument))
+                    .collect();
+                let mut result = function.return_type.clone();
+                substitute_type_vars(&mut result, &bindings);
+                result
+            } else {
+                methods::call(expr, callee, args, env)
+            }
+        }
         Expr::CallSpread { callee, .. } => match callee.as_ref() {
             Expr::PropertyGet {
                 object, property, ..
@@ -344,6 +376,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                             .map(|v| with_absences((**v).clone(), Absence::Undefined))
                     })
                     .unwrap_or_else(|| fallback(env)),
+                HirType::Array(_) if property == "groups" => HirType::Unknown,
+                HirType::Array(_) if property == "index" => HirType::Number,
+                HirType::Array(_) if property == "input" => HirType::String,
                 HirType::String | HirType::Array(_) if property == "length" => HirType::Number,
                 _ => fallback(env),
             }
@@ -566,7 +601,33 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             type_args,
             ..
         } => {
-            if !type_args.is_empty() {
+            if hir_compat::is_object_literal(class_name)
+                && let Some(class) = env.classes.iter().find(|class| class.name == *class_name)
+            {
+                let mut properties = HashMap::new();
+                for (field, argument) in class.fields.iter().zip(args) {
+                    properties.insert(
+                        field.name.clone(),
+                        perry_hir::types::PropertyInfo {
+                            ty: expression(argument, env),
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
+                }
+                HirType::Object(perry_hir::types::ObjectType {
+                    name: None,
+                    properties,
+                    property_order: Some(
+                        class
+                            .fields
+                            .iter()
+                            .map(|field| field.name.clone())
+                            .collect(),
+                    ),
+                    index_signature: None,
+                })
+            } else if !type_args.is_empty() {
                 HirType::Generic {
                     base: class_name.clone(),
                     type_args: type_args.clone(),
@@ -574,51 +635,10 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             } else if let Some(class) = env.classes.iter().find(|c| c.name == *class_name)
                 && !class.type_params.is_empty()
             {
-                let mut inferred_map: HashMap<String, HirType> = HashMap::new();
-                if let Some(ctor) = &class.constructor {
-                    let params: Vec<(String, HirType)> = ctor
-                        .params
-                        .iter()
-                        .filter_map(|p| match &p.ty {
-                            HirType::TypeVar(name) | HirType::Named(name)
-                                if class.type_params.iter().any(|tp| tp.name == *name) =>
-                            {
-                                Some((name.clone(), p.ty.clone()))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    for ((tp_name, _), arg_expr) in params.into_iter().zip(args.iter()) {
-                        let arg_ty = expression(arg_expr, env);
-                        if is_resolvable_type(&arg_ty) {
-                            inferred_map.insert(tp_name, arg_ty);
-                        }
-                    }
-                }
-                let type_params: Vec<(String, Option<HirType>)> = class
-                    .type_params
-                    .iter()
-                    .map(|tp| {
-                        (
-                            tp.name.clone(),
-                            tp.default.as_deref().or(tp.constraint.as_deref()).cloned(),
-                        )
-                    })
-                    .collect();
-                let mut resolved_args = Vec::with_capacity(type_params.len());
-                let mut all_ok = true;
-                for (tp_name, fallback) in type_params {
-                    if let Some(ty) = inferred_map.remove(&tp_name).or(fallback) {
-                        resolved_args.push(ty);
-                    } else {
-                        all_ok = false;
-                        break;
-                    }
-                }
-                if all_ok {
+                if let Some(type_args) = functions::class_arguments(class, args, env) {
                     HirType::Generic {
                         base: class_name.clone(),
-                        type_args: resolved_args,
+                        type_args,
                     }
                 } else {
                     HirType::Named(class_name.clone())

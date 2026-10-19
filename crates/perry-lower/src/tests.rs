@@ -63,3 +63,50 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
     assert!(printed.contains("perry.alloc Frame"), "{printed}");
     assert!(printed.contains("perry.alloc Instance"), "{printed}");
 }
+
+#[test]
+fn generic_collections_keep_concrete_payloads() -> anyhow::Result<()> {
+    let ctx = &mut Context::new();
+    let source = r#"
+function index<T extends {id:string}>(xs:T[]):Map<string,T> {
+    const result = new Map<string,T>();
+    for (const x of xs) {
+        if (result.has(x.id)) throw new Error("duplicate");
+        result.set(x.id,x);
+    }
+    return result;
+}
+function forward<T extends {id:string}>(xs:T[]):Map<string,T> { return index(xs); }
+function unique<T>(xs:T[]) { return new Set<T>(xs); }
+function fromMap<T>(values:Map<string,T>):T|undefined { return values.get("a"); }
+function first<T>(xs:T[]):T { return xs[0]; }
+function defaulted<T>(value:T):T {
+    const read = (fallback:T = first([value].map((item:T):T => item))):T => fallback;
+    return read();
+}
+class Catalog {
+    cached: string = first(["cached"]);
+    static cached: number = first([7]);
+    defaulted(values: Map<string,{id:string,name:string}> = index([{id:"a",name:"default"}])): string {
+        return values.get("a")?.name ?? "";
+    }
+    find(input:string):string { return index([{id:"a",name:input}]).get("a")?.name ?? ""; }
+}
+export function run(input:string):string {
+    const named = index([{id:"a",name:defaulted(input)}]);
+    const counted = forward([{id:"a",count:defaulted(7)}]);
+    const empty = index<{id:string,name:string}>([]);
+    const names = unique([input]);
+    const lookup = (xs:{id:string,name:string}[]):Map<string,{id:string,name:string}> => index(xs);
+    return (fromMap(named)?.name ?? "missing") + counted.get("a")?.count
+        + empty.size + names.has(input) + new Catalog().find(input)
+        + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted();
+}
+"#;
+    let module = lower_without_foreign(ctx, source, "generic-collections.ts")?;
+    pliron::common_traits::Verify::verify(&*module.get_operation().deref(ctx), ctx)?;
+    let printed = module.disp(ctx).to_string();
+    assert!(printed.contains("shape_id_name"), "{printed}");
+    assert!(printed.contains("shape_count_id"), "{printed}");
+    Ok(())
+}

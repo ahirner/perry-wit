@@ -1,8 +1,10 @@
 //! Statically checked reverse and anchored-forward DFA execution with optional NFA captures.
 use crate::runtime;
+use perry_abi::layout::array;
 use perry_abi::layout::regex::{
     FORWARD_CLASSES, FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_PENDING, MAX_STATES,
-    MAX_THREADS, NfaState, NfaTable, REVERSE_CLASSES, REVERSE_ROWS,
+    MAX_THREADS, NAMES_OFFSET, NfaState, NfaTable, RESULT_BYTES, RESULT_GROUPS, RESULT_INDEX,
+    RESULT_INPUT, RESULT_NEXT, REVERSE_CLASSES, REVERSE_ROWS,
 };
 
 #[inline(always)]
@@ -356,6 +358,44 @@ pub(crate) fn push_substitution(
     replacement: &[u8],
     captures: &[u32],
 ) {
+    substitute(out, text, start, end, replacement, captures, None);
+}
+
+#[derive(Clone, Copy)]
+struct Names(*const u8);
+
+impl Iterator for Names {
+    type Item = (usize, &'static [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Names only comes from an immutable compiler table, terminated by group zero.
+        unsafe {
+            let group = read_u16(self.0) as usize;
+            if group == 0 {
+                return None;
+            }
+            let len = read_u16(self.0.add(2)) as usize;
+            let name = core::slice::from_raw_parts(self.0.add(4), len);
+            self.0 = self.0.add(4 + len);
+            Some((group, name))
+        }
+    }
+}
+
+unsafe fn names(program: *const u8) -> Option<Names> {
+    let table = unsafe { program.add(read_u32(program.add(NAMES_OFFSET)) as usize) };
+    (unsafe { read_u16(table) } != 0).then_some(Names(table))
+}
+
+fn substitute(
+    out: &mut runtime::Buffer,
+    text: &[u8],
+    start: usize,
+    end: usize,
+    replacement: &[u8],
+    captures: &[u32],
+    names: Option<Names>,
+) {
     if !replacement.contains(&b'$') {
         out.extend_from_slice(replacement);
         return;
@@ -382,6 +422,18 @@ pub(crate) fn push_substitution(
                 b'\'' => {
                     out.extend_from_slice(&text[end..]);
                     index += 2;
+                }
+                b'<' if let Some(mut names) = names
+                    && let Some(close) =
+                        replacement[index + 2..].iter().position(|&b| b == b'>') =>
+                {
+                    let name = &replacement[index + 2..index + 2 + close];
+                    if let Some((group, _)) = names.find(|(_, candidate)| *candidate == name)
+                        && let Some(range) = capture(captures, group)
+                    {
+                        out.extend_from_slice(&text[range]);
+                    }
+                    index += close + 3;
                 }
                 b'0'..=b'9' if group_count > 0 => {
                     let d1 = (next - b'0') as usize;
@@ -423,10 +475,7 @@ pub(crate) fn push_substitution(
 pub(crate) unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const u8) -> f64 {
     let text = unsafe { runtime::bytes(text) };
     unsafe { match_start(text, 0, program) }.map_or(-1.0, |start| {
-        text[..start]
-            .iter()
-            .filter(|&&byte| byte & 0xc0 != 0x80)
-            .count() as f64
+        f64::from(runtime::scalars_length(&text[..start]))
     })
 }
 
@@ -458,7 +507,15 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
         } else {
             0
         };
-        push_substitution(&mut out, text, start, end, rep, &cap_slots[..cap_len]);
+        substitute(
+            &mut out,
+            text,
+            start,
+            end,
+            rep,
+            &cap_slots[..cap_len],
+            unsafe { names(program) },
+        );
         last_end = end;
         if !global {
             break;
@@ -474,8 +531,19 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
 /// `string` is a live immutable string; `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const u8) -> *mut u8 {
+    unsafe { std_regex_exec_from(string, program, 0.0) }
+}
+
+/// # Safety
+/// `string` is live, `program` is a compiler table, and `from` is a byte boundary.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_regex_exec_from(
+    string: *mut u8,
+    program: *const u8,
+    from: f64,
+) -> *mut u8 {
     let text = unsafe { runtime::bytes(string) };
-    let Some((start, end)) = (unsafe { next_match(text, 0, program) }) else {
+    let Some((start, end)) = (unsafe { next_match(text, from as usize, program) }) else {
         return core::ptr::null_mut();
     };
     let group_count = unsafe { group_count(program) };
@@ -483,18 +551,96 @@ pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const 
     if group_count > 1 {
         unsafe { extract_captures(program, text, start, end, &mut cap_slots) };
     }
-    let (array, slots) = runtime::array_storage(group_count);
-    if let Some(first) = slots.first_mut() {
-        *first = unsafe { slice_string(string, text.len(), start, end) } as u64;
+    // The normal array header is followed by immutable match metadata. Array mutations
+    // replace its data buffer, leaving the metadata and its traced pointers intact.
+    let capacity = group_count.max(4);
+    let result = unsafe {
+        runtime::alloc_shaped(
+            RESULT_BYTES,
+            &[0, 3, array::DATA, RESULT_GROUPS as u32, RESULT_INPUT as u32],
+        )
+    };
+    let data =
+        unsafe { runtime::alloc_shaped(capacity as u32 * array::SLOT, &[array::SLOT, 1, 0]) };
+    unsafe {
+        result
+            .add(array::LEN as usize)
+            .cast::<u32>()
+            .write(group_count as u32);
+        result
+            .add(array::CAP as usize)
+            .cast::<u32>()
+            .write(capacity as u32);
+        result
+            .add(array::DATA as usize)
+            .cast::<*mut u8>()
+            .write(data);
+        core::ptr::write_bytes(data, 0, capacity * array::SLOT as usize);
     }
+    let slots = unsafe { core::slice::from_raw_parts_mut(data.cast::<u64>(), group_count) };
+    slots[0] = unsafe { slice_string(string, text.len(), start, end) } as u64;
     for (i, slot) in slots.iter_mut().enumerate().skip(1) {
-        let piece = match capture(&cap_slots, i) {
-            Some(range) => unsafe { slice_string(string, text.len(), range.start, range.end) },
-            None => runtime::from_static(""),
-        };
-        *slot = piece as u64;
+        *slot = capture(&cap_slots, i).map_or(0, |range| unsafe {
+            slice_string(string, text.len(), range.start, range.end) as u64
+        });
     }
-    array
+    let mut groups = core::ptr::null_mut();
+    if let Some(names) = unsafe { names(program) } {
+        groups = crate::json::std_json_object();
+        for (index, bytes) in names {
+            let key = unsafe { runtime::adopt(bytes.as_ptr() as *mut u8, bytes.len() as u32) };
+            let value = slots[index] as *mut u8;
+            let value = if value.is_null() {
+                value
+            } else {
+                unsafe { crate::json::std_json_from_string(value) }
+            };
+            unsafe { crate::json::std_json_set(groups, key, value) };
+        }
+    }
+    let next = if end > start {
+        end
+    } else {
+        next_scalar_boundary(text, end)
+    };
+    unsafe {
+        result.add(RESULT_GROUPS).cast::<*mut u8>().write(groups);
+        result
+            .add(RESULT_INDEX)
+            .cast::<f64>()
+            .write(runtime::scalars_length(&text[..start]) as f64);
+        result.add(RESULT_NEXT).cast::<f64>().write(next as f64);
+        result.add(RESULT_INPUT).cast::<*mut u8>().write(string);
+    }
+    result
+}
+
+/// # Safety
+/// `result` is an array returned by `std_regex_exec_from`, not an ordinary array.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_regex_groups(result: *mut u8) -> *mut u8 {
+    unsafe { result.add(RESULT_GROUPS).cast::<*mut u8>().read() }
+}
+
+/// # Safety
+/// `result` is an array returned by `std_regex_exec_from`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_regex_index(result: *mut u8) -> f64 {
+    unsafe { result.add(RESULT_INDEX).cast::<f64>().read() }
+}
+
+/// # Safety
+/// `result` is an array returned by `std_regex_exec_from`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_regex_next(result: *mut u8) -> f64 {
+    unsafe { result.add(RESULT_NEXT).cast::<f64>().read() }
+}
+
+/// # Safety
+/// `result` is an array returned by `std_regex_exec_from`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_regex_input(result: *mut u8) -> *mut u8 {
+    unsafe { result.add(RESULT_INPUT).cast::<*mut u8>().read() }
 }
 
 /// `s.match(regex)`.

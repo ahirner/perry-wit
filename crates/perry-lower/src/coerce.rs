@@ -224,29 +224,7 @@ impl<'s> FunctionBuilder<'s> {
         if ty == target {
             Ok(value)
         } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
-            let json_ty: TypeHandle = JsonType::get(ctx).into();
-            let boxed = if let Some(abs) = absence(ctx, ty)
-                && abs.admits_undefined()
-            {
-                let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                self.choose(
-                    ctx,
-                    json_ty,
-                    is_undef,
-                    |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, json_ty))),
-                    |b, ctx| {
-                        let def = b.defined(ctx, value)?;
-                        let text =
-                            b.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, def));
-                        let text = b.defined(ctx, text)?;
-                        Ok(b.intrinsic(ctx, Intrinsic::JsonParse, vec![text]))
-                    },
-                )?
-            } else {
-                let text = self.emit_value(ctx, |ctx| perry_mir::JsonStringifyOp::new(ctx, value));
-                let text = self.defined(ctx, text)?;
-                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-            };
+            let boxed = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
             self.fit(ctx, boxed, target)
         } else if optional_value(ctx, target) == Some(ty) {
             Ok(self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, target)))

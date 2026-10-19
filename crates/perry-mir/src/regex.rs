@@ -21,6 +21,37 @@ op_schema! {
 }
 
 impl RegexConstOp {
+    /// The callback arity of a literal: explicit captures and an optional groups argument.
+    /// Full syntax validation remains with the regex compiler.
+    pub fn captures(&self, ctx: &Context) -> Option<(usize, bool)> {
+        let pattern = self.get_attr_perry_regex_pattern(ctx)?;
+        let mut chars = pattern.as_str().chars().peekable();
+        let mut in_class = false;
+        let mut count = 0;
+        let mut named = false;
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '[' => in_class = true,
+                ']' => in_class = false,
+                '(' if !in_class => {
+                    if chars.peek() != Some(&'?') {
+                        count += 1;
+                    } else {
+                        chars.next();
+                        if chars.next() == Some('<') && !matches!(chars.peek(), Some('=' | '!')) {
+                            count += 1;
+                            named = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some((count, named))
+    }
     pub fn pattern(&self, ctx: &Context) -> String {
         self.get_attr_perry_regex_pattern(ctx)
             .expect("pattern")

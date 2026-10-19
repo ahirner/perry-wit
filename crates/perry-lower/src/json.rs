@@ -2,7 +2,72 @@
 use super::*;
 use perry_mir::JsonSchema;
 
+/// Accepted deviation: JSON revivers and indentation are diagnosed at compile time.
+pub(super) const JSON_CALLBACKS: &str = "JSON revivers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
+
 impl<'s> FunctionBuilder<'s> {
+    /// `JSON.stringify(value)`.
+    pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        let mut value = self.expression(ctx, expr)?;
+        if let Some(src) = self.integer64_source(ctx, value) {
+            value = src;
+        } else if let Expr::LocalGet(id) = expr
+            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
+            && int_ty.deref(ctx).width() == 64
+        {
+            let int_handle: TypeHandle = int_ty.into();
+            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
+        }
+        Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
+    }
+
+    pub(super) fn stringify_replaced(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        replacer: &'s Expr,
+    ) -> Result<Value> {
+        if matches!(replacer, Expr::Null | Expr::Undefined) {
+            return self.stringify(ctx, expr);
+        }
+        let value = self.expression(ctx, expr)?;
+        let value = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
+        let callback = matches!(replacer, Expr::Closure { .. } | Expr::FuncRef(_))
+            || matches!(replacer, Expr::LocalGet(id) if self.closures.get(id).is_some());
+        let keys = if callback {
+            self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
+        } else {
+            let expected = matches!(replacer, Expr::Array(items) if items.is_empty())
+                .then(|| ArrayType::get(ctx, StringType::get(ctx).into()).into());
+            let keys = self.expression_with(ctx, replacer, expected)?;
+            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, keys))
+        };
+        let traversal = self.intrinsic(ctx, Intrinsic::JsonReplacerBegin, vec![value, keys]);
+        let body = self.new_block(ctx, "json_replacer");
+        let done = self.new_block(ctx, "json_written");
+        self.jump(ctx, body);
+        self.switch_to(body);
+        let value = self.intrinsic(ctx, Intrinsic::JsonReplacerValue, vec![traversal]);
+        let replacement = if callback {
+            let key = self.intrinsic(ctx, Intrinsic::JsonReplacerKey, vec![traversal]);
+            let json = JsonType::get(ctx).into();
+            let json =
+                perry_mir::OptionalType::get_with(ctx, json, perry_mir::Absence::Both).into();
+            let value = self.inline_callback(ctx, replacer, &[key, value], Some(json))?;
+            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value))
+        } else {
+            value
+        };
+        let more = self.intrinsic(
+            ctx,
+            Intrinsic::JsonReplacerNext,
+            vec![traversal, replacement],
+        );
+        self.branch(ctx, more, body, done);
+        self.switch_to(done);
+        Ok(self.intrinsic(ctx, Intrinsic::JsonReplacerFinish, vec![traversal]))
+    }
+
     /// Unsupported cursor targets retain the JSON value for later coercion.
     pub(super) fn parse_json_text(
         &mut self,
@@ -34,6 +99,10 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
                 |b, ctx, defined| b.json_scalar_equal(ctx, json, defined),
             );
+        }
+        if kind(ctx, scalar)? == Kind::BigInt {
+            let scalar = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, scalar));
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonStrictEqual, vec![json, scalar]));
         }
         if kind(ctx, scalar)? == Kind::Exception {
             return Ok(self.intrinsic(ctx, Intrinsic::JsonExceptionEqual, vec![json, scalar]));

@@ -104,8 +104,8 @@ pub use calls::{
 };
 pub use collections::{
     ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, NativeJsonOp, StringConstOp,
-    StringLenOp,
+    ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp,
+    StringConstOp, StringLenOp,
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{set_source_span, source_span};
@@ -140,11 +140,11 @@ pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::{
     AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
-    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonType,
-    NumberStringType, NumericType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType,
-    ReadResultType, ReadableType, ReaderType, RecordKind, RecordType, RegexType, RequestType,
-    ResourceType, ResponseType, SearchParamsType, SettledType, SlotType, StatsType, StringType,
-    TransferType, UrlType, ValueKind, VariantType, WritableType, WriterType,
+    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType,
+    JsonTraversalType, JsonType, NumberStringType, NumericType, OptionalType, PlainDateTimeType,
+    PlainDateType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordKind, RecordType,
+    RegexType, RequestType, ResourceType, ResponseType, SearchParamsType, SettledType, SlotType,
+    StatsType, StringType, TransferType, UrlType, ValueKind, VariantType, WritableType, WriterType,
 };
 pub use variants::{VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, variant_cases};
 pub use views::{AggregateViewOp, can_widen};

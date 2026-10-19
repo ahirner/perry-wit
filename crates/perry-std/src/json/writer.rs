@@ -148,7 +148,7 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
 }
 
-fn append_number(text: &mut Buffer, number: Number) {
+pub(super) fn append_number(text: &mut Buffer, number: Number) {
     let (magnitude, negative) = match number {
         Number::Float(number) => {
             if number.is_finite() {
@@ -168,7 +168,7 @@ fn append_number(text: &mut Buffer, number: Number) {
 }
 
 /// Append a JSON string literal, quotes included.
-fn quote(text: &mut Buffer, bytes: &[u8]) {
+pub(super) fn quote(text: &mut Buffer, bytes: &[u8]) {
     text.push(b'"');
     perry_abi::json::quote_contents(bytes, |part| text.extend_from_slice(part));
     text.push(b'"');
@@ -210,9 +210,17 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             append_number(text, number);
         } else {
             match word(current, 0) {
-                NATIVE => {
-                    current = native_snapshot(current);
+                NATIVE | VIEW => {
+                    current = if word(current, 0) == VIEW {
+                        super::view::std_json_snapshot(super::view::to_json(current))
+                    } else {
+                        native_snapshot(current)
+                    };
                     continue;
+                }
+                BIGINT => {
+                    raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
+                    return true;
                 }
                 EXCEPTION => text.extend_from_slice(b"{}"),
                 NULL | UNDEFINED => text.extend_from_slice(b"null"),

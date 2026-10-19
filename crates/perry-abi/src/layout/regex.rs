@@ -3,12 +3,18 @@ pub const MAX_CAPTURES: usize = 8;
 pub const MAX_STATES: usize = 256;
 pub const MAX_THREADS: usize = 24;
 pub const MAX_PENDING: usize = 64;
-pub const REVERSE_CLASSES: usize = 8;
+pub const REVERSE_CLASSES: usize = 12;
 pub const FORWARD_CLASSES: usize = 12;
 pub const REVERSE_ROWS: usize = REVERSE_CLASSES + 256;
 pub const FORWARD_ROWS: usize = FORWARD_CLASSES + 256;
 pub const GLOBAL: u32 = 1 << 31;
 pub const NFA_HEADER: usize = 8;
+pub const NAMES_OFFSET: usize = 8;
+pub const RESULT_GROUPS: usize = 12;
+pub const RESULT_INDEX: usize = 16;
+pub const RESULT_NEXT: usize = 24;
+pub const RESULT_INPUT: usize = 32;
+pub const RESULT_BYTES: u32 = 40;
 
 macro_rules! codes {
     ($name:ident { $($variant:ident = $code:literal),+ $(,)? }) => {

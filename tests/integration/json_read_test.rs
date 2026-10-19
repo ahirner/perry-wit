@@ -653,3 +653,145 @@ export function read():number {{
     assert_eq!(program.counter(Counter::Roots), 0);
     assert_eq!(program.counter(Counter::Pins), 0);
 }
+
+#[test]
+fn stringify_replacers_visit_live_values_and_filter_properties() {
+    let mut program = Program::checked(
+        r#"
+interface Link {n:number; next?:Link}
+interface Box {value:unknown}
+type Choice = {tag:"ok";val:{n:number}} | {tag:"err";val:string};
+type MaybeChoice = {tag:"empty"} | {tag:"value";val:number};
+export function run():number {
+ const text = JSON.stringify({a:"value",b:2}, (key,value) => key === "b" ? undefined : value);
+ if (text !== '{"a":"value"}') return 1;
+ if (JSON.stringify({a:1,b:2}, ["b","a","b"]) !== '{"b":2,"a":1}') return 2;
+ if (JSON.stringify({a:{a:1,b:2},b:3}, ["a"]) !== '{"a":{"a":1}}') return 3;
+ if (JSON.stringify([1,2,3], (key,value) => key === "1" ? undefined : value) !== '[1,null,3]') return 4;
+ if (JSON.stringify({a:1}, (key,value) => undefined) !== undefined) return 5;
+ const live = {a:1,b:2};
+ let visited = "";
+ const updated = JSON.stringify(live, (key,value) => {
+   visited += key + ":";
+   if (key === "a") live.b = 9;
+   return value;
+ });
+ if (updated !== '{"a":1,"b":9}' || visited !== ':a:b:') return 6;
+ let threw = false;
+ try { JSON.stringify({a:1}, (key,value) => { if(key === "a") throw new Error("stop"); return value; }); }
+ catch(e) { threw = true; }
+ if (!threw) return 7;
+ const shared = {a:1};
+ if(JSON.stringify([shared, shared], (key,value) => value) !== '[{"a":1},{"a":1}]') return 8;
+ if(JSON.stringify({a:1,b:2}, (key,value) => key === "b" ? 4 : value) !== '{"a":1,"b":4}') return 9;
+ if(JSON.stringify({"1":1,"2":2,a:3}, [2,"a",1,2]) !== '{"2":2,"a":3,"1":1}') return 10;
+ if(JSON.stringify([1,2], []) !== '[1,2]') return 11;
+ const dictionary:Record<string,string> = {a:"A",b:"B"};
+ if(JSON.stringify(dictionary,["b"]) !== '{"b":"B"}') return 12;
+ const tuple:[number,string] = [1,"one"];
+ if(JSON.stringify(tuple,(key,value) => value) !== '[1,"one"]') return 13;
+ const record:{a:number} = JSON.parse('{"z":0,"a":1,"extra":{"a":2,"b":3}}');
+ if(JSON.stringify(record,(key,value) => key === "b" ? undefined : value) !== '{"z":0,"a":1,"extra":{"a":2}}') return 14;
+ if(JSON.stringify({d:new Date(0)},(key,value) => value) !== '{"d":"1970-01-01T00:00:00.000Z"}') return 15;
+ if(JSON.stringify({a:1n},(key,value) => typeof value === "bigint" ? String(value) : value) !== '{"a":"1"}') return 16;
+ try { JSON.stringify({a:1n}, (key,value) => value); return 17; } catch(e) { if(!(e instanceof TypeError)) return 18; }
+ const optional:{a?:number,b?:number} = {b:undefined};
+ let keys="";
+ JSON.stringify(optional,(key,value) => { keys+=key+":"; return value; });
+ if(keys!==":b:") return 19;
+ const replacement = {x:1,y:2};
+ const replaced = JSON.stringify(0,(key,value) => {
+   if(key === "") return replacement;
+   if(key === "x") replacement.y=7;
+   return value;
+ });
+ if(replaced!=='{"x":1,"y":7}') return 20;
+ const cycle:Link = {n:1}; cycle.next=cycle;
+ try { JSON.stringify(cycle,(key,value) => value); return 21; } catch(e) { if(!(e instanceof TypeError)) return 22; }
+ const choice:Choice = {tag:"ok",val:{n:1}};
+ if(JSON.stringify(choice,(key,value) => value)!=='{"tag":"ok","val":{"n":1}}') return 23;
+ return 0;
+}
+export function retained():number {
+ for(const input of ['{"tag":"ok","val":{"n":1},"extra":true,"extra":7}',
+                     '{"extra":7,"val":{"n":1},"tag":"ok"}']) {
+   const cursor:Choice = JSON.parse(input);
+   const graph = JSON.parse(input);
+   const decoded:Choice = graph;
+   for(const choice of [cursor,decoded]) {
+     if(JSON.stringify(choice,(key,value) => value)!=='{"tag":"ok","val":{"n":1},"extra":7}') return 1;
+     const boxed:Box = {value:choice};
+     if(JSON.stringify(Object.keys(boxed.value))!=='["tag","val","extra"]') return 2;
+     const copy:Choice = boxed.value;
+     if(JSON.stringify(copy)!=='{"tag":"ok","val":{"n":1},"extra":7}') return 3;
+   }
+ }
+ const empty:MaybeChoice = JSON.parse('{"val":{"n":2},"tag":"empty","extra":7}');
+ if(JSON.stringify(empty,(key,value) => value)!=='{"tag":"empty","val":{"n":2},"extra":7}') return 4;
+ const numeric:Choice = JSON.parse('{"tag":"ok","val":{"n":1},"2":2,"1":1,"extra":7}');
+ const numericBox:Box = {value:numeric};
+ if(JSON.stringify(Object.keys(numericBox.value))!=='["1","2","tag","val","extra"]') return 5;
+ const tuple:[number] = JSON.parse('[1,2,3]');
+ const graph = JSON.parse('[1,2,3]');
+ const decoded:[number] = graph;
+ for(const value of [tuple,decoded]) {
+   let keys = "";
+   const text = JSON.stringify(value,(key,item) => {
+     if(key === "") {
+       if(!Array.isArray(item)) return undefined;
+       keys=JSON.stringify(Object.keys(item));
+     }
+     return item;
+   });
+   if(text!=='[1,2,3]' || keys!=='["0","1","2"]') return 6;
+   const boxed:Box = {value};
+   if(boxed.value.length!==3 || boxed.value[1]!==2 || boxed.value[2]!==3 || boxed.value[3]!==undefined) return 7;
+   const copy:[number] = boxed.value;
+   if(JSON.stringify(copy)!=='[1,2,3]') return 8;
+ }
+ return 0;
+}
+export function boxed():number {
+ const values:(number|undefined)[] = [undefined,2,undefined];
+ let keys = "";
+ const text = JSON.stringify(values,(key,value) => {
+   if(key === "") {
+     if(!Array.isArray(value)) return undefined;
+     keys=JSON.stringify(Object.keys(value));
+   }
+   return value;
+ });
+ if(text!=='[null,2,null]' || keys!=='["0","1","2"]') return 1;
+ const boxed:Box = {value:values};
+ const decoded:(number|undefined)[] = boxed.value;
+ if(decoded.length!==3 || decoded[0]!==undefined || decoded[1]!==2 || decoded[2]!==undefined) return 2;
+ const tuple:[number|undefined,number] = [undefined,2];
+ const tupleBox:Box = {value:tuple};
+ const tupleCopy:[number|undefined,number] = tupleBox.value;
+ if(tupleCopy[0]!==undefined || tupleCopy[1]!==2) return 3;
+ const zero:Box = {value:0n};
+ const one:Box = {value:1n};
+ const same:Box = {value:1n};
+ if(zero.value || !one.value || one.value!==same.value || zero.value===one.value) return 4;
+ const object = {n:1};
+ const objectBox:Box = {value:object};
+ const otherBox:Box = {value:{n:1}};
+ const error = new Error('cause',{cause:object});
+ if(error.cause!==objectBox.value || objectBox.value!==error.cause || error.cause===otherBox.value) return 5;
+ const date:Box = {value:new Date(0)};
+ if(JSON.stringify({...date.value})!=='{}') return 6;
+ if(JSON.stringify(date.value)!=='"1970-01-01T00:00:00.000Z"') return 7;
+ return 0;
+}
+"#,
+        "json-replacer.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        for export in ["run", "retained", "boxed"] {
+            assert_eq!(program.outcome(export, &[]), (0.0, 0), "{export}");
+        }
+    }
+    assert_eq!(program.counter(Counter::Roots), 0);
+    assert_eq!(program.counter(Counter::Pins), 0);
+}

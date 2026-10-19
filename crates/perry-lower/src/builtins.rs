@@ -2,9 +2,7 @@
 //! bytes, text coding and `console`.
 use super::*;
 use crate::methods::{Call, Receiver};
-
-/// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
-pub(super) const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
+mod regex;
 
 impl<'s> FunctionBuilder<'s> {
     /// `object.method(args)` on built-in values.
@@ -72,6 +70,15 @@ impl<'s> FunctionBuilder<'s> {
         Ok({
             let search_val = self.expression(ctx, search)?;
             let search_val = self.defined(ctx, search_val)?;
+            let callback = match replacement {
+                Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(replacement),
+                _ => replacement,
+            };
+            if matches!(callback, Expr::Closure { .. } | Expr::FuncRef(_)) {
+                return self
+                    .replace_callback(ctx, receiver, search_val, callback, all)
+                    .map(Some);
+            }
             let repl_val = self.string_operand(ctx, replacement)?;
             match kind(ctx, search_val)? {
                 Kind::String => {
@@ -105,62 +112,6 @@ impl<'s> FunctionBuilder<'s> {
         self.emit_value(ctx, |ctx| {
             MirCompare::new(ctx, CompareKind::Ge, index, zero)
         })
-    }
-
-    /// Whether `regex` has the `g` flag. Global and non-global regexes behave differently for
-    /// every caller, so a regex whose flags are not statically one or the other is rejected.
-    pub(super) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
-        Self::static_regex_global(ctx, regex, &mut Vec::new()).context(
-            "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag",
-        )
-    }
-
-    /// The `g` flag shared by every literal `regex` can hold, or `None`. A local qualifies only
-    /// while its slot is just loaded and stored to; `seen` holds the slots being resolved, so a
-    /// self-assignment is rejected instead of recursing forever.
-    fn static_regex_global(ctx: &Context, regex: Value, seen: &mut Vec<Value>) -> Option<bool> {
-        let op = regex.defining_op()?;
-        if let Some(const_op) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
-            return Some(const_op.flags(ctx).contains('g'));
-        }
-        Operation::get_op::<perry_mir::LoadOp>(op, ctx)?;
-        let slot = op.deref(ctx).get_operand(0);
-        if seen.contains(&slot) {
-            return None;
-        }
-        seen.push(slot);
-        let mut global = None;
-        for user in slot.uses(ctx).iter().map(|u| u.user_op()) {
-            if Operation::get_op::<perry_mir::LoadOp>(user, ctx).is_some() {
-                continue;
-            }
-            Operation::get_op::<perry_mir::StoreOp>(user, ctx)?;
-            let user = user.deref(ctx);
-            if user.get_operand(0) != slot {
-                return None;
-            }
-            let stored = Self::static_regex_global(ctx, user.get_operand(1), seen)?;
-            if global.is_some_and(|global| global != stored) {
-                return None;
-            }
-            global = Some(stored);
-        }
-        global
-    }
-
-    /// `JSON.stringify(value)`.
-    pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
-        let mut value = self.expression(ctx, expr)?;
-        if let Some(src) = self.integer64_source(ctx, value) {
-            value = src;
-        } else if let Expr::LocalGet(id) = expr
-            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
-            && int_ty.deref(ctx).width() == 64
-        {
-            let int_handle: TypeHandle = int_ty.into();
-            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
-        }
-        Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }
 
     /// Construct an Error with a supported scalar or reference cause.

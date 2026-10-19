@@ -246,8 +246,12 @@ Perry-WIT supports a strictly typed subset of TypeScript designed for ahead-of-t
 - **Control Flow**: Supports standard control flow constructs: conditional branches, loops, `break`, `continue`, short-circuit logic, ternary expressions, recursive function calls.
 - **Async**: Asynchronous functions execute over the WASI 0.3 callback ABI. Awaiting an already-settled promise continues inline without microtask queue latency. Supported combinators include `Promise.all`, `Promise.race`, `Promise.allSettled`.
 - **Byte Streams**: Supports default readers, asynchronous iteration, BYOB readers with caller-allocated buffers, minimum read lengths, explicit cancellation. Stream writes maintain bounded buffer reuse.
-- **Temporal**: Supports ISO calendar operations via `Instant.from`, `PlainDate.from`, `PlainDateTime.from`. Instants expose `epochMilliseconds`. Plain dates, times expose date and time fields, ISO string conversion, arithmetic via `.add({ days })`. Unsupported calendar formats, time zone manipulations produce compile-time diagnostics.
-- **Standard Library**: Supports `Math`, UTC `Date`, string manipulation, `Uint8Array`, `TextEncoder`, `TextDecoder`, schema-directed `JSON.stringify`, `JSON.parse`, `crypto.getRandomValues`, `node:timers/promises`, `node:fs/promises`, HTTP `Headers`, `Request`, `Response`, standard stream bridges.
+- **Temporal**: Supports ISO calendar operations via `Instant.from`, `PlainDate.from`, `PlainDateTime.from`. Instants expose `epochMilliseconds`. Plain dates and date-times accept numeric field objects with `overflow: "constrain" | "reject"`; omitted time fields default to zero. They expose date and time fields, ISO string conversion, and arithmetic via `.add({ days })`. Unsupported calendar formats, time zone manipulations produce compile-time diagnostics.
+- **Standard Library**:
+  - `Math`, `Uint8Array`, `TextEncoder`, `TextDecoder`, `crypto.getRandomValues`, `node:timers/promises`, `node:fs/promises`, HTTP `Headers`/`Request`/`Response`, standard stream bridges.
+  - UTC `Date`, with `Date.parse` and `new Date(string)` accepting ISO date and date-time strings (malformed ISO strings return `NaN`; non-ISO legacy formats raise `RangeError`).
+  - String manipulation and literal regular expressions, including named captures (`.groups` on `exec` and non-global `match`), named replacement strings, and synchronous replacement callbacks.
+  - Schema-directed `JSON.parse` and `JSON.stringify`, including synchronous replacer callbacks and property-list arrays.
 
 ### Numerical Tower
 
@@ -255,6 +259,7 @@ Perry-WIT stratifies numeric representations across WebAssembly primitive types:
 
 - **Floating-point default**: Unconstrained JavaScript `number` values evaluate as IEEE 754 64-bit floats (`f64`), preserving fractional division, remainder, negative zero, and `NaN` semantics.
 - **Integer specialization**: Values constrained by WIT interfaces or explicit integer types (`u8`–`u64`, `s8`–`s64`) specialize to native WebAssembly integer instructions. WIT 64-bit integers (`s64`, `u64`) map to TypeScript `bigint`.
+- **Bigint arithmetic**: Arbitrary-width `bigint` values support `+`, `-`, negation, comparison, decimal conversion, and range-checked WIT `s64`/`u64` boundary conversions; `*`, `/`, `%`, literals, and `BigInt(number)` operate on constant or fixed-width 64-bit values.
 - **Subsumption joins**: Mixed numeric operations promote to the smallest representation subsuming both operands. Mixed signedness widens to the next enclosing signed width (e.g., `u8 + s8 → s16`, `u16 + s16 → s32`).
 - **Optimization interaction**: Intermediate integer computations without narrow result requirements evaluate in native 64-bit `i64` registers, preventing premature overflow without heap allocations. Range inference and constant bounds analysis eliminate redundant bounds checks and modular reductions.
 

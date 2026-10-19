@@ -298,3 +298,24 @@ try {
 } catch {
   console.log("construction-stopped");
 }
+
+function indexById<T extends {id:string}>(rows:T[]):Map<string,T> {
+  const result = new Map<string,T>();
+  for(const row of rows) {
+    if(result.has(row.id)) throw new Error("duplicate");
+    result.set(row.id,row);
+  }
+  return result;
+}
+function defaultedValue<T>(value:T):T {
+  const read = (fallback:T = [value].map((item:T):T => item)[0]):T => fallback;
+  return read();
+}
+const indexedRow = {id:"a",count:defaultedValue(7)};
+const genericIndex = indexById([indexedRow]);
+indexedRow.count = 9;
+console.log("generic-collection", indexById([{id:"a",name:defaultedValue("payload")}]).get("a")?.name,
+  genericIndex.get("a") === indexedRow, genericIndex.get("a")?.count);
+const emptyIndexedRows:{id:string,name:string}[] = [];
+console.log("generic-empty", indexById(emptyIndexedRows).size);
+try { indexById([indexedRow,indexedRow]); } catch(e) { console.log("generic-duplicate", e instanceof Error); }

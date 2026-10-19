@@ -66,6 +66,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<PromiseType>()
         || deref.is::<ByteInputType>()
         || deref.is::<TransferType>()
+        || deref.is::<perry_mir::JsonTraversalType>()
         || deref.is::<SlotType>()
     {
         return Ok(Repr::Ref);

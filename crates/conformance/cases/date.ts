@@ -63,6 +63,6 @@ const dates: Array<[string, number]> = [
   ["-000001-12-31T23:59:59.999Z", 1],
   ["+275760-09-13T00:00:00.000Z", 0],
   ["-271821-04-20T00:00:00.000Z", 0],
-  ["invalid", 10],
+  ["2024-13-01", 10],
 ];
 for (const [input, delta] of dates) console.log("utc", inspect(input, delta));

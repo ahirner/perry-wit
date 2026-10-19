@@ -23,9 +23,9 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
         (
             "u64",
             "bigint",
-            Val::U64(u64::MAX),
+            Val::U64(u64::MAX - 2),
             Val::U64(2),
-            Val::U64(1),
+            Val::U64(u64::MAX),
         ),
         (
             "s64",

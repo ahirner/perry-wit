@@ -15,13 +15,18 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
         ("u16", "number", 65535, 1, 0),
         ("s32", "number", i32::MAX as i64, 1, i32::MIN as i64),
         ("u32", "number", u32::MAX as i64, 1, 0),
-        ("s64", "bigint", i64::MAX, 1, i64::MIN),
-        ("u64", "bigint", -1, 1, 0),
-        ("s64", "bigint", 9007199254740993, 2, 9007199254740995),
+        ("s64", "s64", i64::MAX, 1, i64::MIN),
+        ("u64", "u64", -1, 1, 0),
+        ("s64", "s64", 9007199254740993, 2, 9007199254740995),
     ] {
+        let imports = if wit.ends_with("64") {
+            "import type { s64, u64 } from 'perry:types';"
+        } else {
+            ""
+        };
         let compiled = compile(
             &format!(
-                "export function run(a:{source_type}, b:{source_type}):{source_type} {{ return a+b; }}"
+                "{imports} export function run(a:{source_type}, b:{source_type}):{source_type} {{ return a+b; }}"
             ),
             &format!("func(a:{wit},b:{wit})->{wit}"),
         )?;
@@ -176,7 +181,7 @@ fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
         ),
         (
             "export function run(value:bigint):bigint { return -value; }",
-            "func(value:u64)->u64",
+            "func(value:u64)->s64",
             &unary,
             Val::I64(-1),
         ),

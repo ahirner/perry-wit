@@ -248,13 +248,11 @@ builtin.module @lengths { ^module():
             }
         }
         canonicalize(module, ctx)?;
-        let operations = crate::aggregates::operations(ctx, &run);
-        let checked = operations
-            .iter()
-            .any(|&op| Operation::get_op::<ArrayGetOp>(op, ctx).is_some());
-        let length = operations
-            .iter()
-            .any(|&op| Operation::get_op::<ArrayLenOp>(op, ctx).is_some());
+        let (mut checked, mut length) = (false, false);
+        for op in crate::aggregates::operations(ctx, &run) {
+            checked |= Operation::is_op::<ArrayGetOp>(op, ctx);
+            length |= Operation::is_op::<ArrayLenOp>(op, ctx);
+        }
         assert!(!checked, "{mutation}");
         // An unused native view is eliminated before the fresh facts query.
         assert_eq!(

@@ -96,10 +96,12 @@ macro_rules! runtime_functions {
     (@carrier Headers) => { W::I32 };
     (@carrier Incoming) => { W::I32 };
     (@carrier Index) => { W::I32 };
+    (@carrier JsonTraversal) => { W::I32 };
     (@carrier Json) => { W::I32 };
     (@carrier NullReadable) => { W::I32 };
     (@carrier NullString) => { W::I32 };
-    (@carrier NullStringArray) => { W::I32 };
+    (@carrier OptStringArray) => { W::I32 };
+    (@carrier NullOptStringArray) => { W::I32 };
     (@carrier NumberArray) => { W::I32 };
     (@carrier OptBytes) => { W::I32 };
     (@carrier OptString) => { W::I32 };

@@ -727,6 +727,136 @@ fn numeric_bigint_conversion_preserves_transport_bits_and_checks_domain() -> Res
 }
 
 #[test]
+fn bigint_arithmetic_is_exact_beyond_transport_widths() -> Result<()> {
+    let wit = r#"package test:bigint-arithmetic;
+world boundary {
+    export describe: func(a: s64, b: u64) -> string;
+    export powers: func(n: u32, seed: u64) -> string;
+    export unsigned: func(a: u64, b: u64) -> u64;
+    export signed: func(a: s64, b: s64) -> s64;
+    export rounding: func(offset: u64) -> f64;
+    export probe: func(input: string) -> string;
+    export truncation: func(value: u64) -> string;
+}"#;
+    let source = r#"
+import type { u64 } from 'perry:types';
+function sum(a: bigint, b: bigint): bigint { return a + b; }
+function difference(a: bigint, b: bigint): bigint { return a - b; }
+export function describe(a: bigint, b: bigint): string {
+    const total = sum(a, b);
+    const delta = difference(a, b);
+    if (difference(total, b) !== a || sum(delta, b) !== a) throw 'inverse';
+    if ((delta < total) !== (b > 0n)) throw 'order';
+    return String(total) + ':' + String(delta) + ':' + String(-total) + ':' + String(a) + ':' + String(b);
+}
+export function powers(n: number, seed: bigint): string {
+    let value = seed;
+    for (let i = 0; i < n; i++) value = sum(value, value);
+    const below = difference(value, 1n);
+    if (sum(below, 1n) !== value || difference(value, value) !== 0n) throw 'carry';
+    return String(value) + ':' + String(below) + ':' + String(Number(value));
+}
+export function unsigned(a: bigint, b: bigint): bigint { return difference(sum(a, b), b); }
+export function signed(a: bigint, b: bigint): bigint { return sum(difference(a, b), b); }
+export function rounding(offset: bigint): number {
+    const wide = sum(18446744073709551615n, 1n);
+    return Number(sum(wide, offset));
+}
+export function probe(input: string): string {
+    const a: bigint = BigInt(input.length);
+    const b: bigint = 1n;
+    return String(a + b) + ':' + String(a - b);
+}
+export function truncation(value: bigint): string {
+    const total = value + 1n;
+    const wrapped = total as u64;
+    return String(total) + ':' + String(wrapped);
+}
+"#;
+    let mut instance = Instance::compile(wit, source)?;
+    for a in [i64::MIN, -9007199254740993, -1, 0, 1, i64::MAX] {
+        for b in [0, 1, 9007199254740993, u64::MAX] {
+            let (left, right) = (i128::from(a), i128::from(b));
+            instance.check(
+                "describe",
+                (a, b),
+                &format!(
+                    "{}:{}:{}:{a}:{b}",
+                    left + right,
+                    left - right,
+                    -(left + right)
+                ),
+            )?;
+        }
+    }
+    for value in [0, 1, 9007199254740993, u64::MAX] {
+        instance.check("unsigned", (value, u64::MAX), &value)?;
+    }
+    for value in [i64::MIN, -1, 0, i64::MAX] {
+        instance.check("signed", (value, i64::MAX), &value)?;
+    }
+    for (power, expected) in [
+        (
+            64u32,
+            "18446744073709551616:18446744073709551615:18446744073709552000",
+        ),
+        (
+            128,
+            "340282366920938463463374607431768211456:340282366920938463463374607431768211455:3.402823669209385e+38",
+        ),
+    ] {
+        instance.check("powers", (power, 1u64), &expected.to_owned())?;
+    }
+    // 2^1536 exceeds the bounded number-formatting utility's capacity and overflows Number.
+    let huge: String = instance.call("powers", (1536u32, 1u64))?;
+    let (power, below) = huge
+        .strip_suffix(":Infinity")
+        .and_then(|s| s.split_once(':'))
+        .ok_or_else(|| anyhow::anyhow!("invalid large bigint result"))?;
+    assert_eq!(power.len(), 463);
+    assert_eq!(&power[..power.len() - 1], &below[..below.len() - 1]);
+    assert!(power.ends_with('6') && below.ends_with('5'));
+    for offset in [0u64, 2048, 2049, 6144] {
+        instance.check(
+            "rounding",
+            (offset,),
+            &((u128::from(u64::MAX) + 1 + u128::from(offset)) as f64),
+        )?;
+    }
+    for (input, expected) in [("", "1:-1"), ("abc", "4:2")] {
+        instance.check("probe", (input,), &expected.to_owned())?;
+    }
+    instance.check(
+        "truncation",
+        (u64::MAX,),
+        &"18446744073709551616:0".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
+    for (name, ty, expression) in [
+        ("unsigned", "u64", "value + 1n"),
+        ("signed", "s64", "value - 1n"),
+    ] {
+        let mut instance = Instance::compile(
+            &format!(
+                "package test:bigint-overflow; world boundary {{ export {name}: func(value: {ty}) -> {ty}; }}"
+            ),
+            &format!("export function {name}(value: bigint): bigint {{ return {expression}; }}"),
+        )?;
+        let failed = if name == "unsigned" {
+            instance.call::<_, u64>(name, (u64::MAX,)).is_err()
+        } else {
+            instance.call::<_, i64>(name, (i64::MIN,)).is_err()
+        };
+        assert!(failed, "{name} silently truncated an out-of-range bigint");
+    }
+    Ok(())
+}
+
+#[test]
 fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str("reuse.wit", "package test:reuse; world reuse {export text:func(value:string)->list<u8>;export bytes:func(value:list<u8>)->list<u8>;}")?;

@@ -132,6 +132,7 @@ pub fn lower_sources(
 ) -> Result<ModuleOp> {
     let loaded = modules::load(source, identity, modules, foreign)?;
     let mut lowered = hir_compat::lower(loaded, identity)?;
+    infer::specialize_functions(ctx, &mut lowered.module, &lowered.metadata, foreign)?;
     infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
     program::build_module(ctx, &lowered.module, foreign, &lowered.metadata)
 }

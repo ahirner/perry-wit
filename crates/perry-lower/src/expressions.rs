@@ -1,7 +1,7 @@
 //! Expressions: the dispatch over HIR expressions, and locals, literals and member reads.
 use super::*;
-use crate::builtins::{BytesCreation, JSON_CALLBACKS};
 use crate::methods::Call;
+use crate::{builtins::BytesCreation, json::JSON_CALLBACKS};
 
 mod members;
 
@@ -307,11 +307,10 @@ impl<'s> FunctionBuilder<'s> {
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
                 ensure!(
-                    matches!(&**replacer, Expr::Null | Expr::Undefined)
-                        && matches!(&**space, Expr::Null | Expr::Undefined),
+                    matches!(&**space, Expr::Null | Expr::Undefined),
                     "{JSON_CALLBACKS}"
                 );
-                self.stringify(ctx, value)?
+                self.stringify_replaced(ctx, value, replacer)?
             }
             Expr::JsonParseWithReviver(text, reviver)
             | Expr::JsonParseReviver { text, reviver } => {

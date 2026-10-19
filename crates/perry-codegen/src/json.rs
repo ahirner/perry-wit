@@ -101,7 +101,7 @@ impl FunctionLowering<'_, '_> {
         let bytes = if record_fields.is_some() {
             28 + 20 * count
         } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
-            16 + 12 * variant.cases().len()
+            20 + 12 * variant.cases().len()
         } else if definition.is::<perry_mir::NumberStringType>() {
             16
         } else if definition.is::<ArrayType>() {
@@ -192,7 +192,7 @@ impl FunctionLowering<'_, '_> {
                 table.extend_from_slice(&(index as u32).to_le_bytes());
             }
             let table = self.state.data.append(4, &table);
-            words.extend([shape, table]);
+            words.extend([shape, table, u32::from(self.state.retains_json)]);
             words
         } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
             let element = array.deref(ctx).element();
@@ -211,6 +211,8 @@ impl FunctionLowering<'_, '_> {
                 JSON_NUMERIC
             } else if ty.deref(ctx).is::<JsonType>() {
                 JSON_VALUE
+            } else if ty.deref(ctx).is::<perry_mir::BigIntType>() {
+                descriptor::JSON_BIGINT
             } else if ty.deref(ctx).is::<DateType>() {
                 JSON_DATE
             } else if ty.deref(ctx).is::<FP64Type>() {
@@ -274,6 +276,11 @@ impl FunctionLowering<'_, '_> {
                 (bits, self.i32_const(ctx, 0))
             }
         };
+        if Operation::get_op::<perry_mir::JsonBoxOp>(op, ctx).is_some() {
+            let value = self.runtime(ctx, Runtime::StdJsonBox, vec![bits, tag, schema]);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         let data = if let Some(data) = self.state.json_write_data {
             data
         } else {

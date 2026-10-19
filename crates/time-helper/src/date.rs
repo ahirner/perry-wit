@@ -5,9 +5,19 @@ use crate::Error;
 /// Parses ISO year, year-month, date, or date-time forms. Unlike Temporal,
 /// Date permits 24:00 and normalizes days through 31 within a valid month.
 /// Offset-free date-times use UTC, the guest's supported local time zone.
+/// A four-digit year (or signed six-digit year) followed by end, '-' or 'T'
+/// identifies the ISO family; other inputs return `UnsupportedDateFormat`.
 pub fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
     let signed = matches!(input.first(), Some(b'+' | b'-'));
     let width = if signed { 6 } else { 4 };
+    let end = width + usize::from(signed);
+    if !input
+        .get(usize::from(signed)..end)
+        .is_some_and(|year| year.iter().all(u8::is_ascii_digit))
+        || !matches!(input.get(end), None | Some(b'-' | b'T'))
+    {
+        return Err(Error::UnsupportedDateFormat);
+    }
     let mut year = digits(input, usize::from(signed), width)? as i32;
     if input.first() == Some(&b'-') {
         if year == 0 {

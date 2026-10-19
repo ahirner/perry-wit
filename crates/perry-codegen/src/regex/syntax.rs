@@ -6,19 +6,20 @@ const SPACE: &str =
     r"\x09-\x0D\x20\u{A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
 
 pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
-    ensure!(
-        flags.chars().all(|c| matches!(c, 'u' | 's' | 'g' | 'i')),
-        "Regex search supports only the u, s, g, and i flags"
-    );
-    ensure!(
-        flags.matches('u').count() <= 1
-            && flags.matches('s').count() <= 1
-            && flags.matches('g').count() <= 1
-            && flags.matches('i').count() <= 1,
-        "Duplicate regex flags"
-    );
+    let mut seen = 0u8;
+    for flag in flags.chars() {
+        let bit = match flag {
+            'u' => 1,
+            's' => 2,
+            'g' => 4,
+            'i' => 8,
+            _ => bail!("Regex search supports only the u, s, g, and i flags"),
+        };
+        ensure!(seen & bit == 0, "Duplicate regex flags");
+        seen |= bit;
+    }
     let mut output = String::new();
-    if flags.contains('i') {
+    if seen & 8 != 0 {
         output.push_str("(?i)");
     }
     let mut chars = pattern.chars().peekable();
@@ -50,11 +51,13 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
             }
             '(' if !in_class && chars.peek() == Some(&'?') => {
                 chars.next();
-                ensure!(
-                    chars.next() == Some(':'),
-                    "Regex lookaround, named groups, and inline flags are unsupported"
-                );
-                output.push_str("(?:");
+                match chars.next() {
+                    Some(':') => output.push_str("(?:"),
+                    Some('<') if !matches!(chars.peek(), Some('=' | '!')) => {
+                        output.push_str("(?<");
+                    }
+                    _ => bail!("Regex lookaround and inline flags are unsupported"),
+                }
             }
             '.' if !in_class => output.push_str(if flags.contains('s') {
                 r"[\s\S]"

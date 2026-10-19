@@ -4,8 +4,8 @@ use crate::{
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp},
     collections::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, NativeJsonOp, StringConstOp,
-        StringLenOp,
+        ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp,
+        StringConstOp, StringLenOp,
     },
     control::ReturnOp,
     effects::{Allocation, Mutation},
@@ -93,7 +93,7 @@ impl OperationKind {
 pub(crate) trait PrimitiveSemantics {
     fn kind(&self, ctx: &Context) -> OperationKind;
     fn allocation(&self, ctx: &Context) -> Allocation;
-    fn exception(&self) -> Option<ErrorKind>;
+    fn exception(&self, ctx: &Context) -> Option<ErrorKind>;
 
     fn verify(_op: &dyn Op, _ctx: &Context) -> Result<()>
     where
@@ -104,7 +104,7 @@ pub(crate) trait PrimitiveSemantics {
 }
 
 pub(crate) fn exception(ctx: &Context, op: Ptr<Operation>) -> Option<ErrorKind> {
-    op_cast::<dyn PrimitiveSemantics>(Operation::get_op_dyn(op, ctx).as_ref())?.exception()
+    op_cast::<dyn PrimitiveSemantics>(Operation::get_op_dyn(op, ctx).as_ref())?.exception(ctx)
 }
 
 macro_rules! primitive_semantics {
@@ -121,7 +121,10 @@ macro_rules! primitive_semantics {
                 let $this = self;
                 $allocation
             }
-            fn exception(&self) -> Option<ErrorKind> { $exception }
+            fn exception(&self, $ctx: &Context) -> Option<ErrorKind> {
+                let $this = self;
+                $exception
+            }
         }
         #[op_interface_impl]
         impl pliron::opts::dce::SideEffects for $op {
@@ -173,7 +176,7 @@ primitive_semantics! { _ctx, _this;
         ArrayGetOp, ArrayAtOp => OperationKind::Read { slot: 0 };
         ArrayLenOp, StringLenOp => OperationKind::Length;
         UndefinedOp, OmittedOp, NullOp, FieldPresentOp, IsNullOp, IsUndefinedOp => OperationKind::None;
-        AggregateViewOp, BigIntConstOp, BinaryOp, CompareOp, ExceptionIsOp, GlobalOp,
+        AggregateViewOp, BigIntConstOp, CompareOp, ExceptionIsOp, GlobalOp,
         LoadOp, RegexConstOp, SettledFieldOp, StringConstOp, ToStringOp, UndefOp,
         VariantTagOp => OperationKind::Unknown;
     }
@@ -186,7 +189,7 @@ primitive_semantics! { _ctx, _this;
         ArrayNewOp => OperationKind::Allocate { array: true };
         ConcatOp => OperationKind::Concat { depth: 1 };
         ConcatSegmentsOp => OperationKind::Concat { depth: 2 };
-        NativeJsonOp, VariantNewOp => OperationKind::Unknown;
+        NativeJsonOp, JsonBoxOp, VariantNewOp => OperationKind::Unknown;
     }
     (if crate::admits_undefined(
         _ctx, _this.get_operation().deref(_ctx).get_operand(1).get_type(_ctx)
@@ -205,14 +208,25 @@ primitive_semantics! { _ctx, _this;
     (Allocation::Atomic, Some(ErrorKind::Any), true) {
         JsonCopyOp, JsonDecodeOp => OperationKind::JsonDecode;
     }
-    (if _this.get_operation().deref(_ctx).get_result(0).get_type(_ctx)
-        .deref(_ctx).is::<BigIntType>()
-    { Allocation::Atomic } else { Allocation::None }, None, false) {
+    (if bigint_result(_ctx, _this) { Allocation::Atomic } else { Allocation::None }, None, false) {
         NumericCastOp => OperationKind::NumericCast;
+    }
+    (if bigint_result(_ctx, _this) { Allocation::Atomic } else { Allocation::None },
+    if bigint_result(_ctx, _this) { Some(ErrorKind::RangeError) } else { None }, false) {
+        BinaryOp => OperationKind::Unknown;
     }
     (Allocation::Conservative, None, false) {
         ErrorNewOp, ExceptionMessageOp => OperationKind::Unknown;
     }
+}
+
+fn bigint_result(ctx: &Context, op: &impl Op) -> bool {
+    op.get_operation()
+        .deref(ctx)
+        .get_result(0)
+        .get_type(ctx)
+        .deref(ctx)
+        .is::<BigIntType>()
 }
 
 fn field_slot(ctx: &Context, record: Value, field: Option<&StringAttr>) -> Option<usize> {

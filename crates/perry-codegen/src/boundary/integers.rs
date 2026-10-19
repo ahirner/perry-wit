@@ -25,6 +25,8 @@ impl FunctionLowering<'_, '_> {
         let value = self.alloc(ctx, size);
         self.store(ctx, MemKind::I64, value, 0, magnitude);
         self.store(ctx, MemKind::I32, value, 8, negative);
+        let extra_len = self.i32_const(ctx, 0);
+        self.store(ctx, MemKind::I32, value, 12, extra_len);
         Ok(value)
     }
 
@@ -49,6 +51,8 @@ impl FunctionLowering<'_, '_> {
         } else {
             negative
         };
+        let extra_len = self.load(ctx, MemKind::I32, value, 12);
+        let invalid = self.num(ctx, NumOpcode::I32Or, vec![invalid, extra_len]);
         // An invalid canonical value cannot cross the boundary. Compiled bigint arithmetic
         // remains outside the transport domain, so overflow is never silently truncated.
         let valid = self.new_block(ctx, vec![]);

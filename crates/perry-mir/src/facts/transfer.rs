@@ -8,7 +8,7 @@ use crate::{
     calls::AsyncCallOp,
     foreign::Phase,
     intrinsics::{BuiltinContract, Intrinsic},
-    scalar::{BinaryOp, CompareOp},
+    scalar::{BinaryOp, CompareOp, NumericCastOp},
     semantics::OperationKind,
     types::PromiseType,
 };
@@ -22,6 +22,51 @@ use pliron::{
     r#type::Typed,
     value::Value,
 };
+
+/// Arithmetic may wrap only when every consumer explicitly truncates its result.
+fn wrapping_domain(ctx: &Context, result: Value) -> Option<Integer> {
+    let mut domain: Option<Integer> = None;
+    for usage in result.uses(ctx).iter() {
+        let user = usage.user_op();
+        Operation::get_op::<NumericCastOp>(user, ctx)?;
+        let integer = Integer::from_type(ctx, user.deref(ctx).get_result(0).get_type(ctx))?;
+        domain = Some(domain.map_or(integer, |domain| domain.common(integer)));
+    }
+    domain
+}
+
+/// Constant operands can use scalar arithmetic when both inputs and the result fit.
+fn constant_bigint_domain(ctx: &Context, kind: BinaryKind, inputs: [Value; 2]) -> Option<Integer> {
+    let [Some(a), Some(b)] = inputs.map(|value| constant_range(ctx, value.defining_op()?)) else {
+        return None;
+    };
+    let range = match kind {
+        BinaryKind::Div | BinaryKind::Rem => {
+            let value = if kind == BinaryKind::Div {
+                a.lower.checked_div(b.lower)?
+            } else {
+                a.lower.checked_rem(b.lower)?
+            };
+            Interval {
+                lower: value,
+                upper: value,
+            }
+        }
+        _ => match arithmetic_range(kind, Range::Bounds(a), Range::Bounds(b), None) {
+            Range::Bounds(range) => range,
+            _ => return None,
+        },
+    };
+    [
+        Integer::I64,
+        Integer {
+            bits: 64,
+            signed: false,
+        },
+    ]
+    .into_iter()
+    .find(|&domain| [a, b, range].into_iter().all(|range| range.fits(domain)))
+}
 
 impl Solver {
     pub(super) fn operation_effects(
@@ -411,7 +456,13 @@ impl Solver {
                 let declared = declared(
                     &self.analysis.bodies[&key.function].declared_results,
                     position,
-                );
+                )
+                .filter(|_| {
+                    !value
+                        .get_type(ctx)
+                        .deref(ctx)
+                        .is::<crate::types::BigIntType>()
+                });
                 let required = key.results[position];
                 let constrained = is_summary || required.integer().is_some() || declared.is_some();
                 self.demand(id, value, required.integer(), constrained);
@@ -564,24 +615,28 @@ impl Solver {
                 .get_type(ctx)
                 .deref(ctx)
                 .is::<crate::types::BigIntType>();
+            if bigint {
+                // A WIT input bounds its value, not the result of arbitrary-precision arithmetic.
+                let domain = self.analysis.keys[id]
+                    .specialize
+                    .then(|| {
+                        constant_bigint_domain(ctx, kind, [lhs, rhs]).or_else(|| {
+                            matches!(kind, BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul)
+                                .then(|| wrapping_domain(ctx, result))
+                                .flatten()
+                        })
+                    })
+                    .flatten();
+                return ValueFacts::numeric(
+                    domain.map_or(Fact::Original, Fact::Integer),
+                    Range::of(domain),
+                );
+            }
             let was_integer = self.analysis.states[id].fact(result).integer().is_some();
             let required = self.analysis.states[id].required.get(&result).copied();
-            let mut operand_required = required;
-            if operand_required.is_none() && bigint {
-                let state = &self.analysis.states[id];
-                operand_required = state
-                    .fact(lhs)
-                    .integer()
-                    .or_else(|| state.fact(rhs).integer());
-                if let Some(integer) = operand_required
-                    && self.analysis.keys[id].specialize
-                {
-                    self.demand(id, result, Some(integer), false);
-                }
-            }
             let constrained = self.analysis.states[id].is_constrained(result);
             for input in [lhs, rhs] {
-                self.demand(id, input, operand_required, constrained);
+                self.demand(id, input, required, constrained);
             }
             let ranges = [lhs, rhs].map(|input| self.analysis.states[id].range(input));
             let facts = self.arithmetic_result(ctx, id, kind, &[lhs, rhs], ranges, result);
@@ -589,12 +644,11 @@ impl Solver {
                 && self.analysis.keys[id].specialize
                 && required.is_none()
                 && !result.get_type(ctx).deref(ctx).is::<IntegerType>()
-                && (self.analysis.states[id]
+                && self.analysis.states[id]
                     .fact(result)
                     .join(facts.domain)
                     .integer()
                     .is_some()
-                    || bigint)
             {
                 self.width_defaults.push((id, index, result));
             }
@@ -622,11 +676,14 @@ impl Solver {
             return ValueFacts::numeric(fact, range);
         }
         if kind == OperationKind::Intrinsic(Intrinsic::BigIntNegate) {
-            let input = operation.get_operand(0);
-            self.flow(id, result, input);
-            let zero = Range::Bounds(Interval { lower: 0, upper: 0 });
-            let ranges = [zero, self.analysis.states[id].range(input)];
-            return self.arithmetic_result(ctx, id, BinaryKind::Sub, &[input], ranges, result);
+            let domain = self.analysis.keys[id]
+                .specialize
+                .then(|| wrapping_domain(ctx, result))
+                .flatten();
+            return ValueFacts::numeric(
+                domain.map_or(Fact::Original, Fact::Integer),
+                Range::of(domain),
+            );
         }
         if let OperationKind::Intrinsic(intrinsic) = kind
             && let Some(contract) = intrinsic.policy().numeric
