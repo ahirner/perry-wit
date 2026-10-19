@@ -48,11 +48,9 @@ impl std::hash::Hash for TypeKey {
 pliron::dict_key!(HIR_TYPE_INTERNER, "perry_hir_type_interner");
 pliron::context_registration!(register_hir_type_interner);
 
-type RecordStructure = (RecordKind, Vec<(String, TypeHandle)>);
-
 struct TypeInterner {
     hir_types: std::sync::Mutex<HashMap<u64, Vec<TypeId>>>,
-    records: std::sync::Mutex<HashMap<RecordStructure, TypedHandle<RecordType>>>,
+    records: std::sync::Mutex<HashMap<u64, Vec<TypedHandle<RecordType>>>>,
     next_record: std::sync::atomic::AtomicUsize,
 }
 
@@ -832,22 +830,33 @@ impl<'h> Shapes<'h> {
         if kind == RecordKind::Object {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
         }
-        let key = (kind, fields);
+        let hash = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (kind, &fields).hash(&mut hasher);
+            hasher.finish()
+        };
         let interner = TypeId::interner(ctx);
-        if let Some(&record) = interner
+        if let Some(bucket) = interner
             .records
             .lock()
             .expect("type interner lock poisoned")
-            .get(&key)
+            .get(&hash)
+            && let Some(&record) = bucket.iter().find(|r| {
+                let rec = r.deref(ctx);
+                rec.kind() == kind && rec.fields().is_ok_and(|stored| stored == fields.as_slice())
+            })
         {
             return Ok(record);
         }
-        let record = TypeId::fresh_record(ctx, kind, Some(key.1.clone()))?;
+        let record = TypeId::fresh_record(ctx, kind, Some(fields))?;
         interner
             .records
             .lock()
             .expect("type interner lock poisoned")
-            .insert(key, record);
+            .entry(hash)
+            .or_default()
+            .push(record);
         Ok(record)
     }
 

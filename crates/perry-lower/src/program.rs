@@ -65,7 +65,7 @@ pub(super) fn build_module(
     let shapes = Shapes::new(module, hir, foreign, metadata);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
-    let mut builtins: HashMap<String, Builtin> = HashMap::new();
+    let mut builtins: HashMap<&str, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
         let module = match source {
@@ -107,7 +107,7 @@ pub(super) fn build_module(
             let builtin = Builtin::from_import(module, imported)
                 .with_context(|| format!("{imported} from {source} is not supported yet"))
                 .map_err(|error| locations.annotate_import(error, source))?;
-            builtins.insert(local.clone(), builtin);
+            builtins.insert(local.as_str(), builtin);
         }
     }
     let mut signatures = HashMap::new();

@@ -102,7 +102,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// branches they select are not lowered.
     pub(super) iteration: hir_compat::Iteration,
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
-    pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
+    pub(super) variant_guards: Vec<(variants::Path<'s>, &'s str, bool)>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_returns: Vec<inline::ReturnFrame>,
     pub(super) handlers: Vec<Handler>,
@@ -110,7 +110,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) signatures: &'s HashMap<FuncId, Signature<'s>>,
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
-    pub(super) builtins: &'s HashMap<String, Builtin>,
+    pub(super) builtins: &'s HashMap<&'s str, Builtin>,
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
@@ -124,7 +124,7 @@ impl<'s> FunctionBuilder<'s> {
         function: &'s Function,
         signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         ensure!(
             function
@@ -146,7 +146,7 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(
             ctx,
@@ -264,7 +264,7 @@ impl<'s> FunctionBuilder<'s> {
         is_async: bool,
         signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Self {
         let entry = func.get_entry_block(ctx);
         let region = func.get_operation().deref(ctx).get_region(0);

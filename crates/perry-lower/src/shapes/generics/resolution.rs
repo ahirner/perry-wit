@@ -395,16 +395,20 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
 
     fn uniform<'b>(
         &self,
-        mut properties: impl Iterator<Item = (&'b HirType, bool)> + Clone,
+        mut properties: impl Iterator<Item = (&'b HirType, bool)>,
     ) -> Option<HirType> {
-        let optional = properties.clone().any(|(_, optional)| optional);
-        let (first, _) = properties.next()?;
-        let all_match = if optional {
-            properties.all(|(ty, _)| optional_union_members(ty).eq(optional_union_members(first)))
-        } else {
-            properties.all(|(ty, _)| ty == first)
-        };
-        all_match.then(|| optional_property(first.clone(), optional))
+        let (first, mut optional) = properties.next()?;
+        let mut exact = true;
+        for (ty, opt) in properties {
+            optional |= opt;
+            if ty != first {
+                if !optional_union_members(ty).eq(optional_union_members(first)) {
+                    return None;
+                }
+                exact = false;
+            }
+        }
+        (exact || optional).then(|| optional_property(first.clone(), optional))
     }
 }
 

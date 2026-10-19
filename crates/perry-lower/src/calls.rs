@@ -196,7 +196,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(None);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
-            && let Some(builtin) = self.builtins.get(name)
+            && let Some(builtin) = self.builtins.get(name.as_str())
         {
             return match builtin {
                 Builtin::SetTimeout => self.timer(ctx, args).map(Some),
@@ -458,50 +458,46 @@ impl<'s> FunctionBuilder<'s> {
     fn combinator_inputs(&mut self, ctx: &mut Context, items: &'s [Expr]) -> Result<Value> {
         // `Promise.reject(e)` takes its settled type from the other inputs: lower it last.
         let mut inputs = Vec::with_capacity(items.len());
+        let mut promised = None;
+        let mut first = None;
         for item in items {
             inputs.push(match promise_call(item) {
                 Some(("reject", reason)) => CombinatorInput::Reject(reason),
                 _ => {
                     let value = self.expression(ctx, item)?;
-                    CombinatorInput::Lowered(self.defined(ctx, value)?)
+                    let value = self.defined(ctx, value)?;
+                    first.get_or_insert(value);
+                    if promised.is_none()
+                        && let Ok(p) =
+                            TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
+                    {
+                        promised = Some(p.deref(ctx).value());
+                    }
+                    CombinatorInput::Lowered(value)
                 }
             });
         }
-        let mut known = inputs.iter().filter_map(|input| match input {
-            CombinatorInput::Lowered(value) => Some(*value),
-            CombinatorInput::Reject(_) => None,
-        });
-        let promised = known.clone().find_map(|value| {
-            TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
-                .ok()
-                .map(|promise| promise.deref(ctx).value())
-        });
-        let settled = match (promised, known.next()) {
-            (Some(settled), _) => settled,
-            (None, Some(first)) => first.get_type(ctx),
-            (None, None) => void_type(ctx),
-        };
+        let settled = promised
+            .or_else(|| first.map(|v| v.get_type(ctx)))
+            .unwrap_or_else(|| void_type(ctx));
         let promise: TypeHandle = PromiseType::get(ctx, settled).into();
         let mut values = Vec::with_capacity(items.len());
         for input in inputs {
-            values.push(match input {
+            let value = match input {
                 CombinatorInput::Lowered(value) => value,
                 CombinatorInput::Reject(reason) => {
                     self.promise_settled(ctx, "reject", reason, Some(settled))?
                 }
-            });
-        }
-        let mut inputs = Vec::with_capacity(values.len());
-        for value in values {
+            };
             let value = if value.get_type(ctx) == promise {
                 value
             } else {
                 let value = self.fit(ctx, value, settled)?;
                 self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value))
             };
-            inputs.push(value);
+            values.push(value);
         }
-        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, inputs)))
+        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, values)))
     }
 
     /// `Promise.resolve(value)` (a promise passes through) or `Promise.reject(reason)`, a
