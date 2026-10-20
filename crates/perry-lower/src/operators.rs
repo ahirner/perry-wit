@@ -108,6 +108,21 @@ impl<'s> FunctionBuilder<'s> {
         }
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
+        self.comparison_values(ctx, op, lhs, rhs)
+    }
+
+    pub(super) fn comparison_values(
+        &mut self,
+        ctx: &mut Context,
+        op: &CompareOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value> {
+        let equality = match op {
+            CompareOp::Eq => Some(CompareKind::Eq),
+            CompareOp::Ne => Some(CompareKind::Ne),
+            _ => None,
+        };
         if let Some(equality) = equality {
             let exception = |value: Value| value.get_type(ctx).deref(ctx).is::<ExceptionType>();
             if exception(lhs) || exception(rhs) {

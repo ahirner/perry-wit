@@ -8,6 +8,7 @@ path = "../../src/helpers/normalize.rs"
 
 [dependencies]
 icu_properties = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+perry-abi.workspace = true
 
 [build-dependencies]
 icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }

@@ -14,7 +14,52 @@ enum ClassReceiver {
     Constructor(Value),
 }
 
+pub(super) enum ClassExpansion<'s> {
+    Callable(&'s Function),
+    Fields(&'s perry_hir::ir::Class),
+}
+
 impl<'s> FunctionBuilder<'s> {
+    fn with_class_expansion<T>(
+        &mut self,
+        ctx: &mut Context,
+        expansion: ClassExpansion<'s>,
+        owner_class: &str,
+        lower: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
+    ) -> Result<T> {
+        let recursive = self
+            .class_expansions
+            .iter()
+            .any(|active| match (active, &expansion) {
+                (ClassExpansion::Callable(active), ClassExpansion::Callable(next)) => {
+                    std::ptr::eq(*active, *next)
+                }
+                (ClassExpansion::Fields(active), ClassExpansion::Fields(next)) => {
+                    std::ptr::eq(*active, *next)
+                }
+                _ => false,
+            });
+        if recursive {
+            match expansion {
+                ClassExpansion::Callable(func) => {
+                    bail!(
+                        "recursive inline class call to {owner_class}.{} is not supported yet",
+                        func.name
+                    )
+                }
+                ClassExpansion::Fields(_) => {
+                    bail!(
+                        "recursive inline field initialization of class {owner_class} is not supported yet"
+                    )
+                }
+            }
+        }
+        self.class_expansions.push(expansion);
+        let result = lower(self, ctx);
+        self.class_expansions.pop();
+        result
+    }
+
     /// `new ClassName<type_args>(args)` for a user-defined class.
     pub(super) fn class_new(
         &mut self,
@@ -92,7 +137,7 @@ impl<'s> FunctionBuilder<'s> {
         let mut init_operands = Vec::with_capacity(field_defs.len());
         for (field, field_ty) in &field_defs {
             let val = if admits_undefined(ctx, *field_ty) {
-                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, *field_ty))
+                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty))
             } else if absence(ctx, *field_ty).is_some_and(|a| a.admits_null()) {
                 self.emit_value(ctx, |ctx| NullOp::new(ctx, *field_ty))
             } else {
@@ -117,16 +162,27 @@ impl<'s> FunctionBuilder<'s> {
         });
         let this_slot = self.entry_slot(ctx, rec_ty);
         self.store(ctx, this_slot, instance);
-        self.construct_class_instance(
-            ctx,
-            class_name,
-            &effective_args,
-            match pre_evaluated.as_deref() {
+        if let Some(ctor) = &class.constructor {
+            let args = match pre_evaluated.as_deref() {
                 Some(values) => ClassArguments::Evaluated(values),
                 None => ClassArguments::Expressions(args),
-            },
-            this_slot,
-        )?;
+            };
+            self.inline_class_callable(
+                ctx,
+                class_name,
+                &effective_args,
+                ctor,
+                args,
+                ClassReceiver::Constructor(this_slot),
+            )?;
+        } else {
+            if pre_evaluated.is_none() {
+                for arg in args {
+                    self.expression(ctx, arg)?;
+                }
+            }
+            self.init_own_class_fields(ctx, class_name, this_slot)?;
+        }
         self.load(ctx, this_slot)
     }
 
@@ -155,33 +211,6 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
-    fn construct_class_instance(
-        &mut self,
-        ctx: &mut Context,
-        class_name: &'s str,
-        type_args: &[TypeId],
-        args: ClassArguments<'_, 's>,
-        this_slot: Value,
-    ) -> Result<()> {
-        let (&class_name, &(_, class)) = self
-            .shapes
-            .classes
-            .get_key_value(class_name)
-            .with_context(|| format!("unknown class {class_name}"))?;
-        self.init_own_class_fields(ctx, class_name, this_slot)?;
-        if let Some(ctor) = &class.constructor {
-            self.inline_class_callable(
-                ctx,
-                class_name,
-                type_args,
-                ctor,
-                args,
-                ClassReceiver::Constructor(this_slot),
-            )?;
-        }
-        Ok(())
-    }
-
     fn init_own_class_fields(
         &mut self,
         ctx: &mut Context,
@@ -197,24 +226,29 @@ impl<'s> FunctionBuilder<'s> {
         let rec = TypedHandle::<RecordType>::from_handle(rec_val.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected class record"))?;
         let saved_this = self.this_slot.replace(this_slot);
-        let res = (|| -> Result<()> {
-            for field in &class.fields {
-                let Some(init_expr) = &field.init else {
-                    continue;
-                };
-                let (_, field_ty) = rec
-                    .deref(ctx)
-                    .field(&field.name)
-                    .with_context(|| format!("missing field {} on {class_name}", field.name))?;
-                let val = self.expression_with(ctx, init_expr, Some(field_ty))?;
-                let val = self.fit(ctx, val, field_ty)?;
-                let target = self.load(ctx, this_slot)?;
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, target, field.name.clone(), val)
-                });
-            }
-            Ok(())
-        })();
+        let res = self.with_class_expansion(
+            ctx,
+            ClassExpansion::Fields(class),
+            class_name,
+            |this, ctx| {
+                for field in &class.fields {
+                    let Some(init_expr) = &field.init else {
+                        continue;
+                    };
+                    let (_, field_ty) = rec
+                        .deref(ctx)
+                        .field(&field.name)
+                        .with_context(|| format!("missing field {} on {class_name}", field.name))?;
+                    let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
+                    let val = this.fit(ctx, val, field_ty)?;
+                    let target = this.load(ctx, this_slot)?;
+                    this.emit(ctx, |ctx| {
+                        FieldSetOp::new(ctx, target, field.name.clone(), val)
+                    });
+                }
+                Ok(())
+            },
+        );
         self.this_slot = saved_this;
         res
     }
@@ -443,80 +477,92 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
 
-        let saved_locals = self.locals.scope();
-        let saved_closures = self.closures.scope();
-        let saved_this = self.this_slot.take();
-        let guards = self.variant_guards.len();
-        let finallies = std::mem::take(&mut self.finallies);
-        let controls = std::mem::take(&mut self.controls);
-        self.this_slot = match receiver {
-            ClassReceiver::Static => None,
-            ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => Some(slot),
-        };
-
-        for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
-            match eval_arg {
-                EvalArg::Rest(arr) => {
-                    let slot = self.entry_slot(ctx, arr.get_type(ctx));
-                    self.store(ctx, slot, arr);
-                    self.locals.insert(param.id, LocalBinding::plain(slot));
+        self.with_class_expansion(
+            ctx,
+            ClassExpansion::Callable(func),
+            owner_class,
+            |this, ctx| {
+                if let ClassReceiver::Constructor(slot) = receiver {
+                    this.init_own_class_fields(ctx, owner_class, slot)?;
                 }
-                EvalArg::Omitted => {
-                    let val = if let Some(def_expr) = &param.default {
-                        let def_val = self.expression_with(ctx, def_expr, param_ty)?;
-                        match param_ty {
-                            Some(ty) => self.fit(ctx, def_val, ty)?,
-                            None => def_val,
+                let saved_locals = this.locals.scope();
+                let saved_closures = this.closures.scope();
+                let saved_this = this.this_slot.take();
+                let guards = this.variant_guards.len();
+                let finallies = std::mem::take(&mut this.finallies);
+                let controls = std::mem::take(&mut this.controls);
+                this.this_slot = match receiver {
+                    ClassReceiver::Static => None,
+                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => Some(slot),
+                };
+
+                let result = (|| {
+                    for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
+                        match eval_arg {
+                            EvalArg::Rest(arr) => {
+                                let slot = this.entry_slot(ctx, arr.get_type(ctx));
+                                this.store(ctx, slot, arr);
+                                this.locals.insert(param.id, LocalBinding::plain(slot));
+                            }
+                            EvalArg::Omitted => {
+                                let val = if let Some(def_expr) = &param.default {
+                                    let def_val = this.expression_with(ctx, def_expr, param_ty)?;
+                                    match param_ty {
+                                        Some(ty) => this.fit(ctx, def_val, ty)?,
+                                        None => def_val,
+                                    }
+                                } else if let Some(ty) = param_ty {
+                                    let ty = if admits_undefined(ctx, ty) {
+                                        ty
+                                    } else {
+                                        OptionalType::get(ctx, ty).into()
+                                    };
+                                    this.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
+                                } else {
+                                    let f64_ty = FP64Type::get(ctx).into();
+                                    let opt_ty = OptionalType::get(ctx, f64_ty).into();
+                                    this.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
+                                };
+                                let slot = this.entry_slot(ctx, val.get_type(ctx));
+                                this.store(ctx, slot, val);
+                                this.locals.insert(param.id, LocalBinding::plain(slot));
+                            }
+                            EvalArg::Present(value) => {
+                                this.bind_inline_parameter(ctx, param, value, param_ty)?;
+                            }
                         }
-                    } else if let Some(ty) = param_ty {
-                        let ty = if admits_undefined(ctx, ty) {
-                            ty
-                        } else {
-                            OptionalType::get(ctx, ty).into()
-                        };
-                        self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
-                    } else {
-                        let f64_ty = FP64Type::get(ctx).into();
-                        let opt_ty = OptionalType::get(ctx, f64_ty).into();
-                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
-                    };
-                    let slot = self.entry_slot(ctx, val.get_type(ctx));
-                    self.store(ctx, slot, val);
-                    self.locals.insert(param.id, LocalBinding::plain(slot));
-                }
-                EvalArg::Present(value) => {
-                    self.bind_inline_parameter(ctx, param, value, param_ty)?;
-                }
-            }
-        }
+                    }
 
-        let result_type = if matches!(receiver, ClassReceiver::Constructor(_))
-            || matches!(func.return_type, HirType::Void)
-        {
-            InlineResult::Void
-        } else if matches!(func.return_type, HirType::Any | HirType::Unknown) {
-            InlineResult::Inferred
-        } else {
-            self.shapes
-                .class_value_type(ctx, owner_class, type_args, &func.return_type)
-                .ok()
-                .map_or(InlineResult::Inferred, InlineResult::Declared)
-        };
-        let result = self.inline_body(ctx, &func.body, &func.params, result_type);
-        self.locals.restore(saved_locals);
-        self.closures.restore(saved_closures);
-        self.this_slot = saved_this;
-        self.variant_guards.truncate(guards);
-        self.finallies = finallies;
-        self.controls = controls;
-        let slot = result?;
-        if let ClassReceiver::Constructor(slot) = receiver {
-            return self.load(ctx, slot).map(Some);
-        }
-        match slot {
-            Some(slot) => self.load(ctx, slot).map(Some),
-            None => Ok(None),
-        }
+                    let result_type = if matches!(receiver, ClassReceiver::Constructor(_))
+                        || matches!(func.return_type, HirType::Void)
+                    {
+                        InlineResult::Void
+                    } else if matches!(func.return_type, HirType::Any | HirType::Unknown) {
+                        InlineResult::Inferred
+                    } else {
+                        this.shapes
+                            .class_value_type(ctx, owner_class, type_args, &func.return_type)
+                            .ok()
+                            .map_or(InlineResult::Inferred, InlineResult::Declared)
+                    };
+                    this.inline_body(ctx, &func.body, &func.params, result_type)
+                })();
+                this.locals.restore(saved_locals);
+                this.closures.restore(saved_closures);
+                this.this_slot = saved_this;
+                this.variant_guards.truncate(guards);
+                this.finallies = finallies;
+                this.controls = controls;
+                let slot = result?;
+                if let ClassReceiver::Constructor(slot) = receiver {
+                    return this.load(ctx, slot).map(Some);
+                }
+                match slot {
+                    Some(slot) => this.load(ctx, slot).map(Some),
+                    None => Ok(None),
+                }
+            },
+        )
     }
 }
 

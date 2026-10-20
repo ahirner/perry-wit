@@ -119,7 +119,7 @@ pub use facts::{
 };
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
-pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp};
+pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp, RecordOrderOp};
 pub use integers::BigIntConstOp;
 pub use intrinsics::{
     Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
@@ -131,8 +131,8 @@ pub use liveness::{LiveAfter, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};
 pub use optional::{
     IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
-    UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, optional_parts, optional_value,
-    present_type,
+    UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, field_order_may_change,
+    optional_parts, optional_value, present_type,
 };
 pub use pipeline::{canonicalize, optimization_statistics};
 pub use regex::RegexConstOp;

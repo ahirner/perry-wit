@@ -15,7 +15,7 @@ use crate::{
     },
     foreign::{ForeignOp, Phase},
     globals::{GlobalLoadOp, GlobalOp},
-    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp},
+    heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp, RecordOrderOp},
     integers::BigIntConstOp,
     intrinsics::{
         Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
@@ -167,7 +167,7 @@ primitive_semantics! { _ctx, _this;
         PromiseRejectedOp => OperationKind::Rejected;
         PromiseCombinatorOp => OperationKind::Combine(_this.combinator(_ctx));
         RaiseOp => OperationKind::Raise;
-        CatchOp => OperationKind::Unknown;
+        CatchOp, RecordOrderOp => OperationKind::Unknown;
     }
     (Allocation::None, None, false) {
         WrapOp, ToNumberOp => OperationKind::Alias;
@@ -191,7 +191,7 @@ primitive_semantics! { _ctx, _this;
         ConcatSegmentsOp => OperationKind::Concat { depth: 2 };
         NativeJsonOp, JsonBoxOp, VariantNewOp => OperationKind::Unknown;
     }
-    (if crate::admits_undefined(
+    (if crate::field_order_may_change(
         _ctx, _this.get_operation().deref(_ctx).get_operand(1).get_type(_ctx)
     ) { Allocation::Atomic } else { Allocation::None }, None, true) {
         FieldSetOp => OperationKind::Mutate(Mutation::Field { slot:

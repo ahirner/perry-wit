@@ -244,6 +244,7 @@ macro_rules! intrinsic_catalog {
                 StdExceptionToString = "std_exception_to_string" [ExceptionToString = "exception_to_string" (Exception) -> (String), Throws, Conservative;];
                 StdJsonAssign = "std_json_assign" [JsonAssign = "json_assign" (Json, Json) -> (), Effectful, Conservative;];
                 StdJsonRecordSpread = "std_json_record_spread" (I32, I32, I32, I32, I32, I32);
+                StdRecordOrder = "std_record_order" (I32, I32, I32, I32, I32, I32);
                 StdJsonRecordField = "std_json_record_field" (I32, I32, I32, I32, I32);
                 StdJsonBox = "std_json_box" (I64, I32, I32) -> I32;
                 StdJsonReplacerBegin = "std_json_replacer_begin" [JsonReplacerBegin = "json_replacer_begin" (Json, Json) -> (JsonTraversal), Effectful, Conservative;];

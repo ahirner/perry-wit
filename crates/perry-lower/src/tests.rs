@@ -124,3 +124,100 @@ export function run(input:string):string {
     }
     Ok(())
 }
+
+mod classes {
+    use super::*;
+
+    fn assert_recursive_diagnostic(source: &str, target: &str) {
+        let error = lower_without_foreign(&mut Context::new(), source, "classes.ts")
+            .err()
+            .expect("recursive inline expansion must be rejected");
+        let diagnostic = error
+            .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+            .expect("located diagnostic");
+        assert!(
+            diagnostic.message.contains("recursive inline") && diagnostic.message.contains(target),
+            "{error:#}"
+        );
+        let span = diagnostic.span.as_ref().expect("source location");
+        assert_eq!(span.file.to_string_lossy(), "classes.ts");
+        assert!(span.end_byte > span.start_byte, "{span:?}");
+    }
+
+    #[test]
+    fn recursive_instance_calls_include_mutual_and_argument_cycles() {
+        assert_recursive_diagnostic(
+            "class Counter { count(n:number):number { if(n<=0)return 0; return 1+this.count(n-1); } }
+             export function run():number { return new Counter().count(3); }",
+            "Counter.count",
+        );
+        assert_recursive_diagnostic(
+            "class Counter {
+                first(n:number):number { return this.second(n); }
+                second(n:number):number { return this.first(n); }
+             }
+             export function run():number { return new Counter().first(3); }",
+            "Counter.first",
+        );
+        assert_recursive_diagnostic(
+            "class Counter { count(n:number):number { return this.count(this.count(n-1)); } }
+             export function run():number { return new Counter().count(3); }",
+            "Counter.count",
+        );
+    }
+
+    #[test]
+    fn recursive_static_calls_and_parameter_defaults_are_rejected() {
+        assert_recursive_diagnostic(
+            "class Counter { static count(n:number):number { return Counter.count(n-1); } }
+             export function run():number { return Counter.count(3); }",
+            "Counter.count",
+        );
+        assert_recursive_diagnostic(
+            "class Counter { count(n:number=this.count()):number { return n; } }
+             export function run():number { return new Counter().count(); }",
+            "Counter.count",
+        );
+    }
+
+    #[test]
+    fn recursive_accessors_are_rejected() {
+        assert_recursive_diagnostic(
+            "class Counter { get count():number { return this.count; } }
+             export function run():number { return new Counter().count; }",
+            "Counter",
+        );
+        assert_recursive_diagnostic(
+            "class Counter { set count(n:number) { this.count=n; } }
+             export function run():number { const c=new Counter(); c.count=3; return 0; }",
+            "Counter",
+        );
+    }
+
+    #[test]
+    fn recursive_constructors_and_initializers_are_rejected() {
+        assert_recursive_diagnostic(
+            "class Counter { constructor() { new Counter(); } }
+             export function run():number { new Counter(); return 0; }",
+            "Counter",
+        );
+        assert_recursive_diagnostic(
+            "class Counter {
+                count:number=1;
+                constructor(n:number=new Counter().count) { this.count=n; }
+             }
+             export function run():number { return new Counter().count; }",
+            "Counter",
+        );
+        assert_recursive_diagnostic(
+            "class Counter { count:number=new Counter().count; }
+             export function run():number { return new Counter().count; }",
+            "field initialization of class Counter",
+        );
+        assert_recursive_diagnostic(
+            "class Counter { count:number=new Counter().count; constructor() {} }
+             export function run():number { return new Counter().count; }",
+            "Counter",
+        );
+    }
+}

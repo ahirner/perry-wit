@@ -3,6 +3,7 @@
 use super::{
     EmitResult,
     function::{FunctionEmitter, successors},
+    values::{TreeStep, value_tree},
 };
 use crate::types::val_type;
 use pliron::{
@@ -45,8 +46,12 @@ impl FunctionEmitter<'_> {
                 }
                 let defs: Vec<Value> = op.deref(ctx).results().filter(|v| v.is_used(ctx)).collect();
                 values.extend(defs.iter().copied());
-                let mut reads = Vec::new();
-                self.reads(op, &mut reads);
+                let reads = value_tree(ctx, &self.folded, op)
+                    .filter_map(|step| match step {
+                        TreeStep::Local(value) => Some(value),
+                        TreeStep::Operation(_) => None,
+                    })
+                    .collect();
                 list.push((reads, defs));
             }
             statements.insert(block, list);
@@ -208,25 +213,5 @@ impl FunctionEmitter<'_> {
             .map(|(value, local)| (value, renumber.get(&local).copied().unwrap_or(local)))
             .collect();
         Ok(())
-    }
-
-    /// Values with locals that evaluating `op` reads: its operands, through folded and
-    /// constant definitions, which are evaluated in place.
-    fn reads(&self, op: Ptr<Operation>, out: &mut Vec<Value>) {
-        let mut previous = None;
-        for operand in op.deref(self.ctx).operands() {
-            match operand.defining_op() {
-                Some(def) if self.in_place(def) => {
-                    if previous != Some(def) {
-                        self.reads(def, out);
-                        previous = Some(def);
-                    }
-                }
-                _ => {
-                    out.push(operand);
-                    previous = None;
-                }
-            }
-        }
     }
 }

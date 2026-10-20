@@ -311,9 +311,32 @@ builtin.module @m {{
     assert_eq!(memory.data(&store)[16..20], 64i32.to_le_bytes());
 }
 
-/// Single-use pure values are evaluated in place, so straight-line arithmetic needs no locals.
+/// Single-use trees need no locals, preserve operand/result order, and tolerate deep folding.
 #[test]
 fn single_use_values_stay_on_the_stack() {
+    use std::fmt::Write;
+    let depth = 4097;
+    let mut chain = String::new();
+    for index in 1..=depth {
+        let previous = if index == 1 {
+            "x".to_owned()
+        } else {
+            format!("v{}", index - 1)
+        };
+        writeln!(
+            chain,
+            "left{index}, right{index} = wasm.call pair ({previous}) : {I32}, {I32};\n\
+             difference{index} = wasm.num I32Sub left{index}, right{index} : {I32};\n\
+             k{index} = builtin.constant <builtin.integer <{index}: i32>> : {I32};"
+        )
+        .unwrap();
+        let operands = if index % 2 == 0 {
+            format!("difference{index}, k{index}")
+        } else {
+            format!("k{index}, difference{index}")
+        };
+        writeln!(chain, "v{index} = wasm.num I32Sub {operands} : {I32};").unwrap();
+    }
     let input = format!(
         r#"
 builtin.module @m {{
@@ -325,6 +348,16 @@ builtin.module @m {{
         two = builtin.constant <builtin.integer <2: i32>> : {I32};
         r = wasm.num I32Shl s, two : {I32};
         wasm.return r
+    }};
+    builtin.func @pair: builtin.function <({I32}) -> ({I32}, {I32})> {{
+      ^entry(x: {I32}):
+        three = builtin.constant <builtin.integer <3: i32>> : {I32};
+        wasm.return x, three
+    }};
+    builtin.func @deep: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(x: {I32}):
+        {chain}
+        wasm.return v{depth}
     }}
 }}
 "#
@@ -333,6 +366,7 @@ builtin.module @m {{
     let text = wat(&wasm);
     assert!(!text.contains("local.set"), "{text}");
     assert!(!text.contains("(local "), "{text}");
+    assert_eq!(text.matches("call ").count(), depth as usize);
     assert_eq!(
         i32_of(call(
             &wasm,
@@ -341,6 +375,17 @@ builtin.module @m {{
         )),
         28
     );
+    for x in [-11, 0, 17] {
+        let expected = (1..=depth).fold(x, |value, index| {
+            let difference = value - 3;
+            if index % 2 == 0 {
+                difference - index
+            } else {
+                index - difference
+            }
+        });
+        assert_eq!(i32_of(call(&wasm, "deep", &[Val::I32(x)])), expected);
+    }
 }
 
 /// A trapping or memory-reading op never moves across a store: the load below must read the

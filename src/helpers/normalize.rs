@@ -1,7 +1,8 @@
-//! Allocation-free canonical normalization with a bounded reorder buffer and partial NFK mappings.
+//! Canonical normalization with inline run storage and partial NFK mappings.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 use icu_properties::{CodePointMapData, props::CanonicalCombiningClass};
+use perry_abi::Buffer;
 
 #[path = "guest_memory.rs"]
 mod guest_memory;
@@ -66,8 +67,9 @@ pub(crate) extern "C" fn str_normalize(
 
 fn normalize_utf8(input: &str, out_ptr: u32, compose: bool, compat: bool) -> u64 {
     let mut sink = OutSink::new(out_ptr);
+    let mut inline = [[0; 8]; 64];
     let mut run = CharRun {
-        buf: [('\0', 0); 64],
+        storage: RunStorage::Inline(&mut inline),
         len: 0,
     };
     for ch in input.chars() {
@@ -91,68 +93,114 @@ fn normalize_utf8(input: &str, out_ptr: u32, compose: bool, compat: bool) -> u64
             return u64::MAX;
         }
     }
-    if compose {
-        run.compose();
-    }
+    run.order(compose);
     run.emit(&mut sink);
     sink.finish()
 }
 
-struct CharRun {
-    buf: [(char, u8); 64],
+struct CharRun<'a> {
+    storage: RunStorage<'a>,
     len: usize,
 }
 
-impl CharRun {
+enum RunStorage<'a> {
+    Inline(&'a mut [[u8; 8]]),
+    Spill(Buffer),
+}
+
+fn character(entry: &[u8; 8]) -> char {
+    char::from_u32((u64::from_ne_bytes(*entry) & 0xff_ffff) as u32)
+        .expect("run entries contain Unicode scalars")
+}
+
+fn set_character(entry: &mut [u8; 8], ch: char) {
+    *entry = (u64::from_ne_bytes(*entry) & !0xff_ffff | u64::from(ch)).to_ne_bytes();
+}
+
+fn combining_class(entry: &[u8; 8]) -> u8 {
+    (u64::from_ne_bytes(*entry) >> 56) as u8
+}
+
+impl CharRun<'_> {
+    fn entries(&self) -> &[[u8; 8]] {
+        match &self.storage {
+            RunStorage::Inline(entries) => &entries[..self.len],
+            RunStorage::Spill(buffer) => buffer.as_slice().as_chunks::<8>().0,
+        }
+    }
+
+    fn entries_mut(&mut self) -> &mut [[u8; 8]] {
+        match &mut self.storage {
+            RunStorage::Inline(entries) => &mut entries[..self.len],
+            RunStorage::Spill(buffer) => buffer.as_mut_slice().as_chunks_mut::<8>().0,
+        }
+    }
+
     fn push(&mut self, ch: char, out: &mut OutSink, compose: bool) {
         let ccc = CodePointMapData::<CanonicalCombiningClass>::new().get(ch).0;
-        if ccc == 0 || self.len == self.buf.len() {
-            if compose {
-                self.compose();
-                if ccc == 0
-                    && self.len == 1
-                    && self.buf[0].1 == 0
-                    && let Some(composed) = compose_pair(self.buf[0].0, ch)
-                {
-                    self.buf[0].0 = composed;
-                    return;
-                }
+        if ccc == 0 {
+            self.order(compose);
+            if compose
+                && self.len == 1
+                && combining_class(&self.entries()[0]) == 0
+                && let Some(composed) = compose_pair(character(&self.entries()[0]), ch)
+            {
+                set_character(&mut self.entries_mut()[0], composed);
+                return;
             }
             self.emit(out);
         }
-        let mut at = self.len;
-        while at > 0 && ccc != 0 && self.buf[at - 1].1 > ccc {
-            self.buf[at] = self.buf[at - 1];
-            at -= 1;
+        if let RunStorage::Inline(entries) = &self.storage
+            && self.len == entries.len()
+        {
+            let mut spill = Buffer::new();
+            spill.reserve(self.len * 16);
+            spill.extend_from_slice(entries.as_flattened());
+            self.storage = RunStorage::Spill(spill);
         }
-        self.buf[at] = (ch, ccc);
+        // Keys sort by class, then original position, preserving equal-class order.
+        let entry = (u64::from(ccc) << 56 | (self.len as u64) << 24 | u64::from(ch)).to_ne_bytes();
+        match &mut self.storage {
+            RunStorage::Inline(entries) => entries[self.len] = entry,
+            RunStorage::Spill(buffer) => buffer.extend_from_slice(&entry),
+        }
         self.len += 1;
     }
 
-    fn compose(&mut self) {
-        if self.len < 2 || self.buf[0].1 != 0 {
+    fn order(&mut self, compose: bool) {
+        let entries = self.entries_mut();
+        entries.sort_unstable_by_key(|entry| u64::from_ne_bytes(*entry));
+        if !compose || entries.len() < 2 || combining_class(&entries[0]) != 0 {
             return;
         }
         let mut last_ccc = 0;
         let mut write = 1;
-        for read in 1..self.len {
-            let (ch, ccc) = self.buf[read];
+        for read in 1..entries.len() {
+            let ccc = combining_class(&entries[read]);
             if (last_ccc < ccc || last_ccc == 0)
-                && let Some(composed) = compose_pair(self.buf[0].0, ch)
+                && let Some(composed) =
+                    compose_pair(character(&entries[0]), character(&entries[read]))
             {
-                self.buf[0].0 = composed;
+                set_character(&mut entries[0], composed);
                 continue;
             }
             last_ccc = ccc;
-            self.buf[write] = (ch, ccc);
+            entries[write] = entries[read];
             write += 1;
         }
         self.len = write;
+        if let RunStorage::Spill(buffer) = &mut self.storage {
+            buffer.clear();
+            buffer.advance(write * 8);
+        }
     }
 
     fn emit(&mut self, out: &mut OutSink) {
-        for &(ch, _) in &self.buf[..self.len] {
-            let _ = out.emit(ch);
+        for entry in &self.entries()[..self.len] {
+            let _ = out.emit(character(entry));
+        }
+        if let RunStorage::Spill(buffer) = &mut self.storage {
+            buffer.clear();
         }
         self.len = 0;
     }
@@ -189,10 +237,4 @@ fn compat_triple(ch: char) -> Option<(char, Option<char>, Option<char>)> {
         '\u{FB04}' => ('f', Some('f'), Some('l')),
         _ => return None,
     })
-}
-
-#[cfg(target_arch = "wasm32")]
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    core::arch::wasm32::unreachable()
 }

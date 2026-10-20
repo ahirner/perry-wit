@@ -48,6 +48,11 @@ pub fn admits_undefined(ctx: &Context, ty: TypeHandle) -> bool {
     absence(ctx, ty).is_some_and(|states| states.admits_undefined())
 }
 
+/// Whether a field write can change property presence or insertion order.
+pub fn field_order_may_change(ctx: &Context, ty: TypeHandle) -> bool {
+    admits_undefined(ctx, ty) || present_type(ctx, ty).deref(ctx).is::<crate::JsonType>()
+}
+
 /// The value type and absence states of an optional type, in one lookup.
 pub fn optional_parts(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, Absence)> {
     TypedHandle::<OptionalType>::from_handle(ty, ctx)

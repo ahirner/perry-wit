@@ -566,6 +566,18 @@ impl Buffer {
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: `len` bytes are initialized and the buffer owns its payload exclusively.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
     /// Transfer ownership of valid UTF-8 bytes in this buffer into a runtime string.
     ///
     /// # Safety

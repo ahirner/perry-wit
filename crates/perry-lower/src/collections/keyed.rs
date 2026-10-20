@@ -24,6 +24,20 @@ enum SetSelection {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    fn canonicalize_collection_key(&mut self, ctx: &mut Context, key: Value) -> Result<Value> {
+        let ty = key.get_type(ctx);
+        if !matches!(
+            Kind::of(ctx, present_type(ctx, ty)),
+            Some(Kind::Number | Kind::NumberString)
+        ) {
+            return Ok(key);
+        }
+        let zero = self.number(ctx, 0.0);
+        let zero = self.fit(ctx, zero, ty)?;
+        let is_zero = self.compare(ctx, CompareKind::Eq, key, zero);
+        self.choose(ctx, ty, is_zero, |_, _| Ok(zero), |_, _| Ok(key))
+    }
+
     /// Run `hit(index, entry)` on the first live entry of `entries` whose key is
     /// SameValueZero-equal to `key`, then leave the scan.
     fn on_live_match(
@@ -113,6 +127,7 @@ impl<'s> FunctionBuilder<'s> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
+        let key = self.canonicalize_collection_key(ctx, key)?;
         let val = self.fit(ctx, val, v_ty)?;
         let was_found =
             self.find_live_match(ctx, "kv_set", arr, key, k_ty, |b, ctx, _, entry| {
@@ -227,6 +242,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
+        let val = self.canonicalize_collection_key(ctx, val)?;
         let present =
             self.find_live_match(ctx, "set_has", arr, val, elem_ty, |_, _, _, _| Ok(()))?;
         self.append_unless(ctx, "set_add", present, arr, Some(coll), &[val])?;
@@ -260,7 +276,36 @@ impl<'s> FunctionBuilder<'s> {
         let out = self.empty_set(ctx, Some(receiver.get_type(ctx)))?;
         let (first, second) = match operation {
             SetOperation::Difference => (SetSelection::AbsentFrom(other), None),
-            SetOperation::Intersection => (SetSelection::PresentIn(other), None),
+            SetOperation::Intersection => {
+                let receiver_size = self.collection_size(ctx, receiver)?;
+                let other_size = self.collection_size(ctx, other)?;
+                let receiver_first = self.compare(ctx, CompareKind::Le, receiver_size, other_size);
+                return self.choose(
+                    ctx,
+                    out.get_type(ctx),
+                    receiver_first,
+                    |b, ctx| {
+                        b.copy_set_entries(
+                            ctx,
+                            receiver,
+                            SetSelection::PresentIn(other),
+                            out,
+                            elem_ty,
+                        )?;
+                        Ok(out)
+                    },
+                    |b, ctx| {
+                        b.copy_set_entries(
+                            ctx,
+                            other,
+                            SetSelection::PresentIn(receiver),
+                            out,
+                            elem_ty,
+                        )?;
+                        Ok(out)
+                    },
+                );
+            }
             SetOperation::Union => (SetSelection::All, Some((other, SetSelection::All))),
             SetOperation::SymmetricDifference => (
                 SetSelection::AbsentFrom(other),
@@ -268,23 +313,34 @@ impl<'s> FunctionBuilder<'s> {
             ),
         };
         for (source, selection) in std::iter::once((receiver, first)).chain(second) {
-            self.iterate(ctx, Input::Collection(source), |b, ctx, val, _, next, _| {
-                if let SetSelection::PresentIn(set) | SetSelection::AbsentFrom(set) = selection {
-                    let present = b.kv_has(ctx, set, val, elem_ty)?;
-                    let keep = if matches!(selection, SetSelection::AbsentFrom(_)) {
-                        b.not(ctx, present)
-                    } else {
-                        present
-                    };
-                    let add = b.new_block(ctx, "set_copy_add");
-                    b.branch(ctx, keep, add, next);
-                    b.switch_to(add);
-                }
-                b.set_add(ctx, out, val, elem_ty)?;
-                Ok(())
-            })?;
+            self.copy_set_entries(ctx, source, selection, out, elem_ty)?;
         }
         Ok(out)
+    }
+
+    fn copy_set_entries(
+        &mut self,
+        ctx: &mut Context,
+        source: Value,
+        selection: SetSelection,
+        out: Value,
+        elem_ty: TypeHandle,
+    ) -> Result<()> {
+        self.iterate(ctx, Input::Collection(source), |b, ctx, val, _, next, _| {
+            if let SetSelection::PresentIn(set) | SetSelection::AbsentFrom(set) = selection {
+                let present = b.kv_has(ctx, set, val, elem_ty)?;
+                let keep = if matches!(selection, SetSelection::AbsentFrom(_)) {
+                    b.not(ctx, present)
+                } else {
+                    present
+                };
+                let add = b.new_block(ctx, "set_copy_add");
+                b.branch(ctx, keep, add, next);
+                b.switch_to(add);
+            }
+            b.set_add(ctx, out, val, elem_ty)?;
+            Ok(())
+        })
     }
 
     pub(crate) fn set_relation_op(
@@ -341,10 +397,7 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, alloc_bb);
         self.switch_to(loop_start_bb);
 
-        let len = self.array_length(ctx, items);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "map_groupby", zero, len, |b, ctx, idx, _, _| {
-            let elem = b.element_at(ctx, items, idx)?;
+        self.iterate(ctx, Input::Collection(items), |b, ctx, elem, idx, _, _| {
             let raw_key = b.array_callback(ctx, callback, &[elem, idx])?;
             let k_ty = expected
                 .and_then(|exp| map_entry_types(ctx, exp).map(|(k, _, _)| k))

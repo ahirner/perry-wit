@@ -91,24 +91,16 @@ impl<'s> FunctionBuilder<'s> {
                 None
             };
             let output_ty = pair.map_or(elem_ty, Into::into);
+            let tuple = rec.deref(ctx).is_tuple();
             let fields = rec.deref(ctx).fields()?.to_vec();
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, vec![]));
-            for (name, field_ty) in fields {
-                let after = if admits_undefined(ctx, field_ty) {
-                    let op = FieldPresentOp::new(ctx, obj, name.clone())?;
-                    let present = self.append_value(ctx, &op);
-                    let keep = self.new_block(ctx, "obj_member_keep");
-                    let after = self.new_block(ctx, "obj_member_after");
-                    self.branch(ctx, present, keep, after);
-                    self.switch_to(keep);
-                    Some(after)
-                } else {
-                    None
-                };
+            let mut values = Vec::with_capacity(fields.len());
+            for (index, (name, field_ty)) in fields.into_iter().enumerate() {
+                let position = tuple.then(|| index.to_string());
+                let key = position.as_deref().unwrap_or(&name);
                 let value = if method == IteratorMethod::Keys {
-                    self.string(ctx, &name)
+                    self.string(ctx, key)
                 } else {
-                    let entry = pair.map(|pair| (pair, self.string(ctx, &name)));
+                    let entry = pair.map(|pair| (pair, self.string(ctx, key)));
                     let op = FieldGetOp::new(ctx, obj, name)?;
                     let value = self.append_value(ctx, &op);
                     let value = if admits_undefined(ctx, field_ty) {
@@ -123,11 +115,11 @@ impl<'s> FunctionBuilder<'s> {
                         value
                     }
                 };
-                self.emit(ctx, |ctx| ArrayPushOp::new(ctx, out, value));
-                if let Some(after) = after {
-                    self.jump(ctx, after);
-                    self.switch_to(after);
-                }
+                values.push(value);
+            }
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, values));
+            if !tuple {
+                self.emit(ctx, |ctx| perry_mir::RecordOrderOp::new(ctx, obj, out));
             }
             return Ok(out);
         }
@@ -172,6 +164,36 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
+        self.same_value(ctx, lhs, rhs)
+    }
+
+    fn same_value(&mut self, ctx: &mut Context, lhs: Value, rhs: Value) -> Result<Value> {
+        if self.is_optional(ctx, lhs) {
+            let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.match_optional(
+                ctx,
+                lhs,
+                boolean,
+                |b, ctx| {
+                    Ok(if b.is_optional(ctx, rhs) {
+                        b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, rhs))
+                    } else {
+                        b.boolean(ctx, false)
+                    })
+                },
+                |b, ctx| {
+                    Ok(if b.is_optional(ctx, rhs) {
+                        b.emit_value(ctx, |ctx| IsNullOp::new(ctx, rhs))
+                    } else {
+                        b.boolean(ctx, false)
+                    })
+                },
+                |b, ctx, lhs| b.same_value(ctx, lhs, rhs),
+            );
+        }
+        if self.is_optional(ctx, rhs) {
+            return self.same_value(ctx, rhs, lhs);
+        }
         if lhs.get_type(ctx).deref(ctx).is::<FP64Type>()
             && rhs.get_type(ctx).deref(ctx).is::<FP64Type>()
         {
@@ -201,7 +223,7 @@ impl<'s> FunctionBuilder<'s> {
                 |_, _| Ok(both_nan),
             );
         }
-        self.comparison(ctx, &CompareOp::Eq, left, right)
+        self.comparison_values(ctx, &CompareOp::Eq, lhs, rhs)
     }
 
     /// `Array.isArray(val)`.

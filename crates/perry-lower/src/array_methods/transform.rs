@@ -58,18 +58,43 @@ impl<'s> FunctionBuilder<'s> {
                 let position = b.binary(ctx, BinaryKind::Sub, i, step);
                 let j = b.binary(ctx, BinaryKind::Sub, position, one);
                 let candidate = b.element_at(ctx, target, j)?;
-                let gt = if let Some(comparator) = comparator {
-                    let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
-                    let cmp = b.arithmetic(ctx, cmp);
-                    ensure!(
-                        kind(ctx, cmp)? == Kind::Number,
-                        "sort comparator must return a number"
-                    );
-                    b.compare(ctx, CompareKind::Gt, cmp, zero)
+                let compare = |b: &mut Self, ctx: &mut Context| {
+                    Ok(if let Some(comparator) = comparator {
+                        let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
+                        let cmp = b.arithmetic(ctx, cmp);
+                        ensure!(
+                            kind(ctx, cmp)? == Kind::Number,
+                            "sort comparator must return a number"
+                        );
+                        b.compare(ctx, CompareKind::Gt, cmp, zero)
+                    } else {
+                        let cand_str = b.display(ctx, candidate)?;
+                        let key_str = b.display(ctx, key)?;
+                        b.compare(ctx, CompareKind::Gt, cand_str, key_str)
+                    })
+                };
+                let gt = if b.is_optional(ctx, key) {
+                    let key_undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, key));
+                    let bool_ty = key_undefined.get_type(ctx);
+                    b.choose(
+                        ctx,
+                        bool_ty,
+                        key_undefined,
+                        |b, ctx| Ok(b.boolean(ctx, false)),
+                        |b, ctx| {
+                            let candidate_undefined =
+                                b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, candidate));
+                            b.choose(
+                                ctx,
+                                bool_ty,
+                                candidate_undefined,
+                                |b, ctx| Ok(b.boolean(ctx, true)),
+                                compare,
+                            )
+                        },
+                    )?
                 } else {
-                    let cand_str = b.display(ctx, candidate)?;
-                    let key_str = b.display(ctx, key)?;
-                    b.compare(ctx, CompareKind::Gt, cand_str, key_str)
+                    compare(b, ctx)?
                 };
                 let shift = b.new_block(ctx, "sort_shift");
                 b.branch(ctx, gt, shift, done);
@@ -96,14 +121,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
-        let len = self.array_length(ctx, array);
-        let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
         let callback_resolved = match callback {
             Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
             _ => callback,
         };
-        let (acc_slot, start_step) = if let Some(init_expr) = initial {
+        let initial = if let Some(init_expr) = initial {
             let expected_acc = if let Expr::Closure { params, .. } = callback_resolved {
                 params
                     .first()
@@ -113,7 +135,14 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 None
             };
-            let init_val = self.expression_with(ctx, init_expr, expected_acc)?;
+            Some(self.expression_with(ctx, init_expr, expected_acc)?)
+        } else {
+            None
+        };
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        let (acc_slot, start_step) = if let Some(init_val) = initial {
             let slot = self.entry_slot(ctx, init_val.get_type(ctx));
             self.store(ctx, slot, init_val);
             (slot, zero)

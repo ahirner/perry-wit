@@ -10,7 +10,8 @@ use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
     ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp,
-    FieldSetOp, JsonSchema, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
+    FieldSetOp, JsonSchema, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp,
+    VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -241,14 +242,18 @@ impl FunctionLowering<'_, '_> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let value = self.mapped_value(ctx, val_opd)?;
-            if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+            if perry_mir::field_order_may_change(ctx, ty) {
                 let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
                 let table = self.i32_const(ctx, table as i32);
                 let count = self.i32_const(ctx, count as i32);
                 let key = self.state.data.string(&set.field(ctx));
                 let key = self.i32_const(ctx, key as i32);
-                let omitted = self.is_omitted(ctx, value, ty)?;
-                let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
+                let present = if perry_mir::admits_undefined(ctx, ty) {
+                    let omitted = self.is_omitted(ctx, value, ty)?;
+                    self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
+                } else {
+                    self.i32_const(ctx, 1)
+                };
                 self.runtime_void(
                     ctx,
                     Runtime::StdJsonRecordField,
@@ -256,6 +261,26 @@ impl FunctionLowering<'_, '_> {
                 );
             }
             self.store_slot_value(ctx, object, offset, ty, value)?;
+            return Ok(true);
+        }
+        if Operation::get_op::<RecordOrderOp>(op, ctx).is_some() {
+            let record = op.deref(ctx).get_operand(0);
+            let projection = op.deref(ctx).get_operand(1);
+            let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
+            if count > 0 {
+                let element = Self::element_type(ctx, projection)?;
+                let record = self.mapped(ctx, record)?;
+                let projection = self.mapped(ctx, projection)?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let stride = self.i32_const(ctx, slot_size(ctx, element) as i32);
+                let retained = self.i32_const(ctx, i32::from(self.state.retains_json));
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdRecordOrder,
+                    vec![record, projection, table, count, stride, retained],
+                );
+            }
             return Ok(true);
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {

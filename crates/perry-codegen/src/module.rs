@@ -247,8 +247,10 @@ pub(crate) fn lower(
                 .into_iter()
                 .any(|op| {
                     if Operation::is_op::<perry_mir::FieldSetOp>(op, ctx)
-                        && perry_mir::absence(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
-                            .is_some_and(|absence| absence.admits_undefined())
+                        && perry_mir::field_order_may_change(
+                            ctx,
+                            op.deref(ctx).get_operand(1).get_type(ctx),
+                        )
                     {
                         return true;
                     }

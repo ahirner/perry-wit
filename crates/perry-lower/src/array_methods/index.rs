@@ -81,6 +81,11 @@ impl<'s> FunctionBuilder<'s> {
         bound: Value,
         len: Value,
     ) -> Result<Value> {
+        let bound = self.arithmetic(ctx, bound);
+        ensure!(
+            kind(ctx, bound)? == Kind::Number,
+            "a number is required here"
+        );
         let trunc = self.integer_or_infinity(ctx, bound)?;
         let zero = self.number(ctx, 0.0);
         let is_neg = self.compare(ctx, CompareKind::Lt, trunc, zero);
@@ -107,20 +112,26 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
-        let len = self.array_length(ctx, array);
-        let norm_start = match start {
-            None | Some(Expr::Undefined) => self.number(ctx, 0.0),
-            Some(expr) => {
-                let s = self.number_operand(ctx, expr)?;
-                self.normalize_slice_bound(ctx, s, len)?
-            }
+        let start = self.number_or(ctx, start, 0.0)?;
+        let end = match end {
+            None | Some(Expr::Undefined) => None,
+            Some(expr) => Some(self.expression(ctx, expr)?),
         };
+        let len = self.array_length(ctx, array);
+        let norm_start = self.normalize_slice_bound(ctx, start, len)?;
         let norm_end = match end {
-            None | Some(Expr::Undefined) => len,
-            Some(expr) => {
-                let e = self.number_operand(ctx, expr)?;
-                self.normalize_slice_bound(ctx, e, len)?
+            None => len,
+            Some(end) if self.is_optional(ctx, end) => {
+                let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, end));
+                self.choose(
+                    ctx,
+                    len.get_type(ctx),
+                    undefined,
+                    |_, _| Ok(len),
+                    |b, ctx| b.normalize_slice_bound(ctx, end, len),
+                )?
             }
+            Some(end) => self.normalize_slice_bound(ctx, end, len)?,
         };
         self.collect_items(
             ctx,

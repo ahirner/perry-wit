@@ -1,7 +1,86 @@
 //! Strings in compiled core modules: scalar positions, UTF-8 ordering, Unicode casing,
-//! append and split sharing, and the allocations they avoid.
+//! normalization, append and split sharing, and the allocations they avoid.
 use crate::core_program::{Counter, Program};
 use std::fmt::Write;
+
+#[test]
+fn normalization_preserves_complete_combining_segments() {
+    let mut program = Program::checked(
+        r#"
+export function boundaries(n: number): number {
+  const marks = '\u0315'.repeat(n);
+  const source = 'a' + marks + '\u0300';
+  if (source.normalize('NFD') !== 'a\u0300' + marks) return -1;
+  if (source.normalize('NFC') !== '\u00e0' + marks) return -2;
+  if (source.normalize('NFKD') !== 'a\u0300' + marks) return -3;
+  if (source.normalize('NFKC') !== '\u00e0' + marks) return -4;
+  if (source.normalize() !== '\u00e0' + marks) return -5;
+
+  const leading = marks + '\u0301\u0300';
+  const sameClass = '\u0301\u0300'.repeat(n);
+  const blocked = 'a' + '\u0305'.repeat(n + 1) + '\u0300';
+  const forms = ['NFD', 'NFC', 'NFKD', 'NFKC'];
+  for (let i = 0; i < forms.length; i++) {
+    const form = forms[i];
+    if (leading.normalize(form) !== '\u0301\u0300' + marks) return -6;
+    if (('x' + sameClass + '\u0323').normalize(form) !== 'x\u0323' + sameClass) return -7;
+    if (blocked.normalize(form) !== blocked) return -8;
+  }
+
+  const lower = '\u0334'.repeat(n);
+  if (('a' + lower + '\u0300').normalize('NFC') !== '\u00e0' + lower) return -9;
+  if (('a' + marks + '\u0344').normalize('NFD') !== 'a\u0308\u0301' + marks) return -10;
+  if (('a' + marks + '\u0344').normalize('NFC') !== '\u00e4\u0301' + marks) return -11;
+  if (('\uff41' + marks + '\u0300').normalize('NFKD') !== 'a\u0300' + marks) return -12;
+  if (('\uff41' + marks + '\u0300').normalize('NFKC') !== '\u00e0' + marks) return -13;
+
+  const sequence = (leading + source + '\u1100\u1161\u11a8').repeat(3);
+  const composed = ('\u0301\u0300' + marks + '\u00e0' + marks + '\uac01').repeat(3);
+  if (sequence.normalize('NFC') !== composed) return -14;
+  const result = source.normalize('NFC');
+  if (result.length !== n + 1 || result.charAt(0) !== '\u00e0') return -15;
+  if (source !== 'a' + marks + '\u0300') return -16;
+  return n;
+}
+
+export function scaling(n: number): number {
+  const source = 'x' + '\u0315\u0300'.repeat(n);
+  const normalized = source.normalize('NFD');
+  if (normalized !== 'x' + '\u0300'.repeat(n) + '\u0315'.repeat(n)) return -1;
+  return normalized.length;
+}
+"#,
+        "normalization.ts",
+    );
+    program.stress_collection(true);
+    for n in [0, 1, 62, 63, 64, 65, 126, 127, 128, 129, 1024] {
+        assert_eq!(program.number("boundaries", f64::from(n)), f64::from(n));
+    }
+    let fuel = [2048, 8192].map(|n| {
+        let (result, consumed) =
+            program.call("scaling", &[wasmtime::Val::F64(f64::from(n).to_bits())]);
+        assert_eq!(result[0].unwrap_f64(), f64::from(2 * n + 1));
+        consumed
+    });
+    assert!(
+        fuel[1] < fuel[0] * 6,
+        "combining-run sorting must not grow quadratically: {fuel:?}"
+    );
+    let memory = program.memory_bytes();
+    for _ in 0..3 {
+        assert_eq!(program.number("scaling", 8192.0), 16385.0);
+        assert!(program.counter(Counter::LiveBytes) < 1024);
+    }
+    assert_eq!(
+        program.memory_bytes(),
+        memory,
+        "scratch storage is reclaimed"
+    );
+    eprintln!(
+        "normalization fuel (2048, 8192 pairs): {fuel:?}; memory: {memory}; checked module: {} bytes",
+        program.wasm.len()
+    );
+}
 
 #[test]
 fn append_and_builders_reuse_storage_and_preserve_aliases() {

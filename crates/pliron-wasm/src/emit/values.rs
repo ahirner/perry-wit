@@ -1,5 +1,9 @@
 //! Instruction selection for statements and the value trees folded into them.
-use super::{EmitResult, function::FunctionEmitter, schedule::movable};
+use super::{
+    EmitResult,
+    function::FunctionEmitter,
+    schedule::{is_constant, movable},
+};
 use crate::{
     ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
     types::val_type,
@@ -10,13 +14,46 @@ use pliron::{
         op_interfaces::OneResultInterface,
         ops::ConstantOp,
     },
-    context::Ptr,
+    context::{Context, Ptr},
     operation::Operation,
     r#type::Typed,
     utils::apint::APInt,
     value::Value,
 };
+use std::collections::HashSet;
 use wasm_encoder::{Instruction, MemArg, ValType};
+
+pub(super) enum TreeStep {
+    Local(Value),
+    Operation(Ptr<Operation>),
+}
+
+pub(super) fn value_tree<'a>(
+    ctx: &'a Context,
+    folded: &'a HashSet<Ptr<Operation>>,
+    root: Ptr<Operation>,
+) -> impl Iterator<Item = TreeStep> + 'a {
+    let mut pending = vec![(root, 0)];
+    std::iter::from_fn(move || {
+        while let Some((current, next_operand)) = pending.last_mut() {
+            let operation = current.deref(ctx);
+            if *next_operand >= operation.get_num_operands() {
+                return pending.pop().map(|(op, _)| TreeStep::Operation(op));
+            }
+            let value = operation.get_operand(*next_operand);
+            if let Some(def) = value.defining_op()
+                && (folded.contains(&def) || is_constant(ctx, def))
+            {
+                *next_operand += def.deref(ctx).get_num_results();
+                pending.push((def, 0));
+            } else {
+                *next_operand += 1;
+                return Some(TreeStep::Local(value));
+            }
+        }
+        None
+    })
+}
 
 impl FunctionEmitter<'_> {
     /// Emit `op` as a statement: evaluate its tree and store or drop its results. Ops
@@ -47,12 +84,16 @@ impl FunctionEmitter<'_> {
         {
             return self.tree(def);
         }
+        self.code.push(self.local_get(value)?);
+        Ok(())
+    }
+
+    fn local_get(&self, value: Value) -> EmitResult<Instruction<'static>> {
         let local = *self
             .locals
             .get(&value)
             .ok_or_else(|| self.malformed("a used value has no local"))?;
-        self.code.push(Instruction::LocalGet(local));
-        Ok(())
+        Ok(Instruction::LocalGet(local))
     }
 
     /// Push `values` onto the operand stack, evaluating an in-place multi-result op once for
@@ -67,7 +108,7 @@ impl FunctionEmitter<'_> {
                 self.tree(def)?;
                 index += def.deref(self.ctx).get_num_results();
             } else {
-                self.value(value)?;
+                self.code.push(self.local_get(value)?);
                 index += 1;
             }
         }
@@ -76,9 +117,18 @@ impl FunctionEmitter<'_> {
 
     /// Push `op`'s operands, then emit `op` itself.
     fn tree(&mut self, op: Ptr<Operation>) -> EmitResult<()> {
+        for step in value_tree(self.ctx, &self.folded, op) {
+            let instruction = match step {
+                TreeStep::Local(value) => self.local_get(value)?,
+                TreeStep::Operation(op) => self.instruction(op)?,
+            };
+            self.code.push(instruction);
+        }
+        Ok(())
+    }
+
+    fn instruction(&self, op: Ptr<Operation>) -> EmitResult<Instruction<'static>> {
         let ctx = self.ctx;
-        let operands: Vec<_> = op.deref(ctx).operands().collect();
-        self.values(&operands)?;
         let instruction = if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
@@ -117,8 +167,7 @@ impl FunctionEmitter<'_> {
         } else {
             return Err(self.unsupported(op));
         };
-        self.code.push(instruction);
-        Ok(())
+        Ok(instruction)
     }
 }
 

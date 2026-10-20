@@ -6,7 +6,7 @@ use crate::operation_schema::op_schema;
 use crate::signatures::{MissingProjectionField, Ty, TypeMismatch, operand_types, type_mismatch};
 use crate::{
     attrs::{FieldOrder, Tier},
-    types::RecordType,
+    types::{ArrayType, RecordType},
 };
 use pliron::{
     builtin::{attributes::StringAttr, op_interfaces::OneResultInterface},
@@ -25,6 +25,10 @@ use thiserror::Error;
 pub(crate) enum HeapErr {
     #[error("{0} expects a perry.record, found another type")]
     NotRecord(&'static str),
+    #[error("record enumeration projection must be an array")]
+    NotArray,
+    #[error("record enumeration order requires a non-tuple record")]
+    NotObject,
     #[error("record {record} has {expected} fields but perry.alloc supplies {found}")]
     FieldCount {
         record: String,
@@ -193,4 +197,17 @@ op_schema! {
             record: record(ctx, reference.get_type(ctx), "perry.field_set")?.name().to_string(),
             field: field.to_owned(),
         };
+}
+
+op_schema! {
+    /// Filter and order a canonical record-field projection by the instance's property metadata.
+    pub RecordOrderOp(reference, projection) -> infallible;
+    name = "perry.record_order";
+    format = "$0 `, ` $1";
+    constructors { pub new(reference: Value, projection: Value) => empty(); }
+    result(ctx): () = ();
+    error = HeapErr::NotRecord("perry.record_order");
+    check reference.get_type(ctx).deref(ctx).downcast_ref::<RecordType>()
+        .is_some_and(|record| !record.is_tuple()) => HeapErr::NotObject;
+    check projection.get_type(ctx).deref(ctx).is::<ArrayType>() => HeapErr::NotArray;
 }
