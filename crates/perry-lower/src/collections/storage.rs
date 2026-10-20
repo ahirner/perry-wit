@@ -392,7 +392,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Some(states) = absence(ctx, ty) {
             if !states.admits_undefined() {
-                return Some(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)));
+                return Some(self.emit_value(ctx, |ctx| NullOp::new(ctx, ty)));
             }
             return Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)));
         }

@@ -91,6 +91,14 @@ fn parse_and_required_field_errors_have_typed_codes() {
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",
             DiagnosticCode::MissingRequiredField,
         ),
+        (
+            "export async function mergeDocs():Promise<Map<string,string>> { const base=JSON.parse('{\"y\":\"v\"}'); return { \"x\": base.y }; }",
+            DiagnosticCode::UnsupportedType,
+        ),
+        (
+            "export async function mergeDocs():Promise<Map<string,string>> { const [base, update]=[JSON.parse('{}'), JSON.parse('{}')]; return { ...base, ...update }; }",
+            DiagnosticCode::UnsupportedType,
+        ),
     ] {
         let error = api::compile_core(&Program {
             source: source.as_bytes().into(),
@@ -99,6 +107,7 @@ fn parse_and_required_field_errors_have_typed_codes() {
         .unwrap_err();
         assert_eq!(error.diagnostics[0].code, code, "{error}");
         assert!(error.diagnostics[0].span.is_some(), "{error}");
+        assert!(!error.diagnostics[0].message.contains("_0"), "{error}");
     }
 }
 

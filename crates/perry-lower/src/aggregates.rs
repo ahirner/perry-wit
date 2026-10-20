@@ -16,7 +16,7 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
         if let Ok(record) = TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
-            && record.deref(ctx).is_tuple()
+            && record.deref(ctx).kind() == RecordKind::Tuple
         {
             let field = match index {
                 Expr::Number(index) if *index >= 0.0 && index.fract() == 0.0 => {
@@ -43,7 +43,9 @@ impl<'s> FunctionBuilder<'s> {
             crate::collections::dict_entry_types(ctx, array.get_type(ctx))
         {
             let key = self.expression_with(ctx, index, Some(k_ty))?;
+            let key = self.fit(ctx, key, k_ty)?;
             let val = self.expression_with(ctx, value, Some(v_ty))?;
+            let val = self.fit(ctx, val, v_ty)?;
             return self.kv_set(ctx, array, key, val);
         }
         let element = self.array_element(ctx, array)?;
@@ -70,6 +72,7 @@ impl<'s> FunctionBuilder<'s> {
         {
             let key = self.string(ctx, field);
             let val = self.expression_with(ctx, value, Some(v_ty))?;
+            let val = self.fit(ctx, val, v_ty)?;
             return self.kv_set(ctx, record, key, val);
         }
         if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
@@ -77,12 +80,11 @@ impl<'s> FunctionBuilder<'s> {
         {
             return self.class_setter_call(ctx, record, owner_class, &type_args, setter, value);
         }
-        ensure!(
-            kind(ctx, record)? == Kind::Record,
-            "property writes are only supported on records so far"
-        );
-        let field_type = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected a record"))?
+        let rec_ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
+            .ok()
+            .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)
+            .ok_or_else(|| anyhow!("property writes are only supported on records so far"))?;
+        let field_type = rec_ty
             .deref(ctx)
             .field(field)
             .map(|(_, ty)| ty)
@@ -113,7 +115,7 @@ impl<'s> FunctionBuilder<'s> {
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
-        self.record_literal(ctx, names, args, expected)
+        self.record_literal(ctx, names, args, expected, RecordKind::Object)
     }
 
     /// `[…]`, with the element type from `expected` or from the items.
@@ -210,12 +212,12 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &Context,
         expr: &Expr,
     ) -> Option<TypedHandle<RecordType>> {
-        match expr {
+        let record = match expr {
             Expr::LocalGet(id) => {
                 let local = self.locals.get(id)?;
                 let ty = self.slot_type(ctx, local.slot).ok()?;
                 let inner = present_type(ctx, ty);
-                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
             }
             Expr::PropertyGet {
                 object, property, ..
@@ -223,7 +225,7 @@ impl<'s> FunctionBuilder<'s> {
                 let rec = self.peek_record_type(ctx, object)?;
                 let (_, field_ty) = rec.deref(ctx).field(property)?;
                 let inner = present_type(ctx, field_ty);
-                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
             }
             Expr::Call { callee, .. } => {
                 if let Expr::FuncRef(id) = &**callee
@@ -231,12 +233,13 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some(ret) = sig.result
                 {
                     let inner = present_type(ctx, ret.carrier);
-                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
                 } else {
-                    None
+                    return None;
                 }
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        (record.deref(ctx).kind() == RecordKind::Object).then_some(record)
     }
 }

@@ -31,6 +31,7 @@ impl<'s> FunctionBuilder<'s> {
         for (name, val_expr) in names.iter().zip(args) {
             let k = self.string(ctx, name);
             let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
+            let v = self.fit(ctx, v, v_ty)?;
             self.kv_set(ctx, dict, k, v)?;
         }
         Ok(dict)
@@ -75,7 +76,12 @@ impl<'s> FunctionBuilder<'s> {
         if dict_entry_types(ctx, ty).is_some() {
             return self.collection_iterator(ctx, obj, method);
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && matches!(
+                rec.deref(ctx).kind(),
+                RecordKind::Object | RecordKind::Tuple
+            )
+        {
             let str_ty: TypeHandle = StringType::get(ctx).into();
             let elem_ty = if method == IteratorMethod::Keys {
                 str_ty
@@ -91,7 +97,7 @@ impl<'s> FunctionBuilder<'s> {
                 None
             };
             let output_ty = pair.map_or(elem_ty, Into::into);
-            let tuple = rec.deref(ctx).is_tuple();
+            let tuple = rec.deref(ctx).kind() == RecordKind::Tuple;
             let fields = rec.deref(ctx).fields()?.to_vec();
             let mut values = Vec::with_capacity(fields.len());
             for (index, (name, field_ty)) in fields.into_iter().enumerate() {
@@ -196,7 +202,9 @@ impl<'s> FunctionBuilder<'s> {
             let k = self.expression_with(ctx, prop_expr, Some(k_ty))?;
             return self.kv_has(ctx, obj, k, k_ty);
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && rec.deref(ctx).kind() == RecordKind::Object
+        {
             let k = self.string_operand(ctx, prop_expr)?;
             let fields = rec
                 .deref(ctx)
@@ -250,6 +258,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Err(property) = prop_or_idx
             && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && rec.deref(ctx).kind() == RecordKind::Object
         {
             let field_ty = rec.deref(ctx).field(property).map(|(_, t)| t);
             if let Some(field_ty) = field_ty

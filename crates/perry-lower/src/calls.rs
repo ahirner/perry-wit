@@ -66,13 +66,8 @@ impl<'s> FunctionBuilder<'s> {
                     (None, None) => {
                         let ty = expected.map_or_else(|| FP64Type::get(ctx).into(), |b| b.carrier);
                         let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
-                        let value = if expected.is_some() {
-                            self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
-                        } else {
-                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
-                        };
                         expected = None;
-                        value
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
                     }
                 };
                 let target = expected.unwrap_or_else(|| BindingType::plain(value.get_type(ctx)));
@@ -390,7 +385,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.fit(ctx, value, carrier);
         }
         if admits_undefined(ctx, carrier) {
-            return Ok(self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, carrier)));
+            return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
         }
         if let Some(default) = &param.source.default {
             let value = self.expression_with(ctx, default, Some(carrier))?;

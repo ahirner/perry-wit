@@ -13,6 +13,18 @@ class Counter {
     field:number=next();
     arg:number;
     constructor(arg:number=next()) { this.arg=arg; }
+    assign(extra?:string):boolean {
+        const holder:{x?:string} = {};
+        holder.x = extra;
+        return extra===undefined && ('x' in holder);
+    }
+}
+function checkOmitted(a?:string, b?:string):boolean {
+    const short:number|undefined = a && 1;
+    const holder:{x?:string; y?:number} = {};
+    holder.x = a;
+    holder.y = short;
+    return a===b && short===undefined && ('x' in holder) && ('y' in holder);
 }
 class Rest {
     field:number=next();
@@ -25,9 +37,10 @@ export function constructorOrder():number {
     const explicit=new Counter(next());
     if(explicit.field!==2 || explicit.arg!==1 || step!==2)return 1;
     if(Object.keys(explicit).join(',')!=='optional,uninitialized,initialized,field,arg')return 6;
-    if(explicit.optional!==undefined)return 7;
+    if(explicit.optional!==undefined || !explicit.assign())return 7;
     if(explicit.uninitialized!==undefined)return 8;
     if(explicit.initialized!==9)return 9;
+    if(!checkOmitted())return 10;
     step=0;
     const omitted=new Counter();
     if(omitted.field!==1 || omitted.arg!==2 || step!==2)return 2;
@@ -58,12 +71,13 @@ export function implicitConstructor():number {
 class Box<T> {
     field:number=next();
     value:T;
-    constructor(value:T) { this.value=value; }
+    extra?:string;
+    constructor(value:T, extra?:string) { this.value=value; this.extra=extra; }
 }
 export function genericConstruction():number {
     step=0;
     const explicit:Box<number>=new Box<number>(next());
-    if(explicit.value!==1 || explicit.field!==2 || step!==2)return 1;
+    if(explicit.value!==1 || explicit.field!==2 || step!==2 || explicit.extra!==undefined || !('extra' in explicit))return 1;
     step=0;
     const contextual:Box<number>=new Box(next());
     if(contextual.value!==1 || contextual.field!==2 || step!==2)return 2;

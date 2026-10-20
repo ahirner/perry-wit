@@ -55,9 +55,10 @@ use perry_mir::{
     ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
     JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
     PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp, ReaderType,
-    RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp,
-    StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence,
-    admits_undefined, may_throw, optional_parts, optional_value, present_type, set_async,
+    RecordKind, RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp,
+    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
+    WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
+    set_async,
 };
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;

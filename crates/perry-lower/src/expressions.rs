@@ -30,7 +30,7 @@ impl<'s> FunctionBuilder<'s> {
                     let source = self.defined(ctx, source)?;
                     if let Ok(record) =
                         TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-                        && record.deref(ctx).is_tuple()
+                        && record.deref(ctx).kind() == RecordKind::Tuple
                     {
                         let length = record.deref(ctx).fields()?.len();
                         Ok(self.number(ctx, length as f64))
@@ -482,12 +482,12 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Array(items)
                 if expected.is_some_and(|ty| {
                     TypedHandle::<RecordType>::from_handle(present_type(ctx, ty), ctx)
-                        .is_ok_and(|record| record.deref(ctx).is_tuple())
+                        .is_ok_and(|record| record.deref(ctx).kind() == RecordKind::Tuple)
                 }) =>
             {
                 let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                self.record_literal(ctx, &names, items, expected)?
+                self.record_literal(ctx, &names, items, expected, RecordKind::Tuple)?
             }
             Expr::Array(items) => self.array_literal(ctx, items, expected)?,
             Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,

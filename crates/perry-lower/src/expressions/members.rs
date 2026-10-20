@@ -278,7 +278,7 @@ impl<'s> FunctionBuilder<'s> {
 /// The arity of a tuple record type; `None` for other types.
 fn tuple_length(ctx: &Context, ty: TypeHandle) -> Result<Option<usize>> {
     match TypedHandle::<RecordType>::from_handle(ty, ctx) {
-        Ok(record) if record.deref(ctx).is_tuple() => Ok(Some(
+        Ok(record) if record.deref(ctx).kind() == RecordKind::Tuple => Ok(Some(
             record
                 .deref(ctx)
                 .fields()

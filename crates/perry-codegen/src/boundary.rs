@@ -546,8 +546,18 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn record_type(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
-        TypedHandle::<RecordType>::from_handle(mir_ty, ctx)
-            .map_err(|_| anyhow!("WIT record needs a TypeScript object type"))
+        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx)
+            .map_err(|_| anyhow!("WIT record needs a TypeScript object type"))?;
+        ensure!(
+            matches!(
+                record.deref(ctx).kind(),
+                perry_mir::RecordKind::Object
+                    | perry_mir::RecordKind::Tuple
+                    | perry_mir::RecordKind::DictionaryEntry
+            ),
+            "WIT record needs a TypeScript object type"
+        );
+        Ok(record)
     }
 
     /// Allocate a MIR record from named field values.

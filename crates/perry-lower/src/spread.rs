@@ -359,7 +359,7 @@ impl<'s> FunctionBuilder<'s> {
                     let src = self.expression(ctx, expr)?;
                     let src = self.defined(ctx, src)?;
                     if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
-                        && rec.deref(ctx).is_tuple()
+                        && rec.deref(ctx).kind() == RecordKind::Tuple
                     {
                         let fields_len = rec.deref(ctx).fields()?.len();
                         for tuple_idx in 0..fields_len {
