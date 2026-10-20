@@ -15,6 +15,7 @@ mod methods;
 mod parser;
 pub(crate) use parser::parse;
 mod iteration;
+mod regex;
 pub(crate) use iteration::{Availability, Iteration, RecordExpr};
 pub(crate) mod source;
 mod streams;
@@ -41,6 +42,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
+        regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, anyhow::Error>(constructors)

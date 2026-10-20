@@ -27,6 +27,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 hir_compat::RecordExpr::Length(source) => {
                     let source = self.expression(ctx, source)?;
+                    let source = self.defined(ctx, source)?;
                     if let Ok(record) =
                         TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
                         && record.deref(ctx).is_tuple()
@@ -506,8 +507,9 @@ impl<'s> FunctionBuilder<'s> {
         self.narrow_primitive(ctx, expr, value)
     }
 
-    /// A bigint literal (`0x…n`, `1_000n`), within the 64-bit transport domain.
+    /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.
     fn bigint_literal(&mut self, ctx: &mut Context, text: &str) -> Result<Value> {
+        use pliron::utils::apint::{APInt, bw};
         let text = text.trim_end_matches('n').replace('_', "");
         let (radix, digits) =
             if let Some(n) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
@@ -519,19 +521,37 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 (10, text.as_str())
             };
-        let magnitude = u64::from_str_radix(digits, radix)
-            .context("bigint literal exceeds the 64-bit transport domain")?;
+        let value = match u64::from_str_radix(digits, radix) {
+            Ok(value) => APInt::from_u64(value, bw(64)),
+            Err(_) => {
+                let width = digits
+                    .len()
+                    .checked_mul(4)
+                    .context("bigint literal too large")?;
+                APInt::from_str(digits, width, radix as u8).context("invalid bigint literal")?
+            }
+        };
+        let width = u32::try_from(value.bw()).context("bigint literal too large")?;
+        let ty = IntegerType::get(ctx, width, Signedness::Unsigned);
+        let magnitude = IntegerAttr::new(ty, value);
         Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
     }
 
-    /// `null` or `undefined` of the expected optional type (`number | null/undefined` when
-    /// nothing is expected).
+    /// Absence in an optional or unknown type; infer an optional number without context.
     fn absent_literal(
         &mut self,
         ctx: &mut Context,
         null: bool,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if expected.is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
+            let intrinsic = if null {
+                Intrinsic::JsonNull
+            } else {
+                Intrinsic::JsonUndefined
+            };
+            return Ok(self.intrinsic(ctx, intrinsic, vec![]));
+        }
         let ty = match expected {
             Some(ty) => ty,
             None => {

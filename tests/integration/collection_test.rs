@@ -179,6 +179,32 @@ export function liveGrouping():number {
  if(Map.groupBy(empty,(value,index)=>{throw new Error('empty callback');return 0;}).size!==0)return 7;
  return 0;
 }
+
+export function unknownAbsence():number {
+ const values=new Map<string,unknown>();
+ values.set('undefined',undefined);
+ values.set('null',null);
+ if(values.size!==2 || !values.has('undefined') || values.has('missing'))return 1;
+ if(values.get('undefined')!==undefined || values.get('null')!==null)return 2;
+ let trace='';
+ values.forEach((value,key)=>{trace+=key+':'+String(value)+';';});
+ if(trace!=='undefined:undefined;null:null;')return 3;
+ const record:{value:unknown}={value:undefined};
+ const array:unknown[]=[undefined,null];
+ if(record.value!==undefined || array[0]!==undefined || array[1]!==null)return 4;
+ return 0;
+}
+
+export function tupleCallbacks():number {
+ const pairs:[string,number][]=[['a',1],['b',2]];
+ const found=pairs.find(([key])=>key==='b');
+ if(found===undefined || found[1]!==2)return 1;
+ if(pairs.findIndex(([key,value])=>key==='b' && value===2)!==1)return 2;
+ if(pairs.find(([key])=>key==='missing')!==undefined)return 3;
+ const optional:[string,number|undefined][]=[['a',undefined],['b',0]];
+ if(optional.map(([key,value=7])=>key+String(value)).join(',')!=='a7,b0')return 4;
+ return 0;
+}
 "#,
         &[
             ("argumentOrder", &[], 0.0),
@@ -186,6 +212,8 @@ export function liveGrouping():number {
             ("canonicalKeys", &[], 0.0),
             ("intersectionOrder", &[], 0.0),
             ("liveGrouping", &[], 0.0),
+            ("unknownAbsence", &[], 0.0),
+            ("tupleCallbacks", &[], 0.0),
         ],
     )
 }

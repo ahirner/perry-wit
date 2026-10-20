@@ -730,6 +730,7 @@ world boundary {
     export rounding: func(offset: u64) -> f64;
     export probe: func(input: string) -> string;
     export truncation: func(value: u64) -> string;
+    export literals: func() -> string;
 }"#;
     let source = r#"
 import type { u64 } from 'perry:types';
@@ -752,7 +753,7 @@ export function powers(n: number, seed: bigint): string {
 export function unsigned(a: bigint, b: bigint): bigint { return difference(sum(a, b), b); }
 export function signed(a: bigint, b: bigint): bigint { return sum(difference(a, b), b); }
 export function rounding(offset: bigint): number {
-    const wide = sum(18446744073709551615n, 1n);
+    const wide = 18446744073709551616n;
     return Number(sum(wide, offset));
 }
 export function probe(input: string): string {
@@ -765,8 +766,22 @@ export function truncation(value: bigint): string {
     const wrapped = total as u64;
     return String(total) + ':' + String(wrapped);
 }
+export function literals(): string {
+    const wide = 340_282_366_920_938_463_463_374_607_431_768_211_456n;
+    if (wide !== 0x100000000000000000000000000000000n) throw 'hex';
+    if (18446744073709551616n !== 0o2000000000000000000000n) throw 'octal';
+    if (18446744073709551616n !== 0b10000000000000000000000000000000000000000000000000000000000000000n) throw 'binary';
+    if (wide - 1n !== 340282366920938463463374607431768211455n) throw 'carry';
+    return String(wide) + ':' + String(-wide);
+}
 "#;
     let mut instance = Instance::compile(wit, source)?;
+    instance.check(
+        "literals",
+        (),
+        &"340282366920938463463374607431768211456:-340282366920938463463374607431768211456"
+            .to_owned(),
+    )?;
     for a in [i64::MIN, -9007199254740993, -1, 0, 1, i64::MAX] {
         for b in [0, 1, 9007199254740993, u64::MAX] {
             let (left, right) = (i128::from(a), i128::from(b));
@@ -830,11 +845,12 @@ export function truncation(value: bigint): string {
 #[test]
 fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
     let mut instance = Instance::compile(
-        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; }",
-        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; }",
+        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; export constant: func() -> u64; }",
+        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; } export function constant(): bigint { return 18446744073709551616n; }",
     )?;
     assert!(instance.call::<_, u64>("unsigned", (u64::MAX,)).is_err());
     assert!(instance.call::<_, i64>("signed", (i64::MIN,)).is_err());
+    assert!(instance.call::<_, u64>("constant", ()).is_err());
     Ok(())
 }
 

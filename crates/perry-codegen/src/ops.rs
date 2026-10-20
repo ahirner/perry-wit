@@ -100,10 +100,19 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(constant) = Operation::get_op::<perry_mir::BigIntConstOp>(op, ctx) {
             let magnitude = constant
-                .magnitude(ctx)
-                .context("BigInt constant without a u64 magnitude")?;
-            let mut bytes = [0; 16];
-            bytes[..8].copy_from_slice(&magnitude.to_le_bytes());
+                .get_attr_perry_integer_value(ctx)
+                .context("BigInt constant without a magnitude")?
+                .value();
+            let mut bytes = vec![0; magnitude.bw().div_ceil(32).max(2) * 4 + 8];
+            magnitude.to_u8_slice(&mut bytes[8..]);
+            while bytes.len() > 16 && bytes[bytes.len() - 4..] == [0; 4] {
+                bytes.truncate(bytes.len() - 4);
+            }
+            // The runtime header holds low 64 bits, sign, then high-limb count.
+            bytes.copy_within(8..16, 0);
+            bytes[8..12].fill(0);
+            let extra_len = u32::try_from((bytes.len() - 16) / 4)?;
+            bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
             let address = self.state.data.append(8, &bytes);
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);

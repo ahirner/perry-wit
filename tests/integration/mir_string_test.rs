@@ -309,7 +309,10 @@ function probe(text: string): string {
   return match?.groups?.word ?? 'missing';
 }
 export function search(n: number): number {
-  const expression = /[a-z]+\d{2}/u;
+  const chars = 'a-z';
+  const suffix = '\\d{2}';
+  const flags = 'u';
+  const expression = new RegExp(`[${chars}]+` + suffix, flags);
   const text = '🙂x42';
   let total = 0;
   for (let i = 0; i < n; i++) total = total + text.search(expression) + (expression.test(text) ? 1 : 0);
@@ -361,6 +364,20 @@ export function named(n: number): number {
       groups.letter + ':' + second + ':' + offset + ':' + input.length) !== 'a:b:0:4 a:undefined:3:4') return -8;
   if ('ab a'.replace(/(?<first>a)(?<last>b)?/g, '$<last>:$<first>:$<missing>') !== 'b:a: :a:') return -9;
   if ('a'.replace(/(a)/, '$<first>') !== '$<first>') return -10;
+  const [, word, tail = 'absent'] = result;
+  if (word !== 'changed' || tail !== 'absent') return -11;
+  if (matched === null) return -12;
+  const [, first, last] = matched;
+  if (first !== 'a' || last !== 'b') return -13;
+  const chars = 'ab';
+  const global = 'g';
+  if ('cabba'.replace(new RegExp(`[${chars}]`, global), '') !== 'c') return -14;
+  if (!RegExp('a' + 'b').test('ab')) return -15;
+  {
+    const chars = 'xy';
+    if (!new RegExp(`[${chars}]`).test('x')) return -16;
+  }
+  if (new RegExp(`[${chars}]`).test('x')) return -17;
   return n;
 }
 "#,
@@ -372,6 +389,20 @@ export function named(n: number): number {
     program.stress_collection(true);
     assert_eq!(program.throwing("replace", 17.0), (17.0, 0));
     assert_eq!(program.throwing("named", 23.0), (23.0, 0));
+}
+
+#[test]
+fn constant_regex_preserves_binding_initialization() -> anyhow::Result<()> {
+    crate::node_oracle::assert_numbers(
+        r#"
+let caught=0;
+try { probe(); } catch(error) { caught=1; }
+function probe():boolean { return new RegExp(`[${chars}]`).test('a'); }
+const chars='ab';
+export function run():number { return caught+(probe()?1:0); }
+"#,
+        &[("run", &[], 2.0)],
+    )
 }
 
 #[test]
