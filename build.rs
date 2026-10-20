@@ -16,8 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::remove_dir_all(&helpers)?;
     }
     fs::create_dir_all(&helpers)?;
-    compile_json_helpers(&manifest_dir, &helpers)?;
-
     for path in [
         "src/helpers",
         "crates/perry-abi",
@@ -28,7 +26,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-env-changed=PERRY_HELPER_TARGET_DIR");
+    println!("cargo:rerun-if-env-changed=PERRY_PREBUILT_HELPERS_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
+
+    if let Some(source) = env::var_os("PERRY_PREBUILT_HELPERS_DIR") {
+        let source = Path::new(&source);
+        println!("cargo:rerun-if-changed={}", source.display());
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|ext| ext == "wasm") {
+                let bytes = fs::read(entry.path())?;
+                wasmparser::Validator::new().validate_all(&bytes)?;
+                fs::write(helpers.join(entry.file_name()), bytes)?;
+            }
+        }
+        return Ok(());
+    }
+    compile_json_helpers(&manifest_dir, &helpers)?;
 
     for helper in [
         "text",

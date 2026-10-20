@@ -109,30 +109,29 @@
           src = ./.;
           filter = commonFilter;
         };
-        # Shared dependency build artifacts
-        cargoArtifacts = craneLib.buildDepsOnly {
+        compilerArgs = {
           inherit src;
-          pname = "perry-wit-deps";
-          version = cargoManifest.package.version;
-          strictDeps = true;
-          doCheck = false;
-          WASI_WIT_PATH = wasiP3Wit;
-          nativeBuildInputs = with pkgs; [ pkg-config cacert ];
-          preBuild = ''
-            mkdir -p wit/deps
-            ln -sfn "${wasiP3Wit}"/* wit/deps/
-          '';
-        };
-
-        # Compiler with the embedded runtime and computation helpers
-        perryWitBin = craneLib.buildPackage {
-          inherit src cargoArtifacts;
           pname = "perry-wit";
           version = cargoManifest.package.version;
           strictDeps = true;
           doCheck = false;
           WASI_WIT_PATH = wasiP3Wit;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = [ pkgs.pkg-config ];
+        };
+
+        # Shared dependency build artifacts
+        cargoArtifacts = craneLib.buildDepsOnly (compilerArgs // {
+          pname = "perry-wit-deps";
+          nativeBuildInputs = with pkgs; [ pkg-config cacert ];
+          preBuild = ''
+            mkdir -p wit/deps
+            ln -sfn "${wasiP3Wit}"/* wit/deps/
+          '';
+        });
+
+        # Compiler with the embedded runtime and computation helpers
+        perryWitBin = craneLib.buildPackage (compilerArgs // {
+          inherit cargoArtifacts;
           postBuild = ''cargo doc --locked --release --no-deps --lib -p perry-wit'';
           postInstall = ''
             mkdir -p "$out/share/doc"
@@ -142,7 +141,7 @@
             test -n "$helper_marker"
             cp "$(dirname "$helper_marker")"/*.wasm "$out/lib/perry-wit-helpers/"
           '';
-        };
+        });
 
         # Core WASM helper libraries
         coreHelpers = pkgs.runCommand "perry-wit-core-helpers-0.1.0" {} ''
@@ -150,20 +149,44 @@
           cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
         '';
 
-        wasmArgs = {
-          inherit src;
+        muslTarget = "${pkgs.stdenv.hostPlatform.parsed.cpu.name}-unknown-linux-musl";
+        staticCraneLib = craneLib.overrideToolchain (toolchain.override {
+          targets = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.targets
+            ++ [ muslTarget ];
+        });
+        staticArgs = compilerArgs // {
+          pname = "perry-wit-static";
+          CARGO_BUILD_TARGET = muslTarget;
+          CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+          cargoExtraArgs = "--locked --bin perry-wit";
+        };
+        perryWitStatic = staticCraneLib.buildPackage (staticArgs // {
+          cargoArtifacts = staticCraneLib.buildDepsOnly staticArgs;
+          PERRY_PREBUILT_HELPERS_DIR = "${coreHelpers}/lib";
+        });
+
+        perryWitRelease = if pkgs.stdenv.hostPlatform.isLinux then perryWitStatic
+          else pkgs.runCommand "perry-wit-release-${cargoManifest.package.version}" {
+            nativeBuildInputs = [ pkgs.darwin.cctools ];
+          } ''
+            mkdir -p "$out/bin"
+            cp ${perryWitBin}/bin/perry-wit "$out/bin/"
+            chmod u+w "$out/bin/perry-wit"
+            install_name_tool -change "${pkgs.lib.getLib pkgs.libiconv}/lib/libiconv.2.dylib" \
+              /usr/lib/libiconv.2.dylib "$out/bin/perry-wit"
+            source ${pkgs.darwin.signingUtils}
+            sign "$out/bin/perry-wit"
+          '';
+
+        wasmArgs = compilerArgs // {
           pname = "perry-wit-wasm";
-          version = cargoManifest.package.version;
-          strictDeps = true;
-          doCheck = false;
           CARGO_BUILD_TARGET = "wasm32-wasip2";
-          WASI_WIT_PATH = wasiP3Wit;
-          PERRY_HELPER_TARGET_DIR = "target/embedded-helpers";
           cargoExtraArgs = "--bin perry-wit";
         };
         perryWitWasm = craneLib.buildPackage (wasmArgs // {
           nativeBuildInputs = [ pkgs.python3 pkgs.wasm-tools ];
           cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
+          PERRY_PREBUILT_HELPERS_DIR = "${coreHelpers}/lib";
           installPhaseCommand = ''
             mkdir -p "$out/lib" "$out/share/perry-wit"
             python3 scripts/compiler-metadata.py target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm" \
@@ -309,6 +332,7 @@
         packages = {
           default = perryWitBin;
           perry-wit = perryWitBin;
+          perry-wit-release = perryWitRelease;
           perry-wit-wasm = perryWitWasm;
           inherit site;
           core-helpers = coreHelpers;
@@ -316,6 +340,8 @@
           template-component = templateComponent;
           wasi-wit = wasiP3Wit;
           wasmtime = wasmtimeCli;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          perry-wit-static = perryWitStatic;
         };
 
         apps.site = {

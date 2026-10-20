@@ -59,7 +59,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -83,7 +83,7 @@ jobs:
     - run: nix flake check -L --keep-going
       if: matrix.os == 'ubuntu-latest'
     - run: |
-        nix build -L .#perry-wit
+        nix build -L .#perry-wit-release
         mkdir -p dist
         tar -czf "dist/perry-wit-${{ matrix.target }}.tar.gz" -C result/bin perry-wit
     - uses: actions/upload-artifact@v7
