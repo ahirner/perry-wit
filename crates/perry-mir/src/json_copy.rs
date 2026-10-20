@@ -148,7 +148,10 @@ fn match_unwrapped_stringify(
     let def_op = text_val.defining_op()?;
     let (stringify_op, unwrap_op) =
         if Operation::is_op::<UnwrapOp>(def_op, ctx) && def_op.deref(ctx).get_num_operands() == 1 {
-            (def_op.deref(ctx).get_operand(0).defining_op()?, Some(def_op))
+            (
+                def_op.deref(ctx).get_operand(0).defining_op()?,
+                Some(def_op),
+            )
         } else {
             (def_op, None)
         };

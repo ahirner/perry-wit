@@ -117,7 +117,10 @@ export function run(input:string):string {
         "{ x: perry.string  }",
         "{ x_2: builtin.fp64  }",
     ] {
-        assert!(printed.contains(expected), "missing {expected} in:\n{printed}");
+        assert!(
+            printed.contains(expected),
+            "missing {expected} in:\n{printed}"
+        );
     }
     Ok(())
 }

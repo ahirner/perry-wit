@@ -140,7 +140,9 @@ impl<'s> FunctionBuilder<'s> {
         let mut absent = false;
         for (tag, ty) in variant.deref(ctx).cases() {
             if let Some(path) = &path
-                && !self.guards(path).all(|(guard, equal)| (tag == guard) == equal)
+                && !self
+                    .guards(path)
+                    .all(|(guard, equal)| (tag == guard) == equal)
             {
                 continue;
             }

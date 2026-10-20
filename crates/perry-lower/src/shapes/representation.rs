@@ -191,8 +191,7 @@ impl Shapes<'_> {
         for &ty in members {
             match ty.hir(ctx) {
                 HirType::Null => {
-                    absence =
-                        crate::coerce::merge_absence(absence, Some(perry_mir::Absence::Null));
+                    absence = crate::coerce::merge_absence(absence, Some(perry_mir::Absence::Null));
                 }
                 HirType::Void => {
                     absence =
