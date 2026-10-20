@@ -9,7 +9,72 @@ enum ShortCircuit {
     Or,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Equality {
+    SameValue,
+    SameValueZero,
+}
+
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn same_value(
+        &mut self,
+        ctx: &mut Context,
+        lhs: Value,
+        rhs: Value,
+        equality: Equality,
+    ) -> Result<Value> {
+        let equal = match equality {
+            Equality::SameValue => self.comparison_values(ctx, &CompareOp::Eq, lhs, rhs)?,
+            Equality::SameValueZero => self.compare(ctx, CompareKind::Eq, lhs, rhs),
+        };
+        let numeric = |value: Value| Kind::of(ctx, present_type(ctx, value.get_type(ctx)));
+        let numbers = numeric(lhs) == Some(Kind::Number) && numeric(rhs) == Some(Kind::Number);
+        if !numbers
+            && !(equality == Equality::SameValueZero && numeric(lhs) == Some(Kind::NumberString))
+        {
+            return Ok(equal);
+        }
+        let bool_ty = equal.get_type(ctx);
+        self.choose(
+            ctx,
+            bool_ty,
+            equal,
+            |b, ctx| {
+                if equality == Equality::SameValueZero {
+                    return Ok(equal);
+                }
+                // Strict equality already established matching absence states. Coercion
+                // makes both nulls +0 and both undefineds NaN without unwrapping either.
+                let lhs = b.arithmetic(ctx, lhs);
+                let rhs = b.arithmetic(ctx, rhs);
+                let zero = b.number(ctx, 0.0);
+                let is_zero = b.compare(ctx, CompareKind::Eq, lhs, zero);
+                b.choose(
+                    ctx,
+                    bool_ty,
+                    is_zero,
+                    |b, ctx| {
+                        let one = b.number(ctx, 1.0);
+                        let lhs = b.binary(ctx, BinaryKind::Div, one, lhs);
+                        let rhs = b.binary(ctx, BinaryKind::Div, one, rhs);
+                        Ok(b.compare(ctx, CompareKind::Eq, lhs, rhs))
+                    },
+                    |_, _| Ok(equal),
+                )
+            },
+            |b, ctx| {
+                let lhs_nan = b.compare(ctx, CompareKind::Ne, lhs, lhs);
+                b.choose(
+                    ctx,
+                    bool_ty,
+                    lhs_nan,
+                    |b, ctx| Ok(b.compare(ctx, CompareKind::Ne, rhs, rhs)),
+                    |_, _| Ok(lhs_nan),
+                )
+            },
+        )
+    }
+
     /// `left op right` for arithmetic operators and string concatenation.
     pub(super) fn binary_expression(
         &mut self,

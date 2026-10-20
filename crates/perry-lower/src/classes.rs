@@ -1,7 +1,6 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
-use crate::{builder::LocalBinding, inline::InlineResult, shapes::TypeId};
-use perry_mir::OptionalType;
+use crate::{inline::InlineResult, shapes::TypeId};
 
 enum ClassArguments<'a, 's> {
     Expressions(&'s [Expr]),
@@ -412,41 +411,34 @@ impl<'s> FunctionBuilder<'s> {
             !func.is_async && !func.is_generator,
             "async or generator class methods are not supported yet"
         );
-        // Evaluate caller arguments in the caller's scope before switching `locals` and `this_slot`.
-        enum EvalArg {
-            Present(Value),
-            Omitted,
-            Rest(Value),
-        }
-        let mut evaluated_args = Vec::with_capacity(func.params.len());
-        for (i, param) in func.params.iter().enumerate() {
-            if param.is_rest {
-                let rest_ty =
-                    self.shapes
-                        .class_value_type(ctx, owner_class, type_args, &param.ty)?;
-                let elem_ty = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
-                    .map_err(|_| anyhow!("rest parameter must have array type"))?
-                    .deref(ctx)
-                    .element();
-                let mut elems = Vec::new();
-                match args {
-                    ClassArguments::Evaluated(values) => {
-                        for &v in values.iter().skip(i) {
-                            elems.push(self.fit(ctx, v, elem_ty)?);
-                        }
-                    }
-                    ClassArguments::Expressions(expressions) => {
-                        for arg in expressions.iter().skip(i) {
-                            let v = self.expression_with(ctx, arg, Some(elem_ty))?;
-                            elems.push(self.fit(ctx, v, elem_ty)?);
-                        }
+        let mut args = args;
+        let mut next_arg = |this: &mut Self,
+                            ctx: &mut Context,
+                            expected,
+                            default: Option<&Expr>| {
+            match &mut args {
+                ClassArguments::Evaluated(values) => {
+                    let value = values.first().copied();
+                    *values = values.get(1..).unwrap_or_default();
+                    Ok(value)
+                }
+                ClassArguments::Expressions(expressions) => {
+                    let Some((expr, rest)) = expressions.split_first() else {
+                        return Ok(None);
+                    };
+                    *expressions = rest;
+                    if matches!(expr, Expr::Undefined) && default.is_some() {
+                        Ok(None)
+                    } else {
+                        this.expression_with(ctx, expr, expected).map(Some)
                     }
                 }
-                let arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, elems));
-                evaluated_args.push((Some(rest_ty), EvalArg::Rest(arr)));
-                break;
             }
-            let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) {
+        };
+        let mut evaluated_args = Vec::with_capacity(func.params.len());
+        for param in &func.params {
+            let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) && !param.is_rest
+            {
                 None
             } else {
                 Some(
@@ -454,28 +446,26 @@ impl<'s> FunctionBuilder<'s> {
                         .class_value_type(ctx, owner_class, type_args, &param.ty)?,
                 )
             };
-            let evaluated = match args {
-                ClassArguments::Evaluated(values) => values
-                    .get(i)
-                    .copied()
-                    .map_or(EvalArg::Omitted, EvalArg::Present),
-                ClassArguments::Expressions(expressions) => match expressions.get(i) {
-                    Some(Expr::Undefined) if param.default.is_some() => EvalArg::Omitted,
-                    Some(expr) => EvalArg::Present(self.expression_with(ctx, expr, param_ty)?),
-                    None => EvalArg::Omitted,
-                },
+            let value = if param.is_rest {
+                let rest_ty = param_ty.context("rest parameter must have array type")?;
+                let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
+                    .map_err(|_| anyhow!("rest parameter must have array type"))?
+                    .deref(ctx)
+                    .element();
+                let mut items = Vec::new();
+                while let Some(value) = next_arg(self, ctx, Some(element), None)? {
+                    items.push(self.fit(ctx, value, element)?);
+                }
+                Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)))
+            } else {
+                next_arg(self, ctx, param_ty, param.default.as_ref())?
             };
-            evaluated_args.push((param_ty, evaluated));
-        }
-        // Any excess arguments beyond declared params are still evaluated for side effects.
-        if let ClassArguments::Expressions(args) = args
-            && !func.params.iter().any(|p| p.is_rest)
-            && args.len() > func.params.len()
-        {
-            for arg in &args[func.params.len()..] {
-                self.expression(ctx, arg)?;
+            evaluated_args.push((param_ty, value));
+            if param.is_rest {
+                break;
             }
         }
+        while next_arg(self, ctx, None, None)?.is_some() {}
 
         self.with_class_expansion(
             ctx,
@@ -485,52 +475,19 @@ impl<'s> FunctionBuilder<'s> {
                 if let ClassReceiver::Constructor(slot) = receiver {
                     this.init_own_class_fields(ctx, owner_class, slot)?;
                 }
-                let saved_locals = this.locals.scope();
-                let saved_closures = this.closures.scope();
-                let saved_this = this.this_slot.take();
-                let guards = this.variant_guards.len();
-                let finallies = std::mem::take(&mut this.finallies);
-                let controls = std::mem::take(&mut this.controls);
-                this.this_slot = match receiver {
+                let this_slot = match receiver {
                     ClassReceiver::Static => None,
                     ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => Some(slot),
                 };
 
-                let result = (|| {
+                let slot = this.with_inline_scope(ctx, this_slot, |this, ctx| {
                     for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
-                        match eval_arg {
-                            EvalArg::Rest(arr) => {
-                                let slot = this.entry_slot(ctx, arr.get_type(ctx));
-                                this.store(ctx, slot, arr);
-                                this.locals.insert(param.id, LocalBinding::plain(slot));
-                            }
-                            EvalArg::Omitted => {
-                                let val = if let Some(def_expr) = &param.default {
-                                    let def_val = this.expression_with(ctx, def_expr, param_ty)?;
-                                    match param_ty {
-                                        Some(ty) => this.fit(ctx, def_val, ty)?,
-                                        None => def_val,
-                                    }
-                                } else if let Some(ty) = param_ty {
-                                    let ty = if admits_undefined(ctx, ty) {
-                                        ty
-                                    } else {
-                                        OptionalType::get(ctx, ty).into()
-                                    };
-                                    this.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
-                                } else {
-                                    let f64_ty = FP64Type::get(ctx).into();
-                                    let opt_ty = OptionalType::get(ctx, f64_ty).into();
-                                    this.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))
-                                };
-                                let slot = this.entry_slot(ctx, val.get_type(ctx));
-                                this.store(ctx, slot, val);
-                                this.locals.insert(param.id, LocalBinding::plain(slot));
-                            }
-                            EvalArg::Present(value) => {
-                                this.bind_inline_parameter(ctx, param, value, param_ty)?;
-                            }
-                        }
+                        this.bind_parameter(
+                            ctx,
+                            param,
+                            eval_arg,
+                            param_ty.map(BindingType::plain),
+                        )?;
                     }
 
                     let result_type = if matches!(receiver, ClassReceiver::Constructor(_))
@@ -546,14 +503,7 @@ impl<'s> FunctionBuilder<'s> {
                             .map_or(InlineResult::Inferred, InlineResult::Declared)
                     };
                     this.inline_body(ctx, &func.body, &func.params, result_type)
-                })();
-                this.locals.restore(saved_locals);
-                this.closures.restore(saved_closures);
-                this.this_slot = saved_this;
-                this.variant_guards.truncate(guards);
-                this.finallies = finallies;
-                this.controls = controls;
-                let slot = result?;
+                })?;
                 if let ClassReceiver::Constructor(slot) = receiver {
                     return this.load(ctx, slot).map(Some);
                 }

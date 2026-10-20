@@ -368,7 +368,16 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectFromEntries(entries) => {
                 Ok(Some(self.object_from_entries(ctx, entries, expected)?))
             }
-            Expr::ObjectIs(a, b) => Ok(Some(self.object_is(ctx, a, b)?)),
+            Expr::ObjectIs(a, b) => {
+                let lhs = self.expression(ctx, a)?;
+                let rhs = self.expression(ctx, b)?;
+                Ok(Some(self.same_value(
+                    ctx,
+                    lhs,
+                    rhs,
+                    crate::operators::Equality::SameValue,
+                )?))
+            }
             Expr::ArrayIsArray(v) => Ok(Some(self.array_is_array(ctx, v)?)),
             Expr::In { property, object } => Ok(Some(self.in_operator(ctx, property, object)?)),
             Expr::Delete(inner) => Ok(Some(self.delete_operator(ctx, inner)?)),
@@ -522,27 +531,5 @@ impl<'s> FunctionBuilder<'s> {
             Ok(())
         })?;
         Ok(set)
-    }
-
-    pub(super) fn same_value_zero(
-        &mut self,
-        ctx: &mut Context,
-        a: Value,
-        b: Value,
-        ty: TypeHandle,
-    ) -> Result<Value> {
-        let eq = self.compare(ctx, CompareKind::Eq, a, b);
-        if matches!(
-            Kind::of(ctx, present_type(ctx, ty)),
-            Some(Kind::Number | Kind::NumberString)
-        ) {
-            let bool_ty = eq.get_type(ctx);
-            let a_nan = self.compare(ctx, CompareKind::Ne, a, a);
-            let b_nan = self.compare(ctx, CompareKind::Ne, b, b);
-            let both_nan = self.choose(ctx, bool_ty, a_nan, |_, _| Ok(b_nan), |_, _| Ok(a_nan))?;
-            self.choose(ctx, bool_ty, eq, |_, _| Ok(eq), |_, _| Ok(both_nan))
-        } else {
-            Ok(eq)
-        }
     }
 }

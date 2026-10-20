@@ -6,42 +6,34 @@ fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow:
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
+fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic {
+    lower_without_foreign(&mut Context::new(), source, file)
+        .err()
+        .expect("rejection")
+        .downcast()
+        .expect("located diagnostic")
+}
+
 /// Diagnostic messages are tabled in the integration `diagnostics_test`; this pins the spans.
 #[test]
 fn unsupported_forms_are_rejected_with_located_diagnostics() {
-    let ctx = &mut Context::new();
-    let err = lower_without_foreign(
-        ctx,
-        "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
-        "case.ts",
-    )
-    .err()
-    .expect("rejection");
-    let diag = err
-        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
-        .expect("diagnostic");
-    assert_eq!(diag.message, "cannot find name 'a'");
-    let span = diag.span.as_ref().expect("span on unresolved identifier");
-    assert_eq!(span.start_line, 5);
-    assert_eq!(span.start_column, 13);
-
-    let call_err = lower_without_foreign(
-        ctx,
-        "export function run(x: number): string {\n  return x.toFixed(2);\n}",
-        "case.ts",
-    )
-    .err()
-    .expect("rejection");
-    let call_diag = call_err
-        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
-        .expect("diagnostic");
-    assert_eq!(
-        call_diag.message,
-        "method toFixed is not supported on number yet"
-    );
-    let call_span = call_diag.span.as_ref().expect("span on method call");
-    assert_eq!(call_span.start_line, 2);
-    assert_eq!(call_span.start_column, 10);
+    for (source, message, location) in [
+        (
+            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+            "cannot find name 'a'",
+            (5, 13),
+        ),
+        (
+            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+            "method toFixed is not supported on number yet",
+            (2, 10),
+        ),
+    ] {
+        let diagnostic = rejection(source, "case.ts");
+        assert_eq!(diagnostic.message, message);
+        let span = diagnostic.span.expect("source location");
+        assert_eq!((span.start_line, span.start_column), location);
+    }
 }
 
 #[test]
@@ -125,99 +117,76 @@ export function run(input:string):string {
     Ok(())
 }
 
-mod classes {
-    use super::*;
-
-    fn assert_recursive_diagnostic(source: &str, target: &str) {
-        let error = lower_without_foreign(&mut Context::new(), source, "classes.ts")
-            .err()
-            .expect("recursive inline expansion must be rejected");
-        let diagnostic = error
-            .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
-            .expect("located diagnostic");
+#[test]
+fn recursive_class_calls_have_located_diagnostics() {
+    for (members, entry, target) in [
+        (
+            "count(n:number):number { if(n<=0)return 0; return 1+this.count(n-1); }",
+            "return new Counter().count(3);",
+            "Counter.count",
+        ),
+        (
+            "first(n:number):number { return this.second(n); }
+             second(n:number):number { return this.first(n); }",
+            "return new Counter().first(3);",
+            "Counter.first",
+        ),
+        (
+            "count(n:number):number { return this.count(this.count(n-1)); }",
+            "return new Counter().count(3);",
+            "Counter.count",
+        ),
+        (
+            "static count(n:number):number { return Counter.count(n-1); }",
+            "return Counter.count(3);",
+            "Counter.count",
+        ),
+        (
+            "count(n:number=this.count()):number { return n; }",
+            "return new Counter().count();",
+            "Counter.count",
+        ),
+        (
+            "get count():number { return this.count; }",
+            "return new Counter().count;",
+            "Counter",
+        ),
+        (
+            "set count(n:number) { this.count=n; }",
+            "const c=new Counter(); c.count=3; return 0;",
+            "Counter",
+        ),
+        (
+            "constructor() { new Counter(); }",
+            "new Counter(); return 0;",
+            "Counter",
+        ),
+        (
+            "count:number=1;
+             constructor(n:number=new Counter().count) { this.count=n; }",
+            "return new Counter().count;",
+            "Counter",
+        ),
+        (
+            "count:number=new Counter().count;",
+            "return new Counter().count;",
+            "field initialization of class Counter",
+        ),
+        (
+            "count:number=new Counter().count; constructor() {}",
+            "return new Counter().count;",
+            "Counter",
+        ),
+    ] {
+        let source =
+            format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
+        let diagnostic = rejection(&source, "classes.ts");
         assert!(
             diagnostic.message.contains("recursive inline") && diagnostic.message.contains(target),
-            "{error:#}"
+            "{source}\n{diagnostic:?}"
         );
-        let span = diagnostic.span.as_ref().expect("source location");
+        let span = diagnostic.span.expect("source location");
         assert_eq!(span.file.to_string_lossy(), "classes.ts");
-        assert!(span.end_byte > span.start_byte, "{span:?}");
-    }
-
-    #[test]
-    fn recursive_instance_calls_include_mutual_and_argument_cycles() {
-        assert_recursive_diagnostic(
-            "class Counter { count(n:number):number { if(n<=0)return 0; return 1+this.count(n-1); } }
-             export function run():number { return new Counter().count(3); }",
-            "Counter.count",
-        );
-        assert_recursive_diagnostic(
-            "class Counter {
-                first(n:number):number { return this.second(n); }
-                second(n:number):number { return this.first(n); }
-             }
-             export function run():number { return new Counter().first(3); }",
-            "Counter.first",
-        );
-        assert_recursive_diagnostic(
-            "class Counter { count(n:number):number { return this.count(this.count(n-1)); } }
-             export function run():number { return new Counter().count(3); }",
-            "Counter.count",
-        );
-    }
-
-    #[test]
-    fn recursive_static_calls_and_parameter_defaults_are_rejected() {
-        assert_recursive_diagnostic(
-            "class Counter { static count(n:number):number { return Counter.count(n-1); } }
-             export function run():number { return Counter.count(3); }",
-            "Counter.count",
-        );
-        assert_recursive_diagnostic(
-            "class Counter { count(n:number=this.count()):number { return n; } }
-             export function run():number { return new Counter().count(); }",
-            "Counter.count",
-        );
-    }
-
-    #[test]
-    fn recursive_accessors_are_rejected() {
-        assert_recursive_diagnostic(
-            "class Counter { get count():number { return this.count; } }
-             export function run():number { return new Counter().count; }",
-            "Counter",
-        );
-        assert_recursive_diagnostic(
-            "class Counter { set count(n:number) { this.count=n; } }
-             export function run():number { const c=new Counter(); c.count=3; return 0; }",
-            "Counter",
-        );
-    }
-
-    #[test]
-    fn recursive_constructors_and_initializers_are_rejected() {
-        assert_recursive_diagnostic(
-            "class Counter { constructor() { new Counter(); } }
-             export function run():number { new Counter(); return 0; }",
-            "Counter",
-        );
-        assert_recursive_diagnostic(
-            "class Counter {
-                count:number=1;
-                constructor(n:number=new Counter().count) { this.count=n; }
-             }
-             export function run():number { return new Counter().count; }",
-            "Counter",
-        );
-        assert_recursive_diagnostic(
-            "class Counter { count:number=new Counter().count; }
-             export function run():number { return new Counter().count; }",
-            "field initialization of class Counter",
-        );
-        assert_recursive_diagnostic(
-            "class Counter { count:number=new Counter().count; constructor() {} }
-             export function run():number { return new Counter().count; }",
-            "Counter",
-        );
+        assert!(span.end_byte > span.start_byte, "{source}\n{span:?}");
     }
 }

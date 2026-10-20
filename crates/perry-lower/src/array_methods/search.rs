@@ -115,7 +115,12 @@ impl<'s> FunctionBuilder<'s> {
                 let matched = match predicate {
                     Predicate::Equal(needle, same_value_zero) => {
                         if same_value_zero {
-                            b.same_value_zero(ctx, item, needle, element)?
+                            b.same_value(
+                                ctx,
+                                item,
+                                needle,
+                                crate::operators::Equality::SameValueZero,
+                            )?
                         } else {
                             b.compare(ctx, CompareKind::Eq, item, needle)
                         }

@@ -1,28 +1,20 @@
 //! Observable array, Map, and Set semantics compared against Node.
-use crate::{core_program::Program, node_oracle::NodeOracle};
-
-fn matches_node(source: &str) -> anyhow::Result<()> {
-    let oracle = NodeOracle::typescript(source, "console.log(run());")?;
-    let expected = oracle.run(&[])?.trim().parse::<f64>()?;
-    assert_eq!(expected, 0.0, "Node regression fixture");
-    let mut program = Program::checked(source, "collection-semantics.ts");
-    program.stress_collection(true);
-    let (results, _) = program.call("run", &[]);
-    assert_eq!(results[0].unwrap_f64(), expected);
-    if let Some(status) = results.get(1) {
-        assert_eq!(status.unwrap_i32(), 0);
-    }
-    Ok(())
-}
+use crate::node_oracle::assert_numbers;
 
 #[test]
-fn arguments_mutate_receiver_before_slice_bounds_and_reduce_length() -> anyhow::Result<()> {
-    matches_node(
+fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<()> {
+    let error = perry_wit::compile_core(
+        "export function run():number { return [,3,,1].sort()[0]; }",
+        "sparse-sort.ts",
+    )
+    .expect_err("sparse literals remain outside the dense-array profile");
+    assert!(error.to_string().contains("sparse array spreads"));
+    assert_numbers(
         r#"
 function append(a:number[], value:number, result:number):number {a.push(value);return result;}
 function shorten(a:number[]):number {a.pop();return -2;}
 function missingEnd(a:number[]):number|undefined {a.push(4);return undefined;}
-export function run():number {
+export function argumentOrder():number {
  const sliced:number[]=[1,2];
  const alias=sliced;
  const copy=sliced.slice(append(alias,3,-2),append(alias,4,4));
@@ -51,22 +43,9 @@ export function run():number {
  if(empty.reduce((acc,n)=>acc+n,append(empty,7,1))!==8)return 6;
  return 0;
 }
-"#,
-    )
-}
 
-#[test]
-fn sort_places_undefined_last_without_comparing_it() -> anyhow::Result<()> {
-    let error = perry_wit::compile_core(
-        "export function run():number { return [,3,,1].sort()[0]; }",
-        "sparse-sort.ts",
-    )
-    .expect_err("sparse literals remain outside the dense-array profile");
-    assert!(error.to_string().contains("sparse array spreads"));
-    matches_node(
-        r#"
-interface Item { rank:number; label:string }
-export function run():number {
+interface RankedItem { rank:number; label:string }
+export function sortUndefined():number {
  const dense:(number|undefined)[]=[undefined,3,undefined,1];
  const alias=dense;
  let calls=0;
@@ -97,9 +76,9 @@ copied[0]!==1 || copied[1]!==3 || copied[2]!==undefined || copied[3]!==undefined
  });
  if(!sawNull || nullable[0]!==null || nullable[1]!==1 || nullable[2]!==2 ||
 nullable[3]!==undefined)return 4;
- const first:Item={rank:1,label:'a'};
- const second:Item={rank:1,label:'b'};
- const items:(Item|undefined)[]=[undefined,first,second];
+ const first:RankedItem={rank:1,label:'a'};
+ const second:RankedItem={rank:1,label:'b'};
+ const items:(RankedItem|undefined)[]=[undefined,first,second];
  const stable=items.toSorted((a,b)=>{
    if(a===undefined || b===undefined)throw new Error('undefined object');
    return a.rank-b.rank;
@@ -112,15 +91,8 @@ nullable[3]!==undefined)return 4;
  });
  return 0;
 }
-"#,
-    )
-}
 
-#[test]
-fn map_and_set_canonicalize_negative_zero_at_storage() -> anyhow::Result<()> {
-    matches_node(
-        r#"
-export function run():number {
+export function canonicalKeys():number {
  const map=new Map<number,number>([[-0,1],[2,2]]);
  map.set(-0,3);
  let trace='';
@@ -150,16 +122,9 @@ export function run():number {
  if(numbers.size!==2 || !numbers.has(NaN) || !numbers.has(-0))return 10;
  return 0;
 }
-"#,
-    )
-}
 
-#[test]
-fn intersection_traverses_the_smaller_set_and_receiver_on_ties() -> anyhow::Result<()> {
-    matches_node(
-        r#"
 function grow(set:Set<number>, other:Set<number>):Set<number> {set.add(4);return other;}
-export function run():number {
+export function intersectionOrder():number {
  const receiver=new Set<number>([3,1,2]);
  const smaller=new Set<number>([2,3]);
  if(Array.from(receiver.intersection(smaller)).join(',')!=='2,3')return 1;
@@ -177,16 +142,9 @@ export function run():number {
  if(Array.from(smaller.symmetricDifference(new Set<number>([3,1]))).join(',')!=='2,1')return 9;
  return 0;
 }
-"#,
-    )
-}
 
-#[test]
-fn group_by_observes_live_input_and_stores_canonical_keys() -> anyhow::Result<()> {
-    matches_node(
-        r#"
 interface Item { value:number }
-export function run():number {
+export function liveGrouping():number {
  const items:Item[]=[{value:1},{value:2}];
  const alias=items;
  let trace='';
@@ -222,5 +180,12 @@ export function run():number {
  return 0;
 }
 "#,
+        &[
+            ("argumentOrder", &[], 0.0),
+            ("sortUndefined", &[], 0.0),
+            ("canonicalKeys", &[], 0.0),
+            ("intersectionOrder", &[], 0.0),
+            ("liveGrouping", &[], 0.0),
+        ],
     )
 }

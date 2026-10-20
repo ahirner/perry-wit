@@ -1,4 +1,4 @@
-use crate::{core_program::Program, node_oracle::NodeOracle};
+use crate::node_oracle::assert_numbers;
 
 #[test]
 fn same_value_evaluates_once_and_preserves_optional_numbers() -> anyhow::Result<()> {
@@ -15,20 +15,25 @@ export function run(x: number): number {
     if (Object.is(a, 0) || Object.is(0, a)) return 3;
     if (!Object.is(a, a) || !Object.is(NaN, NaN)) return 4;
     const nan: number | undefined = x === 0 ? NaN : undefined;
-    if (Object.is(nan, NaN) !== (x === 0)) return 5;
+    const otherNan: number | undefined = x === 1 ? undefined : Number('invalid');
+    if (Object.is(nan, NaN) !== (x === 0) || Object.is(NaN, nan) !== (x === 0) ||
+        !Object.is(nan, otherNan)) return 5;
     const nullable: number | null = x === 0 ? -0 : null;
-    if (Object.is(nullable, 0) || !Object.is(nullable, nullable)) return 6;
+    if (Object.is(nullable, 0) || Object.is(0, nullable) || !Object.is(nullable, nullable) ||
+        Object.is(nullable, null) !== (x !== 0) || !Object.is(null, null)) return 6;
+    const keys: (number | null | undefined)[] = [NaN, undefined, null, -0];
+    if (!keys.includes(NaN) || !keys.includes(undefined) || !keys.includes(null) ||
+        !keys.includes(0) || keys.includes(1)) return 7;
+    const map = new Map<number | null | undefined, number>([[NaN, 1], [undefined, 2], [null, 3]]);
+    map.set(NaN, 4);
+    if (map.size !== 3 || map.get(NaN) !== 4 || map.get(undefined) !== 2 ||
+        map.get(null) !== 3 || map.has(1)) return 8;
+    const set = new Set<number | null | undefined>([NaN, NaN, undefined, null]);
+    if (set.size !== 3 || !set.has(NaN) || !set.has(undefined) || !set.has(null) || set.has(1)) return 9;
     return 0;
 }
 "#;
-    let oracle = NodeOracle::typescript(source, "console.log(run(Number(process.argv[2])));")?;
-    let mut program = Program::checked(source, "same-value.ts");
-    for input in [0.0, 1.0] {
-        let expected = oracle.run(&[&input.to_string()])?.trim().parse::<f64>()?;
-        assert_eq!(expected, 0.0, "Node regression fixture");
-        assert_eq!(program.number("run", input), expected);
-    }
-    Ok(())
+    assert_numbers(source, &[("run", &[0.0], 0.0), ("run", &[1.0], 0.0)])
 }
 
 #[test]
@@ -96,15 +101,5 @@ export function run(): number {
         .replace("/*FIELDS*/", &fields.join(","))
         .replace("/*NAMES*/", &names.join(","))
         .replace("/*VALUES*/", &values.join(","));
-    let oracle = NodeOracle::typescript(&source, "console.log(run());")?;
-    let expected = oracle.run(&[])?.trim().parse::<f64>()?;
-    let mut program = Program::checked(&source, "record-order.ts");
-    program.stress_collection(true);
-    assert_eq!(expected, 0.0, "Node regression fixture");
-    let (results, _) = program.call("run", &[]);
-    assert_eq!(results[0].unwrap_f64(), expected);
-    if let Some(status) = results.get(1) {
-        assert_eq!(status.unwrap_i32(), 0);
-    }
-    Ok(())
+    assert_numbers(&source, &[("run", &[], 0.0)])
 }

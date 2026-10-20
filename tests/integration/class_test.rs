@@ -1,9 +1,9 @@
-use crate::core_program::Program;
-use crate::node_oracle::NodeOracle;
+use crate::node_oracle::assert_numbers;
 
 #[test]
-fn constructor_arguments_precede_fields_defaults_and_body() -> anyhow::Result<()> {
-    let source = r#"
+fn class_calls_preserve_evaluation_order_and_finite_nesting() -> anyhow::Result<()> {
+    assert_numbers(
+        r#"
 let step=0;
 function next():number { step+=1; return step; }
 class Counter {
@@ -20,7 +20,7 @@ class Rest {
     last:number;
     constructor(...values:number[]) { this.first=values[0]; this.last=values[1]; }
 }
-export function run():number {
+export function constructorOrder():number {
     step=0;
     const explicit=new Counter(next());
     if(explicit.field!==2 || explicit.arg!==1 || step!==2)return 1;
@@ -43,43 +43,24 @@ export function run():number {
     if(excess.arg!==1 || excess.field!==3 || step!==3)return 5;
     return 0;
 }
-"#;
-    let oracle = NodeOracle::typescript(source, "console.log(run());")?;
-    assert_eq!(oracle.run(&[])?.trim(), "0");
-    assert_eq!(Program::new(source).call("run", &[]).0[0].unwrap_f64(), 0.0);
-    Ok(())
-}
 
-#[test]
-fn implicit_constructor_preserves_argument_effects_and_failures() {
-    let source = r#"
-let step=0;
-function next():number { step+=1; return step; }
 function fail():number { throw new Error("argument"); }
-class Counter { field:number=next(); }
-export function run():number {
+class Implicit { field:number=next(); }
+export function implicitConstructor():number {
     step=0;
-    const counter=new Counter(next(),next());
+    const counter=new Implicit(next(),next());
     if(counter.field!==3 || step!==3)return 1;
     step=0;
-    try { new Counter(fail()); } catch(error) { return step; }
+    try { new Implicit(fail()); } catch(error) { return step; }
     return 2;
 }
-"#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (0.0, 0));
-}
 
-#[test]
-fn generic_constructors_preserve_context_and_single_evaluation() {
-    let source = r#"
-let step=0;
-function next():number { step+=1; return step; }
 class Box<T> {
     field:number=next();
     value:T;
     constructor(value:T) { this.value=value; }
 }
-export function run():number {
+export function genericConstruction():number {
     step=0;
     const explicit:Box<number>=new Box<number>(next());
     if(explicit.value!==1 || explicit.field!==2 || step!==2)return 1;
@@ -94,14 +75,8 @@ export function run():number {
     if(empty.value.length!==0 || typed.value.length!==0)return 4;
     return 0;
 }
-"#;
-    assert_eq!(Program::new(source).call("run", &[]).0[0].unwrap_f64(), 0.0);
-}
 
-#[test]
-fn finite_nested_class_calls_and_repeated_construction_remain_supported() {
-    let source = r#"
-class Counter {
+class Nested {
     count:number;
     constructor(count:number=1) { this.count=count; }
     add(n:number=this.count):number { return this.count+n; }
@@ -109,12 +84,18 @@ class Counter {
     get value():number { return this.count; }
     set value(n:number) { this.count=n; }
 }
-export function run():number {
-    const counter=new Counter(new Counter().count);
-    const another=new Counter(counter.add(counter.add(1)));
+export function finiteNesting():number {
+    const counter=new Nested(new Nested().count);
+    const another=new Nested(counter.add(counter.add(1)));
     counter.value=another.value;
-    return Counter.identity(Counter.identity(counter.add()));
+    return Nested.identity(Nested.identity(counter.add()));
 }
-"#;
-    assert_eq!(Program::new(source).call("run", &[]).0[0].unwrap_f64(), 6.0);
+"#,
+        &[
+            ("constructorOrder", &[], 0.0),
+            ("implicitConstructor", &[], 0.0),
+            ("genericConstruction", &[], 0.0),
+            ("finiteNesting", &[], 6.0),
+        ],
+    )
 }

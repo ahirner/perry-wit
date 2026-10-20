@@ -12,7 +12,6 @@
 //! position and its last value) is applied when serializing or enumerating ([canonical]).
 //! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
 //! the same step, so duplicate and numeric keys come out as in Node.
-mod enumeration;
 mod order;
 mod reflection;
 mod replacer;

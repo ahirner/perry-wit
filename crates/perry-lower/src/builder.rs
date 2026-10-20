@@ -184,52 +184,17 @@ impl<'s> FunctionBuilder<'s> {
         }
         for (index, param) in signature.params.iter().enumerate() {
             let arg_val = builder.entry.deref(ctx).get_argument(index);
-            let binding = param.binding;
-            let base_binding = param.base;
-            let is_never = matches!(param.source.ty, HirType::Never);
-            if let Some(default_expr) = &param.source.default
-                && !matches!(default_expr, Expr::Undefined)
+            let binding = if param
+                .source
+                .default
+                .as_ref()
+                .is_some_and(|expr| !matches!(expr, Expr::Undefined))
             {
-                let is_undef = if builder.is_optional(ctx, arg_val) {
-                    builder.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, arg_val))
-                } else {
-                    builder.boolean(ctx, false)
-                };
-                let init_val = builder.choose(
-                    ctx,
-                    base_binding.carrier,
-                    is_undef,
-                    |b, ctx| {
-                        let d = b.expression_with(ctx, default_expr, Some(base_binding.carrier))?;
-                        b.fit_binding(ctx, d, base_binding)
-                    },
-                    |b, ctx| {
-                        let s = b.strip_undefined(ctx, arg_val)?;
-                        b.fit_binding(ctx, s, base_binding)
-                    },
-                )?;
-                let slot = builder.entry_slot(ctx, base_binding.carrier);
-                builder.store(ctx, slot, init_val);
-                builder.locals.insert(
-                    param.source.id,
-                    LocalBinding {
-                        slot,
-                        integer: base_binding.integer,
-                        is_never,
-                    },
-                );
+                param.base
             } else {
-                let slot = builder.entry_slot(ctx, arg_val.get_type(ctx));
-                builder.store(ctx, slot, arg_val);
-                builder.locals.insert(
-                    param.source.id,
-                    LocalBinding {
-                        slot,
-                        integer: binding.integer,
-                        is_never,
-                    },
-                );
-            }
+                param.binding
+            };
+            builder.bind_parameter(ctx, param.source, Some(arg_val), Some(binding))?;
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);

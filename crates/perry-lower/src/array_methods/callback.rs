@@ -68,27 +68,6 @@ impl<'s> FunctionBuilder<'s> {
             !is_async && !is_generator && params.iter().all(|p| !p.is_rest),
             "array callbacks must be synchronous; rest parameters are not supported"
         );
-        let saved_locals = self.locals.scope();
-        let saved_closures = self.closures.scope();
-        // Guards only grow above this length inside the body; branches truncate back.
-        let guards = self.variant_guards.len();
-        for (index, param) in params.iter().enumerate() {
-            let value = match arguments.get(index) {
-                Some(&value) => value,
-                None => {
-                    let ty = self.shapes.value_type(ctx, &param.ty)?;
-                    ensure!(
-                        param.default.is_some() || admits_undefined(ctx, ty),
-                        "missing required callback argument"
-                    );
-                    let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
-                }
-            };
-            self.bind_inline_parameter(ctx, param, value, None)?;
-        }
-        let finallies = std::mem::take(&mut self.finallies);
-        let controls = std::mem::take(&mut self.controls);
         let declared = match return_type {
             HirType::Number | HirType::String | HirType::Boolean | HirType::Union(_) => {
                 self.shapes.value_type(ctx, return_type).ok()
@@ -98,13 +77,24 @@ impl<'s> FunctionBuilder<'s> {
         let result_type = expected
             .or(declared)
             .map_or(InlineResult::Inferred, InlineResult::Declared);
-        let result = self.inline_body(ctx, body, params, result_type);
-        self.locals.restore(saved_locals);
-        self.closures.restore(saved_closures);
-        self.variant_guards.truncate(guards);
-        self.finallies = finallies;
-        self.controls = controls;
-        let slot = result?;
+        let slot = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
+            for (index, param) in params.iter().enumerate() {
+                let value = match arguments.get(index) {
+                    Some(&value) => value,
+                    None => {
+                        let ty = this.shapes.value_type(ctx, &param.ty)?;
+                        ensure!(
+                            param.default.is_some() || admits_undefined(ctx, ty),
+                            "missing required callback argument"
+                        );
+                        let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
+                        this.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                    }
+                };
+                this.bind_parameter(ctx, param, Some(value), None)?;
+            }
+            this.inline_body(ctx, body, params, result_type)
+        })?;
         match slot {
             Some(slot) => self.load(ctx, slot),
             None => {

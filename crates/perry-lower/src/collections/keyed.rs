@@ -46,7 +46,6 @@ impl<'s> FunctionBuilder<'s> {
         label: &str,
         entries: Value,
         key: Value,
-        key_ty: TypeHandle,
         hit: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
     ) -> Result<()> {
         self.iterate(
@@ -55,7 +54,8 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx, entry, idx, next, done| {
                 let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
                 let cand_k = b.append_value(ctx, &k_op);
-                let matched = b.same_value_zero(ctx, cand_k, key, key_ty)?;
+                let matched =
+                    b.same_value(ctx, cand_k, key, crate::operators::Equality::SameValueZero)?;
                 let hit_bb = b.new_block(ctx, &format!("{label}_hit"));
                 b.branch(ctx, matched, hit_bb, next);
                 b.switch_to(hit_bb);
@@ -73,14 +73,13 @@ impl<'s> FunctionBuilder<'s> {
         label: &str,
         entries: Value,
         key: Value,
-        key_ty: TypeHandle,
         hit: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
     ) -> Result<Value> {
         let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let found_slot = self.entry_slot(ctx, bool_ty);
         let false_val = self.boolean(ctx, false);
         self.store(ctx, found_slot, false_val);
-        self.on_live_match(ctx, label, entries, key, key_ty, |b, ctx, idx, entry| {
+        self.on_live_match(ctx, label, entries, key, |b, ctx, idx, entry| {
             hit(b, ctx, idx, entry)?;
             let true_val = b.boolean(ctx, true);
             b.store(ctx, found_slot, true_val);
@@ -104,7 +103,7 @@ impl<'s> FunctionBuilder<'s> {
         let miss = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_v_ty));
         let result = self.entry_slot(ctx, opt_v_ty);
         self.store(ctx, result, miss);
-        self.on_live_match(ctx, "kv_get", arr, key, k_ty, |b, ctx, _, entry| {
+        self.on_live_match(ctx, "kv_get", arr, key, |b, ctx, _, entry| {
             let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
             let cand_v = b.append_value(ctx, &v_op);
             let wrapped = b.fit(ctx, cand_v, opt_v_ty)?;
@@ -129,16 +128,15 @@ impl<'s> FunctionBuilder<'s> {
         let key = self.fit(ctx, key, k_ty)?;
         let key = self.canonicalize_collection_key(ctx, key)?;
         let val = self.fit(ctx, val, v_ty)?;
-        let was_found =
-            self.find_live_match(ctx, "kv_set", arr, key, k_ty, |b, ctx, _, entry| {
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, entry, "_0".to_string(), key)
-                });
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, entry, "_1".to_string(), val)
-                });
-                Ok(())
-            })?;
+        let was_found = self.find_live_match(ctx, "kv_set", arr, key, |b, ctx, _, entry| {
+            b.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, entry, "_0".to_string(), key)
+            });
+            b.emit(ctx, |ctx| {
+                FieldSetOp::new(ctx, entry, "_1".to_string(), val)
+            });
+            Ok(())
+        })?;
         self.append_unless(ctx, "kv_set", was_found, arr, box_opt, &[key, val])?;
         Ok(coll)
     }
@@ -185,7 +183,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
-        self.find_live_match(ctx, "kv_has", arr, key, k_ty, |_, _, _, _| Ok(()))
+        self.find_live_match(ctx, "kv_has", arr, key, |_, _, _, _| Ok(()))
     }
 
     /// `delete(key)` on a `Map` tombstones the entry; on a dictionary it compacts in place.
@@ -199,7 +197,7 @@ impl<'s> FunctionBuilder<'s> {
         let key = self.fit(ctx, key, k_ty)?;
         if let Some((_, v_ty, _)) = map_entry_types(ctx, coll.get_type(ctx)) {
             let arr = self.collection_entries_array(ctx, coll)?;
-            return self.find_live_match(ctx, "map_delete", arr, key, k_ty, |b, ctx, _, entry| {
+            return self.find_live_match(ctx, "map_delete", arr, key, |b, ctx, _, entry| {
                 let cleared = [("_0", k_ty), ("_1", v_ty)];
                 b.tombstone_entry(ctx, arr, entry, EntryKind::Map, &cleared, coll)
             });
@@ -207,7 +205,12 @@ impl<'s> FunctionBuilder<'s> {
         self.retain_array(ctx, coll, |b, ctx, entry| {
             let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
             let candidate = b.append_value(ctx, &k_op);
-            let matched = b.same_value_zero(ctx, candidate, key, k_ty)?;
+            let matched = b.same_value(
+                ctx,
+                candidate,
+                key,
+                crate::operators::Equality::SameValueZero,
+            )?;
             Ok(b.not(ctx, matched))
         })
     }
@@ -243,8 +246,7 @@ impl<'s> FunctionBuilder<'s> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
         let val = self.canonicalize_collection_key(ctx, val)?;
-        let present =
-            self.find_live_match(ctx, "set_has", arr, val, elem_ty, |_, _, _, _| Ok(()))?;
+        let present = self.find_live_match(ctx, "set_has", arr, val, |_, _, _, _| Ok(()))?;
         self.append_unless(ctx, "set_add", present, arr, Some(coll), &[val])?;
         Ok(coll)
     }
@@ -258,7 +260,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
-        self.find_live_match(ctx, "set_delete", arr, val, elem_ty, |b, ctx, _, entry| {
+        self.find_live_match(ctx, "set_delete", arr, val, |b, ctx, _, entry| {
             b.tombstone_entry(ctx, arr, entry, EntryKind::Set, &[("_0", elem_ty)], coll)
         })
     }

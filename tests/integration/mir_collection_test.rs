@@ -1,7 +1,7 @@
 //! Collector behaviour of compiled core modules: reclamation, forced collection with
 //! poisoning, retained roots across suspension, and allocation and root-publication counts.
 use crate::core_program::{Counter, Program};
-use crate::node_oracle::NodeOracle;
+use crate::node_oracle::assert_numbers;
 
 #[test]
 fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
@@ -49,12 +49,7 @@ export function run():number {
  return 0;
 }
 "#;
-    let oracle = NodeOracle::typescript(source, "console.log(run());")?;
-    let expected = oracle.run(&[])?.trim().parse::<f64>()?;
-    let mut program = Program::checked(source, "concat.ts");
-    program.stress_collection(true);
-    assert_eq!(program.outcome("run", &[]), (expected, 0));
-    Ok(())
+    assert_numbers(source, &[("run", &[], 0.0)])
 }
 
 #[test]

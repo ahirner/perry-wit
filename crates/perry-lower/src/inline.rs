@@ -18,6 +18,28 @@ pub(super) struct ReturnFrame {
 }
 
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn with_inline_scope<T>(
+        &mut self,
+        ctx: &mut Context,
+        this_slot: Option<Value>,
+        lower: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
+    ) -> Result<T> {
+        let locals = self.locals.scope();
+        let closures = self.closures.scope();
+        let saved_this = std::mem::replace(&mut self.this_slot, this_slot);
+        let guards = self.variant_guards.len();
+        let finallies = std::mem::take(&mut self.finallies);
+        let controls = std::mem::take(&mut self.controls);
+        let result = lower(self, ctx);
+        self.locals.restore(locals);
+        self.closures.restore(closures);
+        self.this_slot = saved_this;
+        self.variant_guards.truncate(guards);
+        self.finallies = finallies;
+        self.controls = controls;
+        result
+    }
+
     pub(super) fn inline_body(
         &mut self,
         ctx: &mut Context,

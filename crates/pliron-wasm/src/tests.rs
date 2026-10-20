@@ -318,24 +318,20 @@ fn single_use_values_stay_on_the_stack() {
     let depth = 4097;
     let mut chain = String::new();
     for index in 1..=depth {
-        let previous = if index == 1 {
-            "x".to_owned()
+        let previous = index - 1;
+        let (left, right) = if index % 2 == 0 {
+            ("difference", "k")
         } else {
-            format!("v{}", index - 1)
+            ("k", "difference")
         };
         writeln!(
             chain,
-            "left{index}, right{index} = wasm.call pair ({previous}) : {I32}, {I32};\n\
+            "left{index}, right{index} = wasm.call pair (v{previous}) : {I32}, {I32};\n\
              difference{index} = wasm.num I32Sub left{index}, right{index} : {I32};\n\
-             k{index} = builtin.constant <builtin.integer <{index}: i32>> : {I32};"
+             k{index} = builtin.constant <builtin.integer <{index}: i32>> : {I32};\n\
+             v{index} = wasm.num I32Sub {left}{index}, {right}{index} : {I32};"
         )
         .unwrap();
-        let operands = if index % 2 == 0 {
-            format!("difference{index}, k{index}")
-        } else {
-            format!("k{index}, difference{index}")
-        };
-        writeln!(chain, "v{index} = wasm.num I32Sub {operands} : {I32};").unwrap();
     }
     let input = format!(
         r#"
@@ -355,7 +351,7 @@ builtin.module @m {{
         wasm.return x, three
     }};
     builtin.func @deep: builtin.function <({I32}) -> ({I32})> {{
-      ^entry(x: {I32}):
+      ^entry(v0: {I32}):
         {chain}
         wasm.return v{depth}
     }}
