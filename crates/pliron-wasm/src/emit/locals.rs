@@ -3,14 +3,13 @@
 use super::{
     EmitResult,
     function::{FunctionEmitter, successors},
+    values::{TreeStep, value_tree},
 };
-use crate::{
-    control::{BrOp, CondBrOp},
-    types::val_type,
-};
+use crate::types::val_type;
 use pliron::{
     basic_block::BasicBlock, builtin::op_interfaces::BranchOpInterface, context::Ptr,
-    linked_list::ContainsLinkedList, operation::Operation, r#type::Typed, value::Value,
+    linked_list::ContainsLinkedList, op::op_cast, operation::Operation, r#type::Typed,
+    value::Value,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::ValType;
@@ -47,8 +46,12 @@ impl FunctionEmitter<'_> {
                 }
                 let defs: Vec<Value> = op.deref(ctx).results().filter(|v| v.is_used(ctx)).collect();
                 values.extend(defs.iter().copied());
-                let mut reads = Vec::new();
-                self.reads(op, &mut reads);
+                let reads = value_tree(ctx, &self.folded, op)
+                    .filter_map(|step| match step {
+                        TreeStep::Local(value) => Some(value),
+                        TreeStep::Operation(_) => None,
+                    })
+                    .collect();
                 list.push((reads, defs));
             }
             statements.insert(block, list);
@@ -84,7 +87,7 @@ impl FunctionEmitter<'_> {
                 for param in &params[&block] {
                     live.remove(param);
                 }
-                if live_in.get(&block) != Some(&live) {
+                if live_in.get(&block).map_or(0, HashSet::len) != live.len() {
                     live_in.insert(block, live);
                     changed = true;
                 }
@@ -130,26 +133,17 @@ impl FunctionEmitter<'_> {
             let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
                 continue;
             };
-            let edges: Vec<(Ptr<BasicBlock>, Vec<Value>)> =
-                if let Some(cond_br) = Operation::get_op::<CondBrOp>(terminator, ctx) {
-                    (0..2)
-                        .map(|succ| {
-                            (
-                                terminator.deref(ctx).get_successor(succ),
-                                cond_br.successor_operands(ctx, succ),
-                            )
-                        })
-                        .collect()
-                } else if Operation::get_op::<BrOp>(terminator, ctx).is_some() {
-                    vec![(
-                        terminator.deref(ctx).get_successor(0),
-                        terminator.deref(ctx).operands().collect(),
-                    )]
-                } else {
-                    Vec::new()
-                };
-            for (dest, args) in edges {
-                for (param, arg) in dest.deref(ctx).arguments().zip(args) {
+            let op = Operation::get_op_dyn(terminator, ctx);
+            let Some(branch) = op_cast::<dyn BranchOpInterface>(op.as_ref()) else {
+                continue;
+            };
+            for succ in 0..terminator.deref(ctx).get_num_successors() {
+                let dest = terminator.deref(ctx).get_successor(succ);
+                for (param, arg) in dest
+                    .deref(ctx)
+                    .arguments()
+                    .zip(branch.successor_operands(ctx, succ))
+                {
                     if tracked(&param) && tracked(&arg) {
                         hints.entry(param).or_default().push(arg);
                         hints.entry(arg).or_default().push(param);
@@ -219,16 +213,5 @@ impl FunctionEmitter<'_> {
             .map(|(value, local)| (value, renumber.get(&local).copied().unwrap_or(local)))
             .collect();
         Ok(())
-    }
-
-    /// Values with locals that evaluating `op` reads: its operands, through folded and
-    /// constant definitions, which are evaluated in place.
-    fn reads(&self, op: Ptr<Operation>, out: &mut Vec<Value>) {
-        for operand in op.deref(self.ctx).operands() {
-            match operand.defining_op() {
-                Some(def) if self.in_place(def) => self.reads(def, out),
-                _ => out.push(operand),
-            }
-        }
     }
 }

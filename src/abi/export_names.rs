@@ -1,4 +1,5 @@
-use wit_parser::{Function, Resolve, World, WorldItem, WorldKey};
+use super::world_functions;
+use wit_parser::{Function, Resolve, World, WorldKey};
 
 use crate::sdk::to_camel_case;
 
@@ -7,27 +8,22 @@ pub(crate) fn validate_implementation_names(
     world: &World,
 ) -> anyhow::Result<()> {
     let mut names = std::collections::BTreeMap::new();
-    for (key, item) in &world.exports {
-        let functions = match item {
-            WorldItem::Function(function) => {
-                vec![(to_camel_case(&function.name), function.name.clone())]
-            }
-            WorldItem::Interface { id, .. } => resolve.interfaces[*id]
-                .functions
-                .values()
-                .map(|function| {
-                    (
-                        interface_implementation_name(resolve, world, key, function),
-                        core_export_name(resolve, key, function),
-                    )
-                })
-                .collect(),
-            WorldItem::Type { .. } => continue,
+    for entry in world_functions(resolve, world.exports.iter()) {
+        let name = entry.implementation_name(resolve, world);
+        let export = if entry.interface.is_some() {
+            core_export_name(resolve, entry.key, entry.function)
+        } else {
+            entry.function.name.clone()
         };
-        for (name, export) in functions {
-            if let Some(previous) = names.insert(name.clone(), export.clone()) {
+        match names.entry(name) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(export);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
                 anyhow::bail!(
-                    "WIT exports '{previous}' and '{export}' both require TypeScript implementation '{name}'"
+                    "WIT exports '{}' and '{export}' both require TypeScript implementation '{}'",
+                    entry.get(),
+                    entry.key(),
                 );
             }
         }
@@ -58,21 +54,16 @@ pub(crate) fn interface_implementation_name(
     function: &Function,
 ) -> String {
     let candidate = interface_member_name(resolve, key, function);
-    let occurrences = world
-        .exports
-        .iter()
-        .map(|(key, item)| match item {
-            WorldItem::Function(function) => {
-                usize::from(to_camel_case(&function.name) == candidate)
-            }
-            WorldItem::Interface { id, .. } => resolve.interfaces[*id]
-                .functions
-                .values()
-                .filter(|function| interface_member_name(resolve, key, function) == candidate)
-                .count(),
-            _ => 0,
+    let occurrences = world_functions(resolve, world.exports.iter())
+        .filter(|entry| {
+            let name = if entry.interface.is_some() {
+                interface_member_name(resolve, entry.key, entry.function)
+            } else {
+                to_camel_case(&entry.function.name)
+            };
+            name == candidate
         })
-        .sum::<usize>();
+        .count();
     if occurrences == 1 {
         candidate
     } else {

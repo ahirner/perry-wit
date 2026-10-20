@@ -1,3 +1,4 @@
+use crate::world::Compiler::Standard;
 use std::{fs, path::PathBuf};
 
 use perry_wit::component::wit::resolve_wit;
@@ -58,4 +59,105 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
             .count(),
         1
     );
+}
+
+#[test]
+fn encoded_ambient_wasi_packages_are_not_embedded_again() -> anyhow::Result<()> {
+    if let Some(directory) = std::env::var_os("PERRY_AMBIENT_WIT_PROBE") {
+        let (resolve, _) = resolve_wit(&PathBuf::from(directory).join("application"))?;
+        let mut random_packages = resolve
+            .packages
+            .iter()
+            .map(|(_, package)| package)
+            .filter(|package| package.name.to_string() == "wasi:random@0.3.0");
+        let random = random_packages.next().expect("ambient random package");
+        assert!(random_packages.next().is_none(), "duplicate random package");
+        assert!(
+            random.interfaces.contains_key("ambient-marker"),
+            "the encoded ambient package must take precedence over embedded sources"
+        );
+        return Ok(());
+    }
+
+    let directory = tempfile::tempdir()?;
+    let ambient = directory.path().join("ambient");
+    let application = directory.path().join("application");
+    fs::create_dir(&ambient)?;
+    fs::create_dir(&application)?;
+    fs::write(
+        application.join("world.wit"),
+        "package test:encoded-ambient; world test {
+            import wasi:random/random@0.3.0;
+            import wasi:random/ambient-marker@0.3.0;
+        }",
+    )?;
+    let mut sources = wit_parser::SourceMap::new();
+    let standard = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/deps/random");
+    for entry in fs::read_dir(standard)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "wit") {
+            sources.push_str(&path.to_string_lossy(), fs::read_to_string(&path)?);
+        }
+    }
+    sources.push_str(
+        "ambient-marker.wit",
+        "package wasi:random@0.3.0; interface ambient-marker {}",
+    );
+    let package = sources
+        .parse()
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let mut resolve = wit_parser::Resolve::new();
+    let package = resolve.push_groups(package, Vec::new())?;
+    fs::write(
+        ambient.join("random.wasm"),
+        wit_component::encode(&resolve, package, false)?,
+    )?;
+
+    let result = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "wit_resolution_test::encoded_ambient_wasi_packages_are_not_embedded_again",
+            "--nocapture",
+        ])
+        .env("PERRY_AMBIENT_WIT_PROBE", directory.path())
+        .env("WASI_WIT_PATH", ambient)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    Ok(())
+}
+
+/// Local source types win over SDK name matches, and same-named records of different WIT
+/// interfaces resolve in their own modules.
+#[test]
+fn source_and_interface_types_resolve_in_their_own_modules() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("domain.ts"),
+        "export interface Options { label: string }",
+    )?;
+    let main = directory
+        .path()
+        .join("main.ts")
+        .to_string_lossy()
+        .into_owned();
+    for (wit, path, source) in [
+        (
+            "package test:local; world run {record options {count:u32} export run:func(value:options)->u32;}",
+            main.as_str(),
+            "import type { Options } from './domain.ts'; import type { Options as WitOptions } from './types/world'; function size(value:Options):number{return value.label.length;} export function run(value:WitOptions):number{return size({label:'abc'}) + value.count;}",
+        ),
+        (
+            "package test:scoped; interface left {record options {count:u32}} interface right {record options {label:string}} world run {use left.{options as left-options}; use right.{options as right-options}; export run:func(left:left-options,right:right-options)->u32;}",
+            "scoped.ts",
+            "import type { Options as Left } from 'test:scoped/left'; import type { Options as Right } from 'test:scoped/right'; export function run(left:Left,right:Right):number {return left.count + right.label.length;}",
+        ),
+    ] {
+        Standard.compile(wit, "run", path, source)?;
+    }
+    Ok(())
 }

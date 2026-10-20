@@ -16,9 +16,7 @@ pub(crate) use perry_abi::{
 };
 
 pub(crate) mod helper {
-    #[cfg(target_arch = "wasm32")]
-    #[link(wasm_import_module = "__perry_helper")]
-    unsafe extern "C" {
+    perry_abi::wasm_imports! { "__perry_helper";
         pub(crate) fn fetch_header_name(
             input: *const u8,
             len: u32,
@@ -44,61 +42,76 @@ pub(crate) mod helper {
             cap: u32,
         ) -> u64;
     }
-
-    /// The fetch helper exists only in linked modules; host builds never call it.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::missing_safety_doc)]
-    mod host {
-        pub(crate) unsafe fn fetch_header_name(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_header_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_method(_: *const u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_status_text(_: *const u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_url(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn fetch_url_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
-            unreachable!("the fetch helper runs in linked modules")
-        }
-        pub(crate) unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
-            unreachable!("the JSON helper runs in linked modules")
-        }
-        pub(crate) unsafe fn json_populate_measured(
-            _: *const u8,
-            _: u32,
-            _: *mut u8,
-            _: u32,
-        ) -> u64 {
-            unreachable!("the JSON helper runs in linked modules")
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) use host::*;
 }
 
 mod url;
 
 const INVALID: u32 = u32::MAX;
 
-/// Throw `TypeError` with `parts` concatenated.
-fn type_error(parts: &[&[u8]]) {
+pub(crate) fn join_bytes(parts: &[&[u8]]) -> *mut u8 {
     let mut message = Buffer::new();
     for part in parts {
         message.extend_from_slice(part);
     }
-    perry_abi::raise_string(TYPE_ERROR, from_bytes(message.as_slice()));
+    from_bytes(message.as_slice())
+}
+
+/// Throw `TypeError` with `parts` concatenated.
+fn type_error(parts: &[&[u8]]) {
+    perry_abi::raise_string(TYPE_ERROR, join_bytes(parts));
+}
+
+pub(crate) unsafe fn word(area: *const u8, offset: usize) -> u32 {
+    unsafe { *(area.add(offset) as *const u32) }
+}
+
+macro_rules! unlink_node {
+    ($head:expr, $target:expr) => {{
+        let mut link: *mut _ = $head;
+        while !(*link).is_null() {
+            if *link == $target {
+                *link = (**link).next;
+                break;
+            }
+            link = &mut (**link).next;
+        }
+    }};
+}
+pub(crate) use unlink_node;
+
+pub(crate) unsafe fn validate_request_init(
+    url: *mut u8,
+    method: *mut u8,
+    has_body: bool,
+    text: u32,
+    h: *mut u8,
+) -> Result<(*mut u8, u32), *mut u8> {
+    let input = unsafe { bytes(url) };
+    let capacity = 32 + input.len() as u32 * 3 + 16;
+    let output = alloc(capacity);
+    if unsafe { helper::fetch_url(input.as_ptr(), input.len() as u32, output, capacity) } != 0 {
+        return Err(join_bytes(&[b"Failed to parse URL from ", input]));
+    }
+    let name = unsafe { bytes(method) };
+    let tag = unsafe { helper::fetch_method(name.as_ptr(), name.len() as u32) };
+    if tag == INVALID {
+        return Err(join_bytes(&[b"'", name, b"' is not a valid HTTP method."]));
+    }
+    if has_body && matches!(tag, 0 | 1) {
+        return Err(from_static(
+            "Request with GET/HEAD method cannot have body.",
+        ));
+    }
+    if text != 0 {
+        headers::set_default(h, b"content-type", b"text/plain;charset=UTF-8");
+    }
+    Ok((output, tag))
 }
 
 mod body;
 mod fetch;
 mod headers;
+mod http_exchange;
 mod readable;
 mod serve;
 mod writable;

@@ -5,7 +5,7 @@ use crate::{
 };
 use pliron::{
     builtin::{
-        attributes::{IdentifierAttr, IntegerAttr, StringAttr, TypeAttr},
+        attributes::{IdentifierAttr, IntegerAttr, StringAttr, TypeAttr, VecAttr},
         op_interfaces::{
             NOpdsInterface, NRegionsInterface, NResultsInterface, OneResultInterface,
             SymbolOpInterface, SymbolTableInterface,
@@ -24,11 +24,10 @@ use pliron::{
         parsers::{spaced, type_parser},
         printers::op::typed_symb_op_header,
     },
-    location::Located,
     op::{Op, OpObj, op_cast},
     operation::Operation,
     opts::dce::SideEffects,
-    parsable::{Parsable, ParseResult, StateStream},
+    parsable::{Parsable, ParseResult, StateStream, StreamLocation},
     printable::Printable,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
@@ -77,16 +76,7 @@ pub struct NumOp;
 impl NumOp {
     pub fn new(ctx: &mut Context, opcode: NumOpcode, operands: Vec<Value>) -> Self {
         let result = pliron_type(ctx, opcode.signature().1);
-        let op = NumOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![result],
-                operands,
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![result], operands, vec![], 0);
         op.set_attr_wasm_num(ctx, opcode);
         op
     }
@@ -133,16 +123,7 @@ pub struct SelectOp;
 impl SelectOp {
     pub fn new(ctx: &mut Context, condition: Value, then: Value, otherwise: Value) -> Self {
         let ty = then.get_type(ctx);
-        SelectOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![then, otherwise, condition],
-                vec![],
-                0,
-            ),
-        }
+        Operation::new_op::<Self>(ctx, vec![ty], vec![then, otherwise, condition], vec![], 0)
     }
 }
 
@@ -168,10 +149,23 @@ fn offset_attr(ctx: &mut Context, offset: u32) -> IntegerAttr {
     integer_attr(ctx, I32_BITS, offset.into())
 }
 
-/// The `u32` offset of a memory access.
-fn offset_of(attr: &IntegerAttr) -> u32 {
-    let value: APInt = attr.clone().into();
-    value.to_u64() as u32
+macro_rules! mem_accessors {
+    ($op:ty, $kind:ident, $offset:ident) => {
+        impl $op {
+            pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
+                *self.$kind(ctx).expect("set by constructor or parser")
+            }
+
+            pub(crate) fn offset(&self, ctx: &Context) -> u32 {
+                APInt::from(
+                    self.$offset(ctx)
+                        .expect("set by constructor or parser")
+                        .clone(),
+                )
+                .to_u64() as u32
+            }
+        }
+    };
 }
 
 /// A linear-memory load from `address + offset` in memory 0, naturally aligned.
@@ -186,36 +180,15 @@ pub struct LoadOp;
 impl LoadOp {
     pub fn new(ctx: &mut Context, kind: MemKind, address: Value, offset: u32) -> Self {
         let ty = pliron_type(ctx, kind.value());
-        let op = LoadOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![address],
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![ty], vec![address], vec![], 0);
         op.set_attr_wasm_load_kind(ctx, kind);
         let offset = offset_attr(ctx, offset);
         op.set_attr_wasm_load_offset(ctx, offset);
         op
     }
-
-    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
-        *self
-            .get_attr_wasm_load_kind(ctx)
-            .expect("wasm.load gets its kind from LoadOp::new or its parsed format")
-    }
-
-    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(
-            &self
-                .get_attr_wasm_load_offset(ctx)
-                .expect("wasm.load gets its offset from LoadOp::new or its parsed format"),
-        )
-    }
 }
+
+mem_accessors!(LoadOp, get_attr_wasm_load_kind, get_attr_wasm_load_offset);
 
 impl Verify for LoadOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
@@ -246,36 +219,19 @@ impl StoreOp {
         offset: u32,
         value: Value,
     ) -> Self {
-        let op = StoreOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![],
-                vec![address, value],
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![], vec![address, value], vec![], 0);
         op.set_attr_wasm_store_kind(ctx, kind);
         let offset = offset_attr(ctx, offset);
         op.set_attr_wasm_store_offset(ctx, offset);
         op
     }
-
-    pub(crate) fn kind(&self, ctx: &Context) -> MemKind {
-        *self
-            .get_attr_wasm_store_kind(ctx)
-            .expect("wasm.store gets its kind from StoreOp::new or its parsed format")
-    }
-
-    pub(crate) fn offset(&self, ctx: &Context) -> u32 {
-        offset_of(
-            &self
-                .get_attr_wasm_store_offset(ctx)
-                .expect("wasm.store gets its offset from StoreOp::new or its parsed format"),
-        )
-    }
 }
+
+mem_accessors!(
+    StoreOp,
+    get_attr_wasm_store_kind,
+    get_attr_wasm_store_offset
+);
 
 impl Verify for StoreOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
@@ -305,9 +261,7 @@ impl ImportFuncOp {
         module: &str,
         name: &str,
     ) -> Self {
-        let op = ImportFuncOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), vec![], vec![], vec![], 0),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
         op.set_symbol_name(ctx, symbol);
         op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty.into()));
         op.set_attr_wasm_import_module(ctx, StringAttr::new(module.to_string()));
@@ -387,16 +341,7 @@ impl Parsable for ImportFuncOp {
             .parse_stream(state_stream)
             .map(|(symbol, ty, _, module, name)| -> OpObj {
                 let ctx = &mut state_stream.state.ctx;
-                let op = ImportFuncOp {
-                    op: Operation::new(
-                        ctx,
-                        Self::get_concrete_op_info(),
-                        vec![],
-                        vec![],
-                        vec![],
-                        0,
-                    ),
-                };
+                let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
                 op.set_symbol_name(ctx, symbol);
                 op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty));
                 op.set_attr_wasm_import_module(ctx, module);
@@ -445,9 +390,7 @@ impl CallOp {
         args: Vec<Value>,
         results: Vec<TypeHandle>,
     ) -> Self {
-        let op = CallOp {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
-        };
+        let op = Operation::new_op::<Self>(ctx, results, args, vec![], 0);
         op.set_attr_wasm_callee(ctx, IdentifierAttr::new(callee));
         op
     }
@@ -477,28 +420,44 @@ impl Verify for CallOp {
     }
 }
 
-/// The function attribute naming its export.
-fn export_key() -> Identifier {
-    "wasm_export"
-        .try_into()
-        .expect("wasm_export is a valid identifier")
-}
+pliron::dict_key!(EXPORT_KEY, "wasm_export");
 
-/// Export `function` from the emitted module under `name`.
+/// Add an export of `function` under `name`. Several exports may share one implementation.
 pub fn set_export(ctx: &mut Context, function: &FuncOp, name: &str) {
-    function
-        .get_operation()
-        .deref_mut(ctx)
-        .attributes
-        .set(export_key(), StringAttr::new(name.to_string()));
+    let mut op = function.get_operation().deref_mut(ctx);
+    if let Some(names) = op.attributes.get_mut::<VecAttr>(&EXPORT_KEY) {
+        if !names.0.iter().any(|attr| {
+            attr.downcast_ref::<StringAttr>()
+                .is_some_and(|existing| AsRef::<str>::as_ref(existing) == name)
+        }) {
+            names.0.push(Box::new(StringAttr::new(name.to_owned())));
+        }
+    } else {
+        op.attributes.set(
+            EXPORT_KEY.clone(),
+            VecAttr::new(vec![Box::new(StringAttr::new(name.to_owned()))]),
+        );
+    }
 }
 
-/// The export name of `function`, if it is exported.
-pub(crate) fn export_name(ctx: &Context, function: &FuncOp) -> Option<String> {
+/// The export names of `function` in declaration order.
+pub(crate) fn export_names(ctx: &Context, function: &FuncOp) -> Vec<String> {
     function
         .get_operation()
         .deref(ctx)
         .attributes
-        .get::<StringAttr>(&export_key())
-        .map(|name| name.clone().into())
+        .get::<VecAttr>(&EXPORT_KEY)
+        .map(|names| {
+            names
+                .0
+                .iter()
+                .map(|name| {
+                    name.downcast_ref::<StringAttr>()
+                        .expect("export name")
+                        .clone()
+                        .into()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

@@ -1,5 +1,7 @@
 //! UTF-8 string methods indexed by Unicode scalar values.
+mod normalize;
 use crate::runtime::{bytes, from_static, scalars_length};
+use perry_abi::whitespace::{trim_bytes, trim_end_bytes, trim_start_bytes};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.
 pub(crate) fn integer(value: f64) -> i64 {
@@ -44,14 +46,14 @@ fn position(text: &str, ascii: bool, offset: usize) -> u64 {
     }
 }
 
-struct View {
+pub(crate) struct View {
     string: *mut u8,
-    text: &'static str,
+    pub(crate) text: &'static str,
     scalars: u64,
     ascii: bool,
 }
 
-fn view(string: *mut u8) -> View {
+pub(crate) fn view(string: *mut u8) -> View {
     // SAFETY: compiled code passes strings of valid UTF-8.
     let bytes = unsafe { bytes(string) };
     let text = unsafe { core::str::from_utf8_unchecked(bytes) };
@@ -339,34 +341,177 @@ pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, 
     u32::from(head(view.text, to).ends_with(needle.as_bytes()))
 }
 
-/// ECMAScript WhiteSpace and LineTerminator code points.
-fn space(scalar: char) -> bool {
-    matches!(
-        scalar,
-        '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
-    )
+unsafe fn trim_with(string: *mut u8, f: fn(&[u8]) -> &[u8]) -> *mut u8 {
+    let text = unsafe { crate::runtime::bytes(string) };
+    let trimmed = f(text);
+    if trimmed.len() == text.len() {
+        return string;
+    }
+    let from = trimmed.as_ptr() as usize - text.as_ptr() as usize;
+    unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
 /// `s.trim()`.
-///
-/// # Safety
-/// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
+    unsafe { trim_with(string, trim_bytes) }
+}
+
+/// `s.trimStart()`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
+    unsafe { trim_with(string, trim_start_bytes) }
+}
+
+/// `s.trimEnd()`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
+    unsafe { trim_with(string, trim_end_bytes) }
+}
+
+fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> *mut u8 {
     let view = view(string);
-    let trimmed = view.text.trim_matches(space);
-    if trimmed.len() == view.text.len() {
+    let target = integer(max_length);
+    if target <= view.scalars as i64 {
         return string;
     }
-    let from = trimmed.as_ptr() as usize - view.text.as_ptr() as usize;
-    unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
+    let fill_view = self::view(fill);
+    if fill_view.scalars == 0 {
+        return string;
+    }
+    let pad_scalars = (target as u64).saturating_sub(view.scalars);
+    let full = pad_scalars / fill_view.scalars;
+    let rem = pad_scalars % fill_view.scalars;
+    let rem_bytes = offset(&fill_view, rem);
+    let pad_bytes = full
+        .saturating_mul(fill_view.text.len() as u64)
+        .saturating_add(rem_bytes as u64);
+    let total = pad_bytes.saturating_add(view.text.len() as u64);
+    if total > u64::from(u32::MAX >> 2) {
+        crate::runtime::raise(crate::runtime::RANGE_ERROR, "Invalid string length");
+        return from_static("");
+    }
+    let data = crate::runtime::alloc(total as u32);
+    unsafe {
+        let mut cursor = data;
+        if is_end {
+            core::ptr::copy_nonoverlapping(view.text.as_ptr(), cursor, view.text.len());
+            cursor = cursor.add(view.text.len());
+        }
+        let fill_bytes = fill_view.text.len();
+        for _ in 0..full as usize {
+            core::ptr::copy_nonoverlapping(fill_view.text.as_ptr(), cursor, fill_bytes);
+            cursor = cursor.add(fill_bytes);
+        }
+        if rem_bytes > 0 {
+            core::ptr::copy_nonoverlapping(fill_view.text.as_ptr(), cursor, rem_bytes);
+            cursor = cursor.add(rem_bytes);
+        }
+        if !is_end {
+            core::ptr::copy_nonoverlapping(view.text.as_ptr(), cursor, view.text.len());
+        }
+        crate::runtime::adopt(data, total as u32)
+    }
+}
+
+/// `s.padStart(maxLength, fillString)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_pad_start(
+    string: *mut u8,
+    max_length: f64,
+    fill: *mut u8,
+) -> *mut u8 {
+    pad_string(string, max_length, fill, false)
+}
+
+/// `s.padEnd(maxLength, fillString)`.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_pad_end(
+    string: *mut u8,
+    max_length: f64,
+    fill: *mut u8,
+) -> *mut u8 {
+    pad_string(string, max_length, fill, true)
+}
+
+fn replace_string(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+    replace_all: bool,
+) -> *mut u8 {
+    let text_str = view(string).text;
+    let text = text_str.as_bytes();
+    let pat = view(needle).text.as_bytes();
+    let rep = view(replacement).text.as_bytes();
+    let mut out = crate::runtime::Buffer::new();
+    if pat.is_empty() {
+        if !replace_all {
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
+            out.extend_from_slice(text);
+        } else {
+            let mut pos = 0;
+            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
+            for ch in text_str.chars() {
+                let end = pos + ch.len_utf8();
+                out.extend_from_slice(text.get(pos..end).unwrap_or(&[]));
+                crate::regex::push_substitution(&mut out, text, end, end, rep, &[]);
+                pos = end;
+            }
+        }
+        return unsafe { out.into_string() };
+    }
+    let Some(first) = find(text, pat) else {
+        return string;
+    };
+    out.extend_from_slice(text.get(..first).unwrap_or(&[]));
+    crate::regex::push_substitution(&mut out, text, first, first + pat.len(), rep, &[]);
+    let mut cursor = first + pat.len();
+    if replace_all {
+        while let Some(rel) = find(text.get(cursor..).unwrap_or(&[]), pat) {
+            let start = cursor + rel;
+            let end = start + pat.len();
+            out.extend_from_slice(text.get(cursor..start).unwrap_or(&[]));
+            crate::regex::push_substitution(&mut out, text, start, end, rep, &[]);
+            cursor = end;
+        }
+    }
+    out.extend_from_slice(text.get(cursor..).unwrap_or(&[]));
+    unsafe { out.into_string() }
+}
+
+/// `s.replace(needle, replacement)` for string search.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_replace(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+) -> *mut u8 {
+    replace_string(string, needle, replacement, false)
+}
+
+/// `s.replaceAll(needle, replacement)` for string search.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_replace_all(
+    string: *mut u8,
+    needle: *mut u8,
+    replacement: *mut u8,
+) -> *mut u8 {
+    replace_string(string, needle, replacement, true)
+}
+
+/// `s.at(index)`: returns null pointer (`undefined`) when out of bounds.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_string_at(string: *mut u8, index: f64) -> *mut u8 {
+    let view = view(string);
+    let mut idx = integer(index);
+    if idx < 0 {
+        idx = (view.scalars as i64).saturating_add(idx);
+    }
+    if idx < 0 || (idx as u64) >= view.scalars {
+        return core::ptr::null_mut();
+    }
+    std_string_char_at(view.string, idx as f64)
 }
 
 /// `s.repeat(count)`; a negative or infinite count throws `RangeError`.
@@ -394,60 +539,51 @@ pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut 
     unsafe { crate::runtime::adopt(data, total as u32) }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AsciiString {
-    len: u32,
-    scalars: u32,
-    data: *const u8,
-    buffer: *const u8,
-    owner: *const u8,
-    offset: u32,
-    cursor_scalar: u32,
-    cursor_byte: u32,
-}
-struct AsciiStrings([AsciiString; 128]);
-// SAFETY: ASCII strings never update a position cursor or their immutable payload.
-unsafe impl Sync for AsciiStrings {}
-const ASCII: [u8; 128] = {
-    let mut bytes = [0; 128];
-    let mut index = 0;
-    while index < 128 {
-        bytes[index] = index as u8;
-        index += 1;
-    }
-    bytes
-};
-static ASCII_BYTES: [u8; 128] = ASCII;
-static ASCII_STRINGS: AsciiStrings = {
-    let mut strings = [AsciiString {
-        len: 1,
-        scalars: 1,
-        data: core::ptr::null(),
-        buffer: core::ptr::null(),
-        owner: core::ptr::null(),
-        offset: 0,
-        cursor_scalar: 0,
-        cursor_byte: 0,
-    }; 128];
-    let mut index = 0;
-    while index < 128 {
-        // SAFETY: all positions name bytes of the static ASCII table.
-        strings[index].data = unsafe { ASCII_BYTES.as_ptr().add(index) };
-        index += 1;
-    }
-    AsciiStrings(strings)
-};
+use perry_abi::layout::string::Header as AsciiString;
+static mut ASCII_STRINGS: [AsciiString; 128] = [AsciiString {
+    len: 0,
+    scalars: 0,
+    data: core::ptr::null_mut(),
+    buffer: core::ptr::null_mut(),
+    owner: core::ptr::null_mut(),
+    offset: 0,
+    cursor_scalar: 0,
+    cursor_byte: 0,
+}; 128];
+
 /// Static ASCII headers used by compiled character reads.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_ascii_strings() -> *const u8 {
-    (&raw const ASCII_STRINGS.0).cast()
+    unsafe {
+        let base = (&raw mut ASCII_STRINGS).cast::<AsciiString>();
+        if (*base).len == 0 {
+            let mut index = 0usize;
+            while index < 128 {
+                let entry = base.add(index);
+                let byte_ptr = (&raw mut (*entry).cursor_byte).cast::<u8>();
+                entry.write(AsciiString {
+                    len: 1,
+                    scalars: 1,
+                    data: byte_ptr,
+                    buffer: core::ptr::null_mut(),
+                    owner: core::ptr::null_mut(),
+                    offset: 0,
+                    cursor_scalar: 0,
+                    cursor_byte: index as u32,
+                });
+                index += 1;
+            }
+        }
+        base.cast()
+    }
 }
 
 fn ascii_character(byte: u8) -> *mut u8 {
-    (&raw const ASCII_STRINGS.0[byte as usize])
-        .cast_mut()
-        .cast()
+    unsafe {
+        std_ascii_strings()
+            .add((byte as usize) * core::mem::size_of::<AsciiString>())
+            .cast_mut()
+    }
 }
 
 /// `String.fromCodePoint(value)`: one Unicode scalar; surrogate code points are rejected.

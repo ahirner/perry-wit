@@ -1,30 +1,71 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
 
-/// The HIR runtime call that initializes a named built-in import (`Writable`).
-pub(super) const ESM_EXPORT_INIT: &str = "js_native_module_named_esm_export_value";
+pub(super) struct ParamSig<'s> {
+    pub(super) source: &'s perry_hir::ir::Param,
+    pub(super) binding: BindingType,
+    pub(super) base: BindingType,
+}
 
-pub(super) struct Signature {
+pub(super) struct Signature<'s> {
     pub(super) name: Identifier,
-    /// `async`: callers start it with `perry.async_call` and get a promise of `results[0]`.
+    /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
-    pub(super) params: Vec<TypeHandle>,
-    pub(super) results: Vec<TypeHandle>,
+    pub(super) params: Vec<ParamSig<'s>>,
+    pub(super) returns_never: bool,
+    pub(super) result: Option<BindingType>,
+}
+
+impl Signature<'_> {
+    pub(super) fn parameters(&self) -> (&[ParamSig<'_>], Option<&ParamSig<'_>>) {
+        match self.params.split_last() {
+            Some((last, fixed)) if last.source.is_rest => (fixed, Some(last)),
+            _ => (&self.params, None),
+        }
+    }
+
+    pub(super) fn carrier_results(&self) -> Vec<TypeHandle> {
+        self.result.iter().map(|r| r.carrier).collect()
+    }
+
+    pub(super) fn wit_constraints(&self) -> Option<(Vec<TypeHandle>, Vec<TypeHandle>)> {
+        (self.params.iter().any(|p| p.binding.integer.is_some())
+            || self.result.is_some_and(|r| r.integer.is_some()))
+        .then(|| {
+            (
+                self.params.iter().map(|p| p.binding.wit_type()).collect(),
+                self.result.iter().map(|r| r.wit_type()).collect(),
+            )
+        })
+    }
 }
 
 pub(super) fn build_module(
     ctx: &mut Context,
     hir: &HirModule,
-    foreign: &HashMap<String, HirType>,
-    inferred: HashSet<LocalId>,
-    locations: &crate::locations::Locations<'_>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
+    metadata: &hir_compat::Metadata<'_>,
 ) -> Result<ModuleOp> {
+    let locations = &metadata.locations;
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(module, hir, foreign, inferred, locations);
+    // Subclass instances flow into base-typed bindings, where methods would bind statically
+    // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
+    if let Some(class) = hir
+        .classes
+        .iter()
+        .find(|class| class.extends_name.is_some())
+    {
+        bail!(
+            "class {} extends {}: class inheritance is not supported yet",
+            class.name,
+            class.extends_name.as_deref().unwrap_or_default()
+        );
+    }
+    let shapes = Shapes::new(module, hir, foreign, metadata);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
-    let mut builtins: HashMap<String, Builtin> = HashMap::new();
+    let mut builtins: HashMap<&str, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
         let module = match source {
@@ -39,56 +80,88 @@ pub(super) fn build_module(
                 source,
                 "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
             );
-        ensure!(
-            !matches!(source, "fs" | "node:fs"),
-            "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
-        );
-        ensure!(
-            module.is_some() || !builtin,
-            "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
-        );
+        if matches!(source, "fs" | "node:fs") {
+            return Err(locations.annotate_import(
+                anyhow!(
+                    "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
+                ),
+                source,
+            ));
+        }
+        if module.is_none() && builtin {
+            return Err(locations.annotate_import(
+                anyhow!(
+                    "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
+                ),
+                source,
+            ));
+        }
         let Some(module) = module else { continue };
         for specifier in &import.specifiers {
             let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                bail!("only named imports from {source} are supported yet");
+                return Err(locations.annotate_import(
+                    anyhow!("only named imports from {source} are supported yet"),
+                    source,
+                ));
             };
             let builtin = Builtin::from_import(module, imported)
-                .with_context(|| format!("{imported} from {source} is not supported yet"))?;
-            builtins.insert(local.clone(), builtin);
+                .with_context(|| format!("{imported} from {source} is not supported yet"))
+                .map_err(|error| locations.annotate_import(error, source))?;
+            builtins.insert(local.as_str(), builtin);
         }
     }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
-        ensure!(
-            !function.is_generator,
-            "generator function {} is not supported yet",
-            function.name
-        );
+        if function.is_generator {
+            return Err(locations.annotate_function(
+                anyhow!("generator function {} is not supported yet", function.name),
+                &function.name,
+            ));
+        }
 
-        let params = function
-            .params
-            .iter()
-            .map(|param| {
-                ensure!(
-                    param.default.is_none() && !param.is_rest,
-                    "default and rest parameters are not supported yet: {}",
-                    function.name
-                );
-                shapes
-                    .value_type(ctx, &param.ty)
-                    .map_err(|error| shapes.annotate_local(error, param.id))
-                    .with_context(|| format!("parameter {} of {}", param.name, function.name))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let results = match (&function.return_type, function.is_async) {
-            (HirType::Void, false) => Ok(vec![]),
+        let mut params = Vec::with_capacity(function.params.len());
+        for (idx, param) in function.params.iter().enumerate() {
+            if param.is_rest && idx + 1 != function.params.len() {
+                return Err(shapes.annotate_local(
+                    anyhow!("rest parameter must be last in {}", function.name),
+                    param.id,
+                ));
+            }
+            let base_carrier = shapes
+                .value_type(ctx, &param.ty)
+                .map_err(|error| shapes.annotate_local(error, param.id))
+                .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
+            let integer = shapes.integer_type(ctx, &param.ty);
+            let carrier = if param.default.is_some() && !function.is_exported {
+                crate::coerce::admitting(ctx, base_carrier, perry_mir::Absence::Undefined)
+            } else {
+                base_carrier
+            };
+            params.push(ParamSig {
+                source: param,
+                binding: BindingType { carrier, integer },
+                base: BindingType {
+                    carrier: base_carrier,
+                    integer,
+                },
+            });
+        }
+        let result_carrier = match (&function.return_type, function.is_async) {
+            (HirType::Void, false) => Ok(None),
             // An async function settles its promise with its result; `void` settles `undefined`.
-            (HirType::Promise(inner), true) => shapes.settled_type(ctx, inner).map(|ty| vec![ty]),
-            (ty, true) => shapes.settled_type(ctx, ty).map(|ty| vec![ty]),
-            (ty, false) => shapes.value_type(ctx, ty).map(|ty| vec![ty]),
+            (HirType::Promise(inner), true) => shapes.settled_type(ctx, inner).map(Some),
+            (ty, true) => shapes.settled_type(ctx, ty).map(Some),
+            (ty, false) => shapes.value_type(ctx, ty).map(Some),
         }
         .map_err(|error| locations.annotate_function(error, &function.name))
         .with_context(|| format!("result of {}", function.name))?;
+        let integer_result = (!function.is_async)
+            .then(|| shapes.integer_type(ctx, &function.return_type))
+            .flatten();
+        let result = result_carrier.map(|carrier| BindingType {
+            carrier,
+            integer: integer_result,
+        });
         signatures.insert(
             function.id,
             Signature {
@@ -98,40 +171,44 @@ pub(super) fn build_module(
                     && locations.async_init(),
                 name: identifier(&function.name)?,
                 params,
-                results,
+                returns_never: matches!(function.return_type, HirType::Never),
+                result,
             },
         );
     }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
-    let has_init = hir.init.iter().any(|statement| {
-        !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
-            if matches!(&**callee, Expr::ExternFuncRef { name, .. } if name == ESM_EXPORT_INIT))
-    });
+    let has_init = !shapes.static_fields.is_empty()
+        || hir.init.iter().any(|statement| {
+            !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
+                if hir_compat::is_import_initializer(callee))
+        });
     if has_init {
         // Top-level statements (with top-level `await`) form the async main function of a
         // command (`wasi:cli/run`), settling `undefined`.
         let persistent = hir.functions.iter().any(|f| f.is_exported);
         let signature = Signature {
             name: identifier(if persistent {
-                perry_mir::globals::INITIALIZER
+                perry_mir::INITIALIZER
             } else {
                 MAIN
             })?,
             is_async: !persistent || locations.async_init(),
             await_initialization: false,
             params: vec![],
-            results: if persistent && !locations.async_init() {
-                vec![]
+            returns_never: false,
+            result: if persistent && !locations.async_init() {
+                None
             } else {
-                vec![shapes.settled_type(ctx, &HirType::Void)?]
+                Some(BindingType::plain(
+                    shapes.settled_type(ctx, &HirType::Void)?,
+                ))
             },
         };
         let func = FunctionBuilder::lower_body(
             ctx,
             &signature,
-            &[],
             &hir.init,
             &signatures,
             &shapes,
@@ -148,10 +225,13 @@ pub(super) fn build_module(
             .map_err(|error| locations.annotate_function(error, &function.name))
             .with_context(|| format!("lowering function {}", function.name))?;
         if let Some(span) = locations.function_span(&function.name) {
-            perry_mir::diagnostics::set_source_span(ctx, &func, &span);
+            perry_mir::set_source_span(ctx, &func, &span);
+        }
+        if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
+            perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }
         if function.is_exported {
-            perry_mir::calls::set_exported(ctx, &func);
+            perry_mir::set_exported(ctx, &func);
         }
         if function.is_async {
             set_async(ctx, &func);

@@ -1,38 +1,60 @@
-//! Whole-module analyses over MIR functions: reachability, exception classification and a
+//! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use perry_mir::{
-    calls::{AsyncCallOp, CallOp, is_exported},
-    intrinsics::may_throw,
-};
+use anyhow::{Context as _, Result, anyhow};
+use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
 use pliron::{
     builtin::{
-        op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::{OneRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
     },
     context::{Context, Ptr},
-    identifier::Identifier,
     linked_list::ContainsLinkedList,
+    op::Op,
     operation::Operation,
+    pass::AnalysisManager,
+    printable::Printable,
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::Ref,
+    collections::{HashMap, HashSet},
+};
+
+/// Borrow both analyses after computing them, so computing one cannot invalidate the borrow of the other.
+pub(super) struct ModuleAnalyses<'a> {
+    pub(super) facts: Ref<'a, ProgramFacts>,
+    pub(super) live: Ref<'a, LiveValues>,
+}
+
+pub(super) fn module_analyses<'a>(
+    ctx: &Context,
+    module: &ModuleOp,
+    analyses: &'a mut AnalysisManager,
+) -> Result<ModuleAnalyses<'a>> {
+    let op = module.get_operation();
+    analyses
+        .get_analysis::<ProgramFacts>(op, ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    analyses
+        .get_analysis::<LiveValues>(op, ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+    Ok(ModuleAnalyses {
+        facts: analyses
+            .try_get_analysis::<ProgramFacts>(op)
+            .context("computed program facts are missing")?,
+        live: analyses
+            .try_get_analysis::<LiveValues>(op)
+            .context("computed liveness is missing")?,
+    })
+}
 
 pub(crate) fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
-    module
-        .get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect()
+    perry_mir::functions(module.get_operation(), ctx)
 }
 
 pub(crate) fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
-    let mut ops = Vec::new();
-    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        ops.extend(block.deref(ctx).iter(ctx));
-    }
-    ops
+    perry_mir::operations(ctx, function)
 }
 
 /// MIR calls name their targets directly; only boundary exports and module initialization
@@ -58,7 +80,7 @@ pub(crate) fn reachable_functions(
                 .iter()
                 .any(|export| export.function == name.as_ref()),
         };
-        if exported || name.as_ref() == perry_mir::globals::INITIALIZER {
+        if exported || name.as_ref() == perry_mir::INITIALIZER {
             reachable.insert(index);
             pending.push(index);
         }
@@ -83,52 +105,40 @@ pub(crate) fn reachable_functions(
         .collect()
 }
 
-/// Definition order, independent of arena addresses and allocation history.
-pub(crate) fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, usize> {
-    let mut order = HashMap::new();
+pub(crate) fn function_values(ctx: &Context, function: &FuncOp) -> Vec<Value> {
+    let mut values = Vec::new();
     for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        for value in block.deref(ctx).arguments() {
-            order.insert(value, order.len());
-        }
-        for op in block.deref(ctx).iter(ctx) {
-            for value in op.deref(ctx).results() {
-                order.insert(value, order.len());
-            }
+        let block = block.deref(ctx);
+        values.extend(block.arguments());
+        for op in block.iter(ctx) {
+            values.extend(op.deref(ctx).results());
         }
     }
-    order
+    values
 }
 
-/// Functions that may complete with an exception: those with a throwing op other than a call,
-/// and, to a fixpoint, those calling one of them.
-pub(crate) fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier> {
-    let mut throws = HashSet::new();
-    let mut calls: Vec<(Identifier, Vec<Identifier>)> = Vec::new();
-    for function in functions {
-        let name = function.get_symbol_name(ctx);
-        // An async function rejects its promise instead of returning a status.
-        if perry_mir::calls::is_async(ctx, function) {
-            continue;
-        }
-        let mut callees = Vec::new();
-        for op in function_ops(ctx, function) {
-            if let Some(call) = Operation::get_op::<CallOp>(op, ctx) {
-                callees.push(call.callee(ctx));
-            } else if may_throw(ctx, op) {
-                throws.insert(name.clone());
-            }
-        }
-        calls.push((name, callees));
-    }
-    loop {
-        let before = throws.len();
-        for (name, callees) in &calls {
-            if callees.iter().any(|callee| throws.contains(callee)) {
-                throws.insert(name.clone());
-            }
-        }
-        if throws.len() == before {
-            return throws;
-        }
-    }
+pub(crate) fn function_signature(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Result<(
+    Vec<pliron::r#type::TypeHandle>,
+    Vec<pliron::r#type::TypeHandle>,
+)> {
+    use pliron::builtin::type_interfaces::FunctionTypeInterface;
+    let ty = pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
+        pliron::r#type::Typed::get_type(function, ctx),
+        ctx,
+    )
+    .map_err(|_| anyhow::anyhow!("function type"))?;
+    let ty = ty.deref(ctx);
+    Ok((ty.arg_types(), ty.res_types()))
+}
+
+/// Definition order, independent of arena addresses and allocation history.
+pub(crate) fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, usize> {
+    function_values(ctx, function)
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (value, index))
+        .collect()
 }

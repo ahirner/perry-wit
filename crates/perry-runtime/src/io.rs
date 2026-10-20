@@ -51,6 +51,7 @@ impl Bytes {
         self.len = 0;
     }
 
+    #[inline(never)]
     fn extend_from_slice(&mut self, bytes: &[u8]) {
         if self.len + bytes.len() > self.cap {
             let cap = (self.cap * 2).max(self.len + bytes.len()).max(64);
@@ -214,6 +215,7 @@ pub(crate) unsafe extern "C" fn perry_write(fd: u32, data: *const u8, len: u32) 
     print_bytes(fd as usize, bytes, false);
 }
 
+#[inline(never)]
 fn print_bytes(fd: usize, bytes: &[u8], newline: bool) {
     let output = &mut current().outputs[fd.min(1)];
     if output.state != State::Open {
@@ -281,6 +283,7 @@ pub unsafe extern "C" fn perry_write_acknowledged(
     current().outputs[fd].acknowledge();
 }
 
+#[inline(never)]
 fn finish_copy(output: &mut Output, code: u32) {
     output.written += (code >> 4) as usize;
     output.flushed += u64::from(code >> 4);
@@ -294,6 +297,7 @@ fn finish_copy(output: &mut Output, code: u32) {
     output.acknowledge();
 }
 
+#[inline(never)]
 fn pump(fd: usize) {
     let output = &mut current().outputs[fd];
     loop {
@@ -334,93 +338,109 @@ pub(crate) extern "C" fn perry_io_pump() {
     pump(1);
 }
 
+#[inline(never)]
+fn event_fd(fd: usize, event: u32, handle: u32, code: u32) -> u32 {
+    let output = &mut current().outputs[fd];
+    if event == EVENT_STREAM_WRITE && output.writable == handle && output.blocked {
+        output.blocked = false;
+        finish_copy(output, code);
+        pump(fd);
+        return 1;
+    }
+    if event == EVENT_FUTURE_READ && output.future == handle && output.state == State::Closing {
+        // SAFETY: canonical built-ins on handles this output owns.
+        unsafe { host::waitable_join(handle, 0) };
+        host::output::drop_future(fd, handle);
+        output.state = State::Closed;
+        return 1;
+    }
+    0
+}
+
 /// Handle a stream or future event of the current task's output. Returns 1 if it was one.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_io_event(event: u32, handle: u32, code: u32) -> u32 {
-    for fd in 0..2 {
-        let output = &mut current().outputs[fd];
-        if event == EVENT_STREAM_WRITE && output.writable == handle && output.blocked {
-            output.blocked = false;
-            finish_copy(output, code);
-            pump(fd);
-            return 1;
-        }
-        if event == EVENT_FUTURE_READ && output.future == handle && output.state == State::Closing {
-            // SAFETY: canonical built-ins on handles this output owns.
-            unsafe { host::waitable_join(handle, 0) };
-            host::output::drop_future(fd, handle);
-            output.state = State::Closed;
-            return 1;
-        }
+    if event_fd(0, event, handle, code) != 0 {
+        1
+    } else {
+        event_fd(1, event, handle, code)
     }
-    0
+}
+
+#[inline(never)]
+fn close_fd(fd: usize) -> u32 {
+    pump(fd);
+    let output = &mut current().outputs[fd];
+    match output.state {
+        State::Open if output.writable == 0 => {
+            output.state = State::Closed;
+            1
+        }
+        State::Open | State::Failed if output.idle() => {
+            // SAFETY: canonical built-ins on handles this output owns.
+            unsafe { host::waitable_join(output.writable, 0) };
+            host::output::drop_writer(fd, output.writable);
+            output.state = State::Closing;
+            let code = host::output::read(fd, output.future, output.result.as_mut_ptr());
+            if code == BLOCKED {
+                let future = output.future;
+                perry_task_join(future);
+                0
+            } else {
+                host::output::drop_future(fd, output.future);
+                output.state = State::Closed;
+                1
+            }
+        }
+        State::Closed => 1,
+        _ => 0,
+    }
 }
 
 /// Flush and close the current task's outputs. Returns 1 once everything reached the host;
 /// otherwise the task waits on its set for the events that finish it.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_io_close() -> u32 {
-    let mut done = 1;
-    for fd in 0..2 {
-        pump(fd);
-        let output = &mut current().outputs[fd];
-        match output.state {
-            State::Open if output.writable == 0 => output.state = State::Closed,
-            State::Open | State::Failed if output.idle() => {
-                // SAFETY: canonical built-ins on handles this output owns.
-                unsafe { host::waitable_join(output.writable, 0) };
-                host::output::drop_writer(fd, output.writable);
-                output.state = State::Closing;
-                let code = host::output::read(fd, output.future, output.result.as_mut_ptr());
-                if code == BLOCKED {
-                    let future = output.future;
-                    perry_task_join(future);
-                    done = 0;
-                } else {
-                    host::output::drop_future(fd, output.future);
-                    output.state = State::Closed;
-                }
-            }
-            State::Closed => {}
-            _ => done = 0,
-        }
+    close_fd(0) & close_fd(1)
+}
+
+#[inline(never)]
+fn cancel_fd(task: *mut crate::region::Task, fd: usize) {
+    let output = &mut current().outputs[fd];
+    if output.state == State::Closed {
+        return;
     }
-    done
+    if output.writable != 0 && output.state != State::Closing {
+        // SAFETY: this task owns the waitable; cancellation may run other tasks.
+        unsafe { host::waitable_join(output.writable, 0) };
+        if output.blocked {
+            host::output::cancel_write(fd, output.writable);
+            // SAFETY: the cancelling task stays live through acknowledgement.
+            unsafe { crate::region::perry_task_resume(task) };
+            output.blocked = false;
+        }
+        host::output::drop_writer(fd, output.writable);
+    }
+    if output.future != 0 {
+        if output.state == State::Closing {
+            unsafe { host::waitable_join(output.future, 0) };
+            host::output::cancel_read(fd, output.future);
+            // SAFETY: the cancelling task stays live through acknowledgement.
+            unsafe { crate::region::perry_task_resume(task) };
+        }
+        host::output::drop_future(fd, output.future);
+    }
+    output.writable = 0;
+    output.future = 0;
+    output.state = State::Closed;
 }
 
 /// Cancel output transfers before their task-owned buffers are released.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_io_cancel() {
     let task = crate::region::perry_task_current();
-    for fd in 0..2 {
-        let output = &mut current().outputs[fd];
-        if output.state == State::Closed {
-            continue;
-        }
-        if output.writable != 0 && output.state != State::Closing {
-            // SAFETY: this task owns the waitable; cancellation may run other tasks.
-            unsafe { host::waitable_join(output.writable, 0) };
-            if output.blocked {
-                host::output::cancel_write(fd, output.writable);
-                // SAFETY: the cancelling task stays live through acknowledgement.
-                unsafe { crate::region::perry_task_resume(task) };
-                output.blocked = false;
-            }
-            host::output::drop_writer(fd, output.writable);
-        }
-        if output.future != 0 {
-            if output.state == State::Closing {
-                unsafe { host::waitable_join(output.future, 0) };
-                host::output::cancel_read(fd, output.future);
-                // SAFETY: the cancelling task stays live through acknowledgement.
-                unsafe { crate::region::perry_task_resume(task) };
-            }
-            host::output::drop_future(fd, output.future);
-        }
-        output.writable = 0;
-        output.future = 0;
-        output.state = State::Closed;
-    }
+    cancel_fd(task, 0);
+    cancel_fd(task, 1);
 }
 
 /// Join `waitable` to the current task's waitable set, creating the set on first use.
@@ -523,19 +543,9 @@ pub(crate) unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
         return outcome;
     }
     // SAFETY: guaranteed by the caller.
-    let (state, status, value) = unsafe {
-        (
-            *(promise as *const u32),
-            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
-            *(promise.add(crate::promise::VALUE as usize) as *const u64),
-        )
-    };
+    let (state, status, exception) = unsafe { rejection_fields(promise) };
     if state == crate::promise::REJECTED && status != EXIT {
-        let mut text = Bytes::new();
-        text.push_str("Uncaught ");
-        // SAFETY: a rejection's value is its exception object or null.
-        unsafe { describe(&mut text, status, value as usize as *mut u8) };
-        print_bytes(1, text.as_slice(), true);
+        unsafe { print_uncaught(status, exception) };
         process().exit_code = 1;
     }
     let outcome = u32::from(process().exit_code != 0);
@@ -552,16 +562,11 @@ pub(crate) unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
     if current().outcome.is_some() {
         return;
     }
-    let mut text = Bytes::new();
-    text.push_str("Uncaught ");
     unsafe {
         crate::promise::perry_promise_rethrow(promise);
-        let status = *(promise.add(crate::promise::STATUS as usize) as *const u32);
-        let exception =
-            *(promise.add(crate::promise::VALUE as usize) as *const u32) as usize as *mut u8;
-        describe(&mut text, status, exception);
+        let (_, status, exception) = rejection_fields(promise);
+        print_uncaught(status, exception);
     }
-    print_bytes(1, text.as_slice(), true);
     current().outcome = Some(0);
 }
 
@@ -572,22 +577,34 @@ pub(crate) unsafe extern "C" fn perry_report_rejection(promise: *mut u8) {
 /// `promise` must be a rejected promise of the current task.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
-    // SAFETY: guaranteed by the caller.
-    let (status, value) = unsafe {
-        crate::promise::perry_promise_rethrow(promise);
-        (
-            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
-            *(promise.add(crate::promise::VALUE as usize) as *const u64),
-        )
-    };
     let mut text = Bytes::new();
-    // SAFETY: a rejection's value is its exception object or null.
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        describe(&mut text, status, value as usize as *mut u8);
+        crate::promise::perry_promise_rethrow(promise);
+        let (_, status, exception) = rejection_fields(promise);
+        describe(&mut text, status, exception);
         crate::string::perry_string_adopt(text.ptr, text.len as u32)
     }
 }
 
+unsafe fn rejection_fields(promise: *mut u8) -> (u32, u32, *mut u8) {
+    unsafe {
+        (
+            *(promise as *const u32),
+            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
+            *(promise.add(crate::promise::VALUE as usize) as *const u64) as usize as *mut u8,
+        )
+    }
+}
+
+unsafe fn print_uncaught(status: u32, exception: *mut u8) {
+    let mut text = Bytes::new();
+    text.push_str("Uncaught ");
+    unsafe { describe(&mut text, status, exception) };
+    print_bytes(1, text.as_slice(), true);
+}
+
+#[inline(never)]
 unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
     if exception.is_null() {
         push_error_name(text, status);
@@ -628,7 +645,7 @@ unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
                 });
             } else {
                 // Exact for integral values; six decimals otherwise.
-                let scaled = libm::round(libm::fabs(number) * 1e6);
+                let scaled = number.abs() * 1e6 + 0.5;
                 if number < 0.0 {
                     text.push(b'-');
                 }
@@ -737,6 +754,7 @@ pub(crate) unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
             unsafe { core::slice::from_raw_parts(*key as usize as *const u8, *key_len as usize) };
         if key == name {
             found = adopt(*value, *value_len);
+            break;
         }
     }
     release_environment(entries);

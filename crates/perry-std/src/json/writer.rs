@@ -1,7 +1,11 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
-use super::{append_number, canonical, key_bytes, native_snapshot, node, string_bytes, word};
+use super::{canonical, json_number, key_bytes, native_snapshot, node, string_bytes, word};
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
 use perry_abi::json::{MAX_DEPTH, kind::*};
+use perry_abi::{
+    layout::numeric::Tag,
+    number::{Number, format_integer},
+};
 
 /// The writer of `JSON.stringify` for typed values: compiled serializers call it with
 /// structure and pre-formatted pieces.
@@ -111,7 +115,22 @@ pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u
 pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
     let w = writer(w);
     if !w.failed {
-        append_number(&mut w.text, number);
+        append_number(&mut w.text, Number::Float(number));
+    }
+}
+
+/// Serialize the compiler's numeric carriers without losing exact integer digits.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_write_numeric(w: *mut u8, tag: i32, bits: u64) {
+    let w = writer(w);
+    if !w.failed {
+        // Generated serializers handle absence before calling the numeric writer.
+        let tag = Tag::try_from(tag).expect("invalid JSON numeric tag");
+        assert!(
+            !matches!(tag, Tag::Null | Tag::Undefined | Tag::Omitted),
+            "absent JSON number"
+        );
+        append_number(&mut w.text, Number::from_numeric(tag, bits));
     }
 }
 
@@ -129,8 +148,27 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
 }
 
+pub(super) fn append_number(text: &mut Buffer, number: Number) {
+    let (magnitude, negative) = match number {
+        Number::Float(number) => {
+            if number.is_finite() {
+                let mut digits = [0; 40];
+                let len = crate::runtime::number_format(number, &mut digits);
+                text.extend_from_slice(&digits[..len]);
+            } else {
+                text.extend_from_slice(b"null");
+            }
+            return;
+        }
+        Number::Signed(value) => (value.unsigned_abs(), value < 0),
+        Number::Unsigned(value) => (value, false),
+    };
+    let mut digits = [0; 66];
+    text.extend_from_slice(format_integer(magnitude, negative, 10, &mut digits));
+}
+
 /// Append a JSON string literal, quotes included.
-fn quote(text: &mut Buffer, bytes: &[u8]) {
+pub(super) fn quote(text: &mut Buffer, bytes: &[u8]) {
     text.push(b'"');
     perry_abi::json::quote_contents(bytes, |part| text.extend_from_slice(part));
     text.push(b'"');
@@ -164,80 +202,107 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
     }
     let mut stack = arrayvec::ArrayVec::<Open, { MAX_DEPTH as usize + 1 }>::new();
     let mut current = value;
-    loop {
-        if depth + stack.len() as u32 > MAX_DEPTH {
-            return false;
-        }
-        match word(current, 0) {
-            NATIVE => {
-                current = native_snapshot(current);
-                continue;
-            }
-            EXCEPTION => text.extend_from_slice(b"{}"),
-            NULL => text.extend_from_slice(b"null"),
-            BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
-                b"true"
-            } else {
-                b"false"
-            }),
-            NUMBER => {
-                // SAFETY: number nodes hold an f64 at 8.
-                let number = unsafe { *(current.add(8) as *const f64) };
-                append_number(text, number);
-            }
-            STRING => quote(text, string_bytes(current)),
-            kind @ (ARRAY | OBJECT) => {
-                if kind == OBJECT {
-                    current = canonical(current);
-                }
-                text.push(if kind == ARRAY { b'[' } else { b'{' });
-                stack.push(Open {
-                    node: current,
-                    next: word(current, 16),
-                    written: false,
-                });
-            }
-            _ => return false,
-        }
-        // The next member to write, closing the containers that are done.
+    unsafe {
         loop {
-            let Some(container) = stack.last_mut() else {
-                return true;
-            };
-            let mut member = container.next;
-            while member != 0 && word(node(member), 0) == UNDEFINED {
-                member = word(node(member), 4);
+            if depth + stack.len() as u32 > MAX_DEPTH {
+                return false;
             }
-            let object = word(container.node, 0) == OBJECT;
-            if member == 0 {
-                text.push(if object { b'}' } else { b']' });
-                stack.pop();
-                continue;
+            if let Some(number) = json_number(current) {
+                append_number(text, number);
+            } else {
+                match word(current, 0) {
+                    NATIVE | VIEW => {
+                        current = if word(current, 0) == VIEW {
+                            super::view::std_json_snapshot(super::view::to_json(current))
+                        } else {
+                            native_snapshot(current)
+                        };
+                        continue;
+                    }
+                    BIGINT => {
+                        raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
+                        return true;
+                    }
+                    EXCEPTION => text.extend_from_slice(b"{}"),
+                    NULL | UNDEFINED => text.extend_from_slice(b"null"),
+                    BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
+                        b"true"
+                    } else {
+                        b"false"
+                    }),
+                    STRING => quote(text, string_bytes(current)),
+                    kind @ (ARRAY | OBJECT) => {
+                        if kind == OBJECT {
+                            current = canonical(current);
+                        }
+                        text.push(if kind == ARRAY { b'[' } else { b'{' });
+                        stack.push(Open {
+                            node: current,
+                            next: word(current, 16),
+                            written: false,
+                        });
+                    }
+                    _ => return false,
+                }
             }
-            if container.written {
-                text.push(b',');
+            // The next member to write, closing the containers that are done.
+            loop {
+                let Some(container) = stack.last_mut() else {
+                    return true;
+                };
+                let object = word(container.node, 0) == OBJECT;
+                let mut member = container.next;
+                while object && member != 0 && word(node(member), 0) == UNDEFINED {
+                    member = word(node(member), 4);
+                }
+                if member == 0 {
+                    text.push(if object { b'}' } else { b']' });
+                    stack.pop();
+                    continue;
+                }
+                if container.written {
+                    text.push(b',');
+                }
+                if object {
+                    quote(text, string_bytes(node(word(node(member), 24))));
+                    text.push(b':');
+                }
+                container.next = word(node(member), 4);
+                container.written = true;
+                current = node(member);
+                break;
             }
-            if object {
-                quote(text, string_bytes(node(word(node(member), 24))));
-                text.push(b':');
-            }
-            container.next = word(node(member), 4);
-            container.written = true;
-            current = node(member);
-            break;
         }
     }
 }
 
-/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output; `undefined` writes
-/// nothing, so callers check it first).
+/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output). `undefined` (the null
+/// address) writes `null` as an array element does; callers omit it as an object member or at
+/// the top level.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     let w = writer(w);
-    if w.failed || value.is_null() {
+    if w.failed {
         return;
     }
-    if !value_text(&mut w.text, value, w.depth) {
+    if value.is_null() {
+        w.text.extend_from_slice(b"null");
+    } else if !value_text(&mut w.text, value, w.depth) {
+        w.failed = true;
+    }
+}
+
+/// Write an undeclared property at its position among the native fields.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_write_member(w: *mut u8, member: *mut u8) {
+    let w = writer(w);
+    if w.failed || unsafe { word(member, 0) } == UNDEFINED {
+        return;
+    }
+    separate(w);
+    quote(&mut w.text, key_bytes(member as usize as u32));
+    w.text.push(b':');
+    if !value_text(&mut w.text, member, w.depth) {
         w.failed = true;
     }
 }
@@ -259,42 +324,43 @@ pub(crate) unsafe extern "C" fn std_json_extras(
     if graph.is_null() || w.failed {
         return;
     }
-    let object = word(graph, 0) == OBJECT;
-    let graph = if object { canonical(graph) } else { graph };
-    // SAFETY: compiled serializers supply the declared object's static field names.
-    let keys = if object && count != 0 {
-        unsafe { core::slice::from_raw_parts(keys, count as usize) }
-    } else {
-        &[]
-    };
-    let mut member = word(graph, 16);
-    let mut index = 0;
-    while member != 0 {
-        let value = node(member);
-        let keep = if object {
-            let name = key_bytes(member);
-            keys.binary_search_by(|&key| {
-                // SAFETY: every table entry is a static string header.
-                let key = unsafe { crate::runtime::bytes(node(key)) };
-                key.len().cmp(&name.len()).then_with(|| key.cmp(name))
-            })
-            .is_err()
-                && word(value, 0) != UNDEFINED
+    unsafe {
+        let object = word(graph, 0) == OBJECT;
+        let graph = if object { canonical(graph) } else { graph };
+        // SAFETY: compiled serializers supply the declared object's static field names.
+        let keys = if object && count != 0 {
+            core::slice::from_raw_parts(keys, count as usize)
         } else {
-            index >= count
+            &[]
         };
-        if keep {
-            separate(w);
-            if object {
-                quote(&mut w.text, key_bytes(member));
-                w.text.push(b':');
+        let mut member = word(graph, 16);
+        let mut index = if object { 0 } else { word(graph, 28) };
+        while member != 0 {
+            let value = node(member);
+            let keep = if object {
+                let name = key_bytes(member);
+                keys.binary_search_by(|&key| {
+                    // SAFETY: every table entry is a static string header.
+                    perry_abi::json::key_cmp(crate::runtime::bytes(node(key)), name)
+                })
+                .is_err()
+                    && word(value, 0) != UNDEFINED
+            } else {
+                index >= count
+            };
+            if keep {
+                separate(w);
+                if object {
+                    quote(&mut w.text, key_bytes(member));
+                    w.text.push(b':');
+                }
+                if !value_text(&mut w.text, value, w.depth) {
+                    w.failed = true;
+                    return;
+                }
             }
-            if !value_text(&mut w.text, value, w.depth) {
-                w.failed = true;
-                return;
-            }
+            index += 1;
+            member = word(value, 4);
         }
-        index += 1;
-        member = word(value, 4);
     }
 }

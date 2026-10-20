@@ -127,7 +127,7 @@ impl<'s> FunctionBuilder<'s> {
                     names.len() == args.len(),
                     "init object arity differs from its shape"
                 );
-                Ok(names.into_iter().zip(args.iter()).collect())
+                Ok(names.iter().copied().zip(args.iter()).collect())
             }
             Some(_) => bail!(NOT_LITERAL),
         }
@@ -193,7 +193,11 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A body init as `Uint8Array | undefined` and whether it was a string.
-    fn body_init(&mut self, ctx: &mut Context, body: Option<&'s Expr>) -> Result<(Value, bool)> {
+    pub(super) fn body_init(
+        &mut self,
+        ctx: &mut Context,
+        body: Option<&'s Expr>,
+    ) -> Result<(Value, bool)> {
         let bytes: TypeHandle = BytesType::get(ctx).into();
         let Some(body) = body.filter(|b| !matches!(b, Expr::Undefined | Expr::Null)) else {
             return Ok((
@@ -222,147 +226,10 @@ impl<'s> FunctionBuilder<'s> {
         name: &str,
         args: Option<&'s [Expr]>,
     ) -> Result<Value> {
-        let receiver_kind = kind(ctx, receiver)?;
-        let strings = |builder: &mut Self, ctx: &mut Context, count: usize| -> Result<Vec<Value>> {
-            let args = args.unwrap_or(&[]);
-            ensure!(args.len() == count, "{name} takes {count} arguments");
-            args.iter()
-                .map(|arg| builder.typed_operand(ctx, arg, Kind::String, "a string"))
-                .collect()
-        };
-        let (intrinsic, operands) = match (receiver_kind, name, args.is_some()) {
-            (Kind::Headers, "append" | "set", true) => {
-                let mut operands = vec![receiver];
-                operands.extend(strings(self, ctx, 2)?);
-                let intrinsic = if name == "append" {
-                    Intrinsic::HeadersAppend
-                } else {
-                    Intrinsic::HeadersSet
-                };
-                self.call_intrinsic(ctx, intrinsic, operands);
-                // Both return `undefined`; statements discard it.
-                let number = FP64Type::get(ctx).into();
-                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
-            }
-            (Kind::Headers, "delete", true) => {
-                let mut operands = vec![receiver];
-                operands.extend(strings(self, ctx, 1)?);
-                self.intrinsic_void(ctx, Intrinsic::HeadersDelete, operands);
-                let number = FP64Type::get(ctx).into();
-                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
-            }
-            (Kind::Headers, "get" | "has", true) => {
-                let mut operands = vec![receiver];
-                operands.extend(strings(self, ctx, 1)?);
-                let intrinsic = if name == "get" {
-                    Intrinsic::HeadersGet
-                } else {
-                    Intrinsic::HeadersHas
-                };
-                (intrinsic, operands)
-            }
-            (Kind::Response, "status", false) => (Intrinsic::ResponseStatus, vec![receiver]),
-            (Kind::Response, "statusText", false) => {
-                (Intrinsic::ResponseStatusText, vec![receiver])
-            }
-            (Kind::Response, "ok", false) => (Intrinsic::ResponseOk, vec![receiver]),
-            (Kind::Response, "headers", false) => (Intrinsic::ResponseHeaders, vec![receiver]),
-            (Kind::Response, "body", false) => (Intrinsic::ResponseBody, vec![receiver]),
-            (Kind::Request, "body", false) => (Intrinsic::RequestBody, vec![receiver]),
-            (Kind::Response, "bodyUsed", false) => (Intrinsic::ResponseBodyUsed, vec![receiver]),
-            (Kind::Response, "bytes", true) => (Intrinsic::ResponseBytes, vec![receiver]),
-            (Kind::Response, "text", true) => (Intrinsic::ResponseText, vec![receiver]),
-            (Kind::Response, "json", true) => (Intrinsic::ResponseJson, vec![receiver]),
-            (Kind::Request, "method", false) => (Intrinsic::RequestMethod, vec![receiver]),
-            (Kind::Request, "url", false) => (Intrinsic::RequestUrl, vec![receiver]),
-            (Kind::Request, "headers", false) => (Intrinsic::RequestHeaders, vec![receiver]),
-            (Kind::Request, "bodyUsed", false) => (Intrinsic::RequestBodyUsed, vec![receiver]),
-            (Kind::Request, "bytes", true) => (Intrinsic::RequestBytes, vec![receiver]),
-            (Kind::Request, "text", true) => (Intrinsic::RequestText, vec![receiver]),
-            (Kind::Request, "json", true) => (Intrinsic::RequestJson, vec![receiver]),
-            (Kind::Writable, "locked", false) => (Intrinsic::WritableLocked, vec![receiver]),
-            (Kind::Writable, "getWriter", true) => (Intrinsic::WritableGetWriter, vec![receiver]),
-            (Kind::Writer, "write", true) => {
-                let [chunk] = args.unwrap_or(&[]) else {
-                    bail!("write takes one chunk");
-                };
-                let (chunk, _) = self.body_init(ctx, Some(chunk))?;
-                let chunk = self.defined(ctx, chunk)?;
-                return Ok(self.intrinsic(ctx, Intrinsic::WriterWrite, vec![receiver, chunk]));
-            }
-            (Kind::Writer, "close", true) => (Intrinsic::WriterClose, vec![receiver]),
-            (Kind::Readable, "locked", false) => (Intrinsic::ReadableLocked, vec![receiver]),
-            (Kind::Readable, "getReader", true) => {
-                let args = args.unwrap_or(&[]);
-                if args.is_empty() {
-                    (Intrinsic::ReadableGetReader, vec![receiver])
-                } else {
-                    ensure!(
-                        args.len() == 1,
-                        "getReader takes an optional {{mode: 'byob'}}"
-                    );
-                    let fields = self.init_fields(args.first())?;
-                    ensure!(
-                        fields.len() == 1
-                            && fields[0].0 == "mode"
-                            && matches!(fields[0].1, Expr::String(mode) if mode == "byob"),
-                        "getReader supports only {{mode: 'byob'}}"
-                    );
-                    return Ok(self.intrinsic(
-                        ctx,
-                        Intrinsic::ReadableGetByobReader,
-                        vec![receiver],
-                    ));
-                }
-            }
-            (Kind::Readable, "cancel", true) => (Intrinsic::ReadableCancel, vec![receiver]),
-            (Kind::Reader, "read", true) => {
-                ensure!(
-                    args.is_some_and(<[Expr]>::is_empty),
-                    "default reader.read takes no arguments"
-                );
-                (Intrinsic::ReaderRead, vec![receiver])
-            }
-            (Kind::ByobReader, "read", true) => {
-                let args = args.unwrap_or(&[]);
-                ensure!(
-                    (1..=2).contains(&args.len()),
-                    "BYOB read requires a Uint8Array and optional {{min}}"
-                );
-                let view = self.typed_operand(ctx, &args[0], Kind::Bytes, "a Uint8Array")?;
-                let fields = self.init_fields(args.get(1))?;
-                ensure!(
-                    fields.is_empty() || (fields.len() == 1 && fields[0].0 == "min"),
-                    "BYOB read supports only {{min}}"
-                );
-                let minimum = self.number_or(ctx, fields.first().map(|(_, value)| *value), 1.0)?;
-                return Ok(self.intrinsic(
-                    ctx,
-                    Intrinsic::ReaderReadByob,
-                    vec![receiver, view, minimum],
-                ));
-            }
-            (Kind::Reader | Kind::ByobReader, "cancel", true) => {
-                (Intrinsic::ReaderCancel, vec![receiver])
-            }
-            (Kind::Reader | Kind::ByobReader, "releaseLock", true) => {
-                self.intrinsic_void(ctx, Intrinsic::ReaderReleaseLock, vec![receiver]);
-                let number = FP64Type::get(ctx).into();
-                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
-            }
-            (Kind::ReadResult, "done", false) => (Intrinsic::ReadDone, vec![receiver]),
-            (Kind::ReadResult, "value", false) => (Intrinsic::ReadValue, vec![receiver]),
-            (Kind::Writer, "releaseLock", true) => {
-                self.intrinsic_void(ctx, Intrinsic::WriterReleaseLock, vec![receiver]);
-                let number = FP64Type::get(ctx).into();
-                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
-            }
-            (_, name, _) => bail!("{name} is not supported on this type yet"),
-        };
-        if args.is_some_and(|args| !args.is_empty()) && !matches!(receiver_kind, Kind::Headers) {
-            bail!("{name} takes no arguments");
-        }
-        Ok(self.intrinsic(ctx, intrinsic, operands))
+        crate::methods::Call::member(crate::methods::Receiver::of(ctx, receiver)?, name, args)?
+            .with_context(|| format!("{name} is not supported on this receiver"))?
+            .lower(self, ctx, receiver)?
+            .context("web members produce a value")
     }
 
     /// `fetch(url, { method, headers, body })` as Perry HIR desugars a literal init.
@@ -410,35 +277,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        let call = !args.is_empty()
-            || !matches!(
-                method,
-                "status"
-                    | "statusText"
-                    | "ok"
-                    | "headers"
-                    | "bodyUsed"
-                    | "url"
-                    | "method"
-                    | "locked"
-                    | "body"
-            );
-        ensure!(
-            matches!(
-                kind(ctx, receiver)?,
-                Kind::Headers
-                    | Kind::Response
-                    | Kind::Request
-                    | Kind::Writable
-                    | Kind::Writer
-                    | Kind::Readable
-                    | Kind::Reader
-                    | Kind::ByobReader
-                    | Kind::ReadResult
-            ),
-            "{method} is not supported on this type yet"
-        );
-        self.web_member(ctx, receiver, method, call.then_some(args))
+        let property =
+            crate::methods::Method::lookup(crate::methods::Receiver::of(ctx, receiver)?, method)
+                .is_some_and(crate::methods::Method::is_property)
+                && args.is_empty();
+        self.web_member(ctx, receiver, method, (!property).then_some(args))
     }
 
     /// A `node:fs/promises` function: an operation whose promise settles from host events.

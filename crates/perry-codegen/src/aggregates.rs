@@ -1,20 +1,17 @@
 //! Records, arrays and variants: allocation, field and element access.
 use crate::{
     function::FunctionLowering,
-    repr::{Repr, optional_inner, repr, slot_kind},
+    repr::{Carriers, Repr, optional_inner, repr, slot_kind, slot_size},
     runtime::Runtime,
+    values::is_numeric_type,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
-    attrs::ErrorKind,
-    collections::{
-        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ConcatSegmentsOp,
-    },
-    heap::{AllocOp, FieldGetOp, FieldSetOp},
-    types::{ArrayType, RecordType},
-    variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
+    AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
+    ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp,
+    FieldSetOp, JsonSchema, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp,
+    VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -26,11 +23,75 @@ use pliron::{
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
+    /// The runtime's element-kind flag for arrays of `element` (`layout::*_ELEMENTS`).
+    pub(crate) fn array_element_kind(
+        ctx: &Context,
+        element: TypeHandle,
+    ) -> Result<layout::Elements> {
+        if is_numeric_type(ctx, element) {
+            Ok(layout::Elements::Numeric)
+        } else if repr(ctx, element)? == Repr::Ref {
+            Ok(layout::Elements::References)
+        } else {
+            Ok(layout::Elements::Scalar)
+        }
+    }
+
+    /// Byte size of `record`: its header and every field slot.
+    pub(crate) fn record_size(ctx: &Context, record: TypedHandle<RecordType>) -> Result<u32> {
+        let record = record.deref(ctx);
+        let fields = record
+            .fields()
+            .map_err(|_| anyhow!("record without fields"))?;
+        Ok(record_offset(ctx, fields))
+    }
+
+    /// Store `value` into a `ty` slot at `addr + offset`.
+    pub(crate) fn store_slot_value(
+        &mut self,
+        ctx: &mut Context,
+        addr: Value,
+        offset: u32,
+        ty: TypeHandle,
+        value: Carriers<Value>,
+    ) -> Result<()> {
+        match value {
+            Carriers::Scalar(v) => {
+                let kind = slot_kind(ctx, ty)?;
+                self.store(ctx, kind, addr, offset, v);
+            }
+            Carriers::Numeric { tag, payload } => {
+                self.store(ctx, MemKind::I32, addr, offset, tag);
+                self.store(ctx, MemKind::I64, addr, offset + 8, payload);
+            }
+        }
+        Ok(())
+    }
+
+    /// Load the carriers of a `ty` slot at `addr + offset`.
+    pub(crate) fn load_slot_value(
+        &mut self,
+        ctx: &mut Context,
+        addr: Value,
+        offset: u32,
+        ty: TypeHandle,
+    ) -> Result<Carriers<Value>> {
+        if is_numeric_type(ctx, ty) {
+            let tag = self.load(ctx, MemKind::I32, addr, offset);
+            let payload = self.load(ctx, MemKind::I64, addr, offset + 8);
+            Ok(Carriers::Numeric { tag, payload })
+        } else {
+            let kind = slot_kind(ctx, ty)?;
+            let raw = self.load(ctx, kind, addr, offset);
+            Ok(Carriers::Scalar(raw))
+        }
+    }
+
     pub(crate) fn array_concat(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
         let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
         let operands = self.operands(ctx, op)?;
-        let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
-        let reuse = Operation::get_op::<perry_mir::collections::ConcatReuseOp>(op, ctx)
+        let references = self.i32_const(ctx, Self::array_element_kind(ctx, element)? as i32);
+        let reuse = Operation::get_op::<perry_mir::ConcatReuseOp>(op, ctx)
             .map_or_else(Vec::new, |concat| concat.candidates(ctx).0);
         let value = if operands.len() == 2 {
             let mask = reuse.iter().fold(0, |mask, index| mask | (1 << index));
@@ -41,12 +102,24 @@ impl FunctionLowering<'_, '_> {
                 vec![operands[0], operands[1], references, reuse],
             )
         } else {
-            let mark = self.publish_roots(ctx, &operands);
-            let stack = self.runtime(ctx, Runtime::RootsState, vec![]);
-            let data = self.load(ctx, MemKind::I32, stack, perry_abi::layout::roots::DATA);
-            let two = self.i32_const(ctx, 2);
-            let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
-            let sources = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+            let (sources, mark) = if self.state.collectible {
+                let mark = self.publish_roots(ctx, &operands);
+                let stack = self.runtime(ctx, Runtime::RootsState, vec![]);
+                let data = self.load(ctx, MemKind::I32, stack, perry_abi::layout::roots::DATA);
+                let two = self.i32_const(ctx, 2);
+                let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
+                (
+                    self.num(ctx, NumOpcode::I32Add, vec![data, offset]),
+                    Some(mark),
+                )
+            } else {
+                let size = self.i32_const(ctx, (operands.len() * 4) as i32);
+                let sources = self.alloc(ctx, size);
+                for (index, value) in operands.iter().copied().enumerate() {
+                    self.store(ctx, MemKind::I32, sources, index as u32 * 4, value);
+                }
+                (sources, None)
+            };
             let count = self.i32_const(ctx, operands.len() as i32);
             let indices = reuse
                 .iter()
@@ -64,7 +137,9 @@ impl FunctionLowering<'_, '_> {
                 Runtime::ArrayConcatMany,
                 vec![sources, count, references, candidates, candidate_count],
             );
-            self.reset_roots(ctx, mark);
+            if let Some(mark) = mark {
+                self.reset_roots(ctx, mark);
+            }
             value
         };
         self.define(ctx, op, value);
@@ -97,7 +172,7 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(true);
         }
-        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
+        if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
                 .map_err(|_| anyhow!("expected a record"))?;
@@ -108,8 +183,8 @@ impl FunctionLowering<'_, '_> {
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect();
-            let operands = self.operands(ctx, op)?;
-            let size = self.i32_const(ctx, record::field(fields.len()) as i32);
+            let byte_size = Self::record_size(ctx, record)?;
+            let size = self.i32_const(ctx, byte_size as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self
                     .local_frame
@@ -119,10 +194,17 @@ impl FunctionLowering<'_, '_> {
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
-            self.record_header(ctx, object, record);
-            for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
-                let kind = slot_kind(ctx, ty)?;
-                self.store(ctx, kind, object, record::field(index), value);
+            let order = {
+                let order = allocation.get_attr_perry_field_order(ctx);
+                self.record_order(ctx, record, order.as_ref().map(|order| order.0.as_slice()))?
+            };
+            self.record_header(ctx, object, order);
+            let mut offset = record::HEADER;
+            for (index, ty) in fields.into_iter().enumerate() {
+                let operand = op.deref(ctx).get_operand(index);
+                let value = self.mapped_value(ctx, operand)?;
+                self.store_slot_value(ctx, object, offset, ty, value)?;
+                offset += slot_size(ctx, ty);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -130,32 +212,94 @@ impl FunctionLowering<'_, '_> {
         if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
-            let kind = slot_kind(ctx, ty)?;
             let object = self.mapped(ctx, record)?;
-            let value = self.load(ctx, kind, object, offset);
+            let mut value = self.load_slot_value(ctx, object, offset, ty)?;
+            if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                let omitted = self.is_omitted(ctx, value, ty)?;
+                let undef = self.undefined_value(ctx, ty)?;
+                value = self.select_carriers(ctx, omitted, undef, value)?;
+            }
+            self.define_value(ctx, op, value);
+            return Ok(true);
+        }
+        if let Some(present) = Operation::get_op::<FieldPresentOp>(op, ctx) {
+            let record = op.deref(ctx).get_operand(0);
+            let (offset, ty) = Self::field_slot(ctx, record, &present.field(ctx))?;
+            let value = if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
+                let object = self.mapped(ctx, record)?;
+                let unpacked = self.load_slot_value(ctx, object, offset, ty)?;
+                let omitted = self.is_omitted(ctx, unpacked, ty)?;
+                self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
+            } else {
+                self.i32_const(ctx, 1)
+            };
             self.define(ctx, op, value);
             return Ok(true);
         }
         if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
+            let val_opd = op.deref(ctx).get_operand(1);
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
-            let kind = slot_kind(ctx, ty)?;
-            let operands = self.operands(ctx, op)?;
-            self.store(ctx, kind, operands[0], offset, operands[1]);
+            let object = self.mapped(ctx, record)?;
+            let value = self.mapped_value(ctx, val_opd)?;
+            if perry_mir::field_order_may_change(ctx, ty) {
+                let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let key = self.state.data.string(&set.field(ctx));
+                let key = self.i32_const(ctx, key as i32);
+                let present = if perry_mir::admits_undefined(ctx, ty) {
+                    let omitted = self.is_omitted(ctx, value, ty)?;
+                    self.num(ctx, NumOpcode::I32Eqz, vec![omitted])
+                } else {
+                    self.i32_const(ctx, 1)
+                };
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdJsonRecordField,
+                    vec![object, table, count, key, present],
+                );
+            }
+            self.store_slot_value(ctx, object, offset, ty, value)?;
+            return Ok(true);
+        }
+        if Operation::get_op::<RecordOrderOp>(op, ctx).is_some() {
+            let record = op.deref(ctx).get_operand(0);
+            let projection = op.deref(ctx).get_operand(1);
+            let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
+            if count > 0 {
+                let element = Self::element_type(ctx, projection)?;
+                let record = self.mapped(ctx, record)?;
+                let projection = self.mapped(ctx, projection)?;
+                let table = self.i32_const(ctx, table as i32);
+                let count = self.i32_const(ctx, count as i32);
+                let stride = self.i32_const(ctx, slot_size(ctx, element) as i32);
+                let retained = self.i32_const(ctx, i32::from(self.state.retains_json));
+                self.runtime_void(
+                    ctx,
+                    Runtime::StdRecordOrder,
+                    vec![record, projection, table, count, stride, retained],
+                );
+            }
             return Ok(true);
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
-            let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
-            let capacity = self.i32_const(ctx, operands.len() as i32);
+            let count = op.deref(ctx).get_num_operands();
+            let capacity = self.i32_const(ctx, count as i32);
             let array = self.new_array(ctx, capacity, element)?;
-            if !operands.is_empty() {
-                let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-                for (index, value) in operands.iter().enumerate() {
-                    self.store(ctx, kind, data, layout::SLOT * index as u32, *value);
+            if count > 0 {
+                let mut slots = Vec::with_capacity(count);
+                for index in 0..count {
+                    let operand = op.deref(ctx).get_operand(index);
+                    slots.push(self.mapped_value(ctx, operand)?);
                 }
-                let len = self.i32_const(ctx, operands.len() as i32);
+                let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+                let stride = slot_size(ctx, element);
+                for (index, slot) in slots.into_iter().enumerate() {
+                    self.store_slot_value(ctx, data, stride * index as u32, element, slot)?;
+                }
+                let len = self.i32_const(ctx, count as i32);
                 self.store(ctx, MemKind::I32, array, layout::LEN, len);
             }
             self.define(ctx, op, array);
@@ -167,10 +311,19 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, len);
             return Ok(true);
         }
-        if let Some(native) = Operation::get_op::<perry_mir::collections::NativeJsonOp>(op, ctx) {
+        if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
+            let operands = self.operands(ctx, op)?;
+            self.store(ctx, MemKind::I32, operands[0], layout::LEN, operands[1]);
+            return Ok(true);
+        }
+        if let Some(native) = Operation::get_op::<perry_mir::NativeJsonOp>(op, ctx) {
             use pliron::builtin::op_interfaces::OneOpdInterface;
             let source = native.get_operand(ctx);
-            let descriptor = self.native_descriptor(ctx, source.get_type(ctx))?;
+            ensure!(
+                JsonSchema::supports_reflection(ctx, source.get_type(ctx)),
+                "unsupported native cause field type"
+            );
+            let descriptor = self.layout_descriptor(ctx, source.get_type(ctx))?;
             let descriptor = self.i32_const(ctx, descriptor as i32);
             let source = self.mapped(ctx, source)?;
             let value = self.runtime(ctx, Runtime::StdJsonNative, vec![source, descriptor]);
@@ -180,7 +333,7 @@ impl FunctionLowering<'_, '_> {
         if Operation::get_op::<ConcatSegmentsOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
             let sources = self.operand(ctx, op, 0)?;
-            let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+            let references = self.i32_const(ctx, Self::array_element_kind(ctx, element)? as i32);
             let value = self.runtime(ctx, Runtime::ArrayConcatSegments, vec![sources, references]);
             self.define(ctx, op, value);
             return Ok(true);
@@ -188,7 +341,7 @@ impl FunctionLowering<'_, '_> {
         if Operation::get_op::<ArrayExtendOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let operands = self.operands(ctx, op)?;
-            let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
+            let references = self.i32_const(ctx, Self::array_element_kind(ctx, element)? as i32);
             self.runtime_void(
                 ctx,
                 Runtime::ArrayExtend,
@@ -197,22 +350,17 @@ impl FunctionLowering<'_, '_> {
             return Ok(true);
         }
         if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
-            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
-            let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
-            self.push(
-                ctx,
-                operands[0],
-                operands[1],
-                kind,
-                repr(ctx, element)? == Repr::Ref,
-            );
+            let arr_opd = op.deref(ctx).get_operand(0);
+            let val_opd = op.deref(ctx).get_operand(1);
+            let element = Self::element_type(ctx, arr_opd)?;
+            let array = self.mapped(ctx, arr_opd)?;
+            let value = self.mapped_value(ctx, val_opd)?;
+            self.push(ctx, array, value, element)?;
             return Ok(true);
         }
         if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
             // Branch-free: read slot 0 when out of range (capacity is never 0), then select.
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
-            let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let (array, index) = (operands[0], operands[1]);
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
@@ -220,34 +368,34 @@ impl FunctionLowering<'_, '_> {
             let zero = self.i32_const(ctx, 0);
             let slot = self.select(ctx, ok, i, zero);
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, slot);
-            let loaded = self.load(ctx, kind, address, 0);
+            let address = self.slot_address(ctx, data, slot, element);
+            let loaded = self.load_slot_value(ctx, address, 0, element)?;
             let target = op.deref(ctx).get_result(0).get_type(ctx);
-            let loaded = if optional_inner(ctx, element).is_some() {
-                self.optional_cast(ctx, loaded, element, target)?
-            } else {
-                loaded
-            };
-            let undefined = self.undefined(ctx, target)?;
-            let value = self.select(ctx, ok, loaded, undefined);
-            self.define(ctx, op, value);
+            if optional_inner(ctx, element).is_some() {
+                self.check_optional_cast(ctx, loaded, element, target)?;
+            }
+            let undefined = self.undefined_value(ctx, target)?;
+            let value = self.select_carriers(ctx, ok, loaded, undefined)?;
+            self.define_value(ctx, op, value);
             return Ok(true);
         }
         if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
-            let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let data = self.load(ctx, MemKind::I32, operands[0], layout::DATA);
-            let address = self.slot_address(ctx, data, operands[1]);
-            let value = self.load(ctx, kind, address, 0);
-            self.define(ctx, op, value);
+            let address = self.slot_address(ctx, data, operands[1], element);
+            let value = self.load_slot_value(ctx, address, 0, element)?;
+            self.define_value(ctx, op, value);
             return Ok(true);
         }
         if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
-            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
-            let kind = slot_kind(ctx, element)?;
-            let operands = self.operands(ctx, op)?;
-            let (array, index, value) = (operands[0], operands[1], operands[2]);
+            let arr_opd = op.deref(ctx).get_operand(0);
+            let idx_opd = op.deref(ctx).get_operand(1);
+            let val_opd = op.deref(ctx).get_operand(2);
+            let element = Self::element_type(ctx, arr_opd)?;
+            let array = self.mapped(ctx, arr_opd)?;
+            let index = self.mapped(ctx, idx_opd)?;
+            let value = self.mapped_value(ctx, val_opd)?;
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             let (i, ok, integral) = self.element_index(ctx, index, len)?;
             let write = self.new_block(ctx, vec![]);
@@ -256,8 +404,8 @@ impl FunctionLowering<'_, '_> {
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, i);
-            self.store(ctx, kind, address, 0, value);
+            let address = self.slot_address(ctx, data, i, element);
+            self.store_slot_value(ctx, address, 0, element, value)?;
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -268,12 +416,22 @@ impl FunctionLowering<'_, '_> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, kind, repr(ctx, element)? == Repr::Ref);
+            self.push(ctx, array, value, element)?;
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn select_carriers(
+        &mut self,
+        ctx: &mut Context,
+        cond: Value,
+        a: Carriers<Value>,
+        b: Carriers<Value>,
+    ) -> Result<Carriers<Value>> {
+        Ok(a.zip(b)?.map(|(av, bv)| self.select(ctx, cond, av, bv)))
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
@@ -296,9 +454,16 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    pub(crate) fn slot_address(&mut self, ctx: &mut Context, data: Value, index: Value) -> Value {
-        let three = self.i32_const(ctx, 3);
-        let offset = self.num(ctx, NumOpcode::I32Shl, vec![index, three]);
+    /// Address of element `index` in array storage `data` holding `element` slots.
+    pub(crate) fn slot_address(
+        &mut self,
+        ctx: &mut Context,
+        data: Value,
+        index: Value,
+        element: TypeHandle,
+    ) -> Value {
+        let shift = self.i32_const(ctx, slot_size(ctx, element).trailing_zeros() as i32);
+        let offset = self.num(ctx, NumOpcode::I32Shl, vec![index, shift]);
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
 
@@ -307,10 +472,9 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         array: Value,
-        value: Value,
-        kind: MemKind,
-        references: bool,
-    ) {
+        value: Carriers<Value>,
+        element: TypeHandle,
+    ) -> Result<()> {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
@@ -318,20 +482,25 @@ impl FunctionLowering<'_, '_> {
         let write = self.new_block(ctx, vec![]);
         self.cond_br(ctx, full, (grow, vec![]), (write, vec![]));
         self.block = grow;
+        let elem_kind = Self::array_element_kind(ctx, element)?;
         if self.state.collectible {
-            let references = self.i32_const(ctx, i32::from(references));
+            let references = self.i32_const(ctx, elem_kind as i32);
             self.runtime_void(ctx, Runtime::ArrayGrowCollectible, vec![array, references]);
+        } else if elem_kind == layout::Elements::Numeric {
+            let references = self.i32_const(ctx, elem_kind as i32);
+            self.runtime_void(ctx, Runtime::ArrayGrowTyped, vec![array, references]);
         } else {
             self.runtime_void(ctx, Runtime::ArrayGrow, vec![array]);
         }
         self.br(ctx, write, vec![]);
         self.block = write;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-        let address = self.slot_address(ctx, data, len);
-        self.store(ctx, kind, address, 0, value);
+        let address = self.slot_address(ctx, data, len, element);
+        self.store_slot_value(ctx, address, 0, element, value)?;
         let one = self.i32_const(ctx, 1);
         let next = self.num(ctx, NumOpcode::I32Add, vec![len, one]);
         self.store(ctx, MemKind::I32, array, layout::LEN, next);
+        Ok(())
     }
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {
@@ -340,40 +509,67 @@ impl FunctionLowering<'_, '_> {
         Ok(ty.deref(ctx).element())
     }
 
-    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
-        let ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected a record"))?;
-        let ty = ty.deref(ctx);
-        let (index, field_ty) = ty
-            .field(field)
-            .ok_or_else(|| anyhow!("record has no field {field}"))?;
-        Ok((record::field(index), field_ty))
+    pub(crate) fn record_type_field_slot(
+        ctx: &Context,
+        record: TypedHandle<RecordType>,
+        field: &str,
+    ) -> Result<(u32, TypeHandle)> {
+        let record = record.deref(ctx);
+        let fields = record
+            .fields()
+            .map_err(|_| anyhow!("record has no field {field}"))?;
+        let (index, (_, field_ty)) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| name == field)
+            .ok_or_else(|| anyhow!("TypeScript type {} has no field {field}", record.name()))?;
+        Ok((record_offset(ctx, &fields[..index]), *field_ty))
     }
 
-    /// Initialize the header of fresh record storage: the id of shape `record` and, when the
-    /// module retains parsed JSON, an empty source word.
-    pub(crate) fn record_header(
+    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
+        let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
+            .map_err(|_| anyhow!("expected a record"))?;
+        Self::record_type_field_slot(ctx, record, field)
+    }
+
+    /// Encode static insertion order before emitting operations into the context.
+    pub(crate) fn record_order(
         &mut self,
-        ctx: &mut Context,
-        object: Value,
+        ctx: &Context,
         record: TypedHandle<RecordType>,
-    ) {
-        let shape = {
-            let record = record.deref(ctx);
-            let name: &str = record.name().as_ref();
-            if let Some(&shape) = self.state.shapes.get(name) {
-                shape
-            } else {
-                let next_shape = self.state.shapes.len() as i32 + 1;
-                self.state.shapes.insert(name.to_string(), next_shape);
-                next_shape
+        order: Option<&[u32]>,
+    ) -> Result<u32> {
+        let count = record.deref(ctx).fields()?.len();
+        let length = order.map_or(count, <[_]>::len);
+        let fields = (0..length).map(|index| order.map_or(index as u32, |order| order[index]));
+        Ok(if count <= perry_abi::json::PACKED_FIELDS {
+            fields.fold(0, perry_abi::json::append_field)
+        } else {
+            let mut bytes = Vec::with_capacity(4 * (length + 1));
+            bytes.extend_from_slice(&(length as u32).to_le_bytes());
+            for field in fields {
+                bytes.extend_from_slice(&field.to_le_bytes());
             }
-        };
+            self.state.data.append(4, &bytes)
+        })
+    }
+
+    /// Initialize insertion order and, when needed, the retained JSON graph.
+    pub(crate) fn record_header(&mut self, ctx: &mut Context, object: Value, order: u32) {
         if self.state.retains_json {
             let zero = self.i32_const(ctx, 0);
             self.store(ctx, MemKind::I32, object, record::JSON, zero);
         }
-        let shape = self.i32_const(ctx, shape);
-        self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
+        let order = self.i32_const(ctx, order as i32);
+        self.store(ctx, MemKind::I32, object, record::ORDER, order);
     }
+}
+
+/// Offset of the field following `preceding`: the header plus their slots.
+fn record_offset(ctx: &Context, preceding: &[(String, TypeHandle)]) -> u32 {
+    record::HEADER
+        + preceding
+            .iter()
+            .map(|(_, ty)| slot_size(ctx, *ty))
+            .sum::<u32>()
 }

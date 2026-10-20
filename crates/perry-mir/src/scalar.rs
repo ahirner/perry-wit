@@ -1,23 +1,23 @@
 //! Scalar arithmetic and comparison.
-use crate::attrs::{BinaryKind, CompareKind, ConvertKind};
+use crate::attrs::{BinaryKind, CompareKind};
+use crate::operation_schema::op_schema;
+use crate::signatures::{Accepts, OutputContract, ResultType, Ty};
 use pliron::{
     builtin::{
         op_interfaces::{
             NOpdsInterface, OneResultInterface, SameOperandsAndResultType, SameOperandsType,
             SameResultsType,
         },
-        types::{IntegerType, Signedness},
+        types::IntegerType,
     },
     common_traits::Verify,
     context::Context,
-    derive::{op_interface_impl, pliron_op},
+    derive::pliron_op,
     op::Op,
     operation::Operation,
-    opts::dce::SideEffects,
     result::Result,
-    r#type::Typed,
+    r#type::{TypeHandle, Typed},
     value::Value,
-    verify_err,
 };
 use thiserror::Error;
 
@@ -37,19 +37,12 @@ use thiserror::Error;
 )]
 pub struct BinaryOp;
 
+pliron::dict_key!(UNCONSTRAINED_ARITH, "perry_unconstrained_arith");
+
 impl BinaryOp {
     pub fn new(ctx: &mut Context, kind: BinaryKind, lhs: Value, rhs: Value) -> Self {
         let ty = lhs.get_type(ctx);
-        let op = BinaryOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![lhs, rhs],
-                vec![],
-                0,
-            ),
-        };
+        let op = Operation::new_op::<Self>(ctx, vec![ty], vec![lhs, rhs], vec![], 0);
         op.set_attr_perry_binary_kind(ctx, kind);
         op
     }
@@ -57,151 +50,88 @@ impl BinaryOp {
     pub fn kind(&self, ctx: &Context) -> BinaryKind {
         *self.get_attr_perry_binary_kind(ctx).expect("binary kind")
     }
-}
 
-#[op_interface_impl]
-impl SideEffects for BinaryOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
+    /// Marks numeric add/sub/mul whose exact result no integer consumer constrains.
+    pub(crate) fn set_unconstrained(&self, ctx: &mut Context, unconstrained: bool) {
+        if unconstrained {
+            self.get_operation().deref_mut(ctx).attributes.set(
+                UNCONSTRAINED_ARITH.clone(),
+                pliron::builtin::attributes::UnitAttr::new(),
+            );
+        } else {
+            self.get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .0
+                .remove(&UNCONSTRAINED_ARITH);
+        }
+    }
+
+    pub fn is_unconstrained(&self, ctx: &Context) -> bool {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .0
+            .contains_key(&UNCONSTRAINED_ARITH)
     }
 }
 
-/// Comparison of two operands of one type, producing an `i1`.
-///
-/// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
-/// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
-#[pliron_op(
-    name = "perry.compare",
-    format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)",
-    interfaces = [NOpdsInterface<2>, OneResultInterface, SameOperandsType],
-    attributes = (perry_compare_kind: CompareKind)
-)]
-pub struct CompareOp;
-
-impl CompareOp {
-    pub fn new(ctx: &mut Context, kind: CompareKind, lhs: Value, rhs: Value) -> Self {
-        let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let op = CompareOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![i1],
-                vec![lhs, rhs],
-                vec![],
-                0,
-            ),
-        };
-        op.set_attr_perry_compare_kind(ctx, kind);
-        op
-    }
-
-    pub fn kind(&self, ctx: &Context) -> CompareKind {
-        *self.get_attr_perry_compare_kind(ctx).expect("compare kind")
-    }
+op_schema! {
+    /// Comparison of two operands of one type, producing an `i1`.
+    ///
+    /// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
+    /// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
+    pub CompareOp(_lhs, _rhs) -> infallible;
+    name = "perry.compare";
+    format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)";
+    interfaces = [SameOperandsType];
+    attributes = (perry_compare_kind: CompareKind);
+    constructors { pub new(kind: CompareKind, _lhs: Value, _rhs: Value) => infer(); }
+    attribute(kind: CompareKind, get_attr_perry_compare_kind, set_attr_perry_compare_kind) = kind;
+    result(ctx): Ty = Ty::Predicate;
+    error = CompareResultErr;
 }
 
 #[derive(Debug, Error)]
 #[error("perry.compare must produce a signless i1")]
 pub(crate) struct CompareResultErr;
 
-impl Verify for CompareOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if !is_bool(ctx, self.get_result(ctx)) {
-            verify_err!(self.loc(ctx), CompareResultErr)?
-        }
-        Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for CompareOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Whether `value` is a signless `i1`, the type of branch conditions.
 pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
-    value
-        .get_type(ctx)
-        .deref(ctx)
-        .downcast_ref::<IntegerType>()
-        .is_some_and(|ty| ty.width() == 1 && ty.signedness() == Signedness::Signless)
+    Ty::Predicate.matches(ctx, value.get_type(ctx))
 }
 
-/// Conversion between `f64` and signless `i32`.
-#[pliron_op(
-    name = "perry.convert",
-    format = "attr($perry_convert_kind, $ConvertKind) ` ` $0 ` : ` type($0)",
-    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, OneResultInterface],
-    attributes = (perry_convert_kind: ConvertKind)
-)]
-pub struct ConvertOp;
-
-impl ConvertOp {
-    pub fn new(ctx: &mut Context, kind: crate::attrs::ConvertKind, value: Value) -> Self {
-        use crate::attrs::ConvertKind;
-        let ty = match kind {
-            ConvertKind::I32ToF64 => pliron::builtin::types::FP64Type::get(ctx).into(),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                IntegerType::get(ctx, 32, Signedness::Signless).into()
+op_schema! {
+    /// A representation conversion with explicit source and destination numeric types.
+    /// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
+    /// conversion to an integer saturates, matching the existing floating-point WIT boundary.
+    pub NumericCastOp(value) -> infallible;
+    name = "perry.numeric_cast";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(value: Value, target: TypeHandle) => explicit(target); }
+    result(ctx, value: Value): impl OutputContract = {
+        Accepts(move |ctx: &Context, target: TypeHandle| {
+            let source = value.get_type(ctx);
+            let bigint = |ty: TypeHandle| ty.deref(ctx).is::<crate::types::BigIntType>();
+            let integer = |ty: TypeHandle| {
+                ty.deref(ctx)
+                    .downcast_ref::<IntegerType>()
+                    .is_some_and(|ty| matches!(ty.width(), 8 | 16 | 32 | 64))
+            };
+            if bigint(source) || bigint(target) {
+                return integer(if bigint(source) { target } else { source });
             }
-        };
-        let op = ConvertOp {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![value],
-                vec![],
-                0,
-            ),
-        };
-        op.set_attr_perry_convert_kind(ctx, kind);
-        op
-    }
-
-    pub fn kind(&self, ctx: &Context) -> crate::attrs::ConvertKind {
-        *self.get_attr_perry_convert_kind(ctx).expect("convert kind")
-    }
+            [source, target].into_iter().all(|ty| {
+                let ty = crate::optional::present_type(ctx, ty);
+                ty.deref(ctx).is::<crate::types::NumericType>()
+                    || Ty::Number.matches(ctx, ty)
+                    || integer(ty)
+            })
+        })
+    };
+    error = NumericCastErr;
 }
 
 #[derive(Debug, Error)]
-#[error("perry.convert {0:?} has operand or result of the wrong type")]
-pub(crate) struct ConvertErr(crate::attrs::ConvertKind);
-
-impl Verify for ConvertOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        use crate::attrs::ConvertKind;
-        let kind = self.kind(ctx);
-        let input = self.get_operation().deref(ctx).get_operand(0);
-        let is_f64 = |v: Value| {
-            v.get_type(ctx)
-                .deref(ctx)
-                .is::<pliron::builtin::types::FP64Type>()
-        };
-        let is_i32 = |v: Value| {
-            v.get_type(ctx)
-                .deref(ctx)
-                .downcast_ref::<IntegerType>()
-                .is_some_and(|ty| ty.width() == 32 && ty.signedness() == Signedness::Signless)
-        };
-        let ok = match kind {
-            ConvertKind::I32ToF64 => is_i32(input) && is_f64(self.get_result(ctx)),
-            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
-                is_f64(input) && is_i32(self.get_result(ctx))
-            }
-        };
-        if !ok {
-            verify_err!(self.loc(ctx), ConvertErr(kind))?
-        }
-        Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for ConvertOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
+#[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
+struct NumericCastErr;

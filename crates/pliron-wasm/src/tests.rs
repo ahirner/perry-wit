@@ -311,9 +311,28 @@ builtin.module @m {{
     assert_eq!(memory.data(&store)[16..20], 64i32.to_le_bytes());
 }
 
-/// Single-use pure values are evaluated in place, so straight-line arithmetic needs no locals.
+/// Single-use trees need no locals, preserve operand/result order, and tolerate deep folding.
 #[test]
 fn single_use_values_stay_on_the_stack() {
+    use std::fmt::Write;
+    let depth = 4097;
+    let mut chain = String::new();
+    for index in 1..=depth {
+        let previous = index - 1;
+        let (left, right) = if index % 2 == 0 {
+            ("difference", "k")
+        } else {
+            ("k", "difference")
+        };
+        writeln!(
+            chain,
+            "left{index}, right{index} = wasm.call pair (v{previous}) : {I32}, {I32};\n\
+             difference{index} = wasm.num I32Sub left{index}, right{index} : {I32};\n\
+             k{index} = builtin.constant <builtin.integer <{index}: i32>> : {I32};\n\
+             v{index} = wasm.num I32Sub {left}{index}, {right}{index} : {I32};"
+        )
+        .unwrap();
+    }
     let input = format!(
         r#"
 builtin.module @m {{
@@ -325,6 +344,16 @@ builtin.module @m {{
         two = builtin.constant <builtin.integer <2: i32>> : {I32};
         r = wasm.num I32Shl s, two : {I32};
         wasm.return r
+    }};
+    builtin.func @pair: builtin.function <({I32}) -> ({I32}, {I32})> {{
+      ^entry(x: {I32}):
+        three = builtin.constant <builtin.integer <3: i32>> : {I32};
+        wasm.return x, three
+    }};
+    builtin.func @deep: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(v0: {I32}):
+        {chain}
+        wasm.return v{depth}
     }}
 }}
 "#
@@ -333,6 +362,7 @@ builtin.module @m {{
     let text = wat(&wasm);
     assert!(!text.contains("local.set"), "{text}");
     assert!(!text.contains("(local "), "{text}");
+    assert_eq!(text.matches("call ").count(), depth as usize);
     assert_eq!(
         i32_of(call(
             &wasm,
@@ -341,6 +371,17 @@ builtin.module @m {{
         )),
         28
     );
+    for x in [-11, 0, 17] {
+        let expected = (1..=depth).fold(x, |value, index| {
+            let difference = value - 3;
+            if index % 2 == 0 {
+                difference - index
+            } else {
+                index - difference
+            }
+        });
+        assert_eq!(i32_of(call(&wasm, "deep", &[Val::I32(x)])), expected);
+    }
 }
 
 /// A trapping or memory-reading op never moves across a store: the load below must read the
@@ -553,6 +594,18 @@ fn dialect_round_trips_through_text() {
     )
     .unwrap_or_else(|error| panic!("{}", error.disp(ctx2)));
     verify_operation(reparsed, ctx2).unwrap();
+    let invalid = loops().replace(
+        "negative = wasm.num I32LtS x, zero : builtin.integer i32;",
+        "negative = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1;",
+    );
+    let module = parse_from_str(spaced(Operation::top_level_parser()), ctx2, &invalid).unwrap();
+    assert!(
+        verify_operation(module, ctx2)
+            .unwrap_err()
+            .disp(ctx2)
+            .to_string()
+            .contains("condition must be a signless i32")
+    );
 }
 
 /// Drop printer-only location references (` !N`).
@@ -698,4 +751,46 @@ builtin.module @m {{
             .unwrap_or_else(|error| panic!("{}", error.disp(ctx)));
         assert!(verify_operation(module, ctx).is_err());
     }
+}
+
+#[test]
+fn multiple_exports_share_one_function() {
+    use pliron::builtin::op_interfaces::SymbolOpInterface;
+    let ctx = &mut Context::new();
+    let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &format!(
+        "builtin.module @m {{ ^module(): builtin.func @identity: builtin.function <({I32}) -> ({I32})> {{ ^entry(x: {I32}): wasm.return x }} }}"
+    )).unwrap();
+    let module = Operation::get_op::<ModuleOp>(module, ctx).unwrap();
+    let function = Operation::get_op::<FuncOp>(
+        module.get_body(ctx, 0).deref(ctx).iter(ctx).next().unwrap(),
+        ctx,
+    )
+    .unwrap();
+    assert_eq!(function.get_symbol_name(ctx).as_ref(), "identity");
+    for name in ["first", "second", "first"] {
+        crate::ops::set_export(ctx, &function, name);
+    }
+    let bytes = emit_module(ctx, &module, &EmitOptions::default()).unwrap();
+    let exports = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .filter_map(|payload| {
+            if let wasmparser::Payload::ExportSection(section) = payload.unwrap() {
+                Some(
+                    section
+                        .into_iter()
+                        .map(|e| {
+                            let e = e.unwrap();
+                            (e.name.to_owned(), e.index)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(exports, [("first".to_owned(), 0), ("second".to_owned(), 0)]);
+    assert_eq!(i32_of(call(&bytes, "first", &[Val::I32(17)])), 17);
+    assert_eq!(i32_of(call(&bytes, "second", &[Val::I32(-9)])), -9);
 }

@@ -1,7 +1,101 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
+use perry_mir::JsonSchema;
+
+/// Accepted deviation: JSON revivers and indentation are diagnosed at compile time.
+pub(super) const JSON_CALLBACKS: &str = "JSON revivers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
 
 impl<'s> FunctionBuilder<'s> {
+    /// `JSON.stringify(value)`.
+    pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        let mut value = self.expression(ctx, expr)?;
+        if let Some(src) = self.integer64_source(ctx, value) {
+            value = src;
+        } else if let Expr::LocalGet(id) = expr
+            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
+            && int_ty.deref(ctx).width() == 64
+        {
+            let int_handle: TypeHandle = int_ty.into();
+            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
+        }
+        Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
+    }
+
+    pub(super) fn stringify_replaced(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        replacer: &'s Expr,
+    ) -> Result<Value> {
+        if matches!(replacer, Expr::Null | Expr::Undefined) {
+            return self.stringify(ctx, expr);
+        }
+        let value = self.expression(ctx, expr)?;
+        let value = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
+        let callback = matches!(replacer, Expr::Closure { .. } | Expr::FuncRef(_))
+            || matches!(replacer, Expr::LocalGet(id) if self.closures.get(id).is_some());
+        let keys = if callback {
+            self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
+        } else {
+            let expected = matches!(replacer, Expr::Array(items) if items.is_empty())
+                .then(|| ArrayType::get(ctx, StringType::get(ctx).into()).into());
+            let keys = self.expression_with(ctx, replacer, expected)?;
+            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, keys))
+        };
+        let traversal = self.intrinsic(ctx, Intrinsic::JsonReplacerBegin, vec![value, keys]);
+        let body = self.new_block(ctx, "json_replacer");
+        let done = self.new_block(ctx, "json_written");
+        self.jump(ctx, body);
+        self.switch_to(body);
+        let value = self.intrinsic(ctx, Intrinsic::JsonReplacerValue, vec![traversal]);
+        let replacement = if callback {
+            let key = self.intrinsic(ctx, Intrinsic::JsonReplacerKey, vec![traversal]);
+            let json = JsonType::get(ctx).into();
+            let json =
+                perry_mir::OptionalType::get_with(ctx, json, perry_mir::Absence::Both).into();
+            let value = self.inline_callback(ctx, replacer, &[key, value], Some(json))?;
+            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value))
+        } else {
+            value
+        };
+        let more = self.intrinsic(
+            ctx,
+            Intrinsic::JsonReplacerNext,
+            vec![traversal, replacement],
+        );
+        self.branch(ctx, more, body, done);
+        self.switch_to(done);
+        Ok(self.intrinsic(ctx, Intrinsic::JsonReplacerFinish, vec![traversal]))
+    }
+
+    pub(super) fn decode_json(
+        &mut self,
+        ctx: &mut Context,
+        input: Value,
+        target: TypeHandle,
+    ) -> Result<Value> {
+        ensure!(
+            JsonSchema::supports_descriptor(ctx, target),
+            "unsupported JSON schema"
+        );
+        Ok(self.emit_value(ctx, |ctx| perry_mir::JsonDecodeOp::new(ctx, input, target)))
+    }
+
+    /// Unsupported cursor targets retain the JSON value for later coercion.
+    pub(super) fn parse_json_text(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        match expected
+            .filter(|ty| !ty.deref(ctx).is::<JsonType>() && JsonSchema::supports_cursor(ctx, *ty))
+        {
+            Some(target) => self.decode_json(ctx, text, target),
+            None => Ok(self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])),
+        }
+    }
+
     pub(super) fn json_scalar_equal(
         &mut self,
         ctx: &mut Context,
@@ -10,26 +104,18 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
         if self.is_optional(ctx, scalar) {
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, scalar));
-            return self.choose(
+            return self.match_optional(
                 ctx,
+                scalar,
                 boolean,
-                undefined,
                 |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, scalar));
-                    b.choose(
-                        ctx,
-                        boolean,
-                        null,
-                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
-                        |b, ctx| {
-                            let scalar = b.defined(ctx, scalar)?;
-                            b.json_scalar_equal(ctx, json, scalar)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
+                |b, ctx, defined| b.json_scalar_equal(ctx, json, defined),
             );
+        }
+        if kind(ctx, scalar)? == Kind::BigInt {
+            let scalar = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, scalar));
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonStrictEqual, vec![json, scalar]));
         }
         if kind(ctx, scalar)? == Kind::Exception {
             return Ok(self.intrinsic(ctx, Intrinsic::JsonExceptionEqual, vec![json, scalar]));
@@ -57,257 +143,70 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| Ok(b.boolean(ctx, false)),
         )
     }
-
-    pub(super) fn decode_aggregate(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        let existing = self.shapes.decoders.borrow().get(&target).cloned();
-        let name = match existing {
-            Some(name) => name,
-            None => {
-                let mut index = self.shapes.decoders.borrow().len();
-                let name = loop {
-                    let name = identifier(&format!("perry_json_decode_{index}"))?;
-                    if self
-                        .signatures
-                        .values()
-                        .all(|signature| signature.name != name)
-                        && self
-                            .shapes
-                            .decoders
-                            .borrow()
-                            .values()
-                            .all(|other| *other != name)
-                    {
-                        break name;
-                    }
-                    index += 1;
-                };
-                self.shapes
-                    .decoders
-                    .borrow_mut()
-                    .insert(target, name.clone());
-                let signature = Signature {
-                    name: name.clone(),
-                    is_async: false,
-                    await_initialization: false,
-                    params: vec![JsonType::get(ctx).into()],
-                    results: vec![target],
-                };
-                let ty =
-                    FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
-                let function = FuncOp::new(ctx, name.clone(), ty);
-                self.shapes
-                    .module
-                    .append_operation(ctx, function.get_operation(), 0);
-                let input = function.get_entry_block(ctx).deref(ctx).get_argument(0);
-                let mut builder = Self::new(
-                    ctx,
-                    &function,
-                    &signature,
-                    self.signatures,
-                    self.shapes,
-                    self.builtins,
-                );
-                let output = builder.decode_fields(ctx, input, target)?;
-                builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![output]));
-                remove_unreachable(ctx, builder.region);
-                name
-            }
-        };
-        let call = CallOp::new(ctx, name, vec![value], vec![target]);
-        self.append(ctx, &call);
-        Ok(call.get_operation().deref(ctx).get_result(0))
-    }
-
-    fn decode_fields(
-        &mut self,
-        ctx: &mut Context,
-        value: Value,
-        target: TypeHandle,
-    ) -> Result<Value> {
-        if target.deref(ctx).is::<perry_mir::types::NumberStringType>() {
-            let tag = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]);
-            let number = self.string(ctx, "number");
-            let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
-            return self.choose(
-                ctx,
-                target,
-                is_number,
-                |b, ctx| {
-                    let ty = FP64Type::get(ctx).into();
-                    let number = b.fit(ctx, value, ty)?;
-                    b.fit(ctx, number, target)
-                },
-                |b, ctx| {
-                    let ty = StringType::get(ctx).into();
-                    let string = b.fit(ctx, value, ty)?;
-                    b.fit(ctx, string, target)
-                },
-            );
-        }
-        if let Ok(variant) = TypedHandle::<perry_mir::types::VariantType>::from_handle(target, ctx)
-        {
-            let cases = variant.deref(ctx).cases().to_vec();
-            self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-            let tag_key = self.string(ctx, "tag");
-            let tag = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, tag_key]);
-            let string = StringType::get(ctx).into();
-            let tag = self.fit(ctx, tag, string)?;
-            let result = self.entry_slot(ctx, target);
-            let done = self.new_block(ctx, "variant_done");
-            for (name, payload) in cases {
-                let text = self.string(ctx, &name);
-                let matches = self.compare(ctx, CompareKind::Eq, tag, text);
-                let active = self.new_block(ctx, "variant_case");
-                let next = self.new_block(ctx, "variant_next");
-                self.branch(ctx, matches, active, next);
-                self.switch_to(active);
-                let payload = if let Some(ty) = payload {
-                    let key = self.string(ctx, "val");
-                    let member = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key]);
-                    Some(self.fit(ctx, member, ty)?)
-                } else {
-                    None
-                };
-                let decoded = self.emit_value(ctx, |ctx| {
-                    perry_mir::variants::VariantNewOp::new(ctx, target, &name, payload)
-                });
-                self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
-                self.store(ctx, result, decoded);
-                self.jump(ctx, done);
-                self.switch_to(next);
-            }
-            let message = self.string(ctx, "JSON tag is not a case of the declared variant");
-            let error = self.emit_value(ctx, |ctx| {
-                ErrorNewOp::new(ctx, ErrorKind::TypeError, message)
-            });
-            let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
-            self.propagate(ctx, status);
-            self.switch_to(done);
-            return self.load(ctx, result);
-        }
-        if let Ok(record) = TypedHandle::<RecordType>::from_handle(target, ctx) {
-            let tuple = record.deref(ctx).is_tuple();
-            let fields = record
-                .deref(ctx)
-                .fields()
-                .map_err(|_| anyhow!("opaque JSON schema"))?
-                .to_vec();
-            let mut element = if tuple {
-                self.call_intrinsic(ctx, Intrinsic::JsonFirst, vec![value])
-            } else {
-                self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
-                None
-            };
-            let mut values = Vec::with_capacity(fields.len());
-            for (field, ty) in fields {
-                let member = if let Some(current) = element {
-                    element = self.call_intrinsic(ctx, Intrinsic::JsonNext, vec![current]);
-                    current
-                } else {
-                    let name = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field.as_ref()));
-                    self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
-                };
-                values.push(self.fit(ctx, member, ty)?);
-            }
-            let decoded = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values));
-            self.intrinsic_void(ctx, Intrinsic::JsonRetain, vec![decoded, value]);
-            return Ok(decoded);
-        }
-        if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
-            let element = array_type.deref(ctx).element();
-            let first = self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value]);
-            let json = JsonType::get(ctx).into();
-            let cursor = self.entry_slot(ctx, json);
-            self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, first));
-            let array = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-            let header = self.new_block(ctx, "decode_header");
-            let body = self.new_block(ctx, "decode_element");
-            let done = self.new_block(ctx, "decode_done");
-            self.jump(ctx, header);
-            self.switch_to(header);
-            let load = LoadOp::new(ctx, cursor)?;
-            let item = self.append_value(ctx, &load);
-            let end = self.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![item]);
-            self.branch(ctx, end, done, body);
-            self.switch_to(body);
-            let decoded = self.fit(ctx, item, element)?;
-            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, decoded));
-            let next = self.intrinsic(ctx, Intrinsic::JsonNext, vec![item]);
-            self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, next));
-            self.jump(ctx, header);
-            self.switch_to(done);
-            return Ok(array);
-        }
-        bail!(
-            "JSON schema requires scalars, closed records or dense arrays, found {}",
-            target.disp(ctx)
-        )
-    }
-}
-
-impl<'s> FunctionBuilder<'s> {
-    /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
-    /// `{}`: `js_object_literal_spread` copies each spread and `js_object_literal_define`
-    /// defines each static member. Over JSON values it builds a JSON object; typed records
-    /// do not spread yet.
     pub(super) fn object_spread(
         &mut self,
         ctx: &mut Context,
-        target: LocalId,
-        body: &'s [Stmt],
+        parts: &'s [(Option<String>, Expr)],
+        expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
-            response.json()) with static keys; computed keys, methods and accessors are not";
+        let expected_inner = expected.map(|ty| present_type(ctx, ty));
+        if let Some(ty) = expected_inner
+            && !ty.deref(ctx).is::<JsonType>()
+            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        {
+            return self.record_object_spread(ctx, parts, None, Some(rec));
+        }
+        let mut remaining = parts;
+        let mut initial = None;
+        if expected_inner.is_none() {
+            if let Some((None, first_spread)) = parts.first() {
+                let first_src = self.expression(ctx, first_spread)?;
+                let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
+                let first_json = if is_exc {
+                    None
+                } else {
+                    self.json_operand(ctx, first_src)?
+                };
+                if !is_exc
+                    && first_json.is_none()
+                    && parts[1..]
+                        .iter()
+                        .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
+                {
+                    return self.record_object_spread(ctx, parts, Some(first_src), None);
+                }
+                if !is_exc {
+                    initial = Some(first_json.context(
+                        "object spread is supported over typed records or JSON values with static keys",
+                    )?);
+                }
+                remaining = &parts[1..];
+            } else if parts.iter().any(|(k, _)| k.is_none())
+                && parts
+                    .iter()
+                    .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
+            {
+                return self.record_object_spread(ctx, parts, None, None);
+            }
+        }
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
-        let is_target = |expr: &'s Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
-        for statement in body {
-            match statement {
-                Stmt::Let {
-                    id,
-                    init: Some(value),
-                    ..
-                } => {
-                    let value = self.json_value(ctx, value)?;
-                    let slot = self.entry_slot(ctx, value.get_type(ctx));
-                    self.store(ctx, slot, value);
-                    self.locals.insert(*id, slot);
+        if let Some(source) = initial {
+            self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+        }
+        for (key, value) in remaining {
+            if let Some(key) = key {
+                let key = self.string(ctx, key);
+                let value = self.json_value(ctx, value)?;
+                self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+            } else {
+                let source = self.expression(ctx, value)?;
+                if matches!(kind(ctx, source), Ok(Kind::Exception)) {
+                    continue;
                 }
-                Stmt::Expr(Expr::Call { callee, args, .. })
-                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                        if name == "js_object_literal_spread")
-                        && args.len() == 2
-                        && is_target(&args[0]) =>
-                {
-                    let source = self.expression(ctx, &args[1])?;
-                    // An `Error` has no own enumerable properties: it adds nothing.
-                    if matches!(kind(ctx, source), Ok(Kind::Exception)) {
-                        continue;
-                    }
-                    let Some(source) = self.json_operand(ctx, source)? else {
-                        bail!("{UNSUPPORTED}");
-                    };
-                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
-                }
-                Stmt::Expr(Expr::Call { callee, args, .. })
-                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                        if name == "js_object_literal_define")
-                        && args.len() == 3
-                        && is_target(&args[0]) =>
-                {
-                    let Expr::String(key) = &args[1] else {
-                        bail!("{UNSUPPORTED}");
-                    };
-                    let key = self.string(ctx, key);
-                    let value = self.json_value(ctx, &args[2])?;
-                    self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
-                }
-                Stmt::Return(Some(result)) if is_target(result) => {}
-                _ => bail!("{UNSUPPORTED}"),
+                let source = self.json_operand(ctx, source)?.context(
+                    "object spread is supported over typed records or JSON values with static keys",
+                )?;
+                self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }
         }
         Ok(object)
@@ -346,25 +245,13 @@ impl<'s> FunctionBuilder<'s> {
         }
         if self.is_optional(ctx, value) {
             let json = JsonType::get(ctx).into();
-            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-            return self.choose(
+            return self.match_optional(
                 ctx,
+                value,
                 json,
-                undefined,
                 |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
-                |b, ctx| {
-                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
-                    b.choose(
-                        ctx,
-                        json,
-                        null,
-                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
-                        |b, ctx| {
-                            let value = b.defined(ctx, value)?;
-                            b.error_cause(ctx, value)
-                        },
-                    )
-                },
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
+                |b, ctx, defined| b.error_cause(ctx, defined),
             );
         }
         let intrinsic = match kind(ctx, value)? {
@@ -373,9 +260,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::Boolean => Intrinsic::JsonFromBool,
             Kind::Exception => Intrinsic::JsonFromException,
             Kind::Record | Kind::Array => {
-                return Ok(self.emit_value(ctx, |ctx| {
-                    perry_mir::collections::NativeJsonOp::new(ctx, value)
-                }));
+                return Ok(self.emit_value(ctx, |ctx| perry_mir::NativeJsonOp::new(ctx, value)));
             }
             _ => bail!("unsupported Error cause type"),
         };

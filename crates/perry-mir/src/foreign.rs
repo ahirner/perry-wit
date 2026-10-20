@@ -1,17 +1,10 @@
 //! Statically bound component imports and their canonical transfer lifetime.
+use crate::operation_schema::op_schema;
+use crate::signatures::{OutputContract, Signature};
 use crate::types::{PromiseType, TransferType};
 use pliron::{
-    builtin::attributes::StringAttr,
-    common_traits::Verify,
-    context::Context,
-    derive::{op_interface_impl, pliron_attr, pliron_op},
-    op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
-    result::Result,
-    r#type::{TypeHandle, Typed},
-    value::Value,
-    verify_err,
+    builtin::attributes::StringAttr, common_traits::Verify, context::Context, derive::pliron_attr,
+    op::Op, operation::Operation, result::Result, r#type::TypeHandle, value::Value,
 };
 
 #[pliron_attr(name = "perry.foreign_phase", format, verifier = "succ")]
@@ -22,89 +15,46 @@ pub enum Phase {
     Finish,
 }
 
-#[pliron_op(name = "perry.foreign",
-    format = "attr($perry_foreign_phase, $Phase) ` ` attr($perry_foreign_binding, $StringAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))",
-    attributes = (perry_foreign_binding: StringAttr, perry_foreign_phase: Phase))]
-pub struct ForeignOp;
-
-impl ForeignOp {
-    pub fn new(
-        ctx: &mut Context,
-        phase: Phase,
-        binding: &str,
-        args: Vec<Value>,
-        results: Vec<TypeHandle>,
-    ) -> Self {
-        let op = Self {
-            op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
-        };
-        op.set_attr_perry_foreign_binding(ctx, StringAttr::new(binding.to_owned()));
-        op.set_attr_perry_foreign_phase(ctx, phase);
-        op
+op_schema! {
+    pub ForeignOp(.._args) -> infallible;
+    name = "perry.foreign";
+    format = "attr($perry_foreign_phase, $Phase) ` ` attr($perry_foreign_binding, $StringAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))";
+    attributes = (perry_foreign_binding: StringAttr, perry_foreign_phase: Phase);
+    constructors {
+        pub new(phase: Phase, binding: &str, args: Vec<Value>, results: Vec<TypeHandle>)
+            operands(args) => results(results);
     }
-    pub fn binding(&self, ctx: &Context) -> String {
-        self.get_attr_perry_foreign_binding(ctx)
-            .expect("foreign binding")
-            .as_str()
-            .to_owned()
-    }
-    pub fn phase(&self, ctx: &Context) -> Phase {
-        *self
-            .get_attr_perry_foreign_phase(ctx)
-            .expect("foreign phase")
-    }
+    attribute(phase: Phase, get_attr_perry_foreign_phase, set_attr_perry_foreign_phase) =
+        phase => InvalidForeign;
+    attribute(binding: String, get_attr_perry_foreign_binding, set_attr_perry_foreign_binding) =
+        StringAttr::new(binding.to_owned()) => InvalidForeign;
+    prepare(_this) { let phase = *phase; }
+    result(ctx, phase: Phase): Phase = phase;
+    error = InvalidForeign;
+    check binding.as_str().contains('#') => InvalidForeign;
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("foreign call must have a binding and the signature required by its transfer phase")]
 struct InvalidForeign;
 
-impl Verify for ForeignOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        let operation = self.get_operation().deref(ctx);
-        let valid = match self.get_attr_perry_foreign_phase(ctx).as_deref() {
-            Some(Phase::Call) => operation.get_num_results() <= 1,
-            Some(Phase::Start) => {
-                operation.get_num_results() == 1
-                    && operation
-                        .get_result(0)
-                        .get_type(ctx)
-                        .deref(ctx)
-                        .downcast_ref::<PromiseType>()
-                        .is_some_and(|promise| promise.value().deref(ctx).is::<TransferType>())
+impl OutputContract for Phase {
+    fn accepts(self, ctx: &Context, op: &Operation) -> bool {
+        match self {
+            Phase::Call => op.get_num_results() <= 1,
+            Phase::Start => {
+                let transfer = TransferType::get(ctx).into();
+                let promise: TypeHandle = PromiseType::get(ctx, transfer).into();
+                promise.accepts(ctx, op)
             }
-            Some(Phase::Finish) => {
-                operation.get_num_results() == 1
-                    && operation.get_num_operands() == 1
-                    && operation
-                        .get_operand(0)
-                        .get_type(ctx)
-                        .deref(ctx)
-                        .is::<TransferType>()
+            Phase::Finish => {
+                op.get_num_results() == 1
+                    && (Signature {
+                        inputs: [TypeHandle::from(TransferType::get(ctx))],
+                        outputs: crate::signatures::result_types(ctx, op),
+                    })
+                    .accepts(ctx, op)
             }
-            None => false,
-        };
-        if !valid
-            || self
-                .get_attr_perry_foreign_binding(ctx)
-                .is_none_or(|binding| !binding.as_str().contains('#'))
-        {
-            verify_err!(self.loc(ctx), InvalidForeign)?;
         }
-        Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for ForeignOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        true
-    }
-}
-
-#[op_interface_impl]
-impl crate::exceptions::MayThrowInterface for ForeignOp {
-    fn exception(&self, _: &Context) -> crate::attrs::ErrorKind {
-        crate::attrs::ErrorKind::TypeError
     }
 }

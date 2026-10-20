@@ -124,6 +124,14 @@ try {
       result = { value: response.status, trace: Array.from(response.body) };
     } else {
       result = await guest.run(input);
+      // Mirrors the worker: a list is [value, ...trace]; other record fields follow the trace.
+      if (Array.isArray(result)) {
+        result = { value: result[0], trace: result.slice(1) };
+      } else {
+        const { value, trace, ...extras } = result;
+        const lifted = Object.values(extras).map(v => (v == null ? -66.0 : v + 0.0));
+        result = { value, trace: [...trace, ...lifted] };
+      }
     }
     observations.push({ value: number(result.value), trace: result.trace.map(number) });
     if (clockQueue.length !== 0) throw new Error('clock operations leaked');

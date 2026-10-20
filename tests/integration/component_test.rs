@@ -1,11 +1,19 @@
 //! Component exports end to end: TypeScript compiled against a WIT world, instantiated with
 //! wasmtime's component model, called with WIT values (canonical ABI lift and lower).
+use crate::world::Compiler::Standard;
 use anyhow::Result;
 use perry_wit::compile_for_world;
 use wasmtime::{
     Engine, ResourceLimiter, Store,
-    component::{Component, Linker, Val},
+    component::{Component, ComponentNamedList, ComponentType, Lift, Linker, Lower, Val},
 };
+
+macro_rules! boundary {
+    ($wit:literal) => {
+        const WIT: &str = $wit;
+        wasmtime::component::bindgen!({ inline: $wit, world: "boundary", additional_derives: [PartialEq] });
+    };
+}
 
 /// Records the largest linear memory the guest asks for.
 #[derive(Default)]
@@ -34,16 +42,16 @@ export function double(count: number): number { return count * 2; }
 ";
     let engine = Engine::default();
     for world in ["base", "composed"] {
-        let bytes = crate::world::component(wit, world, "selection.ts", source)?;
+        let bytes = Standard.component(wit, world, "selection.ts", source)?;
         let (mut store, instance) = crate::world::instantiate(&engine, &bytes)?;
         let snapshot = instance.get_func(&mut store, "snapshot").unwrap();
         let mut result = [Val::Bool(false)];
         snapshot.call(&mut store, &[Val::U32(7)], &mut result)?;
         assert_eq!(
             result[0],
-            record([
-                ("count", Val::U32(7)),
-                ("label", Val::String("snapshot".into()))
+            Val::Record(vec![
+                ("count".into(), Val::U32(7)),
+                ("label".into(), Val::String("snapshot".into()))
             ])
         );
         let double = instance.get_func(&mut store, "double");
@@ -67,34 +75,35 @@ fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
         export async function unused():Promise<void> { console.log('not in this world'); }
         "#,
     )?;
-    assert_eq!(component.call_success("run", &[])?, Val::U32(11));
-    assert_eq!(component.call_success("run", &[])?, Val::U32(12));
+    component.check("run", (), &Ok::<u32, ()>(11))?;
+    component.check("run", (), &Ok::<u32, ()>(12))?;
     Ok(())
 }
 
 #[test]
 fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
+    boundary!(
+        "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}"
+    );
     let mut component = Instance::compile(
-        "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}",
+        WIT,
         "import type { Input } from './types/world'; export function run(value:Input):string {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
     )?;
-    let value = record([
-        ("a", Val::String("a".into())),
-        ("b", Val::String("b".into())),
-        ("c", Val::String("c".into())),
-        ("d", Val::String("d".into())),
-        ("e", Val::String("e".into())),
-        ("f", Val::String("f".into())),
-        ("g", Val::String("g".into())),
-        ("h", Val::String("h".into())),
-        ("i", Val::Option(Some(Box::new(Val::String("🙂".into()))))),
-        ("n", Val::U64(18446744073709551615)),
-    ]);
+    let value = Input {
+        a: "a".into(),
+        b: "b".into(),
+        c: "c".into(),
+        d: "d".into(),
+        e: "e".into(),
+        f: "f".into(),
+        g: "g".into(),
+        h: "h".into(),
+        i: Some("🙂".into()),
+        n: u64::MAX,
+    };
+    let expected = "abcdefgh🙂18446744073709551615".to_owned();
     for _ in 0..1000 {
-        assert_eq!(
-            component.call("run", std::slice::from_ref(&value))?,
-            Val::String("abcdefgh🙂18446744073709551615".into())
-        );
+        component.check("run", (&value,), &expected)?;
     }
     assert!(component.store.data().0 <= 131072);
     Ok(())
@@ -116,7 +125,8 @@ impl ResourceLimiter for Peak {
     }
 }
 
-const WIT: &str = r#"
+boundary!(
+    r#"
 package test:boundary;
 world boundary {
   record point { x: f64, y-coord: f64 }
@@ -129,7 +139,8 @@ world boundary {
   export wide: func(a: s64, b: u8, c: f32) -> f64;
   export nested: func(rows: list<list<f64>>) -> list<f64>;
 }
-"#;
+"#
+);
 
 const SOURCE: &str = r#"
 interface Point { x: number; yCoord: number }
@@ -183,14 +194,16 @@ struct Instance {
 
 #[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
-    let wit = r#"package test:integers;
+    boundary!(
+        r#"package test:integers;
 world boundary {
   record packet { signed: s64, unsigned: u64, optional: option<u64> }
   export echo: func(value: packet) -> result<packet, string>;
   export extremes: func() -> list<s64>;
   export describe-wide: func(value: u64) -> string;
   export throw-wide: func(value: s64) -> result<s64, s64>;
-}"#;
+}"#
+    );
     let source = r#"
 interface Packet { signed: bigint; unsigned: bigint; optional: bigint | undefined }
 type Answer = { ok: true; value: Packet } | { ok: false; error: string };
@@ -204,35 +217,29 @@ export function extremes(): bigint[] { return [-9223372036854775808n, -1n, 0n, 9
 export function describeWide(value: bigint): string { return typeof value + ':' + String(value); }
 export function throwWide(value: bigint): bigint { throw -value; }
 "#;
-    let mut instance = Instance::compile(wit, source)?;
-    for optional in [None, Some(Box::new(Val::U64(9_007_199_254_740_993)))] {
-        let packet = Val::Record(vec![
-            ("signed".into(), Val::S64(i64::MIN)),
-            ("unsigned".into(), Val::U64(u64::MAX)),
-            ("optional".into(), Val::Option(optional)),
-        ]);
+    let mut instance = Instance::compile(WIT, source)?;
+    for optional in [None, Some(9_007_199_254_740_993)] {
+        let packet = Packet {
+            signed: i64::MIN,
+            unsigned: u64::MAX,
+            optional,
+        };
         assert_eq!(
-            instance.call("echo", std::slice::from_ref(&packet))?,
-            Val::Result(Ok(Some(Box::new(packet))))
+            instance.call::<_, Result<Packet, String>>("echo", (&packet,))?,
+            Ok(packet)
         );
     }
-    assert_eq!(
-        instance.call("extremes", &[])?,
-        Val::List(vec![
-            Val::S64(i64::MIN),
-            Val::S64(-1),
-            Val::S64(0),
-            Val::S64(i64::MAX)
-        ])
-    );
-    assert_eq!(
-        instance.call("describe-wide", &[Val::U64(u64::MAX)])?,
-        Val::String("bigint:18446744073709551615".into())
-    );
-    assert_eq!(
-        instance.call("throw-wide", &[Val::S64(9_007_199_254_740_993)])?,
-        Val::Result(Err(Some(Box::new(Val::S64(-9_007_199_254_740_993)))))
-    );
+    instance.check("extremes", (), &vec![i64::MIN, -1, 0, i64::MAX])?;
+    instance.check(
+        "describe-wide",
+        (u64::MAX,),
+        &"bigint:18446744073709551615".to_owned(),
+    )?;
+    instance.check(
+        "throw-wide",
+        (9_007_199_254_740_993i64,),
+        &Err::<i64, _>(-9_007_199_254_740_993i64),
+    )?;
     Ok(())
 }
 
@@ -242,34 +249,35 @@ impl Instance {
     }
 
     fn compile(wit: &str, source: &str) -> Result<Self> {
-        let mut resolve = wit_parser::Resolve::default();
-        let package = resolve.push_str("boundary.wit", wit)?;
-        let world = resolve.select_world(&[package], Some("boundary"))?;
-        let compiled = compile_for_world(source, "boundary.ts", &resolve, world, true)?;
         let engine = Engine::default();
-        let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+        let component = Component::new(
+            &engine,
+            Standard.component(wit, "boundary", "boundary.ts", source)?,
+        )?;
         let mut store = Store::new(&engine, Peak::default());
         store.limiter(|peak| peak);
         let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
         Ok(Instance { store, instance })
     }
 
-    fn call_success(&mut self, name: &str, args: &[Val]) -> Result<Val> {
-        match self.call(name, args)? {
-            Val::Result(Ok(Some(value))) => Ok(*value),
-            other => anyhow::bail!("unexpected fixture completion: {other:?}"),
-        }
+    fn check<P, R>(&mut self, name: &str, args: P, expected: &R) -> Result<()>
+    where
+        P: ComponentNamedList + Lower,
+        R: ComponentType + Lift + std::fmt::Debug + PartialEq,
+    {
+        assert_eq!(&self.call::<P, R>(name, args)?, expected, "{name}");
+        Ok(())
     }
 
-    fn call(&mut self, name: &str, args: &[Val]) -> Result<Val> {
-        let function = self
+    fn call<P, R>(&mut self, name: &str, args: P) -> Result<R>
+    where
+        P: ComponentNamedList + Lower,
+        R: ComponentType + Lift,
+    {
+        let run = self
             .instance
-            .get_func(&mut self.store, name)
-            .unwrap_or_else(|| panic!("missing export {name}"));
-        let mut results = [Val::Bool(false)];
-        function.call(&mut self.store, args, &mut results)?;
-        let [result] = results;
-        Ok(result)
+            .get_typed_func::<P, (R,)>(&mut self.store, name)?;
+        Ok(run.call(&mut self.store, args)?.0)
     }
 }
 
@@ -302,30 +310,19 @@ export function recall(n: number): string {
 export function bytes(): Uint8Array { return data; }
 "#,
     )?;
-    assert_eq!(
-        component.call_success(
-            "remember",
-            &[
-                Val::String("!hé🙂".into()),
-                Val::List(vec![Val::U8(1), Val::U8(2), Val::U8(3)])
-            ]
-        )?,
-        Val::U32(2)
-    );
-    assert_eq!(
-        component.call_success("recall", &[Val::U32(200_000)])?,
-        Val::String("hé🙂:255:temporary:199999".into())
-    );
-    assert_eq!(
-        component.call_success("bytes", &[])?,
-        Val::List(vec![Val::U8(255), Val::U8(3)])
-    );
+    component.check("remember", ("!hé🙂", &[1u8, 2, 3][..]), &Ok::<u32, ()>(2))?;
+    component.check(
+        "recall",
+        (200_000u32,),
+        &Ok::<_, ()>("hé🙂:255:temporary:199999".to_owned()),
+    )?;
+    component.check("bytes", (), &Ok::<_, ()>(vec![255u8, 3]))?;
     Ok(())
 }
 
 #[test]
 fn utf8_strings_lower_to_nested_byte_lists() -> Result<()> {
-    let mut component = Instance::compile(
+    boundary!(
         r#"
 package test:bytes;
 world boundary {
@@ -333,119 +330,71 @@ world boundary {
     export encode: func(text: string) -> payload;
 }
 
-"#,
+"#
+    );
+    let mut component = Instance::compile(
+        WIT,
         r#"
 interface Payload { text: string; parts: string[] }
 export function encode(text: string): Payload { return { text, parts: [text, "é🙂"] }; }
 "#,
     )?;
-    let bytes = |s: &str| Val::List(s.bytes().map(Val::U8).collect());
-    assert_eq!(
-        component.call("encode", &[Val::String("a✓".into())])?,
-        record([
-            ("text", bytes("a✓")),
-            ("parts", Val::List(vec![bytes("a✓"), bytes("é🙂")]))
-        ])
-    );
+    component.check(
+        "encode",
+        ("a✓",),
+        &Payload {
+            text: "a✓".as_bytes().to_vec(),
+            parts: vec!["a✓".as_bytes().to_vec(), "é🙂".as_bytes().to_vec()],
+        },
+    )?;
     Ok(())
 }
 
-/// A WIT record value from `(field, value)` pairs.
-fn record<const N: usize>(fields: [(&str, Val); N]) -> Val {
-    Val::Record(fields.map(|(name, value)| (name.to_owned(), value)).into())
-}
-
+/// A WIT record value from `(field, value)` pairs, and repeated calls on one instance release their memory.
 #[test]
 fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
     let mut component = Instance::new()?;
-    assert_eq!(
-        component.call(
-            "scale",
-            &[
-                record([("x", Val::Float64(1.5)), ("y-coord", Val::Float64(-2.0))]),
-                Val::Float64(4.0)
-            ]
-        )?,
-        record([("x", Val::Float64(6.0)), ("y-coord", Val::Float64(-8.0))])
-    );
-    assert_eq!(
-        component.call(
-            "describe",
-            &[
-                Val::String("sum ✓".into()),
-                Val::List(vec![
-                    Val::Float64(1.0),
-                    Val::Float64(-2.5),
-                    Val::Float64(4.0)
-                ])
-            ]
-        )?,
-        record([
-            ("count", Val::U32(3)),
-            ("total", Val::Float64(2.5)),
-            ("label", Val::String("sum ✓!".into())),
-            (
-                "positive",
-                Val::List(vec![Val::Bool(true), Val::Bool(false), Val::Bool(true)])
-            ),
-        ])
-    );
+    component.check(
+        "scale",
+        (
+            &Point {
+                x: 1.5,
+                y_coord: -2.0,
+            },
+            4.0,
+        ),
+        &Point {
+            x: 6.0,
+            y_coord: -8.0,
+        },
+    )?;
+    component.check(
+        "describe",
+        ("sum ✓", &[1.0, -2.5, 4.0][..]),
+        &Summary {
+            count: 3,
+            total: 2.5,
+            label: "sum ✓!".into(),
+            positive: vec![true, false, true],
+        },
+    )?;
     // `.length` counts Unicode scalars: both "🙂" and "é" have length one.
-    assert_eq!(
-        component.call(
-            "count",
-            &[Val::List(vec![
-                Val::String("ab".into()),
-                Val::String("🙂".into()),
-                Val::String("é".into()),
-                Val::String(String::new()),
-            ])]
-        )?,
-        Val::U32(4)
-    );
-    assert_eq!(
-        component.call("greet", &[Val::String("wörld".into())])?,
-        Val::String("héllo wörld".into())
-    );
-    assert_eq!(
-        component.call("negate", &[Val::Bool(true)])?,
-        Val::Bool(false)
-    );
-    assert_eq!(
-        component.call("wide", &[Val::S64(-5), Val::U8(200), Val::Float32(0.5)])?,
-        Val::Float64(195.5)
-    );
-    assert_eq!(
-        component.call(
-            "nested",
-            &[Val::List(vec![
-                Val::List(vec![Val::Float64(1.0), Val::Float64(2.0)]),
-                Val::List(vec![]),
-                Val::List(vec![Val::Float64(-3.0)]),
-            ])]
-        )?,
-        Val::List(vec![
-            Val::Float64(3.0),
-            Val::Float64(0.0),
-            Val::Float64(-3.0)
-        ])
-    );
-    Ok(())
-}
-
-/// Every call is one task: repeated calls on one instance release their memory.
-#[test]
-fn repeated_calls_do_not_grow_memory() -> Result<()> {
-    let mut component = Instance::new()?;
-    let numbers = Val::List((0..20_000).map(|i| Val::Float64(f64::from(i))).collect());
-    let warm = [Val::String("warm".into()), numbers.clone()];
+    component.check("count", (&["ab", "🙂", "é", ""][..],), &4u32)?;
+    component.check("greet", ("wörld",), &"héllo wörld".to_owned())?;
+    component.check("negate", (true,), &false)?;
+    component.check("wide", (-5i64, 200u8, 0.5f32), &195.5f64)?;
+    component.check(
+        "nested",
+        (&[vec![1.0, 2.0], vec![], vec![-3.0]][..],),
+        &vec![3.0, 0.0, -3.0],
+    )?;
+    let numbers: Vec<_> = (0..20_000).map(f64::from).collect();
     for _ in 0..3 {
-        component.call("describe", &warm)?;
+        component.call::<_, Summary>("describe", ("warm", &numbers))?;
     }
     let before = component.store.data().0;
-    let again = [Val::String("again".into()), numbers];
     for _ in 0..50 {
-        component.call("describe", &again)?;
+        component.call::<_, Summary>("describe", ("again", &numbers))?;
     }
     assert_eq!(component.store.data().0, before, "memory grew across tasks");
     Ok(())
@@ -453,7 +402,7 @@ fn repeated_calls_do_not_grow_memory() -> Result<()> {
 
 #[test]
 fn tagged_results_options_and_enums_cross_nested_boundaries() -> Result<()> {
-    let mut component = Instance::compile(
+    boundary!(
         r#"
 package test:sums;
 world boundary {
@@ -465,7 +414,10 @@ world boundary {
     export make: func(ok: bool) -> answer;
     export finish: func(ok: bool) -> nothing;
 }
-"#,
+"#
+    );
+    let mut component = Instance::compile(
+        WIT,
         r#"
 import type { Answer, Nothing, Packet } from './types/world';
 export function inspect(value: Packet): Packet { return value; }
@@ -473,33 +425,21 @@ export function make(ok: boolean): Answer { if (ok) return { ok: true, value: 42
 export function finish(ok: boolean): Nothing { if (ok) return { ok: true }; return { ok: false }; }
 "#,
     )?;
-    let ok = Val::Result(Ok(Some(Box::new(Val::Float64(42.0)))));
-    let err = Val::Result(Err(Some(Box::new(Val::String("failed".into())))));
-    for note in [
-        Val::Option(None),
-        Val::Option(Some(Box::new(Val::String("note".into())))),
-    ] {
-        let packet = record([
-            ("answer", err.clone()),
-            ("color", Val::Enum("blue".into())),
-            ("note", note),
-            ("history", Val::List(vec![ok.clone(), err.clone()])),
-        ]);
-        assert_eq!(
-            component.call("inspect", std::slice::from_ref(&packet))?,
-            packet
-        );
+    let ok = Ok::<_, String>(42.0);
+    let err = Err::<f64, _>("failed".to_owned());
+    for note in [None, Some("note".to_owned())] {
+        let packet = Packet {
+            answer: err.clone(),
+            color: Color::Blue,
+            note,
+            history: vec![ok.clone(), err.clone()],
+        };
+        component.check("inspect", (&packet,), &packet)?;
     }
-    assert_eq!(component.call("make", &[Val::Bool(true)])?, ok);
-    assert_eq!(component.call("make", &[Val::Bool(false)])?, err);
-    assert_eq!(
-        component.call("finish", &[Val::Bool(true)])?,
-        Val::Result(Ok(None))
-    );
-    assert_eq!(
-        component.call("finish", &[Val::Bool(false)])?,
-        Val::Result(Err(None))
-    );
+    component.check("make", (true,), &ok)?;
+    component.check("make", (false,), &err)?;
+    component.check("finish", (true,), &Ok::<(), ()>(()))?;
+    component.check("finish", (false,), &Err::<(), ()>(()))?;
     Ok(())
 }
 
@@ -518,28 +458,16 @@ export function run(fail: boolean): string { if (fail) throw "failed"; return "d
 export function nothing(fail: boolean): void { if (fail) throw 3; }
 "#,
     )?;
-    assert_eq!(
-        component.call("run", &[Val::Bool(false)])?,
-        Val::Result(Ok(Some(Box::new(Val::String("done".into())))))
-    );
-    assert_eq!(
-        component.call("run", &[Val::Bool(true)])?,
-        Val::Result(Err(Some(Box::new(Val::String("failed".into())))))
-    );
-    assert_eq!(
-        component.call("nothing", &[Val::Bool(false)])?,
-        Val::Result(Ok(None))
-    );
-    assert_eq!(
-        component.call("nothing", &[Val::Bool(true)])?,
-        Val::Result(Err(None))
-    );
+    component.check("run", (false,), &Ok::<_, String>("done".to_owned()))?;
+    component.check("run", (true,), &Err::<String, _>("failed".to_owned()))?;
+    component.check("nothing", (false,), &Ok::<(), ()>(()))?;
+    component.check("nothing", (true,), &Err::<(), ()>(()))?;
     Ok(())
 }
 
 #[test]
 fn recursive_wit_input_accepts_strings_and_mutable_bytes() -> Result<()> {
-    let mut component = Instance::compile(
+    boundary!(
         r#"
 package test:input;
 world boundary {
@@ -547,7 +475,10 @@ world boundary {
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
     export regular: func(bytes: list<u8>) -> payload;
 }
-"#,
+"#
+    );
+    let mut component = Instance::compile(
+        WIT,
         r#"
 import type { Payload, PayloadInput, WitInput } from './types/world';
 interface Ordinary { text: Uint8Array; parts: Uint8Array[] }
@@ -566,29 +497,24 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean): Pay
 }
 "#,
     )?;
-    let bytes = |s: &str| Val::List(s.bytes().map(Val::U8).collect());
-    assert_eq!(
-        component.call("regular", &[bytes("é🙂")])?,
-        record([
-            ("text", bytes("é🙂")),
-            ("parts", Val::List(vec![bytes("é🙂")]))
-        ])
-    );
+    let bytes = |text: &str| text.as_bytes().to_vec();
+    component.check(
+        "regular",
+        ("é🙂".as_bytes(),),
+        &Payload {
+            text: bytes("é🙂"),
+            parts: vec![bytes("é🙂")],
+        },
+    )?;
     for text_first in [true, false] {
-        assert_eq!(
-            component.call(
-                "encode",
-                &[
-                    Val::String("é🙂".into()),
-                    bytes("xyz"),
-                    Val::Bool(text_first)
-                ]
-            )?,
-            record([
-                ("text", bytes(if text_first { "é🙂" } else { "xyz" })),
-                ("parts", Val::List(vec![bytes("é🙂"), bytes("xyz")]))
-            ])
-        );
+        component.check(
+            "encode",
+            ("é🙂", b"xyz".as_slice(), text_first),
+            &Payload {
+                text: bytes(if text_first { "é🙂" } else { "xyz" }),
+                parts: vec![bytes("é🙂"), bytes("xyz")],
+            },
+        )?;
     }
     Ok(())
 }
@@ -615,8 +541,8 @@ export function decode(text: string): string {
 "#,
     )?;
     let good = r#"{"rows":[{"count":1,"label":"é","active":true}],"title":"ok"}"#;
-    let got = component.call("decode", &[Val::String(good.into())])?;
-    assert_eq!(got, Val::Result(Ok(Some(Box::new(Val::String(r#"{"rows":[{"active":true,"count":99,"label":"é"}],"title":"ok"}:{"rows":[{"active":true,"count":1,"label":"é"}],"title":"ok"}"#.into()))))));
+    component.check("decode", (good,), &Ok::<_, String>(r#"{"rows":[{"count":99,"label":"é","active":true}],"title":"ok"}:{"rows":[{"count":1,"label":"é","active":true}],"title":"ok"}"#.to_owned()))?;
+    let invalid_schema = Err::<String, _>("invalid schema".to_owned());
     for invalid in [
         "null",
         "[]",
@@ -625,11 +551,7 @@ export function decode(text: string): string {
         r#"{"rows":[{"count":null,"label":"x","active":true}],"title":"x"}"#,
         r#"{"rows":[{"count":1,"label":false,"active":true}],"title":"x"}"#,
     ] {
-        assert_eq!(
-            component.call("decode", &[Val::String(invalid.into())])?,
-            Val::Result(Err(Some(Box::new(Val::String("invalid schema".into()))))),
-            "{invalid}"
-        );
+        component.check("decode", (invalid,), &invalid_schema)?;
     }
     Ok(())
 }
@@ -643,6 +565,9 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
     "#,
         r#"
         interface Node { value: number; children: Node[]; next: Node | null }
+        function perry_json_parse_0(n:number):number {return n;}
+        function perry_json_cursor_1(n:number):number {return n;}
+        function perry_json_decode_3(n:number):number {return n;}
         function sum(node: Node): number {
             let value = node.value;
             for (let i = 0; i < node.children.length; i++) value += sum(node.children[i]);
@@ -655,10 +580,13 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
                 for (let i = 0; i < iterations; i++) {
                     const first: Node = JSON.parse(text);
                     const second: Node = JSON.parse(text);
+                    const snapshot = JSON.parse(text);
+                    const view: Node = snapshot;
+                    if (sum(view) !== sum(second)) throw new Error('snapshot differs');
                     first.value += 100;
                     total = sum(first) + sum(second);
                 }
-                return String(total);
+                return String(perry_json_parse_0(perry_json_cursor_1(perry_json_decode_3(total))));
             } catch (error) { return error.name; }
         }
     "#,
@@ -666,35 +594,40 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
     let leaf = serde_json::json!({"value": 2, "children": [], "next": null});
     let tree =
         serde_json::json!({"value": 3, "children": [leaf.clone(), leaf.clone()], "next": leaf});
-    assert_eq!(
-        component.call("decode", &[Val::String(tree.to_string()), Val::U32(1000)])?,
-        Val::String("118".into())
-    );
+    component.check("decode", (&tree.to_string(), 1000u32), &"118".to_owned())?;
     let invalid = serde_json::json!({"value": 3, "children": [{"value": "wrong", "children": [], "next": null}], "next": null});
-    assert_eq!(
-        component.call("decode", &[Val::String(invalid.to_string()), Val::U32(1)])?,
-        Val::String("TypeError".into())
-    );
+    component.check(
+        "decode",
+        (&invalid.to_string(), 1u32),
+        &"TypeError".to_owned(),
+    )?;
     Ok(())
 }
 
 #[test]
 fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
-    let mut component = Instance::compile(
+    boundary!(
         r#"
         package test:variant-values;
         world boundary {
             record point { x: f64, label: string }
             variant value { empty, number(f64), text(string), point(point), bytes(list<u8>) }
             record packet { values: list<value>, optional: option<value> }
+            variant narrow { small(f32), word(u32) }
+            variant outer { narrow(narrow), wide(f64), empty }
+            export joined: func(value: outer) -> outer;
             export echo: func(values: list<value>) -> list<value>;
             export inspect: func(value: packet) -> packet;
             export make: func(which: u32) -> value;
             export describe: func(value: value) -> result<string>;
         }
-        "#,
+        "#
+    );
+    let mut component = Instance::compile(
+        WIT,
         r#"
-        import type { Packet, Value, WitInput } from './types/world';
+        import type { Outer, Packet, Value, WitInput } from './types/world';
+        export function joined(value: Outer): Outer { return value; }
         export function echo(values: Value[]): Value[] { return values; }
         export function inspect(value: Packet): Packet { return value; }
         export function make(which: number): WitInput<Value> {
@@ -716,46 +649,49 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         "#,
     )?;
     let values = vec![
-        Val::Variant("empty".into(), None),
-        Val::Variant("number".into(), Some(Box::new(Val::Float64(42.5)))),
-        Val::Variant("text".into(), Some(Box::new(Val::String("héllo".into())))),
-        Val::Variant(
-            "point".into(),
-            Some(Box::new(record([
-                ("x", Val::Float64(7.0)),
-                ("label", Val::String("seven".into())),
-            ]))),
-        ),
-        Val::Variant(
-            "bytes".into(),
-            Some(Box::new(Val::List(
-                b"byte text".iter().copied().map(Val::U8).collect(),
-            ))),
-        ),
+        Value::Empty,
+        Value::Number(42.5),
+        Value::Text("héllo".into()),
+        Value::Point(Point {
+            x: 7.0,
+            label: "seven".into(),
+        }),
+        Value::Bytes(b"byte text".to_vec()),
     ];
     for (index, (value, expected)) in values
         .iter()
         .zip(["none", "43.5", "héllo!", "seven:7", "byte text"])
         .enumerate()
     {
-        assert_eq!(component.call("make", &[Val::U32(index as u32)])?, *value);
-        assert_eq!(
-            component.call_success("describe", std::slice::from_ref(value))?,
-            Val::String(expected.into())
-        );
+        component.check("make", (index as u32,), value)?;
+        component.check("describe", (value,), &Ok::<_, ()>(expected.to_owned()))?;
     }
-    let packet = record([
-        ("values", Val::List(values.clone())),
-        ("optional", Val::Option(Some(Box::new(values[2].clone())))),
-    ]);
-    assert_eq!(
-        component.call("inspect", std::slice::from_ref(&packet))?,
-        packet
-    );
-    assert_eq!(
-        component.call("echo", &[Val::List(values.clone())])?,
-        Val::List(values)
-    );
+    let packet = Packet {
+        optional: Some(values[2].clone()),
+        values,
+    };
+    component.check("inspect", (&packet,), &packet)?;
+    component.check("echo", (&packet.values,), &packet.values)?;
+    for value in [
+        Outer::Narrow(Narrow::Small(-0.0)),
+        Outer::Narrow(Narrow::Small(-13.25)),
+        Outer::Narrow(Narrow::Word(0x8000_0001)),
+        Outer::Wide(-0.0),
+        Outer::Wide(-29.5),
+        Outer::Empty,
+    ] {
+        let actual: Outer = component.call("joined", (&value,))?;
+        assert_eq!(actual, value);
+        match (actual, value) {
+            (Outer::Narrow(Narrow::Small(actual)), Outer::Narrow(Narrow::Small(expected))) => {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            (Outer::Wide(actual), Outer::Wide(expected)) => {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -772,22 +708,149 @@ fn numeric_bigint_conversion_preserves_transport_bits_and_checks_domain() -> Res
         "#,
     )?;
     for value in [0i64, -1, 9007199254740992, i64::MIN] {
-        assert_eq!(
-            component.call("signed", &[Val::Float64(value as f64)])?,
-            Val::Result(Ok(Some(Box::new(Val::S64(value)))))
-        );
+        component.check("signed", (value as f64,), &Ok::<_, String>(value))?;
     }
     let wide = u64::MAX - 2047;
-    assert_eq!(
-        component.call("unsigned", &[Val::Float64(wide as f64)])?,
-        Val::Result(Ok(Some(Box::new(Val::U64(wide)))))
-    );
+    component.check("unsigned", (wide as f64,), &Ok::<_, String>(wide))?;
+    let range_error = Err::<i64, _>("range".to_owned());
     for value in [0.5, f64::NAN, f64::INFINITY, 18446744073709551616.0] {
-        assert_eq!(
-            component.call("signed", &[Val::Float64(value)])?,
-            Val::Result(Err(Some(Box::new(Val::String("range".into())))))
-        );
+        component.check("signed", (value,), &range_error)?;
     }
+    Ok(())
+}
+
+#[test]
+fn bigint_arithmetic_is_exact_beyond_transport_widths() -> Result<()> {
+    let wit = r#"package test:bigint-arithmetic;
+world boundary {
+    export describe: func(a: s64, b: u64) -> string;
+    export powers: func(n: u32, seed: u64) -> string;
+    export unsigned: func(a: u64, b: u64) -> u64;
+    export signed: func(a: s64, b: s64) -> s64;
+    export rounding: func(offset: u64) -> f64;
+    export probe: func(input: string) -> string;
+    export truncation: func(value: u64) -> string;
+    export literals: func() -> string;
+}"#;
+    let source = r#"
+import type { u64 } from 'perry:types';
+function sum(a: bigint, b: bigint): bigint { return a + b; }
+function difference(a: bigint, b: bigint): bigint { return a - b; }
+export function describe(a: bigint, b: bigint): string {
+    const total = sum(a, b);
+    const delta = difference(a, b);
+    if (difference(total, b) !== a || sum(delta, b) !== a) throw 'inverse';
+    if ((delta < total) !== (b > 0n)) throw 'order';
+    return String(total) + ':' + String(delta) + ':' + String(-total) + ':' + String(a) + ':' + String(b);
+}
+export function powers(n: number, seed: bigint): string {
+    let value = seed;
+    for (let i = 0; i < n; i++) value = sum(value, value);
+    const below = difference(value, 1n);
+    if (sum(below, 1n) !== value || difference(value, value) !== 0n) throw 'carry';
+    return String(value) + ':' + String(below) + ':' + String(Number(value));
+}
+export function unsigned(a: bigint, b: bigint): bigint { return difference(sum(a, b), b); }
+export function signed(a: bigint, b: bigint): bigint { return sum(difference(a, b), b); }
+export function rounding(offset: bigint): number {
+    const wide = 18446744073709551616n;
+    return Number(sum(wide, offset));
+}
+export function probe(input: string): string {
+    const a: bigint = BigInt(input.length);
+    const b: bigint = 1n;
+    return String(a + b) + ':' + String(a - b);
+}
+export function truncation(value: bigint): string {
+    const total = value + 1n;
+    const wrapped = total as u64;
+    return String(total) + ':' + String(wrapped);
+}
+export function literals(): string {
+    const wide = 340_282_366_920_938_463_463_374_607_431_768_211_456n;
+    if (wide !== 0x100000000000000000000000000000000n) throw 'hex';
+    if (18446744073709551616n !== 0o2000000000000000000000n) throw 'octal';
+    if (18446744073709551616n !== 0b10000000000000000000000000000000000000000000000000000000000000000n) throw 'binary';
+    if (wide - 1n !== 340282366920938463463374607431768211455n) throw 'carry';
+    return String(wide) + ':' + String(-wide);
+}
+"#;
+    let mut instance = Instance::compile(wit, source)?;
+    instance.check(
+        "literals",
+        (),
+        &"340282366920938463463374607431768211456:-340282366920938463463374607431768211456"
+            .to_owned(),
+    )?;
+    for a in [i64::MIN, -9007199254740993, -1, 0, 1, i64::MAX] {
+        for b in [0, 1, 9007199254740993, u64::MAX] {
+            let (left, right) = (i128::from(a), i128::from(b));
+            instance.check(
+                "describe",
+                (a, b),
+                &format!(
+                    "{}:{}:{}:{a}:{b}",
+                    left + right,
+                    left - right,
+                    -(left + right)
+                ),
+            )?;
+        }
+    }
+    for value in [0, 1, 9007199254740993, u64::MAX] {
+        instance.check("unsigned", (value, u64::MAX), &value)?;
+    }
+    for value in [i64::MIN, -1, 0, i64::MAX] {
+        instance.check("signed", (value, i64::MAX), &value)?;
+    }
+    for (power, expected) in [
+        (
+            64u32,
+            "18446744073709551616:18446744073709551615:18446744073709552000",
+        ),
+        (
+            128,
+            "340282366920938463463374607431768211456:340282366920938463463374607431768211455:3.402823669209385e+38",
+        ),
+    ] {
+        instance.check("powers", (power, 1u64), &expected.to_owned())?;
+    }
+    // 2^1536 exceeds the bounded number-formatting utility's capacity and overflows Number.
+    let huge: String = instance.call("powers", (1536u32, 1u64))?;
+    let (power, below) = huge
+        .strip_suffix(":Infinity")
+        .and_then(|s| s.split_once(':'))
+        .ok_or_else(|| anyhow::anyhow!("invalid large bigint result"))?;
+    assert_eq!(power.len(), 463);
+    assert_eq!(&power[..power.len() - 1], &below[..below.len() - 1]);
+    assert!(power.ends_with('6') && below.ends_with('5'));
+    for offset in [0u64, 2048, 2049, 6144] {
+        instance.check(
+            "rounding",
+            (offset,),
+            &((u128::from(u64::MAX) + 1 + u128::from(offset)) as f64),
+        )?;
+    }
+    for (input, expected) in [("", "1:-1"), ("abc", "4:2")] {
+        instance.check("probe", (input,), &expected.to_owned())?;
+    }
+    instance.check(
+        "truncation",
+        (u64::MAX,),
+        &"18446744073709551616:0".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
+    let mut instance = Instance::compile(
+        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; export constant: func() -> u64; }",
+        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; } export function constant(): bigint { return 18446744073709551616n; }",
+    )?;
+    assert!(instance.call::<_, u64>("unsigned", (u64::MAX,)).is_err());
+    assert!(instance.call::<_, i64>("signed", (i64::MIN,)).is_err());
+    assert!(instance.call::<_, u64>("constant", ()).is_err());
     Ok(())
 }
 
@@ -839,13 +902,15 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
 
 #[test]
 fn generic_pages_and_results_use_concrete_wit_records() -> Result<()> {
-    let wit = r#"package test:generics;
+    boundary!(
+        r#"package test:generics;
 world boundary {
   record page { data: list<f64>, next: option<string> }
   export echo: func(value: page) -> result<page, string>;
   export parsed: func() -> result<page>;
   export stringify: func(value: page) -> result<string>;
-}"#;
+}"#
+    );
     let source = r#"
 interface Page<T> {data:T[];next:string|null}
 type Result<T>={ok:true;value:T}|{ok:false;error:string};
@@ -853,22 +918,56 @@ export function echo(value:Page<number>):Result<Page<number>> {return {ok:true,v
 export function parsed():Page<number> {return JSON.parse('{"extra":true,"data":[1,2],"next":null}');}
 export function stringify(value:Page<number>):string {return JSON.stringify(value);}
 "#;
-    let mut instance = Instance::compile(wit, source)?;
-    let page = Val::Record(vec![
-        (
-            "data".into(),
-            Val::List(vec![Val::Float64(1.0), Val::Float64(2.0)]),
-        ),
-        ("next".into(), Val::Option(None)),
-    ]);
-    assert_eq!(instance.call_success("parsed", &[])?, page);
+    let mut instance = Instance::compile(WIT, source)?;
+    let page = Page {
+        data: vec![1.0, 2.0],
+        next: None,
+    };
     assert_eq!(
-        instance.call("echo", std::slice::from_ref(&page))?,
-        Val::Result(Ok(Some(Box::new(page.clone()))))
+        instance.call::<_, Result<Page, ()>>("parsed", ())?.as_ref(),
+        Ok(&page)
     );
     assert_eq!(
-        instance.call_success("stringify", &[page])?,
-        Val::String("{\"data\":[1,2],\"next\":null}".into())
+        instance
+            .call::<_, Result<Page, String>>("echo", (&page,))?
+            .as_ref(),
+        Ok(&page)
     );
+    instance.check(
+        "stringify",
+        (&page,),
+        &Ok::<_, ()>("{\"data\":[1,2],\"next\":null}".to_owned()),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn static_modules_resolve_aliases_namespaces_and_reexports() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("left.ts"),
+        "export function value(x: number): number { const values = new Map<string, number>(); values.set('x', x); return values.get('x') + 1; }",
+    )?;
+    std::fs::write(
+        directory.path().join("right.ts"),
+        "export function value(x: number): number { const values = new Set<number>([x]); return values.size * x * 2; }",
+    )?;
+    let entry = directory.path().join("main.ts");
+    let entry = entry.to_string_lossy();
+    let source = "import { value as left } from './left'; import * as right from './right.js'; \
+                  export function run(x: number): number { return right.value(left(x)); } \
+                  export { value as reexported } from './left.js';";
+    let mut program =
+        crate::core_program::Program::from_wasm(perry_wit::compile_core(source, &entry)?);
+    for marker in ["perry_constructor:", "$$perry", "arrayRecord"] {
+        assert!(
+            !program
+                .wasm
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+        );
+    }
+    assert_eq!(program.number("run", 5.0), 12.0);
+    assert_eq!(program.number("reexported", 5.0), 6.0);
     Ok(())
 }

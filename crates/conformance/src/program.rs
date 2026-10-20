@@ -117,6 +117,7 @@ pub enum Text {
 pub enum Form {
     Direct,
     Local,
+    Permuted,
     Branch,
     Loop,
     InertException,
@@ -134,9 +135,10 @@ pub enum Form {
 
 impl Form {
     /// The metamorphic forms of a direct program; [Form::Direct] comes first.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Direct,
         Self::Local,
+        Self::Permuted,
         Self::Branch,
         Self::Loop,
         Self::InertException,
@@ -206,6 +208,9 @@ impl Program {
             ),
             Form::Direct => format!("const value = {expression};"),
             Form::Local => format!("const fresh = {expression}; const value = fresh;"),
+            Form::Permuted => {
+                format!("let value = 0; const fresh = {expression}; value = fresh;")
+            }
             Form::Branch => format!(
                 "let value = 0; if (x === x) {{ value = {expression}; }} else {{ value = {expression}; }}"
             ),
@@ -236,15 +241,29 @@ impl Program {
         } else {
             "{value:number,trace:number[]}"
         };
-        format!(
-            "{import}{TYPED_HELPERS}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
-        )
+        if self.form == Form::Permuted {
+            format!(
+                "{import}export {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\nfunction identity(value:number):number {{ return value; }}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\n{TYPED_HELPERS_PERMUTED}\n"
+            )
+        } else {
+            format!(
+                "{import}{TYPED_HELPERS}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
+            )
+        }
     }
 }
 
 const TYPED_HELPERS: &str = r#"
+const sharedJsonCell: { value: number } = { value: 0 };
+function clobberSharedJsonCell(): void {
+    sharedJsonCell.value = -999;
+}
 function typedJson(value: number): number {
-    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: value, rows: [1, 2, 3] }));
+    sharedJsonCell.value = value;
+    const snapshot = JSON.stringify(sharedJsonCell);
+    clobberSharedJsonCell();
+    const preserved: { value: number | null } = JSON.parse(snapshot);
+    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));
     parsed.rows[0] = 4;
     return parsed.value === null ? 0 : parsed.value;
 }
@@ -267,6 +286,41 @@ function handled(value: number): number {
     try { if (value < 0) throw value; return value; }
     catch (error) { return error as number; }
 }
+"#;
+
+const TYPED_HELPERS_PERMUTED: &str = r#"
+function handled(value: number): number {
+    try { if (value < 0) throw value; return value; }
+    catch (error) { return error as number; }
+}
+function closedLoop(value: number, count: number): number {
+    const state = { value: value, step: 0 };
+    for (let i = 0; i < count; i++) {
+        if (i % 2 === 0) state.value += i;
+        else state.value -= i;
+        state.step++;
+    }
+    return state.value;
+}
+function byteAlias(first: number, second: number): number {
+    const bytes = new Uint8Array([first, second]);
+    const alias = bytes.subarray(1);
+    alias[0] = first;
+    return bytes[1] as number;
+}
+function typedJson(value: number): number {
+    sharedJsonCell.value = value;
+    const snapshot = JSON.stringify(sharedJsonCell);
+    clobberSharedJsonCell();
+    const preserved: { value: number | null } = JSON.parse(snapshot);
+    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));
+    parsed.rows[0] = 4;
+    return parsed.value === null ? 0 : parsed.value;
+}
+function clobberSharedJsonCell(): void {
+    sharedJsonCell.value = -999;
+}
+const sharedJsonCell: { value: number } = { value: 0 };
 "#;
 
 impl Display for Number {

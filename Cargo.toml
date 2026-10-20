@@ -15,16 +15,18 @@ workspace = true
 [workspace]
 members = [
   ".",
-  "crates/search-helper",
   "crates/text-helper",
+  "crates/normalization-helper",
   "crates/fetch-helper",
   "crates/json-helper",
   "crates/number-helper",
+  "crates/decimal-helper",
   "crates/time-helper",
   "crates/conformance",
   "crates/perry-mir",
   "crates/perry-lower",
   "crates/pliron-wasm",
+  "crates/pliron-control",
   "crates/perry-runtime",
   "crates/perry-abi",
   "crates/perry-std",
@@ -45,12 +47,13 @@ http = "1"
 http-body-util = "0.1"
 libm = "0.2"
 perry-abi = { path = "crates/perry-abi" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
 perry-runtime = { path = "crates/perry-runtime" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97", default-features = false }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "957bef3e132932b6ba66173762b84c3e3508b7ba", default-features = false }
+pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
 tempfile = "3.27.0"
@@ -98,9 +101,11 @@ serde_json.workspace = true
 wit-bindgen = "0.62"
 
 [build-dependencies]
+wat = "1.261.0"
 wasmparser.workspace = true
 
 [dev-dependencies]
+sha2 = "0.10"
 serde = { workspace = true, features = ["derive"] }
 wat = "1.261.0"
 bytes.workspace = true

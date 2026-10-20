@@ -495,7 +495,7 @@ pub(crate) extern "C" fn perry_task_cancel() -> u32 {
             if (*entry).foreign {
                 let transfer = (*entry).value as usize as *mut u8;
                 transfer
-                    .add(crate::foreign::RETURNED as usize)
+                    .add(crate::layout::foreign::RETURNED as usize)
                     .cast::<u32>()
                     .write(u32::from(status == crate::host::SUBTASK_RETURNED));
                 (*entry).next = (*task).cancelled;

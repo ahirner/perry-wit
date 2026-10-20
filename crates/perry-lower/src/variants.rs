@@ -1,21 +1,18 @@
 //! Closed union construction and tag-based payload selection.
 use super::*;
-use perry_mir::{
-    types::VariantType,
-    variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
-};
+use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 /// A path through declared fields; reads are checked even if an alias changes the path.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(super) struct Path(LocalId, Vec<String>);
-fn path(expr: &Expr) -> Option<Path> {
+pub(super) struct Path<'s>(LocalId, Vec<&'s str>);
+pub(super) fn path(expr: &Expr) -> Option<Path<'_>> {
     match expr {
         Expr::LocalGet(id) => Some(Path(*id, vec![])),
         Expr::PropertyGet {
             object, property, ..
         } => {
             let mut path = path(object)?;
-            path.1.push(property.clone());
+            path.1.push(property.as_str());
             Some(path)
         }
         _ => None,
@@ -30,6 +27,20 @@ impl<'s> FunctionBuilder<'s> {
         } = condition
         {
             self.variant_condition(operand, !truth);
+            return;
+        }
+        if let Expr::Logical { op, left, right } = condition {
+            match (op, truth) {
+                (LogicalOp::And, true) => {
+                    self.variant_condition(left, true);
+                    self.variant_condition(right, true);
+                }
+                (LogicalOp::Or, false) => {
+                    self.variant_condition(left, false);
+                    self.variant_condition(right, false);
+                }
+                _ => {}
+            }
             return;
         }
         let Expr::Compare { op, left, right } = condition else {
@@ -63,16 +74,16 @@ impl<'s> FunctionBuilder<'s> {
             _ => return,
         };
         if let Some(path) = path(object) {
-            self.variant_guards.push((path, tag.clone(), equal));
+            self.variant_guards.push((path, tag.as_str(), equal));
         }
     }
 
     /// The guards in effect for `path`: each tag and whether the value equals it.
-    fn guards<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = (&'a str, bool)> + Clone {
+    fn guards<'a>(&'a self, path: &'a Path<'s>) -> impl Iterator<Item = (&'s str, bool)> + 'a {
         self.variant_guards
             .iter()
             .filter(move |(guarded, _, _)| guarded == path)
-            .map(|(_, tag, equal)| (tag.as_str(), *equal))
+            .map(|(_, tag, equal)| (*tag, *equal))
     }
 
     pub(super) fn narrow_primitive(
@@ -81,44 +92,32 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         value: Value,
     ) -> Result<Value> {
-        let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
-        if !ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+        let ty = present_type(ctx, value.get_type(ctx));
+        if !ty.deref(ctx).is::<perry_mir::NumberStringType>() {
             return Ok(value);
         }
         let Some(path) = path(expr) else {
             return Ok(value);
         };
-        // The single tag the guards admit, and whether a positive guard names it.
-        let (tag, asserted) = {
-            let guards = self.guards(&path);
-            if guards.clone().next().is_none() {
-                return Ok(value);
-            }
-            let tags: Vec<&'static str> = ["number", "string"]
-                .into_iter()
-                .filter(|tag| {
-                    guards
-                        .clone()
-                        .all(|(guard, equal)| (*tag == guard) == equal)
-                })
-                .collect();
-            let [tag] = tags.as_slice() else {
-                return Ok(value);
-            };
-            (
-                *tag,
-                guards.clone().any(|(guard, equal)| equal && guard == *tag),
-            )
+        let mut has_guard = false;
+        let mut number = (true, false);
+        let mut string = (true, false);
+        for (guard, equal) in self.guards(&path) {
+            has_guard = true;
+            number.0 &= (guard == "number") == equal;
+            number.1 |= equal && guard == "number";
+            string.0 &= (guard == "string") == equal;
+            string.1 |= equal && guard == "string";
+        }
+        let (result, asserted) = match (has_guard, number.0, string.0) {
+            (true, true, false) => (FP64Type::get(ctx).into(), number.1),
+            (true, false, true) => (StringType::get(ctx).into(), string.1),
+            _ => return Ok(value),
         };
         // Negative typeof guards alone do not remove null or undefined.
         if !asserted && self.is_optional(ctx, value) {
             return Ok(value);
         }
-        let result = if tag == "number" {
-            FP64Type::get(ctx).into()
-        } else {
-            StringType::get(ctx).into()
-        };
         let value = self.defined(ctx, value)?;
         Ok(self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, result)))
     }
@@ -135,19 +134,20 @@ impl<'s> FunctionBuilder<'s> {
         }
         ensure!(field == "val", "variants have tag and val only");
         let variant = TypedHandle::<VariantType>::from_handle(value.get_type(ctx), ctx)?;
-        let mut cases = variant.deref(ctx).cases().to_vec();
-        if let Some(path) = path(object) {
-            let guards = self.guards(&path);
-            cases.retain(|(tag, _)| guards.clone().all(|(guard, equal)| (tag == guard) == equal));
-        }
-        ensure!(
-            !cases.is_empty(),
-            "variant payload access has no reachable case"
-        );
+        let path = path(object);
+        let mut reachable = false;
         let mut payload = None;
         let mut absent = false;
-        for (_, ty) in cases {
-            match ty {
+        for (tag, ty) in variant.deref(ctx).cases() {
+            if let Some(path) = &path
+                && !self
+                    .guards(path)
+                    .all(|(guard, equal)| (tag == guard) == equal)
+            {
+                continue;
+            }
+            reachable = true;
+            match *ty {
                 Some(ty) => {
                     ensure!(
                         payload.is_none_or(|other| other == ty),
@@ -158,8 +158,9 @@ impl<'s> FunctionBuilder<'s> {
                 None => absent = true,
             }
         }
+        ensure!(reachable, "variant payload access has no reachable case");
         let result = match payload {
-            Some(ty) if absent => perry_mir::types::OptionalType::get(ctx, ty).into(),
+            Some(ty) if absent => perry_mir::OptionalType::get(ctx, ty).into(),
             Some(ty) => ty,
             None => self.shapes.value_type(ctx, &HirType::Void)?,
         };

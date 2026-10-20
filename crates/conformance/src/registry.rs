@@ -29,6 +29,8 @@ impl ExitStatus {
 #[serde(tag = "kind", content = "input", rename_all = "snake_case")]
 pub enum Case {
     Program(Program),
+    Aggregate(crate::aggregates::AggregateCase),
+    Collection(crate::collections::CollectionCase),
     Stream(crate::streams::StreamCase),
     Fetch(crate::fetch::FetchCase),
     Handler(crate::handler::HandlerCase),
@@ -76,10 +78,8 @@ impl Case {
     }
     /// The case followed by its metamorphic forms, which must observe identically.
     pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
-        if let Self::Program(program) = self
-            && program.form == Form::Direct
-        {
-            Form::ALL
+        match self {
+            Self::Program(program) if program.form == Form::Direct => Form::ALL
                 .into_iter()
                 .map(|form| {
                     if form == Form::Direct {
@@ -91,13 +91,28 @@ impl Case {
                         }))
                     }
                 })
-                .collect()
-        } else {
-            vec![Cow::Borrowed(self)]
+                .collect(),
+            Self::Aggregate(case) if !case.permuted => vec![
+                Cow::Borrowed(self),
+                Cow::Owned(Self::Aggregate(crate::aggregates::AggregateCase {
+                    permuted: true,
+                    ..case.clone()
+                })),
+            ],
+            Self::Collection(case) if !case.permuted => vec![
+                Cow::Borrowed(self),
+                Cow::Owned(Self::Collection(crate::collections::CollectionCase {
+                    permuted: true,
+                    ..case.clone()
+                })),
+            ],
+            _ => vec![Cow::Borrowed(self)],
         }
     }
     pub fn source(&self) -> String {
         match self {
+            Self::Aggregate(case) => case.source(),
+            Self::Collection(case) => case.source(),
             Self::Stream(case) => case.source(),
             Self::Fetch(case) => case.source(),
             Self::Handler(case) => case.source(),
@@ -426,6 +441,15 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     }
     for (id, source) in [
         ("ecma.json.command", include_str!("../cases/json.ts")),
+        ("ecma.command.arrays", include_str!("../cases/arrays.ts")),
+        ("ecma.command.text", include_str!("../cases/text.ts")),
+        ("ecma.command.records", include_str!("../cases/records.ts")),
+        ("ecma.command.numbers", include_str!("../cases/numbers.ts")),
+        ("ecma.command.web", include_str!("../cases/web.ts")),
+        (
+            "ecma.command.temporal",
+            include_str!("../cases/temporal.ts"),
+        ),
         (
             "web.console.routing",
             include_str!("../cases/console_streams.ts"),
@@ -523,6 +547,8 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.extend(crate::capabilities::contracts());
     contracts.push(crate::handler::contract());
     contracts.extend(crate::scaling::contracts());
+    contracts.push(crate::aggregates::contract());
+    contracts.push(crate::collections::contract());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(

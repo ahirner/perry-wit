@@ -1,29 +1,34 @@
 //! ECMAScript ISO Date strings in the guest's UTC time zone.
 
-use crate::Error;
+use crate::{Error, parse::Cursor};
 
 /// Parses ISO year, year-month, date, or date-time forms. Unlike Temporal,
 /// Date permits 24:00 and normalizes days through 31 within a valid month.
 /// Offset-free date-times use UTC, the guest's supported local time zone.
-pub fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
-    let signed = matches!(input.first(), Some(b'+' | b'-'));
-    let width = if signed { 6 } else { 4 };
-    let mut year = digits(input, usize::from(signed), width)? as i32;
-    if input.first() == Some(&b'-') {
-        if year == 0 {
-            return Err(Error::Syntax);
-        }
-        year = -year;
+/// A four-digit year (or signed six-digit year) followed by end, '-' or 'T'
+/// identifies the ISO family; other inputs return `UnsupportedDateFormat`.
+pub(crate) fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
+    let mut cur = Cursor::new(input);
+    let year_end = if matches!(cur.peek(), Some(b'+' | b'-')) {
+        7
+    } else {
+        4
+    };
+    if !matches!(input.get(year_end), None | Some(b'-' | b'T')) {
+        return Err(Error::UnsupportedDateFormat);
     }
-    let mut end = width + usize::from(signed);
-    let mut month = 1;
-    let mut day = 1;
-    if input.get(end) == Some(&b'-') {
-        month = digits(input, end + 1, 2)?;
-        end += 3;
-        if input.get(end) == Some(&b'-') {
-            day = digits(input, end + 1, 2)?;
-            end += 3;
+    let year = cur.year().map_err(|_| {
+        if cur.pos == year_end {
+            Error::Syntax
+        } else {
+            Error::UnsupportedDateFormat
+        }
+    })?;
+    let (mut month, mut day) = (1, 1);
+    if cur.eat(b'-') {
+        month = cur.digits(2)?;
+        if cur.eat(b'-') {
+            day = cur.digits(2)?;
         }
     }
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
@@ -31,31 +36,27 @@ pub fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
     }
     let days = i64::from(datealgo::date_to_rd((year, month as u8, 1))) + i64::from(day - 1);
     let mut milliseconds = days * 86_400_000;
-    if end != input.len() {
-        if end != width + usize::from(signed) + 6
-            || input.get(end) != Some(&b'T')
-            || input.get(end + 3) != Some(&b':')
-        {
+    if cur.pos != input.len() {
+        if cur.pos != year_end + 6 || !cur.eat(b'T') {
             return Err(Error::Syntax);
         }
-        let hour = digits(input, end + 1, 2)?;
-        let minute = digits(input, end + 4, 2)?;
-        end += 6;
-        let mut second = 0;
-        let mut fraction = 0;
-        if input.get(end) == Some(&b':') {
-            second = digits(input, end + 1, 2)?;
-            end += 3;
-            if input.get(end) == Some(&b'.') {
-                end += 1;
-                let start = end;
-                while input.get(end).is_some_and(u8::is_ascii_digit) {
-                    if end - start < 3 {
-                        fraction += u32::from(input[end] - b'0') * [100, 10, 1][end - start];
+        let hour = cur.digits(2)?;
+        if !cur.eat(b':') {
+            return Err(Error::Syntax);
+        }
+        let minute = cur.digits(2)?;
+        let (mut second, mut fraction) = (0, 0);
+        if cur.eat(b':') {
+            second = cur.digits(2)?;
+            if cur.eat(b'.') {
+                let start = cur.pos;
+                while let Some(d @ b'0'..=b'9') = cur.peek() {
+                    if cur.pos - start < 3 {
+                        fraction += u32::from(d - b'0') * [100, 10, 1][cur.pos - start];
                     }
-                    end += 1;
+                    cur.pos += 1;
                 }
-                if end == start {
+                if cur.pos == start {
                     return Err(Error::Syntax);
                 }
             }
@@ -63,55 +64,42 @@ pub fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
         if hour > 24
             || minute > 59
             || second > 59
-            || (hour == 24 && (minute != 0 || second != 0 || fraction != 0))
+            || (hour == 24 && (minute | second | fraction) != 0)
         {
             return Err(Error::Range);
         }
         milliseconds += i64::from(((hour * 60 + minute) * 60 + second) * 1000 + fraction);
-        match input.get(end) {
-            Some(b'Z') => end += 1,
+        match cur.peek() {
+            Some(b'Z') => cur.pos += 1,
             Some(sign @ (b'+' | b'-')) => {
-                let hour = digits(input, end + 1, 2)?;
-                let minute = digits(input, end + 4, 2)?;
-                if input.get(end + 3) != Some(&b':') || hour > 23 || minute > 59 {
+                cur.pos += 1;
+                let hour = cur.digits(2)?;
+                let colon = cur.eat(b':');
+                let minute = cur.digits(2)?;
+                if !colon || hour > 23 || minute > 59 {
                     return Err(Error::Range);
                 }
                 let offset = i64::from(hour * 60 + minute) * 60_000;
-                milliseconds -= if *sign == b'+' { offset } else { -offset };
-                end += 6;
+                milliseconds -= if sign == b'+' { offset } else { -offset };
             }
             None => {}
             _ => return Err(Error::Syntax),
         }
     }
-    if end != input.len() {
+    if cur.pos != input.len() {
         return Err(Error::Syntax);
     }
-    if milliseconds.abs() > 8_640_000_000_000_000 {
+    if milliseconds.abs() > DATE_LIMIT as i64 {
         return Err(Error::Range);
     }
     Ok(milliseconds as f64)
-}
-
-fn digits(input: &[u8], start: usize, length: usize) -> Result<u32, Error> {
-    input
-        .get(start..start + length)
-        .ok_or(Error::Syntax)?
-        .iter()
-        .try_fold(0, |value, digit| {
-            if digit.is_ascii_digit() {
-                Ok(value * 10 + u32::from(digit - b'0'))
-            } else {
-                Err(Error::Syntax)
-            }
-        })
 }
 
 const DAY_MS: i128 = 86_400_000;
 const DATE_LIMIT: i128 = 8_640_000_000_000_000;
 
 /// Date UTC fields: year, zero-based month, date, weekday, hour, minute, second, millisecond.
-pub fn date_part(ms: f64, part: u32) -> f64 {
+pub(crate) fn date_part(ms: f64, part: u32) -> f64 {
     if !ms.is_finite() || ms.abs() > DATE_LIMIT as f64 {
         return f64::NAN;
     }
@@ -133,7 +121,7 @@ pub fn date_part(ms: f64, part: u32) -> f64 {
 }
 
 /// UTC construction, with ECMAScript's 1900 adjustment for years 0 through 99.
-pub fn date_utc(mut fields: [f64; 7]) -> f64 {
+pub(crate) fn date_utc(mut fields: [f64; 7]) -> f64 {
     if fields[0].is_finite() && (-1.0..100.0).contains(&fields[0]) {
         fields[0] = (fields[0] as i64 + 1900) as f64;
     }
@@ -141,7 +129,7 @@ pub fn date_utc(mut fields: [f64; 7]) -> f64 {
 }
 
 /// Computes a setter's new time value. Omitted trailing fields retain their old values.
-pub fn date_set(time: f64, part: u32, count: usize, values: [f64; 4]) -> f64 {
+pub(crate) fn date_set(time: f64, part: u32, count: usize, values: [f64; 4]) -> f64 {
     if count == 0 || part > 7 {
         return f64::NAN;
     }

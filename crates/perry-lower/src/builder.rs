@@ -1,14 +1,53 @@
 //! The per-function MIR builder: its state and the IR plumbing every lowering uses.
 use super::*;
+use perry_mir::{IntrinsicOp, LocalOp, StringConstOp};
+use pliron::builtin::attributes::FPDoubleAttr;
 
-pub(super) enum Control {
+pub(super) enum Control<'s> {
     Loop {
+        label: Option<&'s str>,
         continue_to: Ptr<BasicBlock>,
         break_to: Ptr<BasicBlock>,
     },
     Switch {
+        label: Option<&'s str>,
         break_to: Ptr<BasicBlock>,
     },
+    Labeled {
+        label: &'s str,
+        break_to: Ptr<BasicBlock>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Jump {
+    Break,
+    Continue,
+}
+
+impl Control<'_> {
+    pub(super) fn target(&self, jump: Jump, label: Option<&str>) -> Option<Ptr<BasicBlock>> {
+        let (own_label, break_to, continue_to) = match self {
+            Self::Loop {
+                label,
+                break_to,
+                continue_to,
+            } => (*label, *break_to, Some(*continue_to)),
+            Self::Switch { label, break_to } => (*label, *break_to, None),
+            Self::Labeled { label, break_to } => (Some(*label), *break_to, None),
+        };
+        if let Some(label) = label {
+            if own_label != Some(label) {
+                return None;
+            }
+        } else if matches!(self, Self::Labeled { .. }) {
+            return None;
+        }
+        match jump {
+            Jump::Break => Some(break_to),
+            Jump::Continue => continue_to,
+        }
+    }
 }
 
 /// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
@@ -31,39 +70,62 @@ pub(super) struct Finally<'s> {
 /// Status of `process.exit` (`ErrorKind::Exit`): handlers pass it on.
 pub(super) const EXIT_STATUS: u64 = 5;
 
+/// A local or global slot and its optional `perry:types` integer wrapping constraint.
+#[derive(Clone, Copy)]
+pub(super) struct LocalBinding {
+    pub(super) slot: Value,
+    pub(super) integer: Option<TypedHandle<IntegerType>>,
+    pub(super) is_never: bool,
+}
+
+impl LocalBinding {
+    pub(super) const fn plain(slot: Value) -> Self {
+        Self {
+            slot,
+            integer: None,
+            is_never: false,
+        }
+    }
+}
+
 pub(super) struct FunctionBuilder<'s> {
     pub(super) region: Ptr<pliron::region::Region>,
     /// The region's entry block, where slots are allocated so they dominate every use.
     entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
-    pub(super) locals: HashMap<LocalId, Value>,
+    pub(super) locals: bindings::Bindings<LocalBinding>,
+    pub(super) closures: bindings::Bindings<&'s Expr>,
+    pub(super) never_values: HashSet<Value>,
     pub(super) global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
-    pub(super) false_guards: HashSet<LocalId>,
+    pub(super) iteration: hir_compat::Iteration,
     /// Tag guards in effect, appended as conditions narrow; branches truncate back.
-    pub(super) variant_guards: Vec<(variants::Path, String, bool)>,
-    pub(super) controls: Vec<Control>,
-    pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
+    pub(super) variant_guards: Vec<(variants::Path<'s>, &'s str, bool)>,
+    pub(super) controls: Vec<Control<'s>>,
+    pub(super) inline_returns: Vec<inline::ReturnFrame>,
+    pub(super) class_expansions: Vec<crate::classes::ClassExpansion<'s>>,
     pub(super) handlers: Vec<Handler>,
     pub(super) finallies: Vec<Finally<'s>>,
-    pub(super) signatures: &'s HashMap<FuncId, Signature>,
+    pub(super) signatures: &'s HashMap<FuncId, Signature<'s>>,
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
-    pub(super) builtins: &'s HashMap<String, Builtin>,
-    pub(super) results: Vec<TypeHandle>,
+    pub(super) builtins: &'s HashMap<&'s str, Builtin>,
+    pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
+    pub(super) rest_excluded_keys: &'s [String],
+    pub(super) this_slot: Option<Value>,
 }
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn lower(
         ctx: &mut Context,
         function: &'s Function,
-        signatures: &'s HashMap<FuncId, Signature>,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         ensure!(
             function
@@ -76,52 +138,82 @@ impl<'s> FunctionBuilder<'s> {
         let signature = signatures
             .get(&function.id)
             .with_context(|| format!("no signature for function {}", function.name))?;
-        let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
-        Self::lower_body(
-            ctx,
-            signature,
-            &params,
-            &function.body,
-            signatures,
-            shapes,
-            builtins,
-        )
+        Self::lower_body(ctx, signature, &function.body, signatures, shapes, builtins)
     }
 
     pub(super) fn lower_body(
         ctx: &mut Context,
-        signature: &Signature,
-        params: &[LocalId],
+        signature: &Signature<'s>,
         body: &'s [Stmt],
-        signatures: &'s HashMap<FuncId, Signature>,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
-        let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
+        let ty = FunctionType::get(
+            ctx,
+            signature.params.iter().map(|p| p.binding.carrier).collect(),
+            signature.carrier_results(),
+        );
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
-        let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
+        let mut builder = Self::new(
+            ctx,
+            &func,
+            signature.result,
+            signature.is_async,
+            signatures,
+            shapes,
+            builtins,
+        );
         let mut globals: Vec<_> = shapes
             .globals
             .borrow()
             .iter()
-            .map(|(&id, &ty)| (id, ty))
+            .map(|(&id, &binding)| (id, binding))
             .collect();
         globals.sort_by_key(|(id, _)| *id);
-        for (id, ty) in globals {
-            let slot = builder.global_slot(ctx, id, ty)?;
-            builder.locals.insert(id, slot);
+        for (id, binding) in globals {
+            let slot = builder.global_slot(ctx, id, binding.carrier)?;
+            builder.locals.insert(
+                id,
+                LocalBinding {
+                    slot,
+                    integer: binding.integer,
+                    is_never: false,
+                },
+            );
         }
-        for (index, param) in params.iter().enumerate() {
-            let value = builder.entry.deref(ctx).get_argument(index);
-            let slot = builder.slot(ctx, value.get_type(ctx));
-            builder.store(ctx, slot, value);
-            builder.locals.insert(*param, slot);
+        for (index, param) in signature.params.iter().enumerate() {
+            let arg_val = builder.entry.deref(ctx).get_argument(index);
+            let binding = if param
+                .source
+                .default
+                .as_ref()
+                .is_some_and(|expr| !matches!(expr, Expr::Undefined))
+            {
+                param.base
+            } else {
+                param.binding
+            };
+            builder.bind_parameter(ctx, param.source, Some(arg_val), Some(binding))?;
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
             let await_ = AwaitOp::new(ctx, promise)?;
             builder.append_value(ctx, &await_);
         }
+        if matches!(signature.name.as_ref(), perry_mir::INITIALIZER | MAIN)
+            && !shapes.static_fields.is_empty()
+        {
+            let mut static_inits: Vec<_> = shapes.static_fields.values().copied().collect();
+            static_inits.sort_by_key(|(id, _)| *id);
+            for (id, field) in static_inits {
+                builder.binding(ctx, id, &field.ty, field.init.as_ref())?;
+            }
+        }
+        let body = hir_compat::strip_synthetic_default_guards(
+            body,
+            signature.params.iter().map(|p| p.source),
+        );
         builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);
@@ -134,10 +226,11 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn new(
         ctx: &Context,
         func: &FuncOp,
-        signature: &Signature,
-        signatures: &'s HashMap<FuncId, Signature>,
+        result: Option<BindingType>,
+        is_async: bool,
+        signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
-        builtins: &'s HashMap<String, Builtin>,
+        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Self {
         let entry = func.get_entry_block(ctx);
         let region = func.get_operation().deref(ctx).get_region(0);
@@ -146,35 +239,73 @@ impl<'s> FunctionBuilder<'s> {
             entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
-            locals: HashMap::new(),
+            locals: bindings::Bindings::default(),
+            closures: bindings::Bindings::default(),
+            never_values: HashSet::new(),
             global_slots: HashSet::new(),
-            false_guards: HashSet::new(),
+            iteration: hir_compat::Iteration::default(),
             variant_guards: Vec::new(),
             controls: Vec::new(),
-            callback_returns: Vec::new(),
+            inline_returns: Vec::new(),
+            class_expansions: Vec::new(),
             handlers: Vec::new(),
             finallies: Vec::new(),
             signatures,
             shapes,
             builtins,
-            results: signature.results.clone(),
-            is_async: signature.is_async,
+            result,
+            is_async,
             labels: 0,
+            rest_excluded_keys: &[],
+            this_slot: None,
         }
     }
 }
 
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn wrap_integer(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        int_ty: TypedHandle<IntegerType>,
+        carrier_ty: TypeHandle,
+    ) -> Value {
+        let int_handle: TypeHandle = int_ty.into();
+        let wrapped = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
+        self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, wrapped, carrier_ty))
+    }
+
+    pub(super) fn fit_binding(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        binding: BindingType,
+    ) -> Result<Value> {
+        match binding.integer {
+            Some(int_ty) if int_ty.deref(ctx).width() == 64 => {
+                let int_val = self.fit(ctx, value, int_ty.into())?;
+                self.fit(ctx, int_val, binding.carrier)
+            }
+            Some(int_ty) => {
+                let fitted = self.fit(ctx, value, binding.carrier)?;
+                Ok(self.wrap_integer(ctx, fitted, int_ty, binding.carrier))
+            }
+            None => self.fit(ctx, value, binding.carrier),
+        }
+    }
+
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
     pub(super) fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
-        self.results
-            .clone()
+        self.result
             .into_iter()
-            .map(|ty| match optional_value(ctx, ty) {
-                Some(_) if absence(ctx, ty).is_some_and(|states| states.admits_undefined()) => {
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+            .map(|r| {
+                let ty = r.carrier;
+                match optional_value(ctx, ty) {
+                    Some(_) if admits_undefined(ctx, ty) => {
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                    }
+                    _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
                 }
-                _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
             })
             .collect()
     }
@@ -184,27 +315,6 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn append(&mut self, ctx: &mut Context, op: &dyn Op) {
         self.ins.append_op(ctx, op);
         self.guard(ctx, op.get_operation());
-    }
-
-    pub(super) fn append_value<T: Op + OneResultInterface>(
-        &mut self,
-        ctx: &mut Context,
-        op: &T,
-    ) -> Value {
-        self.ins.append_op(ctx, op);
-        self.guard(ctx, op.get_operation());
-        op.get_result(ctx)
-    }
-
-    pub(super) fn emit<T: Op>(
-        &mut self,
-        ctx: &mut Context,
-        make: impl FnOnce(&mut Context) -> T,
-    ) -> T {
-        let op = make(ctx);
-        self.ins.append_op(ctx, &op);
-        self.guard(ctx, op.get_operation());
-        op
     }
 
     /// Inside a `try`, route the exception of an op that may throw to the handler.
@@ -243,15 +353,6 @@ impl<'s> FunctionBuilder<'s> {
         op.get_result(ctx)
     }
 
-    pub(super) fn emit_value<T: Op + OneResultInterface>(
-        &mut self,
-        ctx: &mut Context,
-        make: impl FnOnce(&mut Context) -> T,
-    ) -> Value {
-        let op = self.emit(ctx, make);
-        op.get_result(ctx)
-    }
-
     /// A new block named `label` and a counter. Labels only make printed MIR readable, so the
     /// name is legalised: every label names a block, and an identifier label stays as written.
     pub(super) fn new_block(&mut self, ctx: &mut Context, label: &str) -> Ptr<BasicBlock> {
@@ -272,37 +373,22 @@ impl<'s> FunctionBuilder<'s> {
         self.block.deref(ctx).get_terminator(ctx).is_some()
     }
 
-    /// Branch to `target` unless the current block already ended (e.g. with `return`).
-    pub(super) fn jump(&mut self, ctx: &mut Context, target: Ptr<BasicBlock>) {
-        if !self.terminated(ctx) {
-            self.emit(ctx, |ctx| BrOp::new(ctx, target, vec![]));
-        }
-    }
-
     /// After `return`/`break`/`continue`, keep lowering into an unreachable block.
     pub(super) fn after_terminator(&mut self, ctx: &mut Context) {
         let dead = self.new_block(ctx, "unreachable");
         self.switch_to(dead);
     }
 
-    pub(super) fn slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        self.emit_value(ctx, |ctx| LocalOp::new(ctx, ty))
-    }
-
-    pub(super) fn store(&mut self, ctx: &mut Context, slot: Value, value: Value) {
-        self.emit(ctx, |ctx| StoreOp::new(ctx, slot, value));
-    }
-
     pub(super) fn load(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
         if self.global_slots.contains(&slot) {
-            let op = perry_mir::globals::GlobalLoadOp::new(ctx, slot)?;
+            let op = perry_mir::GlobalLoadOp::new(ctx, slot)?;
             return Ok(self.append_value(ctx, &op));
         }
         let op = LoadOp::new(ctx, slot)?;
         Ok(self.append_value(ctx, &op))
     }
 
-    pub(super) fn local(&self, id: LocalId) -> Result<Value> {
+    pub(super) fn local_binding(&self, id: LocalId) -> Result<LocalBinding> {
         self.locals.get(&id).copied().ok_or_else(|| {
             anyhow!(
                 "unsupported reference to local {id} (globals and captures are not supported yet)"
@@ -310,16 +396,31 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
-    pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {
-        let op = ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(value)));
-        self.append_value(ctx, &op)
+    pub(super) fn local(&self, id: LocalId) -> Result<Value> {
+        Ok(self.local_binding(id)?.slot)
     }
 
-    pub(super) fn boolean(&mut self, ctx: &mut Context, value: bool) -> Value {
-        let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-        let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(value), bw(1)));
-        let op = ConstantOp::new(ctx, Box::new(attr));
-        self.append_value(ctx, &op)
+    pub(super) fn integer64_source(&self, ctx: &Context, value: Value) -> Option<Value> {
+        let def_op = value.defining_op()?;
+        Operation::get_op::<NumericCastOp>(def_op, ctx)?;
+        let src = def_op.deref(ctx).get_operand(0);
+        is_integer64(ctx, src.get_type(ctx)).then_some(src)
+    }
+
+    pub(super) fn load_local(&mut self, ctx: &mut Context, id: LocalId) -> Result<Value> {
+        let binding = self.local_binding(id)?;
+        let loaded = self.load(ctx, binding.slot)?;
+        let result = if let Some(int_ty) = binding.integer
+            && int_ty.deref(ctx).width() == 64
+        {
+            self.wrap_integer(ctx, loaded, int_ty, loaded.get_type(ctx))
+        } else {
+            loaded
+        };
+        if binding.is_never {
+            self.never_values.insert(result);
+        }
+        Ok(result)
     }
 
     pub(super) fn binary(
@@ -330,41 +431,6 @@ impl<'s> FunctionBuilder<'s> {
         rhs: Value,
     ) -> Value {
         self.emit_value(ctx, |ctx| MirBinary::new(ctx, kind, lhs, rhs))
-    }
-
-    pub(super) fn compare(
-        &mut self,
-        ctx: &mut Context,
-        kind: CompareKind,
-        lhs: Value,
-        rhs: Value,
-    ) -> Value {
-        self.emit_value(ctx, |ctx| MirCompare::new(ctx, kind, lhs, rhs))
-    }
-
-    pub(super) fn branch(
-        &mut self,
-        ctx: &mut Context,
-        condition: Value,
-        then: Ptr<BasicBlock>,
-        otherwise: Ptr<BasicBlock>,
-    ) {
-        self.emit(ctx, |ctx| {
-            CondBrOp::new(ctx, condition, then, vec![], otherwise, vec![])
-        });
-    }
-
-    pub(super) fn string(&mut self, ctx: &mut Context, text: &str) -> Value {
-        let op = StringConstOp::new(ctx, text);
-        self.append_value(ctx, &op)
-    }
-
-    /// A slot inserted at the start of the entry block, dominating every use.
-    pub(super) fn entry_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        let op = LocalOp::new(ctx, ty);
-        let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(self.entry);
-        at_entry.append_op(ctx, &op);
-        op.get_result(ctx)
     }
 
     /// The region's entry block, cached at construction.
@@ -380,14 +446,14 @@ impl<'s> FunctionBuilder<'s> {
         ty: TypeHandle,
     ) -> Result<Value> {
         let name = identifier(&format!("global_{id}"))?;
-        let slot = self.emit_value(ctx, |ctx| perry_mir::globals::GlobalOp::new(ctx, name, ty));
+        let slot = self.emit_value(ctx, |ctx| perry_mir::GlobalOp::new(ctx, name, ty));
         self.global_slots.insert(slot);
         Ok(slot)
     }
 
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
         Ok(
-            TypedHandle::<perry_mir::types::SlotType>::from_handle(slot.get_type(ctx), ctx)
+            TypedHandle::<perry_mir::SlotType>::from_handle(slot.get_type(ctx), ctx)
                 .map_err(|_| anyhow!("not a slot"))?
                 .deref(ctx)
                 .value(),
@@ -403,48 +469,6 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    /// Emit `intrinsic` and return its result, if its signature has one: for dispatch
-    /// over intrinsics and methods that may or may not produce a value. Otherwise use
-    /// [Self::intrinsic] or [Self::intrinsic_void].
-    pub(super) fn call_intrinsic(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        args: Vec<Value>,
-    ) -> Option<Value> {
-        let op = self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args));
-        let operation = op.get_operation().deref(ctx);
-        (operation.get_num_results() == 1).then(|| operation.get_result(0))
-    }
-
-    /// Emit an intrinsic that returns a value.
-    pub(super) fn intrinsic(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        args: Vec<Value>,
-    ) -> Value {
-        let Some(result) = self.call_intrinsic(ctx, intrinsic, args) else {
-            panic!("{} returns no value", intrinsic.name());
-        };
-        result
-    }
-
-    /// Emit an intrinsic without a result.
-    pub(super) fn intrinsic_void(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        args: Vec<Value>,
-    ) {
-        assert!(
-            !intrinsic.has_result(),
-            "the result of {} is discarded",
-            intrinsic.name()
-        );
-        self.call_intrinsic(ctx, intrinsic, args);
-    }
-
     /// Pick `then` or `otherwise` (strings) by `condition`, through a slot.
     pub(super) fn choose_string(
         &mut self,
@@ -455,32 +479,6 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let ty = StringType::get(ctx).into();
         self.choose(ctx, ty, condition, then, otherwise)
-    }
-
-    /// A value of type `ty` from one of two branches.
-    pub(super) fn choose(
-        &mut self,
-        ctx: &mut Context,
-        ty: TypeHandle,
-        condition: Value,
-        then: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
-        otherwise: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
-    ) -> Result<Value> {
-        let slot = self.entry_slot(ctx, ty);
-        let then_block = self.new_block(ctx, "then");
-        let else_block = self.new_block(ctx, "else");
-        let join = self.new_block(ctx, "join");
-        self.branch(ctx, condition, then_block, else_block);
-        self.switch_to(then_block);
-        let value = then(self, ctx)?;
-        self.store(ctx, slot, value);
-        self.jump(ctx, join);
-        self.switch_to(else_block);
-        let value = otherwise(self, ctx)?;
-        self.store(ctx, slot, value);
-        self.jump(ctx, join);
-        self.switch_to(join);
-        self.load(ctx, slot)
     }
 }
 
@@ -520,5 +518,182 @@ pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::
         .collect();
     for block in dead {
         BasicBlock::erase(block, ctx);
+    }
+}
+
+/// Insert `operations`, in order, before the terminator of an already closed `block`: for
+/// values whose type is known only after later code was lowered.
+pub(super) fn insert_before_terminator(
+    ctx: &mut Context,
+    block: Ptr<BasicBlock>,
+    operations: impl IntoIterator<Item = Ptr<Operation>>,
+) -> Result<()> {
+    let terminator = block
+        .deref(ctx)
+        .get_terminator(ctx)
+        .context("a closed block ends in a terminator")?;
+    for operation in operations {
+        operation.insert_before(ctx, terminator);
+    }
+    Ok(())
+}
+
+impl FunctionBuilder<'_> {
+    pub(super) fn emit<T: Op>(
+        &mut self,
+        ctx: &mut Context,
+        make: impl FnOnce(&mut Context) -> T,
+    ) -> T {
+        let op = make(ctx);
+        self.append(ctx, &op);
+        op
+    }
+    pub(super) fn append_value<T: Op + OneResultInterface>(
+        &mut self,
+        ctx: &mut Context,
+        op: &T,
+    ) -> Value {
+        self.append(ctx, op);
+        op.get_result(ctx)
+    }
+    pub(super) fn emit_value<T: Op + OneResultInterface>(
+        &mut self,
+        ctx: &mut Context,
+        make: impl FnOnce(&mut Context) -> T,
+    ) -> Value {
+        self.emit(ctx, make).get_result(ctx)
+    }
+    pub(super) fn entry_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
+        let op = LocalOp::new(ctx, ty);
+        op.get_operation().insert_at_front(self.entry_block(), ctx);
+        op.get_result(ctx)
+    }
+    pub(super) fn store(&mut self, ctx: &mut Context, slot: Value, value: Value) {
+        self.emit(ctx, |ctx| StoreOp::new(ctx, slot, value));
+    }
+    pub(super) fn jump(&mut self, ctx: &mut Context, target: Ptr<BasicBlock>) {
+        if self.block.deref(ctx).get_terminator(ctx).is_none() {
+            self.emit(ctx, |ctx| BrOp::new(ctx, target, vec![]));
+        }
+    }
+    pub(super) fn branch(
+        &mut self,
+        ctx: &mut Context,
+        condition: Value,
+        yes: Ptr<BasicBlock>,
+        no: Ptr<BasicBlock>,
+    ) {
+        self.emit(ctx, |ctx| {
+            CondBrOp::new(ctx, condition, yes, vec![], no, vec![])
+        });
+    }
+    pub(super) fn boolean(&mut self, ctx: &mut Context, value: bool) -> Value {
+        let ty = IntegerType::get(ctx, 1, Signedness::Signless);
+        self.emit_value(ctx, |ctx| {
+            ConstantOp::new(
+                ctx,
+                Box::new(IntegerAttr::new(
+                    ty,
+                    APInt::from_u64(u64::from(value), bw(1)),
+                )),
+            )
+        })
+    }
+
+    pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {
+        self.emit_value(ctx, |ctx| {
+            ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(value)))
+        })
+    }
+    pub(super) fn string(&mut self, ctx: &mut Context, text: &str) -> Value {
+        self.emit_value(ctx, |ctx| StringConstOp::new(ctx, text))
+    }
+    pub(super) fn compare(
+        &mut self,
+        ctx: &mut Context,
+        kind: CompareKind,
+        lhs: Value,
+        rhs: Value,
+    ) -> Value {
+        self.emit_value(ctx, |ctx| MirCompare::new(ctx, kind, lhs, rhs))
+    }
+    pub(super) fn intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        args: Vec<Value>,
+    ) -> Value {
+        self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args))
+            .get_operation()
+            .deref(ctx)
+            .get_result(0)
+    }
+    pub(super) fn intrinsic_void(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        args: Vec<Value>,
+    ) {
+        self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args));
+    }
+
+    pub(super) fn choose(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        condition: Value,
+        then: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        otherwise: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+    ) -> Result<Value> {
+        let then_block = self.new_block(ctx, "then");
+        let else_block = self.new_block(ctx, "else");
+        self.branch(ctx, condition, then_block, else_block);
+        self.switch_to(then_block);
+        let then_value = then(self, ctx)?;
+        let then_end = self.block;
+        self.switch_to(else_block);
+        let else_value = otherwise(self, ctx)?;
+        let [value] = self.merge_branches(
+            ctx,
+            [ty],
+            [(then_end, [then_value]), (self.block, [else_value])],
+        )?;
+        Ok(value)
+    }
+    pub(super) fn merge_branches<const N: usize>(
+        &mut self,
+        ctx: &mut Context,
+        types: [TypeHandle; N],
+        branches: [(Ptr<BasicBlock>, [Value; N]); 2],
+    ) -> Result<[Value; N]> {
+        let slots = types.map(|ty| self.entry_slot(ctx, ty));
+        let join = self.new_block(ctx, "join");
+        for (block, values) in branches {
+            self.switch_to(block);
+            if self.block.deref(ctx).get_terminator(ctx).is_some() {
+                continue;
+            }
+            for ((slot, ty), value) in slots.into_iter().zip(types).zip(values) {
+                let value = self.fit(ctx, value, ty)?;
+                self.store(ctx, slot, value);
+            }
+            self.jump(ctx, join);
+        }
+        self.switch_to(join);
+        let mut values = slots;
+        for value in &mut values {
+            *value = self.load(ctx, *value)?;
+        }
+        Ok(values)
+    }
+    pub(super) fn call_intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        args: Vec<Value>,
+    ) -> Option<Value> {
+        let op = self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args));
+        let operation = op.get_operation().deref(ctx);
+        (operation.get_num_results() == 1).then(|| operation.get_result(0))
     }
 }

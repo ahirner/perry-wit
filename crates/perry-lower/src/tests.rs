@@ -1,6 +1,4 @@
-use pliron::{
-    builtin::ops::ModuleOp, context::Context, op::Op, operation::Operation, printable::Printable,
-};
+use pliron::{builtin::ops::ModuleOp, context::Context, op::Op, printable::Printable};
 use std::collections::HashMap;
 
 /// Lower a source without foreign (WIT) types.
@@ -8,336 +6,33 @@ fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow:
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
-/// Lower, verify, promote slots, clean up, verify again; return the printed module.
-fn lowered(source: &str) -> String {
-    let ctx = &mut Context::new();
-    let module = lower_without_foreign(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
-    let op = module.get_operation();
-    perry_mir::pipeline::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
-    let printed = Operation::get_op_dyn(op, ctx).disp(ctx).to_string();
-    for slot_op in ["perry.local", "perry.load", "perry.store"] {
-        assert!(
-            !printed.contains(slot_op),
-            "{slot_op} survived mem2reg:\n{printed}"
-        );
-    }
-    printed
+fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic {
+    lower_without_foreign(&mut Context::new(), source, file)
+        .err()
+        .expect("rejection")
+        .downcast()
+        .expect("located diagnostic")
 }
 
-fn rejected(source: &str) -> String {
-    let ctx = &mut Context::new();
-    format!(
-        "{:#}",
-        lower_without_foreign(ctx, source, "case.ts")
-            .err()
-            .expect("rejection")
-    )
-}
-
+/// Diagnostic messages are tabled in the integration `diagnostics_test`; this pins the spans.
 #[test]
-fn scalar_loop_becomes_ssa() {
-    let printed = lowered(
-        r#"
-export function run(x: number): number {
-  let acc = 0;
-  for (let i = 0; i < x; i++) {
-    acc = (acc + i * 3) % 1000003;
-  }
-  return acc;
-}
-"#,
-    );
-    assert!(printed.contains("perry.binary Rem"), "{printed}");
-    if std::env::var_os("PERRY_MIR_PRINT").is_some() {
-        eprintln!("{printed}");
-    }
-    assert!(printed.contains("perry.cond_br if"), "{printed}");
-}
-
-#[test]
-fn calls_branches_and_recursion() {
-    let printed = lowered(
-        r#"
-function fib(n: number): number {
-  if (n < 2) {
-    return n;
-  }
-  return fib(n - 1) + fib(n - 2);
-}
-export function run(x: number): number {
-  return x > 0 && x < 30 ? fib(x) : -x;
-}
-"#,
-    );
-    assert_eq!(printed.matches("perry.call fib").count(), 3, "{printed}");
-}
-
-#[test]
-fn while_break_continue_and_strings() {
-    let printed = lowered(
-        r#"
-export function run(x: number): number {
-  let text = "";
-  let i = 0;
-  while (true) {
-    i++;
-    if (i > x) {
-      break;
-    }
-    if (i % 2 === 0) {
-      continue;
-    }
-    text = text + "x";
-  }
-  do {
-    i--;
-  } while (i > 0 && !(i === 5));
-  return text.length + i;
-}
-"#,
-    );
-    assert!(printed.contains("perry.concat_reuse"), "{printed}");
-    assert!(printed.contains("perry.convert I32ToF64"), "{printed}");
-}
-
-#[test]
-fn unsupported_forms_are_rejected_with_diagnostics() {
-    for (source, expected) in [
+fn unsupported_forms_are_rejected_with_located_diagnostics() {
+    for (source, message, location) in [
         (
-            "export function run(x: number): number { return x ** 2; }",
-            "operator Pow",
+            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+            "cannot find name 'a'",
+            (5, 13),
         ),
         (
-            "function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }",
-            "generator function",
-        ),
-        (
-            "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
-            "MIR backend does not support",
+            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+            "method toFixed is not supported on number yet",
+            (2, 10),
         ),
     ] {
-        let error = rejected(source);
-        assert!(error.contains(expected), "{source}: {error}");
-    }
-}
-
-#[test]
-fn records_unify_by_shape_and_arrays_grow() {
-    let printed = lowered(
-        r#"
-interface Point { x: number; y: number }
-function make(i: number): Point {
-  return { y: i * 2, x: i };
-}
-
-export function run(x: number): number {
-  const items: Point[] = [];
-  for (let i = 0; i < x; i++) {
-    items.push(make(i));
-  }
-  let sum = 0;
-  for (let k = 0; k < items.length; k++) {
-    const point = items[k];
-    point.x = point.x + 1;
-    sum = (sum + point.x + point.y) % 1000003;
-  }
-  const pair: number[] = [sum, x];
-  pair[1] = pair[0];
-  return pair[1];
-}
-"#,
-    );
-    // The interface and the `{ y, x }` literal are one record, fields in sorted order.
-    assert!(
-        printed.contains("perry.record <shape_x_y { x: builtin.fp64 , y: builtin.fp64  }>"),
-        "{printed}"
-    );
-    assert!(!printed.contains("__AnonShape"), "{printed}");
-    for op in [
-        "perry.alloc Instance",
-        "perry.array_new Instance",
-        "perry.array_push",
-        "perry.array_get",
-        "perry.array_set",
-        "perry.field_set",
-        "perry.unwrap",
-    ] {
-        assert!(printed.contains(op), "missing {op}:\n{printed}");
-    }
-    // Indices stay f64: the bounds and integrality check is part of `perry.array_get`.
-    assert!(!printed.contains("perry.convert F64ToI32"), "{printed}");
-}
-
-#[test]
-fn out_of_bounds_reads_are_undefined_not_traps() {
-    let printed = lowered(
-        r#"
-export function run(n: number): number {
-  const xs: number[] = [1, 2];
-  const missing = xs[n];
-  if (missing === undefined) {
-    return -1;
-  }
-  return xs[n + 5] * 2 + missing;
-}
-"#,
-    );
-    for op in [
-        "perry.optional <builtin.fp64 ,Undefined>",
-        "perry.is_undefined",
-        "perry.to_number",
-    ] {
-        assert!(printed.contains(op), "missing {op}:\n{printed}");
-    }
-    // Arithmetic coerces undefined to NaN; nothing on this path throws.
-    assert!(!printed.contains("perry.unwrap"), "{printed}");
-}
-
-#[test]
-fn typed_boundaries_unwrap_with_type_error() {
-    let printed = lowered(
-        r#"
-interface Point { x: number; y: number }
-function norm(p: Point): number {
-  return p.x + p.y;
-}
-export function run(n: number): string {
-  const points: Point[] = [{ x: n, y: n }];
-  const names: string[] = ["a"];
-  const total = norm(points[n]);
-  return "name: " + names[n + total];
-}
-"#,
-    );
-    for op in ["perry.to_string", "perry.unwrap"] {
-        assert!(printed.contains(op), "missing {op}:\n{printed}");
-    }
-}
-
-#[test]
-fn literal_fields_evaluate_in_source_order() {
-    let printed = lowered(
-        r#"
-interface Point { x: number; y: number }
-function trace(v: number): number {
-  if (v < 0) throw new Error('negative');
-  return v;
-}
-export function run(n: number): number {
-  const p: Point = { y: trace(1), x: trace(2) };
-  return p.x - p.y;
-}
-"#,
-    );
-    let first = printed.find("perry.call trace").expect("calls");
-    let call_args: Vec<_> = printed[first..]
-        .lines()
-        .filter(|l| l.contains("perry.call trace"))
-        .collect();
-    assert_eq!(call_args.len(), 2, "{printed}");
-    // y's initializer (1) is computed before x's (2); the allocation then orders x before y.
-    let one = printed.find("builtin.double 1>").expect("1");
-    let two = printed.find("builtin.double 2>").expect("2");
-    assert!(one < two, "{printed}");
-}
-
-#[test]
-fn same_field_names_with_other_types_are_distinct_records() {
-    let printed = lowered(
-        r#"
-interface Inner { v: number; c: Leaf }
-interface Leaf { v: number }
-interface Outer { v: number; c: Inner }
-export function depth(o: Outer): number {
-  return o.c.c.v + o.c.v + o.v;
-}
-export function run(n: number): number {
-  return depth({ v: n, c: { v: 2, c: { v: 3 } } });
-}
-"#,
-    );
-    // The exported signature keeps both shapes observable after aggregate elimination.
-    assert!(printed.contains("shape_c_v {"), "{printed}");
-    assert!(printed.contains("shape_c_v_2 {"), "{printed}");
-}
-
-#[test]
-fn recursive_interfaces_get_a_reserved_name() {
-    let printed = lowered(
-        r#"
-interface Node { value: number; next: Node[] }
-function total(node: Node): number {
-  let sum = node.value;
-  for (let i = 0; i < node.next.length; i++) {
-    sum = sum + total(node.next[i]);
-  }
-  return sum;
-}
-export function run(n: number): number {
-  const leaf: Node = { value: n, next: [] };
-  return total({ value: 1, next: [leaf, leaf] });
-}
-"#,
-    );
-    assert!(printed.contains("shape_next_value_rec1"), "{printed}");
-}
-
-#[test]
-#[ignore]
-fn dump_hir() {
-    let path = std::env::var("PERRY_HIR").expect("PERRY_HIR=<file.ts>");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let ast = perry_parser::parse_typescript(&source, "case.ts").unwrap();
-    let hir = perry_hir::lower_module(&ast, "main", "case.ts").unwrap();
-    println!("{:#?}", hir.functions);
-    println!("INIT {:#?}", hir.init);
-    println!("GLOBALS {:#?}", hir.globals);
-    println!("IMPORTS {:#?}", hir.imports);
-}
-
-#[test]
-fn async_functions_await_promises_and_timers() {
-    let printed = lowered(
-        r#"
-import { setTimeout } from 'node:timers/promises';
-async function later(v: number): Promise<number> {
-  const a = v + 1;
-  await setTimeout(1);
-  return a;
-}
-async function nothing(): Promise<void> {
-  await setTimeout(0);
-}
-export async function run(x: number): Promise<number> {
-  const value = await setTimeout(0, x);
-  const pending = later(value);
-  await nothing();
-  return (await pending) + (await pending);
-}
-"#,
-    );
-    for op in [
-        "perry.async_call later",
-        "perry.await",
-        "perry.timer",
-        "perry.promise <builtin.fp64 >",
-        "perry_async",
-    ] {
-        assert!(printed.contains(op), "missing {op}:\n{printed}");
-    }
-}
-
-#[test]
-#[ignore]
-fn dump_mir() {
-    let path = std::env::var("PERRY_MIR").expect("PERRY_MIR=<file.ts>");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let ctx = &mut Context::new();
-    let module = lower_without_foreign(ctx, &source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
-    let op = module.get_operation();
-    println!("{}", Operation::get_op_dyn(op, ctx).disp(ctx));
-    if let Err(e) = pliron::operation::verify_operation(op, ctx) {
-        println!("VERIFY: {}", e.disp(ctx));
+        let diagnostic = rejection(source, "case.ts");
+        assert_eq!(diagnostic.message, message);
+        let span = diagnostic.span.expect("source location");
+        assert_eq!((span.start_line, span.start_column), location);
     }
 }
 
@@ -353,7 +48,7 @@ export function local(x: number): number { const cell: Cell = { value: x }; retu
 export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
 "#;
     let module = lower_without_foreign(ctx, source, "lifetimes.ts").unwrap();
-    perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
+    perry_mir::canonicalize(module.get_operation(), ctx).unwrap();
     let printed = module.disp(ctx).to_string();
     assert!(printed.contains("perry.call read"), "{printed}");
     assert!(printed.contains("perry.call save"), "{printed}");
@@ -361,24 +56,137 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
     assert!(printed.contains("perry.alloc Instance"), "{printed}");
 }
 
-/// Temporal factories and options outside the supported ISO subset are rejected.
 #[test]
-fn unsupported_temporal_forms_are_rejected() {
-    for (source, message) in [
+fn generic_collections_keep_concrete_payloads() -> anyhow::Result<()> {
+    let ctx = &mut Context::new();
+    let source = r#"
+function index<T extends {id:string}>(xs:T[]):Map<string,T> {
+    const result = new Map<string,T>();
+    for (const x of xs) {
+        if (result.has(x.id)) throw new Error("duplicate");
+        result.set(x.id,x);
+    }
+    return result;
+}
+function forward<T extends {id:string}>(xs:T[]):Map<string,T> { return index(xs); }
+function unique<T>(xs:T[]) { return new Set<T>(xs); }
+function fromMap<T>(values:Map<string,T>):T|undefined { return values.get("a"); }
+function first<T>(xs:T[]):T { return xs[0]; }
+function defaulted<T>(value:T):T {
+    const read = (fallback:T = first([value].map((item:T):T => item))):T => fallback;
+    return read();
+}
+class Catalog {
+    cached: string = first(["cached"]);
+    static cached: number = first([7]);
+    value() { return [1, 2].at(0); }
+    defaulted(values: Map<string,{id:string,name:string}> = index([{id:"a",name:"default"}])): string {
+        return values.get("a")?.name ?? "";
+    }
+    find(input:string):string { return index([{id:"a",name:input}]).get("a")?.name ?? ""; }
+}
+export function catalogValue() { return new Catalog().value(); }
+export function run(input:string):string {
+    const named = index([{id:"a",name:defaulted(input)}]);
+    const counted = forward([{id:"a",count:defaulted(7)}]);
+    const empty = index<{id:string,name:string}>([]);
+    const names = unique([input]);
+    const lookup = (xs:{id:string,name:string}[]):Map<string,{id:string,name:string}> => index(xs);
+    const collided = ({x: 1}.x + {x: input}.x) + {x_2: 2}.x_2;
+    return (fromMap(named)?.name ?? "missing") + counted.get("a")?.count
+        + empty.size + names.has(input) + new Catalog().find(input)
+        + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted()
+        + (new Catalog().value() ?? 0) + collided;
+}
+"#;
+    let module = lower_without_foreign(ctx, source, "generic-collections.ts")?;
+    pliron::common_traits::Verify::verify(&*module.get_operation().deref(ctx), ctx)?;
+    let printed = module.disp(ctx).to_string();
+    for expected in [
+        "{ id: perry.string , name: perry.string  }",
+        "{ count: builtin.fp64 , id: perry.string  }",
+        "{ x: builtin.fp64  }",
+        "{ x: perry.string  }",
+        "{ x_2: builtin.fp64  }",
+    ] {
+        assert!(
+            printed.contains(expected),
+            "missing {expected} in:\n{printed}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recursive_class_calls_have_located_diagnostics() {
+    for (members, entry, target) in [
         (
-            "export function f(): string { return Temporal.Now.instant().toString(); }",
-            "Temporal.Now.instant is not supported",
+            "count(n:number):number { if(n<=0)return 0; return 1+this.count(n-1); }",
+            "return new Counter().count(3);",
+            "Counter.count",
         ),
         (
-            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ months: 1 }).toString(); }",
-            "literal { days }",
+            "first(n:number):number { return this.second(n); }
+             second(n:number):number { return this.first(n); }",
+            "return new Counter().first(3);",
+            "Counter.first",
         ),
         (
-            "export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }",
-            "property hour",
+            "count(n:number):number { return this.count(this.count(n-1)); }",
+            "return new Counter().count(3);",
+            "Counter.count",
+        ),
+        (
+            "static count(n:number):number { return Counter.count(n-1); }",
+            "return Counter.count(3);",
+            "Counter.count",
+        ),
+        (
+            "count(n:number=this.count()):number { return n; }",
+            "return new Counter().count();",
+            "Counter.count",
+        ),
+        (
+            "get count():number { return this.count; }",
+            "return new Counter().count;",
+            "Counter",
+        ),
+        (
+            "set count(n:number) { this.count=n; }",
+            "const c=new Counter(); c.count=3; return 0;",
+            "Counter",
+        ),
+        (
+            "constructor() { new Counter(); }",
+            "new Counter(); return 0;",
+            "Counter",
+        ),
+        (
+            "count:number=1;
+             constructor(n:number=new Counter().count) { this.count=n; }",
+            "return new Counter().count;",
+            "Counter",
+        ),
+        (
+            "count:number=new Counter().count;",
+            "return new Counter().count;",
+            "field initialization of class Counter",
+        ),
+        (
+            "count:number=new Counter().count; constructor() {}",
+            "return new Counter().count;",
+            "Counter",
         ),
     ] {
-        let error = rejected(source);
-        assert!(error.contains(message), "{source}: {error}");
+        let source =
+            format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
+        let diagnostic = rejection(&source, "classes.ts");
+        assert!(
+            diagnostic.message.contains("recursive inline") && diagnostic.message.contains(target),
+            "{source}\n{diagnostic:?}"
+        );
+        let span = diagnostic.span.expect("source location");
+        assert_eq!(span.file.to_string_lossy(), "classes.ts");
+        assert!(span.end_byte > span.start_byte, "{source}\n{span:?}");
     }
 }

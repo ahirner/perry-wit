@@ -9,10 +9,14 @@
 
 use core::ptr;
 
+mod wasm_imports;
+
 pub mod json;
 pub mod layout;
+pub mod number;
 // Public because `perry-runtime` compiles this source too and uses the compact counter.
 pub mod utf8;
+pub mod whitespace;
 /// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
 pub use utf8::scalars_length_wide as scalars_length;
 
@@ -32,141 +36,117 @@ pub const BLOCKED: u32 = 0xffff_ffff;
 pub const COMPLETED: u32 = 0;
 pub const DROPPED: u32 = 1;
 
-/// `TypeError`, `RangeError` and `Error` statuses (`perry_runtime::exception`).
-pub const TYPE_ERROR: u32 = 1;
-pub const RANGE_ERROR: u32 = 2;
-pub const ERROR: u32 = 3;
-pub const REFERENCE_ERROR: u32 = 6;
-pub const SYNTAX_ERROR: u32 = 7;
-/// Exception layout (`perry_runtime::exception`): `kind` at 0, `tag` at 4, `value` at 8.
-pub const EXCEPTION_KIND: usize = 0;
-pub const EXCEPTION_TAG: usize = 4;
-pub const EXCEPTION_VALUE: usize = 8;
-pub const THROWN_VALUE: u32 = 4;
-pub const TAG_NUMBER: u32 = 1;
-pub const TAG_STRING: u32 = 3;
+/// `TypeError`, `RangeError`, `Error`, `ReferenceError` and `SyntaxError` statuses and layout.
+pub use layout::exception::{
+    ERROR, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR, TAG_NUMBER, TAG_STRING, THROWN_VALUE,
+    TYPE_ERROR,
+};
+pub const EXCEPTION_KIND: usize = layout::exception::KIND as usize;
+pub const EXCEPTION_TAG: usize = layout::exception::TAG as usize;
+pub const EXCEPTION_VALUE: usize = layout::exception::VALUE as usize;
+/// Bits of an omitted optional field in a `number | undefined` slot.
+pub use layout::descriptor::OMITTED_BITS;
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
 /// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
-pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+pub use layout::descriptor::UNDEFINED_BITS;
 /// Offset of an array's data address ([layout::array::DATA]).
 pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
 pub const BYTES_DATA: usize = 4;
 
-#[cfg(not(target_arch = "wasm32"))]
-const _: () = {
-    use perry_runtime::exception;
-    assert!(exception::TYPE_ERROR == TYPE_ERROR);
-    assert!(exception::RANGE_ERROR == RANGE_ERROR);
-    assert!(exception::ERROR == ERROR);
-    assert!(exception::THROWN_VALUE == THROWN_VALUE);
-    assert!(exception::TAG_NUMBER == TAG_NUMBER && exception::TAG_STRING == TAG_STRING);
-    assert!(exception::KIND as usize == EXCEPTION_KIND && exception::TAG as usize == EXCEPTION_TAG);
-    assert!(exception::VALUE as usize == EXCEPTION_VALUE);
-};
-
-#[cfg(target_arch = "wasm32")]
+#[allow(clippy::missing_safety_doc)]
 mod imports {
-    #[link(wasm_import_module = "__perry_helper")]
-    unsafe extern "C" {
-        pub(crate) fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
-        pub(crate) fn perry_buffer_resize(
+    crate::wasm_imports!("__perry_helper" => perry_runtime::region;
+        fn perry_alloc(size: u32) -> *mut u8;
+        fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
+        fn perry_buffer_resize(
             old: *mut u8,
             old_size: u32,
             new_size: u32,
             initialized: u32,
             shape: *const u32,
         ) -> *mut u8;
-        pub(crate) fn perry_operation_pin(owner: *mut u8) -> u32;
-        pub(crate) fn perry_operation_unpin(token: u32);
-        pub(crate) fn perry_promise_new_typed(references: u32) -> *mut u8;
-        pub(crate) fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
-        pub(crate) fn perry_alloc(size: u32) -> *mut u8;
-        pub(crate) fn perry_cabi_release(data: *mut u8);
-        pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
-        pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
-        pub(crate) fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
-        pub(crate) fn perry_exception_message(exception: *mut u8) -> *mut u8;
-        pub(crate) fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8;
-        pub(crate) fn perry_raise_with_cause(kind: u32, message: *mut u8, cause: *mut u8);
-        pub(crate) fn perry_raise(kind: u32, message: *mut u8);
-        pub(crate) fn perry_status() -> u32;
-        pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
-        pub(crate) fn perry_promise_cancellation_owned(promise: *mut u8) -> u32;
-        pub(crate) fn perry_task_current() -> *mut u8;
-        pub(crate) fn perry_task_resume(task: *mut u8);
-        pub(crate) fn perry_promise_resolve(promise: *mut u8, value: u64);
-        pub(crate) fn perry_promise_reject(promise: *mut u8, status: i32);
-        pub(crate) fn perry_task_join(waitable: u32);
-        pub(crate) fn perry_write_acknowledged(
-            fd: u32,
-            data: *const u8,
-            len: u32,
-            promise: *mut u8,
-        );
-        /// ECMAScript `Number::toString` of `value` into 40 bytes at `output` (number helper).
-        pub(crate) fn number_format(value: f64, output: *mut u8) -> u32;
-    }
+        fn perry_cabi_release(data: *mut u8);
+        fn perry_operation_pin(owner: *mut u8) -> u32;
+        fn perry_operation_unpin(token: u32);
+        fn perry_task_current() -> *mut u8;
+    );
+    crate::wasm_imports!("__perry_helper" => perry_runtime::string;
+        fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
+        fn perry_string_offset(string: *mut u8, position: u32) -> u32;
+        fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
+    );
+    crate::wasm_imports!("__perry_helper" => perry_runtime::exception;
+        fn perry_exception_message(exception: *mut u8) -> *mut u8;
+        fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8;
+        fn perry_raise(kind: u32, message: *mut u8);
+        fn perry_raise_with_cause(kind: u32, message: *mut u8, cause: *mut u8);
+        fn perry_status() -> u32;
+    );
+    crate::wasm_imports!("__perry_helper" => perry_runtime::promise;
+        fn perry_promise_cancellation_owned(promise: *mut u8) -> u32;
+        fn perry_promise_new_typed(references: u32) -> *mut u8;
+        fn perry_promise_reject(promise: *mut u8, status: i32);
+        fn perry_promise_resolve(promise: *mut u8, value: u64);
+        fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
+    );
+    crate::wasm_imports!("__perry_helper" => perry_runtime::array;
+        fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
+    );
+    crate::wasm_imports!("__perry_helper" => perry_runtime::io;
+        fn perry_task_join(waitable: u32);
+        fn perry_write_acknowledged(fd: u32, data: *const u8, len: u32, promise: *mut u8);
+    );
 
+    #[cfg(target_arch = "wasm32")]
+    #[link(wasm_import_module = "__perry_helper")]
+    unsafe extern "C" {
+        pub(super) fn perry_task_resume(task: *mut u8);
+        pub(super) fn number_format(value: f64, output: *mut u8) -> u32;
+    }
+    #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "$root")]
     unsafe extern "C" {
         #[link_name = "[waitable-join]"]
-        pub(crate) fn waitable_join(waitable: u32, set: u32);
+        pub(super) fn waitable_join(waitable: u32, set: u32);
         #[link_name = "[subtask-drop]"]
-        pub(crate) fn subtask_drop(subtask: u32);
+        pub(super) fn subtask_drop(subtask: u32);
         #[link_name = "[subtask-cancel]"]
-        pub(crate) fn subtask_cancel(subtask: u32) -> u32;
+        pub(super) fn subtask_cancel(subtask: u32) -> u32;
     }
-
+    #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "wasi:random/random@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-random-u64"]
-        pub(crate) fn random_u64() -> u64;
+        pub(super) fn random_u64() -> u64;
     }
-
+    #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "wasi:random/insecure@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-insecure-random-u64"]
-        pub(crate) fn insecure_random_u64() -> u64;
+        pub(super) fn insecure_random_u64() -> u64;
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::missing_safety_doc)]
-mod imports {
+    #[cfg(not(target_arch = "wasm32"))]
     extern crate std;
-    pub(crate) use perry_runtime::{
-        array::perry_array_new_typed,
-        exception::{
-            perry_exception_message, perry_exception_new, perry_raise, perry_raise_with_cause,
-            perry_status,
-        },
-        host::{subtask_cancel, subtask_drop, waitable_join},
-        io::{perry_task_join, perry_write_acknowledged},
-        promise::{
-            perry_promise_cancellation_owned, perry_promise_new_typed, perry_promise_reject,
-            perry_promise_resolve, perry_promise_reuse,
-        },
-        region::{
-            perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
-            perry_operation_pin, perry_operation_unpin, perry_task_current,
-        },
-        string::{perry_string_adopt_counted, perry_string_offset, perry_string_view},
-    };
-
-    pub(crate) unsafe fn perry_task_resume(task: *mut u8) {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) use perry_runtime::host::{subtask_cancel, subtask_drop, waitable_join};
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) unsafe fn perry_task_resume(task: *mut u8) {
         unsafe { perry_runtime::region::perry_task_resume(task.cast()) };
     }
-    pub(crate) unsafe fn number_format(value: f64, output: *mut u8) -> u32 {
-        // Rust's shortest round-trip notation; equal to ECMAScript's for test values.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) unsafe fn number_format(value: f64, output: *mut u8) -> u32 {
         let text = std::format!("{value}");
         unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), output, text.len()) };
         text.len() as u32
     }
-    pub(crate) unsafe fn random_u64() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) unsafe fn random_u64() -> u64 {
         0x0123_4567_89ab_cdef
     }
-    pub(crate) unsafe fn insecure_random_u64() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) unsafe fn insecure_random_u64() -> u64 {
         0xfedc_ba98_7654_3210
     }
 }
@@ -231,12 +211,21 @@ pub fn unpin(token: u32) {
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes of valid UTF-8.
+#[inline(never)]
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let bytes = core::slice::from_raw_parts(data, len as usize);
-        imports::perry_string_adopt_counted(data, len, scalars_length(bytes))
+        adopt_counted(data, len, scalars_length(bytes))
     }
+}
+
+/// Adopt immutable UTF-8 with the scalar count established by its producer.
+///
+/// # Safety
+/// `data` contains `len` readable UTF-8 bytes with exactly `scalars` scalars and outlives the task.
+pub unsafe fn adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8 {
+    unsafe { imports::perry_string_adopt_counted(data, len, scalars) }
 }
 
 /// # Safety
@@ -273,6 +262,29 @@ pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     let data = alloc_uninit(bytes.len()).write_copy_of_slice(bytes);
     // SAFETY: copied UTF-8 in task storage; the string takes ownership of the allocation.
     unsafe { adopt(data.as_mut_ptr(), data.len() as u32) }
+}
+
+/// Decode `bytes` in task storage as UTF-8, replacing ill-formed sequences with U+FFFD and
+/// optionally stripping a leading UTF-8 BOM.
+pub fn from_utf8_lossy(bytes: &[u8], strip_bom: bool) -> *mut u8 {
+    let bytes = if strip_bom {
+        bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
+    } else {
+        bytes
+    };
+    if core::str::from_utf8(bytes).is_ok() {
+        // SAFETY: valid UTF-8 in task storage.
+        return unsafe { adopt(bytes.as_ptr() as *mut u8, bytes.len() as u32) };
+    }
+    let mut out = Buffer::new();
+    out.reserve(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.extend_from_slice(chunk.valid().as_bytes());
+        if !chunk.invalid().is_empty() {
+            out.extend_from_slice("\u{FFFD}".as_bytes());
+        }
+    }
+    unsafe { out.into_string() }
 }
 
 mod byte_buffer;
@@ -373,13 +385,26 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
 /// A reference array and its writable slots; allocation cannot collect inside a helper.
 #[allow(unused_unsafe)]
 pub fn array_storage(len: usize) -> (*mut u8, &'static mut [u64]) {
+    array_storage_typed(len, true)
+}
+
+/// Typed array slots whose pointer map follows their representation.
+#[allow(unused_unsafe)]
+pub fn array_storage_typed(len: usize, references: bool) -> (*mut u8, &'static mut [u64]) {
     // SAFETY: a fresh array with capacity for `len` (layout of `perry_runtime::array`).
     unsafe {
         let len = u32::try_from(len).expect("array length overflow");
-        let array = imports::perry_array_new_typed(len, 1);
+        let array = imports::perry_array_new_typed(len, u32::from(references));
         let data = *(array.add(ARRAY_DATA as usize) as *const *mut u64);
         *(array as *mut u32) = len;
-        (array, core::slice::from_raw_parts_mut(data, len as usize))
+        (
+            array,
+            if len == 0 {
+                &mut []
+            } else {
+                core::slice::from_raw_parts_mut(data, len as usize)
+            },
+        )
     }
 }
 
@@ -485,6 +510,7 @@ impl Buffer {
     }
 
     /// Make room for at least `additional` more bytes.
+    #[inline(never)]
     pub fn reserve(&mut self, additional: usize) {
         let required = self
             .len
@@ -520,6 +546,7 @@ impl Buffer {
         self.len = (self.len + count).min(self.cap);
     }
 
+    #[inline(never)]
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
         self.reserve(bytes.len());
         // SAFETY: capacity was ensured above.
@@ -538,6 +565,29 @@ impl Buffer {
         // SAFETY: `len` bytes at `ptr` are initialized.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: `len` bytes are initialized and the buffer owns its payload exclusively.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Transfer ownership of valid UTF-8 bytes in this buffer into a runtime string.
+    ///
+    /// # Safety
+    /// `self` must contain `self.len` bytes of valid UTF-8.
+    pub unsafe fn into_string(self) -> *mut u8 {
+        if self.len == 0 {
+            return from_static("");
+        }
+        unsafe { adopt(self.ptr, self.len as u32) }
+    }
 }
 
 impl Default for Buffer {
@@ -552,7 +602,7 @@ pub fn json_syntax_message(input: &[u8], offset: u32) -> *mut u8 {
     let mut message = Buffer::new();
     json::syntax_message(input, offset, |part| message.extend_from_slice(part));
     // SAFETY: the buffer owns valid UTF-8 and transfers its payload to the string.
-    unsafe { adopt(message.ptr, message.len as u32) }
+    unsafe { message.into_string() }
 }
 
 /// The message of a live exception supplied by the compiler or another helper.
@@ -570,6 +620,7 @@ pub fn exception_value(tag: u32, value: u64) -> *mut u8 {
 
 /// Reject a native operation with category, code and its original path or URL.
 #[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
+#[inline(never)]
 pub fn reject_native(
     promise: *mut u8,
     kind: u32,
@@ -579,45 +630,32 @@ pub fn reject_native(
     location_key: &str,
     location: &[u8],
 ) {
+    #[inline(never)]
     fn string(bytes: &[u8]) -> *mut u8 {
         let data = alloc(bytes.len() as u32);
-        let node = unsafe { alloc_shaped(32, &[0, 3, 4, 8, 24]) };
+        let node = json::new_node(json::kind::STRING);
         unsafe {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
-            ptr::write_bytes(node, 0, 32);
-            ptr::write(node.cast::<u32>(), json::kind::STRING);
-            ptr::write(node.add(8).cast::<u32>(), data as usize as u32);
-            ptr::write(node.add(12).cast::<u32>(), bytes.len() as u32);
-            ptr::write(node.add(16).cast::<u32>(), scalars_length(bytes));
+            json::set_word(node, 8, data as usize as u32);
+            json::set_word(node, 12, bytes.len() as u32);
+            json::set_word(node, 16, scalars_length(bytes));
         }
         node
     }
-    let cause = unsafe { alloc_shaped(32, &[0, 4, 4, 8, 16, 24]) };
-    unsafe {
-        ptr::write_bytes(cause, 0, 32);
-        ptr::write(cause.cast::<u32>(), json::kind::OBJECT);
-    }
-    let mut previous: *mut u8 = ptr::null_mut();
+    let cause = json::new_node(json::kind::OBJECT);
     for (key, value) in [
         ("code", code.as_bytes()),
         ("category", category.as_bytes()),
         (location_key, location),
     ] {
         let member = string(value);
-        let key = string(key.as_bytes());
+        let key = json::address(string(key.as_bytes()));
         unsafe {
-            ptr::write(member.add(24).cast::<u32>(), key as usize as u32);
-            let next = if previous.is_null() {
-                cause.add(16)
-            } else {
-                previous.add(4)
-            };
-            ptr::write(next.cast::<u32>(), member as usize as u32);
+            json::set_word(member, json::KEY, key);
+            json::link_child(cause, member);
         }
-        previous = member;
     }
     unsafe {
-        ptr::write(cause.add(20).cast::<u32>(), 3);
         imports::perry_raise_with_cause(kind, message, cause);
         imports::perry_status();
         imports::perry_promise_reject(promise, kind as i32);

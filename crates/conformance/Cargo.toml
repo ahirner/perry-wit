@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 perry-wit = { path = "../.." }
+perry-mir = { path = "../perry-mir" }
 anyhow.workspace = true
 bytes.workspace = true
 http.workspace = true

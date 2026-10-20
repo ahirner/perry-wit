@@ -17,31 +17,29 @@
 use crate::{
     function::FunctionLowering,
     module::ModuleState,
-    repr::{i32_type, slot_kind, wasm_type},
+    repr::{i32_type, slot_kind},
     runtime::Runtime,
+    values::{self, Carriers},
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use perry_abi::layout::promise as promises;
-use perry_mir::calls::AwaitOp;
+use perry_mir::AwaitOp;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
+        op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        type_interfaces::FunctionTypeInterface,
-        types::{FP64Type, FunctionType},
+        types::{FP64Type, FunctionType, IntegerType},
     },
     context::{Context, Ptr},
     identifier::Identifier,
-    linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
-    r#type::{Typed, TypedHandle},
+    r#type::Typed,
     value::Value,
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::{ReturnOp, UnreachableOp},
     ops::CallOp,
 };
 use std::collections::{HashMap, HashSet};
@@ -54,7 +52,7 @@ use perry_abi::layout::async_frame::{OBSERVER, PIN, SLOTS};
 pub(crate) struct Frame {
     pub(crate) frame: Value,
     /// Frame slot offset and access of each MIR value kept in the frame.
-    pub(crate) slots: HashMap<Value, (u32, MemKind)>,
+    pub(crate) slots: HashMap<Value, Carriers<(u32, MemKind)>>,
     /// Continuation block of each `await`, in state order (state = index + 1).
     pub(crate) resumes: Vec<Ptr<BasicBlock>>,
 }
@@ -66,61 +64,29 @@ pub(crate) fn step_name(name: &Identifier) -> Identifier {
 pub(super) const RESUME: Identifier = pliron::ident!("resume");
 
 /// MIR values live across some `await` of `function`, in a deterministic order.
-fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
+fn live_across_awaits(
+    ctx: &Context,
+    function: &FuncOp,
+    liveness: &perry_mir::LiveValues,
+) -> Vec<Value> {
     let order = crate::analysis::value_order(ctx, function);
-    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-    let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
-    let transfer = |ctx: &Context, ops: &[Ptr<Operation>], mut live: HashSet<Value>| {
-        for op in ops.iter().rev() {
-            for result in op.deref(ctx).results() {
-                live.remove(&result);
-            }
-            live.extend(op.deref(ctx).operands());
-        }
-        live
-    };
-    loop {
-        let mut changed = false;
-        for &block in blocks.iter().rev() {
-            let mut live: HashSet<Value> = HashSet::new();
-            for succ in block.deref(ctx).succs(ctx) {
-                live.extend(live_in.get(&succ).into_iter().flatten().copied());
-            }
-            let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-            let mut live = transfer(ctx, &ops, live);
-            for arg in block.deref(ctx).arguments() {
-                live.remove(&arg);
-            }
-            if live_in.get(&block) != Some(&live) {
-                live_in.insert(block, live);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     let mut across: Vec<Value> = Vec::new();
     let mut seen = HashSet::new();
-    for &block in &blocks {
-        let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-        let mut live_out: HashSet<Value> = HashSet::new();
-        for succ in block.deref(ctx).succs(ctx) {
-            live_out.extend(live_in.get(&succ).into_iter().flatten().copied());
+    for op in crate::analysis::function_ops(ctx, function) {
+        if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
+            continue;
         }
-        for (index, &op) in ops.iter().enumerate() {
-            if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
-                continue;
-            }
-            let mut live = transfer(ctx, &ops[index + 1..], live_out.clone());
-            live.remove(&op.deref(ctx).get_result(0));
-            let mut live: Vec<_> = live.into_iter().collect();
-            // Order by definition position for deterministic frame layouts.
-            live.sort_unstable_by_key(|value| order[value]);
-            for value in live {
-                if seen.insert(value) {
-                    across.push(value);
-                }
+        let result = op.deref(ctx).get_result(0);
+        let mut live: Vec<_> = liveness
+            .after(op)
+            .values()
+            .filter(|value| *value != result)
+            .collect();
+        // Order by definition position for deterministic frame layouts.
+        live.sort_unstable_by_key(|value| order[value]);
+        for value in live {
+            if seen.insert(value) {
+                across.push(value);
             }
         }
     }
@@ -135,35 +101,39 @@ pub(crate) fn lower(
     kind: i32,
 ) -> Result<()> {
     let name = mir.get_symbol_name(ctx);
-    let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
     let entry = mir.get_entry_block(ctx);
     let params: Vec<Value> = entry.deref(ctx).arguments().collect();
 
     // Frame layout: parameters first, then every other value live across an await.
-    let mut slots: HashMap<Value, (u32, MemKind)> = HashMap::new();
+    let mut slots: HashMap<Value, Carriers<(u32, MemKind)>> = HashMap::new();
     let mut offset = SLOTS;
-    for (param, ty) in params.iter().zip(&mir_params) {
-        slots.insert(*param, (offset, slot_kind(ctx, *ty)?));
-        offset += 8;
-    }
-    for value in live_across_awaits(ctx, mir) {
-        if let std::collections::hash_map::Entry::Vacant(slot) = slots.entry(value) {
-            slot.insert((offset, slot_kind(ctx, value.get_type(ctx))?));
+    let mut alloc_slot = |ty: pliron::r#type::TypeHandle| -> Result<Carriers<(u32, MemKind)>> {
+        if crate::values::is_numeric_type(ctx, ty) {
+            let slot = Carriers::Numeric {
+                tag: (offset, MemKind::I32),
+                payload: (offset + 8, MemKind::I64),
+            };
+            offset += 16;
+            Ok(slot)
+        } else {
+            let slot = Carriers::Scalar((offset, slot_kind(ctx, ty)?));
             offset += 8;
+            Ok(slot)
+        }
+    };
+    for (param, ty) in params.iter().zip(&mir_params) {
+        slots.insert(*param, alloc_slot(*ty)?);
+    }
+    for value in live_across_awaits(ctx, mir, state.live) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = slots.entry(value) {
+            slot.insert(alloc_slot(value.get_type(ctx))?);
         }
     }
     let frame_size = offset;
 
     // Ramp: allocate the frame, store the arguments, run the body to its first suspension.
-    let wasm_params = mir_params
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
+    let wasm_params = values::signature(ctx, mir_params.iter().copied())?;
     let i32 = i32_type(ctx);
     let ramp_ty = FunctionType::get(ctx, wasm_params, vec![i32]);
     let ramp = FuncOp::new(ctx, name.clone(), ramp_ty);
@@ -173,10 +143,11 @@ pub(crate) fn lower(
         let size = b.i32_const(ctx, frame_size as i32);
         let frame = if b.state.collectible {
             let mut offsets = vec![PROMISE, AWAITED];
-            offsets.extend(slots.iter().filter_map(|(value, (offset, _))| {
+            offsets.extend(slots.iter().filter_map(|(value, slot)| {
                 crate::repr::repr(ctx, value.get_type(ctx))
                     .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
-                    .then_some(*offset)
+                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
+                    .flatten()
             }));
             offsets.sort_unstable();
             let shape = b.pointer_shape(&offsets);
@@ -194,14 +165,16 @@ pub(crate) fn lower(
         b.store(ctx, MemKind::I32, frame, STATE, zero);
         let promise = b.new_promise(ctx, mir_results[0])?;
         b.store(ctx, MemKind::I32, frame, PROMISE, promise);
-        for (param, arg) in params.iter().zip(args) {
-            let (at, access) = slots[param];
-            b.store(ctx, access, frame, at, arg);
+        let mut args_iter = args.into_iter();
+        for param in &params {
+            for (at, access) in slots[param].iter() {
+                let arg = args_iter.next().expect("ramp argument");
+                b.store(ctx, access, frame, at, arg);
+            }
         }
         let call = CallOp::new(ctx, step_name(&name), vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
-        let ret = ReturnOp::new(ctx, vec![promise]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![promise]);
         b.state.wasm.append_operation(ctx, ramp.get_operation(), 0);
     }
 
@@ -210,10 +183,7 @@ pub(crate) fn lower(
     let step = FuncOp::new(ctx, step_name(&name), step_ty);
     let dispatch = step.get_entry_block(ctx);
     let frame = dispatch.deref(ctx).get_argument(0);
-    let results = mir_results
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
+    let results = values::signature(ctx, mir_results.iter().copied())?;
     let mut b = FunctionLowering::glue(state, ctx, &step);
     b.throws = true;
     b.results = results;
@@ -232,79 +202,73 @@ pub(crate) fn lower(
     // Every await is lowered; the resume targets are complete.
     let resumes = std::mem::take(&mut b.step_frame_mut().resumes);
     let mut targets = vec![start];
-    for take in &resumes {
+    for &take in &resumes {
         let resume = b.new_block(ctx, vec![]);
-        let saved = std::mem::replace(&mut b.block, resume);
-        let awaited = b.load(ctx, MemKind::I32, frame, AWAITED);
-        b.br(ctx, *take, vec![awaited]);
-        b.block = saved;
+        b.in_block(resume, |b| {
+            let awaited = b.load(ctx, MemKind::I32, frame, AWAITED);
+            b.br(ctx, take, vec![awaited]);
+        });
         targets.push(resume);
     }
     // State 0 enters the body with the parameters loaded from the frame.
     let begin = b.new_block(ctx, vec![]);
-    let saved = std::mem::replace(&mut b.block, begin);
-    let mut loaded = Vec::new();
-    for param in &params {
-        let (at, access) = b.step_frame().slots[param];
-        loaded.push(b.load(ctx, access, frame, at));
-    }
-    b.br(ctx, targets[0], loaded);
-    b.block = saved;
+    let first = targets[0];
+    b.in_block(begin, |b| {
+        let mut loaded = Vec::new();
+        for param in &params {
+            let slot = b.step_frame().slots[param];
+            for (at, access) in slot.iter() {
+                loaded.push(b.load(ctx, access, frame, at));
+            }
+        }
+        b.br(ctx, first, loaded);
+    });
     targets[0] = begin;
     let invalid = b.new_block(ctx, vec![]);
     b.br_table(ctx, current, targets, invalid);
     b.block = invalid;
-    let unreachable = UnreachableOp::new(ctx).get_operation();
-    b.insert(ctx, unreachable);
+    b.trap(ctx);
     b.state.wasm.append_operation(ctx, step.get_operation(), 0);
     Ok(())
 }
 
 /// Resume one frame from the fan-out selected by a native P3 completion event.
 pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
+    let runtime_frames = std::mem::take(&mut state.runtime_frames);
     let i32 = i32_type(ctx);
     let ty = FunctionType::get(ctx, vec![i32], vec![]);
     let function = FuncOp::new(ctx, RESUME, ty);
     let frame = function.get_entry_block(ctx).deref(ctx).get_argument(0);
     let mut b = FunctionLowering::glue(state, ctx, &function);
     let done = b.new_block(ctx, vec![]);
-    let entry = b.block;
-    b.block = done;
-    let ret = ReturnOp::new(ctx, vec![]).get_operation();
-    b.insert(ctx, ret);
-    b.block = entry;
+    b.in_block(done, |b| b.ret(ctx, vec![]));
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
-    // Runtime combinators (`Promise.all`, `Promise.race`) step in the runtime.
-    let combinator_kind = b.i32_const(ctx, perry_abi::layout::promise::COMBINATOR_KIND as i32);
-    let is_combinator = b.num(ctx, NumOpcode::I32Eq, vec![kind, combinator_kind]);
-    let step_combinator = b.new_block(ctx, vec![]);
-    let step_function = b.new_block(ctx, vec![]);
-    b.cond_br(
-        ctx,
-        is_combinator,
-        (step_combinator, vec![]),
-        (step_function, vec![]),
-    );
-    b.block = step_combinator;
-    b.runtime_void(ctx, Runtime::CombinatorStep, vec![frame]);
-    b.br(ctx, done, vec![]);
-    b.block = step_function;
+    for (frame_kind, handler) in runtime_frames {
+        let frame_kind = b.i32_const(ctx, frame_kind as i32);
+        let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, frame_kind]);
+        let handle = b.new_block(ctx, vec![]);
+        let next = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, matches, (handle, vec![]), (next, vec![]));
+        b.block = handle;
+        b.runtime_void(ctx, handler, vec![frame]);
+        b.br(ctx, done, vec![]);
+        b.block = next;
+    }
     let mut calls = Vec::new();
     for index in 0..b.state.async_functions.len() {
         let step = step_name(&b.state.async_functions[index]);
         let call_block = b.new_block(ctx, vec![]);
-        let saved = std::mem::replace(&mut b.block, call_block);
-        let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
-        b.insert(ctx, call);
-        b.br(ctx, done, vec![]);
-        b.block = saved;
+        b.in_block(call_block, |b| {
+            let call = CallOp::new(ctx, step, vec![frame], vec![]).get_operation();
+            b.insert(ctx, call);
+            b.br(ctx, done, vec![]);
+        });
         calls.push(call_block);
     }
     let invalid = b.new_block(ctx, vec![]);
     b.br_table(ctx, kind, calls, invalid);
     b.block = invalid;
-    let unreachable = UnreachableOp::new(ctx).get_operation();
-    b.insert(ctx, unreachable);
+    b.trap(ctx);
     b.state
         .wasm
         .append_operation(ctx, function.get_operation(), 0);
@@ -315,6 +279,13 @@ impl FunctionLowering<'_, '_> {
     pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
         if value.get_type(ctx).deref(ctx).is::<FP64Type>() {
             self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
+        } else if value
+            .get_type(ctx)
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 64)
+        {
+            value
         } else {
             self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
         }
@@ -343,25 +314,32 @@ impl FunctionLowering<'_, '_> {
         let observer = self.num(ctx, NumOpcode::I32Add, vec![frame, offset]);
         self.runtime_void(ctx, Runtime::PromiseWait, vec![promise, frame, observer]);
         self.leave_roots(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
+        self.ret(ctx, vec![]);
 
         self.block = take;
         let promise = take.deref(ctx).get_argument(0);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, frame, AWAITED, zero);
-        let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
-        let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
-        let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        // A rejection makes its exception object pending again and throws its status.
-        let rethrow = self.new_block(ctx, vec![]);
-        let fulfilled = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
-        self.block = rethrow;
-        let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
-        let (throw, args) = self.throw_target(ctx, status);
-        self.br(ctx, throw, args);
-        self.block = fulfilled;
+        let parent = op.deref(ctx).get_parent_op(ctx).expect("MIR function");
+        let function = Operation::get_op::<FuncOp>(parent, ctx).expect("MIR function");
+        if self
+            .state
+            .program_facts
+            .may_reject(&function, op.deref(ctx).get_operand(0))
+        {
+            let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
+            let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
+            let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
+            // A rejection makes its exception object pending again and throws its status.
+            let rethrow = self.new_block(ctx, vec![]);
+            let fulfilled = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
+            self.block = rethrow;
+            let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
+            let (throw, args) = self.throw_target(ctx, status);
+            self.br(ctx, throw, args);
+            self.block = fulfilled;
+        }
         let ty = op.deref(ctx).get_result(0).get_type(ctx);
         let value = self.load(ctx, slot_kind(ctx, ty)?, promise, promises::VALUE);
         self.define(ctx, op, value);
@@ -388,8 +366,7 @@ impl FunctionLowering<'_, '_> {
         };
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.finish_frame(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
+        self.ret(ctx, vec![]);
     }
 
     fn finish_frame(&mut self, ctx: &mut Context) {
@@ -406,14 +383,13 @@ impl FunctionLowering<'_, '_> {
         let frame = self.step_frame().frame;
         let i32 = i32_type(ctx);
         let block = self.new_block(ctx, vec![i32]);
-        let saved = std::mem::replace(&mut self.block, block);
-        let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
-        let status = block.deref(ctx).get_argument(0);
-        self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
-        self.finish_frame(ctx);
-        let ret = ReturnOp::new(ctx, vec![]).get_operation();
-        self.insert(ctx, ret);
-        self.block = saved;
+        self.in_block(block, |b| {
+            let promise = b.load(ctx, MemKind::I32, frame, PROMISE);
+            let status = block.deref(ctx).get_argument(0);
+            b.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
+            b.finish_frame(ctx);
+            b.ret(ctx, vec![]);
+        });
         block
     }
 

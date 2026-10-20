@@ -1,6 +1,7 @@
 //! Collector behaviour of compiled core modules: reclamation, forced collection with
 //! poisoning, retained roots across suspension, and allocation and root-publication counts.
 use crate::core_program::{Counter, Program};
+use crate::node_oracle::assert_numbers;
 
 #[test]
 fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
@@ -48,57 +49,17 @@ export function run():number {
  return 0;
 }
 "#;
-    let directory = tempfile::tempdir()?;
-    let script = directory.path().join("concat.mts");
-    std::fs::write(&script, format!("{source}\nconsole.log(run());"))?;
-    let node = std::process::Command::new("node")
-        .arg("--experimental-strip-types")
-        .arg(script)
-        .output()?;
-    assert!(
-        node.status.success(),
-        "{}",
-        String::from_utf8_lossy(&node.stderr)
-    );
-    let expected = String::from_utf8(node.stdout)?.trim().parse::<f64>()?;
-    let mut program = Program::checked(source, "concat.ts");
-    program.stress_collection(true);
-    assert_eq!(program.outcome("run", &[]), (expected, 0));
-    Ok(())
+    assert_numbers(source, &[("run", &[], 0.0)])
 }
 
 #[test]
 fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
-    for expression in [
-        "owned.concat(borrowed)",
-        "borrowed.concat(owned)",
-        "owned.concat([2,3])",
-    ] {
-        let source = format!(
-            "export function run(n:number):number{{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){{const owned:number[]=[1];const joined={expression};total+=joined.length+joined[0];}}return total;}}"
-        );
-        let mut program = Program::checked(&source, "concat-capacity.ts");
-        program.stress_collection(true);
-        let expected = if expression.starts_with("borrowed") {
-            5000.0
-        } else {
-            4000.0
-        };
-        assert_eq!(program.number("run", 1000.0), expected);
-        assert!(
-            program.counter(Counter::Allocations)
-                < if expression.ends_with("[2,3])") {
-                    4100
-                } else {
-                    2100
-                },
-            "{expression}: {} allocations",
-            program.counter(Counter::Allocations)
-        );
-    }
     let source = r#"
 interface Cell { value: number }
-export function run(n: number): number {
+export function left(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat(borrowed);total+=joined.length+joined[0];}return total;}
+export function right(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=borrowed.concat(owned);total+=joined.length+joined[0];}return total;}
+export function literal(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat([2,3]);total+=joined.length+joined[0];}return total + borrowed[0] - 2;}
+export function loopJoin(n: number): number {
   let numbers: number[] = [];
   let cells: Cell[] = [];
   for (let i = 0; i < n; i++) {
@@ -109,10 +70,21 @@ export function run(n: number): number {
   return numbers.length + numbers[0] + cells.length + cells[0].value + cells[cells.length - 1].value;
 }
 "#;
-    let mut program = Program::checked(source, "concat-join.ts");
+    let mut program = Program::checked(source, "concat-capacity.ts");
     program.stress_collection(true);
-    assert_eq!(program.throwing("run", 1000.0), (3997.0, 0));
-    assert!(program.counter(Counter::Allocations) < 5400);
+    for (export, expected, limit) in [
+        ("left", 4000.0, 2100),
+        ("right", 5000.0, 2100),
+        ("literal", 4000.0, 4100),
+    ] {
+        let before = program.counter(Counter::Allocations);
+        assert_eq!(program.number(export, 1000.0), expected);
+        let allocations = program.counter(Counter::Allocations) - before;
+        assert!(allocations < limit, "{export}: {allocations} allocations");
+    }
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.throwing("loopJoin", 1000.0), (3997.0, 0));
+    assert!(program.counter(Counter::Allocations) - before < 5400);
 }
 
 #[test]
@@ -351,7 +323,7 @@ let saved: Temporal.Instant = Temporal.Instant.fromEpochMilliseconds(-1);
 export async function run(n: number): Promise<number> {
     const original = saved;
     const values: CalendarValues = { date: Temporal.PlainDate.from('2024-02-28'),
-        time: Temporal.PlainDateTime.from('2024-02-28T12:30:00.123456789') };
+        time: Temporal.PlainDateTime.from({year:2024, month:2, day:28, hour:12, minute:30, millisecond:123, microsecond:456, nanosecond:789}, {overflow:'reject'}) };
     const dates: Temporal.PlainDate[] = [values.date];
     for (let i = 0; i < n; i++) {
         saved = Temporal.Instant.fromEpochMilliseconds(i);
@@ -462,7 +434,7 @@ export function run(n: number): number {
     if (value.tag === 'number') total = total + value.val;
     if (value.tag === 'text') total = total + value.val.length;
     if (value.tag === 'point') total = total + value.val.x;
-    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"label":"json","x":7}}') throw new Error('serialization');
+    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"x":7,"label":"json"}}') throw new Error('serialization');
     try {
         const bad: Value = JSON.parse('{"tag":"number","val":null}');
         return -1;
@@ -641,30 +613,12 @@ export async function run(n:number):Promise<number> {
 }
 
 #[test]
-fn nonthrowing_intrinsics_allow_temporary_record_elimination() {
-    let mut program = Program::checked(
-        r#"
-        interface Cell { value: number }
-        function rounded(n:number):Cell { return { value:Math.floor(n) }; }
-        export function run(n:number):number {
-            let sum = 0;
-            for(let i=0;i<n;i++) sum += rounded(i - 0.25).value;
-            return sum;
-        }
-        "#,
-        "intrinsic-leaf.ts",
-    );
-    program.stress_collection(true);
-    assert_eq!(program.number("run", 1000.0), 498_500.0);
-    assert_eq!(program.counter(Counter::Allocations), 0);
-}
-
-#[test]
-fn promoted_record_arguments_stay_fresh_when_aliases_can_mutate() {
+fn promoted_record_arguments_eliminate_temporaries_and_stay_fresh_when_aliases_mutate() {
     let mut program = Program::checked(
         r#"
 interface Cell { value: number }
 let saved: Cell = { value: 0 };
+function rounded(n: number): Cell { return { value: Math.floor(n) }; }
 function change(): number { saved.value += 10; return 3; }
 function read(cell: Cell, n: number): number {
   if (n < 0) return cell.value - n;
@@ -676,7 +630,12 @@ function mutated(cell: Cell): number {
   return before + middle + cell.value;
 }
 function escaped(cell: Cell): Cell { saved = cell; return cell; }
-export function run(n: number): number {
+export function intrinsic(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += rounded(i - 0.25).value;
+  return sum;
+}
+export function promoted(n: number): number {
   let sum = 0;
   for (let i = 0; i < n; i++) {
     const cell: Cell = { value: i };
@@ -690,8 +649,12 @@ export function run(n: number): number {
         "promoted-record.ts",
     );
     program.stress_collection(true);
-    assert_eq!(program.number("run", 1000.0), 999_027.0);
-    assert!(program.counter(Counter::Allocations) < 10);
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("promoted", 1000.0), 999_027.0);
+    assert!(program.counter(Counter::Allocations) - before < 10);
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("intrinsic", 1000.0), 498_500.0);
+    assert_eq!(program.counter(Counter::Allocations) - before, 0);
 }
 
 #[test]
@@ -755,4 +718,197 @@ export async function run(n: number): Promise<number> {
             (f64::from(a * 10000 + b * 100 + c), 0)
         );
     }
+}
+
+/// Abandoned iterators and insert/delete churn reuse memory; fuel scaling is the
+/// `wasi.execution.scaling.collection_churn` conformance contract.
+#[test]
+fn collection_churn_reuses_memory() {
+    let mut churn = Program::new(
+        r#"
+export function run(n: number): number {
+    const s = new Set<number>([0]);
+    const m = new Map<number, number>([[0, 0]]);
+    for (let i = 0; i < n; i = i + 1) {
+        s.values();
+        m.values();
+        for (const _v of s.values()) break;
+        for (const _v of s) break;
+        for (const _e of m) break;
+        s.add(i + 1);
+        s.delete(i + 1);
+        m.set(i + 1, i);
+        m.delete(i + 1);
+    }
+    return s.size + m.size;
+}
+"#,
+    );
+    assert_eq!(churn.number("run", 128.0), 2.0);
+    let warmed = churn.memory_bytes();
+    for n in [512.0, 65536.0] {
+        assert_eq!(churn.number("run", n), 2.0);
+        assert_eq!(churn.memory_bytes(), warmed, "churn of {n} grew memory");
+    }
+    assert!(warmed <= 65536, "expected one 64 KiB page, got {warmed}");
+}
+
+/// Inline and named callbacks see `(item, index, array)` over the original length, propagate
+/// exceptions, run `finally`, return through `switch` and endless loops (an empty return is
+/// `undefined`), and `for...of` visits elements pushed during iteration and string scalars;
+/// all under forced collection with poisoning.
+#[test]
+fn array_callbacks_and_iteration_survive_forced_collection() {
+    let source = r#"
+function twice(n:number):number {return n*2;}
+function nothing(n:number):void {}
+function missingDefault():number {throw new Error('missing');}
+function refill(values:number[]):number {values.push(1,2);return 8;}
+export function callbacks():number {
+ let calls=0;
+ const numbers:number[]=[1,2,3];
+ const mapped=numbers.map((n,i,a)=>{calls++;if(i===0)a.push(4);return n+i;});
+ const doubled=mapped.filter(n=>n>1).map(twice);
+ if(calls!==3 || mapped.length!==3 || doubled[0]!==6 || doubled[1]!==10)return 1;
+ const values:number[]=[1,2];
+ let trace=0;
+ try {values.map((n,i,a)=>{trace=trace*10+n;if(i===1)throw new Error('stop');a[1]=4;return n;});return 2;}
+ catch(e){if(e.message!=='stop')return 3;}
+ const finished=values.map(n=>{try {return n*2;}finally {trace++;}});
+ if(trace!==16 || finished[1]!==8)return 4;
+ const wrapped=values.map(n=>n+(trace as number));
+ if(wrapped[0]!==17 || wrapped[1]!==20)return 7;
+ const small:number[]=[1,2,3];
+ const cases:number[]=small.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
+ const loops:number[]=small.map(n=>{while(true){return n*2;}});
+ const empty=small.map(n=>{switch(n){case 1:return;default:return n;}});
+ const overridden=small.map(n=>{try{return;}finally{return n;}});
+ const ignored=small.map(n=>{return n;return;});
+ if(cases[0]+cases[1]+cases[2]+loops[2]!==18 || empty[0]!==undefined || empty[1]!==2 || overridden[0]!==1 || ignored[0]!==1)return 5;
+ const optional=small.map(n=>{if(n===1)return 'yes';});
+ const bare=small.map(n=>{if(n===1)return;return 'value';});
+ if(optional[0]!=='yes' || optional[1]!==undefined || bare[0]!==undefined || bare[1]!=='value')return 6;
+ const nested=numbers.map(n=>{const adjust=(v:number)=>v+n;const inner=small.map(adjust);return inner[0]+adjust(1);});
+ if(nested[0]!==4 || nested[3]!==10 || small[0]!==1)return 8;
+ return small.filter(nothing).length;
+}
+export function iteration():number {
+ const values:number[]=[1,2];
+ let visits=0;
+ for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
+ let text='';
+ for(const word of 'c,d'.split(',')){text+=word;}
+ const [first, , missing = visits + 4] = values;
+ const [label, count] = ['ok', 3] as [string, number];
+ if(first!==1 || missing!==3 || label!=='ok' || count!==3)return 2;
+ const [, absent = 7] = [5];
+ if(absent!==7)return 3;
+ let thrown=0;
+ try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
+ if(thrown!==1)return 4;
+ const exhausted:number[]=[];
+ const [filled=refill(exhausted), stillMissing=9]=exhausted;
+ if(filled!==8 || stillMissing!==9)return 5;
+ for(const scalar of 'é🙂a'){text+=scalar+':';}
+ return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
+}
+"#;
+    let mut program = Program::checked(source, "array-callbacks.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("callbacks", &[]), (0.0, 0));
+    assert_eq!(program.call("iteration", &[]).0[0].unwrap_f64(), 0.0);
+}
+
+/// Dynamic JSON lookups through computed keys, spread copies and scalar string indexing release
+/// everything they allocate, under forced collection.
+#[test]
+fn json_pointer_lookup_releases_its_storage() {
+    let source = r#"
+interface Options { extra?: Array<[string, { jsonText: string }]> }
+function length(options: Options): number {
+    const extra = options.extra;
+    if (extra === undefined) return -1;
+    return extra[0][0].length + extra[0][1].jsonText.length;
+}
+export function run(): number {
+    const raw = JSON.parse('{"2":2,"0":1,"a":[{"":9}],"0":3}');
+    const keys = Object.keys(raw);
+    if (keys[0] !== '0' || keys[1] !== '2' || keys[2] !== 'a') return -2;
+    const a = raw[keys[2]];
+    const first = a['0'];
+    const encoded = JSON.stringify(raw);
+    if (encoded !== '{"0":3,"2":2,"a":[{"":9}]}') return -6;
+    if (JSON.stringify({ ...raw }) !== encoded) return -7;
+    if (a['00'] !== undefined) return -3;
+    const text = 'é🙂';
+    if (text[-1] !== undefined || text[2] !== undefined || text[0.5] !== undefined) return -4;
+    if (text[1] !== '🙂') return -5;
+    return raw[0] + first[''] + a['length'] + length({extra: [['status', {jsonText: 'ok'}]]});
+}
+"#;
+    let mut program = Program::checked(source, "json-pointer-lookup.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("run", &[]), (21.0, 0));
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}
+
+#[test]
+fn temporal_field_objects_and_legacy_date_parse_survive_collection() {
+    let source = r#"
+interface Fields {
+    year: number; month: number; day: number;
+    hour?: number; minute?: number; second?: number;
+    millisecond?: number; microsecond?: number; nanosecond?: number;
+}
+function convert(fields: Fields, options: {overflow?: 'constrain'|'reject'}): string {
+    return Temporal.PlainDateTime.from(fields, options).toString();
+}
+function parse(input: string): number { return Date.parse(input); }
+export function fields(): number {
+    if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:12}, {overflow:'reject'}).toString() !== '2024-02-29T12:00:00') return 1;
+    if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:undefined}).toString() !== '2024-02-29T00:00:00') return 2;
+    if (convert({year:2024, month:2, day:29, minute:undefined}, {}) !== '2024-02-29T00:00:00') return 3;
+    if (convert({year:2024, month:2, day:31, hour:24, minute:-1, second:61, millisecond:1000, microsecond:-1, nanosecond:1001}, {overflow:undefined}) !== '2024-02-29T23:00:59.999000999') return 4;
+    if (convert({year:2024.9, month:2.9, day:29.9, hour:12.9, minute:34.9, second:56.9, millisecond:123.9, microsecond:456.9, nanosecond:789.9}, {overflow:'reject'}) !== '2024-02-29T12:34:56.123456789') return 5;
+    let errors=0;
+    try { convert({year:2024, month:2, day:31}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, hour:24}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, minute:-1}, {overflow:'reject'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, nanosecond:NaN}, {}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { convert({year:2024, month:2, day:29, second:Infinity}, {}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { Temporal.PlainDateTime.from('2024-02-29', {overflow:'bad'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    try { Temporal.PlainDate.from('2024-02-29', {overflow:'bad'}); } catch(e) { if(e instanceof RangeError) errors++; }
+    if(errors!==7) return 6;
+    if(Temporal.PlainDateTime.from('2024-02-29T12:34:56.123456789', {overflow:'reject'}).toString() !== '2024-02-29T12:34:56.123456789') return 7;
+    const trace:number[]=[];
+    function mark(n:number):number { trace.push(n); return n; }
+    const value=Temporal.PlainDateTime.from({year:mark(2024), ignored:mark(9), month:mark(2), day:mark(31), hour:mark(25), hour:mark(23)}, {ignored:mark(8), overflow:'reject', overflow:'constrain'});
+    if(value.toString()!=='2024-02-29T23:00:00' || trace.join(',')!=='2024,9,2,31,25,23,8') return 8;
+    return 0;
+}
+export function legacy(): number {
+    let errors=0;
+    try { Date.parse('Sun, 06 Nov 1994 08:49:37 GMT'); } catch(e) {
+        if(e instanceof RangeError && e.message.includes('Unsupported legacy Date string format')) errors++;
+    }
+    for(const text of ['Sun, 06 Nov 1994 08:49:37 GMT', '11/06/1994', 'November 6, 1994', 'invalid', '']) {
+        try { parse(text); } catch(e) { if(e instanceof RangeError && e.message.includes('use an ISO date')) errors++; }
+        try { new Date(text); } catch(e) { if(e instanceof RangeError && e.message.includes('use an ISO date')) errors++; }
+    }
+    if(errors!==11) return 1;
+    for(const text of ['2024-13-01', '2024-01-32', '2024-02-', '2024-01-01T25:00Z', '+275760-09-14']) {
+        if(!Number.isNaN(parse(text)) || !Number.isNaN(new Date(text).getTime())) return 2;
+    }
+    if(parse('1994-11-06T08:49:37Z')!==784111777000) return 3;
+    if(new Date('1970-01-01T01:00+01:00').getTime()!==0) return 4;
+    if(parse('1970')!==0 || parse('1970-01')!==0 || parse('+001970-01-01')!==0) return 5;
+    return 0;
+}
+"#;
+    let mut program = Program::checked(source, "date-temporal.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("fields", &[]), (0.0, 0));
+    assert_eq!(program.outcome("legacy", &[]), (0.0, 0));
 }

@@ -3,162 +3,58 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
+use super::names::{TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children};
+use crate::abi::types::{Contract, Input, convert, primitive};
 use anyhow::Result;
-use std::collections::HashSet;
-use wit_parser::{
-    Function, Resolve, Result_ as WitResult, Type, TypeDefKind, TypeId, TypeOwner, World,
-    WorldItem, WorldKey,
-};
+use std::{collections::HashSet, fmt::Write as _};
+use wit_parser::{Function, Resolve, Type, TypeDefKind, World, WorldItem, WorldKey};
 
-/// Converts a kebab-case or snake_case string into camelCase.
-pub(crate) fn to_camel_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-    for (i, c) in s.chars().enumerate() {
-        if !c.is_ascii_alphanumeric() {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else if i == 0 {
-            result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-/// Converts a kebab-case or snake_case string into PascalCase.
-pub(crate) fn to_pascal_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = true;
-    for c in s.chars() {
-        if !c.is_ascii_alphanumeric() {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
-    while let TypeDefKind::Type(Type::Id(inner)) = &resolve.types[id].kind {
-        if resolve.types[id].name != resolve.types[*inner].name {
-            break;
-        }
-        id = *inner;
-    }
-    id
-}
-
-/// The TypeScript name of a named WIT type, owner-qualified when another declaration shares
-/// its PascalCase name.
-///
-/// Callers pass only named types (declarations, resources, or ids filtered on `name`); an
-/// invented name for an anonymous type would reference a declaration that does not exist.
-pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
-    let id = declaration_id(resolve, id);
-    let definition = &resolve.types[id];
-    let name = to_pascal_case(
-        definition
-            .name
-            .as_deref()
-            .expect("callers name only named WIT types; aliases keep their declaration's name"),
-    );
-    let collides = resolve.types.iter().any(|(other, ty)| {
-        declaration_id(resolve, other) != id
-            && ty
-                .name
-                .as_deref()
-                .is_some_and(|other| to_pascal_case(other) == name)
-    });
-    if !collides {
-        return name;
-    }
-    let owner = match definition.owner {
-        TypeOwner::Interface(interface) => resolve
-            .id_of(interface)
-            .unwrap_or_else(|| format!("interface-{}", interface.index())),
-        TypeOwner::World(world) => {
-            let world = &resolve.worlds[world];
-            world
-                .package
-                .map(|package| resolve.id_of_name(package, &world.name))
-                .unwrap_or_else(|| world.name.clone())
-        }
-        TypeOwner::None => format!("type-{}", id.index()),
-    };
-    format!("{}{name}", to_pascal_case(&owner))
-}
-
-/// Formats a WIT Type into its corresponding TypeScript representation.
-fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
-    match ty {
-        Type::Bool => "boolean".to_string(),
-        Type::U8
-        | Type::U16
-        | Type::U32
-        | Type::S8
-        | Type::S16
-        | Type::S32
-        | Type::F32
-        | Type::F64 => "number".to_string(),
-        Type::U64 | Type::S64 => "bigint".to_string(),
-        Type::Char | Type::String => "string".to_string(),
-        Type::ErrorContext => "Error | unknown".to_string(),
-        Type::Id(id) => {
-            let type_def = &resolve.types[*id];
-            if type_def.name.is_some() {
-                type_name(resolve, *id)
-            } else {
-                type_kind_to_ts(resolve, &type_def.kind)
+fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
+    convert(
+        names.resolve,
+        input,
+        &|id| names.name(id),
+        &|contract| match contract {
+            Contract::Scalar(ty) => primitive!(ty, ts).into(),
+            Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
+            Contract::Bytes => "Uint8Array".into(),
+            Contract::ByteStream => "ReadableStream<Uint8Array>".into(),
+            Contract::List(ty) => format!("Array<{ty}>"),
+            Contract::Option(ty) => format!("{ty} | null"),
+            Contract::Result { ok, err } => {
+                let ok = ok.map(|ty| format!("; value: {ty}")).unwrap_or_default();
+                let err = err.map(|ty| format!("; error: {ty}")).unwrap_or_default();
+                format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
             }
-        }
-    }
-}
-
-fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
-    match kind {
-        TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            type_name(resolve, *id)
-        }
-        TypeDefKind::Stream(Some(Type::U8)) => "ReadableStream<Uint8Array>".into(),
-        TypeDefKind::List(elem) => {
-            if matches!(elem, Type::U8) {
-                "Uint8Array".to_string()
-            } else {
-                format!("Array<{}>", wit_type_to_ts(resolve, elem))
+            Contract::Tuple(items) => {
+                format!("[{}]", items.collect::<Vec<_>>().join(", "))
             }
-        }
-        TypeDefKind::Option(inner) => {
-            format!("{} | null", wit_type_to_ts(resolve, inner))
-        }
-        TypeDefKind::Result(WitResult { ok, err }) => {
-            let ok = ok
-                .as_ref()
-                .map(|ty| format!("; value: {}", wit_type_to_ts(resolve, ty)))
-                .unwrap_or_default();
-            let err = err
-                .as_ref()
-                .map(|ty| format!("; error: {}", wit_type_to_ts(resolve, ty)))
-                .unwrap_or_default();
-            format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
-        }
-        TypeDefKind::Tuple(tuple) => {
-            let items: Vec<String> = tuple
-                .types
-                .iter()
-                .map(|t| wit_type_to_ts(resolve, t))
-                .collect();
-            format!("[{}]", items.join(", "))
-        }
-        _ => "unknown".to_string(),
-    }
+            Contract::Record(fields) => {
+                let mut out = String::from("{\n");
+                for (name, ty) in fields {
+                    let _ = writeln!(out, "  {name}: {ty};");
+                }
+                out.push('}');
+                out
+            }
+            Contract::Enum(cases) => cases
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            Contract::Variant(cases) => {
+                let mut out = String::new();
+                for (name, payload) in cases {
+                    let _ = write!(out, "\n  | {{ tag: \"{name}\"");
+                    if let Some(ty) = payload {
+                        let _ = write!(out, "; val: {ty}");
+                    }
+                    out.push_str(" }");
+                }
+                out
+            }
+            Contract::Unsupported(_) => "unknown".into(),
+        },
+    )
 }
 
 fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
@@ -172,9 +68,9 @@ fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
     });
     found
 }
-fn outbound_ts(resolve: &Resolve, ty: &Type) -> String {
-    let ordinary = wit_type_to_ts(resolve, ty);
-    if has_bytes(resolve, ty) {
+fn outbound_ts(names: &TsNames<'_>, ty: &Type) -> String {
+    let ordinary = type_to_ts(names, Input::Reference(*ty));
+    if has_bytes(names.resolve, ty) {
         format!("import(\"./world\").WitInput<{ordinary}>")
     } else {
         ordinary
@@ -182,36 +78,49 @@ fn outbound_ts(resolve: &Resolve, ty: &Type) -> String {
 }
 
 /// Result exports accept either explicit tagged results or completion payloads.
-fn export_result_types(resolve: &Resolve, function: &Function) -> Vec<String> {
+fn export_result_types(names: &TsNames<'_>, function: &Function) -> Vec<String> {
     let mut types = vec![
         function
             .result
-            .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
+            .map_or_else(|| "void".into(), |ty| outbound_ts(names, &ty)),
     ];
     if let Some(result) = function
         .result
-        .and_then(|ty| crate::abi::result_type(resolve, ty))
+        .and_then(|ty| crate::abi::result_type(names.resolve, ty))
     {
         types.push(
             result
                 .ok
-                .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
+                .map_or_else(|| "void".into(), |ty| outbound_ts(names, &ty)),
         );
     }
     types
 }
 
-fn implementation_signature(resolve: &Resolve, function: &Function, allow_promise: bool) -> String {
-    let mut signatures: Vec<String> = export_result_types(resolve, function)
+fn export_return_ts(names: &TsNames<'_>, func: &Function) -> String {
+    let ret_ty = export_result_types(names, func).join(" | ");
+    if func.kind.is_async() {
+        format!("Promise<{ret_ty}>")
+    } else {
+        ret_ty
+    }
+}
+
+fn implementation_signature(
+    names: &TsNames<'_>,
+    function: &Function,
+    allow_promise: bool,
+) -> String {
+    let mut signatures: Vec<String> = export_result_types(names, function)
         .into_iter()
         .map(|result| {
             let mut signature = String::from("(");
-            emit_params(&mut signature, resolve, function);
+            emit_params(&mut signature, names, function);
             signature.push_str(") => ");
             if allow_promise {
-                signature.push_str(&format!("({result}) | Promise<{result}>"));
+                let _ = write!(signature, "({result}) | Promise<{result}>");
             } else if function.kind.is_async() {
-                signature.push_str(&format!("Promise<{result}>"));
+                let _ = write!(signature, "Promise<{result}>");
             } else {
                 signature.push_str(&result);
             }
@@ -226,10 +135,10 @@ fn implementation_signature(resolve: &Resolve, function: &Function, allow_promis
 }
 
 /// Formats a WIT function return type into TypeScript.
-fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
+fn wit_result_to_ts(names: &TsNames<'_>, func: &Function) -> String {
     let result = match &func.result {
         None => "void".to_string(),
-        Some(ty) => wit_type_to_ts(resolve, ty),
+        Some(ty) => type_to_ts(names, Input::Reference(*ty)),
     };
     if func.kind.is_async() {
         format!("Promise<{result}>")
@@ -238,93 +147,51 @@ fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     }
 }
 
-const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\n\n";
+const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\nexport type u8 = number;\nexport type s8 = number;\nexport type u16 = number;\nexport type s16 = number;\nexport type u32 = number;\nexport type s32 = number;\nexport type u64 = bigint;\nexport type s64 = bigint;\n\n";
 
-fn world_type_declarations(resolve: &Resolve, world: &World) -> String {
+fn world_type_declarations(names: &TsNames<'_>) -> String {
     let mut out = String::new();
-    let mut emitted_types = HashSet::new();
-
-    // 1. Collect and emit named types referenced in world or interfaces (imports & exports)
-    for (_, item) in world.imports.iter().chain(world.exports.iter()) {
-        match item {
-            WorldItem::Interface { id, .. } => {
-                let iface = &resolve.interfaces[*id];
-                for &type_id in iface.types.values() {
-                    emit_type_def(resolve, type_id, &mut emitted_types, &mut out);
-                }
-            }
-            WorldItem::Function(func) => {
-                for param in &func.params {
-                    emit_nested_types(resolve, &param.ty, &mut emitted_types, &mut out);
-                }
-                if let Some(ret) = &func.result {
-                    emit_nested_types(resolve, ret, &mut emitted_types, &mut out);
-                }
-            }
-            WorldItem::Type { id: type_id, .. } => {
-                let td = &resolve.types[*type_id];
-                if td.name.is_some() {
-                    emit_type_def(resolve, *type_id, &mut emitted_types, &mut out);
-                }
-            }
+    for (id, _) in &names.resolve.types {
+        if names.types.contains(&id) {
+            emit_type_def(names, id, &mut out);
         }
     }
-
     out
 }
 
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
+    let names = &TsNames::new(resolve, world);
     let mut out = String::new();
 
-    out.push_str("/**\n * Auto-generated TypeScript definitions for WIT world `");
-    out.push_str(&world.name);
-    out.push_str("`.\n * Generated by Perry-WIT SDK compiler.\n */\n\n");
-
-    out.push_str(SUPPORT_TYPES);
-    out.push_str(&world_type_declarations(resolve, world));
-
-    // 2. Emit exported functions
-    out.push_str("/* =========================================================================\n");
-    out.push_str(
-        " * Exported Component Functions (Implement and export in your TypeScript file)\n",
-    );
-    out.push_str(
-        " * ========================================================================= */\n\n",
+    let _ = write!(
+        out,
+        "/**\n * Auto-generated TypeScript definitions for WIT world `{}`.\n * Generated by Perry-WIT SDK compiler.\n */\n\n{SUPPORT_TYPES}{}/* =========================================================================\n * Exported Component Functions (Implement and export in your TypeScript file)\n * ========================================================================= */\n\n",
+        world.name,
+        world_type_declarations(names),
     );
 
     for (key, item) in &world.exports {
         match item {
             WorldItem::Function(func) => {
                 let export_name = match key {
-                    WorldKey::Name(name) => name.clone(),
-                    WorldKey::Interface(_) => func.name.clone(),
+                    WorldKey::Name(name) => name,
+                    WorldKey::Interface(_) => &func.name,
                 };
-                let ts_func_name = to_camel_case(&export_name);
-                let ret_ty = export_result_types(resolve, func).join(" | ");
-                let ret_ty = if func.kind.is_async() {
-                    format!("Promise<{ret_ty}>")
-                } else {
-                    ret_ty
-                };
-
-                out.push_str("/**\n * WIT export: `");
-                out.push_str(&export_name);
-                out.push_str("`\n */\nexport declare function ");
-                out.push_str(&ts_func_name);
-                out.push('(');
-                emit_params(&mut out, resolve, func);
-                out.push_str("): ");
-                out.push_str(&ret_ty);
-                out.push_str(";\n");
-
-                // Also generate a type signature alias
-                out.push_str("export type ");
-                out.push_str(&to_pascal_case(&export_name));
-                out.push_str("Fn = ");
-                out.push_str(&implementation_signature(resolve, func, false));
-                out.push_str(";\n\n");
+                let ts_func_name = to_camel_case(export_name);
+                let ret_ty = export_return_ts(names, func);
+                let _ = write!(
+                    out,
+                    "/**\n * WIT export: `{export_name}`\n */\nexport declare function {ts_func_name}("
+                );
+                emit_params(&mut out, names, func);
+                let _ = writeln!(
+                    out,
+                    "): {ret_ty};\nexport type {}Fn = {};\n",
+                    to_pascal_case(export_name),
+                    implementation_signature(names, func, false),
+                );
             }
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];
@@ -337,24 +204,13 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                         .unwrap_or_else(|| "ExportedInterface".to_string()),
                 };
 
-                out.push_str("export namespace ");
-                out.push_str(&iface_name);
-                out.push_str(" {\n");
+                let _ = writeln!(out, "export namespace {iface_name} {{");
                 for (_, func) in &iface.functions {
                     let ts_name = to_camel_case(&func.name);
-                    let ret_ty = export_result_types(resolve, func).join(" | ");
-                    let ret_ty = if func.kind.is_async() {
-                        format!("Promise<{ret_ty}>")
-                    } else {
-                        ret_ty
-                    };
-                    out.push_str("  export function ");
-                    out.push_str(&ts_name);
-                    out.push('(');
-                    emit_params(&mut out, resolve, func);
-                    out.push_str("): ");
-                    out.push_str(&ret_ty);
-                    out.push_str(";\n");
+                    let ret_ty = export_return_ts(names, func);
+                    let _ = write!(out, "  export function {ts_name}(");
+                    emit_params(&mut out, names, func);
+                    let _ = writeln!(out, "): {ret_ty};");
                 }
                 out.push_str("}\n\n");
             }
@@ -365,38 +221,20 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
     out.push_str(
         "export interface ComponentImplementation {\n  readonly [name: string]: unknown;\n",
     );
-    for (key, item) in &world.exports {
-        let functions = match item {
-            WorldItem::Function(function) => vec![(to_camel_case(&function.name), function)],
-            WorldItem::Interface { id, .. } => {
-                let interface = &resolve.interfaces[*id];
-                interface
-                    .functions
-                    .values()
-                    .map(|function| {
-                        (
-                            crate::abi::export_names::interface_implementation_name(
-                                resolve, world, key, function,
-                            ),
-                            function,
-                        )
-                    })
-                    .collect()
-            }
-            _ => Vec::new(),
+    for entry in crate::abi::world_functions(resolve, world.exports.iter()) {
+        let opt = if crate::abi::export_names::core_export_name(resolve, entry.key, entry.function)
+            == "wasi:cli/run@0.3.0#run"
+        {
+            "?"
+        } else {
+            ""
         };
-        for (name, function) in functions {
-            out.push_str("  ");
-            out.push_str(&name);
-            if crate::abi::export_names::core_export_name(resolve, key, function)
-                == "wasi:cli/run@0.3.0#run"
-            {
-                out.push('?');
-            }
-            out.push_str(": ");
-            out.push_str(&implementation_signature(resolve, function, true));
-            out.push_str(";\n");
-        }
+        let _ = writeln!(
+            out,
+            "  {}{opt}: {};",
+            entry.implementation_name(resolve, world),
+            implementation_signature(names, entry.function, true),
+        );
     }
     out.push_str("}\n");
     Ok(out)
@@ -404,24 +242,7 @@ pub(crate) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
 
 /// Ambient modules expose typed host functions and interface-local type names.
 pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> String {
-    fn collect(resolve: &Resolve, ty: &Type, ids: &mut HashSet<TypeId>) {
-        let Type::Id(id) = ty else {
-            return;
-        };
-        let id = declaration_id(resolve, *id);
-        if !ids.insert(id) {
-            return;
-        }
-        if let TypeDefKind::Handle(
-            wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
-        ) = resolve.types[id].kind
-        {
-            collect(resolve, &Type::Id(resource), ids);
-        }
-        visit_type_children(&resolve.types[id].kind, |ty| {
-            collect(resolve, ty, ids);
-        });
-    }
+    let names = &TsNames::new(resolve, world);
     let mut out = String::new();
     let mut emitted = HashSet::new();
     for (imported, (key, item)) in world
@@ -440,63 +261,62 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         let interface = &resolve.interfaces[*id];
         let mut ids = HashSet::new();
         for id in interface.types.values() {
-            collect(resolve, &Type::Id(*id), &mut ids);
+            collect_types(resolve, &Type::Id(*id), &mut ids);
         }
         for function in interface.functions.values() {
             for param in &function.params {
-                collect(resolve, &param.ty, &mut ids);
+                collect_types(resolve, &param.ty, &mut ids);
             }
             if let Some(ty) = function.result {
-                collect(resolve, &ty, &mut ids);
+                collect_types(resolve, &ty, &mut ids);
             }
         }
-        let mut names: Vec<_> = ids
-            .into_iter()
-            .filter(|id| resolve.types[*id].name.is_some())
-            .map(|id| type_name(resolve, id))
-            .collect();
-        names.sort();
-        names.dedup();
+        let mut declarations: Vec<_> = ids.into_iter().filter_map(|id| names.name(id)).collect();
+        declarations.sort();
+        declarations.dedup();
         // A JSON string literal is a valid TypeScript module specifier.
-        out.push_str(&format!("declare module {module} {{\n"));
-        for name in &names {
-            out.push_str(&format!("  type {name} = import(\"./world\").{name};\n"));
+        let _ = writeln!(out, "declare module {module} {{");
+        for name in &declarations {
+            let _ = writeln!(out, "  type {name} = import(\"./world\").{name};");
         }
         for (name, id) in &interface.types {
-            if has_bytes(resolve, &Type::Id(*id)) {
-                let local = to_pascal_case(name);
-                let target = type_name(resolve, *id);
-                out.push_str(&format!(
-                    "  export type {local}Input = import(\"./world\").WitInput<{target}>;\n"
-                ));
-            }
             let local = to_pascal_case(name);
-            let target = type_name(resolve, *id);
+            let target = type_to_ts(names, Input::Reference(Type::Id(*id)));
+            if has_bytes(names.resolve, &Type::Id(*id)) {
+                let _ = writeln!(
+                    out,
+                    "  export type {local}Input = import(\"./world\").WitInput<{target}>;"
+                );
+            }
             if local == target {
-                out.push_str(&format!("  export {{ type {target} }};\n"));
+                let _ = writeln!(out, "  export {{ type {target} }};");
             } else {
-                out.push_str(&format!("  export type {local} = {target};\n"));
+                let _ = writeln!(out, "  export type {local} = {target};");
             }
         }
         for (name, id) in &interface.types {
-            if !matches!(resolve.types[*id].kind, TypeDefKind::Resource) {
+            if !matches!(names.resolve.types[*id].kind, TypeDefKind::Resource) {
                 continue;
             }
-            let resource = type_name(resolve, *id);
+            let resource = type_to_ts(names, Input::Reference(Type::Id(*id)));
             let suffix = to_pascal_case(name);
-            out.push_str(&format!("  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;\n"));
+            let _ = writeln!(
+                out,
+                "  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;"
+            );
             if !imported {
-                out.push_str(&format!("  export function new{suffix}(representation: number): {resource};\n  export function {local}Rep(value: {resource}): number;\n", local=to_camel_case(name)));
+                let _ = writeln!(
+                    out,
+                    "  export function new{suffix}(representation: number): {resource};\n  export function {local}Rep(value: {resource}): number;",
+                    local = to_camel_case(name)
+                );
             }
         }
         if imported {
             for function in interface.functions.values() {
-                out.push_str(&format!(
-                    "  export function {}(",
-                    to_camel_case(&function.name)
-                ));
-                emit_outbound_params(&mut out, resolve, function);
-                out.push_str(&format!("): {};\n", wit_result_to_ts(resolve, function)));
+                let _ = write!(out, "  export function {}(", to_camel_case(&function.name));
+                emit_function_params(&mut out, names, function, outbound_ts);
+                let _ = writeln!(out, "): {};", wit_result_to_ts(names, function));
             }
         }
         out.push_str("}\n\n");
@@ -504,19 +324,17 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
     out
 }
 
-fn emit_outbound_params(out: &mut String, resolve: &Resolve, function: &Function) {
-    emit_function_params(out, resolve, function, outbound_ts);
-}
-
-fn emit_params(out: &mut String, resolve: &Resolve, function: &Function) {
-    emit_function_params(out, resolve, function, wit_type_to_ts);
+fn emit_params(out: &mut String, names: &TsNames<'_>, function: &Function) {
+    emit_function_params(out, names, function, |names, ty| {
+        type_to_ts(names, Input::Reference(*ty))
+    });
 }
 
 fn emit_function_params(
     out: &mut String,
-    resolve: &Resolve,
+    names: &TsNames<'_>,
     function: &Function,
-    type_to_ts: fn(&Resolve, &Type) -> String,
+    type_to_ts: fn(&TsNames<'_>, &Type) -> String,
 ) {
     for (index, param) in function.params.iter().enumerate() {
         if index != 0 {
@@ -526,152 +344,49 @@ fn emit_function_params(
         let name = perry_parser::swc_ecma_ast::Ident::verify_symbol(&name)
             .err()
             .unwrap_or(name);
-        out.push_str(&name);
-        out.push_str(": ");
-        out.push_str(&type_to_ts(resolve, &param.ty));
+        let _ = write!(out, "{name}: {}", type_to_ts(names, &param.ty));
     }
 }
 
-fn emit_nested_types(
-    resolve: &Resolve,
-    ty: &Type,
-    emitted: &mut HashSet<TypeId>,
-    out: &mut String,
-) {
-    if let Type::Id(id) = ty {
-        let td = &resolve.types[*id];
-        if let TypeDefKind::Handle(
-            wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
-        ) = td.kind
-        {
-            emit_type_def(resolve, resource, emitted, out);
-        }
-        if td.name.is_some() {
-            emit_type_def(resolve, *id, emitted, out);
-        } else {
-            visit_type_children(&td.kind, |child| {
-                emit_nested_types(resolve, child, emitted, out);
-            });
-        }
-    }
-}
-
-fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
-    match kind {
-        TypeDefKind::List(inner) | TypeDefKind::Option(inner) | TypeDefKind::Type(inner) => {
-            visit(inner);
-        }
-        TypeDefKind::Result(result) => result.ok.iter().chain(result.err.iter()).for_each(visit),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().for_each(visit),
-        TypeDefKind::Record(record) => record.fields.iter().map(|field| &field.ty).for_each(visit),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty.as_ref())
-            .for_each(visit),
-        _ => {}
-    }
-}
-
-fn emit_type_def(
-    resolve: &Resolve,
-    type_id: wit_parser::TypeId,
-    emitted: &mut HashSet<TypeId>,
-    out: &mut String,
-) {
-    let type_id = declaration_id(resolve, type_id);
-    if !emitted.insert(type_id) {
+fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut String) {
+    let Some(type_name) = names.name(type_id) else {
         return;
-    }
-    let type_name = type_name(resolve, type_id);
-    let td = &resolve.types[type_id];
-    if has_bytes(resolve, &Type::Id(type_id)) {
-        out.push_str(&format!(
-            "export type {type_name}Input = WitInput<{type_name}>;\n"
-        ));
+    };
+    let td = &names.resolve.types[type_id];
+    if has_bytes(names.resolve, &Type::Id(type_id)) {
+        let _ = writeln!(out, "export type {type_name}Input = WitInput<{type_name}>;");
     }
     match &td.kind {
         TypeDefKind::Resource => {
-            out.push_str("export declare class ");
-            out.push_str(&type_name);
-            out.push_str(" { private constructor(); readonly [__witResourceBrand]: true; private readonly __witResource: never; }\n\n");
+            let _ = write!(
+                out,
+                "export declare class {type_name} {{ private constructor(); readonly [__witResourceBrand]: true; private readonly __witResource: never; }}\n\n"
+            );
         }
-        TypeDefKind::Record(record) => {
-            out.push_str("export interface ");
-            out.push_str(&type_name);
-            out.push_str(" {\n");
-            for field in &record.fields {
-                let fname = to_camel_case(&field.name);
-                let fty = wit_type_to_ts(resolve, &field.ty);
-                out.push_str("  ");
-                out.push_str(&fname);
-                out.push_str(": ");
-                out.push_str(&fty);
-                out.push_str(";\n");
-            }
-            out.push_str("}\n\n");
-        }
-        TypeDefKind::Enum(en) => {
-            let cases: Vec<String> = en.cases.iter().map(|c| format!("\"{}\"", c.name)).collect();
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&cases.join(" | "));
-            out.push_str(";\n\n");
-        }
-        TypeDefKind::Variant(var) => {
-            let cases: Vec<String> = var
-                .cases
-                .iter()
-                .map(|c| {
-                    if let Some(payload) = &c.ty {
-                        let ty_str = wit_type_to_ts(resolve, payload);
-                        format!("{{ tag: \"{}\"; val: {ty_str} }}", c.name)
-                    } else {
-                        format!("{{ tag: \"{}\" }}", c.name)
-                    }
-                })
-                .collect();
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" =\n  | ");
-            out.push_str(&cases.join("\n  | "));
-            out.push_str(";\n\n");
-        }
-        TypeDefKind::Flags(flags) => {
-            out.push_str("export interface ");
-            out.push_str(&type_name);
-            out.push_str(" {\n");
-            for f in &flags.flags {
-                out.push_str("  ");
-                out.push_str(&to_camel_case(&f.name));
-                out.push_str("?: boolean;\n");
-            }
-            out.push_str("}\n\n");
-        }
-        TypeDefKind::Type(alias) => {
-            let alias_ty = wit_type_to_ts(resolve, alias);
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&alias_ty);
-            out.push_str(";\n\n");
-        }
-        TypeDefKind::List(_)
+        TypeDefKind::Record(_)
+        | TypeDefKind::Enum(_)
+        | TypeDefKind::Variant(_)
+        | TypeDefKind::Type(_)
+        | TypeDefKind::List(_)
         | TypeDefKind::Option(_)
         | TypeDefKind::Tuple(_)
         | TypeDefKind::Result(_) => {
-            out.push_str("export type ");
-            out.push_str(&type_name);
-            out.push_str(" = ");
-            out.push_str(&type_kind_to_ts(resolve, &td.kind));
-            out.push_str(";\n\n");
+            let value = type_to_ts(names, Input::Definition(type_id));
+            if matches!(td.kind, TypeDefKind::Record(_)) {
+                let _ = write!(out, "export interface {type_name} {value}\n\n");
+            } else {
+                let _ = write!(out, "export type {type_name} = {value};\n\n");
+            }
+        }
+        TypeDefKind::Flags(flags) => {
+            let _ = writeln!(out, "export interface {type_name} {{");
+            for f in &flags.flags {
+                let _ = writeln!(out, "  {}?: boolean;", to_camel_case(&f.name));
+            }
+            out.push_str("}\n\n");
         }
         _ => {}
     }
-    visit_type_children(&td.kind, |child| {
-        emit_nested_types(resolve, child, emitted, out);
-    });
 }
 
 #[cfg(test)]
@@ -679,52 +394,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_declarations_with_complex_types() {
+    fn unreferenced_sibling_interfaces_do_not_prefix_world_type_names() {
         let wit_code = r#"
-package test:complex;
+package test:multi@0.1.0;
 
-interface types {
-    record payload {
+interface alpha {
+    record parameters {
+        url: string,
+    }
+    record product {
+        name: string,
+    }
+    fetch: func(params: parameters) -> list<product>;
+}
+
+interface beta {
+    record parameters {
+        token: string,
+    }
+    record product {
         id: u32,
-        title: string,
-        tags: list<string>,
-        meta: option<string>,
-    }
-
-    enum status {
-        pending,
-        active,
-        failed,
-    }
-
-    variant output-result {
-        success(string),
-        failure(u32),
     }
 }
 
-world complex-processor {
-    use types.{payload, status, output-result};
-    export process: func(data: payload, stat: status) -> output-result;
+world alpha-worker {
+    import alpha;
+    use alpha.{parameters, product};
+    export run: func(params: parameters) -> list<product>;
 }
 "#;
         let (resolve, package) =
             crate::component::wit::resolve_source("world.wit", wit_code).unwrap();
         let world = resolve
-            .select_world(&[package], Some("complex-processor"))
+            .select_world(&[package], Some("alpha-worker"))
             .unwrap();
-        let dts = generate_world_declarations(&resolve, &resolve.worlds[world]).unwrap();
-        assert!(dts.contains("export interface Payload {"));
-        assert!(dts.contains("id: number;"));
-        assert!(dts.contains("title: string;"));
-        assert!(dts.contains("tags: Array<string>;"));
-        assert!(dts.contains("meta: string | null;"));
-        assert!(dts.contains("export type Status = \"pending\" | \"active\" | \"failed\";"));
-        assert!(dts.contains("export type OutputResult ="));
-        assert!(dts.contains("tag: \"success\"; val: string"));
-        assert!(dts.contains("tag: \"failure\"; val: number"));
-        assert!(dts.contains(
-            "export declare function process(data: Payload, stat: Status): OutputResult;"
-        ));
+        let world_dts = generate_world_declarations(&resolve, &resolve.worlds[world]).unwrap();
+        assert!(world_dts.contains("export interface Parameters {"));
+        assert!(world_dts.contains("export interface Product {"));
+        assert!(!world_dts.contains("TestMulti010AlphaParameters"));
+        assert!(!world_dts.contains("TestMulti010AlphaProduct"));
+
+        let import_dts = generate_import_declarations(&resolve, &resolve.worlds[world]);
+        assert!(import_dts.contains("type Parameters = import(\"./world\").Parameters;"));
+        assert!(import_dts.contains("export { type Parameters };"));
+        assert!(import_dts.contains("export function fetch(params: Parameters): Array<Product>;"));
     }
 }

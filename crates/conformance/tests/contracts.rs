@@ -148,10 +148,10 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
     let exited = command(
         Command::new("node").args(["-e", "process.exit(7)"]),
         directory.path(),
-        Duration::from_secs(5),
+        Duration::from_secs(Limits::default().timeout_seconds),
     )?;
+    assert!(!exited.timed_out && !exited.success());
     assert_eq!(exited.exit, Some(7));
-    assert!(!exited.success());
     let stalled = command(
         Command::new("node").args(["-e", "for(;;){}"]),
         directory.path(),
@@ -198,5 +198,28 @@ fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Re
             .contains("metamorphic form changed Node observations"),
         "wrong replay failure: {error:#}"
     );
+    Ok(())
+}
+
+#[test]
+fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -> Result<()> {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
+    for (select, seed) in [
+        ("ecma.aggregate.specialization", 42),
+        ("ecma.aggregate.specialization", 43),
+        ("ecma.collection.iterators", 42),
+    ] {
+        runner::campaign(
+            Settings {
+                select: select.into(),
+                cases: 6,
+                depth: 3,
+                seed,
+                shrink_limit: 32,
+                limits: Limits::default(),
+            },
+            executable.clone(),
+        )?;
+    }
     Ok(())
 }

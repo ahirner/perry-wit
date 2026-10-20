@@ -3,8 +3,6 @@
 #[path = "../../../src/helpers/number.rs"]
 mod implementation;
 
-pub use implementation::*;
-
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {

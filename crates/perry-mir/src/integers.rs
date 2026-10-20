@@ -1,74 +1,31 @@
-//! Exact signed-magnitude integers for WIT's 64-bit transport domain.
-use crate::types::BigIntType;
+//! Arbitrary-width integer magnitudes; negation is an ordinary BigInt operation.
+use crate::operation_schema::op_schema;
+use crate::signatures::Ty;
 use pliron::{
-    builtin::{
-        attributes::StringAttr,
-        op_interfaces::{NOpdsInterface, OneResultInterface},
-    },
-    common_traits::Verify,
-    context::Context,
-    derive::{op_interface_impl, pliron_op},
-    op::Op,
-    operation::Operation,
-    opts::dce::SideEffects,
-    result::Result,
-    r#type::Typed,
-    verify_err,
+    builtin::attributes::IntegerAttr, common_traits::Verify, context::Context, op::Op,
+    operation::Operation, result::Result,
 };
 
-#[pliron_op(name = "perry.bigint_const",
-    format = "attr($perry_integer_value, $StringAttr) ` : ` type($0)",
-    interfaces = [NOpdsInterface<0>, OneResultInterface],
-    attributes = (perry_integer_value: StringAttr))]
-pub struct BigIntConstOp;
+op_schema! {
+    pub BigIntConstOp() -> infallible;
+    name = "perry.bigint_const";
+    format = "attr($perry_integer_value, $IntegerAttr) ` : ` type($0)";
+    attributes = (perry_integer_value: IntegerAttr);
+    constructors { pub new(magnitude: IntegerAttr) => infer(); }
+    attribute(magnitude, get_attr_perry_integer_value, set_attr_perry_integer_value) = magnitude => InvalidConstant;
+    result(ctx): Ty = Ty::BigInt;
+    error = InvalidConstant;
+    require magnitude.verify(ctx)?;
+    check magnitude.get_type().deref(ctx).is_unsigned() => InvalidConstant;
+}
 
 impl BigIntConstOp {
-    pub fn new(ctx: &mut Context, magnitude: u64) -> Self {
-        let ty = BigIntType::get(ctx).into();
-        let op = Self {
-            op: Operation::new(
-                ctx,
-                Self::get_concrete_op_info(),
-                vec![ty],
-                vec![],
-                vec![],
-                0,
-            ),
-        };
-        op.set_attr_perry_integer_value(ctx, StringAttr::new(magnitude.to_string()));
-        op
-    }
-
-    pub fn magnitude(&self, ctx: &Context) -> Option<u64> {
-        self.get_attr_perry_integer_value(ctx)?
-            .as_str()
-            .parse()
-            .ok()
+    pub(crate) fn magnitude(&self, ctx: &Context) -> Option<u64> {
+        let value = self.get_attr_perry_integer_value(ctx)?;
+        (value.get_type().deref(ctx).width() <= 64).then(|| value.value().to_u64())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("bigint constant needs a 64-bit magnitude and a bigint result")]
+#[error("bigint constant needs an unsigned magnitude and a bigint result")]
 struct InvalidConstant;
-
-impl Verify for BigIntConstOp {
-    fn verify(&self, ctx: &Context) -> Result<()> {
-        if self.magnitude(ctx).is_none()
-            || !self
-                .get_result(ctx)
-                .get_type(ctx)
-                .deref(ctx)
-                .is::<BigIntType>()
-        {
-            verify_err!(self.loc(ctx), InvalidConstant)?;
-        }
-        Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl SideEffects for BigIntConstOp {
-    fn has_side_effects(&self, _: &Context) -> bool {
-        false
-    }
-}

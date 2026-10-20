@@ -1,8 +1,15 @@
-//! The benchmark baseline (`TODOs.md` P0.2), one command:
+//! Deterministic compiler and guest benchmarks.
+//! Run with `cargo test --test benchmark -- --ignored --nocapture`.
 //!
-//! ```text
-//! cargo test --test benchmark -- --ignored --nocapture
-//! ```
+//! `PERRY_BENCH_REPORT` writes measured rows; `PERRY_BENCH_BASELINE` compares each
+//! deterministic metric with its recorded value (at most 105%, zero stays zero).
+//! The comparison never updates the baseline. `tests/baselines/pliron.metadata.json`
+//! records its compiler revision, input hashes, dependency versions and options.
+//! `bytes` measures stripped components or named raw modules, matching the original
+//! campaign; `core_bytes` always measures the named core module before componentization.
+//! `initialization_fuel` measures instantiation and `invocation_fuel` the first export
+//! call. The historical `fuel` metric retains its captured convention: a warmed
+//! component call, a first core-fixture call, or instantiation plus a raw microbenchmark.
 //!
 //! It prints a Markdown table: component bytes (stripped), guest fuel per call and guest
 //! memory, which are deterministic and machine-independent, and median milliseconds per call
@@ -11,19 +18,21 @@
 //! whole), the critique microbenchmarks as core modules, the compile time of a deep property
 //! chain, and the example components.
 use anyhow::{Result, ensure};
+use http_body_util::{BodyExt, Full};
 use perry_wit::{compile_core, compile_for_world, component::wit::resolve_wit};
 use std::{future::Future, time::Instant};
 use wasmtime::{
     Config, Engine, ResourceLimiter, Store, Val,
-    component::{Component, Linker, ResourceTable, StreamReader},
+    component::{Component, Instance, Linker, ResourceTable, StreamReader},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
+use wasmtime_wasi_http::{
+    Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+};
 
-#[allow(dead_code)]
-#[path = "support/http_fixture.rs"]
-mod http_fixture;
-use http_fixture::{HttpFixture, Reply};
+#[path = "benchmark/gate.rs"]
+mod gate;
+use gate::compare_baseline;
 
 const MIB4: usize = 4 * 1024 * 1024;
 const SAMPLES: usize = 5;
@@ -56,6 +65,43 @@ struct Host {
     http: WasiHttpCtx,
     table: ResourceTable,
     memory: Memory,
+    fixture: FixedHttp,
+}
+
+struct FixedHttp;
+
+impl WasiHttpHooks for FixedHttp {
+    fn send_request(
+        &mut self,
+        request: http::Request<WasiBody>,
+        _: Option<RequestOptions>,
+        _: Box<dyn Future<Output = Result<(), Error>> + Send>,
+    ) -> Box<
+        dyn Future<
+                Output = Result<
+                    (
+                        http::Response<WasiBody>,
+                        Box<dyn Future<Output = Result<(), Error>> + Send>,
+                    ),
+                    Error,
+                >,
+            > + Send,
+    > {
+        assert_eq!(request.uri(), "http://benchmark.test/body");
+        Box::new(async {
+            let bytes: Vec<u8> = (0..MIB4).map(|i| i as u8).collect();
+            let body = Full::new(bytes::Bytes::from(bytes))
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            Ok((
+                http::Response::builder()
+                    .header("content-length", MIB4)
+                    .body(body)
+                    .unwrap(),
+                Box::new(async { Ok(()) }) as Box<dyn Future<Output = _> + Send>,
+            ))
+        })
+    }
 }
 
 impl WasiView for Host {
@@ -72,16 +118,23 @@ impl WasiHttpView for Host {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: &mut self.fixture,
         }
     }
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Row {
     workload: String,
+    compilation_error: Option<String>,
     bytes: Option<usize>,
+    core_bytes: Option<usize>,
+    defined_functions: Option<u32>,
+    helper_functions: Option<u32>,
+    optimization: Option<std::collections::BTreeMap<String, u64>>,
     fuel: Option<u64>,
+    initialization_fuel: Option<u64>,
+    invocation_fuel: Option<u64>,
     memory: Option<usize>,
     milliseconds: Option<f64>,
     initial_memory: Option<usize>,
@@ -108,7 +161,7 @@ impl Row {
             "| {} | {} | {} | {} | {} |",
             self.workload,
             number(self.bytes.map(|b| b as u64)),
-            number(self.fuel),
+            number(self.invocation_fuel),
             number(self.memory.map(|b| b as u64)),
             self.milliseconds
                 .map_or("–".into(), |ms| format!("{ms:.3}"))
@@ -134,6 +187,7 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             memory: Memory::default(),
+            fixture: FixedHttp,
         },
     );
     store.limiter(|host| &mut host.memory);
@@ -143,32 +197,76 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
     Ok(store)
 }
 
-fn component(source: &str, wit: &str, world: &str) -> Result<Vec<u8>> {
+struct Compilation {
+    output: perry_wit::Compiled,
+    milliseconds: f64,
+}
+
+fn component(source: &str, wit: &str, world: &str) -> Result<Compilation> {
+    let started = Instant::now();
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), wit)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some(world))?;
-    Ok(
-        compile_for_world(source, "bench.ts", &resolve, world, true)?
-            .component
-            .unwrap()
-            .stripped,
-    )
+    let output = compile_for_world(source, "bench.ts", &resolve, world, true)?;
+    Ok(Compilation {
+        output,
+        milliseconds: started.elapsed().as_secs_f64() * 1000.0,
+    })
 }
 
-/// Measure `call` on a fresh instance per engine: fuel and memory of one call after a
-/// warm-up call, and the median of `SAMPLES` timed calls.
+fn optimization_statistics(report: &str) -> Result<std::collections::BTreeMap<String, u64>> {
+    let line = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Optimization statistics: "))
+        .ok_or_else(|| anyhow::anyhow!("missing optimization statistics"))?;
+    line.split(", ")
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("invalid statistic {entry}"))?;
+            Ok((key.to_string(), value.parse()?))
+        })
+        .collect()
+}
+
+fn helper_functions(report: &str) -> Result<u32> {
+    Ok(report
+        .lines()
+        .find_map(|line| line.strip_prefix("Linked helper functions: "))
+        .ok_or_else(|| anyhow::anyhow!("missing helper count"))?
+        .parse()?)
+}
+
+fn defined_functions(core: &[u8]) -> Result<u32> {
+    for payload in wasmparser::Parser::new(0).parse_all(core) {
+        if let wasmparser::Payload::FunctionSection(functions) = payload? {
+            return Ok(functions.count());
+        }
+    }
+    Ok(0)
+}
+
+/// Measure instantiation, first invocation, the historical warmed call, and timed samples.
 async fn measure<F, Fut>(
     workload: &str,
-    bytes: &[u8],
+    compilation: &Compilation,
     root: Option<&std::path::Path>,
     call: F,
 ) -> Result<Row>
 where
-    F: Fn(Store<Host>, Component, Linker<Host>) -> Fut,
-    Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64)>>,
+    F: Fn(Store<Host>, Instance) -> Fut,
+    Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64, u64)>>,
 {
+    let compiled = &compilation.output;
+    let bytes = &compiled
+        .component
+        .as_ref()
+        .expect("component benchmark")
+        .stripped;
     let mut fuel = None;
+    let mut initialization_fuel = None;
+    let mut invocation_fuel = None;
     let mut memory = None;
     let mut milliseconds = None;
     let mut initial_memory = None;
@@ -178,11 +276,17 @@ where
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-        let (store, times, used) = call(store(&engine, root, metered)?, component, linker).await?;
+        let mut store = store(&engine, root, metered)?;
+        let before = store.get_fuel().unwrap_or(0);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let initialization = spent(&store, before);
+        let (store, times, used, first_used) = call(store, instance).await?;
         if metered {
             fuel = Some(used);
+            initialization_fuel = Some(initialization);
+            invocation_fuel = Some(first_used);
             memory = Some(store.data().memory.bytes);
-            initial_memory = store.data().memory.initial;
+            initial_memory = Some(store.data().memory.initial.unwrap_or(0));
         } else {
             let mut ms: Vec<f64> = times.iter().map(|t| t.as_secs_f64() * 1000.0).collect();
             ms.sort_by(f64::total_cmp);
@@ -192,7 +296,14 @@ where
     Ok(Row {
         workload: workload.into(),
         bytes: Some(bytes.len()),
+        core_bytes: Some(compiled.core.len()),
+        defined_functions: Some(defined_functions(&compiled.core)?),
+        helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+        optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+        compile_milliseconds: Some(compilation.milliseconds),
         fuel,
+        initialization_fuel,
+        invocation_fuel,
         memory,
         milliseconds,
         initial_memory,
@@ -207,8 +318,10 @@ fn spent(store: &Store<Host>, before: u64) -> u64 {
 
 macro_rules! timed {
     ($store:ident, $calls:expr, $body:expr) => {{
-        // Warm-up, then one metered call, then the timed samples.
+        // The first call is also the timing warm-up.
+        let before = $store.get_fuel().unwrap_or(0);
         $body;
+        let first_used = spent(&$store, before);
         let before = $store.get_fuel().unwrap_or(0);
         $body;
         let used = spent(&$store, before);
@@ -218,7 +331,7 @@ macro_rules! timed {
             $body;
             times.push(started.elapsed());
         }
-        (times, used)
+        (times, used, first_used)
     }};
 }
 
@@ -238,16 +351,15 @@ async fn components() -> Result<Vec<Row>> {
     let input = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(128)[..4096].to_owned();
     let expected = format!("{input}{}", "!".repeat(64));
     rows.push(
-        measure("text", &text, None, |mut store, component, linker| {
+        measure("text", &text, None, |mut store, instance| {
             let (input, expected) = (input.clone(), expected.clone());
             async move {
-                let instance = linker.instantiate_async(&mut store, &component).await?;
                 let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run-task")?;
-                let (times, used) = timed!(store, SAMPLES, {
+                let (times, used, first_used) = timed!(store, SAMPLES, {
                     let (result,) = run.call_async(&mut store, (input.as_str(),)).await?;
                     ensure!(result == expected, "text result");
                 });
-                Ok((store, times, used))
+                Ok((store, times, used, first_used))
             }
         })
         .await?,
@@ -272,17 +384,16 @@ export async function runTask(path: string): Promise<string> {
             "io (64 KiB)",
             &io,
             Some(directory.path()),
-            |mut store, component, linker| {
+            |mut store, instance| {
                 let data = data.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run =
                         instance.get_typed_func::<(&str,), (String,)>(&mut store, "run-task")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let (result,) = run.call_async(&mut store, ("/input",)).await?;
                         ensure!(result == data, "io result");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             },
         )
@@ -314,18 +425,17 @@ export async function runTask(path: string): Promise<string> {
             "incoming-stream (4 MiB)",
             &stream,
             None,
-            |mut store, component, linker| {
+            |mut store, instance| {
                 let payload = payload.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run = instance
                         .get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let input = StreamReader::new(&mut store, payload.clone())?;
                         let (result,) = run.call_async(&mut store, (input,)).await?;
                         ensure!(result == sum, "stream sum");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             },
         )
@@ -333,10 +443,7 @@ export async function runTask(path: string): Promise<string> {
     );
 
     // HTTP: a 4 MiB body read with a bound (exact and one byte over) and whole.
-    let body: Vec<u8> = (0..MIB4).map(|i| i as u8).collect();
-    let served = body.clone();
-    let server = HttpFixture::new(move |_| Reply::Bytes(200, served.clone()));
-    let url = format!("http://{}/", server.address);
+    let url = "http://benchmark.test/body".to_owned();
     let http_wit = "package test:bench; world task { include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0; export run: async func(url: string, limit: f64) -> f64; }";
     let bounded = component(
         &format!(
@@ -370,18 +477,17 @@ export async function run(url: string, limit: number): Promise<number> {{
         ("unbounded-http-bytes (4 MiB)", &whole, 0, MIB4 as f64),
     ] {
         rows.push(
-            measure(workload, bytes, None, |mut store, component, linker| {
+            measure(workload, bytes, None, |mut store, instance| {
                 let url = url.clone();
                 async move {
-                    let instance = linker.instantiate_async(&mut store, &component).await?;
                     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
-                    let (times, used) = timed!(store, SAMPLES, {
+                    let (times, used, first_used) = timed!(store, SAMPLES, {
                         let (result,) = run
                             .call_async(&mut store, (url.as_str(), limit as f64))
                             .await?;
                         ensure!(result == expected, "{workload}: {result}");
                     });
-                    Ok((store, times, used))
+                    Ok((store, times, used, first_used))
                 }
             })
             .await?,
@@ -469,12 +575,38 @@ export function run(n: number): number {
         let mut row = Row {
             workload: format!("{workload} (n = 10⁶)"),
             bytes: Some(wasm.len()),
+            core_bytes: Some(wasm.len()),
+            defined_functions: Some(defined_functions(&wasm)?),
             fuel: None,
             memory: None,
             milliseconds: None,
             ..Row::default()
         };
         row.compile_milliseconds = Some(compile_ms);
+        // Inspect the same raw pipeline separately, outside the compilation timing.
+        // The linked-minus-emitted function count measures helpers without naming heuristics.
+        {
+            use pliron::{context::Context, op::Op, printable::Printable};
+            let ctx = &mut Context::new();
+            let mir = perry_lower::lower_sources(
+                ctx,
+                source,
+                "bench.ts",
+                &Default::default(),
+                &Default::default(),
+            )?;
+            let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
+                .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+            let exports = perry_codegen::Exports::Raw;
+            row.optimization = Some(optimization_statistics(&perry_codegen::explain_tiers(
+                ctx,
+                &mir,
+                &exports,
+                &mut analyses,
+            )?)?);
+            let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+            row.helper_functions = Some(defined_functions(&wasm)? - defined_functions(&emitted)?);
+        }
         for metered in [true, false] {
             let mut config = Config::new();
             config.consume_fuel(metered);
@@ -488,10 +620,12 @@ export function run(n: number): number {
             let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
             if metered {
                 row.initial_memory = Some(store.data().bytes);
+                row.initialization_fuel = Some(u64::MAX - store.get_fuel()?);
             }
             let run = instance.get_func(&mut store, "run").unwrap();
             let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
             let n = Val::F64(1_000_000f64.to_bits());
+            let before = store.get_fuel().unwrap_or(0);
             let started = Instant::now();
             run.call(&mut store, &[n], &mut results)?;
             let elapsed = started.elapsed();
@@ -513,6 +647,7 @@ export function run(n: number): number {
             }
             if metered {
                 row.fuel = Some(u64::MAX - store.get_fuel()?);
+                row.invocation_fuel = Some(before - store.get_fuel()?);
                 let memory = instance.get_memory(&mut store, "memory");
                 row.memory = Some(memory.map_or(store.data().bytes, |m| {
                     m.data_size(&store).max(store.data().bytes)
@@ -588,16 +723,19 @@ fn examples() -> Result<Vec<Row>> {
             "task",
         ),
     ] {
+        let started = Instant::now();
         let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
         let world = resolve.select_world(&[package], Some(world))?;
         let source_text = std::fs::read_to_string(source)?;
-        let bytes = compile_for_world(&source_text, source, &resolve, world, true)?
-            .component
-            .unwrap()
-            .stripped;
+        let compiled = compile_for_world(&source_text, source, &resolve, world, true)?;
         rows.push(Row {
             workload: workload.into(),
-            bytes: Some(bytes.len()),
+            bytes: Some(compiled.component.unwrap().stripped.len()),
+            core_bytes: Some(compiled.core.len()),
+            defined_functions: Some(defined_functions(&compiled.core)?),
+            helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+            optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+            compile_milliseconds: Some(started.elapsed().as_secs_f64() * 1000.0),
             fuel: None,
             memory: None,
             milliseconds: None,
@@ -610,17 +748,253 @@ fn examples() -> Result<Vec<Row>> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "performance campaign; run explicitly"]
 async fn benchmark_baseline() -> Result<()> {
+    verify_baseline_inputs()?;
     let mut rows = components().await?;
     rows.extend(microbenchmarks()?);
     rows.push(compile_time()?);
     rows.extend(examples()?);
+    rows.extend(optimization_fixtures().await?);
     println!("| Workload | Component bytes | Fuel per call | Guest memory bytes | Median ms |");
     println!("|---|---:|---:|---:|---:|");
     if let Ok(path) = std::env::var("PERRY_BENCH_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&rows)?)?;
     }
+    if let Ok(path) = std::env::var("PERRY_BENCH_BASELINE") {
+        let baseline: Vec<Row> = serde_json::from_slice(&std::fs::read(path)?)?;
+        compare_baseline(&baseline, &rows)?;
+    }
     for row in rows {
         println!("{}", row.markdown());
     }
+    Ok(())
+}
+
+/// The capture metadata keeps the original harness hash; comparison pins the reviewed
+/// measurement harness separately so reporting changes never overwrite baseline results.
+fn verify_baseline_inputs() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("baselines/pliron.metadata.json"))?;
+    for (path, hash) in metadata["inputs_sha256"].as_object().unwrap() {
+        if matches!(path.as_str(), "tests/benchmark.rs" | "Cargo.lock") {
+            continue;
+        }
+        let actual = format!("{:x}", Sha256::digest(std::fs::read(path)?));
+        ensure!(
+            Some(actual.as_str()) == hash.as_str(),
+            "benchmark input changed: {path}; baseline review is required"
+        );
+    }
+    let mut harness = Sha256::new();
+    harness.update(include_bytes!("benchmark.rs"));
+    harness.update(include_bytes!("benchmark/gate.rs"));
+    let harness = format!("{:x}", harness.finalize());
+    ensure!(
+        Some(harness.as_str()) == metadata["comparison_harness_sha256"].as_str(),
+        "benchmark measurement harness changed; baseline review is required"
+    );
+    let lock = include_str!("../Cargo.lock");
+    for package in ["wasmtime", "wasmtime-wasi", "wasmtime-wasi-http"] {
+        let declaration = lock
+            .split("[[package]]")
+            .find(|entry| entry.contains(&format!("\nname = \"{package}\"\n")))
+            .ok_or_else(|| anyhow::anyhow!("missing locked {package}"))?;
+        let expected = metadata["wasmtime"].as_str().unwrap();
+        ensure!(
+            declaration.contains(&format!("\nversion = \"{expected}\"\n")),
+            "benchmark requires {package} {expected}"
+        );
+    }
+    Ok(())
+}
+
+async fn optimization_fixtures() -> Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    for domain in ["s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64"] {
+        let wide = domain.ends_with("64");
+        let source = if wide {
+            include_str!("fixtures/optimization/add_bigint.ts")
+        } else {
+            include_str!("fixtures/optimization/add.ts")
+        };
+        let compiled = component(
+            source,
+            &format!(
+                "package test:integers; world test {{ export add: func(x: {domain}, y: {domain}) -> {domain}; }}"
+            ),
+            "test",
+        )?;
+        rows.push(measure_core(
+            &format!("WIT {domain} addition"),
+            &compiled,
+            "add",
+            if wide {
+                &[Val::I64(20), Val::I64(22)]
+            } else {
+                &[Val::I32(20), Val::I32(22)]
+            },
+            if wide { Val::I64(42) } else { Val::I32(42) },
+        )?);
+    }
+    let widening = component(
+        include_str!("fixtures/optimization/add.ts"),
+        "package test:integers; world test { export add: func(x: u8, y: u8) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT backward result width",
+        &widening,
+        "add",
+        &[Val::I32(255), Val::I32(255)],
+        Val::I32(510),
+    )?);
+    let shared = component(
+        include_str!("fixtures/optimization/shared.ts"),
+        "package test:integers; world test {
+          export narrow: func(x: u8, y: u8) -> u8;
+          export wide: func(x: u8, y: u8) -> u32;
+          export floating: func(x: f64, y: f64) -> f64;
+        }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT shared helper",
+        &shared,
+        "wide",
+        &[Val::I32(255), Val::I32(255)],
+        Val::I32(510),
+    )?);
+    let recursive = component(
+        include_str!("fixtures/optimization/recursive.ts"),
+        "package test:integers; world test { export sum: func(n: u32) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "WIT recursion",
+        &recursive,
+        "sum",
+        &[Val::I32(10)],
+        Val::I32(55),
+    )?);
+    let unwrap = component(
+        include_str!("fixtures/optimization/unwrap.ts"),
+        "package test:optimization; world test { export run: func(n: f64) -> f64; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "successful unwrap reuse",
+        &unwrap,
+        "run",
+        &[Val::F64(4.0f64.to_bits())],
+        Val::F64(12.0f64.to_bits()),
+    )?);
+    let asynchronous = component(
+        include_str!("fixtures/optimization/async.ts"),
+        "package test:optimization; world test { import wasi:cli/stderr@0.3.0; export run: async func(n: f64) -> f64; }",
+        "test",
+    )?;
+    rows.push(
+        measure(
+            "async frame liveness",
+            &asynchronous,
+            None,
+            |mut store, instance| async move {
+                let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+                let (times, used, first_used) = timed!(store, SAMPLES, {
+                    let (result,) = run.call_async(&mut store, (4.0,)).await?;
+                    ensure!(result == 17.0, "async frame result");
+                });
+                Ok((store, times, used, first_used))
+            },
+        )
+        .await?,
+    );
+    Ok(rows)
+}
+
+fn measure_core(
+    workload: &str,
+    compilation: &Compilation,
+    export: &str,
+    args: &[Val],
+    expected: Val,
+) -> Result<Row> {
+    let compiled = &compilation.output;
+    let engine = engine(true)?;
+    let module = wasmtime::Module::new(&engine, &compiled.core)?;
+    let mut store = Store::new(&engine, Memory::default());
+    store.limiter(|memory| memory);
+    store.set_fuel(u64::MAX)?;
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let run = instance
+        .get_func(&mut store, export)
+        .expect("fixture export");
+    let mut results = [Val::I32(0)];
+    let before = store.get_fuel()?;
+    let start = Instant::now();
+    run.call(&mut store, args, &mut results)?;
+    let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
+    let fuel = before - store.get_fuel()?;
+    let correct = match (results[0], expected) {
+        (Val::I32(actual), Val::I32(expected)) => actual == expected,
+        (Val::I64(actual), Val::I64(expected)) => actual == expected,
+        (Val::F64(actual), Val::F64(expected)) => actual == expected,
+        _ => false,
+    };
+    ensure!(correct, "{workload}: wrong result {:?}", results[0]);
+    Ok(Row {
+        workload: workload.into(),
+        bytes: Some(
+            compiled
+                .component
+                .as_ref()
+                .expect("fixture component")
+                .stripped
+                .len(),
+        ),
+        core_bytes: Some(compiled.core.len()),
+        defined_functions: Some(defined_functions(&compiled.core)?),
+        helper_functions: Some(helper_functions(&compiled.allocation_report)?),
+        optimization: Some(optimization_statistics(&compiled.allocation_report)?),
+        compile_milliseconds: Some(compilation.milliseconds),
+        fuel: Some(fuel),
+        initialization_fuel: Some(u64::MAX - before),
+        invocation_fuel: Some(fuel),
+        initial_memory: Some(store.data().initial.unwrap_or(0)),
+        memory: Some(store.data().bytes),
+        milliseconds: Some(milliseconds),
+        ..Row::default()
+    })
+}
+
+#[test]
+fn timed_calls_account_for_warmup_separately() -> Result<()> {
+    let engine = engine(true)?;
+    let module = wasmtime::Module::new(
+        &engine,
+        wat::parse_str(
+            r#"(module
+              (global $calls (mut i32) (i32.const 0))
+              (func $start nop)
+              (start $start)
+              (func (export "run") (result i32)
+                global.get $calls i32.const 1 i32.add global.set $calls
+                global.get $calls))"#,
+        )?,
+    )?;
+    let mut store = store(&engine, None, true)?;
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let before = store.get_fuel()?;
+    ensure!(before < u64::MAX, "start function must consume fuel");
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    let mut results = Vec::new();
+    let (times, warmed, first) = timed!(store, 2, {
+        results.push(run.call(&mut store, ())?);
+    });
+    assert_eq!(results, [1, 2, 3, 4]);
+    assert_eq!(times.len(), 2);
+    assert!(first > 0);
+    assert_eq!(warmed, first);
+    assert_eq!(spent(&store, before), 4 * first);
     Ok(())
 }

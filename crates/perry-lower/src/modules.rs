@@ -1,7 +1,8 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
+use crate::hir_compat::parse;
 use anyhow::{Context, Result, bail, ensure};
-use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
+use perry_parser::swc_ecma_ast as ast;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -14,19 +15,20 @@ type Exports = BTreeMap<String, String>;
 
 pub(super) struct Loaded<'s> {
     pub(super) module: ast::Module,
-    pub(super) locations: crate::locations::Locations<'s>,
+    pub(super) locations: crate::hir_compat::locations::Locations<'s>,
 }
 
 pub(super) fn load<'s>(
     source: &'s str,
     file: &str,
     sources: &'s BTreeMap<String, String>,
-    foreign: &HashMap<String, perry_hir::types::Type>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
 ) -> Result<Loaded<'s>> {
     let mut initial = parse(source, file)?;
     let foreign: BTreeSet<_> = foreign
-        .keys()
-        .filter_map(|name| name.strip_prefix("wit:").map(str::to_owned))
+        .iter()
+        .filter(|&(_, item)| !matches!(item, crate::hir::Foreign::Function(_)))
+        .map(|(name, _)| name.clone())
         .collect();
     wit_imports(&mut initial, &foreign, Path::new(file), sources);
     let needs_graph = initial.body.iter().any(|item| match item {
@@ -39,7 +41,7 @@ pub(super) fn load<'s>(
         _ => false,
     });
     if !needs_graph {
-        let mut locations = crate::locations::Locations::default();
+        let mut locations = crate::hir_compat::locations::Locations::default();
         locations.add(PathBuf::from(file), source, 0);
         return Ok(Loaded {
             module: initial,
@@ -57,7 +59,7 @@ pub(super) fn load<'s>(
             types: BTreeSet::new(),
             next: 0,
             next_span: 0,
-            locations: crate::locations::Locations::default(),
+            locations: crate::hir_compat::locations::Locations::default(),
             entry_path: normalize(Path::new(file)),
             entry_source: source,
         };
@@ -201,55 +203,6 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         })
 }
 
-pub(super) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
-    let mut cache = Default::default();
-    use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
-    let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
-        .map_err(|error| {
-            // The pinned wrapper discards fatal spans; recover SWC metadata directly.
-            use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
-            let lexer = Lexer::new(
-                Syntax::Typescript(TsSyntax::default()),
-                Default::default(),
-                swc_common::input::StringInput::new(
-                    source,
-                    swc_common::BytePos(1),
-                    swc_common::BytePos(source.len() as u32 + 1),
-                ),
-                None,
-            );
-            let mut parser = Parser::new_from(lexer);
-            let mut diagnostic = PerryDiagnostic::error(
-                DiagnosticCode::ParseError,
-                format!("Parsing {identity}: {error}"),
-            );
-            if let Err(failure) = parser.parse_module() {
-                let span = failure.span();
-                diagnostic.span = Some(SourceSpan::new(
-                    identity,
-                    source,
-                    span.lo.0.saturating_sub(1) as usize,
-                    span.hi.0.saturating_sub(1) as usize,
-                ));
-            }
-            error.context(diagnostic)
-        })?;
-    if let Some(diagnostic) = parsed.diagnostics.iter().next() {
-        return Err(PerryDiagnostic::error(
-            DiagnosticCode::ParseError,
-            format!("Parsing {identity}: {}", diagnostic.message),
-        )
-        .with_span(SourceSpan::new(
-            identity,
-            source,
-            diagnostic.span.start.saturating_sub(1) as usize,
-            diagnostic.span.end.saturating_sub(1) as usize,
-        ))
-        .into());
-    }
-    Ok(parsed.module)
-}
-
 pub(super) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_ {
     module
         .body
@@ -276,7 +229,7 @@ struct Graph<'a> {
     types: BTreeSet<String>,
     next: usize,
     next_span: u32,
-    locations: crate::locations::Locations<'a>,
+    locations: crate::hir_compat::locations::Locations<'a>,
     entry_path: PathBuf,
     entry_source: &'a str,
 }
@@ -307,7 +260,6 @@ impl Graph<'_> {
         Ok(path)
     }
     fn module(&mut self, path: &Path, mut module: ast::Module) -> Result<Exports> {
-        super::source::validate(&module)?;
         wit_imports(&mut module, &self.foreign, path, self.sources);
         // Each parser invocation owns a source map; give merged bindings disjoint spans.
         struct Rebase {
@@ -335,6 +287,7 @@ impl Graph<'_> {
         self.locations.add(path.to_owned(), text, self.next_span);
         module.visit_mut_with(&mut rebase);
         self.next_span = rebase.end + 1;
+        super::hir_compat::source::validate(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {
@@ -352,26 +305,25 @@ impl Graph<'_> {
         let index = self.next;
         self.next += 1;
         module.visit_mut_with(&mut resolver(Mark::new(), Mark::new(), true));
-        let imports = module.body.iter().filter_map(|item| match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import))
-                if local(&import.src.value.to_string_lossy()) =>
-            {
-                Some(import.src.as_ref())
-            }
-            _ => None,
-        });
-        let reexports = module.body.iter().filter_map(|item| match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export)) => {
-                export.src.as_deref()
-            }
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportAll(export)) => {
-                Some(export.src.as_ref())
-            }
-            _ => None,
-        });
         let mut dependencies = HashMap::new();
-        for source in imports.chain(reexports) {
-            dependencies.insert(&source.value, self.dependency(path, source)?);
+        for item in &module.body {
+            let source = match item {
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import))
+                    if local(&import.src.value.to_string_lossy()) =>
+                {
+                    Some(import.src.as_ref())
+                }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export)) => {
+                    export.src.as_deref()
+                }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportAll(export)) => {
+                    Some(export.src.as_ref())
+                }
+                _ => None,
+            };
+            if let Some(source) = source {
+                dependencies.insert(&source.value, self.dependency(path, source)?);
+            }
         }
         let (mut renamer, exports) = bind_module(&module, index, |source| {
             &self.loaded[&dependencies[&source.value]]
@@ -398,10 +350,21 @@ impl Graph<'_> {
                         .insert(function.ident.sym.to_string(), self.body.len());
                 }
                 ast::ModuleItem::Stmt(ast::Stmt::Decl(
-                    decl @ (ast::Decl::TsInterface(_) | ast::Decl::TsTypeAlias(_)),
+                    decl @ (ast::Decl::TsInterface(_)
+                    | ast::Decl::TsTypeAlias(_)
+                    | ast::Decl::Class(_)),
                 )) => {
                     self.types
                         .extend(declared(decl)?.into_iter().map(|id| id.sym.to_string()));
+                }
+                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
+                    for specifier in &import.specifiers {
+                        if let ast::ImportSpecifier::Named(named) = specifier
+                            && (import.type_only || named.is_type_only)
+                        {
+                            self.types.insert(named.local.sym.to_string());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -423,58 +386,65 @@ fn bind_module<'a>(
     let mut namespaces = HashMap::new();
     let mut exports = Exports::new();
     for item in &module.body {
-        let declaration = match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => Some(&export.decl),
-            ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => Some(decl),
-            _ => None,
-        };
-        if let Some(decl) = declaration {
-            for id in declared(decl)? {
-                ensure!(
-                    !id.sym.starts_with("__perry_"),
-                    "Reserved compiler name in source"
-                );
-                names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                for id in declared(&export.decl)? {
+                    ensure!(
+                        !id.sym.starts_with("__perry_"),
+                        "Reserved compiler name in source"
+                    );
+                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+                }
             }
-        }
-    }
-    for item in &module.body {
-        if let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item {
-            if local(&import.src.value.to_string_lossy()) {
-                let dependency = dependency_exports(&import.src);
-                for specifier in &import.specifiers {
-                    match specifier {
-                        ast::ImportSpecifier::Named(named) => {
-                            let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
-                            let original: &str = imported.as_deref().unwrap_or(&named.local.sym);
-                            names.insert(
-                                named.local.to_id(),
-                                dependency
-                                    .get(original)
-                                    .with_context(|| {
-                                        format!(
-                                            "Module '{}' has no export '{original}'",
-                                            import.src.value.to_string_lossy()
-                                        )
-                                    })?
-                                    .clone(),
-                            );
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
+                for id in declared(decl)? {
+                    ensure!(
+                        !id.sym.starts_with("__perry_"),
+                        "Reserved compiler name in source"
+                    );
+                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+                }
+            }
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
+                if local(&import.src.value.to_string_lossy()) {
+                    let dependency = dependency_exports(&import.src);
+                    for specifier in &import.specifiers {
+                        match specifier {
+                            ast::ImportSpecifier::Named(named) => {
+                                let imported =
+                                    named.imported.as_ref().map(ast::ModuleExportName::atom);
+                                let original: &str =
+                                    imported.as_deref().unwrap_or(&named.local.sym);
+                                names.insert(
+                                    named.local.to_id(),
+                                    dependency
+                                        .get(original)
+                                        .with_context(|| {
+                                            format!(
+                                                "Module '{}' has no export '{original}'",
+                                                import.src.value.to_string_lossy()
+                                            )
+                                        })?
+                                        .clone(),
+                                );
+                            }
+                            ast::ImportSpecifier::Namespace(namespace) => {
+                                namespaces.insert(namespace.local.to_id(), dependency);
+                            }
+                            _ => bail!("Local modules require named imports"),
                         }
-                        ast::ImportSpecifier::Namespace(namespace) => {
-                            namespaces.insert(namespace.local.to_id(), dependency);
-                        }
-                        _ => bail!("Local modules require named imports"),
+                    }
+                } else {
+                    for specifier in &import.specifiers {
+                        let binding = specifier.local();
+                        names.insert(
+                            binding.to_id(),
+                            format!("__perry_module_{index}_{}", binding.sym),
+                        );
                     }
                 }
-            } else {
-                for specifier in &import.specifiers {
-                    let binding = specifier.local();
-                    names.insert(
-                        binding.to_id(),
-                        format!("__perry_module_{index}_{}", binding.sym),
-                    );
-                }
             }
+            _ => {}
         }
     }
     for item in &module.body {
@@ -541,6 +511,7 @@ fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
     Ok(match decl {
         ast::Decl::Fn(function) => vec![&function.ident],
+        ast::Decl::Class(class) => vec![&class.ident],
         ast::Decl::TsInterface(interface) => vec![&interface.id],
         ast::Decl::TsTypeAlias(alias) => vec![&alias.id],
         ast::Decl::Var(var) => var

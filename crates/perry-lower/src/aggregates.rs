@@ -1,4 +1,6 @@
 //! Arrays and records: literals, element and field writes.
+mod records;
+
 use super::*;
 use crate::coerce::merge_absence;
 
@@ -31,12 +33,19 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, value, Some(ty))?;
             let value = self.fit(ctx, value, ty)?;
             self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
-            return Ok(value);
+            return Ok(self.bigint_view(ctx, value));
         }
         ensure!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
         );
+        if let Some((k_ty, v_ty, _)) =
+            crate::collections::dict_entry_types(ctx, array.get_type(ctx))
+        {
+            let key = self.expression_with(ctx, index, Some(k_ty))?;
+            let val = self.expression_with(ctx, value, Some(v_ty))?;
+            return self.kv_set(ctx, array, key, val);
+        }
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
         let value = self.expression_with(ctx, value, Some(element))?;
@@ -52,8 +61,22 @@ impl<'s> FunctionBuilder<'s> {
         field: &str,
         value: &'s Expr,
     ) -> Result<Value> {
+        if let Expr::ClassRef(class_name) = object {
+            return self.class_static_field_set(ctx, class_name, field, value);
+        }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        if let Some((_, v_ty, _)) = crate::collections::dict_entry_types(ctx, record.get_type(ctx))
+        {
+            let key = self.string(ctx, field);
+            let val = self.expression_with(ctx, value, Some(v_ty))?;
+            return self.kv_set(ctx, record, key, val);
+        }
+        if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
+            && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)
+        {
+            return self.class_setter_call(ctx, record, owner_class, &type_args, setter, value);
+        }
         ensure!(
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"
@@ -71,113 +94,7 @@ impl<'s> FunctionBuilder<'s> {
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, record, field.to_string(), value)
         });
-        Ok(value)
-    }
-
-    /// `{ a: …, b: … }`: evaluate fields in source order, allocate in record order.
-    pub(super) fn record_literal(
-        &mut self,
-        ctx: &mut Context,
-        names: &[&str],
-        args: &'s [Expr],
-        expected: Option<TypeHandle>,
-    ) -> Result<Value> {
-        // A record or variant where `T | undefined` is expected is a `T`.
-        let expected = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
-        if let Some(ty) = expected
-            && ty.deref(ctx).is::<perry_mir::types::VariantType>()
-        {
-            return self.variant_literal(ctx, ty, names, args);
-        }
-        if let Some(record) =
-            expected.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
-        {
-            let missing: Vec<_> = record
-                .deref(ctx)
-                .fields()
-                .map_err(|_| anyhow!("record without fields"))?
-                .iter()
-                .filter(|(name, ty)| {
-                    !names.contains(&name.as_str())
-                        && !absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
-                })
-                .map(|(name, _)| name.to_string())
-                .collect();
-            if !missing.is_empty() {
-                return Err(PerryDiagnostic::error(
-                    DiagnosticCode::MissingRequiredField,
-                    format!("missing required record fields: {}", missing.join(", ")),
-                )
-                .into());
-            }
-        }
-        let expected = expected
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
-            .filter(|record| {
-                record.deref(ctx).fields().is_ok_and(|fields| {
-                    names
-                        .iter()
-                        .all(|name| fields.iter().any(|(field, _)| field.as_str() == *name))
-                        && fields.iter().all(|(name, ty)| {
-                            names.contains(&name.as_str())
-                                || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
-                        })
-                })
-            });
-        let mut values = Vec::with_capacity(args.len());
-        for (&name, arg) in names.iter().zip(args) {
-            let field_type = match expected {
-                Some(record) => record.deref(ctx).field(name).map(|(_, ty)| ty),
-                _ => None,
-            };
-            let value = self.expression_with(ctx, arg, field_type)?;
-            let value = match field_type {
-                Some(field_type) => self.fit(ctx, value, field_type)?,
-                None => value,
-            };
-            values.push((name, value));
-        }
-        // With a matching expected type the fields were fitted to it; that includes recursive
-        // records, which no literal's own structure can name. Its fields the literal omits
-        // are `undefined`, by record position.
-        let (record, missing) = match expected {
-            Some(record) => {
-                let missing: Vec<(usize, TypeHandle)> = record
-                    .deref(ctx)
-                    .fields()
-                    .map_err(|_| anyhow!("record without fields"))?
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (name, _))| !names.contains(&name.as_str()))
-                    .map(|(index, (_, ty))| (index, *ty))
-                    .collect();
-                (record, missing)
-            }
-            None => {
-                let fields = values
-                    .iter()
-                    .map(|&(name, value)| (name.to_string(), value.get_type(ctx)))
-                    .collect();
-                (self.shapes.mir_record(ctx, fields)?, Vec::new())
-            }
-        };
-        let mut positioned = Vec::with_capacity(values.len() + missing.len());
-        for (index, ty) in missing {
-            positioned.push((
-                index,
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
-            ));
-        }
-        for (name, value) in values {
-            let (index, _) = record
-                .deref(ctx)
-                .field(name)
-                .with_context(|| format!("record has no field {name}"))?;
-            positioned.push((index, value));
-        }
-        positioned.sort_by_key(|(index, _)| *index);
-        let operands = positioned.into_iter().map(|(_, value)| value).collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+        Ok(self.bigint_view(ctx, value))
     }
 
     /// `new C(…)` of a class that Perry HIR made from an object literal.
@@ -196,7 +113,7 @@ impl<'s> FunctionBuilder<'s> {
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
-        self.record_literal(ctx, &names, args, expected)
+        self.record_literal(ctx, names, args, expected)
     }
 
     /// `[…]`, with the element type from `expected` or from the items.
@@ -206,9 +123,9 @@ impl<'s> FunctionBuilder<'s> {
         items: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let element = match expected.map(|ty| {
-            TypedHandle::<ArrayType>::from_handle(optional_value(ctx, ty).unwrap_or(ty), ctx)
-        }) {
+        let element = match expected
+            .map(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx))
+        {
             Some(Ok(array)) => Some(array.deref(ctx).element()),
             _ => None,
         };
@@ -225,18 +142,28 @@ impl<'s> FunctionBuilder<'s> {
             (Some(element), _) => element,
             (None, Some((first, rest))) => {
                 let first = first.get_type(ctx);
-                let inner = optional_value(ctx, first).unwrap_or(first);
+                let inner = present_type(ctx, first);
                 let mut states = absence(ctx, first);
+                let mut uniform = true;
                 for value in rest {
                     let ty = value.get_type(ctx);
-                    ensure!(
-                        optional_value(ctx, ty).unwrap_or(ty) == inner,
-                        "array literals must have one element type"
-                    );
+                    if present_type(ctx, ty) != inner {
+                        uniform = false;
+                        break;
+                    }
                     states = merge_absence(states, absence(ctx, ty));
                 }
+                if !uniform {
+                    let fields: Vec<(String, TypeHandle)> = values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| (format!("_{i}"), v.get_type(ctx)))
+                        .collect();
+                    let record = self.shapes.mir_tuple(ctx, fields)?;
+                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
+                }
                 states.map_or(inner, |states| {
-                    perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                    perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 })
             }
             (None, None) => bail!("an empty array literal needs a declared element type"),
@@ -246,18 +173,6 @@ impl<'s> FunctionBuilder<'s> {
             .map(|v| self.fit(ctx, v, element))
             .collect::<Result<_>>()?;
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
-    }
-
-    /// `local.push(value)` on an array local.
-    pub(super) fn array_push(
-        &mut self,
-        ctx: &mut Context,
-        array_id: LocalId,
-        value: &'s Expr,
-    ) -> Result<Value> {
-        let slot = self.local(array_id)?;
-        let array = self.load(ctx, slot)?;
-        self.push_values(ctx, array, std::slice::from_ref(value))
     }
 
     /// `array.push(…values)`: every value is evaluated and fitted to the element type before
@@ -286,7 +201,42 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_length(&mut self, ctx: &mut Context, array: Value) -> Value {
         let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
         self.emit_value(ctx, |ctx| {
-            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
         })
+    }
+
+    pub(super) fn peek_record_type(
+        &self,
+        ctx: &Context,
+        expr: &Expr,
+    ) -> Option<TypedHandle<RecordType>> {
+        match expr {
+            Expr::LocalGet(id) => {
+                let local = self.locals.get(id)?;
+                let ty = self.slot_type(ctx, local.slot).ok()?;
+                let inner = present_type(ctx, ty);
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } => {
+                let rec = self.peek_record_type(ctx, object)?;
+                let (_, field_ty) = rec.deref(ctx).field(property)?;
+                let inner = present_type(ctx, field_ty);
+                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::FuncRef(id) = &**callee
+                    && let Some(sig) = self.signatures.get(id)
+                    && let Some(ret) = sig.result
+                {
+                    let inner = present_type(ctx, ret.carrier);
+                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }

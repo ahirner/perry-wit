@@ -1,13 +1,55 @@
+mod effects;
+mod facts;
+mod optimization;
+
+use crate::{
+    attrs::{BinaryKind, CompareKind},
+    calls::{AwaitOp, set_async, set_atomic_construction, set_exported},
+    collections::{ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp},
+    control::ReturnOp,
+    effects::Failure,
+    facts::{
+        ProgramFacts, constrain_signature, specialize, specialized_implementation,
+        verify_lossless_module, with_fact_limits,
+    },
+    heap::FieldGetOp,
+    intrinsics::{Combinator, IntrinsicOp, PromiseCombinatorOp},
+    liveness::LiveValues,
+    pipeline::{FnPass, canonicalize},
+    scalar::{BinaryOp, CompareOp},
+};
 use pliron::{
+    analyses::liveness::{Liveness, LivenessTq},
+    attribute::AttrObj,
+    builtin::{
+        attr_interfaces::TypedAttrInterface,
+        attributes::{FPDoubleAttr, IntegerAttr, TypeAttr},
+        op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
+        ops::{ConstantOp, FuncOp},
+        type_interfaces::FunctionTypeInterface,
+        types::{FP64Type, FunctionType, IntegerType, Signedness},
+    },
+    common_traits::Verify,
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    graph::{
+        dominance::DomInfo,
+        walkers::{IRNode, WALKCONFIG_PREORDER_FORWARD, uninterruptible::immutable::walk_op},
+    },
+    irbuild::{IRStatus, inserter::OpInsertionPoint, match_rewrite::PassWrapper},
     irfmt::parsers::spaced,
+    linked_list::ContainsLinkedList,
+    op::Op,
     operation::{Operation, verify_operation},
-    opts::dce::dce,
+    opts::{constants::ConstFoldInterface, dce::dce, mem2reg::mem2reg},
     parsable::parse_from_str,
+    pass::{Analysis, AnalysisManager, Pass, PassResult, Passes},
     printable::Printable,
     result::Result,
+    r#type::{TypeHandle, Typed, TypedHandle},
+    utils::apint::{APInt, bw},
+    value::Value,
 };
+use std::{collections::BTreeSet, fmt::Write};
 
 /// The temporary-record workload of `wasi.execution.scaling.temporary_records`, as the HIR→MIR
 /// builder (P2.2) is expected to emit it: `make` inlined, tier not yet classified.
@@ -49,6 +91,44 @@ fn print(ctx: &Context, op: Ptr<Operation>) -> String {
     Operation::get_op_dyn(op, ctx).disp(ctx).to_string()
 }
 
+/// The function called `name` in `module`.
+fn function(ctx: &Context, module: Ptr<Operation>, name: &str) -> FuncOp {
+    crate::aggregates::functions(module, ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == name)
+        .unwrap_or_else(|| panic!("no function {name}"))
+}
+
+/// The first operation of kind `O` in `function`.
+fn first<O: Op>(ctx: &Context, function: &FuncOp) -> Ptr<Operation> {
+    crate::aggregates::operations(ctx, function)
+        .into_iter()
+        .find(|&op| Operation::get_op::<O>(op, ctx).is_some())
+        .unwrap_or_else(|| panic!("no {}", O::get_opid_static()))
+}
+
+/// Freshly computed program facts, bypassing any analysis cache.
+fn facts(ctx: &Context, module: Ptr<Operation>) -> Result<ProgramFacts> {
+    ProgramFacts::compute(module, ctx, &mut AnalysisManager::default())
+}
+
+/// The value SCCP folds `op(lhs, rhs)` to.
+fn fold<O: ConstFoldInterface>(
+    ctx: &mut Context,
+    op: impl FnOnce(&mut Context, Value, Value) -> O,
+    lhs: impl TypedAttrInterface + Clone,
+    rhs: impl TypedAttrInterface + Clone,
+) -> AttrObj {
+    let a = ConstantOp::new(ctx, Box::new(lhs.clone())).get_result(ctx);
+    let b = ConstantOp::new(ctx, Box::new(rhs.clone())).get_result(ctx);
+    op(ctx, a, b)
+        .check_fold(ctx, &[Some(Box::new(lhs)), Some(Box::new(rhs))])
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("constant operands fold")
+}
+
 /// Normalize printer artifacts that depend on parse order: location references (` !N`, which
 /// point into an outline table `disp` omits) and uniquing suffixes on SSA and block names.
 fn normalized(text: &str) -> String {
@@ -62,12 +142,30 @@ fn normalized(text: &str) -> String {
         .join("\n")
 }
 
+fn round_trip(ctx: &Context, module: Ptr<Operation>) -> Result<String> {
+    verify_operation(module, ctx)?;
+    let printed = print(ctx, module);
+    let reparsed_ctx = &mut Context::new();
+    let reparsed = parse(reparsed_ctx, &normalized(&printed));
+    verify_operation(reparsed, reparsed_ctx)?;
+    assert_eq!(
+        normalized(&printed),
+        normalized(&print(reparsed_ctx, reparsed))
+    );
+    Ok(printed)
+}
+
 #[test]
 fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, TEMPORARY_RECORDS);
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
+    let alloc = Operation::get_op::<crate::AllocOp>(
+        first::<crate::AllocOp>(ctx, &function(ctx, module, "run")),
+        ctx,
+    )
+    .unwrap();
+    alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
+    let printed = round_trip(ctx, module)?;
     for expected in [
         "perry.alloc Unassigned (",
         "perry.record <Point { x: builtin.fp64",
@@ -80,13 +178,14 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
             "missing {expected} in\n{printed}"
         );
     }
-    let reparsed_ctx = &mut Context::new();
-    // Printed `!N` location references point into an outline table that `disp` omits.
-    let reparsed = parse(reparsed_ctx, &normalized(&printed));
-    verify_operation(reparsed, reparsed_ctx)?;
-    assert_eq!(
-        normalized(&printed),
-        normalized(&print(reparsed_ctx, reparsed))
+    let invalid = TEMPORARY_RECORDS.replace(
+        "more = perry.compare Lt i, n : builtin.integer i1;",
+        "more = builtin.constant <builtin.integer <1: i32>> : builtin.integer i32;",
+    );
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("condition must be a signless i1")
     );
     Ok(())
 }
@@ -119,7 +218,7 @@ fn verifier_rejects_ill_typed_heap_ops() {
     let flag = "builtin.integer i1";
     let cases = [
         (
-            format!("p = perry.alloc Unassigned (v) : {POINT};"),
+            format!("b = perry.undef : {flag}; p = perry.alloc Unassigned (b) : {POINT};"),
             "has 2 fields but perry.alloc supplies 1",
         ),
         (
@@ -139,6 +238,18 @@ fn verifier_rejects_ill_typed_heap_ops() {
             "not an allocation tier",
         ),
         (
+            format!(
+                "p = perry.alloc Unassigned (v, v) : {POINT}; x = perry.field_get p.\"x\" : perry.string;"
+            ),
+            "field x has a different type",
+        ),
+        (
+            format!(
+                "p = perry.alloc Unassigned (v, v) : {POINT}; x = perry.field_present p.\"x\" : builtin.integer si1;"
+            ),
+            "field x has a different type",
+        ),
+        (
             "c = perry.compare Lt v, v : builtin.fp64;".to_string(),
             "must produce a signless i1",
         ),
@@ -154,6 +265,43 @@ fn verifier_rejects_ill_typed_heap_ops() {
         "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.\"y\" = v; y = perry.field_get p.\"y\" : builtin.fp64;"
     )))
     .expect("well-typed heap ops verify");
+    for (source, target, valid) in [
+        ("perry.string", POINT, false),
+        ("perry.exception", "builtin.fp64", false),
+        ("perry.bigint", "builtin.fp64", false),
+        ("builtin.integer si8", "builtin.fp64", true),
+        ("perry.numeric", "builtin.fp64", true),
+        (POINT, POINT, true),
+    ] {
+        let text = single_block(&format!("copy = perry.json_copy v : {target};"))
+            .replacen("(builtin.fp64)", &format!("({source})"), 1)
+            .replacen("v: builtin.fp64", &format!("v: {source}"), 1);
+        let result = verify_text(&text);
+        assert_eq!(result.is_ok(), valid, "{source} -> {target}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.contains("json_copy"), "{error}");
+        }
+    }
+    for fields in [vec![0, 0], vec![2]] {
+        let ctx = &mut Context::new();
+        let module = parse(
+            ctx,
+            &single_block(&format!("p = perry.alloc Task (v, v) : {POINT};")),
+        );
+        let alloc = Operation::get_op::<crate::AllocOp>(
+            first::<crate::AllocOp>(ctx, &function(ctx, module, "f")),
+            ctx,
+        )
+        .unwrap();
+        alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(fields));
+        let error = verify_operation(module, ctx).expect_err("invalid field order");
+        assert!(
+            error
+                .disp(ctx)
+                .to_string()
+                .contains("invalid property insertion order")
+        );
+    }
 }
 
 #[test]
@@ -188,115 +336,29 @@ builtin.module @m {
             && printed.contains("next: perry.record <Node> }>"),
         "{printed}"
     );
-    Ok(())
-}
-
-#[test]
-fn dce_removes_unused_allocation_and_reads() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(
-        ctx,
-        &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.\"x\" : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
-        ),
-    );
-    assert_eq!(dce(module, ctx)?, IRStatus::Changed);
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(
-        !printed.contains("perry.alloc")
-            && !printed.contains("perry.field_get")
-            && !printed.contains("perry.binary"),
-        "{printed}"
-    );
-    Ok(())
-}
-
-#[test]
-fn dce_keeps_field_writes() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(
-        ctx,
-        &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.\"x\" = v;",
-        ),
-    );
-    dce(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(
-        printed.contains("perry.alloc") && printed.contains("perry.field_set"),
-        "{printed}"
-    );
-    Ok(())
-}
-
-/// The sum loop as the builder emits it: mutable `let` bindings as slots, no SSA joins.
-const SLOTTED_LOOP: &str = r#"
-builtin.module @m {
-  ^module():
-    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
-      ^entry(n: builtin.fp64):
-        i = perry.local : perry.slot <builtin.fp64>;
-        sum = perry.local : perry.slot <builtin.fp64>;
-        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
-        perry.store i = zero;
-        perry.store sum = zero;
-        perry.br ^header()
-      ^header():
-        iv = perry.load i : builtin.fp64;
-        more = perry.compare Lt iv, n : builtin.integer i1;
-        perry.cond_br if more ^body() else ^exit()
-      ^body():
-        ib = perry.load i : builtin.fp64;
-        sb = perry.load sum : builtin.fp64;
-        next_sum = perry.binary Add sb, ib : builtin.fp64;
-        perry.store sum = next_sum;
-        one = builtin.constant <builtin.double 1.0> : builtin.fp64;
-        next_i = perry.binary Add ib, one : builtin.fp64;
-        perry.store i = next_i;
-        perry.br ^header()
-      ^exit():
-        result = perry.load sum : builtin.fp64;
-        perry.return result
-    }
-}
-"#;
-
-#[test]
-fn mem2reg_turns_slots_into_block_arguments() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(ctx, SLOTTED_LOOP);
-    verify_operation(module, ctx)?;
-    let status =
-        pliron::opts::mem2reg::mem2reg(module, ctx, &mut pliron::pass::AnalysisManager::default())?;
-    assert_eq!(status, IRStatus::Changed);
-    verify_operation(module, ctx)?;
-    let printed = print(ctx, module);
-    for gone in ["perry.local", "perry.load", "perry.store"] {
-        assert!(!printed.contains(gone), "{gone} survived:\n{printed}");
-    }
-    let header = printed
-        .lines()
-        .find(|line| line.trim_start().starts_with("^header"))
-        .expect("header block");
-    assert_eq!(
-        header.matches("builtin.fp64").count(),
-        2,
-        "loop header must carry i and sum: {header}"
-    );
+    let f = function(ctx, module, "f");
+    set_exported(ctx, &f);
+    let returned = first::<ReturnOp>(ctx, &f);
+    assert!(!facts(ctx, module)?.is_count(ctx, &f, returned.deref(ctx).get_operand(0)));
     Ok(())
 }
 
 #[test]
 fn verifier_rejects_ill_typed_slot_access() {
-    let error = verify_text(&single_block(
-        "s = perry.local : perry.slot <builtin.fp64>; b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; perry.store s = b;",
-    ))
-    .expect_err("store of the wrong type");
-    assert!(
-        error.contains("value type differs from the slot"),
-        "{error}"
-    );
+    for access in [
+        "perry.store s = b;",
+        "x = perry.load s : perry.string;",
+        "x = perry.global_load s : perry.string;",
+    ] {
+        let error = verify_text(&single_block(&format!(
+            "s = perry.local : perry.slot <builtin.fp64>; b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; {access}",
+        )))
+        .expect_err("access with the wrong type");
+        assert!(
+            error.contains("value type differs from the slot"),
+            "{error}"
+        );
+    }
 }
 
 /// `wasi.execution.scaling.retained_records` with a helper call, arrays and an optional read.
@@ -355,24 +417,27 @@ builtin.module @tasks {
 
 #[test]
 fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
-    for input in [RETAINED_RECORDS, ASYNC_STEP] {
+    let dictionary = single_block(
+        "value = perry.undef : perry.array <perry.record <Renamed dict_tuple [ _0: perry.string, _1: builtin.fp64 ]>>;",
+    );
+    let recursive_collection = single_block(
+        "value = perry.undef : perry.record <Recursive map_box [ _0: perry.array <perry.record <Entry map_tuple [ _0: perry.string, _1: perry.record <Recursive>, _2: builtin.integer i1, _3: builtin.fp64 ]>>, _1: builtin.fp64, _2: builtin.fp64, _3: builtin.fp64 ]>;",
+    );
+    for input in [
+        RETAINED_RECORDS,
+        ASYNC_STEP,
+        &dictionary,
+        &recursive_collection,
+    ] {
         let ctx = &mut Context::new();
         let module = parse(ctx, input);
-        verify_operation(module, ctx)?;
-        let printed = print(ctx, module);
-        let reparsed_ctx = &mut Context::new();
-        let reparsed = parse(reparsed_ctx, &normalized(&printed));
-        verify_operation(reparsed, reparsed_ctx)?;
-        assert_eq!(
-            normalized(&printed),
-            normalized(&print(reparsed_ctx, reparsed))
-        );
+        round_trip(ctx, module)?;
     }
     Ok(())
 }
 
 #[test]
-fn verifier_rejects_mismatched_calls_and_awaits() {
+fn verifier_rejects_malformed_operation_contracts() {
     let mismatched_call = RETAINED_RECORDS.replace(
         "point = perry.call make (i) : perry.record <Point>;",
         "point = perry.call make (i, i) : perry.record <Point>;",
@@ -399,6 +464,109 @@ fn verifier_rejects_mismatched_calls_and_awaits() {
         error.contains("perry.promise of the result type"),
         "{error}"
     );
+    let ctx = &mut Context::new();
+    let number = FP64Type::get(ctx).into();
+    let value = crate::UndefOp::new(ctx, number).get_result(ctx);
+    for operands in [vec![], vec![value], vec![value, value]] {
+        let malformed = Operation::new_op::<AwaitOp>(ctx, vec![number], operands, vec![], 0);
+        let error =
+            verify_operation(malformed.get_operation(), ctx).expect_err("invalid await source");
+        assert!(
+            error
+                .disp(ctx)
+                .to_string()
+                .contains("perry.promise of the result type")
+        );
+    }
+
+    let array = ArrayNewOp::new(ctx, number, vec![value]).get_result(ctx);
+    for (operands, results) in [
+        (vec![], vec![]),
+        (vec![array, value, value], vec![]),
+        (vec![array, value], vec![number]),
+    ] {
+        let malformed = Operation::new_op::<crate::ArrayPushOp>(ctx, results, operands, vec![], 0);
+        assert!(
+            malformed.verify(ctx).is_err(),
+            "direct verification must reject malformed arity"
+        );
+        assert!(malformed.verify_interfaces(ctx).is_err());
+    }
+    let predicate = IntegerType::get(ctx, 1, Signedness::Signless).into();
+    for (operands, results, valid) in [
+        (vec![value, value], vec![predicate], true),
+        (vec![value], vec![predicate], false),
+        (vec![value, value], vec![], false),
+        (vec![value, value], vec![predicate, predicate], false),
+    ] {
+        let compare = Operation::new_op::<CompareOp>(ctx, results, operands, vec![], 0);
+        compare.set_attr_perry_compare_kind(ctx, CompareKind::Eq);
+        assert_eq!(compare.verify(ctx).is_ok(), valid);
+        assert_eq!(compare.verify_interfaces(ctx).is_ok(), valid);
+    }
+    let missing_result = Operation::new_op::<crate::WrapOp>(ctx, vec![], vec![value], vec![], 0);
+    assert!(missing_result.verify(ctx).is_err());
+    let missing_result = Operation::new_op::<ArrayNewOp>(ctx, vec![], vec![value], vec![], 0);
+    assert!(missing_result.verify(ctx).is_err());
+    assert!(
+        crate::ConcatOp::from_sources(ctx, vec![])
+            .verify(ctx)
+            .is_err()
+    );
+    assert!(
+        crate::ConcatSegmentsOp::new(ctx, value)
+            .verify(ctx)
+            .is_err()
+    );
+
+    let promises = "p = perry.promise_resolved v : perry.promise <builtin.fp64>; \
+        ps = perry.array_new Unassigned (p) : perry.array <perry.promise <builtin.fp64>>; \
+        settled = perry.undef : perry.settled <builtin.fp64>;";
+    for (operation, result) in [
+        (
+            "perry.promise_combinator All ps",
+            "perry.promise <perry.array <builtin.fp64>>",
+        ),
+        (
+            "perry.promise_combinator Race ps",
+            "perry.promise <builtin.fp64>",
+        ),
+        (
+            "perry.promise_combinator AllSettled ps",
+            "perry.promise <perry.array <perry.settled <builtin.fp64>>>",
+        ),
+        ("perry.settled_field Status settled", "perry.string"),
+        (
+            "perry.settled_field Value settled",
+            "perry.optional <builtin.fp64,Undefined>",
+        ),
+        (
+            "perry.settled_field Reason settled",
+            "perry.optional <perry.exception,Undefined>",
+        ),
+        ("perry.promise_resolved v", "perry.promise <builtin.fp64>"),
+        ("perry.promise_rejected v", "perry.promise <perry.string>"),
+    ] {
+        let invalid = if operation.contains("rejected") || !result.starts_with("perry.promise") {
+            "builtin.fp64"
+        } else {
+            "perry.promise <perry.exception>"
+        };
+        for (ty, valid) in [(result, true), (invalid, false)] {
+            let body = format!("{promises} r = {operation} : {ty};");
+            assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+        }
+    }
+    assert!(PromiseCombinatorOp::new(ctx, Combinator::All, value).is_none());
+    assert!(crate::SettledFieldOp::new(ctx, crate::SettledField::Value, value).is_none());
+
+    let status = crate::RaiseOp::new(ctx, value).get_result(ctx);
+    assert!(crate::CatchOp::new(ctx, status).verify(ctx).is_ok());
+    let catch = Operation::new_op::<crate::CatchOp>(ctx, vec![number], vec![status], vec![], 0);
+    assert!(
+        catch.verify(ctx).is_err(),
+        "catch must produce an exception"
+    );
 
     let wrong_push = RETAINED_RECORDS.replace(
         "perry.array_push items <- point;",
@@ -423,6 +591,10 @@ fn optional_reads_coerce_and_unwrap() {
     )))
     .expect("well-typed optional ops verify");
 
+    for (payload, valid) in [("builtin.fp64", true), ("perry.string", false)] {
+        let body = format!("x = perry.wrap v : perry.optional <{payload},Null>;");
+        assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+    }
     let cases = [
         (
             format!(
@@ -456,23 +628,74 @@ fn optional_reads_coerce_and_unwrap() {
             "{body}: expected {expected:?}, got {error}"
         );
     }
+    for (ty, width, signless) in [
+        ("i1", 1, true),
+        ("si1", 1, false),
+        ("ui1", 1, false),
+        ("i32", 32, true),
+        ("si32", 32, false),
+        ("ui32", 32, false),
+    ] {
+        for (operation, valid) in [
+            ("perry.array_len a", width == 32),
+            ("perry.string_len text", width == 32),
+            ("perry.is_undefined m", width == 1 && signless),
+            ("perry.is_null m", width == 1 && signless),
+            ("perry.intrinsic NumberIsNaN (v)", width == 1),
+            ("perry.raise v", width == 32 && signless),
+        ] {
+            let body = format!(
+                "{read} text = perry.string_const \"\" : perry.string; x = {operation} : builtin.integer {ty};"
+            );
+            assert_eq!(
+                verify_text(&single_block(&body)).is_ok(),
+                valid,
+                "{operation}: {ty}"
+            );
+        }
+    }
+    let numeric = "s = perry.undef : perry.string; n = perry.undef : perry.numeric; \
+        i = perry.undef : builtin.integer si32; bytes = perry.undef : perry.bytes;";
+    let optional_number = "perry.optional <builtin.fp64,Undefined>";
+    for (operation, result, valid) in [
+        ("BytesGet (bytes, v)", optional_number, true),
+        (
+            "BytesGet (bytes, v)",
+            "perry.optional <builtin.fp64,Null>",
+            true,
+        ),
+        ("BytesGet (bytes, v)", "builtin.fp64", false),
+        ("BytesGet (bytes)", optional_number, false),
+        ("BytesGet (bytes, v, v)", optional_number, false),
+        ("BytesGet (bytes, n)", optional_number, false),
+        ("StringCodePointAt (s, v)", optional_number, true),
+        ("ParseInt (s, n)", "builtin.integer si32", true),
+        ("ParseInt (s, i)", "perry.numeric", true),
+        ("BytesAt (bytes, i)", "builtin.integer si32", true),
+        ("BytesAt (bytes, i)", "perry.numeric", false),
+        ("NumberToStringRadix (n, v)", "perry.string", true),
+        ("NumberToStringRadix (v, n)", "perry.string", false),
+        ("NumberInspect (n)", "perry.string", false),
+        ("MathFloor (i)", "builtin.integer si32", true),
+        ("MathFloor (i)", "builtin.integer si64", false),
+        ("MathFloor (n)", "perry.numeric", true),
+    ] {
+        let body = format!("{numeric} r = perry.intrinsic {operation} : {result};");
+        assert_eq!(verify_text(&single_block(&body)).is_ok(), valid, "{body}");
+    }
 }
 
 #[test]
 fn may_throw_marks_calls_unwraps_and_writes() {
-    use crate::exceptions::MayThrowInterface;
-    use pliron::{
-        graph::walkers::{
-            IRNode, WALKCONFIG_PREORDER_FORWARD, uninterruptible::immutable::walk_op,
-        },
-        op::op_cast,
-    };
     let ctx = &mut Context::new();
     let module = parse(
         ctx,
         &RETAINED_RECORDS.replace(
             "perry.return count",
-            "perry.array_set items[zero] = first;\n        perry.return count",
+            "perry.array_set items[zero] = first;\n\
+             abs = perry.intrinsic MathAbs (count) : builtin.integer i32;\n\
+             status = perry.caught : builtin.integer i32;\n\
+             perry.return count",
         ),
     );
     verify_operation(module, ctx).expect("verifies");
@@ -484,9 +707,14 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         module,
         |ctx, throwing, node| {
             if let IRNode::Operation(op) = node {
-                let op = Operation::get_op_dyn(op, ctx);
-                if let Some(may_throw) = op_cast::<dyn MayThrowInterface>(&*op) {
-                    throwing.push(format!("{} {:?}", op.get_opid(), may_throw.exception(ctx)));
+                if Operation::is_op::<IntrinsicOp>(op, ctx) {
+                    assert!(
+                        !crate::may_throw(ctx, op),
+                        "a pure intrinsic still has a status boundary"
+                    );
+                }
+                if let Some(exception) = crate::semantics::exception(ctx, op) {
+                    throwing.push(format!("{} {:?}", Operation::get_opid(op, ctx), exception));
                 }
             }
         },
@@ -496,22 +724,11 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         [
             "perry.call Any",
             "perry.unwrap TypeError",
-            "perry.array_set RangeError"
+            "perry.array_set RangeError",
+            "perry.intrinsic Any"
         ],
         "array_get, to_number and the rest are pure reads"
     );
-}
-
-#[test]
-fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
-    let ctx = &mut Context::new();
-    let module = parse(ctx, TEMPORARY_RECORDS);
-    crate::pipeline::canonicalize(module, ctx)?;
-    let printed = print(ctx, module);
-    assert!(!printed.contains("perry.alloc"), "{printed}");
-    assert!(!printed.contains("perry.field_get"), "{printed}");
-    assert!(!printed.contains("perry.local"), "{printed}");
-    Ok(())
 }
 
 #[test]
@@ -526,12 +743,7 @@ fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
     ));
     let ctx = &mut Context::new();
     let module = parse(ctx, &input);
-    verify_operation(module, ctx)?;
-    let printed = normalized(&print(ctx, module));
-    let ctx = &mut Context::new();
-    let reparsed = parse(ctx, &printed);
-    verify_operation(reparsed, ctx)?;
-    assert_eq!(printed, normalized(&print(ctx, reparsed)));
+    round_trip(ctx, module)?;
     let invalid = single_block(&format!(
         r#"value = perry.variant_new "text" (v) : {variant};"#
     ));

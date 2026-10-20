@@ -4,7 +4,6 @@ use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 use std::collections::HashSet;
 
 pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
-    use pliron::{builtin::op_interfaces::OneRegionInterface, linked_list::ContainsLinkedList};
     fn visit(
         ctx: &Context,
         ty: TypeHandle,
@@ -15,7 +14,7 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
             return;
         }
         let ty = ty.deref(ctx);
-        if let Some(resource) = ty.downcast_ref::<perry_mir::types::ResourceType>() {
+        if let Some(resource) = ty.downcast_ref::<perry_mir::ResourceType>() {
             keys.insert(resource.key());
         } else if let Some(record) = ty.downcast_ref::<RecordType>() {
             if let Ok(fields) = record.fields() {
@@ -25,11 +24,11 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
             }
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             visit(ctx, array.element(), seen, keys);
-        } else if let Some(optional) = ty.downcast_ref::<perry_mir::types::OptionalType>() {
+        } else if let Some(optional) = ty.downcast_ref::<perry_mir::OptionalType>() {
             visit(ctx, optional.value(), seen, keys);
-        } else if let Some(promise) = ty.downcast_ref::<perry_mir::types::PromiseType>() {
+        } else if let Some(promise) = ty.downcast_ref::<perry_mir::PromiseType>() {
             visit(ctx, promise.value(), seen, keys);
-        } else if let Some(variant) = ty.downcast_ref::<perry_mir::types::VariantType>() {
+        } else if let Some(variant) = ty.downcast_ref::<perry_mir::VariantType>() {
             for (_, payload) in variant.cases() {
                 if let Some(payload) = payload {
                     visit(ctx, *payload, seen, keys);
@@ -40,15 +39,8 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
     let mut seen = HashSet::new();
     let mut keys = HashSet::new();
     for function in functions {
-        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            for value in block.deref(ctx).arguments() {
-                visit(ctx, value.get_type(ctx), &mut seen, &mut keys);
-            }
-            for op in block.deref(ctx).iter(ctx) {
-                for value in op.deref(ctx).results() {
-                    visit(ctx, value.get_type(ctx), &mut seen, &mut keys);
-                }
-            }
+        for value in crate::analysis::function_values(ctx, function) {
+            visit(ctx, value.get_type(ctx), &mut seen, &mut keys);
         }
     }
     keys
@@ -103,11 +95,9 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
         b.br(ctx, next, vec![]);
         b.block = other;
     }
-    let trap = UnreachableOp::new(ctx).get_operation();
-    b.insert(ctx, trap);
+    b.trap(ctx);
     b.block = done;
-    let ret = ReturnOp::new(ctx, vec![]).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, vec![]);
     b.state
         .wasm
         .append_operation(ctx, function.get_operation(), 0);
@@ -212,15 +202,14 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, target, args);
         } else {
             self.task_free(ctx);
-            let trap = UnreachableOp::new(ctx).get_operation();
-            self.insert(ctx, trap);
+            self.trap(ctx);
         }
         self.block = normal;
     }
     fn check_resource_type(&self, ctx: &Context, ty: TypeHandle, key: u32) -> Result<()> {
         ensure!(
             ty.deref(ctx)
-                .downcast_ref::<perry_mir::types::ResourceType>()
+                .downcast_ref::<perry_mir::ResourceType>()
                 .is_some_and(|r| r.key() == key),
             "WIT resource requires its declared opaque SDK type"
         );

@@ -1,5 +1,22 @@
 //! Structured source control flow expressed as ordinary typed MIR blocks.
 use super::*;
+use crate::collections::LiveCursor;
+
+mod traversal;
+pub(super) use traversal::{ArrayOutput, Holes, Input, Projection, Span};
+
+#[derive(Clone, Copy)]
+pub(super) enum LoopCondition<'s> {
+    Before(Option<&'s Expr>),
+    After(&'s Expr),
+    Indices(Value, LoopBound),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LoopBound {
+    Fixed(Value),
+    Collection(Value),
+}
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
@@ -22,6 +39,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         discriminant: &'s Expr,
         cases: &'s [perry_hir::ir::SwitchCase],
+        label: Option<&'s str>,
     ) -> Result<()> {
         let value = self.expression(ctx, discriminant)?;
         let ty = value.get_type(ctx);
@@ -57,7 +75,10 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         self.jump(ctx, default);
-        self.controls.push(Control::Switch { break_to: done });
+        self.controls.push(Control::Switch {
+            label,
+            break_to: done,
+        });
         let guards = self.variant_guards.len();
         let mut fallthrough = false;
         for (index, (case, &block)) in cases.iter().zip(&blocks).enumerate() {
@@ -177,7 +198,7 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = exception.get_type(ctx);
                 let slot = self.entry_slot(ctx, ty);
                 self.store(ctx, slot, exception);
-                self.locals.insert(*id, slot);
+                self.locals.insert(*id, LocalBinding::plain(slot));
             }
             if let Some(rethrow) = rethrow_block {
                 self.finallies.push(outer);
@@ -225,7 +246,7 @@ impl<'s> FunctionBuilder<'s> {
         if self.handlers.is_empty() {
             self.emit(ctx, |ctx| {
                 let rethrow = RethrowOp::new(ctx, status);
-                perry_mir::exceptions::set_exit_only(ctx, &rethrow);
+                perry_mir::set_exit_only(ctx, &rethrow);
                 rethrow
             });
         } else {
@@ -239,46 +260,186 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         init: Option<&'s Stmt>,
-        condition: Option<&'s Expr>,
+        condition: LoopCondition<'s>,
         update: Option<&'s Expr>,
         body: &'s [Stmt],
-        body_first: bool,
+        label: Option<&'s str>,
     ) -> Result<()> {
         if let Some(init) = init {
-            self.statement(ctx, init)?;
+            self.statement(ctx, init, None)?;
         }
-        let header = self.new_block(ctx, "header");
-        let body_block = self.new_block(ctx, "body");
-        let latch = self.new_block(ctx, "latch");
-        let exit = self.new_block(ctx, "exit");
-        self.jump(ctx, if body_first { body_block } else { header });
+        let collection = match condition {
+            LoopCondition::Before(condition) => self.collection_loop(ctx, condition)?,
+            LoopCondition::After(_) | LoopCondition::Indices(..) => None,
+        };
+        self.repeat(
+            ctx,
+            "source",
+            condition,
+            update,
+            collection,
+            |b, ctx, next, done| {
+                b.controls.push(Control::Loop {
+                    label,
+                    continue_to: next,
+                    break_to: done,
+                });
+                let lowered = b.statements(ctx, body);
+                b.controls.pop();
+                lowered
+            },
+        )
+    }
 
+    /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
+    /// a cursor so deletes in the body neither skip nor repeat entries.
+    fn collection_loop(
+        &mut self,
+        ctx: &mut Context,
+        condition: Option<&'s Expr>,
+    ) -> Result<Option<CollectionTraversal>> {
+        let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition) else {
+            return Ok(None);
+        };
+        let (Ok(arr_slot), Ok(index)) = (self.local(arr_id), self.local(idx_id)) else {
+            return Ok(None);
+        };
+        let arr_val = self.load(ctx, arr_slot)?;
+        let Ok(collection) = self.defined(ctx, arr_val) else {
+            return Ok(None);
+        };
+        let ty = collection.get_type(ctx);
+        if !(crate::collections::is_collection_or_view_record(ctx, ty)
+            || crate::collections::map_entry_types(ctx, ty).is_some()
+            || crate::collections::set_entry_type(ctx, ty).is_some())
+        {
+            return Ok(None);
+        }
+        let cursor = LiveCursor::open(self, ctx, collection, index)?;
+        Ok(Some(CollectionTraversal {
+            index,
+            collection,
+            cursor,
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CollectionTraversal {
+    index: Value,
+    collection: Value,
+    cursor: Option<LiveCursor>,
+}
+
+impl<'s> FunctionBuilder<'s> {
+    fn repeat<T>(
+        &mut self,
+        ctx: &mut Context,
+        label: &str,
+        condition: LoopCondition<'s>,
+        update: Option<&'s Expr>,
+        collection: Option<CollectionTraversal>,
+        body: impl FnOnce(&mut Self, &mut Context, Ptr<BasicBlock>, Ptr<BasicBlock>) -> Result<T>,
+    ) -> Result<T> {
+        let header = self.new_block(ctx, &format!("{label}_header"));
+        let entered = self.new_block(ctx, &format!("{label}_body"));
+        let next = self.new_block(ctx, &format!("{label}_next"));
+        let done = self.new_block(ctx, &format!("{label}_done"));
+        let exhausted = if collection.is_some_and(|walk| walk.cursor.is_some()) {
+            self.new_block(ctx, "loop_exhausted")
+        } else {
+            done
+        };
+        let body_first = matches!(condition, LoopCondition::After(_));
+        self.jump(ctx, if body_first { entered } else { header });
         self.switch_to(header);
-        match condition {
-            None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
-            Some(Expr::Bool(false)) => self.jump(ctx, exit),
-            Some(condition) => {
-                let condition = self.condition(ctx, condition)?;
-                self.branch(ctx, condition, body_block, exit);
+        let test = match condition {
+            LoopCondition::Before(None | Some(Expr::Bool(true))) => None,
+            LoopCondition::Before(Some(condition)) | LoopCondition::After(condition) => {
+                Some(self.condition(ctx, condition)?)
+            }
+            LoopCondition::Indices(index, bound) => {
+                let current = self.load(ctx, index)?;
+                let limit = match bound {
+                    LoopBound::Fixed(limit) => limit,
+                    LoopBound::Collection(collection) => {
+                        self.collection_backing_length(ctx, collection)?
+                    }
+                };
+                Some(self.compare(ctx, CompareKind::Lt, current, limit))
+            }
+        };
+        match test {
+            Some(test) => self.branch(ctx, test, entered, exhausted),
+            None => self.jump(ctx, entered),
+        }
+        self.switch_to(entered);
+        if let Some(walk) = collection {
+            let current = self.load(ctx, walk.index)?;
+            let entries = self.collection_entries_array(ctx, walk.collection)?;
+            let entry = self.element_at(ctx, entries, current)?;
+            if let Some(cursor) = walk.cursor {
+                let one = self.number(ctx, 1.0);
+                let advanced = self.binary(ctx, BinaryKind::Add, current, one);
+                cursor.advance(self, ctx, advanced, entry)?;
+            }
+            if let Some(live) = self.collection_entry_live(ctx, entry)? {
+                let visit = self.new_block(ctx, "loop_live");
+                self.branch(ctx, live, visit, next);
+                self.switch_to(visit);
             }
         }
-
-        self.switch_to(body_block);
-        self.controls.push(Control::Loop {
-            continue_to: latch,
-            break_to: exit,
-        });
-        let lowered = self.statements(ctx, body);
-        self.controls.pop();
-        lowered?;
-        self.jump(ctx, latch);
-
-        self.switch_to(latch);
+        let output = body(self, ctx, next, done)?;
+        self.jump(ctx, next);
+        self.switch_to(next);
         if let Some(update) = update {
             self.effect(ctx, update)?;
         }
+        if let Some(walk) = collection
+            && let Some(cursor) = walk.cursor
+        {
+            let position = cursor.position(self, ctx)?;
+            self.store(ctx, walk.index, position);
+        } else if let LoopCondition::Indices(index, _) = condition {
+            let current = self.load(ctx, index)?;
+            let one = self.number(ctx, 1.0);
+            let advanced = self.binary(ctx, BinaryKind::Add, current, one);
+            self.store(ctx, index, advanced);
+        }
         self.jump(ctx, header);
-        self.switch_to(exit);
-        Ok(())
+        if exhausted != done {
+            self.switch_to(exhausted);
+            if let Some(walk) = collection
+                && let Some(cursor) = walk.cursor
+            {
+                cursor.exhausted(self, ctx)?;
+            }
+            self.jump(ctx, done);
+        }
+        self.switch_to(done);
+        Ok(output)
+    }
+
+    pub(crate) fn index_loop<T>(
+        &mut self,
+        ctx: &mut Context,
+        label: &str,
+        start: Value,
+        limit: Value,
+        body: impl FnOnce(&mut Self, &mut Context, Value, Ptr<BasicBlock>, Ptr<BasicBlock>) -> Result<T>,
+    ) -> Result<T> {
+        let index = self.entry_slot(ctx, start.get_type(ctx));
+        self.store(ctx, index, start);
+        self.repeat(
+            ctx,
+            label,
+            LoopCondition::Indices(index, LoopBound::Fixed(limit)),
+            None,
+            None,
+            |b, ctx, next, done| {
+                let current = b.load(ctx, index)?;
+                body(b, ctx, current, next, done)
+            },
+        )
     }
 }

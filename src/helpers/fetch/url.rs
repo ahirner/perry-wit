@@ -32,13 +32,8 @@ impl Output<'_> {
         self.length += 1;
         Ok(())
     }
-    fn encoded(&mut self, byte: u8, query: bool) -> Result<(), ()> {
-        if byte <= 32
-            || byte >= 127
-            || matches!(byte, b'"' | b'<' | b'>')
-            || (query && byte == b'\'')
-            || (!query && matches!(byte, b'?' | b'^' | b'`' | b'{' | b'}'))
-        {
+    fn encoded(&mut self, byte: u8, extra: &[u8]) -> Result<(), ()> {
+        if byte <= 32 || byte >= 127 || b"\"<>".contains(&byte) || extra.contains(&byte) {
             self.byte(b'%')?;
             self.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
             self.byte(b"0123456789ABCDEF"[(byte & 15) as usize])
@@ -232,47 +227,6 @@ fn dot(segment: &[u8]) -> usize {
     }
 }
 
-/// Returns secure, authority start/end, path start, and total byte length.
-/// Input storage is immutable and disjoint from output; no allocation occurs.
-pub(super) fn normalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
-    normalize_with_credentials(input, output, false)
-}
-
-fn normalize_with_credentials(
-    input: &[u8],
-    output: &mut [u8],
-    credentials: bool,
-) -> Result<[u32; 5], ()> {
-    let start = input.iter().position(|byte| *byte > 32).ok_or(())?;
-    let end = input.iter().rposition(|byte| *byte > 32).ok_or(())? + 1;
-    let input = &input[start..end];
-    if input
-        .iter()
-        .any(|byte| matches!(byte, b'\t' | b'\r' | b'\n'))
-    {
-        let reserve = input
-            .len()
-            .checked_mul(3)
-            .and_then(|length| length.checked_add(1))
-            .ok_or(())?;
-        if reserve > output.len() {
-            return Err(());
-        }
-        let (target, scratch) = output.split_at_mut(reserve);
-        let mut length = 0;
-        for byte in input
-            .iter()
-            .filter(|byte| !matches!(byte, b'\t' | b'\r' | b'\n'))
-        {
-            *scratch.get_mut(length).ok_or(())? = *byte;
-            length += 1;
-        }
-        canonicalize(&scratch[..length], target, credentials)
-    } else {
-        canonicalize(input, output, credentials)
-    }
-}
-
 fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u32; 5], ()> {
     let input = input.split(|byte| *byte == b'#').next().ok_or(())?;
     let scheme_end = input.iter().position(|byte| *byte == b':').ok_or(())?;
@@ -345,13 +299,7 @@ fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u
                     out.byte(b':')?;
                 }
                 for &byte in *bytes {
-                    if byte <= 32 || byte >= 127 || b"\"#<>?`{}/:;=@[\\]^|".contains(&byte) {
-                        out.byte(b'%')?;
-                        out.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
-                        out.byte(b"0123456789ABCDEF"[(byte & 15) as usize])?;
-                    } else {
-                        out.byte(byte)?;
-                    }
+                    out.encoded(byte, b"#?`{}/:;=@[\\]^|")?;
                 }
             }
             out.byte(b'@')?;
@@ -431,7 +379,7 @@ fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u
             }
             _ => {
                 for byte in segment {
-                    out.encoded(*byte, false)?;
+                    out.encoded(*byte, b"?^`{}")?;
                 }
                 if segments.peek().is_some() {
                     out.byte(b'/')?;
@@ -442,7 +390,7 @@ fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u
     if let Some(query) = query {
         out.byte(b'?')?;
         for byte in &path_query[query + 1..] {
-            out.encoded(*byte, true)?;
+            out.encoded(*byte, b"'")?;
         }
     }
     Ok([
@@ -452,73 +400,6 @@ fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u
         path_start as u32,
         out.length as u32,
     ])
-}
-
-/// Resolve an HTTP Location against a canonical absolute URL into disjoint storage.
-pub(super) fn resolve(base: &[u8], location: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
-    let location = location.trim_ascii();
-    let scheme = base.iter().position(|byte| *byte == b':').ok_or(())?;
-    let authority_end = base
-        .get(scheme + 3..)
-        .ok_or(())?
-        .iter()
-        .position(|byte| *byte == b'/')
-        .map(|at| at + scheme + 3)
-        .ok_or(())?;
-    let path_end = base
-        .iter()
-        .position(|byte| *byte == b'?')
-        .unwrap_or(base.len());
-    let mut location = location;
-    let colon = location.iter().position(|byte| *byte == b':');
-    let delimiter = location
-        .iter()
-        .position(|byte| matches!(byte, b'/' | b'\\' | b'?' | b'#'))
-        .unwrap_or(location.len());
-    let absolute = colon.is_some_and(|colon| colon < delimiter);
-    if absolute {
-        return normalize(location, output);
-    }
-    let prefix = if location.starts_with(b"//") || location.starts_with(b"\\\\") {
-        scheme + 1
-    } else if location.starts_with(b"/") || location.starts_with(b"\\") {
-        authority_end
-    } else if location.starts_with(b"?") {
-        path_end
-    } else if location.is_empty() || location.starts_with(b"#") {
-        base.len()
-    } else {
-        base[..path_end]
-            .iter()
-            .rposition(|byte| *byte == b'/')
-            .ok_or(())?
-            + 1
-    };
-    if location.starts_with(b"\\\\") {
-        // The canonical parser needs the scheme separator in its normal form.
-        location = &location[2..];
-    }
-    let network_backslashes = prefix == scheme + 1 && !location.starts_with(b"//");
-    let extra = if network_backslashes { 2 } else { 0 };
-    let size = prefix
-        .checked_add(location.len())
-        .and_then(|size| size.checked_add(extra))
-        .ok_or(())?;
-    let reserve = size
-        .checked_mul(4)
-        .and_then(|size| size.checked_add(64))
-        .ok_or(())?;
-    if reserve > output.len() {
-        return Err(());
-    }
-    let (target, scratch) = output.split_at_mut(reserve);
-    let source = scratch.get_mut(..size).ok_or(())?;
-    source[..prefix].copy_from_slice(&base[..prefix]);
-    if network_backslashes {
-        source[prefix..prefix + 2].copy_from_slice(b"//");
-    }
-    source[prefix + extra..].copy_from_slice(location);
-    normalize(source, target)
 }
 
 /// Request.url retains its fragment, while the transport metadata excludes it.
@@ -531,10 +412,34 @@ pub(super) fn normalize_url(input: &[u8], output: &mut [u8]) -> Result<[u32; 6],
 }
 
 fn normalize_value(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u32; 6], ()> {
-    let metadata = normalize_with_credentials(input, output, credentials)?;
     let start = input.iter().position(|byte| *byte > 32).ok_or(())?;
     let end = input.iter().rposition(|byte| *byte > 32).ok_or(())? + 1;
     let input = &input[start..end];
+    let metadata = if input
+        .iter()
+        .any(|byte| matches!(byte, b'\t' | b'\r' | b'\n'))
+    {
+        let reserve = input
+            .len()
+            .checked_mul(3)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(())?;
+        if reserve > output.len() {
+            return Err(());
+        }
+        let (target, scratch) = output.split_at_mut(reserve);
+        let mut length = 0;
+        for byte in input
+            .iter()
+            .filter(|byte| !matches!(byte, b'\t' | b'\r' | b'\n'))
+        {
+            *scratch.get_mut(length).ok_or(())? = *byte;
+            length += 1;
+        }
+        canonicalize(&scratch[..length], target, credentials)
+    } else {
+        canonicalize(input, output, credentials)
+    }?;
     let mut out = Output {
         bytes: output,
         length: metadata[4] as usize,
@@ -546,13 +451,7 @@ fn normalize_value(input: &[u8], output: &mut [u8], credentials: bool) -> Result
             .copied()
             .filter(|byte| !matches!(byte, b'\t' | b'\r' | b'\n'))
         {
-            if byte <= 32 || byte >= 127 || matches!(byte, b'"' | b'<' | b'>' | b'`') {
-                out.byte(b'%')?;
-                out.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
-                out.byte(b"0123456789ABCDEF"[(byte & 15) as usize])?;
-            } else {
-                out.byte(byte)?;
-            }
+            out.encoded(byte, b"`")?;
         }
     }
     Ok([

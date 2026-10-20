@@ -4,9 +4,16 @@ use pliron::{
     basic_block::BasicBlock,
     builtin::op_interfaces::OneRegionInterface,
     context::{Context, Ptr},
-    graph::dominance::compute_dominator_tree,
+    graph::dominance::DomInfo,
+    irbuild::{
+        IRStatus,
+        listener::DummyListener,
+        rewriter::{IRRewriter, Rewriter},
+    },
     linked_list::{ContainsLinkedList, LinkedList},
     operation::Operation,
+    pass::{AnalysisManager, PassResult},
+    result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
 };
@@ -18,10 +25,20 @@ enum Visit {
     Leave(Vec<Key>),
 }
 
-pub(crate) fn reuse(root: Ptr<Operation>, ctx: &mut Context) {
+pub(crate) fn reuse_unwraps(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<PassResult> {
+    analyses.get_analysis::<DomInfo>(root, ctx)?;
+    let mut dominance = analyses
+        .try_get_analysis_mut::<DomInfo>(root)
+        .expect("dominance");
+    let mut rewriter = IRRewriter::<DummyListener>::default();
+    let mut result = PassResult::default();
     for function in functions(root, ctx) {
         let region = function.get_region(ctx);
-        let tree = compute_dominator_tree(ctx, &region);
+        let tree = dominance.get_dom_tree(ctx, region);
         let Some(root) = tree.root() else {
             continue;
         };
@@ -52,8 +69,8 @@ pub(crate) fn reuse(root: Ptr<Operation>, ctx: &mut Context) {
                 let result = op.deref(ctx).get_result(0);
                 let key = (input, result.get_type(ctx));
                 if let Some(value) = successful.get(&key) {
-                    result.replace_all_uses_with(ctx, value);
-                    Operation::erase(op, ctx);
+                    rewriter.replace_value_uses_with(ctx, result, *value);
+                    rewriter.erase_operation(ctx, op);
                 } else {
                     successful.insert(key, result);
                     introduced.push(key);
@@ -63,4 +80,11 @@ pub(crate) fn reuse(root: Ptr<Operation>, ctx: &mut Context) {
             work.extend(tree.children(&block).map(Visit::Enter));
         }
     }
+    result.ir_changed = if rewriter.is_modified() {
+        IRStatus::Changed
+    } else {
+        IRStatus::Unchanged
+    };
+    result.set_preserved::<DomInfo>();
+    Ok(result)
 }

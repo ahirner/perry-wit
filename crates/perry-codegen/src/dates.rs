@@ -1,7 +1,7 @@
 //! Boxed UTC dates and their calendar helper calls.
 use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use anyhow::{Result, bail};
-use perry_mir::intrinsics::Intrinsic;
+use perry_mir::Intrinsic;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -34,9 +34,15 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::DateParse => {
                 let data = self.load(ctx, MemKind::I32, args[0], perry_abi::layout::string::DATA);
                 let len = self.load(ctx, MemKind::I32, args[0], perry_abi::layout::string::LEN);
-                self.runtime(ctx, Runtime::TimeDateParse, vec![data, len])
+                let out = self.numeric_result_slot(ctx);
+                let packed = self.runtime(ctx, Runtime::TimeDateParse, vec![data, len, out]);
+                self.check_time_status(
+                    ctx,
+                    packed,
+                    "Unsupported legacy Date string format; use an ISO date or date-time string",
+                );
+                self.load(ctx, MemKind::F64, out, 0)
             }
-            Intrinsic::DateUtc => self.runtime(ctx, Runtime::TimeDateUtc, args),
             Intrinsic::DatePart => {
                 let time = self.load(ctx, MemKind::F64, args[0], 0);
                 let part = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[1]]);

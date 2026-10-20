@@ -5,6 +5,7 @@ use crate::{
     host::{EffectHost, Host, ValueHost},
     repr::i32_type,
     runtime::Runtime,
+    values::Carriers,
 };
 use anyhow::{Result, anyhow};
 use pliron::{
@@ -23,7 +24,7 @@ use pliron::{
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
-    control::{BrOp, BrTableOp, CondBrOp},
+    control::{BrOp, BrTableOp, CondBrOp, ReturnOp, UnreachableOp},
     ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
 };
 use std::num::NonZeroUsize;
@@ -135,6 +136,15 @@ impl FunctionLowering<'_, '_> {
         op.deref(ctx).results().next()
     }
 
+    /// Synchronous helpers finish writing before the next call can reuse this cell.
+    pub(super) fn numeric_result_slot(&mut self, ctx: &mut Context) -> Value {
+        let address = *self
+            .state
+            .numeric_result
+            .get_or_insert_with(|| self.state.data.append(8, &[0; 8]));
+        self.i32_const(ctx, address as i32)
+    }
+
     /// Call a runtime function that returns a value. Results are declared statically in
     /// [Runtime], so a function without one is a bug at the call site.
     pub(crate) fn runtime(
@@ -190,13 +200,42 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, op);
     }
 
+    pub(crate) fn ret(&mut self, ctx: &mut Context, values: Vec<Value>) {
+        let op = ReturnOp::new(ctx, values).get_operation();
+        self.insert(ctx, op);
+    }
+
+    pub(crate) fn trap(&mut self, ctx: &mut Context) {
+        let op = UnreachableOp::new(ctx).get_operation();
+        self.insert(ctx, op);
+    }
+
+    pub(crate) fn in_block<T>(
+        &mut self,
+        block: Ptr<BasicBlock>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = std::mem::replace(&mut self.block, block);
+        let out = f(self);
+        self.block = saved;
+        out
+    }
+
     /// The Wasm value of MIR `value`; frame-resident values are loaded from the frame.
     pub(crate) fn mapped(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.mapped_value(ctx, value)?.scalar()
+    }
+
+    pub(crate) fn mapped_value(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+    ) -> Result<Carriers<Value>> {
         if let Some(frame) = &self.frame
-            && let Some(&(offset, kind)) = frame.slots.get(&value)
+            && let Some(&slot) = frame.slots.get(&value)
         {
             let frame = frame.frame;
-            return Ok(self.load(ctx, kind, frame, offset));
+            return slot.try_map(|(offset, kind)| Ok(self.load(ctx, kind, frame, offset)));
         }
         self.values
             .get(&value)
@@ -255,6 +294,15 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {
+        self.define_value(ctx, op, Carriers::Scalar(value));
+    }
+
+    pub(crate) fn define_value(
+        &mut self,
+        ctx: &Context,
+        op: Ptr<Operation>,
+        value: Carriers<Value>,
+    ) {
         self.values.insert(op.deref(ctx).get_result(0), value);
     }
 

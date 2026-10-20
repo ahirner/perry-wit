@@ -1,8 +1,10 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
 mod codegen;
-pub(crate) use codegen::{to_camel_case, to_pascal_case, type_name};
-mod tsconfig;
+mod names;
+pub(crate) use names::{
+    NamedType, canonical_type, collect_world_types, declaration_id, to_camel_case, to_pascal_case,
+};
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -94,12 +96,27 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         serde_json::to_string(&entry_import)?
     );
     fs::write(&check_path, check)?;
+    let compiler_options = || {
+        serde_json::json!({
+            "target": "ES2022",
+            "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
+            "module": "ESNext",
+            "moduleDetection": "force",
+            "moduleResolution": "bundler",
+            "allowImportingTsExtensions": true,
+            "strict": true,
+            "noEmit": true,
+            "skipLibCheck": false,
+            "types": []
+        })
+    };
     let generated_tsconfig = if !tsconfig_path.exists() && options.initialize_tsconfig {
-        let mut config: serde_json::Value =
-            serde_json::from_str(&tsconfig::generate_default_tsconfig())?;
-        config["files"] = serde_json::json!([relative_path(&project_root, &check_path)?]);
-        let tsconfig_content = serde_json::to_string_pretty(&config)?;
-        fs::write(&tsconfig_path, tsconfig_content).with_context(|| {
+        let config = serde_json::json!({
+            "compilerOptions": compiler_options(),
+            "include": ["src/**/*", "examples/**/*", "*.ts", ".perry/types/**/*"],
+            "files": [relative_path(&project_root, &check_path)?]
+        });
+        fs::write(&tsconfig_path, serde_json::to_string_pretty(&config)?).with_context(|| {
             format!(
                 "Failed to write tsconfig.json at {}",
                 tsconfig_path.display()
@@ -113,7 +130,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     };
 
     let mut check_config = serde_json::json!({
-        "compilerOptions": {"target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"], "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false, "types": []},
+        "compilerOptions": compiler_options(),
         "files": ["implementation-check.ts"],
         "include": [],
         "exclude": []

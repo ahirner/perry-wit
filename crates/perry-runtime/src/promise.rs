@@ -9,7 +9,7 @@
 use crate::{host, region::current};
 use core::ptr;
 
-pub use crate::layout::promise::{FULFILLED, REJECTED, STATE, STATUS, VALUE};
+pub(crate) use crate::layout::promise::{COMBINATOR_KIND, FULFILLED, REJECTED, STATUS, VALUE};
 
 const PENDING: u32 = 0;
 
@@ -596,9 +596,6 @@ pub(crate) fn cancel_observers() {
         }
     }
 }
-
-/// Frame kind of runtime combinators; the P3 dispatcher passes such frames to [perry_combinator_step].
-pub use crate::layout::promise::COMBINATOR_KIND;
 
 const ALL: u32 = 0;
 const RACE: u32 = 1;

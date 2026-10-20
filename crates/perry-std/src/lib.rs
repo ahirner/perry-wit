@@ -12,20 +12,12 @@ mod decoder;
 mod exception;
 mod integers;
 mod json;
+mod number;
 mod random;
 mod regex;
 mod text;
 
 use perry_abi as runtime;
-
-/// `JSON.parse` of text the JSON helper rejected.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_raise_syntax(data: *const u8, len: u32, offset: u32) -> u32 {
-    let input = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    let message = runtime::json_syntax_message(input, offset);
-    runtime::raise_string(runtime::SYNTAX_ERROR, message);
-    runtime::take_status()
-}
 
 /// `toISOString` of an invalid date.
 #[unsafe(no_mangle)]

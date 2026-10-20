@@ -64,27 +64,62 @@ assert.equal(api.generateSdk(grouped).length, 3);
 assert.throws(() => api.compile(bundled, { ...grouped, dependencies: [] }, { coreOnly: false }), diagnosticsMatch(/test:types/));
 assert.throws(() => api.generateSdk({ application: { tag: 'sources', val: [{ contents: new Uint8Array([255]) }] }, dependencies: [] }), diagnosticsMatch(/UTF-8/));
 assert.equal(api.generateSdk({ application: { tag: 'sources', val: [{ contents: encode('package test:http; world app { import wasi:http/client@0.3.0; }') }] }, dependencies: [] }).length, 3);
-console.log('Wasm library: anonymous buffers, supplied modules, grouped/embedded WIT, core output, SDK and invalid inputs; standard WASI imports, no filesystem grants');
+const parityCases = [{ name: 'floating point', source, contract, compiled, sdk }];
+for (const [domain, result, args, expected] of [
+  ['s8', 's8', [127, 1], -128],
+  ['u8', 'u8', [255, 1], 0],
+  ['s16', 's16', [32767, 1], -32768],
+  ['u16', 'u16', [65535, 1], 0],
+  ['s32', 's32', [2147483647, 1], -2147483648],
+  ['u32', 'u32', [4294967295, 1], 0],
+  ['s64', 's64', [9223372036854775807n, 1n], -9223372036854775808n],
+  ['u64', 'u64', [18446744073709551615n, 1n], 0n],
+  ['u64', 'u64', [9007199254740993n, 2n], 9007199254740995n],
+  ['u8', 'u32', [255, 255], 510],
+]) {
+  const imports = domain.endsWith('64') ? "import type { s64, u64 } from 'perry:types'; " : '';
+  const type = domain.endsWith('64') ? domain : 'number';
+  const source = `${imports}function add(a: ${type}, b: ${type}): ${type} { return a + b; } export function run(a: ${type}, b: ${type}): ${type} { return add(a, b); }`;
+  const contract = `package test:integer; world app { export run: func(a: ${domain}, b: ${domain}) -> ${result}; }`;
+  const program = { source: { contents: encode(source) }, modules: [] };
+  const wit = { application: { tag: 'sources', val: [{ contents: encode(contract) }] }, dependencies: [] };
+  const compiled = api.compile(program, wit, { coreOnly: false });
+  const core = api.compile(program, wit, { coreOnly: true });
+  assert.deepEqual(core.core, compiled.core);
+  assert.equal(core.component, undefined);
+  const module = new WebAssembly.Module(compiled.core);
+  assert.deepEqual(WebAssembly.Module.imports(module), [], `${domain}: no runtime imports`);
+  assert.deepEqual(WebAssembly.Module.exports(module), [{ name: 'run', kind: 'function' }], `${domain}: no memory, allocator or cleanup exports`);
+  assert.equal(new WebAssembly.Instance(module).exports.run(...args), expected, `${domain} → ${result}`);
+  if (type === 'number') {
+    const raw = new WebAssembly.Instance(new WebAssembly.Module(api.compileCore(program)));
+    assert.equal(raw.exports.run(...args), args[0] + args[1], 'Raw compilation retains unconstrained number semantics');
+  }
+  parityCases.push({ name: `${domain} → ${result}`, source, contract, compiled, sdk: api.generateSdk(wit) });
+}
+console.log('Wasm library: anonymous buffers, supplied modules, grouped/embedded WIT, all integer widths, exact 64-bit arithmetic, raw/core output, SDK and invalid inputs; no filesystem grants');
 
 if (process.env.PERRY_NATIVE_COMPILER && process.env.PERRY_COMPILER_WASM) {
   const directory = await mkdtemp(join(tmpdir(), 'perry-parity-'));
   try {
     await mkdir(join(directory, 'wit'));
-    await writeFile(join(directory, 'input.ts'), source);
-    await writeFile(join(directory, 'wit/world.wit'), contract);
     const native = resolve(process.env.PERRY_NATIVE_COMPILER);
     const wasm = resolve(process.env.PERRY_COMPILER_WASM);
-    for (const [name, command, prefix] of [
-      ['native', native, []],
-      ['wasm', process.env.PERRY_WASMTIME || 'wasmtime', ['run', '--dir', '.', wasm]],
-    ]) {
-      const run = args => execFileSync(command, [...prefix, ...args], { cwd: directory, stdio: 'pipe' });
-      run(['input.ts', '--wit', 'wit', '-o', `${name}.wasm`]);
-      assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}.wasm`))), compiled.component.stripped);
-      run(['input.ts', '--wit', 'wit', '--core-only', '-o', `${name}.core.wasm`]);
-      assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}.core.wasm`))), compiled.core);
-      run(['gen-types', '--wit', 'wit', '--out', `${name}-sdk`, '--no-tsconfig']);
-      for (const file of sdk) assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-sdk`, file.name))), file.contents);
+    for (const fixture of parityCases) {
+      await writeFile(join(directory, 'input.ts'), fixture.source);
+      await writeFile(join(directory, 'wit/world.wit'), fixture.contract);
+      for (const [name, command, prefix] of [
+        ['native', native, []],
+        ['wasm', process.env.PERRY_WASMTIME || 'wasmtime', ['run', '--dir', '.', wasm]],
+      ]) {
+        const run = args => execFileSync(command, [...prefix, ...args], { cwd: directory, stdio: 'pipe' });
+        run(['input.ts', '--wit', 'wit', '-o', `${name}.wasm`]);
+        assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}.wasm`))), fixture.compiled.component.stripped, `${fixture.name}: ${name} component`);
+        run(['input.ts', '--wit', 'wit', '--core-only', '-o', `${name}.core.wasm`]);
+        assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}.core.wasm`))), fixture.compiled.core, `${fixture.name}: ${name} core`);
+        run(['gen-types', '--wit', 'wit', '--out', `${name}-sdk`, '--no-tsconfig']);
+        for (const file of fixture.sdk) assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-sdk`, file.name))), file.contents);
+      }
     }
     console.log('Native CLI / Wasm CLI / Wasm library: identical component, core and SDK artifacts');
   } finally { await rm(directory, { recursive: true, force: true }); }

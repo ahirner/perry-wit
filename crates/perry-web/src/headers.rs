@@ -25,10 +25,9 @@ impl Headers {
             .as_chunks::<16>()
             .0
             .iter()
-            .map(|field| {
-                let word = |at: usize| u32::from_le_bytes(field[at..at + 4].try_into().unwrap());
-                // SAFETY: fields point at bytes in the task region.
-                unsafe { (slice(word(0), word(4)), slice(word(8), word(12))) }
+            .map(|field| unsafe {
+                let [n, nl, v, vl] = *(field.as_ptr() as *const [u32; 4]);
+                (slice(n, nl), slice(v, vl))
             })
     }
 
@@ -254,4 +253,24 @@ pub(crate) fn adopt_field_buffer(list: *mut u8, count: u32) -> Buffer {
         perry_abi::release_canonical(list);
     }
     fields
+}
+
+pub(crate) mod wasi {
+    perry_abi::wasm_imports! { "wasi:http/types@0.3.0";
+        #[link_name = "[constructor]fields"]
+        pub(crate) fn fields_new() -> u32;
+        #[link_name = "[method]fields.append"]
+        pub(crate) fn fields_append(
+            fields: u32,
+            name: *const u8,
+            nlen: u32,
+            value: *const u8,
+            vlen: u32,
+            result: *mut u8,
+        );
+        #[link_name = "[method]fields.copy-all"]
+        pub(crate) fn fields_copy_all(fields: u32, result: *mut u32);
+        #[link_name = "[resource-drop]fields"]
+        pub(crate) fn fields_drop(fields: u32);
+    }
 }

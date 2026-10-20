@@ -12,61 +12,79 @@
 //! position and its last value) is applied when serializing or enumerating ([canonical]).
 //! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
 //! the same step, so duplicate and numeric keys come out as in Node.
+mod order;
 mod reflection;
+mod replacer;
+mod view;
 mod writer;
 
+use perry_abi::number::Number;
 pub(crate) use reflection::std_json_strict_equal;
 use reflection::{native_property, native_snapshot};
 
-use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, scalars_length};
+use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
-use perry_abi::json::{MEMBER_COUNT, kind::*};
+use perry_abi::json::{
+    MEMBER_COUNT, METADATA as CANONICAL, NODE_BYTES, address, array_index, kind::*, link_child,
+    new_node, node, set_word, word,
+};
 use perry_abi::layout::descriptor;
 
-/// Word 28 of an object: nonzero once its members are in property order.
-const CANONICAL: usize = 28;
-const NODE_BYTES: u32 = 32;
-
-fn word(node: *mut u8, offset: usize) -> u32 {
-    // SAFETY: compiled code passes graph nodes.
-    unsafe { *(node.add(offset) as *const u32) }
-}
-
-fn node(address: u32) -> *mut u8 {
-    address as usize as *mut u8
-}
-
-fn set_word(node: *mut u8, offset: usize, value: u32) {
-    // SAFETY: callers pass nodes they own.
-    unsafe { *(node.add(offset) as *mut u32) = value }
-}
-
-fn address(node: *mut u8) -> u32 {
-    node as usize as u32
-}
-
-/// A fresh zeroed node of `kind`.
-fn new_node(kind: u32) -> *mut u8 {
-    let shape: &'static [u32] = match kind {
-        STRING => &[0, 3, 4, 8, 24],
-        EXCEPTION | NATIVE | ARRAY | OBJECT => &[0, 4, 4, 8, 16, 24],
-        _ => &[0, 2, 4, 24],
+/// Graph nodes carry the same three numeric representations as generated code.
+fn json_number(value: *mut u8) -> Option<Number> {
+    if value.is_null() {
+        return None;
+    }
+    let tag = match unsafe { word(value, 0) } {
+        NUMBER => perry_abi::layout::numeric::Tag::Float,
+        INT64 => perry_abi::layout::numeric::Tag::Signed,
+        UINT64 => perry_abi::layout::numeric::Tag::Unsigned,
+        _ => return None,
     };
-    // SAFETY: tags select exact pointer fields; scalar payload bits remain opaque.
-    let node = unsafe { crate::runtime::alloc_shaped(NODE_BYTES, shape) };
-    // SAFETY: a fresh block of `NODE_BYTES`.
-    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
-    set_word(node, 0, kind);
+    // Numeric node tags guarantee an initialized 64-bit payload at offset 8.
+    Some(Number::from_numeric(tag, unsafe {
+        value.add(8).cast::<u64>().read()
+    }))
+}
+
+fn numeric_node(number: Number) -> *mut u8 {
+    let kind = match number {
+        Number::Float(_) => NUMBER,
+        Number::Signed(_) => INT64,
+        Number::Unsigned(_) => UINT64,
+    };
+    let node = new_node(kind);
+    unsafe {
+        node.add(8).cast::<u64>().write(number.into_numeric().1);
+    }
     node
+}
+
+fn json_integer<T: TryFrom<i64> + TryFrom<u64>>(value: *mut u8) -> Option<T> {
+    match json_number(value)? {
+        Number::Signed(value) => T::try_from(value).ok(),
+        Number::Unsigned(value) => T::try_from(value).ok(),
+        Number::Float(value)
+            if value.abs() <= (1u64 << 53) as f64 && (value as i64) as f64 == value =>
+        {
+            T::try_from(value as i64).ok()
+        }
+        Number::Float(_) => None,
+    }
 }
 
 /// A string node retaining its immutable UTF-8 payload through the exact pointer map.
 fn string_node(bytes: &[u8]) -> *mut u8 {
+    string_node_counted(bytes, scalars_length(bytes))
+}
+
+fn string_node_counted(bytes: &[u8], scalars: u32) -> *mut u8 {
     let node = new_node(STRING);
-    set_word(node, 8, bytes.as_ptr() as usize as u32);
-    set_word(node, 12, bytes.len() as u32);
-    // Word 16 of a string node is its scalar count, as the parser writes it.
-    set_word(node, 16, scalars_length(bytes));
+    unsafe {
+        set_word(node, 8, bytes.as_ptr() as usize as u32);
+        set_word(node, 12, bytes.len() as u32);
+        set_word(node, 16, scalars);
+    }
     node
 }
 
@@ -77,7 +95,7 @@ fn string_bytes(node: *mut u8) -> &'static [u8] {
 
 /// Reading a property of `undefined` or `null` throws, as in ECMAScript.
 fn checked(value: *mut u8) -> bool {
-    if value.is_null() || word(value, 0) == NULL {
+    if value.is_null() || unsafe { word(value, 0) } == NULL {
         raise(TYPE_ERROR, "Cannot read properties of undefined or null");
         return false;
     }
@@ -98,60 +116,65 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     if !checked(value) {
         return core::ptr::null_mut();
     }
-    match word(value, 0) {
-        NATIVE => return native_property(value, name),
-        EXCEPTION => {
-            let error = node(word(value, 8));
-            return match name {
-                b"name" => unsafe {
-                    std_json_from_string(crate::exception::std_exception_name(error))
-                },
-                b"message" => unsafe {
-                    std_json_from_string(crate::runtime::exception_message(error))
-                },
-                b"cause" => unsafe {
-                    *(error.add(crate::runtime::layout::exception::CAUSE as usize)
-                        as *const *mut u8)
-                },
-                _ => core::ptr::null_mut(),
-            };
-        }
-        ARRAY => {
-            if name == b"length" {
-                return std_json_from_number(f64::from(word(value, MEMBER_COUNT)));
+    unsafe {
+        match word(value, 0) {
+            NATIVE => return native_property(value, name),
+            VIEW => return view::property(value, name),
+            EXCEPTION => {
+                let error = node(word(value, 8));
+                return match name {
+                    b"name" => std_json_from_string(crate::exception::std_exception_name(error)),
+                    b"message" => std_json_from_string(crate::runtime::exception_message(error)),
+                    b"cause" => {
+                        *(error.add(crate::runtime::layout::exception::CAUSE as usize)
+                            as *const *mut u8)
+                    }
+                    _ => core::ptr::null_mut(),
+                };
             }
-            return array_index(name)
-                .map_or(core::ptr::null_mut(), |index| array_element(value, index));
-        }
-        STRING => {
-            let bytes = string_bytes(value);
-            if name == b"length" {
-                return std_json_from_number(f64::from(scalars_length(bytes)));
+            ARRAY => {
+                if name == b"length" {
+                    return std_json_from_number(f64::from(word(value, MEMBER_COUNT)));
+                }
+                return array_index(name)
+                    .map_or(core::ptr::null_mut(), |index| array_element(value, index));
             }
-            // SAFETY: JSON string nodes contain validated UTF-8.
-            let text = unsafe { core::str::from_utf8_unchecked(bytes) };
-            return array_index(name)
-                .and_then(|index| text.char_indices().nth(index as usize))
-                .map_or(core::ptr::null_mut(), |(start, scalar)| {
-                    string_node(&bytes[start..start + scalar.len_utf8()])
-                });
+            STRING => {
+                let bytes = string_bytes(value);
+                if name == b"length" {
+                    return std_json_from_number(f64::from(scalars_length(bytes)));
+                }
+                // SAFETY: JSON string nodes contain validated UTF-8.
+                let text = core::str::from_utf8_unchecked(bytes);
+                return array_index(name)
+                    .and_then(|index| text.char_indices().nth(index as usize))
+                    .map_or(core::ptr::null_mut(), |(start, scalar)| {
+                        string_node(&bytes[start..start + scalar.len_utf8()])
+                    });
+            }
+            OBJECT => {}
+            _ => return core::ptr::null_mut(),
         }
-        OBJECT => {}
-        _ => return core::ptr::null_mut(),
     }
-    let mut found = core::ptr::null_mut();
-    let mut child = word(value, 16);
-    while child != 0 {
-        let key = node(word(node(child), 24));
-        if string_bytes(key) == name {
-            found = node(child);
+    object_member(value, name)
+}
+
+fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
+    unsafe {
+        let mut found = core::ptr::null_mut();
+        let mut child = word(value, 16);
+        while child != 0 {
+            let key = node(word(node(child), 24));
+            if string_bytes(key) == name {
+                found = node(child);
+            }
+            child = word(node(child), 4);
         }
-        child = word(node(child), 4);
+        if !found.is_null() && word(found, 0) == UNDEFINED {
+            return core::ptr::null_mut();
+        }
+        found
     }
-    if !found.is_null() && word(found, 0) == UNDEFINED {
-        return core::ptr::null_mut();
-    }
-    found
 }
 
 /// `value[index]` of an array, or `undefined`.
@@ -160,29 +183,38 @@ pub(crate) extern "C" fn std_json_index(value: *mut u8, index: f64) -> *mut u8 {
     if !checked(value) {
         return core::ptr::null_mut();
     }
-    if word(value, 0) != ARRAY {
-        let mut text = [0; 40];
-        let len = crate::runtime::number_format(index, &mut text);
-        return property(value, &text[..len]);
-    }
-    if !(index >= 0.0
-        && libm::trunc(index) == index
-        && index < f64::from(word(value, MEMBER_COUNT)))
-    {
-        return core::ptr::null_mut();
+    unsafe {
+        if word(value, 0) != ARRAY {
+            let mut text = [0; 40];
+            let len = crate::runtime::number_format(index, &mut text);
+            return property(value, &text[..len]);
+        }
+        if !(index >= 0.0
+            && libm::trunc(index) == index
+            && index < f64::from(word(value, MEMBER_COUNT)))
+        {
+            return core::ptr::null_mut();
+        }
     }
     array_element(value, index as u32)
 }
 
 fn array_element(value: *mut u8, index: u32) -> *mut u8 {
-    if index >= word(value, MEMBER_COUNT) {
-        return core::ptr::null_mut();
+    unsafe {
+        if index >= word(value, MEMBER_COUNT) {
+            return core::ptr::null_mut();
+        }
+        let mut child = word(value, 16);
+        for _ in 0..index {
+            child = word(node(child), 4);
+        }
+        let found = node(child);
+        if word(found, 0) == UNDEFINED {
+            core::ptr::null_mut()
+        } else {
+            found
+        }
     }
-    let mut child = word(value, 16);
-    for _ in 0..index {
-        child = word(node(child), 4);
-    }
-    node(child)
 }
 
 /// Own enumerable keys of an immutable JSON snapshot, in ECMAScript property order.
@@ -191,31 +223,45 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
     if !checked(value) {
         return crate::runtime::array(&[]);
     }
-    if word(value, 0) == OBJECT {
-        let value = canonical(value);
-        let mut child = word(value, 16);
-        let mut count = 0;
-        while child != 0 {
-            count += usize::from(word(node(child), 0) != UNDEFINED);
-            child = word(node(child), 4);
+    unsafe {
+        if word(value, 0) == VIEW {
+            return view::keys(value);
         }
-        let (array, slots) = crate::runtime::array_storage(count);
-        child = word(value, 16);
-        let mut at = 0;
-        while child != 0 {
-            if word(node(child), 0) != UNDEFINED {
-                slots[at] = std_json_to_string(node(word(node(child), 24))) as u64;
-                at += 1;
+        let value = if word(value, 0) == NATIVE {
+            reflection::native_snapshot(value)
+        } else {
+            value
+        };
+        if word(value, 0) == OBJECT {
+            let value = canonical(value);
+            let mut child = word(value, 16);
+            let mut count = 0;
+            while child != 0 {
+                count += usize::from(word(node(child), 0) != UNDEFINED);
+                child = word(node(child), 4);
             }
-            child = word(node(child), 4);
+            let (array, slots) = crate::runtime::array_storage(count);
+            child = word(value, 16);
+            let mut at = 0;
+            while child != 0 {
+                if word(node(child), 0) != UNDEFINED {
+                    slots[at] = std_json_to_string(node(word(node(child), 24))) as u64;
+                    at += 1;
+                }
+                child = word(node(child), 4);
+            }
+            return array;
         }
-        return array;
+        let count = match word(value, 0) {
+            ARRAY => word(value, MEMBER_COUNT),
+            STRING => scalars_length(string_bytes(value)),
+            _ => 0,
+        };
+        index_keys(count)
     }
-    let count = match word(value, 0) {
-        ARRAY => word(value, MEMBER_COUNT),
-        STRING => scalars_length(string_bytes(value)),
-        _ => 0,
-    };
+}
+
+fn index_keys(count: u32) -> *mut u8 {
     let (array, slots) = crate::runtime::array_storage(count as usize);
     for (index, slot) in slots.iter_mut().enumerate() {
         let mut text = [0; 40];
@@ -231,18 +277,27 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     if !checked(value) {
         return 0;
     }
-    match word(value, 0) {
-        STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
-        ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
-        NATIVE if word(node(word(value, 12)), 0) == descriptor::ARRAY => {
-            f64::from(word(node(word(value, 8)), 0)).to_bits()
+    unsafe {
+        match word(value, 0) {
+            VIEW => view::array_length(value)
+                .map_or(crate::runtime::UNDEFINED_BITS, |n| f64::from(n).to_bits()),
+            STRING => f64::from(scalars_length(string_bytes(value))).to_bits(),
+            ARRAY => f64::from(word(value, MEMBER_COUNT)).to_bits(),
+            NATIVE
+                if matches!(
+                    word(node(word(value, 12)), 0),
+                    descriptor::ARRAY | descriptor::JSON_DICTIONARY
+                ) =>
+            {
+                f64::from(word(node(word(value, 8)), 0)).to_bits()
+            }
+            _ => crate::runtime::UNDEFINED_BITS,
         }
-        _ => crate::runtime::UNDEFINED_BITS,
     }
 }
 
 fn expected(value: *mut u8, kind: u32, what: &'static str) -> bool {
-    if value.is_null() || word(value, 0) != kind {
+    if value.is_null() || unsafe { word(value, 0) } != kind {
         raise(TYPE_ERROR, what);
         return false;
     }
@@ -259,11 +314,12 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
     if value.is_null() {
         return f64::NAN;
     }
-    match word(value, 0) {
-        // SAFETY: number nodes hold an f64 at 8.
-        NUMBER => unsafe { *(value.add(8) as *const f64) },
+    if let Some(number) = json_number(value) {
+        return number.as_f64();
+    }
+    match unsafe { word(value, 0) } {
         NULL => 0.0,
-        BOOLEAN => f64::from(word(value, 8)),
+        BOOLEAN => f64::from(unsafe { word(value, 8) }),
         _ => {
             raise(TYPE_ERROR, "JSON value is not a number");
             0.0
@@ -277,11 +333,37 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
 /// `value` is null (undefined) or a live JSON node.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
-    if !expected(value, NUMBER, "JSON value is not a number") {
-        return 0.0;
+    if let Some(number) = json_number(value) {
+        return number.as_f64();
     }
-    // SAFETY: the checked number node holds an f64 at offset 8.
-    unsafe { *(value.add(8) as *const f64) }
+    raise(TYPE_ERROR, "JSON value is not a number");
+    0.0
+}
+
+/// A checked signed 64-bit integer at a typed JSON boundary.
+///
+/// # Safety
+/// `value` is null (undefined) or a live JSON node.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
+    if let Some(integer) = json_integer(value) {
+        return integer;
+    }
+    raise(TYPE_ERROR, "JSON value does not match the declared schema");
+    0
+}
+
+/// A checked unsigned 64-bit integer at a typed JSON boundary.
+///
+/// # Safety
+/// `value` is null (undefined) or a live JSON node.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
+    if let Some(integer) = json_integer(value) {
+        return integer;
+    }
+    raise(TYPE_ERROR, "JSON value does not match the declared schema");
+    0
 }
 
 /// A JSON string used as `string`.
@@ -301,7 +383,7 @@ pub(crate) extern "C" fn std_json_to_bool(value: *mut u8) -> u32 {
     if !expected(value, BOOLEAN, "JSON value is not a boolean") {
         return 0;
     }
-    word(value, 8)
+    unsafe { word(value, 8) }
 }
 
 /// ECMAScript truthiness within the immutable JSON value domain.
@@ -310,26 +392,23 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
     if value.is_null() {
         return 0;
     }
-    match word(value, 0) {
-        UNDEFINED | NULL => 0,
-        BOOLEAN => word(value, 8),
-        NUMBER => {
-            let bits = u64::from(word(value, 8)) | (u64::from(word(value, 12)) << 32);
-            let number = f64::from_bits(bits);
-            u32::from(number != 0.0 && !number.is_nan())
+    unsafe {
+        match word(value, 0) {
+            UNDEFINED | NULL => 0,
+            BOOLEAN => word(value, 8),
+            NUMBER => {
+                let bits = u64::from(word(value, 8)) | (u64::from(word(value, 12)) << 32);
+                let number = f64::from_bits(bits);
+                u32::from(number != 0.0 && !number.is_nan())
+            }
+            INT64 | UINT64 => u32::from(word(value, 8) != 0 || word(value, 12) != 0),
+            STRING => u32::from(word(value, 12) != 0),
+            BIGINT => {
+                u32::from(!(&*node(word(value, 8)).cast::<crate::integers::Integer>()).is_zero())
+            }
+            ARRAY | OBJECT | EXCEPTION | NATIVE | VIEW => 1,
+            _ => unreachable!("JSON tag"),
         }
-        STRING => u32::from(word(value, 12) != 0),
-        _ => 1,
-    }
-}
-
-fn append_number(text: &mut Buffer, number: f64) {
-    if number.is_finite() {
-        let mut digits = [0; 40];
-        let len = crate::runtime::number_format(number, &mut digits);
-        text.extend_from_slice(&digits[..len]);
-    } else {
-        text.extend_from_slice(b"null");
     }
 }
 
@@ -339,37 +418,28 @@ pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         return from_static("undefined");
     }
-    from_static(match word(value, 0) {
+    from_static(match unsafe { word(value, 0) } {
         BOOLEAN => "boolean",
-        NUMBER => "number",
+        NUMBER | INT64 | UINT64 => "number",
         STRING => "string",
+        BIGINT => "bigint",
         _ => "object",
     })
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_is_array(value: *mut u8) -> u32 {
+    u32::from(view::array_length(value).is_some())
 }
 
 /// Whether a JSON node is the explicit `null` value, distinct from an absent property.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_is_null(value: *mut u8) -> u32 {
-    u32::from(!value.is_null() && word(value, 0) == NULL)
-}
-
-/// The array index a key names (a canonical decimal below 2³² − 1), if any.
-fn array_index(key: &[u8]) -> Option<u32> {
-    if key.is_empty() || key.len() > 10 || (key[0] == b'0' && key.len() > 1) {
-        return None;
-    }
-    let mut value = 0u64;
-    for &digit in key {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        value = value * 10 + u64::from(digit - b'0');
-    }
-    (value < u64::from(u32::MAX)).then_some(value as u32)
+    u32::from(!value.is_null() && unsafe { word(value, 0) } == NULL)
 }
 
 fn key_bytes(member: u32) -> &'static [u8] {
-    string_bytes(node(word(node(member), 24)))
+    string_bytes(node(unsafe { word(node(member), 24) }))
 }
 
 /// An object view with its members in ECMAScript property order: array-index keys first in
@@ -377,91 +447,80 @@ fn key_bytes(member: u32) -> &'static [u8] {
 /// position and takes its last value. Reordered members belong to a fresh traced object.
 /// The original may live in an opaque parsed graph, which cannot trace external nodes.
 fn canonical(object: *mut u8) -> *mut u8 {
-    if word(object, CANONICAL) != 0 {
-        return object;
-    }
-    let count = word(object, MEMBER_COUNT) as usize;
-    if count < 2 {
-        set_word(object, CANONICAL, 1);
-        return object;
-    }
-    let size = (count * 2).next_power_of_two();
-    let words = count * 2 + size;
-    let mut local = [0u32; 128];
-    let scratch = if words <= local.len() {
-        &mut local[..words]
-    } else {
-        let data = crate::runtime::alloc((words * 4) as u32) as *mut u32;
-        // SAFETY: a fresh block of `words` words, with no collection during canonicalization.
-        unsafe {
+    unsafe {
+        if word(object, CANONICAL) != 0 {
+            return object;
+        }
+        let count = word(object, MEMBER_COUNT) as usize;
+        if count < 2 {
+            set_word(object, CANONICAL, 1);
+            return object;
+        }
+        let size = (count * 2).next_power_of_two();
+        let words = count * 2 + size;
+        let mut local = [0u32; 128];
+        let scratch = if words <= local.len() {
+            &mut local[..words]
+        } else {
+            let data = crate::runtime::alloc((words * 4) as u32) as *mut u32;
+            // SAFETY: a fresh block of `words` words, with no collection during canonicalization.
             core::ptr::write_bytes(data, 0, words);
             core::slice::from_raw_parts_mut(data, words)
-        }
-    };
-    // Each entry keeps its first insertion position and its final member node.
-    let (entries, table) = scratch.split_at_mut(count * 2);
-    let entries = entries.as_chunks_mut::<2>().0;
-    let mut unique = 0;
-    let mut child = word(object, 16);
-    let mut changed = false;
-    while child != 0 {
-        let key = key_bytes(child);
-        let mut hash = 0x811c_9dc5u32;
-        for &byte in key {
-            hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
-        }
-        let mut at = hash as usize & (size - 1);
-        loop {
-            match table[at] {
-                0 => {
-                    table[at] = unique as u32 + 1;
-                    entries[unique] = [unique as u32, child];
-                    unique += 1;
-                    break;
-                }
-                slot if key_bytes(entries[slot as usize - 1][1]) == key => {
-                    entries[slot as usize - 1][1] = child;
-                    changed = true;
-                    break;
-                }
-                _ => at = (at + 1) & (size - 1),
+        };
+        // Each entry keeps its first insertion position and its final member node.
+        let (entries, table) = scratch.split_at_mut(count * 2);
+        let entries = entries.as_chunks_mut::<2>().0;
+        let mut unique = 0;
+        let mut child = word(object, 16);
+        let mut changed = false;
+        while child != 0 {
+            let key = key_bytes(child);
+            let mut hash = 0x811c_9dc5u32;
+            for &byte in key {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
             }
+            let mut at = hash as usize & (size - 1);
+            loop {
+                match table[at] {
+                    0 => {
+                        table[at] = unique as u32 + 1;
+                        entries[unique] = [unique as u32, child];
+                        unique += 1;
+                        break;
+                    }
+                    slot if key_bytes(entries[slot as usize - 1][1]) == key => {
+                        entries[slot as usize - 1][1] = child;
+                        changed = true;
+                        break;
+                    }
+                    _ => at = (at + 1) & (size - 1),
+                }
+            }
+            child = word(node(child), 4);
         }
-        child = word(node(child), 4);
-    }
-    let entries = &mut entries[..unique];
-    let order = |entry: [u32; 2]| match array_index(key_bytes(entry[1])) {
-        Some(index) => (0, index),
-        None => (1, entry[0]),
-    };
-    if !entries
-        .windows(2)
-        .all(|pair| order(pair[0]) <= order(pair[1]))
-    {
-        heap_sort(entries, |a, b| order(*a).cmp(&order(*b)));
-        changed = true;
-    }
-    if !changed {
-        set_word(object, CANONICAL, 1);
-        return object;
-    }
-    let ordered = new_node(OBJECT);
-    let mut previous: *mut u8 = core::ptr::null_mut();
-    for &[_, member] in entries.iter() {
-        let copy = new_node(word(node(member), 0));
-        // SAFETY: both are `NODE_BYTES` blocks.
-        unsafe { core::ptr::copy_nonoverlapping(node(member), copy, NODE_BYTES as usize) };
-        set_word(copy, 4, 0);
-        if previous.is_null() {
-            set_word(ordered, 16, address(copy));
-        } else {
-            set_word(previous, 4, address(copy));
+        let entries = &mut entries[..unique];
+        let order = |entry: [u32; 2]| match array_index(key_bytes(entry[1])) {
+            Some(index) => (0, index),
+            None => (1, entry[0]),
+        };
+        if !entries
+            .windows(2)
+            .all(|pair| order(pair[0]) <= order(pair[1]))
+        {
+            heap_sort(entries, |a, b| order(*a).cmp(&order(*b)));
+            changed = true;
         }
-        previous = copy;
+        if !changed {
+            set_word(object, CANONICAL, 1);
+            return object;
+        }
+        let ordered = new_node(OBJECT);
+        for &[_, member] in entries.iter() {
+            append(ordered, node(member), node(word(node(member), 24)));
+        }
+        set_word(ordered, CANONICAL, 1);
+        ordered
     }
-    set_word(ordered, MEMBER_COUNT, unique as u32);
-    set_word(ordered, CANONICAL, 1);
-    ordered
 }
 
 /// Bounded-stack heapsort; the linked helper must have no recursive call paths.
@@ -491,43 +550,32 @@ fn heap_sort<T>(items: &mut [T], compare: impl Fn(&T, &T) -> core::cmp::Ordering
 /// Append a shallow copy of `value` (or an `undefined` member) under `key` to an object
 /// under construction; word 8 tracks its last member.
 fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
-    let copy = if value.is_null() {
-        new_node(UNDEFINED)
-    } else {
-        let copy = new_node(word(value, 0));
-        // SAFETY: both are `NODE_BYTES` blocks.
-        unsafe { core::ptr::copy_nonoverlapping(value, copy, NODE_BYTES as usize) };
-        set_word(copy, 4, 0);
-        copy
-    };
-    set_word(copy, 24, address(key));
-    match word(object, 8) {
-        0 => set_word(object, 16, address(copy)),
-        last => set_word(node(last), 4, address(copy)),
+    unsafe {
+        let copy = if value.is_null() {
+            new_node(UNDEFINED)
+        } else {
+            let copy = new_node(word(value, 0));
+            // SAFETY: both are `NODE_BYTES` blocks.
+            core::ptr::copy_nonoverlapping(value, copy, NODE_BYTES as usize);
+            set_word(copy, 4, 0);
+            copy
+        };
+        set_word(copy, 24, address(key));
+        // Both nodes are owned, and the shallow copy's next link is clear.
+        link_child(object, copy);
+        set_word(object, CANONICAL, 0);
     }
-    set_word(object, 8, address(copy));
-    set_word(object, MEMBER_COUNT, word(object, MEMBER_COUNT) + 1);
-    set_word(object, CANONICAL, 0);
 }
 
 /// A key node for array index `index`.
 fn index_key(index: u32) -> *mut u8 {
-    let mut digits = [0u8; 10];
-    let mut at = digits.len();
-    let mut rest = index;
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    let data = crate::runtime::alloc((digits.len() - at) as u32);
+    let mut digits = [0u8; 66];
+    let slice = perry_abi::number::format_integer(u64::from(index), false, 10, &mut digits);
+    let data = crate::runtime::alloc(slice.len() as u32);
     // SAFETY: a fresh block of the digits' length.
     let text = unsafe {
-        core::ptr::copy_nonoverlapping(digits[at..].as_ptr(), data, digits.len() - at);
-        core::slice::from_raw_parts(data, digits.len() - at)
+        core::ptr::copy_nonoverlapping(slice.as_ptr(), data, slice.len());
+        core::slice::from_raw_parts(data, slice.len())
     };
     string_node(text)
 }
@@ -545,35 +593,42 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
     if source.is_null() {
         return;
     }
-    match word(source, 0) {
-        OBJECT => {
-            let mut child = word(source, 16);
-            while child != 0 {
-                append(object, node(child), node(word(node(child), 24)));
-                child = word(node(child), 4);
+    unsafe {
+        let source = match word(source, 0) {
+            NATIVE => reflection::native_snapshot(source),
+            VIEW => view::std_json_snapshot(source),
+            _ => source,
+        };
+        match word(source, 0) {
+            OBJECT => {
+                let mut child = word(source, 16);
+                while child != 0 {
+                    append(object, node(child), node(word(node(child), 24)));
+                    child = word(node(child), 4);
+                }
             }
-        }
-        ARRAY => {
-            let mut child = word(source, 16);
-            let mut index = 0;
-            while child != 0 {
-                append(object, node(child), index_key(index));
-                index += 1;
-                child = word(node(child), 4);
+            ARRAY => {
+                let mut child = word(source, 16);
+                let mut index = 0;
+                while child != 0 {
+                    append(object, node(child), index_key(index));
+                    index += 1;
+                    child = word(node(child), 4);
+                }
             }
-        }
-        STRING => {
-            let text = string_bytes(source);
-            let (mut at, mut index) = (0, 0);
-            // SAFETY: JSON string nodes contain validated UTF-8.
-            for character in unsafe { core::str::from_utf8_unchecked(text) }.chars() {
-                let width = character.len_utf8();
-                append(object, string_node(&text[at..at + width]), index_key(index));
-                at += width;
-                index += 1;
+            STRING => {
+                let text = string_bytes(source);
+                let (mut at, mut index) = (0, 0);
+                // SAFETY: JSON string nodes contain validated UTF-8.
+                for character in core::str::from_utf8_unchecked(text).chars() {
+                    let width = character.len_utf8();
+                    append(object, string_node(&text[at..at + width]), index_key(index));
+                    at += width;
+                    index += 1;
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -588,13 +643,50 @@ pub(crate) unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, valu
     append(object, value, key);
 }
 
+/// Remove a key from a JSON residue object graph.
+///
+/// # Safety
+/// `key` must be a valid string pointer when `graph` is non-null.
+unsafe fn exclude_key(graph: *mut u8, key: *mut u8) -> *mut u8 {
+    unsafe {
+        if graph.is_null() || word(graph, 0) != OBJECT {
+            return graph;
+        }
+        let target = crate::runtime::bytes(key);
+        let out = new_node(OBJECT);
+        let mut child = word(graph, 16);
+        while child != 0 {
+            let member = node(child);
+            let k = node(word(member, 24));
+            if string_bytes(k) != target {
+                append(out, member, k);
+            }
+            child = word(member, 4);
+        }
+        if word(out, 16) == 0 {
+            core::ptr::null_mut()
+        } else {
+            out
+        }
+    }
+}
+
 /// A number as a JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
-    let node = new_node(NUMBER);
-    // SAFETY: number nodes hold an f64 at 8.
-    unsafe { *(node.add(8) as *mut f64) = value };
-    node
+    numeric_node(Number::Float(value))
+}
+
+/// A signed 64-bit integer as an exact JSON value.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_from_i64(value: i64) -> *mut u8 {
+    numeric_node(Number::Signed(value))
+}
+
+/// An unsigned 64-bit integer as an exact JSON value.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_from_u64(value: u64) -> *mut u8 {
+    numeric_node(Number::Unsigned(value))
 }
 
 /// A string as a JSON value.
@@ -606,18 +698,14 @@ pub(crate) unsafe extern "C" fn std_json_from_string(value: *mut u8) -> *mut u8 
     // SAFETY: guaranteed by the caller; strings live in the task region.
     let bytes = unsafe { crate::runtime::bytes(value) };
     let scalars = unsafe { (*value.cast::<perry_abi::layout::string::Header>()).scalars };
-    let node = new_node(STRING);
-    set_word(node, 8, bytes.as_ptr() as usize as u32);
-    set_word(node, 12, bytes.len() as u32);
-    set_word(node, 16, scalars);
-    node
+    string_node_counted(bytes, scalars)
 }
 
 /// A boolean (`kind` 2) or `null` (`kind` 1) as a JSON value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 {
     let node = new_node(kind);
-    set_word(node, 8, truth);
+    unsafe { set_word(node, 8, truth) };
     node
 }
 
@@ -633,7 +721,7 @@ pub(crate) extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
     if !expected(value, ARRAY, "JSON value is not an array") {
         return core::ptr::null_mut();
     }
-    node(word(value, 16))
+    node(unsafe { word(value, 16) })
 }
 
 /// Advance a checked array traversal. Null marks the end, without allocating iterator state.
@@ -642,6 +730,6 @@ pub(crate) extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         core::ptr::null_mut()
     } else {
-        node(word(value, 4))
+        node(unsafe { word(value, 4) })
     }
 }

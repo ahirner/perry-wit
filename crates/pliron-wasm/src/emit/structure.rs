@@ -90,9 +90,7 @@ impl FunctionEmitter<'_> {
             Ok(())
         } else if Operation::get_op::<ReturnOp>(terminator, ctx).is_some() {
             let values: Vec<_> = terminator.deref(ctx).operands().collect();
-            for value in values {
-                self.value(value)?;
-            }
+            self.values(&values)?;
             self.code.push(Instruction::Return);
             Ok(())
         } else if Operation::get_op::<UnreachableOp>(terminator, ctx).is_some() {
@@ -123,9 +121,8 @@ impl FunctionEmitter<'_> {
                 (!in_place).then_some((*arg, local))
             })
             .collect();
-        for (arg, _) in &moves {
-            self.value(*arg)?;
-        }
+        let args: Vec<_> = moves.iter().map(|(arg, _)| *arg).collect();
+        self.values(&args)?;
         for (_, local) in moves.iter().rev() {
             self.code.push(Instruction::LocalSet(*local));
         }

@@ -115,6 +115,15 @@ type Result<T> = {tag:'ok';val:T}|{tag:'err';val:string};
 interface Item {n:number}
 interface Envelope {result:Result<Item>}
 interface Row {name:string; inner:Item; extra?:string}
+export function encoding():number {
+ const text = new TextDecoder().decode(new Uint8Array([34,255,34]));
+ const typed:string = JSON.parse(text);
+ if(typed !== '�') return 1;
+ if(JSON.stringify(JSON.parse(text)) !== '\"�\"') return 2;
+ try {const invalid = new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array([255]));return 3;}
+ catch(error) {if(!(error instanceof TypeError))return 4;}
+ return 0;
+}
 export function duplicates():number {
  const tagged:Envelope=JSON.parse('{"result":{"val":{"n":4},"tag":"ok"}}');
  if(tagged.result.tag !== 'ok') return 1;
@@ -132,11 +141,15 @@ export function duplicates():number {
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok"}}');return 8;} catch(e) {}
  const row:Row = JSON.parse('{"name":false,"inner":{"n":false},"name":"é🙂","inner":{"n":3}}');
  if(row.name.length !== 2 || row.inner.n !== 3 || row.extra !== undefined) return 9;
- if(JSON.stringify(row)!=='{"inner":{"n":3},"name":"é🙂"}')return 10;
+ if(JSON.stringify(row)!=='{"name":"é🙂","inner":{"n":3}}')return 10;
  try {const bad:Row = JSON.parse('{"name":"ok","inner":{"n":1},"name":false}'); return 11;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":false,"inner":{},"ignored":[1,]}'); return 12;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":"ok","inner":null}'); return 13;} catch(e) {}
  try {const bad:Row = JSON.parse('{"name":"ok"}'); return 14;} catch(e) {}
+ const retagged:Envelope=JSON.parse('{"result":{"tag":"ok","val":"recovered","tag":"err"}}');
+ if(retagged.result.tag !== 'err' || retagged.result.val !== 'recovered')return 15;
+ try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok","val":{"n":6},"tag":"err"}}');return 16;}
+ catch(e) {if(!(e instanceof TypeError))return 17;}
  const fixed:Row = JSON.parse('{"name":"ok","inner":false,"inner":{"n":4}}');
  return fixed.inner.n - 4;
 }
@@ -196,13 +209,12 @@ export function limits():number {{
     let source = format!("{DUPLICATES}{limits}{fields}");
     let mut program = Program::checked(&source, "typed-validation.ts");
     program.stress_collection(true);
-    for export in ["duplicates", "limits", "fields"] {
+    for export in ["duplicates", "limits", "fields", "encoding"] {
         assert_eq!(program.outcome(export, &[]), (0.0, 0), "{export}");
     }
 }
 
-/// Typed values serialize their declared fields from current storage, then the members,
-/// elements and tag payloads they were parsed with but do not declare.
+/// Typed values overlay current storage on retained members in their insertion order.
 #[test]
 fn typed_stringify_keeps_undeclared_members_and_mutations() {
     let source = r#"
@@ -214,7 +226,7 @@ interface Document {one:Part; two:Part}
 let saved:Document|undefined;
 export function members():number {
  const row:Row = JSON.parse('{ "extra": {"z":1,"2":2,"1":1,"z":3}, "name":"old", "inner":{"n":2,"other":"\\u0061"}, "values":[1,2], "name":"new", "numeric":-0, "overflow":1e400 }');
- if (JSON.stringify(row) !== '{"inner":{"n":2,"other":"a"},"name":"new","values":[1,2],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 1;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"new","inner":{"n":2,"other":"a"},"values":[1,2],"numeric":0,"overflow":null}') return 1;
  const alias = row.inner;
  alias.n = 4;
  row.values.push(3);
@@ -222,9 +234,9 @@ export function members():number {
  row.name = 'changed';
  row.another = 8;
  row.added = 7;
- if (JSON.stringify(row) !== '{"added":7,"another":8,"inner":{"n":4,"other":"a"},"name":"changed","values":[5,2,3],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 2;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"changed","inner":{"n":4,"other":"a"},"values":[5,2,3],"numeric":0,"overflow":null,"another":8,"added":7}') return 2;
  row.another = undefined;
- if (JSON.stringify(row) !== '{"added":7,"inner":{"n":4,"other":"a"},"name":"changed","values":[5,2,3],"extra":{"1":1,"2":2,"z":3},"numeric":0,"overflow":null}') return 3;
+ if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"changed","inner":{"n":4,"other":"a"},"values":[5,2,3],"numeric":0,"overflow":null,"added":7}') return 3;
  row.inner = {n:9};
  if (JSON.stringify(row.inner) !== '{"n":9}' || JSON.stringify(alias) !== '{"n":4,"other":"a"}') return 4;
  const optional:{n?:number}=JSON.parse('{"n":1,"unknown":false,"unknown":{"escaped":"\\u00e9"}}');
@@ -246,6 +258,13 @@ export function tuples():number {
  if(JSON.stringify(result)!=='{"tag":"ok","val":7,"extra":true}')return 4;
  const empty:{tag:'empty'}|{tag:'value';val:number}=JSON.parse('{"val":{"n":2},"tag":"empty","extra":7}');
  if(JSON.stringify(empty)!=='{"tag":"empty","val":{"n":2},"extra":7}')return 5;
+ const tupleError=new Error('tuple',{cause:tuple});
+ if(tupleError.cause._0!==1 || tupleError.cause._1!=='added' || tupleError.cause.length!==undefined)return 6;
+ if(JSON.stringify(tupleError.cause)!=='{"_0":1,"_1":"added"}')return 7;
+ const table:Record<string,string>={first:'one'};
+ const tableError=new Error('dictionary',{cause:table});
+ if(tableError.cause.length!==1 || tableError.cause[0]._0!=='first' || tableError.cause[0]._1!=='one')return 8;
+ if(JSON.stringify(table)!=='{"first":"one"}' || JSON.stringify(tableError.cause)!=='[{"_0":"first","_1":"one"}]')return 9;
  return 0;
 }
 export function warm():number {
@@ -270,6 +289,83 @@ export function mutate():number {
         assert!(program.outcome("warm", &[]).0 > 0.0);
         assert_eq!(program.outcome("read", &[]), (1.0, 0));
         assert_eq!(program.outcome("mutate", &[]), (1.0, 0));
+    }
+    let mut mixed = Program::checked(
+        r#"
+interface MixedInner { n:number }
+interface Mixed { inner:MixedInner; values:number[]; optional?:number }
+export function mixed(x:number):number {
+ const exact=parseInt('9007199254740993');
+ const native:Mixed={inner:{n:exact},values:[exact],optional:exact};
+ const parsed:Mixed=JSON.parse('{"inner":{"n":0.5},"values":[0.5],"optional":null,"optional":0.5}');
+ const copy:Mixed=JSON.parse(JSON.stringify(native));
+ const selected=x===0?native:parsed;
+ const expected=x===0?'{"inner":{"n":9007199254740993},"values":[9007199254740993],"optional":9007199254740993}':'{"inner":{"n":0.5},"values":[0.5],"optional":0.5}';
+ if(JSON.stringify(selected)!==expected)return 1;
+ copy.inner.n=7;
+ if(native.inner.n===7)return 2;
+ return 0;
+}
+"#,
+        "mixed-json-layout.ts",
+    );
+    mixed.stress_collection(true);
+    for value in [0.0f64, 1.0] {
+        assert_eq!(
+            mixed.outcome("mixed", &[wasmtime::Val::F64(value.to_bits())]),
+            (0.0, 0)
+        );
+    }
+    let mut native = Program::checked(
+        r#"
+interface Link {next?:Link}
+interface Reflected {missing?:string; nullable:string|null; both?:boolean|null; value?:number}
+export function reflection(n:number):number {
+ const value:Reflected={nullable:null,both:null,value:n};
+ const error=new Error('optional',{cause:value});
+ if(error.cause.missing!==undefined || error.cause.nullable!==null || error.cause.both!==null || error.cause.value!==n)return 1;
+ value.missing='';value.nullable='';value.both=false;delete value.value;
+ if(error.cause.missing!=='' || error.cause.nullable!=='' || error.cause.both!==false || error.cause.value!==undefined)return 2;
+ value.both=undefined;
+ if(error.cause.both!==undefined)return 3;
+ if(JSON.stringify(error.cause)!=='{"missing":"","nullable":""}' || JSON.stringify(value)!=='{"nullable":"","missing":""}')return 4;
+ const link:Link={};const recursive=new Error('recursive',{cause:link});link.next=link;
+ return recursive.cause.next===link?0:5;
+}
+export function dates():number {
+ const dates=[new Date(NaN),new Date(253402300800000),new Date(-62198755200000)];
+ return JSON.stringify(dates)==='[null,"+010000-01-01T00:00:00.000Z","-000001-01-01T00:00:00.000Z"]'?1:0;
+}
+export function sentinel(n:number, useNull:boolean):number {
+ const value:number|null=useNull?null:n;
+ if(JSON.stringify(value)!=='null' || JSON.stringify({value})!=='{"value":null}')return 1;
+ const copy:{value:number|null}=JSON.parse(JSON.stringify({value}));
+ return copy.value===null?0:2;
+}
+export function depth(n:number):number {
+ let value:Link={};
+ for(let i=0;i<n;i++)value={next:value};
+ try {JSON.stringify(value);return 0;}catch(e){
+  return e instanceof TypeError && JSON.stringify({ok:true})==='{"ok":true}'?1:-1;
+ }
+}
+"#,
+        "native-json-writing.ts",
+    );
+    native.stress_collection(true);
+    assert_eq!(native.throwing("reflection", 0.5), (0.0, 0));
+    assert_eq!(native.outcome("dates", &[]), (1.0, 0));
+    assert_eq!(native.throwing("depth", 127.0), (0.0, 0));
+    assert_eq!(native.throwing("depth", 128.0), (1.0, 0));
+    for payload in [1, 2, 3, 0x8000_0000_0000] {
+        let nan = f64::INFINITY.to_bits() | payload;
+        assert_eq!(
+            native.outcome(
+                "sentinel",
+                &[wasmtime::Val::F64(nan), wasmtime::Val::I32(0)]
+            ),
+            (0.0, 0)
+        );
     }
 }
 
@@ -299,7 +395,7 @@ export async function run(n:number):Promise<number> {
   try {JSON.parse('{"bad":[1,]}');}catch(e){}
   if(temporary.n!==3)return 2;
  }
- if(JSON.stringify(row)!=='{"n":1,"name":"Café 🙂","extra":true}' || saved.n!==n)return 3;
+ if(JSON.stringify(row)!=='{"name":"Café 🙂","n":1,"extra":true}' || saved.n!==n)return 3;
  return row.name.length+rowView.length;
 }
 export function scalar(n:number):number {
@@ -415,8 +511,15 @@ export function writes(n:number):number {{
  const before=JSON.stringify(item);
  if(before!==JSON.stringify(item))return -1;
  for(let i=0;i<n;i++){{item.count++;item.added='yes';}}
- if(JSON.stringify(item)!=='{{"added":"yes","count":'+String(n+1)+',"label":"é🙂","unknown":{{"1":1,"2":2}}}}')return -2;
+ if(JSON.stringify(item)!=='{{"count":'+String(n+1)+',"unknown":{{"1":1,"2":2}},"label":"é🙂","added":"yes"}}')return -2;
  return item.count;
+}}
+export function churn(n:number):number {{
+ const item:Item=JSON.parse('{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}');
+ const copy={{...item}};
+ for(let i=0;i<n;i++){{delete item.added;item.added=item.label;}}
+ if(JSON.stringify(copy)!=='{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}')return -1;
+ return item.count+(item.added===item.label?1:0);
 }}
 export function numbers(n:number):number {{
  const values:number[]=[];
@@ -454,6 +557,11 @@ export function retained():number {{return saved==={quoted} && label==='é🙂'?
     );
     program.stress_collection(true);
     assert_eq!(program.number("writes", 100.0), 101.0);
+    assert_eq!(program.number("churn", 8192.0), 2.0);
+    assert!(
+        program.memory_bytes() <= 1024 * 1024,
+        "property-order churn must remain collectible"
+    );
     assert_eq!(program.call("quote", &[]).0[0].unwrap_f64(), 1.0);
     assert_eq!(program.number("numbers", 1024.0), 1024.0);
     assert_eq!(program.call("retained", &[]).0[0].unwrap_f64(), 1.0);
@@ -502,4 +610,188 @@ export function write():number {{ const rows=JSON.parse({input});let size=0;for(
         allocations[0],
         allocations[1]
     );
+}
+
+#[test]
+fn immutable_json_lookup_preserves_duplicates_keys_and_copied_container_owners() {
+    let members = (0..40)
+        .map(|i| format!("\"k{i}\":{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let values = (0..128)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!("{{{members},\"k0\":99,\"\\u006b1\":88,\"é🙂\":17,\"values\":[{values}]}}");
+    let literal = serde_json::to_string(&input).unwrap();
+    let source = format!(
+        r#"
+let kept=JSON.parse('{{}}');
+export function prepare():number {{
+ const original=JSON.parse({literal});
+ const copy={{...original,k0:100}};
+ if(original.k0!==99 || original.k1!==88 || copy.k0!==100 || copy.k1!==88)return 1;
+ kept=copy;
+ return 0;
+}}
+export function read():number {{
+ if(kept.k0!==100 || kept.k1!==88 || kept['é🙂']!==17 || kept.missing!==undefined)return 1;
+ for(let i=2;i<40;i++)if(kept['k'+i]!==i)return 2;
+ const values=kept.values;
+ for(let i=0;i<128;i++)if(values[i]!==i)return 3;
+ if(values[128]!==undefined || values[-1]!==undefined || values[1.5]!==undefined)return 4;
+ return 0;
+}}
+"#
+    );
+    let mut program = Program::checked(&source, "indexed-json.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("prepare", &[]), (0.0, 0));
+        assert_eq!(program.outcome("read", &[]), (0.0, 0));
+    }
+    assert_eq!(program.counter(Counter::Roots), 0);
+    assert_eq!(program.counter(Counter::Pins), 0);
+}
+
+#[test]
+fn stringify_replacers_visit_live_values_and_filter_properties() {
+    let mut program = Program::checked(
+        r#"
+interface Link {n:number; next?:Link}
+interface Box {value:unknown}
+type Choice = {tag:"ok";val:{n:number}} | {tag:"err";val:string};
+type MaybeChoice = {tag:"empty"} | {tag:"value";val:number};
+export function run():number {
+ const text = JSON.stringify({a:"value",b:2}, (key,value) => key === "b" ? undefined : value);
+ if (text !== '{"a":"value"}') return 1;
+ if (JSON.stringify({a:1,b:2}, ["b","a","b"]) !== '{"b":2,"a":1}') return 2;
+ if (JSON.stringify({a:{a:1,b:2},b:3}, ["a"]) !== '{"a":{"a":1}}') return 3;
+ if (JSON.stringify([1,2,3], (key,value) => key === "1" ? undefined : value) !== '[1,null,3]') return 4;
+ if (JSON.stringify({a:1}, (key,value) => undefined) !== undefined) return 5;
+ const live = {a:1,b:2};
+ let visited = "";
+ const updated = JSON.stringify(live, (key,value) => {
+   visited += key + ":";
+   if (key === "a") live.b = 9;
+   return value;
+ });
+ if (updated !== '{"a":1,"b":9}' || visited !== ':a:b:') return 6;
+ let threw = false;
+ try { JSON.stringify({a:1}, (key,value) => { if(key === "a") throw new Error("stop"); return value; }); }
+ catch(e) { threw = true; }
+ if (!threw) return 7;
+ const shared = {a:1};
+ if(JSON.stringify([shared, shared], (key,value) => value) !== '[{"a":1},{"a":1}]') return 8;
+ if(JSON.stringify({a:1,b:2}, (key,value) => key === "b" ? 4 : value) !== '{"a":1,"b":4}') return 9;
+ if(JSON.stringify({"1":1,"2":2,a:3}, [2,"a",1,2]) !== '{"2":2,"a":3,"1":1}') return 10;
+ if(JSON.stringify([1,2], []) !== '[1,2]') return 11;
+ const dictionary:Record<string,string> = {a:"A",b:"B"};
+ if(JSON.stringify(dictionary,["b"]) !== '{"b":"B"}') return 12;
+ const tuple:[number,string] = [1,"one"];
+ if(JSON.stringify(tuple,(key,value) => value) !== '[1,"one"]') return 13;
+ const record:{a:number} = JSON.parse('{"z":0,"a":1,"extra":{"a":2,"b":3}}');
+ if(JSON.stringify(record,(key,value) => key === "b" ? undefined : value) !== '{"z":0,"a":1,"extra":{"a":2}}') return 14;
+ if(JSON.stringify({d:new Date(0)},(key,value) => value) !== '{"d":"1970-01-01T00:00:00.000Z"}') return 15;
+ if(JSON.stringify({a:1n},(key,value) => typeof value === "bigint" ? String(value) : value) !== '{"a":"1"}') return 16;
+ try { JSON.stringify({a:1n}, (key,value) => value); return 17; } catch(e) { if(!(e instanceof TypeError)) return 18; }
+ const optional:{a?:number,b?:number} = {b:undefined};
+ let keys="";
+ JSON.stringify(optional,(key,value) => { keys+=key+":"; return value; });
+ if(keys!==":b:") return 19;
+ const replacement = {x:1,y:2};
+ const replaced = JSON.stringify(0,(key,value) => {
+   if(key === "") return replacement;
+   if(key === "x") replacement.y=7;
+   return value;
+ });
+ if(replaced!=='{"x":1,"y":7}') return 20;
+ const cycle:Link = {n:1}; cycle.next=cycle;
+ try { JSON.stringify(cycle,(key,value) => value); return 21; } catch(e) { if(!(e instanceof TypeError)) return 22; }
+ const choice:Choice = {tag:"ok",val:{n:1}};
+ if(JSON.stringify(choice,(key,value) => value)!=='{"tag":"ok","val":{"n":1}}') return 23;
+ return 0;
+}
+export function retained():number {
+ for(const input of ['{"tag":"ok","val":{"n":1},"extra":true,"extra":7}',
+                     '{"extra":7,"val":{"n":1},"tag":"ok"}']) {
+   const cursor:Choice = JSON.parse(input);
+   const graph = JSON.parse(input);
+   const decoded:Choice = graph;
+   for(const choice of [cursor,decoded]) {
+     if(JSON.stringify(choice,(key,value) => value)!=='{"tag":"ok","val":{"n":1},"extra":7}') return 1;
+     const boxed:Box = {value:choice};
+     if(JSON.stringify(Object.keys(boxed.value))!=='["tag","val","extra"]') return 2;
+     const copy:Choice = boxed.value;
+     if(JSON.stringify(copy)!=='{"tag":"ok","val":{"n":1},"extra":7}') return 3;
+   }
+ }
+ const empty:MaybeChoice = JSON.parse('{"val":{"n":2},"tag":"empty","extra":7}');
+ if(JSON.stringify(empty,(key,value) => value)!=='{"tag":"empty","val":{"n":2},"extra":7}') return 4;
+ const numeric:Choice = JSON.parse('{"tag":"ok","val":{"n":1},"2":2,"1":1,"extra":7}');
+ const numericBox:Box = {value:numeric};
+ if(JSON.stringify(Object.keys(numericBox.value))!=='["1","2","tag","val","extra"]') return 5;
+ const tuple:[number] = JSON.parse('[1,2,3]');
+ const graph = JSON.parse('[1,2,3]');
+ const decoded:[number] = graph;
+ for(const value of [tuple,decoded]) {
+   let keys = "";
+   const text = JSON.stringify(value,(key,item) => {
+     if(key === "") {
+       if(!Array.isArray(item)) return undefined;
+       keys=JSON.stringify(Object.keys(item));
+     }
+     return item;
+   });
+   if(text!=='[1,2,3]' || keys!=='["0","1","2"]') return 6;
+   const boxed:Box = {value};
+   if(boxed.value.length!==3 || boxed.value[1]!==2 || boxed.value[2]!==3 || boxed.value[3]!==undefined) return 7;
+   const copy:[number] = boxed.value;
+   if(JSON.stringify(copy)!=='[1,2,3]') return 8;
+ }
+ return 0;
+}
+export function boxed():number {
+ const values:(number|undefined)[] = [undefined,2,undefined];
+ let keys = "";
+ const text = JSON.stringify(values,(key,value) => {
+   if(key === "") {
+     if(!Array.isArray(value)) return undefined;
+     keys=JSON.stringify(Object.keys(value));
+   }
+   return value;
+ });
+ if(text!=='[null,2,null]' || keys!=='["0","1","2"]') return 1;
+ const boxed:Box = {value:values};
+ const decoded:(number|undefined)[] = boxed.value;
+ if(decoded.length!==3 || decoded[0]!==undefined || decoded[1]!==2 || decoded[2]!==undefined) return 2;
+ const tuple:[number|undefined,number] = [undefined,2];
+ const tupleBox:Box = {value:tuple};
+ const tupleCopy:[number|undefined,number] = tupleBox.value;
+ if(tupleCopy[0]!==undefined || tupleCopy[1]!==2) return 3;
+ const zero:Box = {value:0n};
+ const one:Box = {value:1n};
+ const same:Box = {value:1n};
+ if(zero.value || !one.value || one.value!==same.value || zero.value===one.value) return 4;
+ const object = {n:1};
+ const objectBox:Box = {value:object};
+ const otherBox:Box = {value:{n:1}};
+ const error = new Error('cause',{cause:object});
+ if(error.cause!==objectBox.value || objectBox.value!==error.cause || error.cause===otherBox.value) return 5;
+ const date:Box = {value:new Date(0)};
+ if(JSON.stringify({...date.value})!=='{}') return 6;
+ if(JSON.stringify(date.value)!=='"1970-01-01T00:00:00.000Z"') return 7;
+ return 0;
+}
+"#,
+        "json-replacer.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        for export in ["run", "retained", "boxed"] {
+            assert_eq!(program.outcome(export, &[]), (0.0, 0), "{export}");
+        }
+    }
+    assert_eq!(program.counter(Counter::Roots), 0);
+    assert_eq!(program.counter(Counter::Pins), 0);
 }

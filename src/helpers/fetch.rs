@@ -4,14 +4,17 @@
 #[path = "fetch/url.rs"]
 mod url;
 #[cfg(test)]
-use url::normalize;
+use url::normalize_request;
 
-fn header(input: &[u8]) -> Result<u32, ()> {
-    if input.is_empty()
-        || !input
+fn is_token(input: &[u8]) -> bool {
+    !input.is_empty()
+        && input
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
-    {
+}
+
+fn header(input: &[u8]) -> Result<u32, ()> {
+    if !is_token(input) {
         return Err(());
     }
     Ok(u32::from(input.eq_ignore_ascii_case(b"content-type")))
@@ -46,21 +49,15 @@ fn status_text(input: &[u8]) -> Result<u32, ()> {
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_status_text(input: u32, length: u32) -> u32 {
+pub(crate) extern "C" fn fetch_status_text(input: u32, length: u32) -> u32 {
     borrow(input, length, 0, 0, |input, _| status_text(input))
 }
 
 fn method(input: &[u8]) -> Result<u32, ()> {
-    if input.is_empty()
-        || !input
+    if !is_token(input)
+        || [b"CONNECT".as_slice(), b"TRACE", b"TRACK"]
             .iter()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
-    {
-        return Err(());
-    }
-    if [b"CONNECT".as_slice(), b"TRACE", b"TRACK"]
-        .iter()
-        .any(|name| input.eq_ignore_ascii_case(name))
+            .any(|name| input.eq_ignore_ascii_case(name))
     {
         return Err(());
     }
@@ -77,42 +74,6 @@ fn method(input: &[u8]) -> Result<u32, ()> {
         }
     }
     Ok(if input == b"PATCH" { 8 } else { 9 })
-}
-
-fn latin1(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
-    let mut length = 0;
-    for byte in input {
-        if *byte < 128 {
-            *output.get_mut(length).ok_or(())? = *byte;
-            length += 1;
-        } else {
-            let target = output.get_mut(length..length + 2).ok_or(())?;
-            target[0] = 0xc0 | (byte >> 6);
-            target[1] = 0x80 | (byte & 63);
-            length += 2;
-        }
-    }
-    Ok(length)
-}
-
-fn decode(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
-    let input = input.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(input);
-    let mut length = 0;
-    for chunk in input.utf8_chunks() {
-        for part in [
-            chunk.valid().as_bytes(),
-            if chunk.invalid().is_empty() {
-                b""
-            } else {
-                b"\xef\xbf\xbd"
-            },
-        ] {
-            let end = length + part.len();
-            output.get_mut(length..end).ok_or(())?.copy_from_slice(part);
-            length = end;
-        }
-    }
-    Ok(length)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -143,7 +104,7 @@ fn borrow(
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         if output.len() < 32 {
             return Err(());
@@ -158,7 +119,12 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_url_value(
+    input: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         Ok(url::normalize_url(input, output)?[5])
     })
@@ -166,61 +132,7 @@ pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_redirect(
-    base: u32,
-    base_len: u32,
-    location: u32,
-    location_len: u32,
-    output: u32,
-    capacity: u32,
-) -> u32 {
-    use guest_memory::GuestRange;
-    let result = (|| {
-        let base = GuestRange::new(base, base_len)?;
-        let location = GuestRange::new(location, location_len)?;
-        let output = GuestRange::new(output, capacity)?;
-        if base.overlaps(output) || location.overlaps(output) {
-            return Err(());
-        }
-        // SAFETY: validated immutable inputs are disjoint from caller-owned output;
-        // the codec neither allocates nor suspends while these ranges are borrowed.
-        let (base, location, output) =
-            unsafe { (base.bytes(), location.bytes(), output.bytes_mut()) };
-        if output.len() < 32 {
-            return Err(());
-        }
-        let metadata = url::resolve(base, location, &mut output[32..])?;
-        let origin_end = base
-            .get(8..)
-            .ok_or(())?
-            .iter()
-            .position(|byte| *byte == b'/')
-            .ok_or(())?
-            + 8;
-        let same_origin = base.get(..origin_end) == output.get(32..32 + metadata[2] as usize);
-        for (index, value) in metadata
-            .into_iter()
-            .chain([u32::from(same_origin)])
-            .enumerate()
-        {
-            output[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        Ok(0)
-    })();
-    result.unwrap_or(u32::MAX)
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_decode(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
-    borrow(input, length, output, capacity, |input, output| {
-        decode(input, output).map(|length| length as u32)
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
+pub(crate) extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
     let result = (|| {
         let input = guest_memory::GuestRange::new(input, length)?;
         // SAFETY: validated initialized guest input, read without allocation or suspension.
@@ -231,160 +143,15 @@ pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
-    borrow(input, length, output, capacity, |input, output| {
-        header_value(input, output).map(|length| length as u32)
-    })
-}
-
-fn joined_header_size<'a>(
-    fields: impl Iterator<Item = (&'a [u8], &'a [u8])>,
-    name: &[u8],
-) -> Result<Option<usize>, ()> {
-    header(name)?;
-    let mut size: Option<usize> = None;
-    for (_, value) in fields.filter(|(key, _)| key.eq_ignore_ascii_case(name)) {
-        let length = value
-            .iter()
-            .try_fold(0usize, |length, byte| {
-                length.checked_add(if *byte < 128 { 1 } else { 2 })
-            })
-            .ok_or(())?;
-        size = Some(match size {
-            None => length,
-            Some(size) => size
-                .checked_add(2)
-                .and_then(|size| size.checked_add(length))
-                .ok_or(())?,
-        });
-    }
-    Ok(size)
-}
-
-fn join_header<'a>(
-    fields: impl Iterator<Item = (&'a [u8], &'a [u8])>,
-    name: &[u8],
-    output: &mut [u8],
-) -> Result<usize, ()> {
-    let mut length = 0;
-    let mut first = true;
-    for (_, value) in fields.filter(|(key, _)| key.eq_ignore_ascii_case(name)) {
-        if !first {
-            output
-                .get_mut(length..length + 2)
-                .ok_or(())?
-                .copy_from_slice(b", ");
-            length += 2;
-        }
-        length += latin1(value, output.get_mut(length..).ok_or(())?)?;
-        first = false;
-    }
-    Ok(length)
-}
-
-#[cfg(target_arch = "wasm32")]
-struct HeaderInput {
-    fields: guest_memory::GuestRange,
-    name: guest_memory::GuestRange,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl HeaderInput {
-    fn new(fields: u32, count: u32, name: u32, length: u32) -> Result<Self, ()> {
-        let input = Self {
-            fields: guest_memory::GuestRange::new(fields, count.checked_mul(16).ok_or(())?)?,
-            name: guest_memory::GuestRange::new(name, length)?,
-        };
-        for ranges in input.ranges() {
-            ranges?;
-        }
-        Ok(input)
-    }
-
-    fn ranges(&self) -> impl Iterator<Item = Result<[guest_memory::GuestRange; 2], ()>> {
-        self.records().map(|record| {
-            let [name, name_length, value, value_length] = record_words(record);
-            Ok([
-                guest_memory::GuestRange::new(name, name_length)?,
-                guest_memory::GuestRange::new(value, value_length)?,
-            ])
-        })
-    }
-
-    /// The canonical 16-byte `(name, name length, value, value length)` field records.
-    fn records(&self) -> impl Iterator<Item = &[u8; 16]> {
-        // SAFETY: the canonical field list is initialized, immutable, and validated by construction.
-        unsafe { self.fields.bytes() }.as_chunks::<16>().0.iter()
-    }
-
-    fn fields(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
-        self.ranges().map(|ranges| {
-            let [name, value] = ranges.expect("HeaderInput::new validated every field range");
-            // SAFETY: construction validated every initialized input; neither traversal allocates nor suspends.
-            unsafe { (name.bytes(), value.bytes()) }
-        })
-    }
-
-    fn name(&self) -> &[u8] {
-        // SAFETY: construction validates this initialized immutable input.
-        unsafe { self.name.bytes() }
-    }
-
-    fn validate_output(&self, output: guest_memory::GuestRange) -> Result<(), ()> {
-        if output.overlaps(self.fields) || output.overlaps(self.name) {
-            return Err(());
-        }
-        for pair in self.ranges() {
-            if pair?.iter().any(|range| output.overlaps(*range)) {
-                return Err(());
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The four little-endian words of one canonical header field record.
-#[cfg(target_arch = "wasm32")]
-fn record_words(record: &[u8; 16]) -> [u32; 4] {
-    core::array::from_fn(|word| {
-        let at = word * 4;
-        u32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_size(fields: u32, count: u32, name: u32, length: u32) -> u32 {
-    let result = (|| {
-        let input = HeaderInput::new(fields, count, name, length)?;
-        match joined_header_size(input.fields(), input.name())? {
-            None => Ok(u32::MAX),
-            Some(size) if size < (u32::MAX - 1) as usize => Ok(size as u32),
-            _ => Err(()),
-        }
-    })();
-    result.unwrap_or(u32::MAX - 1)
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_get(
-    fields: u32,
-    count: u32,
-    name: u32,
+pub(crate) extern "C" fn fetch_header_value(
+    input: u32,
     length: u32,
     output: u32,
     capacity: u32,
 ) -> u32 {
-    let result = (|| {
-        let input = HeaderInput::new(fields, count, name, length)?;
-        let output = guest_memory::GuestRange::new(output, capacity)?;
-        input.validate_output(output)?;
-        // SAFETY: output is checked and disjoint from every input range, with exclusive caller ownership.
-        join_header(input.fields(), input.name(), unsafe { output.bytes_mut() })
-            .map(|size| size as u32)
-    })();
-    result.unwrap_or(u32::MAX)
+    borrow(input, length, output, capacity, |input, output| {
+        header_value(input, output).map(|length| length as u32)
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -393,52 +160,14 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-fn edit_headers<'a>(
-    fields: impl Iterator<Item = ([u32; 4], &'a [u8])>,
-    name: &[u8],
-    replacement: [u32; 4],
-    action: u32,
-    output: &mut [u8],
-) -> Result<u32, ()> {
-    header(name)?;
-    if action > 2 {
-        return Err(());
-    }
-    let mut count = 0u32;
-    let mut replaced = false;
-    let mut write = |field: [u32; 4]| -> Result<(), ()> {
-        let offset = (count as usize).checked_mul(16).ok_or(())?;
-        let target = output
-            .get_mut(offset..offset.checked_add(16).ok_or(())?)
-            .ok_or(())?;
-        for (word, slot) in field
-            .into_iter()
-            .zip(target.as_chunks_mut::<4>().0.iter_mut())
-        {
-            slot.copy_from_slice(&word.to_le_bytes());
-        }
-        count = count.checked_add(1).ok_or(())?;
-        Ok(())
-    };
-    for (field, key) in fields {
-        if action != 0 && key.eq_ignore_ascii_case(name) {
-            if action == 1 && !replaced {
-                write(replacement)?;
-                replaced = true;
-            }
-        } else {
-            write(field)?;
-        }
-    }
-    if action == 0 || (action == 1 && !replaced) {
-        write(replacement)?;
-    }
-    Ok(count)
-}
-
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_name(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+pub(crate) extern "C" fn fetch_header_name(
+    input: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         header(input)?;
         let target = output.get_mut(..input.len()).ok_or(())?;
@@ -449,64 +178,9 @@ pub extern "C" fn fetch_header_name(input: u32, length: u32, output: u32, capaci
     })
 }
 
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_header_edit(
-    fields: u32,
-    count: u32,
-    name: u32,
-    name_length: u32,
-    value: u32,
-    value_length: u32,
-    action: u32,
-    output: u32,
-    capacity: u32,
-) -> u32 {
-    use guest_memory::GuestRange;
-    (|| {
-        let input = HeaderInput::new(fields, count, name, name_length)?;
-        let value_range = GuestRange::new(value, value_length)?;
-        let target = GuestRange::new(output, capacity)?;
-        input.validate_output(target)?;
-        if value_range.overlaps(target) {
-            return Err(());
-        }
-        let fields = input
-            .records()
-            .zip(input.fields())
-            .map(|(record, (key, _))| (record_words(record), key));
-        // SAFETY: all input ranges were validated and output is exclusively borrowed and disjoint.
-        edit_headers(
-            fields,
-            input.name(),
-            [name, name_length, value, value_length],
-            action,
-            unsafe { target.bytes_mut() },
-        )
-    })()
-    .unwrap_or(u32::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn redirect_codec_rejects_short_storage_and_non_http_targets() {
-        let mut request = [0; 256];
-        let parts =
-            url::normalize_request(b"https://example.com/a#fragment", &mut request).unwrap();
-        assert_eq!(&request[..parts[4] as usize], b"https://example.com/a");
-        assert_eq!(
-            &request[..parts[5] as usize],
-            b"https://example.com/a#fragment"
-        );
-        let base = b"https://example.com/a/b";
-        let mut output = [0; 512];
-        assert!(url::resolve(base, b"file:///secret", &mut output).is_err());
-        assert!(url::resolve(base, b"../c", &mut output[..8]).is_err());
-        let metadata = url::resolve(base, b"../c", &mut output).unwrap();
-        assert_eq!(&output[..metadata[4] as usize], b"https://example.com/c");
-    }
     #[test]
     fn methods_and_header_bytes_follow_fetch_validation() {
         for valid in ["", "OK", "Créé\tOK", "\u{80}"] {
@@ -515,28 +189,6 @@ mod tests {
         for invalid in ["bad\rtext", "bad\ntext", "\0", "\u{7f}", "Ā"] {
             assert!(status_text(invalid.as_bytes()).is_err());
         }
-        let fields = [
-            ([1, 1, 2, 1], b"X".as_slice()),
-            ([3, 1, 4, 1], b"x".as_slice()),
-            ([5, 1, 6, 1], b"y".as_slice()),
-        ];
-        let mut output = [0u8; 64];
-        assert_eq!(
-            edit_headers(fields.into_iter(), b"x", [7, 1, 8, 1], 0, &mut output),
-            Ok(4)
-        );
-        assert_eq!(
-            edit_headers(fields.into_iter(), b"x", [7, 1, 8, 1], 1, &mut output),
-            Ok(2)
-        );
-        assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()), 7);
-        assert_eq!(u32::from_le_bytes(output[16..20].try_into().unwrap()), 5);
-        assert_eq!(
-            edit_headers(fields.into_iter(), b"X", [0; 4], 2, &mut output),
-            Ok(1)
-        );
-        assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()), 5);
-        assert!(edit_headers(fields.into_iter(), b"X", [0; 4], 0, &mut output[..1]).is_err());
         assert_eq!(method(b"post"), Ok(2));
         assert_eq!(method(b"patch"), Ok(9));
         assert_eq!(method(b"PATCH"), Ok(8));
@@ -554,53 +206,69 @@ mod tests {
         let mut output = [0; 32];
         let length = header_value(" \tété\r\n".as_bytes(), &mut output).unwrap();
         assert_eq!(&output[..length], b"\xe9t\xe9");
-        let length = latin1(b"\xe9t\xe9", &mut output).unwrap();
-        assert_eq!(&output[..length], "été".as_bytes());
-        let fields = [
-            (b"X".as_slice(), b"\xe9".as_slice()),
-            (b"x", b""),
-            (b"empty", b""),
-        ];
-        assert_eq!(joined_header_size(fields.into_iter(), b"x"), Ok(Some(4)));
-        assert_eq!(join_header(fields.into_iter(), b"X", &mut output), Ok(4));
-        assert_eq!(&output[..4], "é, ".as_bytes());
-        assert_eq!(
-            joined_header_size(fields.into_iter(), b"empty"),
-            Ok(Some(0))
-        );
-        assert_eq!(joined_header_size(fields.into_iter(), b"absent"), Ok(None));
         for invalid in ["🙂", "a\0b", "a\nb", "a\rb"] {
             assert!(header_value(invalid.as_bytes(), &mut output).is_err());
         }
     }
     #[test]
-    fn url_and_utf8_use_one_runtime_path() {
+    fn request_url_coordinates_match_normalization() {
         for (input, expected) in [
             (
                 "HTTP://Example.COM:80?q=hello world#ignored",
                 "http://example.com/?q=hello%20world",
             ),
             ("https://[::1]:8443/é", "https://[::1]:8443/%C3%A9"),
+            ("http://[0:0:0:0:0:0:0:1]:80/a", "http://[::1]/a"),
+            ("http://[::ffff:192.0.2.1]/", "http://[::ffff:c000:201]/"),
+            ("http://[1:0:0:2:0:0:3:4]/", "http://[1::2:0:0:3:4]/"),
+            ("http://127.1/", "http://127.0.0.1/"),
+            ("http://0x7f000001/", "http://127.0.0.1/"),
+            ("http://0177.0.0.1/", "http://127.0.0.1/"),
+            (
+                "http://example.com/a/./b/../%2e/%2e%2E/c\\..\\d?k=\\v",
+                "http://example.com/d?k=\\v",
+            ),
+            ("http://example.com/../../x", "http://example.com/x"),
+            (
+                "  http://exa\tmple.com/a\r/b\n?q=a b  ",
+                "http://example.com/a/b?q=a%20b",
+            ),
         ] {
             let mut output = [0; 512];
-            let metadata = normalize(input.as_bytes(), &mut output).unwrap();
+            let metadata = normalize_request(input.as_bytes(), &mut output).unwrap();
             assert_eq!(&output[..metadata[4] as usize], expected.as_bytes());
         }
         for input in [
             "file:///a",
             "http://",
             "http://host:99999",
+            "http://host:x",
             "http://[wrong]/",
+            "http://[::1",
+            "http://[::1]tail",
+            "http://[1::2::3]/",
             "http://user@host/",
+            "http://host|name/",
+            "http://a%2fb/",
+            "http://a%00b/",
+            "http://a%zzb/",
+            "http://1.2.3.256/",
+            "http://test.42/",
+            "http://1.2.3.4.5/",
+            "http://09/",
         ] {
-            assert!(normalize(input.as_bytes(), &mut [0; 512]).is_err());
+            assert!(normalize_request(input.as_bytes(), &mut [0; 512]).is_err());
         }
         let mut output = [0; 512];
-        let input = b"https://user:pass@example.com/#fragment";
-        let metadata = url::normalize_url(input, &mut output).unwrap();
-        assert_eq!(&output[..metadata[5] as usize], input);
-        assert!(normalize(input, &mut output).is_err());
-        let length = decode(b"\xef\xbb\xbfhi\xf0\x9f\x99\x82\xe2\x82X\xff", &mut output).unwrap();
-        assert_eq!(core::str::from_utf8(&output[..length]).unwrap(), "hi🙂�X�");
+        let input = "HTTP://alice:p@ss@EXAMPLE.com:80/a^b?q=x#é\ny";
+        let metadata = url::normalize_url(input.as_bytes(), &mut output).unwrap();
+        assert_eq!(
+            &output[..metadata[5] as usize],
+            b"http://alice:p%40ss@example.com/a%5Eb?q=x#%C3%A9y"
+        );
+        assert!(normalize_request(input.as_bytes(), &mut output).is_err());
+        let metadata = normalize_request(b"http://example.com/a#x\ny", &mut output).unwrap();
+        assert_eq!(&output[..metadata[4] as usize], b"http://example.com/a");
+        assert_eq!(&output[..metadata[5] as usize], b"http://example.com/a#xy");
     }
 }

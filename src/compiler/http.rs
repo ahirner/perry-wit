@@ -7,13 +7,10 @@
 //! `wasi:http` response from the returned one through the services of `perry:http-server`
 //! (`perry-web`'s `serve` module). The response body is written after `task.return`, so the
 //! export runs until the host has read it.
-use super::{Compiled, ComponentOutput, bind, finish, lower, wit_types};
+use super::{Compiled, emit_component, lower, wit_types};
 use crate::component;
 use anyhow::{Context as _, Result};
-use perry_codegen::{
-    Exports,
-    boundary::{AbiType, Export, ExportKind, Flat},
-};
+use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
 use pliron::context::Context;
 use wit_parser::{
     Resolve, Type, TypeDefKind, WorldId, WorldItem,
@@ -38,8 +35,8 @@ world handler {
 }";
 
 const ADAPTER: &str = r#"
-import type { PerryHttpHandlerTypesMethod as __PerryMethod,
-  PerryHttpHandlerTypesScheme as __PerryScheme } from './handler-types/world';
+import type { Method as __PerryMethod,
+  Scheme as __PerryScheme } from './handler-types/world';
 import { request as __perryRequest, body as __perryBody, method as __perryMethod,
   methodOther as __perryMethodOther, hasScheme as __perryHasScheme, scheme as __perryScheme,
   schemeOther as __perrySchemeOther, authority as __perryAuthority, path as __perryPath,
@@ -102,6 +99,7 @@ pub(crate) fn compile(
     file_name: &str,
     modules: &std::collections::BTreeMap<String, String>,
     types: &Resolve,
+    types_world: WorldId,
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
@@ -109,12 +107,12 @@ pub(crate) fn compile(
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
     let program = format!("{source}\n{adapter}");
     let ctx = &mut Context::new();
-    let mir = lower(
+    let (mir, mut analyses) = lower(
         ctx,
         &program,
         file_name,
         modules,
-        &wit_types::foreign(types),
+        &wit_types::foreign(types, Some(types_world)),
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;
@@ -143,26 +141,19 @@ pub(crate) fn compile(
             command: false,
         },
     }];
-    let imports = bind::imports(&resolve, world);
-    let streams = bind::stream_anchor(&resolve, world);
-    let exports = Exports::Canonical {
+    emit_component(
+        ctx,
+        &mir,
+        &mut analyses,
+        &resolve,
+        world,
         memory_checks,
+        componentize,
         exports,
-        imports,
-        bindings: vec![],
-        resources: vec![],
-    };
-    let allocation_report = perry_codegen::explain_tiers(ctx, &mir, &exports);
-    let core = perry_codegen::compile(ctx, &mir, &exports)?;
-    let core = finish(core, streams.as_ref())?;
-    let component = componentize
-        .then(|| ComponentOutput::encode(&core, &resolve, world))
-        .transpose()?;
-    Ok(Compiled {
-        core,
-        component,
-        allocation_report,
-    })
+        vec![],
+        vec![],
+        false,
+    )
 }
 
 /// The flat core types of `ty` (at most the 16 that `task.return` takes directly).

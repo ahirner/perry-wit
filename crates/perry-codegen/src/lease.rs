@@ -20,43 +20,35 @@
 //!
 //! Without the proof the operations allocate fresh objects, which is always correct.
 use perry_mir::{
-    calls::AwaitOp,
-    intrinsics::{Intrinsic, IntrinsicOp},
-    optional::{IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp, WrapOp},
-    scalar::CompareOp,
+    AwaitOp, CompareOp, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp,
+    WrapOp,
 };
 use pliron::{
     basic_block::BasicBlock,
-    builtin::{
-        op_interfaces::{BranchOpInterface, OneRegionInterface},
-        ops::FuncOp,
-    },
+    builtin::{op_interfaces::BranchOpInterface, ops::FuncOp},
     context::{Context, Ptr},
-    linked_list::ContainsLinkedList,
     op::op_cast,
     operation::Operation,
     value::Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Classes of leasable operations: each operation's objects are reused by the next call of the
 /// same class.
 const CLASSES: [&[Intrinsic]; 2] = [&[Intrinsic::ReaderRead], &[Intrinsic::WriterWrite]];
 
 fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
-    Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
+    Operation::get_op::<IntrinsicOp>(op, ctx).map(|i| i.intrinsic(ctx))
 }
 
 /// The leased operations of `function`.
-pub(crate) fn leased(ctx: &Context, function: &FuncOp) -> HashSet<Ptr<Operation>> {
-    let ops: Vec<Ptr<Operation>> = function
-        .get_region(ctx)
-        .deref(ctx)
-        .iter(ctx)
-        .flat_map(|block| block.deref(ctx).iter(ctx).collect::<Vec<_>>())
-        .collect();
+pub(crate) fn leased(
+    ctx: &Context,
+    function: &FuncOp,
+    live: &perry_mir::LiveValues,
+) -> HashSet<Ptr<Operation>> {
+    let ops = crate::analysis::function_ops(ctx, function);
     let mut leased = HashSet::new();
-    let mut live_after = None;
     for class in CLASSES {
         let members: Vec<_> = ops
             .iter()
@@ -69,11 +61,11 @@ pub(crate) fn leased(ctx: &Context, function: &FuncOp) -> HashSet<Ptr<Operation>
         let Some(derived) = derived(ctx, &members) else {
             continue;
         };
-        let live = live_after.get_or_insert_with(|| live_after_ops(ctx, function));
         let dead = members.iter().all(|op| {
             let result = op.deref(ctx).get_result(0);
-            live.get(op)
-                .is_none_or(|values| values.iter().all(|v| *v == result || !derived.contains(v)))
+            live.after(*op)
+                .values()
+                .all(|v| v == result || !derived.contains(&v))
         });
         if dead {
             leased.extend(members);
@@ -108,16 +100,9 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
             let user = r#use.user_op();
             let operation = user.deref(ctx);
             let result = || operation.get_result(0);
-            if Operation::get_op::<AwaitOp>(user, ctx).is_some()
-                || Operation::get_op::<UnwrapOp>(user, ctx).is_some()
-                || Operation::get_op::<WrapOp>(user, ctx).is_some()
-                || Operation::get_op::<OptionalCastOp>(user, ctx).is_some()
-            {
+            if perry_mir::is_any::<(AwaitOp, UnwrapOp, WrapOp, OptionalCastOp)>(ctx, user) {
                 work.push(result());
-            } else if Operation::get_op::<IsUndefinedOp>(user, ctx).is_some()
-                || Operation::get_op::<IsNullOp>(user, ctx).is_some()
-                || Operation::get_op::<CompareOp>(user, ctx).is_some()
-            {
+            } else if perry_mir::is_any::<(IsUndefinedOp, IsNullOp, CompareOp)>(ctx, user) {
                 // Tests read the value.
             } else if let Some(builtin) = intrinsic(ctx, user) {
                 match builtin {
@@ -152,56 +137,4 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
         }
     }
     Some(derived)
-}
-
-/// The values live right after each operation (backward liveness over the CFG).
-pub(super) fn live_after_ops(
-    ctx: &Context,
-    function: &FuncOp,
-) -> HashMap<Ptr<Operation>, HashSet<Value>> {
-    let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
-    let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
-    let live_out = |live_in: &HashMap<Ptr<BasicBlock>, HashSet<Value>>, block: Ptr<BasicBlock>| {
-        let mut live = HashSet::new();
-        for succ in block.deref(ctx).succs(ctx) {
-            live.extend(live_in.get(&succ).into_iter().flatten().copied());
-        }
-        live
-    };
-    loop {
-        let mut changed = false;
-        for &block in blocks.iter().rev() {
-            let mut live = live_out(&live_in, block);
-            let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-            for op in ops.iter().rev() {
-                for result in op.deref(ctx).results() {
-                    live.remove(&result);
-                }
-                live.extend(op.deref(ctx).operands());
-            }
-            for argument in block.deref(ctx).arguments() {
-                live.remove(&argument);
-            }
-            if live_in.get(&block) != Some(&live) {
-                live_in.insert(block, live);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut after = HashMap::new();
-    for &block in &blocks {
-        let mut live = live_out(&live_in, block);
-        let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
-        for op in ops.iter().rev() {
-            after.insert(*op, live.clone());
-            for result in op.deref(ctx).results() {
-                live.remove(&result);
-            }
-            live.extend(op.deref(ctx).operands());
-        }
-    }
-    after
 }

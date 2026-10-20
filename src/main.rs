@@ -28,67 +28,33 @@ fn run() -> Result<()> {
 
     let mut ts_file_path: Option<String> = None;
     let mut out_file_path: Option<String> = None;
-    let mut wit_dir_path = "wit".to_string();
-    let mut world_name = None;
-    let mut core_only = false;
+    let mut options = CompileOptions {
+        wit_dir: PathBuf::from("wit"),
+        world: None,
+        core_only: false,
+    };
     let mut explain_tiers = false;
     let mut keep_names = false;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-o" | "--out" if i + 1 < args.len() => {
-                out_file_path = Some(args[i + 1].clone());
-                i += 2;
+    let mut iter = args[1..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-o" | "--out" if !iter.as_slice().is_empty() => out_file_path = iter.next().cloned(),
+            "--wit" if !iter.as_slice().is_empty() => {
+                options.wit_dir = PathBuf::from(iter.next().unwrap())
             }
-            "--wit" if i + 1 < args.len() => {
-                wit_dir_path = args[i + 1].clone();
-                i += 2;
-            }
-            "--world" if i + 1 < args.len() => {
-                world_name = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--explain-tiers" => {
-                explain_tiers = true;
-                i += 1;
-            }
-            "--keep-names" => {
-                keep_names = true;
-                i += 1;
-            }
-            "--core-only" => {
-                core_only = true;
-                i += 1;
-            }
-            arg if !arg.starts_with('-') => {
-                ts_file_path = Some(arg.to_string());
-                i += 1;
-            }
+            "--world" if !iter.as_slice().is_empty() => options.world = iter.next().cloned(),
+            "--explain-tiers" => explain_tiers = true,
+            "--keep-names" => keep_names = true,
+            "--core-only" => options.core_only = true,
+            arg if !arg.starts_with('-') => ts_file_path = Some(arg.to_string()),
             "-h" | "--help" => {
-                println!("Usage: perry-wit [OPTIONS] <input.ts>");
-                println!("       perry-wit gen-types [OPTIONS]");
-                println!();
-                println!("Commands:");
-                println!(
-                    "  gen-types             Generate TypeScript declarations (.d.ts) and tsconfig.json from WIT"
+                print!(
+                    "Usage: perry-wit [OPTIONS] <input.ts>\n       perry-wit gen-types [OPTIONS]\n\n                     Commands:\n  gen-types             Generate TypeScript declarations (.d.ts) and tsconfig.json from WIT\n\n                     Options:\n  -o, --out <PATH>      Output WebAssembly file path\n                           --wit <PATH>      WIT definition directory (default: 'wit')\n                           --world <NAME>    WIT world (required when the package has multiple worlds)\n                           --core-only       Output the selected WIT world’s core module\n                           --explain-tiers   Explain allocation lifetimes and stream reuse\n                           --keep-names      Preserve function names for guest profiling\n                       -h, --help            Print help information\n"
                 );
-                println!();
-                println!("Options:");
-                println!("  -o, --out <PATH>      Output WebAssembly file path");
-                println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
-                println!(
-                    "      --world <NAME>    WIT world (required when the package has multiple worlds)"
-                );
-                println!("      --core-only       Output the selected WIT world’s core module");
-                println!("      --explain-tiers   Explain allocation lifetimes and stream reuse");
-                println!("      --keep-names      Preserve function names for guest profiling");
-                println!("  -h, --help            Print help information");
                 return Ok(());
             }
-            other => {
-                bail!("Unknown argument: {other}\nTry 'perry-wit --help' for usage.");
-            }
+            other => bail!("Unknown argument: {other}\nTry 'perry-wit --help' for usage."),
         }
     }
 
@@ -105,14 +71,8 @@ fn run() -> Result<()> {
     });
 
     if out_file_path.ends_with(".core.wasm") {
-        core_only = true;
+        options.core_only = true;
     }
-
-    let options = CompileOptions {
-        wit_dir: PathBuf::from(wit_dir_path),
-        world: world_name,
-        core_only,
-    };
 
     let ts_file = Path::new(&ts_file_path);
     println!("Compiling {}...", ts_file.display());
@@ -126,7 +86,7 @@ fn run() -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    if core_only {
+    if options.core_only {
         println!(
             "Writing Core Wasm ({} bytes) -> {}",
             compiled.core.len(),
@@ -163,71 +123,32 @@ fn run() -> Result<()> {
 }
 
 fn run_gen_types(args: &[String]) -> Result<()> {
-    let mut wit_dir_path = "wit".to_string();
-    let mut world_name = None;
-    let mut entry = PathBuf::from("src/index.ts");
-    let mut out_dir_path = ".perry/types".to_string();
-    let mut initialize_tsconfig = true;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--no-tsconfig" => {
-                initialize_tsconfig = false;
-                i += 1;
+    let mut options = perry_wit::SdkOptions::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--no-tsconfig" => options.initialize_tsconfig = false,
+            "-o" | "--out" if !iter.as_slice().is_empty() => {
+                options.out_dir = PathBuf::from(iter.next().unwrap())
             }
-            "-o" | "--out" if i + 1 < args.len() => {
-                out_dir_path = args[i + 1].clone();
-                i += 2;
+            "--entry" if !iter.as_slice().is_empty() => {
+                options.entry = PathBuf::from(iter.next().unwrap())
             }
-            "--entry" if i + 1 < args.len() => {
-                entry = PathBuf::from(&args[i + 1]);
-                i += 2;
+            "--wit" if !iter.as_slice().is_empty() => {
+                options.wit_dir = PathBuf::from(iter.next().unwrap())
             }
-            "--wit" if i + 1 < args.len() => {
-                wit_dir_path = args[i + 1].clone();
-                i += 2;
-            }
-            "--world" if i + 1 < args.len() => {
-                world_name = Some(args[i + 1].clone());
-                i += 2;
-            }
+            "--world" if !iter.as_slice().is_empty() => options.world = iter.next().cloned(),
             "-h" | "--help" => {
-                println!("Usage: perry-wit gen-types [OPTIONS]");
-                println!();
-                println!(
-                    "Generates TypeScript declarations (.d.ts) and tsconfig.json from WIT definitions."
+                print!(
+                    "Usage: perry-wit gen-types [OPTIONS]\n\n                     Generates TypeScript declarations (.d.ts) and tsconfig.json from WIT definitions.\n\n                     Options:\n                           --wit <PATH>      WIT definition directory (default: 'wit')\n                           --world <NAME>    WIT world (required when the package has multiple worlds)\n                       -o, --out <DIR>       Output directory for generated types (default: '.perry/types')\n                           --entry <PATH>    Implementation module (default: src/index.ts)\n                           --no-tsconfig    Do not create an authored tsconfig.json\n                       -h, --help            Print help information\n"
                 );
-                println!();
-                println!("Options:");
-                println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
-                println!(
-                    "      --world <NAME>    WIT world (required when the package has multiple worlds)"
-                );
-                println!(
-                    "  -o, --out <DIR>       Output directory for generated types (default: '.perry/types')"
-                );
-                println!("      --entry <PATH>    Implementation module (default: src/index.ts)");
-                println!("      --no-tsconfig    Do not create an authored tsconfig.json");
-                println!("  -h, --help            Print help information");
                 return Ok(());
             }
-            other => {
-                bail!(
-                    "Unknown argument to gen-types: {other}\nTry 'perry-wit gen-types --help' for usage."
-                );
-            }
+            other => bail!(
+                "Unknown argument to gen-types: {other}\nTry 'perry-wit gen-types --help' for usage."
+            ),
         }
     }
-
-    let options = perry_wit::SdkOptions {
-        wit_dir: PathBuf::from(wit_dir_path),
-        world: world_name,
-        out_dir: PathBuf::from(out_dir_path),
-        project_root: None,
-        entry,
-        initialize_tsconfig,
-    };
 
     let result = perry_wit::generate_sdk_files(&options)?;
     println!(

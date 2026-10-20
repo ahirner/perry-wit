@@ -79,6 +79,8 @@ numeric! {
     I32ShrU: [I32, I32] -> I32, Pure;
     I32Rotl: [I32, I32] -> I32, Pure;
     I32Rotr: [I32, I32] -> I32, Pure;
+    I32Extend8S: [I32] -> I32, Pure;
+    I32Extend16S: [I32] -> I32, Pure;
     I64Eqz: [I64] -> I32, Pure;
     I64Eq: [I64, I64] -> I32, Pure;
     I64Ne: [I64, I64] -> I32, Pure;

@@ -1,5 +1,6 @@
 //! Raw core modules (`compile_core`, no component) linked with `perry-runtime`, run in
 //! wasmtime with fuel metering.
+use std::sync::OnceLock;
 use wasmtime::{Config, Engine, Instance, Module, Store, Val};
 
 /// Runtime memory counters read through `__perry_gc_counter` (`perry-runtime/src/roots.rs`).
@@ -36,15 +37,18 @@ impl Program {
     }
 
     pub(crate) fn from_wasm(wasm: Vec<u8>) -> Self {
+        static ENGINE: OnceLock<Engine> = OnceLock::new();
         if let Err(error) = wasmparser::Validator::new().validate_all(&wasm) {
             panic!("{error}\n{}", disassemble(&wasm));
         }
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config).expect("fuel engine");
-        let mut store = Store::new(&engine, ());
+        let engine = ENGINE.get_or_init(|| {
+            let mut config = Config::new();
+            config.consume_fuel(true);
+            Engine::new(&config).expect("fuel engine")
+        });
+        let mut store = Store::new(engine, ());
         store.set_fuel(u64::MAX).expect("fuel is enabled");
-        let module = Module::new(&engine, &wasm).expect("valid module");
+        let module = Module::new(engine, &wasm).expect("valid module");
         assert_eq!(module.imports().len(), 0, "the runtime is linked in");
         let instance = Instance::new(&mut store, &module, &[]).expect("instantiation");
         Program {
@@ -93,8 +97,7 @@ impl Program {
     pub(crate) fn memory_bytes(&mut self) -> usize {
         self.instance
             .get_memory(&mut self.store, "memory")
-            .expect("modules export their memory")
-            .data_size(&self.store)
+            .map_or(0, |memory| memory.data_size(&self.store))
     }
 
     /// Force collection at every safe point and poison reclaimed memory, or stop doing so.

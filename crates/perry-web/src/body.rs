@@ -1,7 +1,7 @@
 //! Bodies, and constructed `Response` and `Request` objects.
 use crate::{
     headers::set_default,
-    readable::{Form, Readable, decode, drain, settle_body, snapshot_stream, take_parsed},
+    readable::{Form, Readable, drain, settle_body, snapshot_stream, take_parsed},
     *,
 };
 
@@ -98,6 +98,7 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
 
 /// Read the whole body as `form`. A snapshot is handed over, not copied: once read, the
 /// body never exposes it again.
+#[inline]
 fn read(object: *mut u8, form: Form) -> *mut u8 {
     let promise = promise_new();
     if !body(object).stream.is_null() {
@@ -140,8 +141,8 @@ pub(crate) extern "C" fn web_json_settle() {
 }
 
 fn settle_json(promise: *mut u8, contents: &[u8]) {
-    // SAFETY: `decode` returns a string.
-    let text = unsafe { bytes(decode(contents)) };
+    // SAFETY: `from_utf8_lossy` returns a string.
+    let text = unsafe { bytes(perry_abi::from_utf8_lossy(contents, true)) };
     match parse_json(text) {
         Ok(root) => resolve(promise, root as usize as u64),
         Err(offset) => reject_with(
@@ -289,42 +290,20 @@ pub(crate) unsafe extern "C" fn web_request_new(
     text: u32,
     h: *mut u8,
 ) -> *mut u8 {
-    // SAFETY: compiled code passes strings.
-    let input = unsafe { bytes(url) };
-    let capacity = 32 + input.len() as u32 * 3 + 16;
-    let output = alloc(capacity);
-    // SAFETY: helper call with an input string and a fresh disjoint output.
-    let status = unsafe { helper::fetch_url(input.as_ptr(), input.len() as u32, output, capacity) };
-    if status != 0 {
-        type_error(&[b"Failed to parse URL from ", input]);
-        return core::ptr::null_mut();
-    }
+    let (output, tag) =
+        match unsafe { validate_request_init(url, method, !view.is_null(), text, h) } {
+            Ok(ok) => ok,
+            Err(msg) => {
+                perry_abi::raise_string(TYPE_ERROR, msg);
+                return core::ptr::null_mut();
+            }
+        };
     // SAFETY: the helper wrote six little-endian lengths, then the URL at 32.
-    let normalized = unsafe {
-        let len = *(output.add(20) as *const u32);
-        from_bytes(slice(output as u32 + 32, len))
+    let normalized = unsafe { from_bytes(slice(output as u32 + 32, word(output, 20))) };
+    let method = match METHODS.get(tag as usize).copied().unwrap_or("") {
+        "" => method,
+        s => from_static(s),
     };
-    // SAFETY: compiled code passes strings.
-    let name = unsafe { bytes(method) };
-    // SAFETY: helper call on an input string.
-    let tag = unsafe { helper::fetch_method(name.as_ptr(), name.len() as u32) };
-    let method = match tag {
-        INVALID => {
-            type_error(&[b"'", name, b"' is not a valid HTTP method."]);
-            return core::ptr::null_mut();
-        }
-        tag if (tag as usize) < METHODS.len() && !METHODS[tag as usize].is_empty() => {
-            from_static(METHODS[tag as usize])
-        }
-        _ => method,
-    };
-    if !view.is_null() && matches!(tag, 0 | 1) {
-        perry_abi::raise(TYPE_ERROR, "Request with GET/HEAD method cannot have body.");
-        return core::ptr::null_mut();
-    }
-    if text != 0 {
-        set_default(h, b"content-type", b"text/plain;charset=UTF-8");
-    }
     let r = perry_abi::object!(Request; body.data, body.stream, url, method, headers);
     // SAFETY: a fresh block.
     unsafe {

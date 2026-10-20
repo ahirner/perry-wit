@@ -1,7 +1,7 @@
 //! Inline string comparisons, character reads and owned single-byte appends.
 use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use perry_abi::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
-use perry_mir::{attrs::CompareKind, collections::StringConstOp};
+use perry_mir::{CompareKind, StringConstOp};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,

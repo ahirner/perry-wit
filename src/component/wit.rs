@@ -57,7 +57,7 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
         UnresolvedPackageGroup::parse("dependencies.wit", "package perry:compiler-dependencies;")
             .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?
     };
-    let package = resolve_embedded(main, &mut resolve, &mut groups)?;
+    let package = resolve_with(main, &mut resolve, groups, false)?;
     Ok((resolve, application.unwrap_or(package)))
 }
 
@@ -105,8 +105,8 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
     let main = UnresolvedPackageGroup::parse_dir(wit_dir)
         .with_context(|| format!("loading WIT package from {}", wit_dir.display()))?;
-    let mut deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
-    resolve_packages(main, &mut resolve, &mut deps)
+    let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
+    resolve_with(main, &mut resolve, deps, true)
         .with_context(|| format!("resolving WIT dependencies for {}", wit_dir.display()))
         .map(|package| (resolve, package))
 }
@@ -116,60 +116,46 @@ pub fn resolve_source(name: &str, source: &str) -> Result<(Resolve, PackageId)> 
     let mut resolve = Resolve::new();
     let main = UnresolvedPackageGroup::parse(name, source)
         .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
-    resolve_packages(main, &mut resolve, &mut Vec::new())
+    resolve_with(main, &mut resolve, Vec::new(), true)
         .with_context(|| format!("resolving WIT dependencies for {name}"))
         .map(|package| (resolve, package))
 }
 
-fn resolve_packages(
+fn resolve_with(
     main: UnresolvedPackageGroup,
     resolve: &mut Resolve,
-    deps: &mut Vec<UnresolvedPackageGroup>,
+    mut deps: Vec<UnresolvedPackageGroup>,
+    ambient: bool,
 ) -> Result<PackageId> {
+    let ambient_groups = match ambient.then(|| std::env::var_os("WASI_WIT_PATH")).flatten() {
+        Some(path) => read_dependencies(&PathBuf::from(path), resolve)?,
+        None => Vec::new(),
+    };
     let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
     for group in std::iter::once(&main).chain(deps.iter()) {
         available.insert(group.main.name.clone());
         available.extend(group.nested.iter().map(|package| package.name.clone()));
     }
-
-    if let Some(ambient) = std::env::var_os("WASI_WIT_PATH").map(PathBuf::from) {
-        for mut group in read_dependencies(&ambient, resolve)? {
-            if available.insert(group.main.name.clone()) {
-                group
-                    .nested
-                    .retain(|package| available.insert(package.name.clone()));
-                deps.push(group);
-            }
-        }
-    }
-
-    resolve_embedded(main, resolve, deps)
-}
-
-fn resolve_embedded(
-    main: UnresolvedPackageGroup,
-    resolve: &mut Resolve,
-    deps: &mut Vec<UnresolvedPackageGroup>,
-) -> Result<PackageId> {
-    let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
-    for group in std::iter::once(&main).chain(deps.iter()) {
-        available.insert(group.main.name.clone());
-        available.extend(group.nested.iter().map(|package| package.name.clone()));
-    }
-    for files in embedded::PACKAGES {
-        let mut map = SourceMap::new();
-        for (name, source) in *files {
-            map.push_str(name, *source);
-        }
-        let mut group = map
-            .parse()
-            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let mut push_unique = |mut group: UnresolvedPackageGroup| {
         if available.insert(group.main.name.clone()) {
             group
                 .nested
                 .retain(|package| available.insert(package.name.clone()));
             deps.push(group);
         }
+    };
+    for group in ambient_groups {
+        push_unique(group);
     }
-    Ok(resolve.push_groups(main, std::mem::take(deps))?)
+    for files in embedded::PACKAGES {
+        let mut map = SourceMap::new();
+        for (name, source) in *files {
+            map.push_str(name, *source);
+        }
+        push_unique(
+            map.parse()
+                .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?,
+        );
+    }
+    Ok(resolve.push_groups(main, deps)?)
 }

@@ -1,14 +1,14 @@
 //! The isolated worker process: compiles one case and runs the component under wasmtime.
-use super::{Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
+use super::{FactLimits, Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
 use crate::{
     fetch::FetchCase, handler::HandlerCase, program::ENV_FIXTURE, registry::Case,
     streams::StreamCase,
 };
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use http_body_util::{BodyExt, Full};
 use perry_wit::{CompileOptions, compile_for_world, compile_typescript};
 use std::{env, fs, path::Path, process::Command, sync::Arc, time::Duration};
-use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader};
+use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader, Val};
 use wasmtime::{AsContextMut, Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -121,6 +121,11 @@ fn execute_function(
     limits: &Limits,
     fault: Option<Fault>,
 ) -> Result<Outcome> {
+    if let Case::Aggregate(agg) = case
+        && let Err(error) = fs::write(directory.join("world.wit"), agg.wit_signature.wit_world())
+    {
+        return Ok(Outcome::Compile(error.to_string()));
+    }
     let world = match case {
         Case::Stream(_) => Some(async_wit().replace("x: f64", "input: stream<u8>")),
         Case::Fetch(_) => Some(async_wit().replace("x: f64", "url: string").replace(
@@ -142,26 +147,34 @@ fn execute_function(
         Ok(world) => world,
         Err(error) => return Ok(Outcome::Compile(format!("{error:#}"))),
     };
-    let compilation = if matches!(case, Case::Handler(_)) {
-        // A `perry:http-handler` program compiles to a `wasi:http/handler` component.
-        perry_wit::component::wit::resolve_wit(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
-        )
-        .and_then(|(resolve, package)| {
-            let world = resolve.select_world(&[package], Some("handler"))?;
-            Ok(compile_for_world(
-                source,
-                &path.to_string_lossy(),
-                &resolve,
-                world,
-                true,
-            )?)
-        })
-    } else {
-        compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
-            .map_err(Into::into)
+    let compile_one = || {
+        if matches!(case, Case::Handler(_)) {
+            // A `perry:http-handler` program compiles to a `wasi:http/handler` component.
+            perry_wit::component::wit::resolve_wit(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
+            )
+            .and_then(|(resolve, package)| {
+                let world = resolve.select_world(&[package], Some("handler"))?;
+                Ok(compile_for_world(
+                    source,
+                    &path.to_string_lossy(),
+                    &resolve,
+                    world,
+                    true,
+                )?)
+            })
+        } else {
+            compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
+                .map_err(anyhow::Error::from)
+        }
     };
-    let compiled = match compilation {
+    // Generated cases carry the precision they compile under; the oracle checks every setting.
+    let fact_limits = match case {
+        Case::Aggregate(agg) => agg.fact_limits,
+        Case::Collection(coll) => coll.fact_limits,
+        _ => FactLimits::Default,
+    };
+    let compiled = match fact_limits.apply(compile_one) {
         Ok(compiled) => compiled,
         Err(error) => return Ok(Outcome::Compile(format!("{error:#}"))),
     };
@@ -185,31 +198,31 @@ fn execute_function(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    Ok(
-        match runtime.block_on(observations(
-            &engine, &component, directory, limits, fault, case,
-        )) {
-            Ok(Run {
-                observations,
-                fuel_used,
-                stdout,
-                stderr,
-            }) => Outcome::Values {
-                observations,
-                stdout,
-                stderr,
-                max_fuel_used: fuel_used.iter().copied().max().unwrap_or(0),
-                component_bytes,
-                fuel_used,
-            },
-            Err(error)
-                if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
-            {
-                Outcome::Fuel(format!("{error:#}"))
-            }
-            Err(error) => Outcome::Execute(format!("{error:#}")),
-        },
-    )
+    let run = match runtime.block_on(observations(
+        &engine, &component, directory, limits, fault, case,
+    )) {
+        Ok(run) => run,
+        Err(error)
+            if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
+        {
+            return Ok(Outcome::Fuel(format!("{error:#}")));
+        }
+        Err(error) => return Ok(Outcome::Execute(format!("{error:#}"))),
+    };
+    let Run {
+        observations,
+        fuel_used,
+        stdout,
+        stderr,
+    } = run;
+    Ok(Outcome::Values {
+        observations,
+        stdout,
+        stderr,
+        max_fuel_used: fuel_used.iter().copied().max().unwrap_or(0),
+        component_bytes,
+        fuel_used,
+    })
 }
 
 #[derive(wasmtime::component::ComponentType, wasmtime::component::Lift)]
@@ -292,10 +305,10 @@ async fn observations(
             http: wasmtime_wasi_http::WasiHttpCtx::new(),
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
-                .memory_size(if matches!(case, Case::Stream(_)) {
-                    limits.memory_bytes.min(65536)
-                } else {
-                    limits.memory_bytes
+                .memory_size(match case {
+                    Case::Stream(_) => limits.memory_bytes.min(65536),
+                    Case::Collection(_) => limits.memory_bytes.min(256 * 1024),
+                    _ => limits.memory_bytes,
                 })
                 .build(),
         },
@@ -493,19 +506,16 @@ async fn number_calls(
     fault: Option<Fault>,
     fuel: u64,
 ) -> Result<Calls> {
-    let run =
-        instance.get_typed_func::<(f64,), (Result<GuestObservation, ()>,)>(&mut *store, "run")?;
+    let run = instance
+        .get_func(&mut *store, "run")
+        .context("component does not export run")?;
     let inputs: Vec<String> = serde_json::from_slice(&fs::read(artifacts.join("inputs.json"))?)?;
     let mut calls = Calls::default();
     for encoded in inputs {
-        let input = if encoded == "NaN" {
-            f64::NAN
-        } else {
-            f64::from_bits(u64::from_str_radix(&encoded, 16)?)
-        };
+        let input = decode_input(&encoded)?;
         store.set_fuel(fuel)?;
-        let (value,) = run
-            .call_async(&mut *store, (input,))
+        let mut result = [Val::Bool(false)];
+        run.call_async(&mut *store, &[Val::Float64(input)], &mut result)
             .await
             .map_err(anyhow::Error::from)
             .with_context(|| format!("input {input:?}"))?;
@@ -513,13 +523,61 @@ async fn number_calls(
             store.data_mut().table.push(())?;
         }
         calls.1.push(settle(store, fuel, "run")?);
-        calls.0.push(
-            value
-                .map_err(|()| anyhow!("case failed through its declared WIT result error"))?
-                .into(),
-        );
+        let [result] = result;
+        calls.0.push(lifted_observation(result)?);
     }
     Ok(calls)
+}
+
+/// Reads `run`'s `result<..>` like the Node oracle: a list is `[value, ...trace]`; a record
+/// contributes `value`, then `trace` followed by its other fields in order (`none` as -66).
+fn lifted_observation(result: Val) -> Result<Observation> {
+    let Val::Result(Ok(Some(payload))) = result else {
+        bail!("case failed through its declared WIT result error: {result:?}")
+    };
+    let (value, trace) = match *payload {
+        Val::List(items) => {
+            let mut items = items.into_iter().map(float);
+            let value = items.next().context("direct list return was empty")??;
+            (value, items.collect::<Result<Vec<_>>>()?)
+        }
+        Val::Record(fields) => {
+            let (mut value, mut trace, mut extras) = (None, Vec::new(), Vec::new());
+            for (name, field) in fields {
+                match (name.as_str(), field) {
+                    ("value", field) => value = Some(float(field)?),
+                    ("trace", Val::List(items)) => {
+                        trace = items.into_iter().map(float).collect::<Result<_>>()?;
+                    }
+                    (_, Val::Option(None)) => extras.push(-66.0),
+                    (_, Val::Option(Some(field))) => extras.push(float(*field)? + 0.0),
+                    (_, field) => extras.push(float(field)? + 0.0),
+                }
+            }
+            trace.extend(extras);
+            (value.context("observation record lacks value")?, trace)
+        }
+        other => bail!("unexpected observation {other:?}"),
+    };
+    Ok(Observation {
+        value: number(value),
+        trace: trace.into_iter().map(number).collect(),
+    })
+}
+
+fn float(value: Val) -> Result<f64> {
+    match value {
+        Val::Float64(value) => Ok(value),
+        other => bail!("expected an f64 observation, got {other:?}"),
+    }
+}
+
+fn decode_input(encoded: &str) -> Result<f64> {
+    if encoded == "NaN" {
+        Ok(f64::NAN)
+    } else {
+        Ok(f64::from_bits(u64::from_str_radix(encoded, 16)?))
+    }
 }
 
 /// Fuel used by the finished call; the call must leave no concurrent state or host resources.

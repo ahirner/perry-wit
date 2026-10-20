@@ -6,8 +6,10 @@ pub(crate) fn export(
     ctx: &mut Context,
     state: &mut ModuleState,
     function: &FuncOp,
+    lowered: &FuncOp,
     export: &Export,
 ) -> Result<()> {
+    let scope = Scope::for_export(state, export, &function.get_symbol_name(ctx));
     let is_async = state
         .async_functions
         .contains(&function.get_symbol_name(ctx));
@@ -25,12 +27,7 @@ pub(crate) fn export(
     {
         return async_export(ctx, state, function, export, task_return, *command);
     }
-    let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -41,9 +38,9 @@ pub(crate) fn export(
     let completion = export
         .result
         .as_ref()
-        .and_then(|ty| ty.completion(ctx, mir_results.first().copied()));
+        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure!(
-        completion.is_some() || mir_results.len() == usize::from(export.result.is_some()),
+        completion || mir_results.len() == usize::from(export.result.is_some()),
         "{} returns {} values but the WIT export returns {}",
         export.function,
         mir_results.len(),
@@ -73,34 +70,30 @@ pub(crate) fn export(
     flat.reverse();
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
-    b.task_enter(ctx);
+    if scope == Scope::Task {
+        b.task_enter(ctx);
+    }
     let initialization = b.initialization_status(ctx);
-    let mut joined_types = mir_results
+    let mut call_results = mir_results
         .iter()
         .map(|&ty| wasm_type(ctx, ty))
         .collect::<Result<Vec<_>>>()?;
-    joined_types.push(i32_type(ctx));
     let joined = initialization.map(|status| {
         let active = b.new_block(ctx, vec![]);
         let failed = b.new_block(ctx, vec![]);
-        let joined = b.new_block(ctx, joined_types.clone());
+        let mut values: Vec<_> = call_results.iter().map(|&ty| b.zero(ctx, ty)).collect();
+        values.push(status);
+        let mut joined_types = call_results.clone();
+        joined_types.push(i32_type(ctx));
+        let joined = b.new_block(ctx, joined_types);
         b.cond_br(ctx, status, (failed, vec![]), (active, vec![]));
         b.block = failed;
-        let mut values: Vec<_> = joined_types[..joined_types.len() - 1]
-            .iter()
-            .map(|&ty| b.zero(ctx, ty))
-            .collect();
-        values.push(status);
         b.br(ctx, joined, values);
         b.block = active;
         joined
     });
     let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
-    let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
-    let mut call_results = mir_results
-        .iter()
-        .map(|t| wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
+    let throws = b.state.may_throw(&function.get_symbol_name(ctx));
     if throws {
         call_results.push(i32_type(ctx));
     }
@@ -127,29 +120,21 @@ pub(crate) fn export(
         b.cond_br(ctx, status, (trap, vec![]), (normal, vec![]));
         b.block = trap;
         b.return_resources(ctx);
-        if let Some(completion) = export
-            .result
-            .as_ref()
-            .filter(|r| r.accepts_exception())
-            .and_then(AbiType::error_completion)
+        if let Some(ty @ AbiType::Result { .. }) =
+            export.result.as_ref().filter(|r| r.accepts_exception())
         {
-            let ty = completion.result;
             let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-            let payload = b.completion_error(ctx, completion, exception)?;
-            let returned = if flat_result_len == 1 {
-                b.completion_flat(ctx, completion, 1, payload)?
-            } else {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                b.completion_store(ctx, completion, 1, payload, area)?;
-                vec![area]
-            };
-            let ret = ReturnOp::new(ctx, returned).get_operation();
-            b.insert(ctx, ret);
+            let payload = b.completion_error(ctx, ty, exception)?;
+            let returned = b.lower_return(
+                ctx,
+                ty,
+                BoundaryValue::Completion { case: 1, payload },
+                flat_result_len != 1,
+            )?;
+            b.ret(ctx, returned);
         } else {
             b.task_free(ctx);
-            let unreachable = UnreachableOp::new(ctx).get_operation();
-            b.insert(ctx, unreachable);
+            b.trap(ctx);
         }
         b.block = normal;
     }
@@ -166,37 +151,27 @@ pub(crate) fn export(
         export.result.as_ref().is_some_and(AbiType::has_resources),
         None,
     )?;
-    let returned = if let Some(completion) = completion {
-        let ty = completion.result;
-        let payload = mir_results.first().map(|ty| (*ty, values[0]));
-        if flat_result_len == 1 {
-            b.completion_flat(ctx, completion, 0, payload)?
-        } else {
-            let size = b.i32_const(ctx, ty.size() as i32);
-            let area = b.alloc(ctx, size);
-            b.completion_store(ctx, completion, 0, payload, area)?;
-            vec![area]
-        }
+    let payload = mir_results
+        .first()
+        .map(|ty| (*ty, Carriers::Scalar(values[0])));
+    let source = if completion {
+        Some(BoundaryValue::Completion { case: 0, payload })
     } else {
-        match (&export.result, mir_results.first()) {
-            (Some(ty), Some(mir_ty)) if flat_result_len == 1 => {
-                vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
-            }
-            (Some(ty), Some(mir_ty)) => {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                b.lower_store(ctx, ty, *mir_ty, values[0], area, 0)?;
-                vec![area]
-            }
-            _ => vec![],
-        }
+        payload.map(|(mir, value)| BoundaryValue::Native(mir, value))
+    };
+    let returned = match (&export.result, source) {
+        (Some(ty), Some(source)) => b.lower_return(ctx, ty, source, flat_result_len != 1)?,
+        _ => vec![],
     };
     b.commit_resources(ctx);
     b.finish_resources(ctx);
-    let ret = ReturnOp::new(ctx, returned).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, returned);
     let state = b.state;
-    state.wasm.append_operation(ctx, glue.get_operation(), 0);
+    crate::module::append_export(ctx, state, &glue, lowered, &export.core_name);
+
+    if scope == Scope::Direct {
+        return Ok(());
+    }
 
     // `cabi_post_<export>` receives the core results and ends the task.
     let post_name = format!("cabi_post_{}", export.core_name);
@@ -204,8 +179,7 @@ pub(crate) fn export(
     set_export(ctx, &post, &post_name);
     let mut b = FunctionLowering::glue(state, ctx, &post);
     b.task_free(ctx);
-    let ret = ReturnOp::new(ctx, vec![]).get_operation();
-    b.insert(ctx, ret);
+    b.ret(ctx, vec![]);
     b.state.wasm.append_operation(ctx, post.get_operation(), 0);
     Ok(())
 }
@@ -224,16 +198,11 @@ fn async_export(
     (module, wit_name): &(String, String),
     command: bool,
 ) -> Result<()> {
-    let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
-    let (mir_params, mir_results) = {
-        let ty = ty.deref(ctx);
-        (ty.arg_types(), ty.res_types())
-    };
+    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     let completion = export
         .result
         .as_ref()
-        .and_then(|ty| ty.completion(ctx, mir_results.first().copied()));
+        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -288,20 +257,12 @@ fn async_export(
         // Pending: leave the task and wait on its subtasks (none would wait forever).
         b.block = wait;
         let set = b.runtime(ctx, Runtime::TaskSuspend, vec![]);
-        let stuck = b.num(ctx, NumOpcode::I32Eqz, vec![set]);
-        let trap = b.new_block(ctx, vec![]);
-        let suspend = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, stuck, (trap, vec![]), (suspend, vec![]));
-        b.block = trap;
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        b.insert(ctx, unreachable);
-        b.block = suspend;
+        b.trap_unless(ctx, set, false);
         let four = b.i32_const(ctx, 4);
         let shifted = b.num(ctx, NumOpcode::I32Shl, vec![set, four]);
         let wait_code = b.i32_const(ctx, WAIT);
         let code = b.num(ctx, NumOpcode::I32Or, vec![shifted, wait_code]);
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
 
         // Settled: a rejection without a WIT error type traps (a command reports it and
         // fails); otherwise return the value once the output reached the host.
@@ -391,20 +352,16 @@ fn async_export(
                 .is_some_and(AbiType::accepts_exception)
             {
                 let mut values = Vec::new();
-                if let Some(completion) = export.result.as_ref().and_then(AbiType::error_completion)
-                {
-                    let ty = completion.result;
+                if let Some(ty @ AbiType::Result { .. }) = &export.result {
                     let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
                     let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-                    let payload = b.completion_error(ctx, completion, exception)?;
-                    if indirect {
-                        let size = b.i32_const(ctx, ty.size() as i32);
-                        let area = b.alloc(ctx, size);
-                        b.completion_store(ctx, completion, 1, payload, area)?;
-                        values.push(area);
-                    } else {
-                        values = b.completion_flat(ctx, completion, 1, payload)?;
-                    }
+                    let payload = b.completion_error(ctx, ty, exception)?;
+                    values = b.lower_return(
+                        ctx,
+                        ty,
+                        BoundaryValue::Completion { case: 1, payload },
+                        indirect,
+                    )?;
                 } else if let Some(AbiType::OkHandle { flat, error_case }) = &export.result {
                     // `err(error_case(some(description)))`, then end the task.
                     let text = b.runtime(ctx, Runtime::RejectionText, vec![promise]);
@@ -414,43 +371,25 @@ fn async_export(
                     let case = b.i32_const(ctx, *error_case as i32);
                     b.flat_i32s(ctx, flat, &[one, case, one, data, len], &mut values)?;
                 }
-                if b.state.uses_http_server {
-                    b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
-                }
-                if b.state.uses_fetch {
-                    b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-                }
-                if b.state.uses_streams {
-                    b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-                }
+                b.close_web_handles(ctx, true);
                 b.host_void(ctx, task_return.clone(), values);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.task_free(ctx);
                 let exit = b.i32_const(ctx, EXIT);
-                let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-                b.insert(ctx, ret);
+                b.ret(ctx, vec![exit]);
             } else {
-                if uses_io {
+                if uses_io || b.state.reports_rejection {
                     b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
                     let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
                     let closed = b.new_block(ctx, vec![]);
                     b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
                     b.block = closed;
                 }
-                if b.state.uses_http_server {
-                    b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
-                }
-                if b.state.uses_fetch {
-                    b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-                }
-                if b.state.uses_streams {
-                    b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-                }
+                b.close_web_handles(ctx, true);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.return_resources(ctx);
                 b.task_free(ctx);
-                let unreachable = UnreachableOp::new(ctx).get_operation();
-                b.insert(ctx, unreachable);
+                b.trap(ctx);
             }
             b.block = fulfilled;
             None
@@ -471,24 +410,17 @@ fn async_export(
         if let Some(outcome) = outcome {
             flat.push(outcome);
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
-            let kind = slot_kind(ctx, *mir_ty)?;
-            let value = b.load(ctx, kind, promise, perry_abi::layout::promise::VALUE);
-            if indirect {
-                let size = b.i32_const(ctx, ty.size() as i32);
-                let area = b.alloc(ctx, size);
-                if let Some(completion) = completion {
-                    b.completion_store(ctx, completion, 0, Some((*mir_ty, value)), area)?;
-                } else {
-                    b.lower_store(ctx, ty, *mir_ty, value, area, 0)?;
+            let value =
+                b.load_slot_value(ctx, promise, perry_abi::layout::promise::VALUE, *mir_ty)?;
+            let source = if completion {
+                BoundaryValue::Completion {
+                    case: 0,
+                    payload: Some((*mir_ty, value)),
                 }
-                flat.push(area);
             } else {
-                if let Some(completion) = completion {
-                    flat = b.completion_flat(ctx, completion, 0, Some((*mir_ty, value)))?;
-                } else {
-                    b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
-                }
-            }
+                BoundaryValue::Native(*mir_ty, value)
+            };
+            flat = b.lower_return(ctx, ty, source, indirect)?;
         }
         if b.state.uses_http_server {
             // Return the response once, then keep running until its body is written: the
@@ -508,14 +440,7 @@ fn async_export(
             b.block = done;
             b.runtime_void(ctx, Runtime::WebServeClose, vec![]);
         }
-        if b.state.uses_fetch {
-            // No request or response handle outlives the export call.
-            b.runtime_void(ctx, Runtime::WebFetchClose, vec![]);
-        }
-        if b.state.uses_streams {
-            // No stream end outlives the export call.
-            b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
-        }
+        b.close_web_handles(ctx, false);
         b.commit_resources(ctx);
         b.finish_resources(ctx);
         if !b.state.uses_http_server {
@@ -524,8 +449,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
         b.task_free(ctx);
         let exit = b.i32_const(ctx, EXIT);
-        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![exit]);
         b.state
             .wasm
             .append_operation(ctx, finish.get_operation(), 0);
@@ -567,8 +491,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
         let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
         b.state.wasm.append_operation(ctx, lift.get_operation(), 0);
     }
 
@@ -596,8 +519,7 @@ fn async_export(
         b.abort_task(ctx)?;
         b.host_void(ctx, EffectHost::TaskCancel, vec![]);
         let exit = b.i32_const(ctx, EXIT);
-        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![exit]);
         b.block = active;
         let next = b.new_block(ctx, vec![]);
         let completion = b.runtime(ctx, Runtime::PromiseEvent, vec![event, handle]);
@@ -613,41 +535,18 @@ fn async_export(
         b.insert(ctx, call.get_operation());
         b.br(ctx, observe, vec![]);
         b.block = host_event;
-        if b.state.uses_streams {
-            // Reads of `stream<u8>`s take their stream events.
-            let handled = b.runtime(ctx, Runtime::WebEvent, vec![event, handle, subtask_state]);
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_http_server {
-            // The served exchange takes its stream and future events.
-            let handled = b.runtime(
-                ctx,
-                Runtime::WebServeEvent,
-                vec![event, handle, subtask_state],
-            );
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_fetch {
-            // Fetches take their subtask, stream and future events.
-            let handled = b.runtime(
-                ctx,
-                Runtime::WebFetchEvent,
-                vec![event, handle, subtask_state],
-            );
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
-        }
-        if b.state.uses_fs {
-            // `node:fs` operations take their own subtask, stream and future events.
-            let handled = b.runtime(ctx, Runtime::FsEvent, vec![event, handle, subtask_state]);
-            let unhandled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
-            b.block = unhandled;
+        for (used, handler) in [
+            (b.state.uses_streams, Runtime::WebEvent),
+            (b.state.uses_http_server, Runtime::WebServeEvent),
+            (b.state.uses_fetch, Runtime::WebFetchEvent),
+            (b.state.uses_fs, Runtime::FsEvent),
+        ] {
+            if used {
+                let handled = b.runtime(ctx, handler, vec![event, handle, subtask_state]);
+                let unhandled = b.new_block(ctx, vec![]);
+                b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+                b.block = unhandled;
+            }
         }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
@@ -658,7 +557,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);
         b.br(ctx, next, vec![]);
         b.block = other;
-        if b.state.uses_io {
+        if b.state.uses_io || b.state.reports_rejection {
             b.runtime(ctx, Runtime::IoEvent, vec![event, handle, subtask_state]);
         }
         b.br(ctx, next, vec![]);
@@ -670,8 +569,7 @@ fn async_export(
         }
         let call = CallOp::new(ctx, finish_name, vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
-        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
-        b.insert(ctx, ret);
+        b.ret(ctx, vec![code]);
         b.state
             .wasm
             .append_operation(ctx, callback.get_operation(), 0);
@@ -679,22 +577,32 @@ fn async_export(
     Ok(())
 }
 
-/// `cabi_realloc`, through which the host lowers strings and lists into guest memory.
-pub(crate) fn realloc(ctx: &mut Context, state: &mut ModuleState) {
-    let i32 = i32_type(ctx);
-    let ty = FunctionType::get(ctx, vec![i32; 4], vec![i32]);
-    let function = FuncOp::new(ctx, pliron::ident!("cabi_realloc"), ty);
-    set_export(ctx, &function, "cabi_realloc");
-    let args: Vec<_> = function
-        .get_entry_block(ctx)
-        .deref(ctx)
-        .arguments()
-        .collect();
-    let mut b = FunctionLowering::glue(state, ctx, &function);
-    let block = b.runtime(ctx, Runtime::CabiRealloc, args);
-    let ret = ReturnOp::new(ctx, vec![block]).get_operation();
-    b.insert(ctx, ret);
-    b.state
-        .wasm
-        .append_operation(ctx, function.get_operation(), 0);
+impl FunctionLowering<'_, '_> {
+    fn lower_return(
+        &mut self,
+        ctx: &mut Context,
+        ty: &AbiType,
+        source: BoundaryValue,
+        indirect: bool,
+    ) -> Result<Vec<Value>> {
+        let mut flat = Vec::new();
+        let area = if indirect {
+            let size = self.i32_const(ctx, ty.size() as i32);
+            Some(self.alloc(ctx, size))
+        } else {
+            None
+        };
+        let target = match area {
+            Some(area) => Canonical::Memory(area, 0),
+            None => Canonical::Flat(&mut flat),
+        };
+        match source {
+            BoundaryValue::Native(mir, value) => self.lower_abi(ctx, ty, mir, value, target)?,
+            source @ BoundaryValue::Completion { .. } => self.lower_sum(ctx, ty, source, target)?,
+        }
+        if let Some(area) = area {
+            flat.push(area);
+        }
+        Ok(flat)
+    }
 }

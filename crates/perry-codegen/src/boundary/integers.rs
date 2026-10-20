@@ -2,7 +2,7 @@
 use super::*;
 
 impl FunctionLowering<'_, '_> {
-    pub(super) fn lift_integer(
+    pub(crate) fn lift_integer(
         &mut self,
         ctx: &mut Context,
         signed: bool,
@@ -10,7 +10,7 @@ impl FunctionLowering<'_, '_> {
         raw: Value,
     ) -> Result<Value> {
         ensure!(
-            mir.deref(ctx).is::<perry_mir::types::BigIntType>(),
+            mir.deref(ctx).is::<perry_mir::BigIntType>(),
             "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
         );
         let zero = self.i64_const(ctx, 0);
@@ -25,6 +25,8 @@ impl FunctionLowering<'_, '_> {
         let value = self.alloc(ctx, size);
         self.store(ctx, MemKind::I64, value, 0, magnitude);
         self.store(ctx, MemKind::I32, value, 8, negative);
+        let extra_len = self.i32_const(ctx, 0);
+        self.store(ctx, MemKind::I32, value, 12, extra_len);
         Ok(value)
     }
 
@@ -36,7 +38,7 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<Value> {
         ensure!(
-            mir.deref(ctx).is::<perry_mir::types::BigIntType>(),
+            mir.deref(ctx).is::<perry_mir::BigIntType>(),
             "WIT 64-bit integers require TypeScript bigint"
         );
         let magnitude = self.load(ctx, MemKind::I64, value, 0);
@@ -49,14 +51,15 @@ impl FunctionLowering<'_, '_> {
         } else {
             negative
         };
+        let extra_len = self.load(ctx, MemKind::I32, value, 12);
+        let invalid = self.num(ctx, NumOpcode::I32Or, vec![invalid, extra_len]);
         // An invalid canonical value cannot cross the boundary. Compiled bigint arithmetic
         // remains outside the transport domain, so overflow is never silently truncated.
         let valid = self.new_block(ctx, vec![]);
         let trap = self.new_block(ctx, vec![]);
         self.cond_br(ctx, invalid, (trap, vec![]), (valid, vec![]));
         self.block = trap;
-        let op = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, op);
+        self.trap(ctx);
         self.block = valid;
         let zero = self.i64_const(ctx, 0);
         let inverted = self.num(ctx, NumOpcode::I64Sub, vec![zero, magnitude]);

@@ -24,11 +24,14 @@ impl FunctionLowering<'_, '_> {
             operands.len() == import.params.len(),
             "WIT import argument count mismatch"
         );
-        let values = self.operands(ctx, op)?;
+        let values = operands
+            .iter()
+            .map(|mir| self.mapped_value(ctx, *mir))
+            .collect::<Result<Vec<_>>>()?;
         let mark = self.root_mark(ctx);
         for (mir, value) in operands.iter().zip(&values) {
             if repr(ctx, mir.get_type(ctx))? == Repr::Ref {
-                self.publish_roots(ctx, &[*value]);
+                self.publish_roots(ctx, &[value.scalar()?]);
             }
         }
         self.begin_resources(
@@ -55,13 +58,25 @@ impl FunctionLowering<'_, '_> {
                 .zip(&values)
                 .zip(record_offsets(import.params.iter()))
             {
-                self.lower_store(ctx, abi, mir.get_type(ctx), *value, area, offset)?;
+                self.lower_abi(
+                    ctx,
+                    abi,
+                    mir.get_type(ctx),
+                    *value,
+                    Canonical::Memory(area, offset),
+                )?;
             }
             args.push(area);
             params = vec![Flat::I32];
         } else {
             for ((abi, mir), value) in import.params.iter().zip(&operands).zip(&values) {
-                self.lower_flat_values(ctx, abi, mir.get_type(ctx), *value, &mut args)?;
+                self.lower_abi(
+                    ctx,
+                    abi,
+                    mir.get_type(ctx),
+                    *value,
+                    Canonical::Flat(&mut args),
+                )?;
             }
         }
         let result_flat = import
@@ -130,7 +145,7 @@ impl FunctionLowering<'_, '_> {
             });
             self.canonical_borrows = false;
             self.resource_scope = None;
-            let ty = perry_mir::types::TransferType::get(ctx).into();
+            let ty = perry_mir::TransferType::get(ctx).into();
             let promise = self.new_promise(ctx, ty)?;
             let mask = self.i32_const(ctx, 15);
             let state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
@@ -166,8 +181,13 @@ impl FunctionLowering<'_, '_> {
             if let Some(abi) = &import.result {
                 let mir = op.deref(ctx).get_result(0).get_type(ctx);
                 let value = match area {
-                    Some(area) => self.lift_load(ctx, abi, mir, area, 0)?,
-                    None => self.lift_flat(ctx, abi, mir, &mut result.into_iter().collect())?,
+                    Some(area) => self.lift_abi(ctx, abi, mir, Canonical::Memory(area, 0))?,
+                    None => self.lift_abi(
+                        ctx,
+                        abi,
+                        mir,
+                        Canonical::Flat(&mut result.into_iter().collect()),
+                    )?,
                 };
                 self.define(ctx, op, value);
             }
@@ -205,7 +225,7 @@ impl FunctionLowering<'_, '_> {
         let mir = op.deref(ctx).get_result(0).get_type(ctx);
         let value = if let Some(abi) = &import.result {
             let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
-            self.lift_load(ctx, abi, mir, area, 0)?
+            self.lift_abi(ctx, abi, mir, Canonical::Memory(area, 0))?
         } else {
             self.undefined(ctx, mir)?
         };
@@ -252,8 +272,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, clear, vec![]);
             self.block = other;
         }
-        let trap = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, trap);
+        self.trap(ctx);
         self.block = clear;
         self.finish_transfer_scope(ctx, transfer);
         let zero = self.i32_const(ctx, 0);
@@ -295,8 +314,8 @@ impl FunctionLowering<'_, '_> {
             | AbiType::Enum(_)
             | AbiType::Variant(_) => {
                 let tag = self.load(ctx, abi.discriminant_kind(), area, offset);
-                self.sum_switch(ctx, tag, abi.cases().len(), vec![], |b, ctx, case| {
-                    if let Some(payload) = abi.cases()[case] {
+                self.sum_switch(ctx, tag, abi.cases(), vec![], |b, ctx, _, payload| {
+                    if let Some(payload) = payload {
                         b.discard_canonical(ctx, payload, area, offset + abi.payload_offset())?;
                     }
                     Ok(vec![])

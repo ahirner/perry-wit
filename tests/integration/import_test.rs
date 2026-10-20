@@ -1,6 +1,6 @@
 //! Application imports use the same checked canonical values as component exports.
+use crate::world::Compiler::MemoryChecked;
 use anyhow::Result;
-use perry_wit::compiler::compile_for_world_with_memory_checks;
 use wasmtime::{
     Engine, Store,
     component::{Component, ComponentType, Lift, Linker, Lower},
@@ -24,40 +24,8 @@ struct CompletionError {
 }
 
 #[test]
-fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<()> {
-    let component = crate::world::component(
-        "package test:initialization; world app { export run: func() -> result<f64>; }",
-        "app",
-        "initialization.ts",
-        r#"
-        let effects = 0;
-        const failures = probe();
-        let cell: number | undefined = undefined;
-        function value(): number { effects++; return 3; }
-        function probe(): number {
-            let failures = 0;
-            try { const observed = cell; } catch { failures++; }
-            try { cell = value(); } catch { failures++; }
-            return failures;
-        }
-        export function run(): number {
-            const absent = cell === undefined;
-            return (cell = 5, failures * 100 + effects * 10 + (absent ? 1 : 0) + cell);
-        }
-        "#,
-    )?;
-    let (mut store, instance) = crate::world::instantiate(&Engine::default(), &component)?;
-    let run = instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "run")?;
-    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 216.0);
-    assert_eq!(run.call(&mut store, ())?.0.unwrap(), 215.0);
-    Ok(())
-}
-
-#[test]
 fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str(
-        "imports.wit",
+    let bytes = MemoryChecked.component(
         r#"
         package test:imports;
         interface service {
@@ -67,14 +35,33 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
             wide: func(value: s64) -> s64;
             observe: func(value: string);
         }
-        world app { import service; export run: func(n: u32) -> result<string>; }
+        world app {
+            import service;
+            export guards: func() -> result<f64>;
+            export run: func(n: u32) -> result<string>;
+        }
     "#,
-    )?;
-    let world = resolve.select_world(&[package], Some("app"))?;
-    let compiled = compile_for_world_with_memory_checks(
+        "app",
+        "imports.ts",
         r#"
         import { initialize, exchange, wide, observe } from 'test:imports/service';
         const initial = initialize();
+        let effects = 0;
+        const step = 1;
+        class Step { amount = step; }
+        const failures = probe();
+        let cell: number | undefined = undefined;
+        function value(): number { effects += new Step().amount; return 3; }
+        function probe(): number {
+            let failures = 0;
+            try { const observed = cell; } catch { failures++; }
+            try { cell = value(); } catch { failures++; }
+            return failures;
+        }
+        export function guards(): number {
+            const absent = cell === undefined;
+            return (cell = 5, failures * 100 + effects * 10 + (absent ? 1 : 0) + cell);
+        }
         export function run(n: number): string {
             let text = '';
             for (let i = 0; i < n; i++) {
@@ -89,12 +76,9 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
             return text + ':' + wide(9007199254740993n);
         }
     "#,
-        "imports.ts",
-        &resolve,
-        world,
     )?;
     let engine = Engine::default();
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = Component::new(&engine, bytes)?;
     let mut linker = Linker::<(u32, String)>::new(&engine);
     let mut host = linker.instance("test:imports/service")?;
     host.func_wrap("initialize", |mut store, (): ()| {
@@ -118,6 +102,10 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
     })?;
     let mut store = Store::new(&engine, (0, String::new()));
     let instance = linker.instantiate(&mut store, &component)?;
+    let guards =
+        instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "guards")?;
+    assert_eq!(guards.call(&mut store, ())?.0.unwrap(), 216.0);
+    assert_eq!(guards.call(&mut store, ())?.0.unwrap(), 215.0);
     let run =
         instance.get_typed_func::<(u32,), (std::result::Result<String, ()>,)>(&mut store, "run")?;
     for (n, expected) in [(2, "failure"), (1000, "hé😀:7")] {
@@ -137,9 +125,7 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str(
-        "async-imports.wit",
+    let bytes = MemoryChecked.component(
         r#"
         package test:imports;
         interface service {
@@ -149,9 +135,8 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
         }
         world app { import service; export run: async func(n: u32) -> result<string>; }
     "#,
-    )?;
-    let world = resolve.select_world(&[package], Some("app"))?;
-    let compiled = compile_for_world_with_memory_checks(
+        "app",
+        "async-imports.ts",
         r#"
         import { exchange, observe } from 'test:imports/service';
         export async function run(n: number): Promise<string> {
@@ -175,12 +160,9 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
             return text;
         }
     "#,
-        "async-imports.ts",
-        &resolve,
-        world,
     )?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = Component::new(&engine, bytes)?;
     struct State {
         text: String,
         limits: wasmtime::StoreLimits,
@@ -245,9 +227,7 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str(
-        "cancel-imports.wit",
+    let bytes = MemoryChecked.component(
         r#"
         package test:cancel;
         interface service { work: async func(value: list<string>) -> list<string>; }
@@ -257,9 +237,8 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
             export run: async func(fail: bool) -> result<string, failure>;
         }
     "#,
-    )?;
-    let world = resolve.select_world(&[package], Some("app"))?;
-    let compiled = compile_for_world_with_memory_checks(
+        "app",
+        "cancel-imports.ts",
         r#"
         import { work } from 'test:cancel/service';
         export async function run(fail: boolean): Promise<string> {
@@ -268,12 +247,9 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
             return 'unfinished';
         }
     "#,
-        "cancel-imports.ts",
-        &resolve,
-        world,
     )?;
     let engine = async_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap().stripped)?;
+    let component = Component::new(&engine, bytes)?;
     for immediate in [false, true] {
         let mut linker = Linker::<()>::new(&engine);
         let dropped = Arc::new(AtomicUsize::new(0));

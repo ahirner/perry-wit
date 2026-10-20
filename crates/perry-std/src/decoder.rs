@@ -14,10 +14,16 @@ pub(crate) struct Decoder {
 }
 
 impl Decoder {
-    fn emit(&mut self, bytes: &[u8], output: &mut impl FnMut(&[u8])) {
-        let first = !self.bom_seen;
-        self.bom_seen = true;
-        if !first || self.ignore_bom != 0 || bytes != [0xef, 0xbb, 0xbf] {
+    fn emit(&mut self, mut bytes: &[u8], output: &mut impl FnMut(&[u8])) {
+        if !self.bom_seen {
+            self.bom_seen = true;
+            if self.ignore_bom == 0
+                && let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf])
+            {
+                bytes = rest;
+            }
+        }
+        if !bytes.is_empty() {
             output(bytes);
         }
     }
@@ -47,21 +53,9 @@ impl Decoder {
             // Between sequences, a valid run is emitted as one part; the byte loop below
             // handles pending sequences, invalid bytes and a split final sequence.
             if self.length == 0 {
-                let valid = match core::str::from_utf8(rest) {
-                    Ok(_) => rest.len(),
-                    Err(error) => error.valid_up_to(),
-                };
+                let valid = core::str::from_utf8(rest).map_or_else(|e| e.valid_up_to(), str::len);
                 if valid != 0 {
-                    let mut run = &rest[..valid];
-                    if !self.bom_seen {
-                        self.bom_seen = true;
-                        if self.ignore_bom == 0 && run.starts_with(&[0xef, 0xbb, 0xbf]) {
-                            run = &run[3..];
-                        }
-                    }
-                    if !run.is_empty() {
-                        output(run);
-                    }
+                    self.emit(&rest[..valid], &mut output);
                     rest = &rest[valid..];
                 }
             }

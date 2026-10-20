@@ -1,57 +1,30 @@
-//! Conservative scalar, optional-value and constant-branch folding.
-//!
-//! - Tests and coercions of a wrapped value: `is_undefined(wrap x)` is false,
-//!   `is_undefined(undefined)` true, and `to_number`, `to_string` and `unwrap` of `wrap x`
-//!   are `x` (an unwrap whose throw is caught stays, since `perry.caught` follows it).
-//! - Arithmetic and comparisons of constants. `%` is `fmod`, as in Rust.
-//! - A comparison of two `i32`s converted to numbers compares the `i32`s (the conversion is
-//!   exact and monotone).
-//! - A conditional branch on a constant becomes a branch to the taken successor.
-//!
-//! Branch folding removes unreachable blocks immediately to preserve dominance. DCE and
-//! `simplify_cfg` remove unused values and merge the remaining trivial blocks.
+//! Optional-value and exact-conversion canonicalization.
 use crate::{
-    aggregates::{functions, operations},
-    attrs::{BinaryKind, CompareKind, ConvertKind},
-    control::{BrOp, CondBrOp},
+    attrs::CompareKind,
     exceptions::CaughtOp,
-    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
-    scalar::{BinaryOp, CompareOp, ConvertOp},
+    optional::{IsUndefinedOp, OmittedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
+    scalar::{CompareOp, NumericCastOp},
 };
 use pliron::{
     builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr},
-        op_interfaces::BranchOpInterface,
+        attributes::IntegerAttr,
         ops::ConstantOp,
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    irbuild::IRStatus,
+    irbuild::{
+        inserter::Inserter,
+        match_rewrite::{MatchRewrite, MatchRewriter},
+        rewriter::Rewriter,
+    },
     linked_list::LinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
+    result::Result,
     r#type::Typed,
     utils::apint::{APInt, bw},
     value::Value,
 };
-
-/// A constant operand: a number or a boolean.
-#[derive(Clone, Copy)]
-enum Constant {
-    Number(f64),
-    Bool(bool),
-}
-
-fn constant(ctx: &Context, value: Value) -> Option<Constant> {
-    let op = value.defining_op()?;
-    let constant = Operation::get_op::<ConstantOp>(op, ctx)?;
-    let attr = constant.get_attr_builtin_constant_value(ctx)?;
-    if let Some(double) = attr.downcast_ref::<FPDoubleAttr>() {
-        return Some(Constant::Number(f64::from(double.clone())));
-    }
-    let integer = attr.downcast_ref::<IntegerAttr>()?;
-    (integer.get_type().deref(ctx).width() == 1).then(|| Constant::Bool(!integer.value().is_zero()))
-}
 
 fn wrapped(ctx: &Context, value: Value) -> Option<Value> {
     let op = value.defining_op()?;
@@ -59,66 +32,51 @@ fn wrapped(ctx: &Context, value: Value) -> Option<Value> {
     Some(op.deref(ctx).get_operand(0))
 }
 
-fn converted_i32(ctx: &Context, value: Value) -> Option<Value> {
+fn converted_integer(ctx: &Context, value: Value) -> Option<Value> {
     let op = value.defining_op()?;
-    let convert = Operation::get_op::<ConvertOp>(op, ctx)?;
-    (convert.kind(ctx) == ConvertKind::I32ToF64).then(|| op.deref(ctx).get_operand(0))
+    Operation::get_op::<NumericCastOp>(op, ctx)?;
+    let input = op.deref(ctx).get_operand(0);
+    let val_ty = value.get_type(ctx);
+    let in_ty = input.get_type(ctx);
+    let is_f64_i32 = val_ty.deref(ctx).is::<pliron::builtin::types::FP64Type>()
+        && in_ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() <= 32);
+    let is_bigint_i64 = val_ty.deref(ctx).is::<crate::types::BigIntType>()
+        && in_ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 64);
+    (is_f64_i32 || is_bigint_i64).then_some(input)
 }
 
-fn compare<T: PartialOrd>(kind: CompareKind, a: T, b: T) -> bool {
-    match kind {
-        CompareKind::Lt => a < b,
-        CompareKind::Le => a <= b,
-        CompareKind::Gt => a > b,
-        CompareKind::Ge => a >= b,
-        CompareKind::Eq => a == b,
-        CompareKind::Ne => a != b,
-    }
-}
-
-/// Insert a constant before `op` and return its value.
-fn insert_constant(ctx: &mut Context, op: Ptr<Operation>, value: Constant) -> Value {
-    let constant = match value {
-        Constant::Number(number) => ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(number))),
-        Constant::Bool(flag) => {
-            let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-            let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(flag), bw(1)));
-            ConstantOp::new(ctx, Box::new(attr))
-        }
-    };
-    let constant = constant.get_operation();
-    constant.insert_before(ctx, op);
-    constant.deref(ctx).get_result(0)
-}
-
-/// What `op` folds to.
-enum Folded {
+enum Replacement {
     Value(Value),
-    Constant(Constant),
-    /// A comparison of the operands of two conversions.
+    Cast(Value, pliron::r#type::TypeHandle),
+    Bool(bool),
     Compare(CompareKind, Value, Value),
-    /// A branch to successor `n`.
-    Branch(usize),
 }
 
-fn fold_op(ctx: &Context, op: Ptr<Operation>) -> Option<Folded> {
+fn replacement(ctx: &Context, op: Ptr<Operation>) -> Option<Replacement> {
     let operation = op.deref(ctx);
     if Operation::get_op::<IsUndefinedOp>(op, ctx).is_some() {
         let operand = operation.get_operand(0);
         if wrapped(ctx, operand).is_some() {
-            return Some(Folded::Constant(Constant::Bool(false)));
+            return Some(Replacement::Bool(false));
         }
-        let undefined = operand
-            .defining_op()
-            .is_some_and(|def| Operation::get_op::<UndefinedOp>(def, ctx).is_some());
-        return undefined.then_some(Folded::Constant(Constant::Bool(true)));
+        let undefined = operand.defining_op().is_some_and(|def| {
+            Operation::get_op::<UndefinedOp>(def, ctx).is_some()
+                || Operation::get_op::<OmittedOp>(def, ctx).is_some()
+        });
+        return undefined.then_some(Replacement::Bool(true));
     }
     if Operation::get_op::<ToNumberOp>(op, ctx).is_some()
         || Operation::get_op::<ToStringOp>(op, ctx).is_some()
     {
         let inner = wrapped(ctx, operation.get_operand(0))?;
-        let same = inner.get_type(ctx) == operation.get_result(0).get_type(ctx);
-        return same.then_some(Folded::Value(inner));
+        return (inner.get_type(ctx) == operation.get_result(0).get_type(ctx))
+            .then_some(Replacement::Value(inner));
     }
     if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
         let caught = operation
@@ -127,98 +85,91 @@ fn fold_op(ctx: &Context, op: Ptr<Operation>) -> Option<Folded> {
         return (!caught)
             .then(|| wrapped(ctx, operation.get_operand(0)))
             .flatten()
-            .map(Folded::Value);
+            .map(Replacement::Value);
     }
-    if let Some(binary) = Operation::get_op::<BinaryOp>(op, ctx) {
-        let (Some(Constant::Number(a)), Some(Constant::Number(b))) = (
-            constant(ctx, operation.get_operand(0)),
-            constant(ctx, operation.get_operand(1)),
-        ) else {
-            return None;
-        };
-        let value = match binary.kind(ctx) {
-            BinaryKind::Add => a + b,
-            BinaryKind::Sub => a - b,
-            BinaryKind::Mul => a * b,
-            BinaryKind::Div => a / b,
-            BinaryKind::Rem => a % b,
-        };
-        return Some(Folded::Constant(Constant::Number(value)));
+    if let Some(compare) = Operation::get_op::<CompareOp>(op, ctx) {
+        let lhs = converted_integer(ctx, operation.get_operand(0))?;
+        let rhs = converted_integer(ctx, operation.get_operand(1))?;
+        return (lhs.get_type(ctx) == rhs.get_type(ctx)).then_some(Replacement::Compare(
+            compare.kind(ctx),
+            lhs,
+            rhs,
+        ));
     }
-    if let Some(cmp) = Operation::get_op::<CompareOp>(op, ctx) {
-        let kind = cmp.kind(ctx);
-        let (a, b) = (operation.get_operand(0), operation.get_operand(1));
-        return match (constant(ctx, a), constant(ctx, b)) {
-            (Some(Constant::Number(x)), Some(Constant::Number(y))) => {
-                Some(Folded::Constant(Constant::Bool(compare(kind, x, y))))
+    if Operation::get_op::<NumericCastOp>(op, ctx).is_some() {
+        let operand = operation.get_operand(0);
+        let target = operation.get_result(0).get_type(ctx);
+        if operand.get_type(ctx) == target {
+            return Some(Replacement::Value(operand));
+        }
+        if operand
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<crate::types::NumericType>()
+            && crate::optional::optional_value(ctx, target).is_none()
+        {
+            let inner = operand.defining_op()?;
+            Operation::get_op::<NumericCastOp>(inner, ctx)?;
+            let input = inner.deref(ctx).get_operand(0);
+            if crate::optional::optional_value(ctx, input.get_type(ctx)).is_none() {
+                return Some(if input.get_type(ctx) == target {
+                    Replacement::Value(input)
+                } else {
+                    Replacement::Cast(input, target)
+                });
             }
-            (Some(Constant::Bool(x)), Some(Constant::Bool(y))) => {
-                Some(Folded::Constant(Constant::Bool(compare(kind, x, y))))
+        }
+        if let Some(inner) = converted_integer(ctx, operand) {
+            if inner.get_type(ctx) == target {
+                return Some(Replacement::Value(inner));
             }
-            _ => match (converted_i32(ctx, a), converted_i32(ctx, b)) {
-                (Some(x), Some(y)) => Some(Folded::Compare(kind, x, y)),
-                _ => None,
-            },
-        };
-    }
-    if let Some(cond_br) = Operation::get_op::<CondBrOp>(op, ctx)
-        && let Some(Constant::Bool(taken)) = constant(ctx, cond_br.get_operand_condition(ctx))
-    {
-        return Some(Folded::Branch(if taken { 0 } else { 1 }));
+            if target.deref(ctx).is::<IntegerType>() {
+                return Some(Replacement::Cast(inner, target));
+            }
+        }
     }
     None
 }
 
-/// Fold every operation of `root`'s functions once; see the module documentation.
-pub(crate) fn fold(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
-    let mut status = IRStatus::Unchanged;
-    let mut changed_branches = false;
-    for function in functions(root, ctx) {
-        for op in operations(ctx, &function) {
-            let Some(folded) = fold_op(ctx, op) else {
-                continue;
-            };
-            status = IRStatus::Changed;
-            match folded {
-                Folded::Branch(succ) => {
-                    changed_branches = true;
-                    let dyn_op = Operation::get_op_dyn(op, ctx);
-                    let branch = op_cast::<dyn BranchOpInterface>(dyn_op.as_ref())
-                        .expect("cond_br branches");
-                    let args = branch.successor_operands(ctx, succ);
-                    let dest = op.deref(ctx).get_successor(succ);
-                    let br = BrOp::new(ctx, dest, args).get_operation();
-                    br.insert_before(ctx, op);
-                    Operation::erase(op, ctx);
-                }
-                Folded::Value(value) => {
-                    let result = op.deref(ctx).get_result(0);
-                    result.replace_all_uses_with(ctx, &value);
-                    Operation::erase(op, ctx);
-                }
-                Folded::Constant(value) => {
-                    let value = insert_constant(ctx, op, value);
-                    let result = op.deref(ctx).get_result(0);
-                    result.replace_all_uses_with(ctx, &value);
-                    Operation::erase(op, ctx);
-                }
-                Folded::Compare(kind, a, b) => {
-                    let compare = CompareOp::new(ctx, kind, a, b).get_operation();
-                    compare.insert_before(ctx, op);
-                    let value = compare.deref(ctx).get_result(0);
-                    let result = op.deref(ctx).get_result(0);
-                    result.replace_all_uses_with(ctx, &value);
-                    Operation::erase(op, ctx);
-                }
+pub(crate) struct Canonicalize;
+
+impl MatchRewrite for Canonicalize {
+    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
+        replacement(ctx, op).is_some()
+    }
+
+    fn rewrite(
+        &mut self,
+        ctx: &mut Context,
+        rewriter: &mut MatchRewriter,
+        op: Ptr<Operation>,
+    ) -> Result<()> {
+        let Some(replacement) = replacement(ctx, op) else {
+            return Ok(());
+        };
+        let value = match replacement {
+            Replacement::Value(value) => value,
+            Replacement::Cast(inner, target) => {
+                let cast = NumericCastOp::new(ctx, inner, target).get_operation();
+                rewriter.insert_operation(ctx, cast);
+                cast.deref(ctx).get_result(0)
             }
-        }
+            Replacement::Bool(flag) => {
+                let ty = IntegerType::get(ctx, 1, Signedness::Signless);
+                let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(flag), bw(1)));
+                let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+                rewriter.insert_operation(ctx, constant);
+                constant.deref(ctx).get_result(0)
+            }
+            Replacement::Compare(kind, lhs, rhs) => {
+                let compare = CompareOp::new(ctx, kind, lhs, rhs).get_operation();
+                rewriter.insert_operation(ctx, compare);
+                compare.deref(ctx).get_result(0)
+            }
+        };
+        let result = op.deref(ctx).get_result(0);
+        rewriter.replace_value_uses_with(ctx, result, value);
+        rewriter.erase_operation(ctx, op);
+        Ok(())
     }
-    if changed_branches {
-        pliron::opts::simplify_cfg::remove_blocks_inside_op(
-            root,
-            ctx,
-            &mut pliron::irbuild::rewriter::IRRewriter::<pliron::irbuild::listener::DummyListener>::default(),
-        );
-    }
-    status
 }

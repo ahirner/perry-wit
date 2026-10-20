@@ -1,13 +1,7 @@
 //! How MIR types are represented in Wasm values and memory slots.
+pub(crate) use crate::values::Carriers;
 use anyhow::{Result, bail};
-use perry_mir::types::{
-    AbortType, ArrayType, BigIntType, ByobReaderType, ByteBufferType, ByteInputType, BytesType,
-    DateType, DecoderType, ExceptionType, HeadersType, IncomingType, InstantType, JsonType,
-    NumberStringType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,
-    ReadableType, ReaderType, RecordType, RegexType, RequestType, ResourceType, ResponseType,
-    SearchParamsType, SettledType, SlotType, StatsType, StringType, TransferType, UrlType,
-    VariantType, WritableType, WriterType,
-};
+use perry_mir::{ByteInputType, OptionalType, PromiseType, SlotType, TransferType, ValueKind};
 use pliron::{
     builtin::{
         attributes::FPDoubleAttr,
@@ -28,7 +22,7 @@ pub(crate) fn val_type_is_i64(ctx: &Context, ty: TypeHandle) -> bool {
         .is_some_and(|int| int.width() == 64)
 }
 
-pub(crate) fn i32_type(ctx: &mut Context) -> TypeHandle {
+pub(crate) fn i32_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }
 
@@ -38,6 +32,7 @@ pub(crate) enum Repr {
     F64,
     Bool,
     I32,
+    I64,
     Ref,
 }
 
@@ -56,48 +51,22 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     if deref.is::<FP64Type>() {
         return Ok(Repr::F64);
     }
+    if deref.is::<perry_mir::NumericType>() {
+        return Ok(Repr::I32);
+    }
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
         return match int.width() {
             1 => Ok(Repr::Bool),
-            32 => Ok(Repr::I32),
+            8 | 16 | 32 => Ok(Repr::I32),
+            64 => Ok(Repr::I64),
             width => bail!("integers of width {width} are not supported"),
         };
     }
-    if deref.is::<InstantType>()
-        || deref.is::<PlainDateType>()
-        || deref.is::<PlainDateTimeType>()
-        || deref.is::<DateType>()
-        || deref.is::<RecordType>()
-        || deref.is::<VariantType>()
-        || deref.is::<ResourceType>()
-        || deref.is::<NumberStringType>()
-        || deref.is::<RegexType>()
-        || deref.is::<DecoderType>()
-        || deref.is::<BigIntType>()
-        || deref.is::<ArrayType>()
-        || deref.is::<StringType>()
+    if ValueKind::of(ctx, ty).is_some()
         || deref.is::<PromiseType>()
-        || deref.is::<SettledType>()
-        || deref.is::<StatsType>()
-        || deref.is::<HeadersType>()
-        || deref.is::<ResponseType>()
-        || deref.is::<RequestType>()
-        || deref.is::<WritableType>()
-        || deref.is::<WriterType>()
-        || deref.is::<ReadableType>()
-        || deref.is::<ReaderType>()
-        || deref.is::<ByobReaderType>()
-        || deref.is::<ByteBufferType>()
-        || deref.is::<ReadResultType>()
-        || deref.is::<IncomingType>()
-        || deref.is::<AbortType>()
-        || deref.is::<ExceptionType>()
-        || deref.is::<BytesType>()
         || deref.is::<ByteInputType>()
-        || deref.is::<UrlType>()
-        || deref.is::<SearchParamsType>()
-        || deref.is::<JsonType>()
         || deref.is::<TransferType>()
+        || deref.is::<perry_mir::JsonTraversalType>()
         || deref.is::<SlotType>()
     {
         return Ok(Repr::Ref);
@@ -110,9 +79,10 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     bail!("type {} has no Wasm representation", ty.disp(ctx))
 }
 
-pub(crate) fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+pub(crate) fn wasm_type(ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => FP64Type::get(ctx).into(),
+        Repr::I64 => IntegerType::get(ctx, 64, Signedness::Signless).into(),
         _ => i32_type(ctx),
     })
 }
@@ -120,10 +90,21 @@ pub(crate) fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle>
 pub(crate) fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => MemKind::F64,
+        Repr::I64 => MemKind::I64,
         _ => MemKind::I32,
     })
 }
 
 pub(crate) fn optional_inner(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    perry_mir::optional::optional_value(ctx, ty)
+    perry_mir::optional_value(ctx, ty)
+}
+
+/// Bytes an aggregate slot occupies: numeric alternatives keep a tag and a payload.
+pub(crate) fn slot_size(ctx: &Context, ty: TypeHandle) -> u32 {
+    if crate::values::is_numeric_type(ctx, ty) {
+        perry_abi::layout::array::Elements::Numeric
+    } else {
+        perry_abi::layout::array::Elements::Scalar
+    }
+    .stride()
 }

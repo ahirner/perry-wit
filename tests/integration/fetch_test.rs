@@ -1,16 +1,25 @@
 //! `fetch` over `wasi:http/client`: request method, headers and body reach the server; the
-//! response's status, headers and body read back through `text()`, `bytes()`, `json()` and
-//! readers.
+//! response's status, headers and body read back through `text()`, `bytes()`, and readers; and
+//! host cancellation releases requests and partial bodies.
+use crate::wasi_host::{self, Host};
+use crate::world::Compiler::{MemoryChecked, Standard};
+use crate::{cancellation, engine::async_engine, http_fixture};
 use anyhow::Result;
-use perry_wit::{compile_for_world, component::wit::resolve_wit};
-use wasmtime::{
-    Store,
-    component::{Linker, ResourceTable},
+use bytes::Bytes;
+use http_body::{Body, Frame};
+use http_body_util::BodyExt;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
-
-use crate::{engine::async_engine, http_fixture};
+use wasmtime::component::Component;
+use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
+use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 
 const WIT: &str = r#"
 package test:fetch;
@@ -52,60 +61,6 @@ export async function run(url: string): Promise<string> {
 }
 "#;
 
-struct Host {
-    ctx: WasiCtx,
-    http: WasiHttpCtx,
-    table: ResourceTable,
-}
-
-impl WasiView for Host {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl WasiHttpView for Host {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
-        WasiHttpCtxView {
-            ctx: &mut self.http,
-            table: &mut self.table,
-            hooks: Default::default(),
-        }
-    }
-}
-
-/// Compile `source`, call its `run(url)` export against `server` and return the result.
-async fn run(source: &str, server: &http_fixture::HttpFixture) -> Result<String> {
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("fetch"))?;
-    let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
-    let engine = async_engine()?;
-    let component =
-        wasmtime::component::Component::new(&engine, compiled.component.unwrap().stripped)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-        },
-    );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let url = format!("http://{}", server.address);
-    let (text,) = run.call_async(&mut store, (&url,)).await?;
-    assert!(store.data().table.is_empty(), "host resources leaked");
-    Ok(text)
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
     let server = http_fixture::HttpFixture::new(|request| match request.target.as_str() {
@@ -126,7 +81,21 @@ async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
         "/bytes" => http_fixture::Reply::Bytes(200, (0..20_000u32).map(|i| i as u8).collect()),
         _ => http_fixture::Reply::Body(404, "no".into()),
     });
-    let text = run(SOURCE, &server).await?;
+    let compiled = Standard.compile(WIT, "fetch", "fetch.ts", SOURCE)?;
+    let has_json_parser = crate::world::function_names(&compiled.core)?
+        .into_iter()
+        .any(|name| matches!(name, "json_measure" | "json_populate_measured"));
+    assert!(!has_json_parser);
+    let (mut store, instance) = wasi_host::instantiate(
+        &async_engine()?,
+        &compiled.component.unwrap().stripped,
+        Host::default(),
+    )
+    .await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let url = format!("http://{}", server.address);
+    let (text,) = run.call_async(&mut store, (&url,)).await?;
+    assert!(store.data().table.is_empty(), "host resources leaked");
     assert_eq!(
         text,
         "POST abc héllo|201|true|yes|20000|20000|true|404|false"
@@ -134,32 +103,186 @@ async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
     Ok(())
 }
 
-/// `examples/merge_docs/index.ts` with the server's address: concurrent requests, `json()` and an
-/// object spread of the parsed documents. A body that is not JSON rejects.
-const MERGE: &str = r#"
-export async function run(url: string): Promise<string> {
-  const [res1, res2] = await Promise.all([fetch(url + "/doc1.json"), fetch(url + "/doc2.json")]);
-  const doc1 = await res1.json();
-  const doc2 = await res2.json();
-  let rejected = false;
-  try { await (await fetch(url + "/broken")).json(); } catch (e) { rejected = true; }
-  return JSON.stringify({ ...doc1, ...doc2 }) + "|" + rejected;
+#[derive(Clone, Copy, Debug)]
+enum Phase {
+    Request,
+    Upload,
+    Body,
 }
-"#;
+
+#[derive(Default)]
+struct Observations {
+    ready: AtomicBool,
+    requests: AtomicUsize,
+    dropped_requests: AtomicUsize,
+    uploaded_bytes: AtomicUsize,
+    body_bytes: AtomicUsize,
+    dropped_bodies: AtomicUsize,
+}
+
+struct RequestGuard(Arc<Observations>);
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.0.dropped_requests.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct PartialBody {
+    sent: bool,
+    observations: Arc<Observations>,
+}
+
+impl Body for PartialBody {
+    type Data = Bytes;
+    type Error = Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Error>>> {
+        if self.sent {
+            self.observations.ready.store(true, Ordering::SeqCst);
+            Poll::Pending
+        } else {
+            self.sent = true;
+            self.observations.body_bytes.fetch_add(3, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"abc")))))
+        }
+    }
+}
+
+impl Drop for PartialBody {
+    fn drop(&mut self) {
+        self.observations
+            .dropped_bodies
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct Fixture {
+    phase: Phase,
+    observations: Arc<Observations>,
+}
+
+impl WasiHttpHooks for Fixture {
+    fn p3_outgoing_body_chunk_size(&mut self) -> usize {
+        7
+    }
+
+    fn send_request(
+        &mut self,
+        request: http::Request<WasiBody>,
+        _: Option<RequestOptions>,
+        _: Box<dyn Future<Output = Result<(), Error>> + Send>,
+    ) -> Box<
+        dyn Future<
+                Output = Result<
+                    (
+                        http::Response<WasiBody>,
+                        Box<dyn Future<Output = Result<(), Error>> + Send>,
+                    ),
+                    Error,
+                >,
+            > + Send,
+    > {
+        let phase = self.phase;
+        let observations = self.observations.clone();
+        observations.requests.fetch_add(1, Ordering::SeqCst);
+        let guard = RequestGuard(observations.clone());
+        Box::new(async move {
+            let _guard = guard;
+            let mut request = request;
+            if !matches!(phase, Phase::Body) {
+                if matches!(phase, Phase::Upload) {
+                    let frame = request
+                        .body_mut()
+                        .frame()
+                        .await
+                        .ok_or(ErrorCode::HttpProtocolError)??;
+                    let bytes = frame
+                        .into_data()
+                        .map_err(|_| ErrorCode::HttpProtocolError)?;
+                    observations
+                        .uploaded_bytes
+                        .fetch_add(bytes.len(), Ordering::SeqCst);
+                }
+                observations.ready.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            let body = PartialBody {
+                sent: false,
+                observations,
+            }
+            .boxed_unsync();
+            Ok((
+                http::Response::new(body),
+                Box::new(async { Ok(()) }) as Box<dyn Future<Output = _> + Send>,
+            ))
+        })
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
-async fn fetched_json_documents_merge_like_node() -> Result<()> {
-    let server = http_fixture::HttpFixture::new(|request| match request.target.as_str() {
-        "/doc1.json" => http_fixture::Reply::Body(200, r#"{"b":1,"2":"x","a":[1,2]}"#.into()),
-        "/doc2.json" => {
-            http_fixture::Reply::Bytes(200, "\u{feff}{\"a\":null,\"1\":true,\"c\":\"é\"}".into())
+async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
+    let bytes = MemoryChecked.component(
+        "package test:fetch-cancel; world run {import wasi:http/client@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func();}",
+        "run",
+        "cancel.ts",
+        "export async function run():Promise<void>{const response=await fetch('https://example.test/body',{method:'POST',body:new Uint8Array(1024)});try{await response.bytes();}finally{throw new Error('cancelled continuation ran');}}",
+    )?;
+    let engine = async_engine()?;
+    let component = Component::new(&engine, cancellation::cancellation_caller(&bytes, true)?)?;
+    for phase in [Phase::Request, Phase::Upload, Phase::Body] {
+        let observations = Arc::new(Observations::default());
+        let mut linker = wasi_host::linker(&engine)?;
+        let readiness = observations.clone();
+        linker.instance("test:control/cancellation")?.func_wrap(
+            "ready",
+            move |_: wasmtime::StoreContextMut<'_, Host<Fixture>>, (): ()| {
+                Ok((readiness.ready.load(Ordering::SeqCst),))
+            },
+        )?;
+        let host = Host::default()
+            .with_hooks(Fixture {
+                phase,
+                observations: observations.clone(),
+            })
+            .with_memory_limit(512 * 1024);
+        let mut store = wasi_host::store(&engine, host);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+        let mut peak = 0;
+        for round in 1..=16 {
+            observations.ready.store(false, Ordering::SeqCst);
+            assert_eq!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    run.call_async(&mut store, ())
+                )
+                .await??
+                .0,
+                4,
+                "{phase:?}"
+            );
+            assert_eq!(observations.requests.load(Ordering::SeqCst), round);
+            assert_eq!(observations.dropped_requests.load(Ordering::SeqCst), round);
+            if matches!(phase, Phase::Upload) {
+                assert_eq!(
+                    observations.uploaded_bytes.load(Ordering::SeqCst),
+                    round * 7
+                );
+            }
+            if matches!(phase, Phase::Body) {
+                assert_eq!(observations.body_bytes.load(Ordering::SeqCst), round * 3);
+                assert_eq!(observations.dropped_bodies.load(Ordering::SeqCst), round);
+            }
+            assert!(store.data().table.is_empty(), "{phase:?}");
+            store.assert_concurrent_state_empty();
+            if round == 2 {
+                peak = store.data().peak;
+            } else if round > 2 {
+                assert_eq!(store.data().peak, peak, "{phase:?}");
+            }
         }
-        _ => http_fixture::Reply::Body(200, "{\"a\":".into()),
-    });
-    // Recorded from Node 22.
-    assert_eq!(
-        run(MERGE, &server).await?,
-        r#"{"1":true,"2":"x","b":1,"a":null,"c":"é"}|true"#
-    );
+    }
     Ok(())
 }

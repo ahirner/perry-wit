@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 pliron.workspace = true
+pliron-control.workspace = true
 thiserror.workspace = true
 wasm-encoder.workspace = true
 
