@@ -124,7 +124,12 @@ impl JsonSchema {
             Self::NumberString
         } else if let Some(optional) = definition.downcast_ref::<OptionalType>() {
             Self::Optional(optional.value())
-        } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+        } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && matches!(
+                record.deref(ctx).kind(),
+                RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
+            )
+        {
             Self::Record(record)
         } else if let Some(array) = definition.downcast_ref::<ArrayType>() {
             let element = array.element();

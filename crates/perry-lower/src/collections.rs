@@ -369,6 +369,9 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(Some(self.object_from_entries(ctx, entries, expected)?))
             }
             Expr::ObjectIs(a, b) => {
+                if let Some(value) = self.absence_test(ctx, CompareKind::Eq, false, a, b)? {
+                    return Ok(Some(value));
+                }
                 let lhs = self.expression(ctx, a)?;
                 let rhs = self.expression(ctx, b)?;
                 Ok(Some(self.same_value(

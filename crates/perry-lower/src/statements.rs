@@ -338,7 +338,7 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.expression(ctx, source)?;
                 let source = self.defined(ctx, source)?;
                 let tuple = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-                    .is_ok_and(|record| record.deref(ctx).is_tuple());
+                    .is_ok_and(|record| record.deref(ctx).kind() == RecordKind::Tuple);
                 ensure!(
                     kind(ctx, source)? == Kind::Array || tuple,
                     "array destructuring is supported for arrays so far"

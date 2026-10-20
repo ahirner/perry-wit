@@ -276,19 +276,24 @@ impl<'s> FunctionBuilder<'s> {
         names: &[&str],
         args: &'s [Expr],
         expected: Option<TypeHandle>,
+        kind: RecordKind,
     ) -> Result<Value> {
         let expected = expected.map(|ty| present_type(ctx, ty));
-        if let Some(ty) = expected
-            && ty.deref(ctx).is::<perry_mir::VariantType>()
-        {
-            return self.variant_literal(ctx, ty, names, args);
+        if kind == RecordKind::Object {
+            if let Some(ty) = expected
+                && ty.deref(ctx).is::<perry_mir::VariantType>()
+            {
+                return self.variant_literal(ctx, ty, names, args);
+            }
+            if let Some(ty) = expected
+                && let Some((_, value, tuple)) = crate::collections::dict_entry_types(ctx, ty)
+            {
+                return self.dict_literal(ctx, names, args, value, tuple);
+            }
         }
-        if let Some(ty) = expected
-            && let Some((_, value, tuple)) = crate::collections::dict_entry_types(ctx, ty)
-        {
-            return self.dict_literal(ctx, names, args, value, tuple);
-        }
-        let expected = expected.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok());
+        let expected = expected
+            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .filter(|record| record.deref(ctx).kind() == kind);
         let expected = matching_record(
             ctx,
             expected,
@@ -325,6 +330,7 @@ impl<'s> FunctionBuilder<'s> {
                         ctx,
                     )
                     .ok()
+                    .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
                 })
                 .or_else(|| {
                     parts.iter().find_map(|(key, value)| {
@@ -361,6 +367,8 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let source = self.defined(ctx, raw)?;
                 let record = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+                    .ok()
+                    .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
                     .context("object spread is supported over typed records or JSON values with static keys")?;
                 sources.push(RecordSource::Spread(source));
                 assembly.copy(self, ctx, source, record, &[], CopyMode::Spread)?;
@@ -385,10 +393,13 @@ impl<'s> FunctionBuilder<'s> {
         let source = self.expression(ctx, object)?;
         let source = self.defined(ctx, source)?;
         let record = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+            .ok()
+            .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
             .context("object rest destructuring requires a typed record")?;
         let expected = expected
             .map(|ty| present_type(ctx, ty))
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok());
+            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .filter(|record| record.deref(ctx).kind() == RecordKind::Object);
         let mut assembly = RecordAssembly {
             expected,
             fields: Vec::new(),

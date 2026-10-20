@@ -50,7 +50,7 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             a.downcast_ref::<RecordType>(),
             b.downcast_ref::<RecordType>(),
         ) {
-            if a.is_tuple() != b.is_tuple() {
+            if a.kind() != b.kind() {
                 return false;
             }
             let (Ok(a), Ok(b)) = (a.fields(), b.fields()) else {

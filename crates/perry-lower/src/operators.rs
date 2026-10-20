@@ -27,10 +27,17 @@ impl<'s> FunctionBuilder<'s> {
             Equality::SameValue => self.comparison_values(ctx, &CompareOp::Eq, lhs, rhs)?,
             Equality::SameValueZero => self.compare(ctx, CompareKind::Eq, lhs, rhs),
         };
-        let numeric = |value: Value| Kind::of(ctx, present_type(ctx, value.get_type(ctx)));
-        let numbers = numeric(lhs) == Some(Kind::Number) && numeric(rhs) == Some(Kind::Number);
+        let kind_of = |value: Value| Kind::of(ctx, present_type(ctx, value.get_type(ctx)));
+        let numbers = kind_of(lhs) == Some(Kind::Number) && kind_of(rhs) == Some(Kind::Number);
+        let may_be_number = |value: Value| {
+            matches!(
+                kind_of(value),
+                Some(Kind::Number | Kind::NumberString | Kind::Json | Kind::Exception)
+            )
+        };
         if !numbers
-            && !(equality == Equality::SameValueZero && numeric(lhs) == Some(Kind::NumberString))
+            && !(equality == Equality::SameValueZero && kind_of(lhs) == Some(Kind::NumberString))
+            && !(equality == Equality::SameValue && may_be_number(lhs) && may_be_number(rhs))
         {
             return Ok(equal);
         }
@@ -43,18 +50,21 @@ impl<'s> FunctionBuilder<'s> {
                 if equality == Equality::SameValueZero {
                     return Ok(equal);
                 }
-                // Strict equality already established matching absence states. Coercion
-                // makes both nulls +0 and both undefineds NaN without unwrapping either.
-                let lhs = b.arithmetic(ctx, lhs);
-                let rhs = b.arithmetic(ctx, rhs);
                 let zero = b.number(ctx, 0.0);
-                let is_zero = b.compare(ctx, CompareKind::Eq, lhs, zero);
+                let is_zero = if numbers {
+                    let lhs = b.arithmetic(ctx, lhs);
+                    b.compare(ctx, CompareKind::Eq, lhs, zero)
+                } else {
+                    b.comparison_values(ctx, &CompareOp::Eq, lhs, zero)?
+                };
                 b.choose(
                     ctx,
                     bool_ty,
                     is_zero,
                     |b, ctx| {
                         let one = b.number(ctx, 1.0);
+                        let lhs = b.unwrapped_number(ctx, lhs)?;
+                        let rhs = b.unwrapped_number(ctx, rhs)?;
                         let lhs = b.binary(ctx, BinaryKind::Div, one, lhs);
                         let rhs = b.binary(ctx, BinaryKind::Div, one, rhs);
                         Ok(b.compare(ctx, CompareKind::Eq, lhs, rhs))
@@ -63,16 +73,41 @@ impl<'s> FunctionBuilder<'s> {
                 )
             },
             |b, ctx| {
-                let lhs_nan = b.compare(ctx, CompareKind::Ne, lhs, lhs);
+                let is_nan = |b: &mut Self, ctx: &mut Context, val: Value| -> Result<Value> {
+                    if numbers {
+                        Ok(b.compare(ctx, CompareKind::Ne, val, val))
+                    } else {
+                        b.comparison_values(ctx, &CompareOp::Ne, val, val)
+                    }
+                };
+                let lhs_nan = is_nan(b, ctx, lhs)?;
                 b.choose(
                     ctx,
                     bool_ty,
                     lhs_nan,
-                    |b, ctx| Ok(b.compare(ctx, CompareKind::Ne, rhs, rhs)),
+                    |b, ctx| is_nan(b, ctx, rhs),
                     |_, _| Ok(lhs_nan),
                 )
             },
         )
+    }
+
+    fn unwrapped_number(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if Kind::of(ctx, present_type(ctx, value.get_type(ctx))) == Some(Kind::Number) {
+            return Ok(self.arithmetic(ctx, value));
+        }
+        let value = self.defined(ctx, value)?;
+        let f64_ty = FP64Type::get(ctx).into();
+        if value
+            .get_type(ctx)
+            .deref(ctx)
+            .is::<perry_mir::NumberStringType>()
+        {
+            return Ok(self.emit_value(ctx, |ctx| {
+                perry_mir::VariantPayloadOp::new(ctx, value, f64_ty)
+            }));
+        }
+        self.fit(ctx, value, f64_ty)
     }
 
     /// `left op right` for arithmetic operators and string concatenation.
@@ -293,7 +328,7 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Strict or loose (in)equality with a `null` or `undefined` literal: a test of the other
     /// operand's absence state. `None` when neither side is such a literal.
-    fn absence_test(
+    pub(super) fn absence_test(
         &mut self,
         ctx: &mut Context,
         equality: CompareKind,
@@ -495,7 +530,7 @@ impl<'s> FunctionBuilder<'s> {
             match states {
                 perry_mir::Absence::Null => self.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty)),
                 perry_mir::Absence::Undefined => {
-                    self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, result_ty))
                 }
                 perry_mir::Absence::Both => {
                     let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, lhs));
@@ -504,7 +539,9 @@ impl<'s> FunctionBuilder<'s> {
                         result_ty,
                         is_null,
                         |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, result_ty))),
+                        |b, ctx| {
+                            Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, result_ty)))
+                        },
                     )?
                 }
             }

@@ -194,7 +194,10 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.intrinsic(ctx, convert, vec![value]));
             }
         }
-        if ty.deref(ctx).is::<JsonType>() && ty != target {
+        if ty.deref(ctx).is::<JsonType>()
+            && ty != target
+            && perry_mir::JsonSchema::supports_descriptor(ctx, target)
+        {
             return self.decode_json(ctx, value, target);
         }
         let thrown = present_type(ctx, ty);
@@ -256,20 +259,26 @@ impl<'s> FunctionBuilder<'s> {
             {
                 return self.project_record(ctx, value, ty == source, dst_rec, target);
             }
-            let code =
-                if source.deref(ctx).is::<RecordType>() && wanted.deref(ctx).is::<RecordType>() {
-                    DiagnosticCode::IncompatibleRecordLayout
-                } else if absence(ctx, ty) != absence(ctx, target) {
-                    DiagnosticCode::AbsenceMismatch
-                } else {
-                    DiagnosticCode::UnsupportedType
-                };
+            let code = if let (Ok(src_rec), Ok(dst_rec)) = (
+                TypedHandle::<RecordType>::from_handle(source, ctx),
+                TypedHandle::<RecordType>::from_handle(wanted, ctx),
+            ) && src_rec.deref(ctx).kind() == dst_rec.deref(ctx).kind()
+                && matches!(
+                    src_rec.deref(ctx).kind(),
+                    RecordKind::Object | RecordKind::Tuple
+                ) {
+                DiagnosticCode::IncompatibleRecordLayout
+            } else if absence(ctx, ty) != absence(ctx, target) {
+                DiagnosticCode::AbsenceMismatch
+            } else {
+                DiagnosticCode::UnsupportedType
+            };
             Err(PerryDiagnostic::error(
                 code,
                 format!(
                     "value type {} differs from the expected type {}",
-                    ty.disp(ctx),
-                    target.disp(ctx)
+                    describe_type(ctx, ty),
+                    describe_type(ctx, target)
                 ),
             )
             .into())
@@ -461,4 +470,20 @@ fn record_projection(
 pub(super) fn void_type(ctx: &mut Context) -> TypeHandle {
     let number = FP64Type::get(ctx).into();
     perry_mir::OptionalType::get(ctx, number).into()
+}
+
+fn describe_type(ctx: &Context, ty: TypeHandle) -> String {
+    if let Some((k, v, _)) = crate::collections::map_entry_types(ctx, ty) {
+        format!("Map<{}, {}>", describe_type(ctx, k), describe_type(ctx, v))
+    } else if crate::collections::set_box_record(ctx, ty).is_some() {
+        "Set".into()
+    } else if let Some((k, v, _)) = crate::collections::dict_entry_types(ctx, ty) {
+        format!(
+            "Record<{}, {}>",
+            describe_type(ctx, k),
+            describe_type(ctx, v)
+        )
+    } else {
+        ty.disp(ctx).to_string()
+    }
 }

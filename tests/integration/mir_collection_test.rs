@@ -471,14 +471,21 @@ function size(value: number | string): number {
     else { return value.length; }
 }
 function same(a: number | string, b: number | string): boolean { return a === b; }
+function isSame(a: number | string, b: number | string): boolean { return Object.is(a, b); }
 let retained: Item = {};
 export function run(n: number): number {
     const absent: Item = {};
     const nil: Item = {value: null};
     if (typeof absent.value !== 'undefined' || typeof nil.value !== 'object') return -1;
+    const nullableText: string | null = null;
+    if (!Object.is(nullableText, null) || Object.is(nullableText, undefined)) return -12;
+    if (!Object.is(absent.value, undefined) || !Object.is(nil.value, null)) return -13;
     const values: (number | string)[] = [n, 'é😀'];
     if (text(values[0]) !== '7' || text(values[1]) !== 'é😀') return -2;
     if (!same('abc', 'a' + 'bc') || same(7, '7') || same(NaN, NaN) || !same(0, -0)) return -3;
+    if (!isSame(NaN, NaN) || isSame(0, -0) || !isSame(-0, -0) || !Object.is(values[0], 7)) return -14;
+    const dynZero = JSON.parse('-0');
+    if (Object.is(dynZero, 0) || !Object.is(dynZero, -0)) return -15;
     const parsed: Item = JSON.parse('{"value":"ok"}');
     if (typeof parsed.value !== 'string') return -4;
     if (JSON.stringify(parsed) !== '{"value":"ok"}') return -5;

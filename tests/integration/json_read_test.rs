@@ -151,6 +151,12 @@ export function duplicates():number {
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok","val":{"n":6},"tag":"err"}}');return 16;}
  catch(e) {if(!(e instanceof TypeError))return 17;}
  const fixed:Row = JSON.parse('{"name":"ok","inner":false,"inner":{"n":4}}');
+ const [base, update] = [JSON.parse('{"y":"hello","a":"1"}'), JSON.parse('{"a":"2","b":"3"}')];
+ const dictLiteral:Record<string,string> = { "x": base.y };
+ const closedLiteral:{x:string} = { "x": base.y };
+ const dictSpread:Record<string,string> = { ...base, ...update };
+ const closedSpread:{y:string;a:string;b:string} = { ...base, ...update };
+ if (dictLiteral.x !== 'hello' || closedLiteral.x !== 'hello' || dictSpread.y !== 'hello' || dictSpread.a !== '2' || dictSpread.b !== '3' || closedSpread.a !== '2') return 18;
  return fixed.inner.n - 4;
 }
 "#;

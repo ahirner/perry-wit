@@ -149,45 +149,46 @@ impl<'s> FunctionBuilder<'s> {
         parts: &'s [(Option<String>, Expr)],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let expected_inner = expected.map(|ty| present_type(ctx, ty));
-        if let Some(ty) = expected_inner
-            && !ty.deref(ctx).is::<JsonType>()
-            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
-        {
-            return self.record_object_spread(ctx, parts, None, Some(rec));
-        }
+        let expected_record = expected
+            .map(|ty| present_type(ctx, ty))
+            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object);
         let mut remaining = parts;
         let mut initial = None;
-        if expected_inner.is_none() {
-            if let Some((None, first_spread)) = parts.first() {
-                let first_src = self.expression(ctx, first_spread)?;
-                let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
-                let first_json = if is_exc {
-                    None
-                } else {
-                    self.json_operand(ctx, first_src)?
-                };
-                if !is_exc
-                    && first_json.is_none()
-                    && parts[1..]
-                        .iter()
-                        .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
-                {
-                    return self.record_object_spread(ctx, parts, Some(first_src), None);
-                }
-                if !is_exc {
-                    initial = Some(first_json.context(
-                        "object spread is supported over typed records or JSON values with static keys",
-                    )?);
-                }
-                remaining = &parts[1..];
-            } else if parts.iter().any(|(k, _)| k.is_none())
+        if let Some((None, first_spread)) = parts.first() {
+            let first_src = self.expression(ctx, first_spread)?;
+            let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
+            let first_json = if is_exc {
+                None
+            } else {
+                self.json_operand(ctx, first_src)?
+            };
+            if first_json.is_none()
+                && (expected_record.is_some()
+                    || (!is_exc
+                        && parts[1..]
+                            .iter()
+                            .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())))
+            {
+                return self.record_object_spread(ctx, parts, Some(first_src), expected_record);
+            }
+            if !is_exc {
+                initial = Some(first_json.context(
+                    "object spread is supported over typed records or JSON values with static keys",
+                )?);
+            }
+            remaining = &parts[1..];
+        } else if (expected_record.is_some()
+            && !parts.iter().any(|(k, v)| {
+                k.is_none()
+                    && matches!(v, Expr::LocalGet(id) if self.locals.get(id).and_then(|l| self.slot_type(ctx, l.slot).ok()).is_some_and(|ty| present_type(ctx, ty).deref(ctx).is::<JsonType>()))
+            }))
+            || (parts.iter().any(|(k, _)| k.is_none())
                 && parts
                     .iter()
-                    .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())
-            {
-                return self.record_object_spread(ctx, parts, None, None);
-            }
+                    .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some()))
+        {
+            return self.record_object_spread(ctx, parts, None, expected_record);
         }
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
         if let Some(source) = initial {
