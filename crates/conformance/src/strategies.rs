@@ -1,4 +1,4 @@
-//! Input domains are pure strategies; rejection by the compiler is never a filter.
+//! Pure `proptest` input-domain strategies for conformance contracts.
 use crate::{
     execution::FactLimits,
     program::{Binary, Condition, Math, Number, Text},

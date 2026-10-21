@@ -26,7 +26,8 @@ struct AtomicConstructionError {
     operation: String,
 }
 
-/// Async failures settle a promise; they never add a synchronous status result.
+/// Failure outcome of a function: synchronous status return (`Throws`) or async promise
+/// rejection (`Rejects`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Failure {
     #[default]
@@ -173,8 +174,8 @@ impl Mutation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Allocation {
     None,
-    /// The helper completes without collecting, suspending, or invoking callbacks.
-    /// Collection may still occur at the compiled safe point preceding the operation.
+    /// Single-step allocation where collection may occur at the compiled safe point preceding
+    /// the operation.
     Atomic,
     /// Caller roots must remain published throughout the operation.
     Conservative,
@@ -190,7 +191,7 @@ pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
     allocation(ctx, op) != Allocation::None
 }
 
-/// Classify each operation once; caller-dependent propagation belongs to ProgramFacts.
+/// Classify each operation once. Caller-dependent propagation runs in `ProgramFacts`.
 pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEffects>> {
     let names: Vec<_> = functions.iter().map(|f| f.get_symbol_name(ctx)).collect();
     let indices: HashMap<_, _> = names

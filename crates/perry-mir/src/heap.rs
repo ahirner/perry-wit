@@ -1,7 +1,7 @@
 //! Record allocation and field access (`perry.heap` part of the dialect).
 //!
-//! Allocations carry a [Tier]; field reads and writes are typed against the record's shape.
-//! Escape analysis, SROA and tier classification (P3.3, P3.4, P3.7) rewrite these ops.
+//! Allocations carry a [Tier], and field reads and writes are typed against the record's shape.
+//! Escape analysis, SROA, and tier classification refine and rewrite these ops.
 use crate::operation_schema::op_schema;
 use crate::signatures::{MissingProjectionField, Ty, TypeMismatch, operand_types, type_mismatch};
 use crate::{

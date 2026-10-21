@@ -1,11 +1,11 @@
 //! Line-oriented TypeScript emission shared by the generated aggregate and collection programs.
 use std::fmt;
 
-/// Weighted trace checksum emitted into generated programs; `NaN` items count as -55 so they
-/// stay visible in the sum.
+/// Weighted trace checksum emitted into generated programs. `NaN` items contribute -55 so they
+/// remain observable in the sum.
 pub(crate) const CHECKSUM_TS: &str = "function checksum(seed: number, trace: number[]): number { let acc = seed; for (let i = 0; i < trace.length; i += 1) { const item = trace[i]; acc += (Number.isNaN(item) ? -55 : item + 0) * ((i % 5) + 1); } return acc; }";
 
-/// [`CHECKSUM_TS`] for cases whose oracle is a Rust model; same operations in the same order.
+/// Compute the [`CHECKSUM_TS`] value in Rust for model-backed oracle cases.
 pub(crate) fn checksum(seed: f64, trace: &[f64]) -> f64 {
     trace.iter().enumerate().fold(seed, |acc, (index, &item)| {
         let term = if item.is_nan() { -55.0 } else { item + 0.0 };
@@ -13,7 +13,7 @@ pub(crate) fn checksum(seed: f64, trace: &[f64]) -> f64 {
     })
 }
 
-/// Source under construction; every line is written at the current block depth.
+/// Source buffer that indents each emitted line to the current block depth.
 #[derive(Default)]
 pub(crate) struct Emitter {
     out: String,

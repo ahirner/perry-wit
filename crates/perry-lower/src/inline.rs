@@ -185,7 +185,7 @@ const LABELLED: u8 = 16;
 // Return-type inference also sees syntactically present returns on unreachable paths.
 const EMPTY_RETURN: u8 = 32;
 
-/// The ways `statements` may complete; a callback whose body may fall through returns
+/// Compute the completion mask of `statements` so a callback that can fall through yields
 /// `undefined` on that path.
 fn completions(statements: &[Stmt]) -> u8 {
     let mut result = FALLTHROUGH;

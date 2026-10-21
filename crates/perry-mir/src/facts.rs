@@ -1,8 +1,8 @@
 //! Cached numeric, runtime-effect and parameter-provenance constraints over SSA values.
 //!
-//! Contexts contain domains, never constants or intervals. A single worklist propagates
+//! Contexts are keyed by argument and result domains. A single worklist propagates
 //! representation facts forward and required widths backward, including recursive calls.
-//! Rewriting runs only after the analysis converges, fixing semantic wrap points before
+//! Rewriting runs after the analysis converges, fixing semantic wrap points before
 //! SCCP, inlining and other algebraic transformations.
 use crate::{calls::AwaitOp, scalar::NumericCastOp, semantics::OperationKind, types::PromiseType};
 use pliron::{
@@ -153,7 +153,7 @@ struct Key {
     function: Identifier,
     args: Vec<ArgumentDomain>,
     results: Vec<ResultDomain>,
-    /// Actual MIR ranges never assume a specialization that has not been rewritten yet.
+    /// Whether this context represents a specialized clone of `function`.
     specialize: bool,
 }
 
@@ -375,8 +375,8 @@ impl State {
     }
 }
 
-/// Cached result for one unchanged module. Domain propagation is Perry semantics;
-/// scheduling, cloning, verification and invalidation use pliron infrastructure.
+/// Cached analysis result for an unchanged module. Domain propagation implements Perry
+/// semantics on top of pliron scheduling, cloning, verification, and invalidation infrastructure.
 pub struct ProgramFacts {
     bodies: HashMap<Identifier, Body>,
     keys: Vec<Key>,

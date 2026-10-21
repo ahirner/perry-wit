@@ -1,5 +1,5 @@
 //! Precise roots at generated safe points. Callers keep a stack segment while a callee can
-//! collect; suspended operations use independent pin tokens until acknowledgement.
+//! collect, and suspended operations hold independent pin tokens until acknowledgement.
 use crate::collectible::Collector;
 use crate::instance::instance_state;
 use alloc::{boxed::Box, vec::Vec};
@@ -20,7 +20,7 @@ const _: () = {
     assert!(core::mem::offset_of!(RootStack, capacity) == CAPACITY as usize);
 };
 
-/// Stable prefix read by generated Wasm; backing storage is private to the runtime.
+/// Stable header prefix read by generated Wasm, with backing storage kept private to the runtime.
 #[repr(C)]
 pub struct RootStack {
     data: *mut *mut u8,
@@ -65,7 +65,7 @@ impl RootStack {
         self.capacity = capacity;
     }
 
-    /// The layout of `capacity` slots; an allocated capacity always has one.
+    /// Compute the layout for an allocated `capacity` of slots.
     fn layout(capacity: u32) -> core::alloc::Layout {
         core::alloc::Layout::array::<*mut u8>(capacity as usize).expect("root stack overflow")
     }
@@ -332,7 +332,7 @@ pub(crate) extern "C" fn perry_gc_due() -> u32 {
 /// Collect at a component return boundary, with output owners pinned for canonical lifting.
 ///
 /// # Safety
-/// All surviving compiled values are pinned or registered roots; helpers have completed.
+/// All surviving compiled values are pinned or registered roots, and runtime helpers have completed.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_gc_boundary() {
     unsafe { roots().collect() };
@@ -395,7 +395,7 @@ pub(crate) extern "C" fn perry_gc_pin(owner: *mut u8) -> u32 {
     roots().pin(owner)
 }
 
-/// Canonical lowering can occur outside a guest task; its owner releases this pin on lift.
+/// Pin an allocation during canonical lowering outside a guest task until its owner releases the pin on lift.
 #[cfg(feature = "collectible")]
 pub(crate) fn pin_external(owner: *mut u8) -> u32 {
     let roots = roots();
@@ -410,7 +410,7 @@ pub(crate) extern "C" fn perry_gc_unpin(token: u32) {
     roots().unpin(token);
 }
 
-/// Register a static module cell once; stores replace its root without retaining history.
+/// Register a static module cell once so subsequent stores replace its root in place.
 ///
 /// # Safety
 /// `cell` contains an exact pointer at byte 0 and a zero-initialized registration flag at 12.
@@ -442,10 +442,10 @@ pub extern "C" fn perry_gc_debug(flags: u32) {
     roots.heap.set_poison(flags & 2 != 0);
 }
 
-/// Indices 0–6: allocations, collections, live bytes, reserved bytes, transfer-copy bytes,
-/// active pins and roots. Compiled wrappers supply root publications at 7; indices 8–10
-/// are in-place growths, copy fallbacks and growth-copy bytes. Index 11 counts live
-/// WebAssembly address-lookup tables (zero for the native ordered-map implementation).
+/// Read collector telemetry counters. Indices 0–6 report allocations, collections, live bytes,
+/// reserved bytes, transfer-copy bytes, active pins, and roots. Compiled wrappers supply root
+/// publications at index 7, indices 8–10 report in-place growths, copy fallbacks, and
+/// growth-copy bytes, and index 11 counts live WebAssembly address-lookup tables.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
     let roots = roots();

@@ -1,4 +1,4 @@
-//! TypeScript emission for [`AggregateCase`]; the Rust model in the parent module mirrors it.
+//! TypeScript emission for [`AggregateCase`], mirrored by the Rust model in the parent module.
 use super::{
     AggregateCase, AggregateOp, AggregateShape, ExactIntSeed, Extra, SlotSelector, ValueSource,
     int_arith_factor, non_zero_divisor,
@@ -230,7 +230,7 @@ impl AggregateCase {
     }
 }
 
-/// Emits one operation over the `n` instances; `index` keeps its locals unique.
+/// Emit one operation over the `n` instances, using `index` to keep local variable names unique.
 fn emit_op(e: &mut Emitter, index: usize, op: AggregateOp, n: usize) {
     match op {
         AggregateOp::ReadMod {

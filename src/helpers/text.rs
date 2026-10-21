@@ -4,8 +4,9 @@ mod casing;
 #[path = "guest_memory.rs"]
 mod guest_memory;
 
-/// Converts UTF-8 text, returning packed byte/scalar lengths, or u64::MAX on overflow.
-/// With out_ptr = 0, measures without writing; zero means the unchanged input can be reused.
+/// Converts UTF-8 text, returning packed byte/scalar lengths, or `u64::MAX` on overflow.
+/// When `out_ptr` is 0, this measures the output size, and a return value of 0 indicates
+/// the input is already in target form.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn str_case_convert(
     src_ptr: u32,

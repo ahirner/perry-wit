@@ -1,16 +1,15 @@
 //! `node:fs/promises` over `wasi:filesystem@0.3.0`: `readFile`, `writeFile`, `stat`,
-//! `readdir`, `mkdir`, `unlink` and `rmdir`.
+//! `readdir`, `mkdir`, `unlink`, and `rmdir`.
 //!
-//! A helper library like `perry-std`, linked only into programs that import `node:fs`. Each
-//! call starts an operation that returns its promise at once and advances whenever the host
-//! completes a step: async-lowered calls finish as subtasks, file contents and directory
-//! entries arrive on streams, and each stream's result on a future. The waitables join the
-//! task's set; compiled callbacks pass their events to [fs_event] first.
+//! Linked into programs that import `node:fs`. Each call starts an operation that returns its
+//! promise immediately and advances whenever the host completes a step. Async-lowered calls
+//! finish as subtasks, file contents and directory entries arrive on streams, and each
+//! stream's result arrives on a future. The waitables join the task's waitable set, and
+//! compiled callbacks pass their events to `fs_event` first.
 //!
-//! Paths resolve as in WASI libc with the working directory `/`: against the preopen with the
-//! longest matching prefix. Every operation takes its own preopen handles and drops them when
-//! it settles, so no host resource outlives the call. Failures reject with Node's message
-//! (`ENOENT: no such file or directory, open 'missing.txt'`).
+//! Paths resolve against the preopen with the longest matching prefix relative to `/`.
+//! Every operation acquires its own preopen handles and drops them when it settles.
+//! Failures reject with Node-compatible `Error` messages (`ENOENT: no such file or directory, open 'missing.txt'`).
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 mod canonical;
@@ -375,7 +374,7 @@ unsafe fn drop_future(kind: Kind, future: u32) {
     }
 }
 
-/// Wait for an async-lowered call that returned `status`; false if it already returned.
+/// Wait for an async-lowered call that returned `status`, returning `false` if it already completed.
 fn called(op: &mut Op, status: u32) -> bool {
     if status & 0xF == SUBTASK_RETURNED {
         return false;
@@ -404,7 +403,7 @@ fn byte(area: *mut u8, offset: usize) -> u8 {
     unsafe { *area.add(offset) }
 }
 
-/// Run `op` until it waits or settles; `code` is the result of the step it waited for.
+/// Run `op` until it waits or settles, where `code` is the result of the step it awaited.
 fn advance(op: &mut Op, mut code: Option<u32>) {
     loop {
         match op.stage {

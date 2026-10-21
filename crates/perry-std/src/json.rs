@@ -1,17 +1,17 @@
 //! JSON values (`JSON.parse`) and the writer behind typed `JSON.stringify`.
 //!
-//! Parsed values are nodes of the JSON helper's graph (`src/helpers/json`): `kind: u32` at
+//! Parsed values are nodes of the JSON helper's graph: `kind: u32` at
 //! 0, `next: u32` at 4, the payload at 8 (a number, a boolean, or a string's data and byte
-//! length), `first: u32` at 16, `count: u32` at 20, `key: u32` at 24 (a string node). The
-//! null address is `undefined`.
+//! length), `first: u32` at 16, `count: u32` at 20, and `key: u32` at 24 (a string node). The
+//! null address represents `undefined`.
 //!
 //! Object spreads (`{ ...a, ...b, k: v }`) build new objects whose members are shallow
-//! copies of the sources' (values are immutable, so copies share their children). Members
-//! keep the order the sources list them in; ECMAScript's property order (array-index keys
-//! first, ascending, then the others in creation order, a repeated key keeping its first
-//! position and its last value) is applied when serializing or enumerating ([canonical]).
+//! copies of the sources (values are immutable, so copies share their children). Members
+//! retain source listing order during construction, and ECMAScript property order (ascending
+//! array-index keys followed by remaining keys in creation order, with duplicate keys keeping
+//! their first position and last value) is applied when serializing or enumerating ([canonical]).
 //! Already ordered objects are marked to skip subsequent checks. Parsed objects go through
-//! the same step, so duplicate and numeric keys come out as in Node.
+//! the same step so duplicate and numeric keys match Node semantics.
 mod order;
 mod reflection;
 mod replacer;
@@ -304,9 +304,8 @@ fn expected(value: *mut u8, kind: u32, what: &'static str) -> bool {
     true
 }
 
-/// A JSON value used as `number`: ECMAScript `ToNumber` for numbers, `null` (0), booleans
-/// and `undefined` (NaN), so arithmetic on `as number` values matches; strings, arrays and
-/// objects throw `TypeError` (R6: no implicit parsing of untyped data).
+/// Coerce a JSON value to `number`: applies ECMAScript `ToNumber` for numbers, `null` (`0`),
+/// booleans, and `undefined` (`NaN`), and throws `TypeError` for strings, arrays, and objects.
 /// # Safety
 /// `value` must be a JSON node or null.
 #[unsafe(no_mangle)]
@@ -442,10 +441,9 @@ fn key_bytes(member: u32) -> &'static [u8] {
     string_bytes(node(unsafe { word(node(member), 24) }))
 }
 
-/// An object view with its members in ECMAScript property order: array-index keys first in
-/// ascending order, then the others in creation order; a repeated key keeps its first
-/// position and takes its last value. Reordered members belong to a fresh traced object.
-/// The original may live in an opaque parsed graph, which cannot trace external nodes.
+/// Return an object view with its members in ECMAScript property order: ascending array-index
+/// keys followed by remaining keys in creation order, where a repeated key keeps its first
+/// position and takes its last value. Reordered members are allocated in a fresh traced object.
 fn canonical(object: *mut u8) -> *mut u8 {
     unsafe {
         if word(object, CANONICAL) != 0 {
@@ -523,7 +521,7 @@ fn canonical(object: *mut u8) -> *mut u8 {
     }
 }
 
-/// Bounded-stack heapsort; the linked helper must have no recursive call paths.
+/// Iterative bounded-stack heapsort.
 fn heap_sort<T>(items: &mut [T], compare: impl Fn(&T, &T) -> core::cmp::Ordering) {
     let sift = |items: &mut [T], mut root: usize| {
         while root < items.len() / 2 {
@@ -548,7 +546,7 @@ fn heap_sort<T>(items: &mut [T], compare: impl Fn(&T, &T) -> core::cmp::Ordering
 }
 
 /// Append a shallow copy of `value` (or an `undefined` member) under `key` to an object
-/// under construction; word 8 tracks its last member.
+/// under construction, updating word 8 to track its last member.
 fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
     unsafe {
         let copy = if value.is_null() {
@@ -586,8 +584,8 @@ pub(crate) extern "C" fn std_json_object() -> *mut u8 {
     new_node(OBJECT)
 }
 
-/// `...source` in an object literal: an object's members, an array's elements or a string's
-/// characters under their indices; other values add nothing.
+/// Apply `...source` in an object literal by copying an object's members, an array's elements,
+/// or a string's characters under their indices, ignoring other value kinds.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
     if source.is_null() {
@@ -724,7 +722,7 @@ pub(crate) extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
     node(unsafe { word(value, 16) })
 }
 
-/// Advance a checked array traversal. Null marks the end, without allocating iterator state.
+/// Advance a checked array traversal along node links, returning null at the end.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_next(value: *mut u8) -> *mut u8 {
     if value.is_null() {

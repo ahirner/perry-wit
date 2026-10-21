@@ -322,7 +322,7 @@ unsafe fn matches(text: &[u8], program: *const u8) -> impl Iterator<Item = (usiz
     })
 }
 
-/// Byte range of capture `group` (1-based); slots store offset + 1 so 0 means unset.
+/// Return the byte range of 1-based capture `group`. Slots store `offset + 1` so `0` represents an unset group.
 fn capture(slots: &[u32], group: usize) -> Option<core::ops::Range<usize>> {
     let (s, e) = (slots[2 * group - 2], slots[2 * group - 1]);
     (s != 0 && e != 0 && s <= e).then(|| s as usize - 1..e as usize - 1)
@@ -470,7 +470,7 @@ fn substitute(
 }
 
 /// # Safety
-/// `text` is a live immutable string; `program` is a compiler-generated DFA table.
+/// `text` is a live immutable string, and `program` is a compiler-generated DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const u8) -> f64 {
     let text = unsafe { runtime::bytes(text) };
@@ -482,7 +482,7 @@ pub(crate) unsafe extern "C" fn std_regex_search(text: *mut u8, program: *const 
 /// `s.replace(regex, replacement)` and `s.replaceAll(regex, replacement)`.
 ///
 /// # Safety
-/// `string` and `replacement` are live immutable strings; `program` is a DFA table.
+/// `string` and `replacement` are live immutable strings, and `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_replace(
     string: *mut u8,
@@ -528,7 +528,7 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
 /// `regex.exec(s)`.
 ///
 /// # Safety
-/// `string` is a live immutable string; `program` is a DFA table.
+/// `string` is a live immutable string, and `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_exec(string: *mut u8, program: *const u8) -> *mut u8 {
     unsafe { std_regex_exec_from(string, program, 0.0) }
@@ -646,7 +646,7 @@ pub(crate) unsafe extern "C" fn std_regex_input(result: *mut u8) -> *mut u8 {
 /// `s.match(regex)`.
 ///
 /// # Safety
-/// `string` is a live immutable string; `program` is a DFA table.
+/// `string` is a live immutable string, and `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_match(string: *mut u8, program: *const u8) -> *mut u8 {
     if !unsafe { is_global(program) } {
@@ -667,7 +667,7 @@ pub(crate) unsafe extern "C" fn std_regex_match(string: *mut u8, program: *const
 /// `s.split(regex)`.
 ///
 /// # Safety
-/// `string` is a live immutable string; `program` is a DFA table.
+/// `string` is a live immutable string, and `program` is a DFA table.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_regex_split(string: *mut u8, program: *const u8) -> *mut u8 {
     let text = unsafe { runtime::bytes(string) };

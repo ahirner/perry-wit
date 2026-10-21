@@ -80,13 +80,13 @@ impl StreamAnchor {
     }
 }
 
-/// [link_helpers_with] without byte streams (helper tests link core modules directly).
+/// Link `perry:helper/*` imports for standalone core-module tests.
 #[cfg(test)]
 fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
-/// [link_helpers] for a module of a WIT world whose byte streams use `streams`.
+/// Link `perry:helper/*` imports and rewrite canonical stream placeholders for `core_wasm`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,

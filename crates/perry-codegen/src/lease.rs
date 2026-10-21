@@ -1,24 +1,20 @@
-//! Leases: static liveness for objects a built-in hands out again on its next call
-//! (design decision D3, "static liveness first").
+//! Static liveness analysis for objects that built-in stream operations reuse across calls.
 //!
-//! `reader.read()` returns a promise, a `{ done, value }` result and a `Uint8Array` over the
-//! chunk; `writer.write(bytes)` returns a promise. In a streaming loop each call's objects die
-//! before the next call, but a bump region would keep all of them until the task ends. An
-//! operation is **leased** when the MIR proves that nothing derived from any call of its class
-//! is live when one of them runs again; the runtime then reuses one set of objects (and one
-//! chunk buffer) per reader or writer, so a stream of any length runs in constant memory.
+//! `reader.read()` returns a promise, a `{ done, value }` result, and a `Uint8Array` view over
+//! the chunk, while `writer.write(bytes)` returns a promise. An operation is **leased** when
+//! the MIR proves that values derived from any call of its class are dead before the next call
+//! of that class runs. The runtime then reuses a single set of objects and chunk buffer per
+//! reader or writer so a stream of arbitrary length runs in constant memory.
 //!
-//! The proof, per function and class:
+//! The per-function, per-class proof checks three conditions:
 //!
-//! - every receiver (reader or writer) is used only by built-ins, so no other function can
-//!   call the class on it;
-//! - the values derived from the results (through `await`, `.value`, `subarray`, optional
-//!   wrapping and block arguments) are used only by operations that read or copy them, never
-//!   stored, returned, passed to a function or captured;
-//! - none of them is live after any operation of the class, except that operation's own
-//!   result (backward liveness over the MIR CFG).
+//! - Every receiver (reader or writer) is used exclusively by built-in stream operations.
+//! - Values derived from the results (through `await`, `.value`, `subarray`, optional
+//!   wrapping, and block arguments) are consumed only by operations that read or copy them.
+//! - Every derived value is dead after any operation of the class, except for that operation's
+//!   own result (verified by backward liveness over the MIR CFG).
 //!
-//! Without the proof the operations allocate fresh objects, which is always correct.
+//! Unproven operations allocate fresh objects on each call.
 use perry_mir::{
     AwaitOp, CompareOp, Intrinsic, IntrinsicOp, IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp,
     WrapOp,

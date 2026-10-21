@@ -10,8 +10,8 @@ impl<'s> FunctionBuilder<'s> {
         self.expression_with(ctx, expr, None)
     }
 
-    /// Lower `expr`; `expected` types literals whose own type is not determined by their
-    /// operands (empty arrays, object literals widened to a declared shape).
+    /// Lower `expr`, using `expected` to type literals whose own type is not determined by their
+    /// operands (such as empty arrays or object literals widened to a declared shape).
     pub(super) fn expression_with(
         &mut self,
         ctx: &mut Context,
@@ -537,7 +537,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
     }
 
-    /// Absence in an optional or unknown type; infer an optional number without context.
+    /// Emit an absent literal in an optional or unknown type, defaulting to an optional number when unconstrained.
     fn absent_literal(
         &mut self,
         ctx: &mut Context,

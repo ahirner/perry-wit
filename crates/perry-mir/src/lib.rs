@@ -1,11 +1,8 @@
-//! Perry MIR: the typed middle layer between Perry HIR and Wasm (`TODOs.md`, phase P2).
+//! Perry MIR: the typed middle layer between Perry HIR and Wasm.
 //!
 //! Dialect `perry` is built on [pliron]. Values of [RecordType] are references to
-//! closed-shape records (subset rule R1); every allocation carries a memory [Tier]
-//! that passes refine from `unassigned` (design decision D3).
-//!
-//! The control-flow ops are adapted from `pliron-llvm`, which perry-wit must not depend on:
-//! that crate's default feature links `llvm-sys`, which the LLVM audit rejects.
+//! closed-shape records, and every allocation carries a memory [Tier] that passes refine
+//! from `Unassigned`. Control-flow ops use shared dialect definitions from `pliron-control`.
 mod aggregates;
 mod append;
 mod attrs;

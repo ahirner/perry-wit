@@ -1,6 +1,6 @@
 //! Immutable UTF-8 strings with cached scalar counts and shared append storage.
-//! Views retain an owner, byte offset and length. The cached data pointer keeps boundary
-//! transfers direct; a scalar-position cursor makes sequential non-ASCII indexing linear.
+//! Views retain an owner, byte offset, and length. The cached data pointer keeps boundary
+//! transfers direct, and a scalar-position cursor makes sequential non-ASCII indexing linear.
 use crate::layout::string::AppendBuffer as Buffer;
 pub(crate) use crate::layout::string::Header as Str;
 use crate::region::perry_alloc;
@@ -158,9 +158,9 @@ unsafe fn shared(string: *mut Str) -> *mut u8 {
     }
 }
 
-/// `a + b` where `a` is not used afterwards (compiled code proved it, `perry.concat_reuse`):
-/// a header made by concatenation is updated in place instead of allocating a new one, so a
-/// loop of `text = text + x` allocates only when its buffer doubles.
+/// Append `b` to `a` when `a` has no subsequent uses (`perry.concat_reuse`), updating a
+/// concatenation header in place so a loop of `text = text + x` reallocates only when its
+/// buffer doubles.
 ///
 /// # Safety
 /// Both arguments must be strings. The caller owns `a`'s header exclusively and must not
@@ -253,7 +253,7 @@ unsafe fn append_scalar<const REUSE: bool>(string: *mut u8, scalar: i32) -> *mut
     }
 }
 
-/// Concatenate an unboxed MIR character without materializing a temporary string.
+/// Concatenate an unboxed Unicode scalar onto `string`.
 ///
 /// # Safety
 /// `string` is live and `scalar` is a Unicode scalar or -1 for empty text.
@@ -268,7 +268,7 @@ pub(crate) unsafe extern "C" fn perry_string_scalar_concat(
 /// Append an unboxed MIR character to an exclusively owned string header.
 ///
 /// # Safety
-/// `string` obeys `perry_string_append`'s ownership contract; `scalar` is a scalar or -1.
+/// `string` obeys `perry_string_append`'s ownership contract, and `scalar` is a Unicode scalar or `-1`.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_string_scalar_append(
     string: *mut u8,

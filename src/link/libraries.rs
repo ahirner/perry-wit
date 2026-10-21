@@ -1,7 +1,5 @@
-//! Guest helper libraries: parsing, reachability analysis, and relocations.
-//!
-//! Provides compiled helper artifacts compiled to `wasm32-unknown-unknown`
-//! without runtime dependencies on rustc/LLVM.
+//! Guest helper libraries: parsing, reachability analysis, and relocations for prebuilt
+//! `wasm32-unknown-unknown` helper artifacts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -237,10 +235,10 @@ impl ControlFlowGraph<()> for HelperCalls<'_> {
 }
 
 impl<'a> Library<'a> {
-    /// Bound the deepest shadow-stack frame chain among reachable helpers. Recursive
-    /// components that allocate no frame contribute only their callees' depth. Growing
-    /// recursion, unrecognized stack writes, and indirect calls retain the conservative
-    /// reservation. This bounds linear-memory shadow storage, not the Wasm call stack.
+    /// Bound the deepest linear-memory shadow-stack frame chain among reachable helpers.
+    /// Recursive components that allocate no frame contribute only their callees' depth.
+    /// Growing recursion, unrecognized stack writes, and indirect calls retain the
+    /// conservative reservation.
     fn fixed_stack_bound(&self, reachable: Option<&BTreeSet<u32>>) -> Option<u32> {
         use wasmparser::Operator as Op;
         macro_rules! return_value_ops {

@@ -221,7 +221,7 @@ impl FunctionLowering<'_, '_> {
         out
     }
 
-    /// The Wasm value of MIR `value`; frame-resident values are loaded from the frame.
+    /// Resolve the Wasm value of MIR `value`, loading frame-resident values from the async frame.
     pub(crate) fn mapped(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         self.mapped_value(ctx, value)?.scalar()
     }
@@ -316,7 +316,7 @@ impl FunctionLowering<'_, '_> {
         call.deref(ctx).get_result(0)
     }
 
-    /// `for (i = 0; i < count; i++) body(i)` as a CFG; code after it continues in the exit.
+    /// Emit `for (i = 0; i < count; i++) body(i)` as a CFG and position the builder at the loop exit.
     pub(crate) fn counted_loop(
         &mut self,
         ctx: &mut Context,

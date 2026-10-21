@@ -1,9 +1,9 @@
 //! Runtime services linked on demand into compiled components.
 //!
-//! `talc` supplies linear-memory storage. Proven bounded tasks use regions; unproven and
+//! `talc` supplies linear-memory storage. Proven bounded tasks use regions, while unproven and
 //! persistent allocations use precise non-moving collection. Compiled safe points root live
-//! values, while suspended operations retain explicit owners through acknowledgement.
-//! Promise observers reside in their frames; proven stream leases reuse their storage.
+//! values, and suspended operations retain explicit owners through acknowledgement.
+//! Promise observers reside in their frames, and proven stream leases reuse their storage.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 extern crate alloc;

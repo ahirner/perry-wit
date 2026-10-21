@@ -79,8 +79,9 @@ impl BinaryOp {
 op_schema! {
     /// Comparison of two operands of one type, producing an `i1`.
     ///
-    /// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
-    /// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
+    /// On `perry.optional` operands `Eq` and `Ne` implement ECMAScript strict equality, where
+    /// `undefined` equals only `undefined`. The builder coerces operands with `perry.to_number`
+    /// before ordered comparisons.
     pub CompareOp(_lhs, _rhs) -> infallible;
     name = "perry.compare";
     format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)";
@@ -102,9 +103,9 @@ pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
 }
 
 op_schema! {
-    /// A representation conversion with explicit source and destination numeric types.
-    /// Integer narrowing wraps; integer widening uses the source signedness. Floating-point
-    /// conversion to an integer saturates, matching the existing floating-point WIT boundary.
+    /// Representation conversion with explicit source and destination numeric types.
+    /// Integer narrowing wraps, and integer widening uses the source signedness. Floating-point
+    /// conversion to an integer saturates, matching the floating-point WIT boundary.
     pub NumericCastOp(value) -> infallible;
     name = "perry.numeric_cast";
     format = "$0 ` : ` type($0)";

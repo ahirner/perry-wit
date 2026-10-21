@@ -33,8 +33,8 @@ struct FunctionCfg {
     aliases: HashMap<Value, HashSet<Value>>,
 }
 
-/// Analyze exclusive sequence headers and their final observations without changing MIR.
-/// Direct return summaries start unresolved; fresh allocations prove them monotonically.
+/// Analyze exclusive sequence headers and their final observations across the module.
+/// Direct return summaries start unresolved and converge monotonically as fresh allocations prove exclusivity.
 fn reuse_candidates(
     root: Ptr<Operation>,
     ctx: &Context,

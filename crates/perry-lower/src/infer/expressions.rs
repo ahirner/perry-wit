@@ -612,8 +612,8 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
     }
 }
 
-/// The type `method` returns on `source`: a live view of a `Map` or `Set`, or a fresh array of
-/// indices, elements or `[index, element]` pairs; `None` for other sources.
+/// Return the result type of `method` on `source` (a live view of a `Map` or `Set`, or a
+/// fresh array of indices, elements, or `[index, element]` pairs), or `None` for other receivers.
 pub(super) fn iterator_view(source: HirType, method: IteratorMethod) -> Option<HirType> {
     match source {
         HirType::Generic { base, type_args }

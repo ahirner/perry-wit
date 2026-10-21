@@ -1,4 +1,4 @@
-//! Preserve optional class-field types before upstream HIR drops question marks.
+//! Normalize optional class-field annotations into explicit `T | undefined` unions.
 use perry_parser::swc_ecma_ast as ast;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 

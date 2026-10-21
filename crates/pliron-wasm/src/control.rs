@@ -1,4 +1,4 @@
-//! Unstructured control flow with block arguments; [crate::emit] structures it.
+//! Unstructured control flow with block arguments, structured into Wasm blocks by [crate::emit].
 //!
 //! Adapted from `pliron-llvm` (Apache-2.0, The pliron contributors).
 use crate::types::val_type;
@@ -33,7 +33,7 @@ mod branches {
 }
 pub use branches::{BrOp, CondBrOp, ReturnOp};
 
-/// Traps unconditionally; also marks code the emitter can prove unreachable.
+/// Trap unconditionally and mark control-flow paths that the emitter proves unreachable.
 #[pliron_op(
     name = "wasm.unreachable",
     format = "",

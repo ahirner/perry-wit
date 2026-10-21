@@ -11,7 +11,7 @@ use core::str;
 mod memory;
 use memory::GuestRange;
 
-/// Measure graph storage for strict UTF-8 JSON without changing guest memory.
+/// Validate strict UTF-8 JSON and return its required graph storage size in bytes.
 ///
 /// # Safety
 /// Nonempty inputs must be initialized guest-owned memory outside the helper's
@@ -35,7 +35,7 @@ pub(crate) unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
 ///
 /// # Safety
 /// Both ranges must be guest-owned storage outside helper stack/data. The input
-/// must be initialized and immutable; output must be exclusively writable during
+/// must be initialized and immutable, and the output must be exclusively writable during
 /// this single-threaded call. Checked disjointness prevents input/output aliasing.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_populate(
@@ -66,12 +66,12 @@ pub(crate) unsafe extern "C" fn json_populate(
     outcome(populate(input, destination, output).map(|root| root as usize))
 }
 
-/// Populate an input already validated by `json_measure`, without repeating measurement.
+/// Populate a JSON graph from an input previously validated and sized by `json_measure`.
 ///
 /// # Safety
 /// The input must be unchanged since a successful `json_measure` call, and capacity must
 /// cover that measured size. Both ranges obey `json_populate`'s ownership contract. Bounds
-/// and disjointness remain checked; malformed-input failure atomicity belongs to the
+/// and disjointness remain checked, while malformed-input failure atomicity belongs to the
 /// checked `json_populate` entry point.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_populate_measured(

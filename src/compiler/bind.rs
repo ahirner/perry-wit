@@ -92,8 +92,8 @@ pub(crate) fn specialized_implementations(ctx: &Context, mir: &ModuleOp, exports
     }
 }
 
-/// The component exports of `world`, each bound to the exported TypeScript function with the
-/// SDK's implementation name. Missing implementations are errors; extra exports are ignored.
+/// Bind each component export of `world` to the exported TypeScript function matching the
+/// SDK's implementation name. Missing implementations produce errors, and extra exports are ignored.
 pub(crate) fn exports(
     ctx: &Context,
     mir: &ModuleOp,
@@ -195,7 +195,7 @@ fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
     perry_mir::functions(mir.get_operation(), ctx)
 }
 
-/// Top-level statements only run as a command; elsewhere they are an error, not dead code.
+/// Require a command world (`wasi:cli/run`) when top-level statements are present.
 pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
     ensure!(
         !has_main(ctx, mir) || exports.iter().any(Export::is_command),

@@ -1,4 +1,4 @@
-//! Shared UTF-8 JSON lexical operations; storage and schema construction stay in destinations.
+//! Shared UTF-8 JSON lexical operations. Destinations own storage and schema construction.
 use super::Error;
 use perry_abi::number::{DecimalLiteral, DecimalSyntax, scan_decimal};
 

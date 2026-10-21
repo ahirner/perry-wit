@@ -1,10 +1,9 @@
-//! The core runtime services and layouts that helper libraries (`perry-std`, `perry-fs`)
-//! build on.
+//! Core runtime services and layouts shared by the helper libraries (`perry-std`, `perry-fs`,
+//! `perry-web`).
 //!
-//! In linked modules these are `__perry_helper` imports that `src/link` resolves against the
-//! `perry_*` exports of `perry-runtime` (and `number_format` of the number helper), and
-//! canonical built-ins; on the host, the runtime crate itself and recording stand-ins provide
-//! them. The crate exports nothing, so a library carries only the pieces it uses.
+//! In linked Wasm modules, these map to `__perry_helper` imports resolved against
+//! `perry-runtime` exports, `number_format`, and canonical built-ins. On host builds, the
+//! runtime crate and recording mocks provide them directly.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 use core::ptr;
@@ -46,8 +45,7 @@ pub const EXCEPTION_TAG: usize = layout::exception::TAG as usize;
 pub const EXCEPTION_VALUE: usize = layout::exception::VALUE as usize;
 /// Bits of an omitted optional field in a `number | undefined` slot.
 pub use layout::descriptor::OMITTED_BITS;
-/// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
-/// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
+/// Signalling-NaN bit pattern representing `undefined` in a `number | undefined` slot.
 pub use layout::descriptor::UNDEFINED_BITS;
 /// Offset of an array's data address ([layout::array::DATA]).
 pub const ARRAY_DATA: u32 = layout::array::DATA;
@@ -158,9 +156,9 @@ pub fn alloc(size: u32) -> *mut u8 {
     unsafe { imports::perry_alloc(size) }
 }
 
-/// `len` fresh, uninitialized bytes in the task region, exclusively the caller's.
+/// Allocate `len` fresh, uninitialized bytes in the task region for the caller's exclusive use.
 ///
-/// Like every task allocation, the block lives until the task ends; `'static` stands for that.
+/// Like every task allocation, the block lives until the task ends, which `'static` represents.
 fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
     let len32 = u32::try_from(len).expect("allocation size overflow");
     // SAFETY: a fresh, 8-aligned block of `len` bytes that nothing else references; any
@@ -176,8 +174,8 @@ pub unsafe fn release_canonical(data: *mut u8) {
     unsafe { imports::perry_cabi_release(data) };
 }
 
-/// An object with a static exact pointer map; allocation cannot trigger collection.
-/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
+/// Allocate an object with a static exact pointer map.
+/// Collectible storage is zeroed, and task-region storage is initialized by the caller.
 ///
 /// # Safety
 /// Shape is `[stride, count, offsets...]`, valid for every instance of this allocation.
@@ -229,7 +227,7 @@ pub unsafe fn adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8 {
 }
 
 /// # Safety
-/// `string` is live; position is a scalar index.
+/// `string` is a live string allocation and `position` is a scalar index.
 pub unsafe fn string_offset(string: *mut u8, position: u32) -> u32 {
     unsafe { imports::perry_string_offset(string, position) }
 }
@@ -319,7 +317,7 @@ pub fn take_status() -> u32 {
     unsafe { imports::perry_status() }
 }
 
-/// ECMAScript `Number::toString` of `value` into `output`; returns the length.
+/// Format `value` into `output` according to ECMAScript `Number::toString`, returning the byte length.
 pub fn number_format(value: f64, output: &mut [u8; 40]) -> usize {
     // SAFETY: the number helper writes at most 40 bytes.
     unsafe { imports::number_format(value, output.as_mut_ptr()) as usize }
@@ -382,7 +380,7 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
     }
 }
 
-/// A reference array and its writable slots; allocation cannot collect inside a helper.
+/// Allocate a reference array and its writable slots.
 #[allow(unused_unsafe)]
 pub fn array_storage(len: usize) -> (*mut u8, &'static mut [u64]) {
     array_storage_typed(len, true)
@@ -415,8 +413,8 @@ pub fn array(values: &[u64]) -> *mut u8 {
     array
 }
 
-/// Append `bytes` to the task's output `fd` (0 stdout, 1 stderr); `promise` settles once the
-/// host accepted them.
+/// Append `bytes` to the task's output `fd` (0 for stdout, 1 for stderr) and settle `promise`
+/// once the host accepts them.
 #[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
 pub fn write_acknowledged(fd: u32, bytes: &[u8], promise: *mut u8) {
     // SAFETY: a runtime service over a live slice and a pending promise.
@@ -469,7 +467,7 @@ pub fn insecure_random_u64() -> u64 {
 }
 
 /// Exclusive growable storage in the module's selected allocation tier.
-/// Exposed immutable views require finishing mutation; host borrows must acknowledge before reserve.
+/// Callers finish mutation before exposing immutable views, and host borrows acknowledge before reserving capacity.
 #[repr(C)]
 pub struct Buffer {
     ptr: *mut u8,
@@ -488,7 +486,7 @@ impl Buffer {
         }
     }
 
-    /// A buffer of repeated typed entries; unused capacity is zeroed before tracing.
+    /// Create a buffer of repeated typed entries with unused capacity zeroed before tracing.
     ///
     /// # Safety
     /// `shape` describes every entry written to this buffer, with a nonzero repetition stride.

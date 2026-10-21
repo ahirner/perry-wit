@@ -101,7 +101,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
     pub(super) iteration: hir_compat::Iteration,
-    /// Tag guards in effect, appended as conditions narrow; branches truncate back.
+    /// Active tag guards appended as conditions narrow and truncated when branches exit.
     pub(super) variant_guards: Vec<(variants::Path<'s>, &'s str, bool)>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_returns: Vec<inline::ReturnFrame>,
@@ -482,8 +482,8 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-/// Delete blocks no path from the entry reaches (code after `return`, handlers nothing throws
-/// to); they would break dominance of the values they use.
+/// Remove blocks unreachable from the entry block (such as code following `return` or
+/// unused exception handlers) so value dominance remains well-formed.
 pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::Region>) {
     let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
     let Some(&entry) = blocks.first() else {

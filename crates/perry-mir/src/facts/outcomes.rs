@@ -1,6 +1,6 @@
 use super::*;
 
-/// Possible settlements; bottom also covers a recursive promise that never settles.
+/// Possible promise settlements. Bottom represents a promise that has not yet settled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Outcomes {
     #[default]

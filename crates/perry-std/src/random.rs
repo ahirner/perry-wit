@@ -8,7 +8,7 @@ pub(crate) extern "C" fn std_math_random() -> f64 {
     bits as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
-/// `crypto.getRandomValues(bytes)`: fills the view from the secure generator; returns it.
+/// Implement `crypto.getRandomValues(bytes)` by filling the view from the secure generator and returning it.
 /// # Safety
 /// `bytes` must be a `Uint8Array`.
 #[unsafe(no_mangle)]

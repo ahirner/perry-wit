@@ -145,7 +145,7 @@ impl FunctionLowering<'_, '_> {
         self.define(ctx, op, value);
         Ok(())
     }
-    /// Lower a record, array or variant op; `false` if `op` is none.
+    /// Lower a record, array, or variant operation, returning `false` for other operations.
     pub(crate) fn aggregate_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<bool> {
         if let Some(variant) = Operation::get_op::<VariantNewOp>(op, ctx) {
             let payload = if op.deref(ctx).get_num_operands() == 0 {

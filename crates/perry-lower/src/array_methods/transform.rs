@@ -1,8 +1,8 @@
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {
-    /// `array.map(callback)`, or `array.filter(callback)` when `filter`; the callback is
-    /// lowered inline once and sees `(item, index, array)`.
+    /// Lower `array.map(callback)` or `array.filter(callback)` (when `filter` is true),
+    /// expanding the callback inline once with `(item, index, array)`.
     pub(crate) fn array_transform(
         &mut self,
         ctx: &mut Context,

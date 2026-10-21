@@ -1,5 +1,5 @@
-//! Private unit futures for promise observers. The anchor exists only while the component
-//! encoder resolves canonical future builtins; its synthetic export is removed afterwards.
+//! Private unit futures for promise observers. The anchor exists while the component
+//! encoder resolves canonical future builtins, and its synthetic export is removed afterwards.
 use anyhow::{Context, Result, ensure};
 use std::convert::Infallible;
 use wasm_encoder::{
@@ -8,8 +8,8 @@ use wasm_encoder::{
 };
 use wasmparser::{Parser, Payload, TypeRef};
 
-/// Name of the synthetic export whose `future` result type the runtime's promise signals use;
-/// `perry-runtime` imports the canonical future builtins under this name.
+/// Name of the synthetic export whose `future` result type backs runtime promise signals.
+/// The runtime imports the canonical future builtins under this name.
 pub(crate) const ANCHOR: &str = "perry-internal-promise";
 
 /// Whether the core module imports promise-signal future builtins and so needs the anchor.
@@ -139,7 +139,7 @@ impl Reencode for Anchor {
 struct Hide {
     /// Top-level component function index of the removed export.
     removed: u32,
-    /// Component nesting depth; only the outermost component is rewritten.
+    /// Component nesting depth. Only the outermost component is rewritten.
     depth: usize,
 }
 impl Reencode for Hide {
@@ -171,7 +171,7 @@ impl ReencodeComponent for Hide {
     }
 }
 
-/// `component` without the anchor export [prepare] added, so hosts never see it.
+/// Re-encode `component` after stripping the temporary anchor export added by [prepare].
 pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     let mut depth = 0;

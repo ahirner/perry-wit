@@ -1,5 +1,5 @@
-//! Transferred views and queued BYOB reads. Filling and cancellation follow main's stream
-//! contract; collectible request nodes retain only active promises, views and successors.
+//! Transferred views and queued BYOB reads. Collectible request nodes retain active
+//! promises, views, and successors while reads are in flight.
 use super::*;
 use core::ptr;
 
@@ -119,7 +119,7 @@ fn finish(r: &mut Reader, done: bool, cancelled: bool) {
     }
 }
 
-/// Add a completed transfer; return whether filling or the next queued read should continue.
+/// Record a completed transfer and return whether filling or the next queued read should continue.
 pub(super) fn deliver(r: &mut Reader, count: u32) -> bool {
     unsafe {
         let request = &mut *r.reads;
@@ -153,8 +153,9 @@ pub(super) fn reject(r: &mut Reader, message: &'static str) {
     r.buffer = ptr::null_mut();
 }
 
-/// A known closed queue shorter than min is an error, as on main. A short host EOF discovered
-/// while filling a request instead returns the bytes with `done: true`.
+/// Whether a closed in-memory queue has fewer bytes than `min` before any bytes are written.
+/// A short host EOF discovered while filling a request returns the accumulated bytes with
+/// `done: true`.
 pub(super) fn short_closed_queue(r: &Reader) -> bool {
     unsafe {
         let stream = &*r.stream;

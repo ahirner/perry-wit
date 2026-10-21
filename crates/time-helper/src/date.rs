@@ -2,11 +2,11 @@
 
 use crate::{Error, parse::Cursor};
 
-/// Parses ISO year, year-month, date, or date-time forms. Unlike Temporal,
-/// Date permits 24:00 and normalizes days through 31 within a valid month.
+/// Parses ISO year, year-month, date, or date-time forms, accepting `24:00` and normalizing
+/// days through 31 within a valid month.
 /// Offset-free date-times use UTC, the guest's supported local time zone.
 /// A four-digit year (or signed six-digit year) followed by end, '-' or 'T'
-/// identifies the ISO family; other inputs return `UnsupportedDateFormat`.
+/// identifies the ISO family, and other inputs return `UnsupportedDateFormat`.
 pub(crate) fn parse_date_milliseconds(input: &[u8]) -> Result<f64, Error> {
     let mut cur = Cursor::new(input);
     let year_end = if matches!(cur.peek(), Some(b'+' | b'-')) {

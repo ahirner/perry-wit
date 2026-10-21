@@ -1,8 +1,8 @@
-//! Cost-growth contracts: guest fuel must grow at most proportionally with input size.
+//! Cost-growth contracts verifying that guest fuel grows at most proportionally with input size.
 //!
 //! Each case calls the same instance with a warm-up size, a base size, and `factor` times the
-//! base size. Values and traces must equal Node's; the fuel ratio between the last two calls
-//! must not exceed `max_growth`. Fuel is deterministic, so the bound is not timing-sensitive.
+//! base size. Values and traces must match Node, and the fuel ratio between the last two calls
+//! must stay within `max_growth`.
 use crate::{
     execution::{Evidence, Outcome, number},
     registry::{Case, Contract, Witness},
@@ -12,7 +12,7 @@ use proptest::prelude::*;
 use std::{fs, path::Path};
 
 const FACTOR: u32 = 4;
-/// Linear work yields 4; allow constant-factor noise and n·log n, reject quadratic (16).
+/// Upper bound on fuel growth for a 4x input increase, accommodating `O(n log n)` work while rejecting quadratic growth (16x).
 const MAX_GROWTH: u32 = 6;
 
 fn inputs(base: u32, factor: u32) -> [f64; 3] {

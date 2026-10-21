@@ -57,7 +57,7 @@ impl AbsentKind {
 }
 
 impl FunctionLowering<'_, '_> {
-    /// Lower an optional-value op; `false` if `op` is none.
+    /// Lower an optional-value operation, returning `false` for other operations.
     pub(crate) fn optional_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<bool> {
         let absent = if Operation::get_op::<NullOp>(op, ctx).is_some() {
             Some(AbsentKind::Null)
@@ -183,7 +183,7 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    /// Whether `value` is the omitted marker; constant false when `ty` admits no `undefined`.
+    /// Test whether `value` is the omitted marker, folding to `false` when `ty` excludes `undefined`.
     pub(crate) fn is_omitted(
         &mut self,
         ctx: &mut Context,
@@ -196,8 +196,8 @@ impl FunctionLowering<'_, '_> {
         self.is_sentinel(ctx, value.into(), ty, AbsentKind::Omitted)
     }
 
-    /// Whether `value` is `undefined` (`null == false`) or `null`; constant false when `ty`
-    /// does not admit that absence. Omission counts as `undefined`.
+    /// Test whether `value` is `undefined` (`null == false`) or `null`, folding to `false` when
+    /// `ty` excludes that absence. Omission counts as `undefined`.
     pub(crate) fn absence_test(
         &mut self,
         ctx: &mut Context,

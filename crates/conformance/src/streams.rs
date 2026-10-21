@@ -1,4 +1,4 @@
-//! Pure stream inputs and observation assertions; transports own the effects.
+//! Pure stream inputs and observation assertions. Transports own the host effects.
 use crate::{
     execution::{Evidence, Outcome, check_equivalence, number},
     registry::{Case, Contract, Witness},

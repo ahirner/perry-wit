@@ -2,9 +2,7 @@
 use super::*;
 use perry_mir::{ForeignOp, Phase};
 
-/// Native values can cross an outbound boundary without cloning aggregate headers. This
-/// relation only applies while lowering the import; it never creates a mutable native alias
-/// whose fields have wider types.
+/// Whether `actual` is structurally compatible with outbound import parameter type `expected`.
 pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHandle) -> bool {
     fn accepts(
         ctx: &Context,

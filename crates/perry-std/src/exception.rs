@@ -16,7 +16,7 @@ fn parts(exception: *mut u8) -> (u32, u32, u64) {
     }
 }
 
-/// Error objects compare by identity; boxed thrown primitives compare by their values.
+/// Compare `Error` objects by identity and boxed thrown primitives by value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_equal(left: *mut u8, right: *mut u8) -> u32 {
     use perry_abi::layout::exception::*;
@@ -72,7 +72,7 @@ pub(crate) extern "C" fn std_exception_bigint_equal(exception: *mut u8, value: *
     }
 }
 
-/// A thrown number; `TypeError` for any other thrown value.
+/// Extract a thrown number or raise `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
     match parts(exception) {
@@ -84,7 +84,7 @@ pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
     }
 }
 
-/// A thrown string; `TypeError` for any other thrown value.
+/// Extract a thrown string or raise `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
     match parts(exception) {
@@ -110,7 +110,7 @@ pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
     })
 }
 
-/// A thrown boolean; other thrown values produce a checked TypeError.
+/// Extract a thrown boolean or raise a checked `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_to_bool(exception: *mut u8) -> u32 {
     use perry_abi::layout::exception::TAG_BOOLEAN;

@@ -245,7 +245,7 @@ impl Verify for StoreOp {
     }
 }
 
-/// A function imported from the host as `module`.`name`; callable with [CallOp].
+/// A function imported from the host as `module`.`name` and callable with [CallOp].
 #[pliron_op(
     name = "wasm.import_func",
     interfaces = [SymbolOpInterface, NOpdsInterface<0>, NResultsInterface<0>, NRegionsInterface<0>],

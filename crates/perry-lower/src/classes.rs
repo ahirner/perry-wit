@@ -185,9 +185,8 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, this_slot)
     }
 
-    /// The value a non-optional field holds between allocation and its constructor assignment.
-    /// TypeScript's definite assignment means it is never observed; types without a
-    /// reference-free value fail loudly instead of guessing.
+    /// Initial placeholder value for a non-optional field before its constructor assignment.
+    /// Requires a reference-free zero or empty value for `ty`.
     fn unassigned_field(
         &mut self,
         ctx: &mut Context,

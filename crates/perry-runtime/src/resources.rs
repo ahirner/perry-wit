@@ -1,5 +1,5 @@
-//! Opaque resource owners and transactional canonical transfers. Only active transfers root
-//! descriptors; the registry is weak and queues host destruction after marking has finished.
+//! Opaque resource owners and transactional canonical transfers. Active transfers root
+//! descriptors, while the weak registry queues host destruction after marking finishes.
 use crate::{collectible::Collector, instance::instance_state, region::Task};
 use alloc::{boxed::Box, vec::Vec};
 #[cfg(target_arch = "wasm32")]
@@ -273,7 +273,7 @@ pub(crate) unsafe extern "C" fn perry_resource_lower(
 }
 
 /// # Safety
-/// Owner is a live descriptor; access is checked against its task and ownership state.
+/// Owner is a live descriptor, and access is checked against its task and ownership state.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_resource_handle(owner: *mut Resource) -> u32 {
     let owner = unsafe { &*owner };
@@ -330,13 +330,14 @@ pub(crate) unsafe extern "C" fn perry_resource_scope_commit(scope: *mut Scope) {
 }
 
 /// # Safety
-/// Scope is live; acknowledgement has arrived if it was committed to a host call.
+/// Scope is live, and acknowledgement has arrived if it was committed to a host call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_resource_scope_finish(scope: *mut Scope) {
     unsafe { registry().finish(scope) };
 }
 
-/// Zero means no destruction remains; otherwise high bits contain kind+1 and low bits handle.
+/// Pop the next queued resource destruction, returning `0` when none remains or packing
+/// `kind + 1` in the high bits and the handle in the low bits.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_resource_drop_next() -> u64 {
     registry().drops.pop().map_or(0, |drop| {

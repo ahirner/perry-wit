@@ -207,8 +207,8 @@ impl Solver {
         }
     }
 
-    /// The fact and range of integer arithmetic `result` of `inputs`, whose operand
-    /// `ranges` combine by `kind`; a literal stays non-negative only while its range does.
+    /// Compute the fact and range of integer arithmetic `result` of `inputs`, whose operand
+    /// `ranges` combine according to `kind`. A literal remains non-negative while its range stays non-negative.
     fn arithmetic_result(
         &self,
         ctx: &Context,
@@ -227,8 +227,8 @@ impl Solver {
         ValueFacts::numeric(fact, range)
     }
 
-    /// The fact and range of the result of `op`, a service with a numeric `contract`; `None`
-    /// for predicates, whose boolean results are ordinary values.
+    /// Compute the fact and range of the result of `op` for a service with a numeric `contract`.
+    /// Returns `None` for predicates whose boolean results are ordinary values.
     fn contract_result(
         &mut self,
         ctx: &Context,
@@ -392,8 +392,8 @@ impl Solver {
         }
     }
 
-    /// Whether context `id` may give values numeric (lossless 64-bit) representations; async
-    /// functions keep their promise payloads.
+    /// Check whether context `id` may assign lossless 64-bit numeric representations to values.
+    /// Async functions retain their promise payload representations.
     fn can_specialize(&self, ctx: &Context, id: usize) -> bool {
         let key = &self.analysis.keys[id];
         key.specialize

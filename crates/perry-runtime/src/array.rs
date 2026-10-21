@@ -3,10 +3,10 @@
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
 //! `data: u32` at 8. Elements are scalars, a 32-bit reference in the low half of a slot, or a
 //! numeric tag and payload (see [`Elements`]).
-//! `cap` is never 0, so compiled code may read slot 0 unconditionally (branch-free bounds
-//! checks select the result afterwards). Growth doubles capacity and preserves live elements.
-//! Collectible arrays release old storage through tracing; proven bounded task allocations
-//! retain their storage until task completion.
+//! Every array maintains `cap >= 1`, so compiled code can read slot 0 unconditionally and
+//! select the result with branch-free bounds checks. Growth doubles capacity and preserves
+//! live elements. Collectible arrays release old storage through tracing, while proven
+//! bounded task allocations retain their storage until task completion.
 use crate::region::perry_alloc;
 
 pub(crate) use crate::layout::array::*;
@@ -35,12 +35,12 @@ impl Array {
 }
 
 impl Elements {
-    /// Byte size of `cap` slots; traps when it exceeds the 32-bit address space.
+    /// Compute the byte size of `cap` slots, trapping if it exceeds the 32-bit address space.
     fn bytes(self, cap: u32) -> u32 {
         crate::byte_size(cap, self.stride(), 0)
     }
 
-    /// Twice `cap`, with the byte size of that many slots; traps when either overflows.
+    /// Compute twice `cap` and the byte size of that many slots, trapping if either overflows.
     fn doubled(self, cap: u32) -> (u32, u32) {
         let cap = cap.checked_mul(2).expect("array capacity overflow");
         (cap, self.bytes(cap))
@@ -64,7 +64,7 @@ pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
     allocate(capacity, Elements::Scalar)
 }
 
-/// Double the capacity of `array`; called by compiled code when a push finds it full.
+/// Double the capacity of `array` when a compiled push finds it full.
 ///
 /// # Safety
 /// `array` must come from [perry_array_new].
@@ -104,8 +104,8 @@ unsafe fn grow(array: *mut u8, elements: Elements) {
     }
 }
 
-/// An array whose header and element storage are collectible. Reference slots are described
-/// precisely; numeric slots are opaque, even when their bits resemble guest addresses.
+/// Allocate an array whose header and element storage are collectible. Reference slots are
+/// traced precisely, and numeric slots are treated as opaque values.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: u32) -> *mut u8 {
     let elements = Elements::decode(references);
@@ -122,7 +122,7 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
     }
 }
 
-/// Grow collectible element storage. Allocation does not collect inside this helper.
+/// Grow collectible element storage.
 ///
 /// # Safety
 /// `array` was created by [perry_array_new_collectible], with the same reference flag.
@@ -160,7 +160,7 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
     }
 }
 
-/// Grow a helper array without collecting; its reference flag must match construction.
+/// Grow a helper array whose reference flag matches its construction.
 ///
 /// # Safety
 /// `array` is a live exclusively owned array created with the same `references` flag.
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn perry_array_grow_typed(array: *mut u8, references: u32)
 ///
 /// # Safety
 /// Both arrays are live, have the same element representation, and every operand selected
-/// by `reuse` is exclusively owned and unobserved after this call. Allocation never collects.
+/// by `reuse` is exclusively owned and unobserved after this call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_array_concat(
     left: *mut u8,

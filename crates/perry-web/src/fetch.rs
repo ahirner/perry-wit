@@ -1,16 +1,16 @@
 //! `fetch(url, { method, headers, body })` over `wasi:http/client@0.3.0`.
 //!
-//! An operation builds the request (URL, method and header rules of the fetch helper), sends
-//! it as an async-lowered call, and settles its promise with a `Response` once the head
-//! arrived. The body is a [crate::readable::Readable] over the response's `stream<u8>`; its end counts once the
-//! trailers future reports that the body arrived intact (otherwise the last read rejects with
-//! `TypeError: terminated`, as in Node). Request bodies are written through the request's
-//! contents stream. The request's transmission future is held (and read) until the exchange
-//! ends: the host drives the connection only while it lives, so dropping it early cuts off
-//! response bodies. Every handle is dropped when the operation finishes, or by
+//! An operation builds the request using the URL, method, and header rules of the fetch helper,
+//! sends it as an async-lowered call, and settles its promise with a `Response` once the
+//! response head arrives. The body is a [crate::readable::Readable] over the response's
+//! `stream<u8>`. Its end is confirmed once the trailers future reports that the body arrived
+//! intact, and a truncated body rejects the final read with `TypeError: terminated` as in Node.
+//! Request bodies are written through the request's contents stream. The request's transmission
+//! future is held and read until the exchange finishes so the host continues driving the
+//! connection for the response body. Every handle is dropped when the operation finishes or by
 //! [web_fetch_close] at the end of the task.
 //!
-//! Callbacks pass their events to [web_fetch_event]; the readable side uses [crate::readable::web_event].
+//! Callbacks pass their events to [web_fetch_event], and the readable side uses [crate::readable::web_event].
 use crate::{
     body::{Body, Response},
     http_exchange::{Exchange, RESULT_SIZE, Request},

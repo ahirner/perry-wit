@@ -6,7 +6,7 @@ use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
-    /// The value of a `Date` intrinsic; dates are boxed `f64` time values.
+    /// Lower a `Date` intrinsic operating on boxed `f64` time values.
     pub(super) fn date_intrinsic(
         &mut self,
         ctx: &mut Context,

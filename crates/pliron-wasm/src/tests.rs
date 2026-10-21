@@ -437,8 +437,8 @@ builtin.module @m {{
     assert!(error.to_string().contains("irreducible"), "{error}");
 }
 
-/// A cycle entered at two blocks gets a guard; nested multi-entry cycles inside a reducible
-/// loop are fixed too, and the code runs as before.
+/// Verify that a cycle entered at two blocks receives a guard and that nested multi-entry
+/// cycles inside a reducible loop are also made reducible while preserving behavior.
 #[test]
 fn irreducible_control_flow_is_made_reducible() {
     let input = format!(

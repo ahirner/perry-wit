@@ -22,7 +22,7 @@ pub(super) fn release_result(op: &Op) {
     }
 }
 
-/// Directory names may have been adopted by native strings; releasing their pins is idempotent.
+/// Directory names may have been adopted by native strings, and releasing their pins is idempotent.
 pub(super) fn release_entries(contents: &[u8]) {
     for entry in contents.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
         let entry = entry.as_ptr().cast_mut();

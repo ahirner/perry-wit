@@ -119,7 +119,7 @@ pub(crate) unsafe extern "C" fn std_decoder_validate_label(label: *mut u8) {
     }
 }
 
-/// Allocate only the decoder's bounded scalar state; no input buffer is retained.
+/// Allocate the decoder's bounded scalar state.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut Decoder {
     let decoder = runtime::alloc(core::mem::size_of::<Decoder>() as u32).cast::<Decoder>();
@@ -138,8 +138,8 @@ pub(crate) extern "C" fn std_decoder_new(fatal: u32, ignore_bom: u32) -> *mut De
 }
 
 /// # Safety
-/// `decoder` is a live, exclusively accessed decoder; `bytes` is a live byte view.
-/// No collection occurs while this helper holds temporary output storage.
+/// `decoder` is a live, exclusively accessed decoder, and `bytes` is a live byte view.
+/// Temporary output storage is held across a non-collecting section.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_decoder_decode(
     decoder: *mut Decoder,

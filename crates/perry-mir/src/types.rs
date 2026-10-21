@@ -52,7 +52,7 @@ record_kinds! {
     SetEntries => "set_entries_box",
 }
 
-/// Whether a value can retain native storage; unknown dialect types are conservative.
+/// Check whether a value can retain native storage, treating unknown dialect types conservatively.
 pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
     if let Some(inner) = crate::optional::optional_value(ctx, ty) {
         return is_reference(ctx, inner);
@@ -63,11 +63,11 @@ pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
         && !ty.is::<NumericType>()
 }
 
-/// A closed-shape record, referenced by value of this type (subset rule R1).
+/// A closed-shape record, referenced by value of this type.
 ///
-/// Records are nominal and uniqued by name, so shapes may be recursive: create the record
-/// without fields first and supply them on a later [RecordType::get].
-/// Fields define storage order; source evaluation order is retained by the allocating operations.
+/// Records are nominal and uniqued by name, so recursive shapes can declare an opaque record
+/// first and supply its fields in a subsequent [RecordType::get] call.
+/// Fields define physical storage order, while allocating operations preserve source evaluation order.
 #[pliron_type(name = "perry.record")]
 #[derive(Debug)]
 pub struct RecordType {
@@ -89,8 +89,8 @@ enum RecordErr {
 }
 
 impl RecordType {
-    /// Get or create the record `name`. Supplying `fields` defines an opaque record;
-    /// supplying different fields for an existing definition is an error.
+    /// Get or create the record `name`. Supplying `fields` defines an opaque record, and
+    /// supplying different fields for an existing definition returns an error.
     pub fn get(
         ctx: &Context,
         name: Identifier,
@@ -304,7 +304,7 @@ impl Parsable for RecordType {
     }
 }
 
-/// Storage for one mutable local before SSA construction; removed by pliron `mem2reg`.
+/// Storage for one mutable local prior to SSA construction by pliron `mem2reg`.
 #[pliron_type(
     name = "perry.slot",
     generate_get = true,
@@ -322,7 +322,7 @@ impl SlotType {
     }
 }
 
-/// A dense, growable array of one element type (subset: no holes, no mixed elements).
+/// A dense, growable array of a single element type.
 #[pliron_type(
     name = "perry.array",
     generate_get = true,
@@ -340,7 +340,7 @@ impl ArrayType {
     }
 }
 
-/// The eventual value of an async call; lives no longer than its export task (subset rule R3).
+/// The eventual value of an async call, scoped to its export task.
 #[pliron_type(
     name = "perry.promise",
     generate_get = true,
@@ -377,8 +377,8 @@ impl SettledType {
     }
 }
 
-/// A value with one or both absence states. Single-absence references use a null pointer;
-/// values admitting both states reserve a second sentinel without boxing the payload.
+/// A value with one or both absence states (`null`, `undefined`). Single-absence references
+/// use a null pointer, and values admitting both states reserve a second unboxed sentinel.
 #[pliron_type(
     name = "perry.optional",
     format = "`<` $value `,` $absence `>`",

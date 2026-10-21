@@ -1,16 +1,16 @@
-//! `ReadableStream<Uint8Array>`: over a WIT `stream<u8>` (an export argument or a fetched
+//! `ReadableStream<Uint8Array>` over a WIT `stream<u8>` (an export argument or a fetched
 //! body) or over a body snapshot, with default and BYOB readers.
 //!
-//! A default reader has one outstanding read; BYOB readers queue transferred views. A copy
-//! completes inline or by a stream event
-//! ([web_event]); an empty copy of an open stream reads again. When the writer drops its end
-//! the stream ends; a stream with a pending completion (a fetched body whose trailers decide
-//! between success and truncation) holds its final read until [complete] reports the outcome.
+//! A default reader has one outstanding read, and BYOB readers queue transferred views. A copy
+//! completes inline or via a stream event ([web_event]), and an empty copy on an open stream
+//! issues another read. Dropping the writer end closes the stream. A stream with a pending
+//! completion (such as a fetched body whose trailers determine whether it arrived intact or
+//! truncated) holds its final read until [complete] reports the outcome.
 use crate::*;
 
 mod byob;
 
-/// Canonical built-ins for `stream<u8>`. `src/link` binds these placeholders to the built-ins
+/// Canonical built-ins for `stream<u8>`. The linker binds these placeholders to the built-ins
 /// of a function of the WIT world that carries a `stream<u8>` (all such streams share one
 /// type per component instance).
 mod canon {
@@ -223,7 +223,7 @@ fn new_reader(stream: *mut Readable) -> *mut Reader {
     r
 }
 
-/// `stream.getReader()`; `TypeError` while another reader holds the lock.
+/// Implement `stream.getReader()`, throwing `TypeError` when another reader holds the lock.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
     if readable(stream).locked != 0 {
@@ -252,7 +252,7 @@ pub(crate) extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
     promise
 }
 
-/// Settle the user's read with `{ done, value }`; leased reads reuse the reader's objects.
+/// Settle the caller's read with `{ done, value }`, reusing the reader's objects for leased reads.
 fn settle_read(r: &mut Reader, promise: *mut u8, leased: bool, data: *mut u8, count: u32) {
     let (result, view) = if leased && !r.result.is_null() {
         (r.result, r.view)
@@ -346,8 +346,7 @@ fn fail(r: &mut Reader) {
     reject_with(promise, TYPE_ERROR, from_static("terminated"));
 }
 
-/// Report whether a stream with a pending completion ended intact; a read waiting for it
-/// settles now.
+/// Report whether a stream with a pending completion ended intact and settle any waiting final read.
 pub(crate) fn complete(stream: *mut Readable, ok: bool) {
     // SAFETY: fetches keep their body streams.
     let stream = unsafe { &mut *stream };
@@ -463,8 +462,9 @@ fn copied(r: &mut Reader, code: u32) -> bool {
 
 const COPY_COMPLETED: u32 = 0;
 
-/// `await reader.read()`. A leased read (the compiler proved that nothing from the previous
-/// read is live) reuses the reader's buffer, promise and result; others get fresh ones.
+/// Implement `await reader.read()`. A leased read (where the compiler proved that values from
+/// the previous read do not outlive the iteration) reuses the reader's buffer, promise, and
+/// result record, while unleased reads allocate fresh objects.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
     let r = reader(r);
@@ -534,7 +534,7 @@ pub(crate) extern "C" fn web_event(event: u32, handle: u32, code: u32) -> u32 {
     0
 }
 
-/// Stop the host copy of `r`, if any; what was copied is delivered.
+/// Cancel an in-flight host copy on `r` and deliver any bytes already copied.
 fn cancel_copy(r: &mut Reader) {
     if r.copying == 0 {
         return;
@@ -553,7 +553,7 @@ fn stop_copy(r: &mut Reader) -> u32 {
     code
 }
 
-/// `reader.cancel()`: ends the stream; an outstanding read settles first.
+/// Implement `reader.cancel()` by settling any outstanding read and closing the stream.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
     let r = reader(r);
@@ -587,8 +587,8 @@ pub(crate) extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
     promise
 }
 
-/// `reader.releaseLock()`: an outstanding read rejects; the stream stays open for a new
-/// reader.
+/// Implement `reader.releaseLock()` by rejecting any outstanding read and leaving the stream
+/// open for a new reader.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
     let r = reader(r);

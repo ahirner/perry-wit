@@ -1,5 +1,5 @@
-//! Mutable byte storage shared by views. Transfer detaches the old buffer in constant time;
-//! each access checks its owner, so detached aliases never retain or dereference the payload.
+//! Mutable byte storage shared by views. Transfer detaches the old buffer in constant time,
+//! and each access checks its owner before reading the payload.
 use core::ptr;
 
 #[repr(C)]
@@ -66,10 +66,10 @@ pub unsafe fn bytes_subview(source: *mut u8, offset: u32, len: u32) -> *mut u8 {
     }
 }
 
-/// Transfer an attached view's entire buffer, preserving the view bounds without copying.
+/// Transfer ownership of an attached view's buffer in place, preserving view bounds.
 ///
 /// # Safety
-/// `source` is a live attached byte view; no collection occurs during this operation.
+/// `source` is a live attached byte view.
 pub unsafe fn bytes_transfer(source: *mut u8) -> *mut u8 {
     unsafe {
         let source = &*source.cast::<Bytes>();

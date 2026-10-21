@@ -207,7 +207,7 @@ impl<E: Endpoint> Exchange<E> {
         self.end = Waitable::new(ends[1]);
     }
 
-    /// Report consumption before reading trailers; the host pipes the body after the outcome.
+    /// Report consumption before reading trailers so the host pipes the body after the outcome.
     pub(crate) fn read(&mut self) {
         self.outcome
             .write(self.zero, E::OUTCOME_WRITE, E::OUTCOME_DROP);

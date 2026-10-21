@@ -1,7 +1,8 @@
-//! Checked time-codec ABI. Values occupy 16 bytes; results pack status above length.
+//! Checked time-codec ABI. Values occupy 16 bytes, and results pack status above length.
 //! Instant stores little-endian i128 epoch nanoseconds. PlainDateTime stores an i32
 //! epoch day, four padding bytes, and u64 nanoseconds within that day.
-//! Status: 0 success, 1 syntax, 2 range, 3 annotation, 4 capacity, 5 unsupported Date format, 6 memory/overlap.
+//! Status codes are 0 for success, 1 for syntax, 2 for range, 3 for annotation, 4 for capacity,
+//! 5 for unsupported Date format, and 6 for memory/overlap.
 //! Scalar accessors write eight bytes on success and use the same status convention.
 
 use crate::{Error, Instant, PlainDateTime};
@@ -62,7 +63,7 @@ pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) ->
 }
 
 /// # Safety
-/// Input must be initialized; output must be exclusively owned and disjoint.
+/// The input range must be initialized, and the output range must be exclusively owned and disjoint.
 /// Both ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_instant_ms(input: u32, output: u32) -> u64 {
@@ -207,7 +208,7 @@ pub(crate) unsafe extern "C" fn time_plain_add_calendar(
 }
 
 /// # Safety
-/// Inputs must be initialized; output must be exclusively owned and disjoint from both.
+/// Both input ranges must be initialized, and the output range must be exclusively owned and disjoint from both.
 /// All ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_until_part(
@@ -251,7 +252,7 @@ pub(crate) unsafe extern "C" fn time_plain_until_part(
 }
 
 /// # Safety
-/// Input must be initialized; output must be exclusively owned and disjoint.
+/// The input range must be initialized, and the output range must be exclusively owned and disjoint.
 /// Both ranges must be outside helper stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32, output: u32) -> u64 {
@@ -305,7 +306,7 @@ pub(crate) unsafe extern "C" fn time_plain_date_format(
     }
 }
 
-/// UTC accessor; invalid times produce NaN.
+/// Read a UTC date field, returning `NaN` for invalid time values.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn time_date_part(ms: f64, part: u32) -> f64 {
     crate::date_part(ms, part)
@@ -325,7 +326,7 @@ pub(crate) extern "C" fn time_date_utc(
     crate::date_utc([year, month, day, hour, minute, second, ms])
 }
 
-/// Pure setter calculation; compiled code owns and updates the Date object.
+/// Compute an updated UTC timestamp for a `Date` setter call. Compiled code owns and updates the `Date` object.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn time_date_set(
     time: f64,
@@ -434,7 +435,7 @@ fn plain(input: &[u8]) -> Result<PlainDateTime, Error> {
     PlainDateTime::from_day_and_nanosecond(day, nanosecond)
 }
 
-/// Decodes a shared ABI code; unknown codes are range errors.
+/// Decode a shared ABI code, mapping unknown values to range errors.
 fn code<T: TryFrom<u32>>(value: u32) -> Result<T, Error> {
     T::try_from(value).map_err(|_| Error::Range)
 }

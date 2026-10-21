@@ -1,7 +1,6 @@
-//! Isolated effectful adapters. Models and observation checks do not perform I/O.
+//! Isolated effectful adapters for Node oracle and Wasmtime component execution.
 //!
-//! The parent [Executor] runs the Node oracle and spawns a `worker` process per case; the worker
-//! ([worker]) compiles the case and runs the component under wasmtime.
+//! [Executor] runs the Node oracle and executes the compiled Wasm component under wasmtime.
 use crate::{
     program::{ENV_FIXTURE, FIXTURE, INPUTS, WIT},
     registry::Case,
@@ -13,12 +12,30 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
+mod oracle;
 mod worker;
+use oracle::{encoded_inputs, is_typechecked, link_handler_types, run_node_oracle, run_tsc_batch};
 pub use worker::worker;
+
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn spawn_worker<'scope, 'env, F, T>(
+    scope: &'scope thread::Scope<'scope, 'env>,
+    f: F,
+) -> Result<thread::ScopedJoinHandle<'scope, T>>
+where
+    F: FnOnce() -> T + Send + 'scope,
+    T: Send + 'scope,
+{
+    Ok(thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn_scoped(scope, f)?)
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Limits {
@@ -37,7 +54,7 @@ impl Default for Limits {
 }
 /// The fact-analysis precision a generated case compiles under. The oracle ignores it, so each
 /// setting is checked against the same expected observations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactLimits {
     #[default]
@@ -73,7 +90,7 @@ pub(crate) enum Outcome {
         stderr: Vec<u8>,
         max_fuel_used: u64,
         component_bytes: usize,
-        /// Fuel consumed by each call, in input order; empty for the Node oracle.
+        /// Fuel consumed by each call in input order, populated for component executions.
         #[serde(default)]
         fuel_used: Vec<u64>,
     },
@@ -228,7 +245,7 @@ pub fn check_fault(case: &Case, evidence: &Evidence) -> Result<()> {
     }
     Ok(())
 }
-/// The worker's input; borrowed when written, owned when read back.
+/// Input payload for the worker, borrowed during serialization and owned on deserialization.
 #[derive(Serialize, Deserialize)]
 struct Request<'a> {
     case: Cow<'a, Case>,
@@ -289,7 +306,7 @@ pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
     equivalence(case, &evidence.oracle, &evidence.component, evidence)
 }
 
-/// Compares an oracle outcome with a component outcome; `evidence` is reported on failure.
+/// Compare an oracle outcome against a component outcome, reporting `evidence` on mismatch.
 fn equivalence(
     case: &Case,
     oracle: &Outcome,
@@ -319,12 +336,7 @@ fn equivalence(
         ) => {
             ensure!(a == b, "value or side-effect trace mismatch: {evidence:?}");
             ensure!(
-                a.len()
-                    == if matches!(case, Case::Stream(_) | Case::Fetch(_) | Case::Handler(_)) {
-                        3
-                    } else {
-                        INPUTS.len()
-                    },
+                a.len() == case.inputs().len(),
                 "missing boundary observations"
             );
             ensure!(
@@ -354,7 +366,7 @@ fn equivalence(
     Ok(())
 }
 
-/// Capture through files so a full pipe cannot deadlock a child; reap every timeout.
+/// Capture child output through temporary files and reap timed-out processes.
 pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Result<Captured> {
     let logs = tempfile::Builder::new()
         .prefix("process-")
@@ -367,6 +379,7 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
         .stdin(Stdio::null())
         .spawn()?;
     let start = Instant::now();
+    let mut polls = 0u32;
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait()? {
             break (status, false);
@@ -375,7 +388,13 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
             let _ = child.kill();
             break (child.wait()?, true);
         }
-        thread::sleep(Duration::from_millis(1));
+        polls = polls.saturating_add(1);
+        let pause = if polls <= 25 {
+            Duration::from_micros(200)
+        } else {
+            Duration::from_millis(1)
+        };
+        thread::sleep(pause);
     };
     Ok(Captured {
         exit: status.code(),
@@ -386,157 +405,139 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
 }
 
 pub struct Executor {
-    executable: PathBuf,
     limits: Limits,
+    batch_tsc: Mutex<Option<Vec<(PathBuf, String)>>>,
 }
 impl Executor {
-    pub fn new(executable: PathBuf, limits: Limits) -> Self {
-        Self { executable, limits }
+    pub fn new(_executable: PathBuf, limits: Limits) -> Self {
+        Self {
+            limits,
+            batch_tsc: Mutex::new(None),
+        }
     }
+
+    pub(crate) fn begin_typecheck_batch(&self) {
+        *self.batch_tsc.lock().expect("tsc batch lock") = Some(Vec::new());
+    }
+
+    pub(crate) fn flush_typecheck_batch(&self, directory: &Path) -> Result<()> {
+        let pending = self
+            .batch_tsc
+            .lock()
+            .expect("tsc batch lock")
+            .take()
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        run_tsc_batch(&pending, directory)
+    }
+
     pub fn check(&self, case: &Case, directory: &Path) -> Result<Vec<Evidence>> {
-        let evidence = case
-            .variants()
-            .into_iter()
+        let variants = case.variants();
+        let Some((first_variant, rest_variants)) = variants.split_first() else {
+            return Ok(Vec::new());
+        };
+        if rest_variants.is_empty() {
+            let evidence = self.execute(first_variant, &directory.join("0"))?;
+            return Ok(vec![evidence]);
+        }
+        // Variant 0 establishes the oracle observation and schedules TypeScript verification;
+        // metamorphic variants 1..N share Variant 0's oracle outcome and compile/run in parallel.
+        let first_dir = directory.join("0");
+        let first_source = first_variant.source();
+        self.prepare_directory(first_variant, &first_source, &first_dir, true)?;
+        let rest_prepared = rest_variants
+            .iter()
             .enumerate()
-            .map(|(index, variant)| self.execute(&variant, &directory.join(index.to_string())))
+            .map(|(i, variant)| {
+                let dir = directory.join((i + 1).to_string());
+                let src = variant.source();
+                self.prepare_directory(variant, &src, &dir, false)?;
+                Ok((variant, src, dir))
+            })
             .collect::<Result<Vec<_>>>()?;
+
+        let (first_oracle, first_component, rest_components) =
+            thread::scope(|scope| -> Result<_> {
+                let oracle_handle = spawn_worker(scope, || {
+                    self.run_oracle(first_variant, &first_source, &first_dir)
+                })?;
+                let first_comp_handle = spawn_worker(scope, || {
+                    self.run_component(first_variant, &first_source, &first_dir)
+                })?;
+                let rest_handles = rest_prepared
+                    .iter()
+                    .map(|(variant, src, dir)| {
+                        spawn_worker(scope, move || self.run_component(variant, src, dir))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let oracle = oracle_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("oracle thread panicked"))??;
+                let (first_comp, first_ctrl) = first_comp_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("component thread panicked"))??;
+                let mut rest_results = Vec::with_capacity(rest_handles.len());
+                for handle in rest_handles {
+                    rest_results.push(
+                        handle
+                            .join()
+                            .map_err(|_| anyhow::anyhow!("variant thread panicked"))??,
+                    );
+                }
+                Ok((oracle, (first_comp, first_ctrl), rest_results))
+            })?;
+
+        let mut evidence = Vec::with_capacity(variants.len());
+        let first_ev = Evidence {
+            oracle: first_oracle.clone(),
+            component: first_component.0,
+            control: first_component.1,
+        };
+        fs::write(
+            first_dir.join("evidence.json"),
+            serde_json::to_vec(&first_ev)?,
+        )?;
+        evidence.push(first_ev);
+
+        for ((_, _, dir), (component, control)) in rest_prepared.into_iter().zip(rest_components) {
+            let ev = Evidence {
+                oracle: first_oracle.clone(),
+                component,
+                control,
+            };
+            fs::write(dir.join("evidence.json"), serde_json::to_vec(&ev)?)?;
+            evidence.push(ev);
+        }
+
         check_metamorphic(&evidence)?;
         Ok(evidence)
     }
+
     fn execute(&self, case: &Case, directory: &Path) -> Result<Evidence> {
         self.execute_source(case, &case.source(), directory)
     }
+
     pub(crate) fn execute_source(
         &self,
         case: &Case,
         source: &str,
         directory: &Path,
     ) -> Result<Evidence> {
-        fs::create_dir_all(directory)?;
-        let path = directory.join("case.ts");
-        fs::write(&path, source)?;
-        environment(directory)?;
-        crate::scaling::override_inputs(case, directory)?;
-        fs::write(directory.join("input-case.json"), serde_json::to_vec(case)?)?;
-        if !matches!(case, Case::Reject { .. }) {
-            let checked = command(
-                Command::new("tsc")
-                    .current_dir(directory)
-                    .args([
-                        "--ignoreConfig",
-                        "--noEmit",
-                        "--strict",
-                        "--target",
-                        "esnext",
-                        "--module",
-                        "esnext",
-                        "--skipLibCheck",
-                    ])
-                    .arg(&path)
-                    .arg(directory.join("capabilities.d.ts")),
-                directory,
-                Duration::from_secs(60),
-            )?;
-            ensure!(
-                checked.success(),
-                "source failed TypeScript: {}",
-                String::from_utf8_lossy(&checked.stdout)
-            );
-        }
-        let oracle = if matches!(case, Case::Reject { .. }) {
-            Outcome::Compile("expected source-domain rejection".into())
-        } else if let Case::Aggregate(agg) = case
-            && agg.uses_wide_exact_int()
-        {
-            agg.expected_outcome()
-        } else if matches!(case, Case::Command { .. }) {
-            Outcome::Command(command(
-                Command::new("node")
-                    .args([
-                        // Runtime warnings are not program output.
-                        "--no-warnings",
-                        "--harmony-temporal",
-                        // Parameter properties need transformation, not just stripping.
-                        "--experimental-transform-types",
-                    ])
-                    .arg(&path)
-                    .env("PERRY_CONFORMANCE", ENV_FIXTURE)
-                    // WASI exposes no zone, so components observe UTC.
-                    .env("TZ", "UTC"),
-                directory,
-                Duration::from_secs(self.limits.timeout_seconds),
-            )?)
-        } else {
-            let captured = command(
-                Command::new("node")
-                    .args([
-                        "--disable-warning=ExperimentalWarning",
-                        "--harmony-temporal",
-                        "--experimental-strip-types",
-                    ])
-                    .arg(directory.join("oracle.mjs"))
-                    .arg(&path)
-                    .arg(directory.join("inputs.json"))
-                    .arg(serde_json::to_string(FIXTURE)?)
-                    .arg(directory.join("input-case.json"))
-                    .arg(directory.join("node-observations.json")),
-                directory,
-                Duration::from_secs(self.limits.timeout_seconds),
-            )?;
-            if captured.timed_out {
-                Outcome::Timeout
-            } else if !captured.success() {
-                Outcome::Execute(String::from_utf8_lossy(&captured.stderr).into_owned())
-            } else {
-                Outcome::Values {
-                    observations: serde_json::from_slice(&fs::read(
-                        directory.join("node-observations.json"),
-                    )?)
-                    .context("Node observations")?,
-                    stdout: captured.stdout,
-                    stderr: captured.stderr,
-                    max_fuel_used: 0,
-                    component_bytes: 0,
-                    fuel_used: Vec::new(),
-                }
-            }
-        };
-        let request = directory.join("request.json");
-        let destination = directory.join("outcome.json");
-        fs::write(
-            &request,
-            serde_json::to_vec(&Request {
-                case: Cow::Borrowed(case),
-                limits: self.limits,
-            })?,
-        )?;
-        let output = command(
-            Command::new(&self.executable)
-                .arg("worker")
-                .arg(request)
-                .arg(&destination),
-            directory,
-            Duration::from_secs(self.limits.timeout_seconds + 5),
-        )?;
-        let component = if output.timed_out {
-            Outcome::Timeout
-        } else if !output.success() {
-            Outcome::Crash(String::from_utf8_lossy(&output.stderr).into_owned())
-        } else {
-            serde_json::from_slice(&fs::read(destination).context("worker produced no outcome")?)?
-        };
-        let control = if let Case::Fault { program, .. } = case {
-            Some(
-                self.execute_source(
-                    &Case::Program(program.clone()),
-                    source,
-                    &directory.join("control"),
-                )?
-                .component,
-            )
-        } else {
-            None
-        };
+        self.prepare_directory(case, source, directory, true)?;
+        let (oracle, (component, control)) = thread::scope(|scope| -> Result<_> {
+            let oracle_handle = spawn_worker(scope, || self.run_oracle(case, source, directory))?;
+            let comp_handle = spawn_worker(scope, || self.run_component(case, source, directory))?;
+            let oracle = oracle_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("oracle thread panicked"))??;
+            let comp = comp_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("component thread panicked"))??;
+            Ok((oracle, comp))
+        })?;
         let evidence = Evidence {
             oracle,
             component,
@@ -544,66 +545,125 @@ impl Executor {
         };
         fs::write(
             directory.join("evidence.json"),
-            serde_json::to_vec_pretty(&evidence)?,
+            serde_json::to_vec(&evidence)?,
         )?;
         Ok(evidence)
     }
-}
 
-fn cached_handler_sdk() -> Result<&'static [(PathBuf, Vec<u8>)]> {
-    static SDK_FILES: std::sync::OnceLock<Vec<(PathBuf, Vec<u8>)>> = std::sync::OnceLock::new();
-    if let Some(files) = SDK_FILES.get() {
-        return Ok(files.as_slice());
+    fn prepare_directory(
+        &self,
+        case: &Case,
+        source: &str,
+        directory: &Path,
+        check_ts: bool,
+    ) -> Result<()> {
+        fs::create_dir_all(directory)?;
+        let path = directory.join("case.ts");
+        fs::write(&path, source)?;
+        if matches!(case, Case::Handler(_)) {
+            link_handler_types(directory)?;
+        }
+        crate::scaling::override_inputs(case, directory)?;
+        if check_ts && !matches!(case, Case::Reject { .. }) {
+            self.schedule_typecheck(case, &path, source, directory)?;
+        }
+        Ok(())
     }
-    let temp = tempfile::tempdir()?;
-    let out_dir = temp.path().join("handler-types");
-    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
-        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
-        world: Some("handler".into()),
-        out_dir: out_dir.clone(),
-        project_root: Some(temp.path().into()),
-        entry: "case.ts".into(),
-        initialize_tsconfig: false,
-    })?;
-    let mut files = Vec::new();
-    for entry in fs::read_dir(&out_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            files.push((PathBuf::from(entry.file_name()), fs::read(&path)?));
+
+    fn schedule_typecheck(
+        &self,
+        case: &Case,
+        path: &Path,
+        source: &str,
+        directory: &Path,
+    ) -> Result<()> {
+        if is_typechecked(source) {
+            return Ok(());
+        }
+        // Non-module Command scripts share global scope if batched, so check them individually.
+        if !matches!(case, Case::Command { .. })
+            && let Some(batch) = &mut *self.batch_tsc.lock().expect("tsc batch lock")
+        {
+            if !batch.iter().any(|(_, s)| s == source) {
+                if !matches!(case, Case::Handler(_)) {
+                    link_handler_types(directory)?;
+                }
+                batch.push((path.to_path_buf(), source.to_owned()));
+            }
+            return Ok(());
+        }
+        if !matches!(case, Case::Handler(_)) {
+            link_handler_types(directory)?;
+        }
+        run_tsc_batch(&[(path.to_path_buf(), source.to_owned())], directory)
+    }
+
+    fn run_oracle(&self, case: &Case, _source: &str, directory: &Path) -> Result<Outcome> {
+        let path = directory.join("case.ts");
+        if matches!(case, Case::Reject { .. }) {
+            Ok(Outcome::Compile("expected source-domain rejection".into()))
+        } else if let Case::Aggregate(agg) = case
+            && agg.uses_wide_exact_int()
+        {
+            Ok(agg.expected_outcome())
+        } else if matches!(case, Case::Command { .. }) {
+            Ok(Outcome::Command(command(
+                Command::new("node")
+                    .args([
+                        "--no-warnings",
+                        "--harmony-temporal",
+                        "--experimental-transform-types",
+                    ])
+                    .arg(&path)
+                    .env("PERRY_CONFORMANCE", ENV_FIXTURE)
+                    .env("TZ", "UTC"),
+                directory,
+                Duration::from_secs(self.limits.timeout_seconds),
+            )?))
+        } else {
+            let inputs_path = directory.join("inputs.json");
+            let custom_inputs: Option<Vec<String>> = if inputs_path.exists() {
+                Some(serde_json::from_slice(&fs::read(inputs_path)?)?)
+            } else {
+                None
+            };
+            let inputs = custom_inputs
+                .as_deref()
+                .unwrap_or_else(|| &encoded_inputs()[..case.inputs().len()]);
+            run_node_oracle(
+                &path,
+                inputs,
+                case,
+                Duration::from_secs(self.limits.timeout_seconds),
+            )
         }
     }
-    let _ = SDK_FILES.set(files);
-    Ok(SDK_FILES.get().expect("initialized").as_slice())
-}
 
-fn environment(directory: &Path) -> Result<()> {
-    static INPUTS_JSON: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    static ASYNC_WIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    fs::write(directory.join("fixture.txt"), FIXTURE)?;
-    fs::write(directory.join("world.wit"), WIT)?;
-    fs::write(
-        directory.join("async-world.wit"),
-        ASYNC_WIT.get_or_init(async_wit),
-    )?;
-    fs::write(
-        directory.join("capabilities.d.ts"),
-        "/// <reference path=\"./handler-types/runtime.d.ts\" />\ndeclare module \"test:generated/control\" { export function release():void; }",
-    )?;
-    let handler_types = directory.join("handler-types");
-    fs::create_dir_all(&handler_types)?;
-    for (rel, bytes) in cached_handler_sdk()? {
-        let target = handler_types.join(rel);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(target, bytes)?;
+    fn run_component(
+        &self,
+        case: &Case,
+        source: &str,
+        directory: &Path,
+    ) -> Result<(Outcome, Option<Outcome>)> {
+        let path = directory.join("case.ts");
+        let component = worker::execute_in_process(case, source, directory, &path, &self.limits)?;
+        let control = if let Case::Fault { program, .. } = case {
+            let control_dir = directory.join("control");
+            fs::create_dir_all(&control_dir)?;
+            let control_path = control_dir.join("case.ts");
+            fs::write(&control_path, source)?;
+            Some(worker::execute_in_process(
+                &Case::Program(program.clone()),
+                source,
+                &control_dir,
+                &control_path,
+                &self.limits,
+            )?)
+        } else {
+            None
+        };
+        Ok((component, control))
     }
-    fs::write(directory.join("oracle.mjs"), include_str!("../oracle.mjs"))?;
-    let inputs = INPUTS_JSON
-        .get_or_init(|| serde_json::to_vec(&INPUTS.map(number)).expect("inputs serialize"));
-    fs::write(directory.join("inputs.json"), inputs)?;
-    Ok(())
 }
 
 fn async_wit() -> String {

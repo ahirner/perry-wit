@@ -2,8 +2,8 @@ use super::*;
 use crate::inline::InlineResult;
 
 impl<'s> FunctionBuilder<'s> {
-    /// Apply an array callback (a named function or an inline closure) to `arguments`; an
-    /// inline closure's body is lowered in place, its `return`s leaving to a `done` block.
+    /// Apply an array callback (a named function or an inline closure) to `arguments`. An
+    /// inline closure's body lowers in place, with its `return` statements branching to a `done` block.
     pub(crate) fn array_callback(
         &mut self,
         ctx: &mut Context,

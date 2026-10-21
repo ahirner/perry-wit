@@ -13,7 +13,7 @@ use pliron::{
 
 pliron::dict_key!(STATISTICS, "perry_optimization_statistics");
 
-/// Compilation measurements attached by the optimizer, without process-global state.
+/// Compilation measurements attached to `root` by the optimizer.
 pub fn optimization_statistics(
     root: Ptr<Operation>,
     ctx: &Context,
@@ -86,8 +86,8 @@ impl IrPotential {
     }
 }
 
-/// Run `passes` until a round changes nothing; returns the number of rounds. Test and debug
-/// builds assert that every changing round strictly lowers the [IrPotential].
+/// Run `passes` until a round leaves the IR unchanged and return the number of rounds executed.
+/// Test and debug builds assert that every changing round strictly lowers the [IrPotential].
 pub(crate) fn run_to_fixpoint(
     passes: &mut Passes,
     root: Ptr<Operation>,

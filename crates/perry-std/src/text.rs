@@ -16,7 +16,7 @@ pub(crate) fn integer(value: f64) -> i64 {
     }
 }
 
-/// A relative index (`slice`, `subarray`): negative counts from the end; clamped to `len`.
+/// Resolve a relative index (`slice`, `subarray`), counting negative values from the end and clamping to `len`.
 pub(crate) fn relative(value: f64, len: u64) -> u64 {
     let value = integer(value);
     if value < 0 {
@@ -129,7 +129,7 @@ pub(crate) unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mu
     array
 }
 
-/// Scalar index access; invalid, fractional and out-of-range indices yield undefined.
+/// Read a character by scalar index, returning `undefined` for invalid, fractional, or out-of-range indices.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_index(string: *mut u8, index: f64) -> *mut u8 {
     let view = view(string);
@@ -217,10 +217,8 @@ pub(crate) extern "C" fn std_string_index_of(
     }
 }
 
-/// The bytes of `text` from `from`, and up to `to`. Searching bytes is exact for UTF-8: a
-/// match of a valid needle starts at a scalar boundary. Byte searches avoid `core`'s
-/// two-way `str` searcher, which is larger and links a panic path the linker reads as
-/// recursion (keeping the conservative stack reservation).
+/// Byte slice of `text` from `from`. Searching UTF-8 bytes directly is exact because a valid
+/// UTF-8 needle matches at scalar boundaries.
 fn tail(text: &str, from: usize) -> &[u8] {
     text.as_bytes().get(from..).unwrap_or(&[])
 }
@@ -514,7 +512,7 @@ pub(crate) extern "C" fn std_string_at(string: *mut u8, index: f64) -> *mut u8 {
     std_string_char_at(view.string, idx as f64)
 }
 
-/// `s.repeat(count)`; a negative or infinite count throws `RangeError`.
+/// Implement `s.repeat(count)`, throwing `RangeError` when `count` is negative or infinite.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut u8 {
     let view = view(string);
@@ -586,7 +584,7 @@ fn ascii_character(byte: u8) -> *mut u8 {
     }
 }
 
-/// `String.fromCodePoint(value)`: one Unicode scalar; surrogate code points are rejected.
+/// Implement `String.fromCodePoint(value)` for a single Unicode scalar, rejecting surrogate code points.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     if value < 0.0 || value > 0x10ffff as f64 || value != value as u32 as f64 {

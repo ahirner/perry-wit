@@ -1,21 +1,22 @@
 //! Exception model.
 //!
 //! Runtime failures in the supported subset are ECMAScript exceptions that `try`/`catch` can
-//! observe; Wasm traps are reserved for resource exhaustion and compiler bugs, because a trap
-//! aborts the component instance and cannot be caught by guest code.
+//! observe. Wasm traps are reserved for resource exhaustion and compiler bugs because a trap
+//! aborts the component instance.
 //!
 //! An op with an exception contract may throw. Exceptions travel as an `i32` status
-//! (0 = none, otherwise an [ErrorKind] code) plus, for `throw` statements, a pending exception
-//! object held by the task. Outside a `try`, a throwing op leaves the function with its status.
-//! Inside a `try`, the builder follows it with [CaughtOp], which yields the status of the op
-//! just before it and suppresses that implicit exit, then branches to the handler on non-zero.
+//! (`0` for normal completion or an [ErrorKind] code) together with a pending exception
+//! object held by the task for `throw` statements. Outside a `try`, a throwing op leaves the
+//! function with its status. Inside a `try`, the builder follows it with [CaughtOp], which
+//! yields the status of the preceding op, suppresses the implicit exit, and branches to the
+//! handler when the status is non-zero.
 //!
-//! - [RaiseOp] records a thrown value as the pending exception and yields its status;
+//! - [RaiseOp] records a thrown value as the pending exception and yields its status, and
 //!   [RethrowOp] leaves the function with a status.
-//! - [CatchOp] takes the pending exception (or materializes one for a status raised by the
-//!   runtime, such as the `TypeError` of `perry.unwrap`).
-//! - [ErrorNewOp], [ExceptionIsOp] and [ExceptionMessageOp] cover `new Error(...)`,
-//!   `instanceof` and `.message`.
+//! - [CatchOp] takes the pending exception or materializes one for a status raised by the
+//!   runtime, such as the `TypeError` from `perry.unwrap`.
+//! - [ErrorNewOp], [ExceptionIsOp], and [ExceptionMessageOp] implement `new Error(...)`,
+//!   `instanceof`, and `.message`.
 use crate::attrs::ErrorKind;
 use crate::operation_schema::op_schema;
 use crate::signatures::{ResultType, Ty};
@@ -89,8 +90,8 @@ op_schema! {
 }
 
 op_schema! {
-    /// The status of the op just before it (0 if it completed normally); that op then does not
-    /// leave the function when it throws.
+    /// Read the status of the immediately preceding op (`0` on normal completion) and keep
+    /// control within the current function when that op throws.
     pub CaughtOp() -> infallible;
     name = "perry.caught";
     format = "` : ` type($0)";
@@ -133,7 +134,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// `e.message` of an `Error`; the empty string for other thrown values.
+    /// Read `e.message` from an `Error` instance, returning the empty string for other thrown values.
     pub ExceptionMessageOp(exception) -> infallible;
     name = "perry.exception_message";
     format = "$0";

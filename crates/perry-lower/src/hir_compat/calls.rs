@@ -1,4 +1,4 @@
-//! Compiler-generated calls consumed without a Perry runtime dependency.
+//! Compiler-generated synthetic calls recognized during HIR lowering.
 use super::*;
 
 pub(crate) enum RuntimeCall<'a> {

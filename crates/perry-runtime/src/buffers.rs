@@ -31,7 +31,7 @@ pub(crate) unsafe fn reallocate(old: *mut u8, old_size: u32, new_size: u32) -> *
     }
 }
 
-/// Transfer a canonical buffer from the host pin to its compiled owner, without copying.
+/// Transfer ownership of a canonical buffer from the host pin to its compiled owner.
 ///
 /// # Safety
 /// `data` came from [reallocate], or is the empty canonical pointer (0 or 8).

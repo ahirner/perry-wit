@@ -1,11 +1,10 @@
 //! Bounded inlining, read-only argument promotion and scalar replacement.
 //!
-//! - [inline_leaves]: calls to small synchronous leaf functions (no calls, awaits or
-//!   timers of their own) take the callee's body, bottom-up by construction since leaves
-//!   call nothing. Callees left without callers are removed unless exported.
-//! - [DecomposeRecords]: a record that does not escape its function (it is only read and
-//!   written through `perry.field_get`/`perry.field_set`) becomes one local per field, which
-//!   `mem2reg` then promotes to SSA values: the allocation disappears.
+//! - [inline_leaves]: calls to small synchronous leaf functions take the callee's body,
+//!   bottom-up by construction. Callees with zero remaining callers are removed unless exported.
+//! - [DecomposeRecords]: a function-local record (accessed solely through
+//!   `perry.field_get`/`perry.field_set`) becomes one local per field, which `mem2reg` promotes
+//!   to SSA values.
 use crate::{
     calls::{AsyncCallOp, CallOp, is_async, is_exported},
     control::{BrOp, ReturnOp},
@@ -43,8 +42,8 @@ use pliron::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Callees of at most this many operations are inlined at every call site; larger leaves
-/// only where they have a single caller (and are not exported), so code does not grow.
+/// Callees with at most this many operations are inlined at every call site. Larger leaf
+/// functions are inlined only when they have a single caller and are private to the module.
 const SMALL: usize = 25;
 /// No callee above this size is inlined.
 const LIMIT: usize = 64;
@@ -96,7 +95,7 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
     Some(ops.len())
 }
 
-/// Inline calls to small leaf functions; see the module documentation.
+/// Inline calls to small leaf functions as described in the module documentation.
 pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let functions = functions(root, ctx);
     let mut leaves: HashMap<Identifier, (FuncOp, usize)> = HashMap::new();
@@ -209,8 +208,7 @@ fn inline_call(ctx: &mut Context, call: Ptr<Operation>, callee: &FuncOp) {
     Operation::erase(call, ctx);
 }
 
-/// The fields a record parameter is read through, when those reads are its only uses (the
-/// parameter's escape summary: it does not escape and is not written through).
+/// The fields a record parameter is read through when all of its uses are `perry.field_get` reads.
 fn read_only_fields(ctx: &Context, parameter: Value) -> Option<BTreeMap<String, FieldReads>> {
     let mut fields = BTreeMap::<_, FieldReads>::new();
     for use_ in parameter.uses(ctx) {
@@ -226,18 +224,16 @@ fn read_only_fields(ctx: &Context, parameter: Value) -> Option<BTreeMap<String, 
     Some(fields)
 }
 
-/// Retain the verified projections so promotion does not rediscover field types or uses.
+/// Verified field projections for a read-only record parameter.
 struct FieldReads {
     first: FieldGetOp,
     others: Vec<FieldGetOp>,
 }
 
-/// A record parameter of a
-/// synchronous, non-exported function that is only read through fields becomes one parameter
-/// per field read, and callers read the fields at the call. This is exact when nothing can
-/// write the record while the callee runs: the callee writes no record field, directly or
-/// through a call, and does not await. The caller's record then often no longer escapes, so
-/// record decomposition dissolves it.
+/// Promote a read-only record parameter of a synchronous, internal function into one
+/// parameter per field read, rewriting callers to pass those fields at the call site.
+/// Applies when the callee preserves all record fields and stays synchronous, enabling
+/// caller-side scalar replacement via [DecomposeRecords].
 pub(crate) fn promote_arguments(
     root: Ptr<Operation>,
     ctx: &mut Context,
@@ -351,9 +347,9 @@ fn promote(
     Ok(())
 }
 
-/// Split a record into local field slots only when all uses are direct field reads/writes.
-/// Entry slots plus stores at the original allocation preserve per-iteration initialization;
-/// mem2reg then removes the slots and supplies the required control-flow joins.
+/// Split a record into local field slots when all uses are direct field reads and writes.
+/// Entry slots combined with stores at the original allocation site preserve per-iteration
+/// initialization. A subsequent `mem2reg` pass promotes the slots and inserts control-flow joins.
 pub(crate) struct DecomposeRecords;
 
 impl MatchRewrite for DecomposeRecords {

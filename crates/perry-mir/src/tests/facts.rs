@@ -623,8 +623,8 @@ fn aggregate_summary_bounds_preserve_existing_alias_soundness() -> Result<()> {
     Ok(())
 }
 
-/// Precise per-arity context accounting; integration tests only check that summarized
-/// compilation stays sound.
+/// Verify precise per-arity context accounting while integration tests check that summarized
+/// compilation remains sound.
 #[test]
 fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()> {
     // Every u8/f64 mix of two parameters: 4 distinct contexts, twice the precise budget of 2.
@@ -676,7 +676,7 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
 }
 
 /// A recursive helper returning `(status, x / 2, x + x)` to a `u8 -> (bool, f64, u32)` export:
-/// each call result takes its own domain instead of one shared representation.
+/// each call result retains its own independent domain.
 #[test]
 fn specialization_keeps_each_call_result_independent() -> Result<()> {
     let ctx = &mut Context::new();

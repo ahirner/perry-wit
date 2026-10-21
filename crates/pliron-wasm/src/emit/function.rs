@@ -19,8 +19,8 @@ use pliron::{
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::{Function, Instruction, NameMap, ValType};
 
-/// The enclosing constructs of the code being emitted, innermost last; a branch target's
-/// label index is its distance from the end.
+/// Enclosing constructs of the code being emitted, ordered innermost last so a branch target's
+/// label index equals its distance from the end.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Frame {
     IfThenElse,
@@ -34,8 +34,8 @@ pub(super) struct Emitted {
     pub(super) names: NameMap,
 }
 
-/// Emits one `builtin.func`: [FunctionEmitter::new] analyses the CFG, schedules values onto
-/// the stack and allocates locals; [FunctionEmitter::emit] then structures and encodes it.
+/// Emits one `builtin.func`. [FunctionEmitter::new] analyses the CFG, schedules values onto
+/// the stack, and allocates locals, and [FunctionEmitter::emit] structures and encodes the body.
 pub(super) struct FunctionEmitter<'a> {
     pub(super) ctx: &'a Context,
     pub(super) name: String,

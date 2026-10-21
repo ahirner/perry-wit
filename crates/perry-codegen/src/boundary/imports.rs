@@ -237,8 +237,8 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    /// Acknowledged cancellation can race a returned canonical result. Release its payload
-    /// buffers before detaching the transfer; pending callbacks can no longer access them.
+    /// Release canonical result payload buffers before detaching the transfer when acknowledged
+    /// cancellation races a returned result.
     pub(super) fn cleanup_foreign(&mut self, ctx: &mut Context) -> Result<()> {
         if self.state.foreign_transfers.is_empty() {
             return Ok(());

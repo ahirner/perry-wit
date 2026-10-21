@@ -122,7 +122,7 @@ impl FunctionLowering<'_, '_> {
         self.num(ctx, NumOpcode::F64Copysign, vec![rounded, value])
     }
 
-    /// `Math.min` (`min`) or `Math.max` of two operands; NaN wins either way.
+    /// Compute `Math.min` (`min`) or `Math.max` of two operands, propagating `NaN` from either operand.
     fn numeric_extremum(
         &mut self,
         ctx: &mut Context,

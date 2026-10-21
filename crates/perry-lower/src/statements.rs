@@ -442,7 +442,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// Lower an expression evaluated for its effects; void calls are allowed here.
+    /// Lower an expression statement evaluated for its side effects, permitting `void` calls.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
         if self.iteration.is_release(expr) {
             return Ok(());

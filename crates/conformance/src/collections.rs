@@ -1,14 +1,5 @@
-//! Orthogonal state-machine generator for live `Set` and `Map` iterators, checked against Node.
-//!
-//! Covers the product of:
-//! - collection views (`Set.values()`, `Set.entries()`, `Map.keys()`, `Map.values()`,
-//!   `Map.entries()`),
-//! - multiple concurrent iterator lifetimes (active loop, paused via `break`, exhausted, and
-//!   overwritten/abandoned),
-//! - structural mutations both between loops and inside active loop bodies (`add`/`set`,
-//!   `delete`, delete + reinsert, `clear`, and batch deletes across the 32-tombstone compaction
-//!   threshold),
-//! - declaration-order permutation (`permuted`).
+//! Orthogonal state-machine generator for live `Set` and `Map` iterators across concurrent
+//! cursors, structural mutations, tombstone compaction, and declaration-order permutations.
 
 use crate::{
     emit::{CHECKSUM_TS, Emitter},
@@ -46,7 +37,7 @@ impl CollectionKind {
         }
     }
 
-    /// The `for...of` binding over [`Self::view`]; entries destructure their pair.
+    /// Return the `for...of` binding over [`Self::view`], destructuring key-value pairs for entries.
     fn binding(self) -> &'static str {
         match self {
             Self::SetEntries | Self::MapEntries => "[k, v]",
@@ -64,7 +55,7 @@ impl CollectionKind {
         }
     }
 
-    /// The statement inserting `key`; maps store `valueFor(key, bias)`.
+    /// Format the statement inserting `key`, storing `valueFor(key, bias)` for maps.
     fn insert(self, key: impl Display, bias: impl Display) -> String {
         if self.is_set() {
             format!("coll.add({key});")

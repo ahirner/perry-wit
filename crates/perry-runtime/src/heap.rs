@@ -1,17 +1,17 @@
-//! The `buffer` tier's memory source (design decision D3): [talc] over the memory after the
-//! linked data and stack, then over pages it grows.
+//! The `buffer` tier's memory source: [talc] over the memory after the linked data and stack,
+//! then over pages it grows.
 //!
-//! `src/link` places every library's data and the shared stack at the start of memory and
+//! The linker places every library's data and the shared stack at the start of memory and
 //! resolves `__heap_base` to their end. The rest of the initial pages is claimed before any
 //! page is grown, so a component runs within its initial memory when its working set fits
-//! there (the stream contracts allow 64 KiB in total). Later growth extends the heap in place.
+//! there. Later growth extends the heap in place.
 use core::{alloc::Layout, ptr::NonNull};
 use talc::{base::Talc, base::binning::Binning, source::Source};
 
 const PAGE: usize = 64 * 1024;
 
 unsafe extern "C" {
-    /// End of the linked data and stack (`src/link`).
+    /// End of the linked data and stack.
     static __heap_base: u8;
 }
 
@@ -103,10 +103,10 @@ impl Allocator {
             counters.available_bytes
         }
     }
-    /// Grow an exclusive allocation without moving it or collecting. Failure preserves its layout.
+    /// Grow an exclusive allocation in place. Failure preserves its layout.
     ///
     /// # Safety
-    /// `pointer` has the supplied allocation layout; `new_size` is a valid, larger layout size.
+    /// `pointer` has the supplied allocation layout, and `new_size` is a valid, larger layout size.
     #[cfg(feature = "collectible")]
     pub(crate) unsafe fn grow_in_place(
         &self,

@@ -18,8 +18,7 @@ macro_rules! numeric {
     ($($name:ident: [$($operand:ident),*] -> $result:ident, $effect:ident;)*) => {
         /// A Wasm numeric instruction. The name is the instruction's mnemonic in CamelCase.
         ///
-        /// `f32` arithmetic is not modelled yet (only conversions); the frontends this crate
-        /// serves compute in `f64`, `i32` and `i64`.
+        /// Arithmetic instructions cover `i32`, `i64`, and `f64`, with `f32` conversions.
         #[pliron_attr(name = "wasm.num_opcode", format, verifier = "succ")]
         #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
         pub enum NumOpcode {
@@ -150,7 +149,7 @@ numeric! {
 macro_rules! memory {
     ($($name:ident: $value:ident, $bytes:literal, $load:ident, $store:ident;)*) => {
         /// The value type and width of a linear-memory access. Narrow kinds (`I32U8`, …)
-        /// zero- or sign-extend on load and truncate on store; for stores the sign is ignored.
+        /// zero-extend or sign-extend on load and truncate the low bits on store.
         #[pliron_attr(name = "wasm.mem_kind", format, verifier = "succ")]
         #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
         pub enum MemKind {

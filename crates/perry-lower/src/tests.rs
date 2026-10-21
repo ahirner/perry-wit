@@ -14,7 +14,7 @@ fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic
         .expect("located diagnostic")
 }
 
-/// Diagnostic messages are tabled in the integration `diagnostics_test`; this pins the spans.
+/// Verify diagnostic source spans alongside the message table in `diagnostics_test`.
 #[test]
 fn unsupported_forms_are_rejected_with_located_diagnostics() {
     for (source, message, location) in [

@@ -170,7 +170,7 @@ pub(crate) extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8
     }
 }
 
-/// `headers.get(name)`: the values joined with `, `, as UTF-8; null when absent.
+/// Implement `headers.get(name)`, returning the matching values joined with `, ` as UTF-8, or null when absent.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
     let Some(key) = name(b"Headers.get", key) else {

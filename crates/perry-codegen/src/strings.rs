@@ -156,8 +156,8 @@ impl FunctionLowering<'_, '_> {
         self.character(ctx, string, index, position, valid, representation)
     }
 
-    /// The character at scalar `index` (`position` as a number for the runtime fallback);
-    /// `valid` tells whether `index` is an in-range integer.
+    /// Read the character at scalar `index` (`position` as a number for the runtime fallback),
+    /// where `valid` indicates whether `index` is an in-range integer.
     fn character(
         &mut self,
         ctx: &mut Context,
@@ -286,8 +286,8 @@ impl FunctionLowering<'_, '_> {
         join.deref(ctx).get_argument(0)
     }
 
-    /// Append one byte to an exclusively owned header's spare tail capacity. Failure leaves
-    /// the string untouched; MIR supplies the allocating fallback and its collection point.
+    /// Append one byte to an exclusively owned header's spare tail capacity. When capacity is
+    /// exhausted, the string remains unchanged and MIR supplies the allocating fallback.
     pub(super) fn try_string_append(
         &mut self,
         ctx: &mut Context,
@@ -355,7 +355,7 @@ impl FunctionLowering<'_, '_> {
         join.deref(ctx).get_argument(0)
     }
 
-    /// Materialize ASCII only when MIR needs a string; scalar users keep the byte.
+    /// Materialize an ASCII character into a string when required by MIR, keeping the raw byte for scalar users.
     fn character_value(
         &mut self,
         ctx: &mut Context,

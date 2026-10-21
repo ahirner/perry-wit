@@ -1,7 +1,7 @@
-//! Concrete standard API domains. Source generation is pure; adapters own all effects.
+//! Concrete standard API domains. Source generation is pure, and adapters own all host effects.
 use crate::{
     execution::check_equivalence,
-    program::literal,
+    program::{FIXTURE, Form, Number, Program, literal},
     registry::{Case, Contract, ExitStatus, Witness},
 };
 use proptest::prelude::*;
@@ -405,4 +405,317 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn retained_fs_witness(form: Form) -> Witness {
+    Witness {
+        partition: "retained-operation",
+        case: Case::Program(Program {
+            expression: Number::Mark(Box::new(Number::Input)),
+            form,
+        }),
+    }
+}
+
+fn fs_read_utf8_case(payload: String) -> Case {
+    let fixture = literal(FIXTURE);
+    let payload = literal(&payload);
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            r#"
+import {{readFile,writeFile}} from 'node:fs/promises';
+export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
+  const payload={payload};
+  const trace:number[]=[];
+  await writeFile('dynamic-utf8.txt',payload);
+  const first=readFile('dynamic-utf8.txt','utf8');
+  const second=readFile('fixture.txt','utf8');
+  const restored=await first;
+  const fixture=await second;
+  if(restored!==payload||fixture!=={fixture})throw 91;
+  const encoded=new TextEncoder().encode(restored);
+  trace.push(encoded.length);
+  for(let i=0;i<encoded.length;i++){{const byte=encoded[i];if(byte===undefined)throw 92;trace.push(byte);}}
+  return {{value:x,trace}};
+}}
+"#
+        ),
+    }
+}
+
+fn fs_write_text_case(first: String, second: String) -> Case {
+    let first = literal(&first);
+    let second = literal(&second);
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            r#"
+import {{readFile,writeFile}} from 'node:fs/promises';
+export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
+  const first={first};
+  const second={second};
+  const trace:number[]=[];
+  await writeFile('roundtrip.txt',first);
+  const r1=await readFile('roundtrip.txt','utf8');
+  if(r1!==first)throw 90;
+  await writeFile('roundtrip.txt',second);
+  const r2=await readFile('roundtrip.txt','utf8');
+  if(r2!==second)throw 92;
+  const encoded1=new TextEncoder().encode(r1);
+  const encoded2=new TextEncoder().encode(r2);
+  trace.push(encoded1.length);
+  trace.push(encoded2.length);
+  for(let i=0;i<encoded1.length;i++){{const byte=encoded1[i];if(byte===undefined)throw 93;trace.push(byte);}}
+  for(let i=0;i<encoded2.length;i++){{const byte=encoded2[i];if(byte===undefined)throw 93;trace.push(byte);}}
+  return {{value:x,trace}};
+}}
+"#
+        ),
+    }
+}
+
+fn fs_metadata_case(bytes: Vec<u8>, text: String) -> Case {
+    let bytes = literal(&bytes);
+    let text = literal(&text);
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            r#"
+import {{writeFile,stat,readdir,unlink}} from 'node:fs/promises';
+export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
+  const input=new Uint8Array({bytes});
+  const text={text};
+  const textBytes=new TextEncoder().encode(text);
+  const trace:number[]=[];
+  await writeFile('alpha.bin',input);
+  await writeFile('beta.txt',text);
+  try {{
+    const fInfo=await stat('fixture.txt');
+    const aInfo=await stat('alpha.bin');
+    const bInfo=await stat('beta.txt');
+    const names=await readdir('.');
+    if(!fInfo.isFile()||fInfo.isDirectory()||fInfo.size!==6)throw 93;
+    if(!aInfo.isFile()||aInfo.isDirectory()||aInfo.size!==input.length)throw 94;
+    if(!bInfo.isFile()||bInfo.isDirectory()||bInfo.size!==textBytes.length)throw 95;
+    if(names.length!==3)throw 96;
+    trace.push(fInfo.size);
+    trace.push(aInfo.size);
+    trace.push(bInfo.size);
+    trace.push(names.length);
+  }} finally {{
+    await unlink('alpha.bin');
+    await unlink('beta.txt');
+  }}
+  const remaining=await readdir('.');
+  if(remaining.length!==1||remaining[0]!=='fixture.txt')throw 97;
+  return {{value:x,trace}};
+}}
+"#
+        ),
+    }
+}
+
+fn fs_read_bytes_case(bytes: Vec<u8>) -> Case {
+    let fixture = literal(FIXTURE);
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            "import {{readFile,writeFile}} from 'node:fs/promises';\n{}",
+            bytes_source(
+                &bytes,
+                &format!(
+                    r#"
+await writeFile('binary.bin',input);
+const first:Uint8Array=await readFile('binary.bin');
+const b0=first[0];
+if(b0!==undefined)first[0]=(b0+1)%256;
+const second=await readFile('binary.bin');
+const fixtureBytes=await readFile('fixture.txt');
+if(second.byteLength!==input.length||fixtureBytes.byteLength!==6||new TextDecoder().decode(fixtureBytes)!=={fixture})throw 94;
+for(let i=0;i<second.byteLength;i++){{const byte=second[i];if(byte===undefined||byte!==input[i])throw 95;trace.push(byte);}}
+"#
+                ),
+                true,
+            )
+        ),
+    }
+}
+
+fn fs_write_subview_case(bytes: Vec<u8>, raw_start: usize, raw_end: usize) -> Case {
+    let len = bytes.len();
+    let a = if len == 0 { 0 } else { raw_start % (len + 1) };
+    let b = if len == 0 { 0 } else { raw_end % (len + 1) };
+    let (start, end) = if a <= b { (a, b) } else { (b, a) };
+    let expected_len = end - start;
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            "import {{readFile,writeFile}} from 'node:fs/promises';\n{}",
+            bytes_source(
+                &bytes,
+                &format!(
+                    r#"
+const view=input.subarray({start},{end});
+const snapshot=new Uint8Array(view);
+const pending=writeFile('view.bin',view);
+await pending;
+if(view.byteLength>0)view[0]=99;
+const restored=await readFile('view.bin');
+if(restored.byteLength!=={expected_len})throw 95;
+for(let i=0;i<restored.byteLength;i++){{const byte=restored[i];if(byte===undefined||byte!==snapshot[i])throw 96;trace.push(byte);}}
+await writeFile('view.bin',view.subarray(0,0));
+const empty=await readFile('view.bin');
+if(empty.byteLength!==0)throw 97;
+trace.push(empty.byteLength);
+"#
+                ),
+                true,
+            )
+        ),
+    }
+}
+
+fn fs_recovery_case(bytes: Vec<u8>) -> Case {
+    let fixture = literal(FIXTURE);
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            "import {{readFile,writeFile,stat}} from 'node:fs/promises';\n{}",
+            bytes_source(
+                &bytes,
+                &format!(
+                    r#"
+const pendingUtf8=readFile('missing-utf8.txt','utf8');
+let failures=0;
+try{{await pendingUtf8;}}catch{{failures++;}}
+try{{await pendingUtf8;}}catch{{failures++;}}
+try{{await readFile('missing-bytes.bin');}}catch{{failures++;}}
+try{{await stat('missing-stat.bin');}}catch{{failures++;}}
+if(failures!==4)throw 97;
+trace.push(failures);
+await writeFile('recovered.bin',input);
+const restored=await readFile('recovered.bin');
+const fixtureText=await readFile('fixture.txt','utf8');
+if(restored.byteLength!==input.length||fixtureText!=={fixture})throw 98;
+for(let i=0;i<restored.byteLength;i++){{const byte=restored[i];if(byte===undefined||byte!==input[i])throw 99;trace.push(byte);}}
+"#
+                ),
+                true,
+            )
+        ),
+    }
+}
+
+pub(crate) fn fs_contracts() -> Vec<Contract> {
+    let unicode_text = || {
+        prop::collection::vec(any::<char>(), 0..=48)
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+    };
+    vec![
+        Contract {
+            id: "node.fs.readFile.utf8",
+            description: "UTF-8 file read across retained and dynamic Unicode payloads",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained async UTF-8 read interleaved with numeric evaluation, plus dynamic Unicode/NUL payloads of 0..48 scalar values and concurrent reads",
+            witnesses: vec![
+                retained_fs_witness(Form::FileRead),
+                Witness {
+                    partition: "unicode-and-concurrent-read",
+                    case: fs_read_utf8_case("é\0漢𝄞😀\nline2".into()),
+                },
+            ],
+            strategy: unicode_text().prop_map(fs_read_utf8_case).boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.writeFile.text",
+            description: "Text file round trip, overwrite and truncation",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained JSON text round trip plus sequential UTF-8 writes testing file truncation and growth across arbitrary Unicode strings",
+            witnesses: vec![
+                retained_fs_witness(Form::FileRoundTrip),
+                Witness {
+                    partition: "overwrite-and-truncate",
+                    case: fs_write_text_case("initial-long-payload-é\0漢".into(), "short".into()),
+                },
+            ],
+            strategy: (unicode_text(), unicode_text())
+                .prop_map(|(a, b)| fs_write_text_case(a, b))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.metadata",
+            description: "File stat and directory listing across dynamic files and cleanup",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained stat/readdir on fixture plus multi-file creation, exact byte-length stat verification, directory entry count and unlink cleanup",
+            witnesses: vec![
+                retained_fs_witness(Form::FileMetadata),
+                Witness {
+                    partition: "multi-file-stat-and-unlink",
+                    case: fs_metadata_case(vec![0, 1, 255, 128, 42], "extra\0é".into()),
+                },
+            ],
+            strategy: (prop::collection::vec(any::<u8>(), 0..=256), unicode_text())
+                .prop_map(|(bytes, text)| fs_metadata_case(bytes, text))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.readFile.bytes",
+            description: "Binary file read, buffer isolation and UTF-8 decoding",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained binary read plus arbitrary 0..256-byte payloads, returned Uint8Array mutation isolation across repeated reads and TextDecoder verification",
+            witnesses: vec![
+                retained_fs_witness(Form::FileBytes),
+                Witness {
+                    partition: "binary-buffer-isolation",
+                    case: fs_read_bytes_case(vec![0, 255, 128, 1, 0, 42, 199]),
+                },
+            ],
+            strategy: prop::collection::vec(any::<u8>(), 0..=256)
+                .prop_map(fs_read_bytes_case)
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.writeFile.subviews",
+            description: "Byte view and empty file round trip across arbitrary subarray slices",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained subarray write plus arbitrary 0..128-byte buffers and subarray(start, end) slices, post-write view mutation isolation and empty subview truncation",
+            witnesses: vec![
+                retained_fs_witness(Form::FileByteRoundTrip),
+                Witness {
+                    partition: "arbitrary-subview-slice",
+                    case: fs_write_subview_case(vec![19, 0, 255, 128, 42, 20, 77], 1, 5),
+                },
+            ],
+            strategy: (
+                prop::collection::vec(any::<u8>(), 0..=128),
+                0usize..=128,
+                0usize..=128,
+            )
+                .prop_map(|(bytes, start, end)| fs_write_subview_case(bytes, start, end))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.readFile.recovery",
+            description: "Repeated rejection across missing UTF-8, binary and stat calls followed by recovery",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Retained rejected readFile plus repeated rejection observation across UTF-8 readFile, binary readFile and stat, followed by successful write/read recovery",
+            witnesses: vec![
+                retained_fs_witness(Form::FileRejectedRead),
+                Witness {
+                    partition: "multi-op-rejection-recovery",
+                    case: fs_recovery_case(vec![7, 0, 254, 128]),
+                },
+            ],
+            strategy: prop::collection::vec(any::<u8>(), 0..=128)
+                .prop_map(fs_recovery_case)
+                .boxed(),
+            check: check_equivalence,
+        },
+    ]
 }

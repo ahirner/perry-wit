@@ -1,11 +1,11 @@
 //! Canonical built-ins and WASI functions the runtime calls.
 //!
 //! On wasm32 these are imports, named with the legacy mangling `wit-component` resolves
-//! (`$root` built-ins, `[stream-new-0]write-via-stream` and so on). `src/link` forwards the
+//! (`$root` built-ins, `[stream-new-0]write-via-stream` and so on). The linker forwards the
 //! imports of reachable runtime functions to the linked module, so a component imports only
 //! what its program uses. On other targets a recording mock stands in, for the unit tests.
 
-/// `stream.write` / `future.read` result: the operation is pending; an event follows.
+/// Status returned by `stream.write` or `future.read` when the operation is pending and will deliver a completion event.
 pub const BLOCKED: u32 = 0xffff_ffff;
 /// Low four bits of a copy result: the reader dropped its end.
 pub(crate) const DROPPED: u32 = 1;
@@ -256,7 +256,7 @@ pub mod mock {
         }
     }
 
-    /// Complete the blocked write; returns the copy result for the event.
+    /// Complete the blocked write and return the copy result for the event.
     pub fn complete_pending() -> Option<(u32, u32)> {
         with(|host| host.pending.take()).map(|(fd, data, len)| {
             let len = len.min(LIMIT);

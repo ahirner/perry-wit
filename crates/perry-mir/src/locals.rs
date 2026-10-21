@@ -1,8 +1,7 @@
 //! Mutable locals as slots, promoted to SSA values and block arguments by pliron `mem2reg`.
 //!
-//! The HIR→MIR builder (P2.2) emits one `perry.local` per mutable binding and plain loads and
-//! stores, so it never constructs SSA joins, loop-carried block parameters or await
-//! continuations itself; that hand-rolled machinery in the legacy `ssa.rs` goes away.
+//! The HIR-to-MIR builder emits one `perry.local` per mutable binding together with `perry.load`
+//! and `perry.store` operations. The `mem2reg` pass then constructs SSA joins and loop-carried block parameters.
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OutputContract};
 use crate::types::SlotType;

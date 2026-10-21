@@ -32,7 +32,7 @@ unsafe fn lookup_field(table: *const u32, count: u32, key: &[u8]) -> u32 {
     unsafe { field_index(table, count, |name| key_cmp(key, name)) }
 }
 
-/// Find the native field overlaid on this graph member; `count` denotes an extra key.
+/// Find the native field overlaid on this graph member, returning `count` for an extra key.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_record_index(
     member: u32,

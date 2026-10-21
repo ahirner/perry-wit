@@ -23,7 +23,7 @@ use pliron::{
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
-    /// Lower an exception op; `false` if `op` is none.
+    /// Lower an exception operation, returning `false` for other operations.
     pub(crate) fn exception_op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<bool> {
         if let Some(error) = Operation::get_op::<ErrorNewOp>(op, ctx) {
             let kind = self.i32_const(ctx, status_code(error.kind(ctx)));
@@ -169,7 +169,7 @@ impl FunctionLowering<'_, '_> {
         (landing, args)
     }
 
-    /// Throw `status` if `failed` is non-zero; code after this runs on the normal path.
+    /// Branch to the exception handler with `kind` when `failed` is non-zero, continuing on the normal path otherwise.
     pub(crate) fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
         let status = self.i32_const(ctx, status_code(kind));
         let status = self.runtime(ctx, Runtime::ExceptionImplicit, vec![failed, status]);

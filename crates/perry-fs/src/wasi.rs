@@ -3,7 +3,7 @@
 //! Async functions are async-lowered: they take their flat parameters (or a pointer to them
 //! when there are more than four) and a result area, and return a subtask status. Streams and
 //! futures are read and written with the canonical built-ins of the function that created
-//! them; payload indices count the function's streams and futures in signature order.
+//! them, and payload indices count the function's streams and futures in signature order.
 
 perry_abi::wasm_imports! { "wasi:filesystem/preopens@0.3.0";
     #[link_name = "get-directories"]
@@ -126,6 +126,6 @@ const _: () = assert!(core::mem::size_of::<OpenAt>() == 20);
 /// A `directory-entry` in a stream buffer: `type` at 0, `name` at 16.
 pub(crate) const ENTRY_SIZE: usize = 24;
 pub(crate) const ENTRY_NAME: usize = 16;
-/// `result<descriptor-stat, error-code>`: the payload at 8; `size` at 24 within the stat.
+/// Layout of `result<descriptor-stat, error-code>` with the payload at offset 8 and `size` at offset 24 within the stat.
 pub(crate) const STAT_PAYLOAD: usize = 8;
 pub(crate) const STAT_SIZE: usize = 24;

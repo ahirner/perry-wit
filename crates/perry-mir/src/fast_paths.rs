@@ -19,9 +19,10 @@ use pliron::{
 };
 use std::collections::HashSet;
 
-/// Ownership analysis already established exclusive headers. A successful try-append
-/// mutates that header without allocating; failure leaves it unchanged for the ordinary
-/// append. Only the fallback can collect, so its own live operands determine its roots.
+/// Ownership analysis establishes exclusive sequence headers before this pass runs. A
+/// successful try-append mutates that header in place, and a full header falls back to an
+/// ordinary append. Only the fallback path can trigger collection, so its live operands
+/// determine its roots.
 #[derive(Default)]
 pub(crate) struct ExpandAppends {
     expanded: HashSet<Ptr<Operation>>,

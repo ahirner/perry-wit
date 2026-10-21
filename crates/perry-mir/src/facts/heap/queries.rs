@@ -22,8 +22,8 @@ fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
 }
 
 /// The heap cell `value` names, looking through single-operand wrappers, and whether it may
-/// instead hold an untracked aggregate. `visited` ends a wrapper cycle (possible only in
-/// unreachable code) as untracked rather than looping.
+/// hold an untracked aggregate. `visited` terminates wrapper cycles in unreachable code as
+/// untracked.
 fn root_heap_cells(ctx: &Context, state: &State, value: Value) -> (Vec<usize>, bool) {
     let mut visited = HashSet::new();
     let mut current = value;
