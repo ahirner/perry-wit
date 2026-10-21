@@ -9,17 +9,19 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::HashSet,
     fs::{self, File},
-    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    process::{Command, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
+mod oracle;
 mod worker;
+use oracle::{
+    encoded_inputs, is_typechecked, link_handler_types, run_node_oracle, run_tsc_batch,
+};
 pub use worker::worker;
 
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -628,7 +630,12 @@ impl Executor {
             let inputs = custom_inputs
                 .as_deref()
                 .unwrap_or_else(|| &encoded_inputs()[..case.inputs().len()]);
-            run_node_oracle(&path, inputs, case)
+            run_node_oracle(
+                &path,
+                inputs,
+                case,
+                Duration::from_secs(self.limits.timeout_seconds),
+            )
         }
     }
 
@@ -657,295 +664,6 @@ impl Executor {
         };
         Ok((component, control))
     }
-}
-
-struct SharedSdk {
-    _temp: tempfile::TempDir,
-    handler_types: PathBuf,
-    capabilities_dts: PathBuf,
-    oracle_mjs: PathBuf,
-}
-
-fn shared_sdk() -> Result<&'static SharedSdk> {
-    static SDK: OnceLock<SharedSdk> = OnceLock::new();
-    if let Some(sdk) = SDK.get() {
-        return Ok(sdk);
-    }
-    let temp = tempfile::tempdir()?;
-    let handler_types = temp.path().join("handler-types");
-    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
-        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
-        world: Some("handler".into()),
-        out_dir: handler_types.clone(),
-        project_root: Some(temp.path().into()),
-        entry: "case.ts".into(),
-        initialize_tsconfig: false,
-    })?;
-    let capabilities_dts = temp.path().join("capabilities.d.ts");
-    fs::write(
-        &capabilities_dts,
-        "/// <reference path=\"./handler-types/runtime.d.ts\" />\ndeclare module \"test:generated/control\" { export function release():void; }",
-    )?;
-    let oracle_mjs = temp.path().join("oracle.mjs");
-    fs::write(&oracle_mjs, include_str!("../oracle.mjs"))?;
-    let _ = SDK.set(SharedSdk {
-        _temp: temp,
-        handler_types,
-        capabilities_dts,
-        oracle_mjs,
-    });
-    Ok(SDK.get().expect("sdk initialized"))
-}
-
-fn link_handler_types(directory: &Path) -> Result<()> {
-    let target = directory.join("handler-types");
-    if target.exists() || target.symlink_metadata().is_ok() {
-        return Ok(());
-    }
-    let sdk = shared_sdk()?;
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&sdk.handler_types, &target)?;
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(&target)?;
-        for entry in fs::read_dir(&sdk.handler_types)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                fs::copy(entry.path(), target.join(entry.file_name()))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn typechecked_cache() -> &'static Mutex<HashSet<String>> {
-    static CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn is_typechecked(source: &str) -> bool {
-    typechecked_cache()
-        .lock()
-        .expect("typecheck cache lock")
-        .contains(source)
-}
-
-fn run_tsc_batch(files: &[(PathBuf, String)], directory: &Path) -> Result<()> {
-    let sdk = shared_sdk()?;
-    let mut cmd = Command::new("tsc");
-    cmd.current_dir(directory).args([
-        "--ignoreConfig",
-        "--noEmit",
-        "--strict",
-        "--target",
-        "esnext",
-        "--module",
-        "esnext",
-        "--skipLibCheck",
-    ]);
-    for (path, _) in files {
-        cmd.arg(path);
-    }
-    cmd.arg(&sdk.capabilities_dts);
-    let checked = command(&mut cmd, directory, Duration::from_secs(60))?;
-    ensure!(
-        checked.success(),
-        "source failed TypeScript: {}",
-        String::from_utf8_lossy(&checked.stdout)
-    );
-    let mut cache = typechecked_cache().lock().expect("typecheck cache lock");
-    for (_, source) in files {
-        cache.insert(source.clone());
-    }
-    Ok(())
-}
-
-struct NodeDaemon {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-#[derive(Serialize)]
-struct OracleCaseMeta<'a> {
-    kind: &'static str,
-    #[serde(rename = "payloadPath", skip_serializing_if = "Option::is_none")]
-    payload_path: Option<&'a Path>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
-    #[serde(default, skip_serializing_if = "is_zero_u16")]
-    status: u16,
-}
-
-fn is_zero_u16(v: &u16) -> bool {
-    *v == 0
-}
-
-#[derive(Serialize)]
-struct OracleRequest<'a> {
-    #[serde(rename = "casePath")]
-    case_path: &'a Path,
-    #[serde(rename = "stdoutPath")]
-    stdout_path: &'a Path,
-    #[serde(rename = "stderrPath")]
-    stderr_path: &'a Path,
-    inputs: &'a [String],
-    fixture: &'static str,
-    #[serde(rename = "testCase")]
-    test_case: OracleCaseMeta<'a>,
-}
-
-#[derive(Deserialize)]
-struct OracleResponse {
-    ok: bool,
-    #[serde(default)]
-    observations: Vec<Observation>,
-    #[serde(rename = "hasStdout", default)]
-    has_stdout: bool,
-    #[serde(rename = "hasStderr", default)]
-    has_stderr: bool,
-    #[serde(default)]
-    error: String,
-}
-
-impl NodeDaemon {
-    fn spawn() -> Result<Self> {
-        let sdk = shared_sdk()?;
-        let mut child = Command::new("node")
-            .args([
-                "--disable-warning=ExperimentalWarning",
-                "--harmony-temporal",
-                "--experimental-strip-types",
-            ])
-            .arg(&sdk.oracle_mjs)
-            .env("TZ", "UTC")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().context("node daemon stdin")?;
-        let stdout = BufReader::new(child.stdout.take().context("node daemon stdout")?);
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
-        })
-    }
-
-    fn call(&mut self, req: &OracleRequest<'_>) -> Result<Outcome> {
-        serde_json::to_writer(&mut self.stdin, req)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
-        let mut line = String::new();
-        let read = self.stdout.read_line(&mut line)?;
-        ensure!(read > 0, "node daemon closed stdout unexpectedly");
-        let resp: OracleResponse = serde_json::from_str(&line).context("Node daemon response")?;
-        if resp.ok {
-            let stdout = if resp.has_stdout {
-                fs::read(req.stdout_path)?
-            } else {
-                Vec::new()
-            };
-            let stderr = if resp.has_stderr {
-                fs::read(req.stderr_path)?
-            } else {
-                Vec::new()
-            };
-            Ok(Outcome::Values {
-                observations: resp.observations,
-                stdout,
-                stderr,
-                max_fuel_used: 0,
-                component_bytes: 0,
-                fuel_used: Vec::new(),
-            })
-        } else {
-            Ok(Outcome::Execute(resp.error))
-        }
-    }
-}
-
-impl Drop for NodeDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn run_node_oracle(case_path: &Path, inputs: &[String], test_case: &Case) -> Result<Outcome> {
-    static DAEMON: OnceLock<Mutex<Option<NodeDaemon>>> = OnceLock::new();
-    let dir = case_path.parent().context("case directory")?;
-    let payload_path = dir.join("payload.bin");
-    let stdout_path = dir.join("oracle-stdout.bin");
-    let stderr_path = dir.join("oracle-stderr.bin");
-    let meta = match test_case {
-        Case::Stream(s) => {
-            fs::write(&payload_path, &s.bytes)?;
-            OracleCaseMeta {
-                kind: "stream",
-                payload_path: Some(&payload_path),
-                truncated: false,
-                status: 0,
-            }
-        }
-        Case::Fetch(f) => {
-            fs::write(&payload_path, &f.bytes)?;
-            OracleCaseMeta {
-                kind: "fetch",
-                payload_path: Some(&payload_path),
-                truncated: f.truncated,
-                status: f.status,
-            }
-        }
-        Case::Handler(h) => {
-            fs::write(&payload_path, &h.bytes)?;
-            OracleCaseMeta {
-                kind: "handler",
-                payload_path: Some(&payload_path),
-                truncated: false,
-                status: 0,
-            }
-        }
-        Case::Lifecycle(_) => OracleCaseMeta {
-            kind: "lifecycle",
-            payload_path: None,
-            truncated: false,
-            status: 0,
-        },
-        _ => OracleCaseMeta {
-            kind: "program",
-            payload_path: None,
-            truncated: false,
-            status: 0,
-        },
-    };
-    let req = OracleRequest {
-        case_path,
-        stdout_path: &stdout_path,
-        stderr_path: &stderr_path,
-        inputs,
-        fixture: FIXTURE,
-        test_case: meta,
-    };
-    let mutex = DAEMON.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().expect("node daemon lock");
-    if guard.is_none() {
-        *guard = Some(NodeDaemon::spawn()?);
-    }
-    match guard.as_mut().expect("daemon initialized").call(&req) {
-        Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            *guard = Some(NodeDaemon::spawn()?);
-            guard.as_mut().expect("daemon respawned").call(&req)
-        }
-    }
-}
-
-fn encoded_inputs() -> &'static [String] {
-    static ENCODED: OnceLock<Vec<String>> = OnceLock::new();
-    ENCODED
-        .get_or_init(|| INPUTS.map(number).to_vec())
-        .as_slice()
 }
 
 fn async_wit() -> String {

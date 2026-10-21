@@ -187,7 +187,7 @@ if (process.argv.length > 2) {
     rmSync(directory, { recursive: true, force: true });
   }
 } else {
-  const directory = mkdtempSync(join(tmpdir(), 'perry-oracle-'));
+  const directory = process.env.PERRY_ORACLE_SANDBOX || mkdtempSync(join(tmpdir(), 'perry-oracle-'));
   const rawStdoutWrite = process.stdout.write.bind(process.stdout);
   const rawStderrWrite = process.stderr.write.bind(process.stderr);
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });

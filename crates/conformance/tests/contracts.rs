@@ -158,6 +158,49 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
         Duration::from_millis(100),
     )?;
     assert!(stalled.timed_out && !stalled.success());
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
+    let case = Case::Program(Program {
+        expression: Number::Integer(0),
+        form: Form::Timer,
+    });
+    let mut settings = Settings::default();
+    settings.limits.timeout_seconds = 1;
+    let slow_path = directory.path().join("slow-timer.json");
+    fs::write(
+        &slow_path,
+        serde_json::to_vec(&SavedCase {
+            contract: "ecma.number.arithmetic".into(),
+            source: case.source().replace("setTimeout(0,", "setTimeout(3000,"),
+            case: case.clone(),
+            metamorphic: vec![],
+            settings: settings.clone(),
+            source_sha256: "test".into(),
+            revision: "test".into(),
+            versions: serde_json::json!({}),
+        })?,
+    )?;
+    let start = std::time::Instant::now();
+    let error = runner::replay(&slow_path, executable.clone()).unwrap_err();
+    ensure!(
+        error.to_string().contains("oracle: Timeout, component: Timeout"),
+        "expected oracle and component timeout: {error:#}"
+    );
+    assert!(start.elapsed() < Duration::from_millis(2500));
+    let ok_path = directory.path().join("recovered.json");
+    fs::write(
+        &ok_path,
+        serde_json::to_vec(&SavedCase {
+            contract: "ecma.number.arithmetic".into(),
+            source: case.source(),
+            case,
+            metamorphic: vec![],
+            settings,
+            source_sha256: "test".into(),
+            revision: "test".into(),
+            versions: serde_json::json!({}),
+        })?,
+    )?;
+    runner::replay(&ok_path, executable)?;
     Ok(())
 }
 

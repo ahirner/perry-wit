@@ -151,6 +151,8 @@ fn compile_command_cached(source: &str, path: &str) -> CommandCacheResult {
     result
 }
 
+const EPOCH_TICK_MS: u64 = 100;
+
 fn shared_engine() -> Result<&'static Engine> {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     if let Some(engine) = ENGINE.get() {
@@ -159,12 +161,23 @@ fn shared_engine() -> Result<&'static Engine> {
     let mut config = Config::new();
     config
         .consume_fuel(true)
+        .epoch_interruption(true)
         .wasm_component_model_async(true)
         .wasm_component_model_async_stackful(false)
         .wasm_component_model_more_async_builtins(false)
         .wasm_component_model_threading(false);
     let engine = Engine::new(&config)?;
-    let _ = ENGINE.set(engine);
+    if ENGINE.set(engine).is_ok()
+        && let Some(engine) = ENGINE.get()
+    {
+        let ticker = engine.weak();
+        std::thread::spawn(move || {
+            while let Some(engine) = ticker.upgrade() {
+                std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                engine.increment_epoch();
+            }
+        });
+    }
     Ok(ENGINE.get().expect("engine initialized"))
 }
 
@@ -320,16 +333,18 @@ fn execute_function(
         Ok(pair) => pair,
         Err(outcome) => return Ok(outcome),
     };
-    let run = match block_on_local(observations(
-        engine, &component, directory, limits, fault, case,
-    ))? {
-        Ok(run) => run,
-        Err(error)
-            if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
-        {
-            return Ok(Outcome::Fuel(format!("{error:#}")));
-        }
-        Err(error) => return Ok(Outcome::Execute(format!("{error:#}"))),
+    let timeout = Duration::from_secs(limits.timeout_seconds);
+    let run = match block_on_local(
+        timeout,
+        observations(engine, &component, directory, limits, fault, case),
+    )? {
+        Err(_elapsed) => return Ok(Outcome::Timeout),
+        Ok(Ok(run)) => run,
+        Ok(Err(error)) => match error.downcast_ref::<wasmtime::Trap>() {
+            Some(&wasmtime::Trap::OutOfFuel) => return Ok(Outcome::Fuel(format!("{error:#}"))),
+            Some(&wasmtime::Trap::Interrupt) => return Ok(Outcome::Timeout),
+            _ => return Ok(Outcome::Execute(format!("{error:#}"))),
+        },
     };
     let Run {
         observations,
@@ -347,7 +362,10 @@ fn execute_function(
     })
 }
 
-fn block_on_local<F: std::future::Future>(future: F) -> Result<F::Output> {
+fn block_on_local<F: std::future::Future>(
+    timeout: Duration,
+    future: F,
+) -> Result<std::result::Result<F::Output, tokio::time::error::Elapsed>> {
     std::thread_local! {
         static RUNTIME: std::cell::RefCell<Option<tokio::runtime::Runtime>> = const { std::cell::RefCell::new(None) };
     }
@@ -355,15 +373,19 @@ fn block_on_local<F: std::future::Future>(future: F) -> Result<F::Output> {
         let mut borrow = cell.borrow_mut();
         let runtime = match &mut *borrow {
             Some(rt) => rt,
-            None => {
-                let rt = tokio::runtime::Builder::new_current_thread()
+            None => borrow.insert(
+                tokio::runtime::Builder::new_current_thread()
                     .enable_all()
-                    .build()?;
-                *borrow = Some(rt);
-                borrow.as_mut().expect("runtime initialized")
-            }
+                    .build()?,
+            ),
         };
-        Ok(runtime.block_on(future))
+        let result = runtime.block_on(async move { tokio::time::timeout(timeout, future).await });
+        if result.is_err()
+            && let Some(rt) = borrow.take()
+        {
+            rt.shutdown_background();
+        }
+        Ok(result)
     })
 }
 
@@ -454,6 +476,11 @@ async fn observations(
     );
     store.limiter(|host| &mut host.limits);
     store.set_fuel(fuel)?;
+    let epoch_ticks = limits
+        .timeout_seconds
+        .saturating_mul(1000 / EPOCH_TICK_MS)
+        .max(1);
+    store.set_epoch_deadline(epoch_ticks);
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     if matches!(case, Case::Fetch(_) | Case::Handler(_)) {
