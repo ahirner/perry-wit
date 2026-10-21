@@ -171,9 +171,13 @@ fn version(program: &str) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
 fn versions() -> Result<serde_json::Value> {
-    Ok(
-        serde_json::json!({"node":version("node")?,"typescript":version("tsc")?,"wasmtime":version("wasmtime")?,"rust":version("rustc")?}),
-    )
+    static VERSIONS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    if let Some(cached) = VERSIONS.get() {
+        return Ok(cached.clone());
+    }
+    let value = serde_json::json!({"node":version("node")?,"typescript":version("tsc")?,"wasmtime":version("wasmtime")?,"rust":version("rustc")?});
+    let _ = VERSIONS.set(value.clone());
+    Ok(value)
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let temporary = tempfile::NamedTempFile::new_in(path.parent().context("report directory")?)?;
@@ -299,6 +303,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         let artifacts = directory.join(contract.id);
         fs::create_dir_all(&artifacts)?;
         eprintln!("Checking {}", contract.id);
+        executor.begin_typecheck_batch();
         for (witness, partition) in contract.witnesses.iter().zip(result.partitions.iter_mut()) {
             let outcome = evaluate(
                 contract,
@@ -308,6 +313,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
             );
             result.executions += 1;
             if let Err(error) = outcome {
+                let _ = executor.flush_typecheck_batch(&artifacts);
                 partition.status = Status::Failed;
                 result.status = Status::Failed;
                 result.error = Some(format!("{error:#}"));
@@ -362,10 +368,16 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
             result.executions += attempts.get();
             match outcome {
                 Ok(()) => {
-                    result.generated_cases = settings.cases;
-                    result.status = Status::Passed;
+                    if let Err(error) = executor.flush_typecheck_batch(&artifacts) {
+                        result.status = Status::Failed;
+                        result.error = Some(format!("{error:#}"));
+                    } else {
+                        result.generated_cases = settings.cases;
+                        result.status = Status::Passed;
+                    }
                 }
                 Err(error) => {
+                    let _ = executor.flush_typecheck_batch(&artifacts);
                     result.status = Status::Failed;
                     result.error = Some(error.to_string());
                     if let TestError::Fail(_, case) = error {
@@ -397,8 +409,6 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         if let Some(error) = &result.error {
             eprintln!("{}: {error}", contract.id);
         }
-        write_json(&directory.join("report.json"), &report)?;
-        write_json(&output.join("report.json"), &report)?;
     }
     report.source_unchanged = identity()?.0 == report.source_sha256;
     write_json(&directory.join("report.json"), &report)?;
