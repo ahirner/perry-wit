@@ -1,17 +1,5 @@
 //! Orthogonal generator and exact reference model for aggregate layout specialization,
 //! recursive types, `parseInt` value sources, origin-limit scaling, and WIT export boundaries.
-//!
-//! Covers the product of:
-//! - aggregate shapes (`FlatRecord`, `NestedRecord`, `SelfRecursive`, `MutuallyRecursive`,
-//!   `RecordWithArrays`),
-//! - WIT export signatures (`ObservationRecord`, `MultiFieldRecord`, `DirectList`, `OptionRecord`),
-//! - value sources (`FloatFraction`, `NegativeZero`, `NanValue`, `NarrowInt`, `BoundaryInput`,
-//!   constant-foldable `ConstParseInt` with radix wrapping, and runtime-string `RuntimeParseInt`),
-//! - multiple distinct instances of the same type with independent field representations + optional
-//!   origin-limit overflow (`> 32` origins),
-//! - operations (`ReadMod`, `MutateSlot`, `ArrayConcatSpread`, `SharedHelperCall`, `CompareSlots`,
-//!   `InspectSpecial`),
-//! - declaration-order permutation (`permuted`).
 
 use crate::{
     emit::checksum,

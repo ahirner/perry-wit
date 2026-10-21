@@ -96,8 +96,7 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
     Some(unsafe { slice(body.data as u32, body.len) })
 }
 
-/// Read the whole body as `form`. A snapshot is handed over, not copied: once read, the
-/// body never exposes it again.
+/// Read the whole body as `form`, consuming its snapshot on first read.
 #[inline]
 fn read(object: *mut u8, form: Form) -> *mut u8 {
     let promise = promise_new();
@@ -133,8 +132,8 @@ pub(crate) extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
     promise
 }
 
-/// Parse the `json()` bodies read to their end since the last call. Compiled code calls
-/// this after each event when the program uses `json()`; stream readers only queue them.
+/// Parse the `json()` bodies read to completion since the last call. Compiled code calls
+/// this after each event when the program uses `json()`, while stream readers queue completed bodies.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_json_settle() {
     take_parsed(settle_json);
@@ -187,10 +186,10 @@ fn response<'a>(r: *mut u8) -> &'a Response {
     unsafe { &*(r as *const Response) }
 }
 
-/// `new Response(body, { status, statusText, headers })`; `text` marks a string body.
+/// Construct `new Response(body, { status, statusText, headers })`, where `text` marks a string body.
 ///
 /// # Safety
-/// `view` must be null or a `Uint8Array`, `status_text` a string and `h` a header list.
+/// `view` must be null or a `Uint8Array`, `status_text` a string, and `h` a header list.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn web_response_new(
     view: *mut u8,
@@ -278,10 +277,10 @@ fn request<'a>(r: *mut u8) -> &'a Request {
 /// Methods the fetch helper normalizes, by its tag.
 const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "DELETE", "", "OPTIONS"];
 
-/// `new Request(url, { method, headers, body })`; `text` marks a string body.
+/// Construct `new Request(url, { method, headers, body })`, where `text` marks a string body.
 ///
 /// # Safety
-/// `url` and `method` must be strings, `view` null or a `Uint8Array`, `h` a header list.
+/// `url` and `method` must be strings, `view` null or a `Uint8Array`, and `h` a header list.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn web_request_new(
     url: *mut u8,

@@ -1,11 +1,11 @@
-//! Promises of the current task (design decision D5).
+//! Promises of the current task.
 //!
 //! Layout, read inline by compiled code: `state: u32` at 0 (`PENDING`, `FULFILLED`,
-//! `REJECTED`), `status: i32` at 4 (the exception code of a rejection), the settled value's
-//! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object).
-//! Compiled code checks `state` before suspending, so awaiting a settled promise continues
-//! inline; otherwise observers share a private P3 future whose completion dispatches that
-//! promise's registered frames.
+//! `REJECTED`), `status: i32` at 4 (the exception code of a rejection), and the settled
+//! value's 8-byte slot at 8 (`f64` bits or a 32-bit reference, holding the exception object on
+//! rejection). Compiled code checks `state` before suspending so awaiting a settled promise
+//! continues inline, while pending observers share a private P3 future whose completion
+//! dispatches the promise's registered frames.
 use crate::{host, region::current};
 use core::ptr;
 
@@ -58,7 +58,7 @@ pub(crate) extern "C" fn perry_promise_new_collectible(references: u32) -> *mut 
     unsafe { pending(promise, references) }
 }
 
-/// Initialize fresh storage as a pending promise; `references` types its settled value.
+/// Initialize fresh storage as a pending promise, where `references` types its settled value.
 ///
 /// # Safety
 /// `promise` points to writable storage for a [Promise].
@@ -80,7 +80,7 @@ unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
     promise.cast()
 }
 
-/// Whether a fulfilled `promise` holds a traced reference rather than number bits.
+/// Whether a fulfilled `promise` holds a traced reference value.
 pub(crate) unsafe fn has_reference_value(promise: *mut u8) -> bool {
     // SAFETY: caller supplies a live promise.
     unsafe { (*(promise as *const Promise)).references }
@@ -155,7 +155,7 @@ pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
     settle(promise, REJECTED, status, exception as usize as u64);
 }
 
-/// `await` of the rejected `promise`: make its exception pending again; returns its status.
+/// Handle an `await` on a rejected `promise` by restoring its pending exception and returning its status.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     let promise = promise as *mut Promise;
@@ -243,11 +243,11 @@ impl Observers {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum SignalState {
-    /// No native future; the signal may be armed or its owner reused.
+    /// Unallocated native future state where the signal may be armed or its owner reused.
     Dormant,
     /// Read pending, awaiting `fire`.
     Armed,
-    /// Written; the task's waitable set will report the event.
+    /// Future has been written and the task's waitable set will report the completion event.
     Signalled,
     /// The event arrived and the dispatcher is draining observers.
     Dispatching,
@@ -302,7 +302,7 @@ impl Signal {
             crate::io::perry_task_join(self.readable);
         }
     }
-    /// Complete an armed signal's future; its event follows through the waitable set.
+    /// Complete an armed signal's future so its event is delivered through the waitable set.
     unsafe fn fire(&mut self) {
         assert!(
             self.state == SignalState::Armed,
@@ -334,7 +334,7 @@ impl Signal {
     }
 }
 
-/// Handle lookup and GC ownership for native completions; entries have no runnable order.
+/// Handle lookup and GC ownership table for native completions, unordered across runnable entries.
 pub(crate) struct Signals {
     buckets: &'static mut [*mut Signal],
     len: usize,
@@ -450,7 +450,7 @@ unsafe fn unlink(observer: *mut Observer) {
     }
 }
 
-/// Register a pending await in its frame; observers of one promise share a P3 completion.
+/// Register a pending `await` in its frame, sharing a single P3 completion across observers of the same promise.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, storage: *mut u8) {
     let promise = promise.cast::<Promise>();
@@ -601,8 +601,9 @@ const ALL: u32 = 0;
 const RACE: u32 = 1;
 const ALL_SETTLED: u32 = 2;
 
-/// A `Promise.all`/`race`/`allSettled` in progress: a frame (kind first) that waits on every
-/// pending input at once. Settlements update counters; one native event publishes the result.
+/// In-progress `Promise.all`, `Promise.race`, or `Promise.allSettled` combinator frame (kind
+/// first) that awaits all pending inputs simultaneously. Settlements update counters, and a
+/// single native event publishes the combined result.
 #[repr(C)]
 struct Combinator {
     kind: u32,
@@ -707,7 +708,7 @@ pub(crate) extern "C" fn perry_promise_all_settled(inputs: *mut u8) -> *mut u8 {
     combine(ALL_SETTLED, inputs, false, false)
 }
 
-/// Typed combinator; `references` describes fulfilled input payloads.
+/// Typed combinator entry point, where `references` describes fulfilled input payloads.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_combine_collectible(
     mode: u32,

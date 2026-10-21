@@ -1,21 +1,21 @@
 //! `wasm` dialect → core Wasm binary.
 //!
 //! Control flow is structured with Ramsey's dominator-tree translation ("Beyond Relooper",
-//! ICFP 2022): every reducible CFG becomes nested `block`/`loop`/`if` with no code duplication
-//! and no helper variables. Loop headers get a `loop`, blocks with several forward
+//! ICFP 2022): every reducible CFG becomes nested `block`/`loop`/`if` directly from the
+//! dominator tree. Loop headers get a `loop`, blocks with several forward
 //! predecessors ("merge nodes") get an enclosing `block` that forward branches exit, and every
 //! other block is emitted inline at its single forward predecessor.
 //!
-//! Values: a single-use result defined in the same block as its user is evaluated in place on
+//! Values with a single use in the same block as their definition are evaluated in place on
 //! the operand stack (tree folding), and constants are rematerialized at each use. Effects and
-//! traps keep their order; pure ops move freely.
-//! Every other value, and every block argument, lives in a local. Block arguments are written
-//! at each edge by pushing all incoming values before setting any parameter, so cyclic moves
-//! (`^loop(b, a)`) need no temporaries.
+//! traps preserve their relative order, while pure operations can be reordered across them.
+//! Remaining values and block arguments reside in locals. Block arguments are written
+//! at each edge by pushing all incoming values before setting any parameter, supporting cyclic
+//! parallel moves (`^loop(b, a)`).
 //!
-//! Submodules: [function] holds the per-function analyses, [schedule] the tree folding,
-//! [locals] local allocation, [structure] the control-flow structuring, [values] instruction
-//! selection and [peephole] the final rewrites.
+//! Submodules: `function` holds the per-function analyses, `schedule` the tree folding,
+//! `locals` local allocation, `structure` the control-flow structuring, `values` instruction
+//! selection and `peephole` the final rewrites.
 mod function;
 mod locals;
 mod peephole;
@@ -66,7 +66,7 @@ type EmitResult<T> = Result<T, EmitError>;
 /// Linear memory 0 of the emitted module.
 #[derive(Clone, Debug, Default)]
 pub enum Memory {
-    /// No memory; loads and stores fail validation.
+    /// Omit linear memory so loads and stores fail validation.
     #[default]
     None,
     /// Import memory 0, e.g. from a runtime module that owns the allocator.

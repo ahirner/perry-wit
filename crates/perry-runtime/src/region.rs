@@ -1,15 +1,15 @@
 //! Tasks and their regions: bump allocation over a chain of chunks, released in bulk when the
 //! task ends.
 //!
-//! Every export call is one task (design decision D3/D5). Async export calls can overlap on one
-//! instance, so each task owns its region, its active promise observers and its pending host
+//! Every export call is one task. Async export calls can overlap on one
+//! instance, so each task owns its region, its active promise observers, and its pending host
 //! subtasks ([Task]). Compiled code makes a task current while it runs ([perry_task_resume]) and
 //! clears it before handing control back to the host ([perry_task_suspend]).
 //!
 //! At a component export, the host lowers string and list arguments through
-//! [perry_cabi_realloc] before the export runs. With no current task, that creates the task
-//! early; the export adopts it with [perry_task_enter]. Synchronous exports end the task in
-//! their post-return function, after the host has lifted the results, so arguments and results
+//! `perry_cabi_realloc` before the export runs. When called outside an active task, that
+//! creates the task early, and the export adopts it with [perry_task_enter]. Synchronous exports end the task in
+//! their post-return function after the host has lifted the results, so arguments and results
 //! live in the region and are released with everything else.
 use crate::instance::instance_state;
 #[cfg(target_arch = "wasm32")]
@@ -66,13 +66,13 @@ pub struct Task {
     spare_subtasks: *mut Subtask,
     pub(crate) subtasks: *mut Subtask,
     cancelled: *mut Subtask,
-    /// Waitable set of the pending subtasks and output streams, created on first use; 0 if
-    /// none.
+    /// Waitable set of the pending subtasks and output streams, created on first use (`0` when
+    /// none exists).
     pub(crate) set: u32,
-    /// The promise an async export settles; read again by its callback.
+    /// The promise that an async export settles and its callback reads.
     result: *mut u8,
-    /// The thrown exception object on its way to a handler (`crate::exception`); null when
-    /// the status alone describes it.
+    /// The thrown exception object on its way to a handler (`crate::exception`), or null when
+    /// the status alone describes the failure.
     pub(crate) exception: *mut u8,
     /// Console output (`crate::io`): stdout, stderr.
     pub(crate) outputs: [crate::io::Output; 2],
@@ -532,9 +532,9 @@ pub(crate) extern "C" fn perry_foreign_cancelled() -> *mut u8 {
 
 /// The canonical ABI `realloc`, exported by compiled components as `cabi_realloc`.
 ///
-/// The host only allocates (`old == 0`) to lower arguments and results; blocks live in the
+/// The host allocates with `old == 0` to lower arguments and results. Blocks live in the
 /// current task's region, created here when argument lowering precedes the export call, and
-/// are never freed individually. Alignment is at most 8 in the canonical ABI.
+/// are released with the region. Alignment is at most 8 in the canonical ABI.
 ///
 /// # Safety
 /// `old` must be null or a block of `old_size` bytes from this function.
@@ -567,7 +567,7 @@ pub(crate) unsafe extern "C" fn perry_cabi_realloc(
 /// Release the host's canonical pin after its value is lifted or discarded.
 ///
 /// # Safety
-/// `data` is a pointer produced by [perry_cabi_realloc].
+/// `data` is a pointer produced by `perry_cabi_realloc`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_cabi_release(data: *mut u8) {
     #[cfg(feature = "collectible")]
@@ -585,8 +585,8 @@ pub extern "C" fn perry_alloc(size: u32) -> *mut u8 {
     unsafe { perry_alloc_shaped(size, ptr::null()) }
 }
 
-/// Allocate an object with a static map of its reference fields, without collecting.
-/// Collectible storage is zeroed; task-region storage must be initialized by the caller.
+/// Allocate an object with a static map of its reference fields.
+/// Collectible storage is zeroed, and task-region storage is initialized by the caller.
 ///
 /// # Safety
 /// `shape` meets `Collector::allocate`'s shape contract.
@@ -603,12 +603,12 @@ pub unsafe extern "C" fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mu
     }
 }
 
-/// Grow private helper storage; collectible payloads first attempt non-moving growth.
+/// Grow private helper storage, attempting non-moving growth first for collectible payloads.
 ///
 /// # Safety
 /// `old` is null or exclusively owned storage of `old_size` bytes. `initialized <= old_size`
 /// bytes are live. No immutable aliases or outstanding host borrows may refer to this buffer.
-/// `shape` describes both capacities; allocation remains atomic with respect to collection.
+/// `shape` describes both capacities, and allocation remains atomic with respect to collection.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_buffer_resize(
     old: *mut u8,
@@ -635,7 +635,7 @@ pub unsafe extern "C" fn perry_buffer_resize(
     }
 }
 
-/// Pin an active runtime operation; bounded-region components need no pin table.
+/// Pin an active runtime operation when running with collectible storage.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_operation_pin(owner: *mut u8) -> u32 {
     #[cfg(feature = "collectible")]

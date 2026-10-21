@@ -261,11 +261,11 @@ impl NodeDaemon {
                 return DaemonCall::Disconnected(anyhow!("node daemon reader disconnected"));
             }
         };
-        let resp: OracleResponse =
-            match serde_json::from_str(&line).context("Node daemon response") {
-                Ok(resp) => resp,
-                Err(err) => return DaemonCall::Disconnected(err),
-            };
+        let resp: OracleResponse = match serde_json::from_str(&line).context("Node daemon response")
+        {
+            Ok(resp) => resp,
+            Err(err) => return DaemonCall::Disconnected(err),
+        };
         if resp.ok {
             let stdout = if resp.has_stdout {
                 match fs::read(req.stdout_path) {

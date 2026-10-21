@@ -5,7 +5,7 @@ use super::*;
 use crate::coerce::merge_absence;
 
 impl<'s> FunctionBuilder<'s> {
-    /// `array[index] = value`; computed keys on records are rejected (subset rule R1).
+    /// Lower `array[index] = value` for arrays and tuples.
     pub(super) fn set_index(
         &mut self,
         ctx: &mut Context,
@@ -177,8 +177,8 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
     }
 
-    /// `array.push(…values)`: every value is evaluated and fitted to the element type before
-    /// the first push; the result is the new length.
+    /// Lower `array.push(…values)`, evaluating and coercing every argument to the element type
+    /// before the first push and returning the new length.
     pub(super) fn push_values(
         &mut self,
         ctx: &mut Context,

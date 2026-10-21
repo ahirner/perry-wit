@@ -1,5 +1,4 @@
-//! Stack scheduling: which single-use values are evaluated in place at their user (tree
-//! folding) instead of going through a local.
+//! Stack scheduling: single-use values evaluated in place at their user (tree folding).
 use super::function::FunctionEmitter;
 use crate::{
     attrs::Effect,
@@ -91,7 +90,7 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// Whether `op` is evaluated in place at its user rather than as a statement.
+    /// Whether `op` is evaluated in place at its user on the operand stack.
     pub(super) fn in_place(&self, op: Ptr<Operation>) -> bool {
         self.folded.contains(&op) || is_constant(self.ctx, op)
     }

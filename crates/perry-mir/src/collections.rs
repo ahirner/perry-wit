@@ -1,8 +1,8 @@
 //! Dense arrays and UTF-8 strings.
 //!
-//! Lengths are signless `i32`. Reads and writes take ECMAScript numbers as indices and follow
-//! subset rule R8: reads miss with `undefined`, writes past `length` throw `RangeError`.
-//! P3.5 narrows indices to `i32` and removes checks where ranges are proven.
+//! Lengths are signless `i32`. Reads and writes take ECMAScript numbers as indices: out-of-bounds
+//! reads yield `undefined` and writes past `length` throw `RangeError`.
+//! Range analysis narrows indices to `i32` and elides bounds checks where ranges are proven.
 use crate::operation_schema::op_schema;
 use crate::signatures::{OutputContract, ResultType, Signature, Ty};
 use crate::{
@@ -110,10 +110,9 @@ op_schema! {
 }
 
 op_schema! {
-    /// Read an element as `T | undefined`, as ECMAScript does: an index that is not an integer
-    /// in `[0, length)` yields `undefined` (arrays are dense, so in-range reads never miss).
-    /// The index is an ECMAScript number (`f64`) or a range-proven `i32` (P3.5); with a proven
-    /// in-bounds index P3.5 rewrites the result to the plain element type.
+    /// Read an element as `T | undefined`: an index in `[0, length)` yields the element, and
+    /// any other index yields `undefined`. Accepts an ECMAScript number (`f64`) or a
+    /// range-proven `i32`.
     pub ArrayGetOp(array, index) -> fallible;
     name = "perry.array_get";
     format = "$0 `[` $1 `] : ` type($0)";
@@ -129,8 +128,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Read an element at an `i32` index proven in `[0, length)` (P3.5, `perry_mir::ranges`):
-    /// the plain element, with no check. Only the range pass creates it.
+    /// Unchecked element read at an `i32` index proven in `[0, length)` by `perry_mir::ranges`.
     pub ArrayAtOp(array, index) -> fallible;
     name = "perry.array_at";
     format = "$0 `[` $1 `] : ` type($0)";
@@ -141,8 +139,8 @@ op_schema! {
 }
 
 op_schema! {
-    /// Write an element at an index in `[0, length]`; writing at `length` appends.
-    /// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
+    /// Write an element at an index in `[0, length]`. Writing at `length` appends to the array,
+    /// and any out-of-range index throws a catchable `RangeError`.
     pub ArraySetOp(array, index, value) -> infallible;
     name = "perry.array_set";
     format = "$0 `[` $1 `] = ` $2";
@@ -168,7 +166,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// A string literal; the text is validated UTF-8 by construction.
+    /// Materialize a string literal whose text is validated UTF-8 by construction.
     pub StringConstOp() -> infallible;
     name = "perry.string_const";
     format = "attr($perry_string_value, $StringAttr) ` : ` type($0)";
@@ -192,7 +190,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Shrink an array's length in-place without reallocating.
+    /// Shrink an array's length in place.
     pub ArrayTruncateOp(array, new_len) -> infallible;
     name = "perry.array_truncate";
     format = "$0 `, ` $1";
@@ -288,7 +286,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Length in Unicode scalar values (Perry rejects UTF-16 code-unit operations).
+    /// String length in Unicode scalar values.
     pub StringLenOp(text) -> infallible;
     name = "perry.string_len";
     format = "$0 ` : ` type($0)";

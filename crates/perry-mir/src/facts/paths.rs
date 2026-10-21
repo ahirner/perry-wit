@@ -6,7 +6,7 @@ use pliron::{
 use std::{collections::HashSet, hash::Hash};
 
 /// Walk every path backwards from `consumer` to its last `origin` execution.
-/// A transition returning `None` invalidates the path; joins retain each distinct state.
+/// A transition returning `None` invalidates the path, and control-flow joins retain each distinct state.
 pub(crate) fn preserves<S: Copy + Eq + Hash>(
     ctx: &Context,
     origin: Ptr<Operation>,

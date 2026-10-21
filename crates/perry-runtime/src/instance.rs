@@ -47,7 +47,7 @@ pub(crate) mod native {
     }
 
     /// Owns one native runtime instance, including allocations and its mock host.
-    /// Guest ABI calls are available only within `enter`; separate instances can alternate on one thread.
+    /// Guest ABI calls run within `enter`, and separate instances can alternate on a single thread.
     pub struct RuntimeInstance {
         state: Rc<State>,
     }

@@ -1,5 +1,5 @@
 //! Promise-timer cancellation. Active scheduler entries watch a collectible signal and
-//! unlink on completion, cancellation or task cleanup; completed timers retain no history.
+//! unlink on completion, cancellation or task cleanup.
 use crate::{exception, host, promise, region};
 use core::ptr;
 
@@ -45,10 +45,10 @@ pub(crate) extern "C" fn perry_abort_reject(promise: *mut u8, message: *mut u8) 
     promise::perry_promise_reject(promise, status as i32);
 }
 
-/// Watch a registered timer without allocating a second scheduler node.
+/// Attach `signal` to an existing timer scheduler node identified by `handle` and `promise`.
 ///
 /// # Safety
-/// `signal` is live; `handle` and `promise` identify a newly registered timer.
+/// `signal` is live, and `handle` and `promise` identify a newly registered timer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_abort_watch(signal: *mut u8, handle: u32, promise: *mut u8) {
     let signal = signal.cast::<Signal>();

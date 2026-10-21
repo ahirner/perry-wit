@@ -294,8 +294,8 @@ impl FunctionLowering<'_, '_> {
         Ok((self.i32_const(ctx, tag), payload))
     }
 
-    /// Scalar projection uses nontrapping conversions; an absent alternative selects
-    /// its sentinel after the present payloads have been converted.
+    /// Convert present numeric payloads with nontrapping conversions and select the absent
+    /// sentinel when the tag indicates absence.
     fn untag_numeric(
         &mut self,
         ctx: &mut Context,
@@ -333,8 +333,9 @@ impl FunctionLowering<'_, '_> {
         Ok(self.select(ctx, absent, absent_val, present))
     }
 
-    /// The `br_table` index of a present tag: `FLOAT`, `SIGNED` or `UNSIGNED`. Integer tags,
-    /// fixed-width ones included, are odd exactly when signed; exclude absent tags first.
+    /// Compute the `br_table` index of a present tag (`FLOAT`, `SIGNED`, or `UNSIGNED`).
+    /// Integer tags, including fixed-width variants, are odd when signed, and callers filter
+    /// absent tags beforehand.
     pub(crate) fn canonical_numeric_tag(&mut self, ctx: &mut Context, tag: Value) -> Value {
         let float_tag = self.i32_const(ctx, FLOAT);
         let is_float = self.num(ctx, NumOpcode::I32Eq, vec![tag, float_tag]);
@@ -798,8 +799,8 @@ impl FunctionLowering<'_, '_> {
         self.num(ctx, NumOpcode::I32And, vec![signed, negative])
     }
 
-    /// Compare magnitudes without rounding the integer. Truncation is exact in range;
-    /// the equal-integer case retains a fractional remainder, and 2^64 bounds saturation.
+    /// Exact magnitude comparison between a 64-bit integer and an IEEE 754 `f64`.
+    /// Truncation is exact in range, the equal-integer case retains any fractional remainder, and `2^64` bounds saturation.
     fn integer_float_order(
         &mut self,
         ctx: &mut Context,

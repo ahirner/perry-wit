@@ -73,7 +73,7 @@ pub enum CompareKind {
     Ne,
 }
 
-/// Memory tier of an allocation site (design decision D3).
+/// Memory tier of an allocation site.
 ///
 /// Ordered by escape: `Scalar < Frame < Task < Instance`. `Unassigned` is the builder's
 /// output before tier classification runs.
@@ -151,8 +151,8 @@ impl NumericConstant {
         }
     }
 
-    /// An integer or double scalar as a numeric constant; a double holding a safe integer
-    /// (other than `-0`) becomes that integer.
+    /// Convert an integer or double scalar attribute into a numeric constant. A double holding
+    /// a safe integer other than `-0` converts to that integer.
     pub(crate) fn from_scalar(ctx: &Context, attr: &dyn Attribute) -> Option<Self> {
         Some(match Self::of(ctx, attr)? {
             Self::Float(bits) => {

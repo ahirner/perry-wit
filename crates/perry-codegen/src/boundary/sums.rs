@@ -378,7 +378,7 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    /// Reinterpret canonical joined slots; widening preserves the low payload bits.
+    /// Reinterpret canonical joined slots, preserving the low payload bits when widening.
     pub(super) fn coerce_flat(
         &mut self,
         ctx: &mut Context,

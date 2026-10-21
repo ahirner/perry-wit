@@ -1,7 +1,7 @@
 //! Direct calls and async calls to functions of the enclosing module.
 //!
-//! Perry has no first-class functions in MIR (subset rule R5): every callee is a symbol,
-//! which keeps escape summaries and inlining (P3.2, P3.3) exact.
+//! Every MIR callee is a static module symbol, keeping interprocedural escape summaries and
+//! inlining exact.
 use crate::operation_schema::op_schema;
 use crate::signatures::{OutputContract, ResultType, Signature, Ty};
 use crate::types::PromiseType;
@@ -55,7 +55,7 @@ fn callee_signature(
     verify_err!(loc, CallErr::Unknown(callee.to_string()))
 }
 
-/// The function `op` calls, synchronously or asynchronously; every MIR callee is a symbol.
+/// Return the function symbol that `op` calls synchronously or asynchronously.
 pub(crate) fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
     Operation::get_op::<CallOp>(op, ctx)
         .map(|call| call.callee(ctx))
@@ -63,7 +63,7 @@ pub(crate) fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
 }
 
 op_schema! {
-    /// Synchronous call; results are the callee's results.
+    /// Synchronous call returning the callee's results.
     pub CallOp(.._operands) -> infallible;
     name = "perry.call";
     format = "attr($perry_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` types(CharSpace(`,`))";
@@ -84,7 +84,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Start an async function eagerly; it runs until its first pending `await` (D5).
+    /// Start an async function eagerly and run it until its first pending `await`.
     pub AsyncCallOp(.._operands) -> infallible;
     name = "perry.async_call";
     format = "attr($perry_async_callee, $IdentifierAttr) ` (` operands(CharSpace(`,`)) `) : ` type($0)";
@@ -109,8 +109,8 @@ op_schema! {
 }
 
 op_schema! {
-    /// Wait for a promise. Before async split (P3.8) this is an ordinary op; the split turns each
-    /// `await` into a state-machine suspension point. Awaiting a settled promise continues inline.
+    /// Wait for a promise. Async splitting lowers each `await` into a state-machine suspension
+    /// point that continues inline when the promise is already settled.
     pub AwaitOp(promise) -> fallible;
     name = "perry.await";
     format = "$0 ` : ` type($0)";
@@ -151,7 +151,7 @@ pub(crate) fn function_meta(ctx: &Context, function: &FuncOp) -> crate::attrs::F
         .unwrap_or_default()
 }
 
-/// Mark `function` as exported from the component; each call of one is a task (D3, D5).
+/// Mark `function` as exported from the component so each invocation runs as a component task.
 pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
     update_meta(ctx, function, |m| m.exported = true);
 }
@@ -183,8 +183,8 @@ pub(crate) fn is_atomic_construction(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).atomic_construction
 }
 
-/// Mark `function` as an `async` function. Its body may `perry.await`; callers start it
-/// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
+/// Mark `function` as an `async` function. Its body may use `perry.await`, callers start it
+/// with `perry.async_call`, and codegen splits it into a ramp and a state machine.
 pub fn set_async(ctx: &mut Context, function: &FuncOp) {
     update_meta(ctx, function, |m| m.asynchronous = true);
 }

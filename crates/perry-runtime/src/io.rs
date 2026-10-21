@@ -1,15 +1,15 @@
-//! Console output, process state, environment and clocks for WASI P3 components.
+//! Console output, process state, environment, and clocks for WASI P3 components.
 //!
-//! `console.log` and `console.error` append to the current task's output buffers
-//! ([perry_print]); nothing blocks there, as in Node. The buffers drain through one
-//! `wasi:cli/stdout` (or `stderr`) stream per task, opened on first use: [perry_io_pump]
-//! starts async `stream.write`s whenever the task is about to wait or finish, a blocked write
-//! joins the task's waitable set and completes through [perry_io_event], and [perry_io_close]
-//! drops the writable end and waits for the host's completion future before the export
-//! returns. A buffer being written is never touched; new output goes to a second one.
+//! `console.log` and `console.error` append synchronously to the current task's output buffers
+//! (`perry_print`). The buffers drain through one `wasi:cli/stdout` (or `stderr`) stream per
+//! task, opened on first use: `perry_io_pump` starts async `stream.write`s whenever the task
+//! waits or finishes, a blocked write joins the task's waitable set and completes through
+//! `perry_io_event`, and `perry_io_close` drops the writable end and awaits the host's
+//! completion future before the export returns. Double buffering isolates in-flight writes
+//! from new output.
 //!
-//! `process.exitCode` and `process.exit` are instance state ([perry_exit_code_set],
-//! [perry_exit]); `process.exit` unwinds with status 5, which no handler catches.
+//! `process.exitCode` and `process.exit` update instance state (`perry_exit_code_set` and
+//! `perry_exit`), and `process.exit` unwinds with status 5 directly to the export boundary.
 use crate::{
     exception::{
         ERROR, EXIT, KIND, REFERENCE_ERROR, SYNTAX_ERROR, TAG, TAG_BOOLEAN, TAG_JSON, TAG_NULL,
@@ -22,8 +22,7 @@ use crate::{
 #[cfg(target_arch = "wasm32")]
 use core::cell::UnsafeCell;
 
-/// A growable byte buffer in the task region: released with the task, so a component that
-/// prints never needs the buffer allocator's `free` path.
+/// Growable byte buffer in the task region, reclaimed in bulk when the task ends.
 struct Bytes {
     ptr: *mut u8,
     len: usize,
@@ -91,7 +90,7 @@ impl Bytes {
 pub(crate) struct Output {
     writable: u32,
     future: u32,
-    /// Bytes handed to `stream.write`; immutable while `blocked`.
+    /// Bytes handed to `stream.write`, held immutable while `blocked`.
     writing: Bytes,
     written: usize,
     blocked: bool,
@@ -119,7 +118,7 @@ struct Ack {
 enum State {
     Open,
     Failed,
-    /// Writable end dropped; waiting for the completion future.
+    /// Writable end has been dropped and the stream is awaiting the completion future.
     Closing,
     Closed,
 }
@@ -235,12 +234,12 @@ fn print_bytes(fd: usize, bytes: &[u8], newline: bool) {
     }
 }
 
-/// `writer.write(bytes)` of a Web writer over output `fd`: append `len` bytes at `data` and
-/// settle `promise` once the host accepted them. Writing starts at once, so a writer that
-/// awaits each write keeps at most one chunk buffered (bounded memory for streams).
+/// Implement `writer.write(bytes)` for a Web writer over output `fd`: append `len` bytes at
+/// `data` and settle `promise` once the host accepts them. Writing starts immediately, so a
+/// writer that awaits each write keeps at most one chunk buffered.
 ///
 /// # Safety
-/// `data` must point to `len` readable bytes; `promise` must be a pending promise.
+/// `data` must point to `len` readable bytes, and `promise` must be a pending promise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_write_acknowledged(
     fd: u32,
@@ -397,8 +396,8 @@ fn close_fd(fd: usize) -> u32 {
     }
 }
 
-/// Flush and close the current task's outputs. Returns 1 once everything reached the host;
-/// otherwise the task waits on its set for the events that finish it.
+/// Flush and close the current task's outputs. Returns `1` once all bytes reach the host,
+/// or `0` when the task must wait on its waitable set for completion events.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_io_close() -> u32 {
     close_fd(0) & close_fd(1)

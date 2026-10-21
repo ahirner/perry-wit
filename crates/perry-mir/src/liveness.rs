@@ -14,8 +14,8 @@ use pliron::{
 };
 use std::collections::{HashMap, HashSet};
 
-/// Block-local live intervals. Pliron supplies inter-block liveness; definition and
-/// last-use positions answer local queries without copying a set at every operation.
+/// Block-local live intervals. Pliron supplies inter-block liveness, and definition and
+/// last-use positions answer local queries in O(1).
 #[derive(Default)]
 pub struct LiveValues {
     positions: HashMap<Ptr<Operation>, (Ptr<BasicBlock>, usize)>,

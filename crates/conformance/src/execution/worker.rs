@@ -318,8 +318,8 @@ fn compile_component_cached(
     built
 }
 
-/// Compiles and runs a function case; failures of the case itself become outcomes, and only
-/// host setup failures are errors.
+/// Compile and run a function case, recording case-level traps as outcomes and propagating
+/// host setup failures as errors.
 fn execute_function(
     source: &str,
     directory: &Path,
@@ -683,10 +683,7 @@ async fn number_calls(
         None
     };
     let mut calls = Calls::default();
-    let run_one = async |input: f64,
-                         store: &mut Store<Host>,
-                         calls: &mut Calls|
-           -> Result<()> {
+    let run_one = async |input: f64, store: &mut Store<Host>, calls: &mut Calls| -> Result<()> {
         store.set_fuel(fuel)?;
         let mut result = [Val::Bool(false)];
         run.call_async(&mut *store, &[Val::Float64(input)], &mut result)
@@ -713,8 +710,9 @@ async fn number_calls(
     Ok(calls)
 }
 
-/// Reads `run`'s `result<..>` like the Node oracle: a list is `[value, ...trace]`; a record
-/// contributes `value`, then `trace` followed by its other fields in order (`none` as -66).
+/// Decode `run`'s `result<..>` matching the Node oracle format. A list represents
+/// `[value, ...trace]`, and a record contributes `value`, `trace`, and its remaining fields
+/// in declaration order (`none` encoded as -66).
 fn lifted_observation(result: Val) -> Result<Observation> {
     let Val::Result(Ok(Some(payload))) = result else {
         bail!("case failed through its declared WIT result error: {result:?}")
@@ -764,7 +762,8 @@ fn decode_input(encoded: &str) -> Result<f64> {
     }
 }
 
-/// Fuel used by the finished call; the call must leave no concurrent state or host resources.
+/// Return the fuel consumed by the finished call after verifying that all concurrent state
+/// and host resources have settled.
 fn settle(store: &mut Store<Host>, fuel: u64, call: &str) -> Result<u64> {
     let used = fuel - store.get_fuel()?;
     store.assert_concurrent_state_empty();

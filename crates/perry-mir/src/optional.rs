@@ -186,8 +186,8 @@ op_schema! {
 }
 
 op_schema! {
-    /// The defined value; throws a catchable `TypeError` on `undefined`. Emitted at typed
-    /// boundaries and before property access, where ECMAScript also throws `TypeError`.
+    /// Extract the defined value or throw a catchable `TypeError` on `undefined`. Emitted at
+    /// typed boundaries and before property access, matching ECMAScript `TypeError` semantics.
     pub UnwrapOp(value) -> fallible;
     name = "perry.unwrap";
     format = "$0 ` : ` type($0)";

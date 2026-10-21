@@ -15,7 +15,7 @@ builtin.module @live { ^module():
 }
 "#;
 
-/// Live-in sets per block; live-after sets are checked against pliron below.
+/// Verify live-in sets per block and check live-after sets against pliron below.
 #[test]
 fn shared_liveness_distinguishes_edges_and_block_definitions() -> Result<()> {
     let ctx = &mut Context::new();
@@ -293,8 +293,8 @@ builtin.module @loop {
     Ok(())
 }
 
-/// Integer folds wrap at every width and signedness; float folds keep IEEE special values; every
-/// ordered or equality comparison with NaN except `!=` folds to false.
+/// Verify that integer folds wrap at every width and signedness, float folds preserve IEEE
+/// special values, and ordered or equality comparisons with `NaN` other than `!=` fold to false.
 #[test]
 fn sccp_folds_scalar_constants() {
     let ctx = &mut Context::new();
@@ -403,8 +403,8 @@ fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
     Ok(())
 }
 
-/// Cleanup reaches a fixed point over several rounds; `run_to_fixpoint` asserts in test builds
-/// that every changing round strictly lowers the IR potential.
+/// Verify that cleanup reaches a fixed point over several rounds while `run_to_fixpoint`
+/// asserts that every changing round strictly lowers the IR potential.
 #[test]
 fn cleanup_rounds_strictly_decrease_ir_potential() -> Result<()> {
     let ctx = &mut Context::new();

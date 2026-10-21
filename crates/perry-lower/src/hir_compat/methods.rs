@@ -1,4 +1,4 @@
-//! Preserve method arguments that upstream specializations discard or reorder.
+//! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
 use super::*;
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::{DUMMY_SP, SyntaxContext};

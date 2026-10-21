@@ -1,4 +1,4 @@
-//! WIT s64/u64 transport never passes through a floating-point representation.
+//! Exact 64-bit integer lifting and lowering across the canonical ABI boundary.
 use super::*;
 
 impl FunctionLowering<'_, '_> {

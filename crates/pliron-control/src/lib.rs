@@ -3,7 +3,7 @@
 //! Adapted from `pliron-llvm` (Apache-2.0, The pliron contributors).
 
 /// Define `BrOp`, `CondBrOp`, and `ReturnOp` in a module importing pliron and thiserror.
-/// The predicate checks the dialect's condition type; operation names and errors stay local.
+/// The predicate checks the dialect's condition type, while operation names and errors remain local.
 #[macro_export]
 macro_rules! control_flow_ops {
     ($branch:literal, $conditional:literal, $return:literal, $valid:expr, $description:literal) => {

@@ -55,7 +55,7 @@ macro_rules! type_kinds {
 type_kinds! {
     ctx, ty;
     BigInt = crate::types::BigIntType::get(ctx).into();
-    /// A signless i32 index proven in bounds; verification admits any signedness.
+    /// A signless `i32` index proven in bounds. Verification admits any 32-bit integer signedness.
     Index = IntegerType::get(ctx, 32, Signedness::Signless).into(),
         accepts integer_width(ctx, ty) == Some(32);
     /// Unicode scalar value, or -1 for the empty result of charAt. Internal MIR only.
@@ -69,9 +69,9 @@ type_kinds! {
         accepts ty.deref(ctx).is::<IntegerType>() || Ty::Number.matches(ctx, ty);
     Bool = Ty::Predicate.get(ctx),
         accepts integer_width(ctx, ty) == Some(1);
-    /// Strict boolean predicate; unlike intrinsic Bool, signedness is significant.
+    /// Signless 1-bit boolean predicate.
     Predicate = IntegerType::get(ctx, 1, Signedness::Signless).into();
-    /// Exception status; unlike an Index, it must be signless.
+    /// Signless 32-bit exception status code.
     Status = Ty::Index.get(ctx);
     String = StringType::get(ctx).into();
     OptString = OptionalType::get(ctx, Ty::String.get(ctx)).into();

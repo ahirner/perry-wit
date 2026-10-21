@@ -27,7 +27,7 @@ pub(crate) struct Locations<'s> {
 }
 
 impl<'s> Locations<'s> {
-    /// HIR erases binary spans; preserve the operators rejected by MIR as inert sequences.
+    /// Preserve spans for unsupported binary operators as inert sequences before HIR erases binary spans.
     pub(super) fn preserve_operators(&mut self, module: &mut ast::Module) {
         struct Preserver<'a>(&'a mut Vec<Span>);
         impl VisitMut for Preserver<'_> {

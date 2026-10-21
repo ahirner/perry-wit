@@ -1,8 +1,9 @@
-//! Content-based compiler API. Module names identify supplied contents, never host files.
+//! Content-based compiler API over caller-supplied sources and modules.
 //!
-//! [`compile`] checks a WIT world and returns its core plus an optional [`crate::ComponentOutput`]
-//! containing both component forms. [`Options::core_only`] omits that record; it does not
-//! bypass WIT. [`compile_core`] instead exports raw TypeScript functions without WIT.
+//! [`compile`] validates a WIT world and returns its core module plus an optional
+//! [`crate::ComponentOutput`] containing both component forms. [`Options::core_only`]
+//! returns only the world-bound core module. [`compile_core`] exports raw TypeScript
+//! functions with core signatures.
 //!
 //! ```
 //! # fn main() -> anyhow::Result<()> {
@@ -22,7 +23,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct Source {
-    /// Optional diagnostic name; for a TypeScript entrypoint, also its logical identity.
+    /// Optional diagnostic name. For a TypeScript entrypoint, this also serves as its logical identity.
     pub name: Option<String>,
     pub contents: Vec<u8>,
 }
@@ -36,7 +37,7 @@ impl From<&[u8]> for Source {
     }
 }
 
-/// A supplied dependency module. Imports resolve against this identity, never host files.
+/// A supplied dependency module resolved from in-memory contents by package-relative name.
 #[derive(Clone, Debug)]
 pub struct Module {
     pub name: String,
@@ -70,7 +71,7 @@ pub struct Wit {
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub world: Option<String>,
-    /// Omit component wrapping; the core still implements the selected WIT world's ABI.
+    /// Emit the linked core Wasm module directly while preserving the selected WIT world's ABI.
     pub core_only: bool,
 }
 
@@ -137,9 +138,7 @@ fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::
     )
 }
 
-/// Compile raw TypeScript exports without WIT or filesystem access.
-/// Unlike [`compile`] with [`Options::core_only`], these exports use raw core signatures,
-/// not the canonical ABI of a WIT world.
+/// Compile raw TypeScript exports with core signatures from supplied in-memory sources.
 fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
     let (source, identity, modules) = program(input)?;
     crate::compiler::compile_core_sources(source, identity, &modules, false)

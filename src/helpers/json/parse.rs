@@ -23,8 +23,8 @@ pub fn measure(input: &str) -> Result<usize, Error> {
 
 /// Writes a validated graph using absolute addresses relative to `base`.
 /// Nodes contain kind, next sibling, payload, first child, count, and member key.
-/// String payloads contain a data address and byte length; offset 16 is scalar length.
-/// Word 28 is zero: the runtime marks objects whose members it has put in property order.
+/// String payloads contain a data address, byte length, and scalar length at offset 16.
+/// Word 28 starts at zero, and the runtime sets it once object members are in property order.
 pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error> {
     let mut parser = Parser {
         reader: Reader::new(input),
@@ -74,8 +74,8 @@ struct Open {
 }
 
 impl<S: GraphStorage> Parser<'_, S> {
-    /// One loop over values with an explicit stack of open containers instead of recursion:
-    /// the frame is fixed, so the linker can bound the stack of programs that parse JSON.
+    /// Iterative loop over values using a fixed-capacity stack of open containers so the
+    /// linker can bound the shadow stack of programs that parse JSON.
     /// Nodes are reserved in document order (a container, then each member's key and value).
     fn document(&mut self, complete: bool) -> Result<usize, Error> {
         let mut stack = ArrayVec::<Open, MAX_DEPTH>::new();
@@ -143,9 +143,9 @@ impl<S: GraphStorage> Parser<'_, S> {
         Ok(key)
     }
 
-    /// Parse a scalar value, or open an array or object (its kind written, the bracket
-    /// consumed; [Parser::document] parses its members). Returns the node and, for a
-    /// container, whether it is an object.
+    /// Parse a scalar value, or open an array or object by writing its kind and consuming
+    /// the opening bracket so [Parser::document] can parse its members. Returns the node
+    /// and, for a container, whether it is an object.
     fn value(&mut self, depth: usize) -> Result<(usize, Option<bool>), Error> {
         self.reader.whitespace();
         if depth >= MAX_DEPTH {

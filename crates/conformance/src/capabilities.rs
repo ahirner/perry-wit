@@ -1,4 +1,4 @@
-//! Concrete standard API domains. Source generation is pure; adapters own all effects.
+//! Concrete standard API domains. Source generation is pure, and adapters own all host effects.
 use crate::{
     execution::check_equivalence,
     program::{FIXTURE, Form, Number, Program, literal},

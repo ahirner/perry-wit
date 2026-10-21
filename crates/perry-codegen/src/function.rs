@@ -26,7 +26,7 @@ use pliron::{
 use std::collections::HashMap;
 
 /// Builds the Wasm body of one function (or of generated glue) into the module state.
-/// Methods are spread over the topical modules; the construction helpers are in `builder`.
+/// Lowering methods are organized across the topical modules, and instruction builders live in `builder`.
 pub(crate) struct FunctionLowering<'s, 'e> {
     pub(crate) state: &'s mut ModuleState<'e>,
     pub(crate) region: Ptr<Region>,
@@ -44,9 +44,9 @@ pub(crate) struct FunctionLowering<'s, 'e> {
     /// Wasm result types, without the status.
     pub(crate) results: Vec<TypeHandle>,
     pub(crate) throw_block: Option<Ptr<BasicBlock>>,
-    /// While lowering an op followed by `perry.caught`: where its exception goes instead of
-    /// leaving the function. The block takes the status, then the op's results (zero on the
-    /// exceptional edge), so the results dominate the code after it.
+    /// Active landing block and result types while lowering an op followed by `perry.caught`.
+    /// The block takes the status followed by the op's results (zero on the exceptional edge),
+    /// so the results dominate the code after it.
     pub(crate) landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
     pub(crate) frame: Option<async_split::Frame>,

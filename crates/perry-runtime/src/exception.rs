@@ -2,13 +2,13 @@
 //!
 //! Compiled code passes exceptions as an `i32` status (1 `TypeError`, 2 `RangeError`, 3
 //! `Error`, 4 another thrown value, 5 `process.exit`, 6 `ReferenceError`, 7 `SyntaxError`).
-//! `throw` also makes an exception object
-//! pending in the task, so `catch (e)` sees the thrown object itself; failures raised by
-//! compiled code without an object (`perry.unwrap`, holes) get one materialized at the catch.
+//! A `throw` statement also records a pending exception object on the task so `catch (e)`
+//! receives the thrown value directly. Failures raised by compiled checks such as
+//! `perry.unwrap` or array holes materialize an exception object when caught.
 //!
 //! Layout, read inline by compiled code: `kind: u32` at 0 (the status), `tag: u32` at 4,
 //! `value: u64` at 8, `cause: u32` at 16, `owner: u32` at 20. `Error` objects have tag
-//! [TAG_STRING] and their message in `value`; their cause is a JSON value or null.
+//! [TAG_STRING] and their message in `value`, with a JSON value or null in `cause`.
 //! Other thrown values keep their slot bits. The owner retains referenced payloads.
 use crate::region::current;
 use core::ptr;

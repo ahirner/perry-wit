@@ -1,19 +1,18 @@
-//! The async split (`TODOs.md` P3.8): stackless state machines for `async` functions.
+//! Stackless state machines for `async` functions.
 //!
-//! Each async MIR function `f` becomes two Wasm functions:
+//! Each async MIR function `f` lowers into two Wasm functions:
 //!
-//! - the **ramp** `f(args) -> promise`: allocates a frame in the task region, stores the
-//!   arguments, creates the result promise and runs `step_f` eagerly;
-//! - the **step** `step_f(frame)`: the function body. Its entry dispatches on the frame's
-//!   state: 0 starts the body, `k` resumes after the `k`-th `await`.
+//! - The **ramp** `f(args) -> promise` allocates a frame in the task region, stores the
+//!   arguments, creates the result promise, and runs `step_f` eagerly.
+//! - The **step** `step_f(frame)` executes the function body, dispatching on the frame's
+//!   state at entry (0 starts the body and `k` resumes after the `k`-th `await`).
 //!
 //! An `await` of a settled promise continues inline. Otherwise the step stores its state,
-//! registers its frame on a shared P3 future and returns. Settling the promise completes
-//! that future; its host event dispatches the registered frames in order. Values live
-//! across an `await` (backward liveness over the MIR CFG) live in
-//! frame slots: they are stored where they are defined and loaded where they are used, so the
-//! resume entries need no SSA repair. `return v` fulfils the frame's promise, and an exception
-//! rejects it with its status.
+//! registers its frame on a shared P3 future, and returns. Settling the promise completes
+//! that future, and its host event dispatches the registered frames in order. Values live
+//! across an `await` (determined by backward liveness over the MIR CFG) reside in frame
+//! slots, where definitions store them and uses load them.
+//! `return v` fulfils the frame's promise, and an exception rejects it with its status.
 use crate::{
     function::FunctionLowering,
     module::ModuleState,

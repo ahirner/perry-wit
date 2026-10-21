@@ -1,7 +1,7 @@
-//! Non-moving collectible storage. Allocation never collects: compiled safe points provide
-//! roots before calling `collect`. Shapes describe exact pointer offsets and an optional
-//! repetition stride; byte payloads have no shape. Small objects occupy size-class pages,
-//! with allocation/mark bits beside the payload and free slots swept on demand.
+//! Non-moving collectible storage. Compiled safe points publish roots before calling
+//! `collect`. Shapes describe exact pointer offsets and an optional repetition stride, while
+//! byte payloads use a null shape. Small objects occupy size-class pages with allocation and
+//! mark bitmaps beside the payload and free slots swept on demand.
 use alloc::{
     alloc::{alloc, dealloc, handle_alloc_error},
     boxed::Box,
@@ -21,8 +21,8 @@ const MAX_SMALL: usize = PAGE / 2;
 /// Eight-byte alignment is preserved while common 32-byte payloads fit 48-byte cells.
 const CLASSES: usize = 11;
 
-/// One entry per eight-byte requirement; derived at compile time from the cell layout.
-/// The small table avoids bit-width arithmetic in every allocation and release.
+/// Size-class lookup table with one entry per eight-byte increment, derived at compile time
+/// from the cell layout for direct indexing during allocation and release.
 #[cfg(feature = "collectible")]
 const CLASS_FOR_SIZE: [u8; MAX_SMALL / 8] = {
     let mut classes = [0; MAX_SMALL / 8];
@@ -68,7 +68,7 @@ struct Header {
 }
 const HEADER: usize = core::mem::size_of::<Header>();
 
-/// One bit per slot; a small page holds at most 64 slots.
+/// Occupancy bitmap with one bit per slot for small pages holding at most 64 slots.
 const fn bit(index: usize) -> u64 {
     1 << index
 }
@@ -185,7 +185,7 @@ impl Drop for Page {
 
 #[cfg(target_arch = "wasm32")]
 struct DirectoryTable {
-    /// Populated page entries; a large allocation occupies several entries.
+    /// Populated page entries, where a large allocation spans multiple entries.
     occupied: usize,
     pages: [*mut Page; 1024],
 }
@@ -278,8 +278,8 @@ pub(crate) struct Counters {
 }
 
 /// Shapes are static arrays `[stride, number_of_offsets, offsets…]`. A zero stride traces
-/// one object; a nonzero stride repeats the offsets across its allocation (array storage).
-/// Offsets identify native pointer fields, never integer or floating-point slots.
+/// a single object, and a nonzero stride repeats the offsets across array storage.
+/// Offsets identify native pointer fields.
 pub(crate) struct Collector {
     pages: Vec<Option<Box<Page>>>,
     directory: Directory,
@@ -320,8 +320,9 @@ impl Collector {
         }
     }
 
-    /// Allocate without collecting. The caller must establish safe points between allocation
-    /// bursts; every pointer field remains zero until the caller initializes it.
+    /// Allocate zero-initialized storage of `size` bytes with pointer map `shape`.
+    /// Callers establish safe points between allocation bursts and initialize described
+    /// pointer fields before the next collection.
     ///
     /// # Safety
     /// `shape` is null or a static shape as documented on [Collector]. All described pointer
@@ -415,7 +416,7 @@ impl Collector {
         })
     }
 
-    /// Enlarge an exclusive payload without collecting or moving it. Newly exposed bytes are zero.
+    /// Enlarge an exclusive payload in place and zero newly exposed bytes.
     ///
     /// # Safety
     /// `object` is the exact start of a live allocation, with no interior aliases or host borrows.
@@ -508,8 +509,7 @@ impl Collector {
         }
     }
 
-    /// Release a proven nonescaping small frame at activation exit, without a heap search.
-    /// Codegen releases each such frame exactly once, so anything else is a compiler bug.
+    /// Release a proven non-escaping small frame at activation exit by direct page lookup.
     ///
     /// # Safety
     /// `object` is an exact allocation pointer with no remaining aliases or retained children.
@@ -562,13 +562,10 @@ impl Collector {
         self.work.push(unsafe { payload.add(HEADER) });
     }
 
-    /// Trace the supplied precise roots, then make dead small slots available for lazy sweep.
-    /// Large dead blocks are returned to talc immediately. Roots may include static objects;
-    /// unowned addresses and null sentinels are ignored without inspecting their contents.
+    /// Trace `roots` without a weak-owner finalization callback.
     ///
     /// # Safety
-    /// All live pointer fields satisfy their allocation's shape. No unregistered temporary
-    /// pointer may be needed after this explicit safe point.
+    /// All live pointer fields satisfy their allocation's shape.
     #[cfg(test)]
     pub(crate) unsafe fn collect(&mut self, roots: &[*mut u8]) {
         unsafe { self.collect_with(roots, |_| {}) };
@@ -583,11 +580,11 @@ impl Collector {
         })
     }
 
-    /// Finalize weak external owners after tracing and before any dead storage is reclaimed.
-    /// The callback cannot allocate from this collector or invoke guest/host code.
+    /// Trace the supplied precise roots, run `finalize` on weak external owners, and make
+    /// dead small slots available for lazy sweep. Large dead blocks return to talc immediately.
     ///
     /// # Safety
-    /// Same shape and root contract as [`Self::collect`].
+    /// All live pointer fields satisfy their allocation's shape.
     pub(crate) unsafe fn collect_with(&mut self, roots: &[*mut u8], finalize: impl FnOnce(&Self)) {
         for page in self.pages.iter_mut().flatten() {
             // Finish a previous sweep before resetting its marks.

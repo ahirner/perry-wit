@@ -1,9 +1,9 @@
 //! Canonical ABI conversion for typed component imports and exports.
 //!
-//! Strings share UTF-8 payloads across the boundary; adopted input buffers and borrowed output
-//! owners remain live through lifting/post-return or async acknowledgement. Results support
-//! explicit tags and checked completion-style returns/throws. Async exports use stackless P3
-//! callbacks; async imports retain a canonical transfer until the host settles it.
+//! Strings share UTF-8 payloads across the boundary, while adopted input buffers and borrowed
+//! output owners remain live through lifting, post-return, or async acknowledgement. Results
+//! support explicit tags and checked completion-style returns and throws. Async exports use
+//! stackless P3 callbacks, and async imports retain a canonical transfer until the host settles it.
 use crate::{
     function::FunctionLowering,
     host::{EffectHost, Foreign, ValueHost},
@@ -650,8 +650,7 @@ impl FunctionLowering<'_, '_> {
         Ok(self.num(ctx, opcode, vec![value]))
     }
 
-    /// Store a MIR value at `address + offset` in canonical layout.
-    /// Copy a MIR array into a canonical list buffer; returns (buffer, length).
+    /// Copy a MIR array into a canonical list buffer and return the `(buffer, length)` pair.
     fn lower_list(
         &mut self,
         ctx: &mut Context,

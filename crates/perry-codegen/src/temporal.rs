@@ -20,8 +20,8 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Call a `time-helper` codec that writes into `capacity` new opaque bytes (passed
-    /// after `args`, with the capacity for text results) and returns
-    /// `status << 32 | length`; a failure throws `RangeError`. Returns the bytes and length.
+    /// after `args`, with the capacity for text results) and returns `status << 32 | length`.
+    /// Throws `RangeError` on failure and returns the buffer and written length on success.
     fn time_codec(
         &mut self,
         ctx: &mut Context,

@@ -155,8 +155,8 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    /// Open the resource scope of one canonical call when `needed`; `roots` is the root mark a
-    /// failed lowering resets to. Scopes do not nest.
+    /// Open a non-nesting resource scope for one canonical call when `needed`, recording the
+    /// root mark `roots` for rollback if lowering fails.
     pub(super) fn begin_resources(
         &mut self,
         ctx: &mut Context,

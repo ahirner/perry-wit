@@ -52,7 +52,7 @@ impl ValueFacts {
     }
 
     /// Returns whether facts changed and whether an interval widened. Storage joins widen
-    /// immediately; SSA values and return summaries allow one exact expansion first.
+    /// immediately, while SSA values and return summaries allow one exact expansion first.
     pub(super) fn join(&mut self, other: Self, representation: Representation) -> (bool, bool) {
         let (domain, bounds) = representation.resolve(self.domain.join(other.domain));
         let (range, expanded, widened) = self.range.join_step(

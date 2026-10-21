@@ -1,5 +1,5 @@
 //! WIT types as HIR types under their SDK names, for programs that import the SDK's generated
-//! declarations (which the parser does not read). The mapping mirrors the SDK's TypeScript:
+//! declarations. The mapping mirrors the SDK's TypeScript:
 //! records are object types, variants unions of `{ tag, val }` objects, options
 //! `T | null`, tuples tuples and `list<u8>` a `Uint8Array`.
 use crate::abi::types::{Contract, Input, convert, primitive};

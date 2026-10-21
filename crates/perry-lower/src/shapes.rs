@@ -4,13 +4,12 @@
 //! `(field_name, field_type)` pairs: an interface `P { x; y }`, a type literal `{ y; x }`, and
 //! Perry's synthesized `__AnonShape_*` class for `{ y: …, x: … }` all resolve to the same
 //! `perry.record` handle. Nominal classes and recursive declarations allocate fresh record handles.
-//! Field order inside an object record is the sorted order; evaluation order stays the source order.
-//! Widening a record to a narrower shape (subset rule R2) is not supported yet.
+//! Field order inside an object record follows the sorted field names, while expression evaluation
+//! preserves source order.
 //!
-//! WIT types come from the SDK's generated declarations, which the parser does not read: the
-//! compiler passes them as *foreign* HIR types under their SDK names (prefixed `wit:`), and imports of those
-//! names resolve to them. Finite variants retain their case-specific payload types.
-//! Options distinguish admitted null and undefined states; tuples use `{ _0: A, _1: B }`.
+//! WIT types are passed by the compiler as *foreign* HIR types under their SDK names (prefixed `wit:`),
+//! and imports of those names resolve to them. Finite variants retain their case-specific payload types.
+//! Options distinguish admitted null and undefined states, and tuples use `{ _0: A, _1: B }`.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
@@ -70,7 +69,7 @@ fn hir_type_hash(ty: &HirType) -> u64 {
     hasher.finish()
 }
 
-/// An interned [`HirType`] handle backed by [`Context`]'s [`pliron::uniqued_any::UniqueStore`].
+/// An interned [`HirType`] handle backed by [`Context`]'s [`pliron::uniqued_any::Uniqued`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct TypeId(pliron::uniqued_any::Uniqued<TypeKey>);
 

@@ -2,8 +2,7 @@
 //!
 //! A `Map` or `Set` is a box record `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
 //! Deletes tombstone entries, and live iterators track `(index, min_seq, epoch)` so clears and
-//! compactions resynchronize cursor positions against monotonic entry sequence numbers without
-//! retaining cursor lists or compaction histories.
+//! compactions resynchronize cursor positions against monotonic entry sequence numbers.
 
 use super::*;
 use crate::control_flow::{ArrayOutput, Holes, Input, Projection};
@@ -72,7 +71,7 @@ impl EntryKind {
         }
     }
 
-    /// Classify an entry record; dictionary and plain tuples have no liveness flag.
+    /// Classify a `Map` or `Set` entry record by its `[live, key, value?]` field layout.
     fn of_entry(ctx: &Context, rec: TypedHandle<RecordType>) -> Option<Self> {
         match rec.deref(ctx).kind() {
             RecordKind::MapEntry => Some(Self::Map),

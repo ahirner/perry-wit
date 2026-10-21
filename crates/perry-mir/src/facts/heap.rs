@@ -1,5 +1,5 @@
 //! Allocation identities and stable slot facts, independent of physical storage.
-//! Writes join into slots; readers subscribe to slots and possible object identities.
+//! Writes join into slots, and readers subscribe to slots and possible object identities.
 use super::*;
 use crate::{
     collections::{ArrayAtOp, ArrayGetOp},
@@ -226,8 +226,8 @@ impl Solver {
         }
     }
 
-    /// The object after `previous` that `cell` may hold; iterating by position lets the
-    /// visitor grow the set.
+    /// Return the next object after `previous` that `cell` may hold. Iterating by position
+    /// allows the visitor to grow the set during traversal.
     fn next_object(&self, cell: usize, previous: Option<usize>) -> Option<usize> {
         after(&self.analysis.heap.cells[cell].objects, previous)
     }

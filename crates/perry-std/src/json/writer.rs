@@ -39,7 +39,7 @@ pub(crate) extern "C" fn std_json_writer() -> *mut u8 {
     w as *mut u8
 }
 
-/// Enter a container value; returns 0 (and fails the writer) when nesting is too deep.
+/// Enter a container value, returning `0` and marking the writer failed when nesting exceeds [MAX_DEPTH].
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
     let w = writer(w);
@@ -82,7 +82,7 @@ pub(crate) extern "C" fn std_json_item(w: *mut u8) {
     }
 }
 
-/// Start an object member; `key` is the already quoted key followed by `:`.
+/// Start an object member, where `key` is the pre-quoted key followed by `:`.
 ///
 /// # Safety
 /// `key` must be a string.
@@ -188,9 +188,9 @@ pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
     unsafe { adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
-/// Write a parsed JSON value starting `depth` levels deep; false when it nests deeper than
-/// [MAX_DEPTH]. Iterative, with a fixed stack of open containers, so the linker can bound
-/// the stack of programs that serialize JSON values.
+/// Write a parsed JSON value starting `depth` levels deep, returning `false` when nesting
+/// exceeds [MAX_DEPTH]. Uses an iterative traversal with a fixed stack of open containers so
+/// the linker can bound the call stack of programs that serialize JSON values.
 fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
     /// An array or object being written: its node, its next member, and whether a member
     /// was written (for separators).
@@ -276,9 +276,9 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
     }
 }
 
-/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output). `undefined` (the null
-/// address) writes `null` as an array element does; callers omit it as an object member or at
-/// the top level.
+/// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output). A null address
+/// (`undefined`) writes `null` in array element position, while callers omit it for object
+/// members and at the top level.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     let w = writer(w);

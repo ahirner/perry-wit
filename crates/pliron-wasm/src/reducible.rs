@@ -3,14 +3,13 @@
 //! A cycle with several entry blocks gets a *guard* block that every edge into an entry,
 //! from outside or inside the cycle, is redirected through. The guard takes an `i32` label
 //! naming the original target followed by the block arguments of every entry, and dispatches
-//! on the label. It becomes the cycle's only header. This is the transformation of LLVM's
-//! `FixIrreducible` (after Johnson's and Unger's guard/dispatch constructions): no code is
-//! duplicated, every run takes the same blocks as before plus the guard, and since any path in
-//! the new graph minus the guards is a path in the old one, definitions still dominate their
-//! uses.
+//! on the label. It becomes the cycle's only header. This follows the guard/dispatch
+//! construction of Johnson and Unger (as in LLVM's `FixIrreducible`): every run takes the
+//! original blocks plus the guard, and since any path in the new graph minus the guards is a
+//! path in the old one, definitions still dominate their uses.
 //!
-//! Cycles are found as strongly connected components, outermost first; after fixing a
-//! component, the components nested in it (without its header) are processed the same way.
+//! Cycles are found as strongly connected components, outermost first. After fixing a
+//! component, the components nested within it (excluding its header) are processed recursively.
 use crate::{
     attrs::NumOpcode,
     control::{BrOp, CondBrOp},
@@ -40,8 +39,8 @@ use wasm_encoder::ValType;
 ///
 /// # Panics
 ///
-/// If a `wasm.br_table` branches to an entry of a multi-entry cycle; such a target must be
-/// reached through an intermediate block.
+/// Panics if a `wasm.br_table` branches directly to an entry of a multi-entry cycle rather
+/// than routing through an intermediate block.
 pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
     let entry = function.get_entry_block(ctx);
     let region = function.get_region(ctx);

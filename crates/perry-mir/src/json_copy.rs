@@ -32,8 +32,7 @@ use pliron::builtin::{
 use pliron::utils::apint::{APInt, bw};
 
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
-/// provably compatible schemas into a schema-driven deep-copy/normalization helper
-/// without constructing intermediate JSON text or a JSON cursor.
+/// provably compatible schemas into a schema-driven deep-copy and normalization helper.
 pub(crate) fn normalize_json_copy(
     root: Ptr<Operation>,
     ctx: &mut Context,
@@ -292,9 +291,9 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
 /// first visit decides the pair (coinductively for `all`).
 type SchemaPairs = HashSet<(TypeHandle, TypeHandle)>;
 
-/// Whether converting `source_ty` to `target_ty` adds a field the source lacks. Swapping the
-/// types asks whether the conversion drops a source field; a tuple-ness mismatch, where the
-/// two directions differ, fails [schemas_compatible] anyway.
+/// Check whether converting `source_ty` to `target_ty` adds a field absent from the source.
+/// Swapping the arguments tests whether the conversion drops a source field, and any tuple-ness
+/// mismatch is already rejected by [schemas_compatible].
 fn schemas_add_fields(
     ctx: &Context,
     source_ty: TypeHandle,

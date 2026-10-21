@@ -1,6 +1,6 @@
-//! Runtime and helper-library functions that compiled code imports, each declared once
-//! with its Wasm signature. Calls name a [Runtime] variant; the import is emitted once per
-//! module for every function used.
+//! Runtime and helper-library functions imported by compiled code, each declared once
+//! with its Wasm signature. Calls reference a [Runtime] variant, and each used function is
+//! emitted once in the module's import section.
 use perry_mir::Intrinsic;
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -9,7 +9,7 @@ use pliron::{
     r#type::TypeHandle,
 };
 
-/// Runtime ABI carriers; `F64Bits` preserves optional-number sentinels through an i64.
+/// Runtime ABI carriers, where `F64Bits` preserves optional-number sentinels in an `i64`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum W {
     I32,

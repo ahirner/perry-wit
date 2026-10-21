@@ -1,4 +1,4 @@
-//! Arbitrary-width integer magnitudes; negation is an ordinary BigInt operation.
+//! Arbitrary-width integer magnitudes. Negation is represented as an ordinary `BigInt` operation.
 use crate::operation_schema::op_schema;
 use crate::signatures::Ty;
 use pliron::{

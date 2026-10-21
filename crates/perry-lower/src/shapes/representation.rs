@@ -246,7 +246,7 @@ impl Shapes<'_> {
         self.variant(ctx, &records)
     }
 
-    /// SDK results retain disjoint payload slots; inactive payloads admit undefined.
+    /// Build the record representation for an SDK `Result`, keeping disjoint payload slots that admit `undefined` when inactive.
     fn result(
         &self,
         ctx: &Context,
@@ -330,7 +330,7 @@ impl Shapes<'_> {
         Ok(perry_mir::VariantType::get(ctx, cases).into())
     }
 
-    /// The value a promise of `ty` settles with; `void` settles `undefined`.
+    /// Return the MIR value type that a promise of `ty` settles with, mapping `void` to `undefined`.
     pub(crate) fn settled_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
         match ty {
             HirType::Void => {

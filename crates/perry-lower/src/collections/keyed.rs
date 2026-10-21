@@ -186,7 +186,7 @@ impl<'s> FunctionBuilder<'s> {
         self.find_live_match(ctx, "kv_has", arr, key, |_, _, _, _| Ok(()))
     }
 
-    /// `delete(key)` on a `Map` tombstones the entry; on a dictionary it compacts in place.
+    /// Lower `delete(key)`, tombstoning the entry on a `Map` or compacting in place on a dictionary.
     pub(crate) fn kv_delete(
         &mut self,
         ctx: &mut Context,
@@ -215,7 +215,7 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
-    /// `forEach` passes `(value, key, collection)`; a Set's key equals its value.
+    /// Lower `forEach`, passing `(value, key, collection)` with `key` equal to `value` on a `Set`.
     pub(crate) fn collection_for_each(
         &mut self,
         ctx: &mut Context,

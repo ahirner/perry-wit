@@ -28,7 +28,7 @@ pub(crate) enum CalendarError {
     OutOfRange,
 }
 
-/// An exact instant; no floating-point rounding of sub-millisecond precision.
+/// An exact instant with integer nanosecond precision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Instant {
     nanoseconds: i128,
@@ -52,8 +52,7 @@ impl Instant {
         Self::from_epoch_nanoseconds(i128::from(milliseconds as i64) * 1_000_000)
     }
 
-    /// Temporal.Instant.from with ISO date/time and an explicit numeric offset or Z.
-    /// Calendar and named-zone annotations are outside this supported subset.
+    /// `Temporal.Instant.from` over an ISO date-time with an explicit numeric offset or `Z`.
     pub(crate) fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
         let time = parsed.time.ok_or(Error::Syntax)?;
@@ -64,7 +63,7 @@ impl Instant {
         )
     }
 
-    /// UTC interchange: YYYY-MM-DDTHH:mm:ss[.1-9 digits]Z, without leap seconds.
+    /// Strict UTC interchange format `YYYY-MM-DDTHH:mm:ss[.1-9 digits]Z`.
     #[cfg(test)]
     pub(crate) fn parse_utc(input: &[u8]) -> Result<Self, Error> {
         parse::strict_utc(input)?;
@@ -100,7 +99,7 @@ impl Instant {
     }
 }
 
-/// ISO calendar fields without a time zone or an implicit conversion to an instant.
+/// Unzoned ISO 8601 calendar date and wall-clock time fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PlainDateTime {
     day: i32,
@@ -120,7 +119,7 @@ impl PlainDateTime {
         (self.day, self.nanosecond)
     }
 
-    /// Temporal.PlainDateTime.from: numeric offsets are ignored; Z is rejected.
+    /// Parse a `Temporal.PlainDateTime.from` string, ignoring numeric offsets and rejecting `Z`.
     pub(crate) fn parse(input: &[u8]) -> Result<Self, Error> {
         let parsed = parse::record(input)?;
         if parsed.offset == Some(Offset::Z) {

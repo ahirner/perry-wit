@@ -51,8 +51,8 @@ use pliron::{
 };
 use std::{collections::BTreeSet, fmt::Write};
 
-/// The temporary-record workload of `wasi.execution.scaling.temporary_records`, as the HIR→MIR
-/// builder (P2.2) is expected to emit it: `make` inlined, tier not yet classified.
+/// The temporary-record workload of `wasi.execution.scaling.temporary_records` as emitted
+/// before tier classification (`make` inlined, tier `Unassigned`).
 const TEMPORARY_RECORDS: &str = r#"
 builtin.module @scaling {
   ^module():

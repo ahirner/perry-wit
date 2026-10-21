@@ -102,7 +102,7 @@ impl JsonSchema {
         true
     }
 
-    /// Classify logical types without relying on generated record names.
+    /// Classify a MIR type into its structural JSON schema kind.
     pub fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
         let definition = ty.deref(ctx);
         Some(if definition.is::<JsonType>() {

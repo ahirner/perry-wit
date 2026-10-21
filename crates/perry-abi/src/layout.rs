@@ -44,7 +44,7 @@ pub mod array {
     }
 
     impl Elements {
-        /// Decode the ABI flag; any other value is a compiler bug, so it traps.
+        /// Decode the ABI flag, trapping if `references` is outside `{0, 1}`.
         pub fn decode(references: u32) -> Self {
             match references {
                 SCALAR_ELEMENTS => Self::Scalar,
@@ -247,8 +247,8 @@ pub mod numeric {
     pub const U64: i32 = 12;
     pub const S64: i32 = 13;
 
-    /// A decoded numeric tag. Compiled code passes tags as raw `i32`, so helpers decode them
-    /// once with `TryFrom` and then match exhaustively instead of guessing on unknown values.
+    /// A decoded numeric tag converted from the raw `i32` ABI discriminant via `TryFrom`
+    /// for exhaustive matching.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Tag {
         Float,

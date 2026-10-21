@@ -1,5 +1,5 @@
-//! Raw inspection modules have no P3 host. Unreachable canonical observer paths trap if
-//! exercised; only component exports support suspension and native completion callbacks.
+//! Stub canonical observer imports for raw inspection modules. Component exports provide
+//! full suspension and native completion callbacks.
 use anyhow::Result;
 use std::convert::Infallible;
 use wasm_encoder::{
@@ -87,7 +87,7 @@ fn stub_imports(core: Vec<u8>, replace: impl Fn(&str, &str) -> bool) -> Result<V
 struct Raw {
     /// New function index by old function index.
     indices: Vec<u32>,
-    /// New index of the first stub; old imports mapped at or above it are removed.
+    /// New index of the first stub. Old imports mapped at or above this index are removed.
     first_stub: u32,
     /// Type index of each stub, in order.
     types: Vec<u32>,

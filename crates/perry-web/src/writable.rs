@@ -40,7 +40,7 @@ pub(crate) extern "C" fn web_writable_locked(stream: *mut u8) -> u32 {
     unsafe { (*(stream as *const Writable)).locked }
 }
 
-/// `stream.getWriter()`; `TypeError` while another writer holds the lock.
+/// Implement `stream.getWriter()`, throwing `TypeError` when another writer holds the lock.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
     let stream = stream as *mut Writable;
@@ -90,8 +90,8 @@ fn bound(writer: *mut u8, promise: *mut u8) -> Option<&'static mut Writable> {
     }
 }
 
-/// `writer.write(bytes)`: the bytes join the output in order; the promise settles once the
-/// host accepted them, so awaiting each write bounds the buffered output.
+/// Implement `writer.write(bytes)`: append the bytes to the output in order and settle the
+/// returned promise once the host accepts them, so awaiting each write bounds buffered output.
 ///
 /// # Safety
 /// `writer` must be a writer and `view` a `Uint8Array`.
@@ -116,8 +116,8 @@ pub(crate) unsafe extern "C" fn web_writer_write(
     promise
 }
 
-/// `writer.close()`: later writes through this stream reject; the console output itself stays
-/// open for other writers, as for Node's stdio.
+/// Implement `writer.close()`: reject subsequent writes through this stream while keeping the
+/// underlying console output open for other writers, matching Node stdio semantics.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_writer_close(writer: *mut u8) -> *mut u8 {
     let promise = promise_new();

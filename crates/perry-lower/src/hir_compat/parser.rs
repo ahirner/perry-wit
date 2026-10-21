@@ -1,4 +1,4 @@
-//! Preserve parser diagnostics discarded by the upstream wrapper.
+//! Parse TypeScript source into SWC AST modules with spanned syntax diagnostics.
 use anyhow::Result;
 use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};

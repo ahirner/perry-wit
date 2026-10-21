@@ -30,7 +30,7 @@ pub(crate) const INPUTS: [f64; 24] = [
     -8640000000000001.0,
 ];
 pub(crate) const FIXTURE: &str = "é\0abc";
-/// Value of `PERRY_CONFORMANCE` in command cases; non-ASCII so both runtimes must decode it.
+/// Non-ASCII `PERRY_CONFORMANCE` fixture value used to exercise UTF-8 environment decoding.
 pub(crate) const ENV_FIXTURE: &str = "grüezi";
 pub(crate) const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
@@ -134,7 +134,7 @@ pub enum Form {
 }
 
 impl Form {
-    /// The synchronous metamorphic forms of a direct program; [Form::Direct] comes first.
+    /// Synchronous metamorphic forms of a direct program, starting with [Form::Direct].
     pub(crate) const ALL: [Self; 6] = [
         Self::Direct,
         Self::Local,
@@ -144,7 +144,7 @@ impl Form {
         Self::InertException,
     ];
 
-    /// The metamorphic forms of repeated timer observation; [Form::StoredTimer] comes first.
+    /// Metamorphic forms of repeated timer observation, starting with [Form::StoredTimer].
     pub(crate) const TIMER_OBSERVERS: [Self; 3] = [
         Self::StoredTimer,
         Self::FirstCompletion,

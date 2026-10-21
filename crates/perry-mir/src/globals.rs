@@ -1,4 +1,4 @@
-//! Typed module cells. Local slots promote to SSA; module cells persist across export calls.
+//! Typed module cells. Local slots promote to SSA values, while module cells persist across export calls.
 use crate::operation_schema::op_schema;
 use crate::types::SlotType;
 use pliron::{
@@ -36,7 +36,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Checked load; reading a module binding before its initializer ran raises a TypeError.
+    /// Checked load that raises a `TypeError` if the module binding is read before its initializer runs.
     pub GlobalLoadOp(slot) -> fallible;
     name = "perry.global_load";
     format = "$0 ` : ` type($0)";

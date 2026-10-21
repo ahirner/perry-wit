@@ -21,7 +21,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-/// Borrow both analyses after computing them, so computing one cannot invalidate the borrow of the other.
+/// Precompute and borrow reachability and value-order analyses together.
 pub(super) struct ModuleAnalyses<'a> {
     pub(super) facts: Ref<'a, ProgramFacts>,
     pub(super) live: Ref<'a, LiveValues>,
@@ -57,8 +57,8 @@ pub(crate) fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operatio
     perry_mir::operations(ctx, function)
 }
 
-/// MIR calls name their targets directly; only boundary exports and module initialization
-/// can enter from outside this graph. Preserve source order for deterministic dispatch IDs.
+/// Collect functions reachable from boundary exports and module initialization, preserving
+/// source order for deterministic dispatch IDs.
 pub(crate) fn reachable_functions(
     ctx: &Context,
     module: &ModuleOp,

@@ -62,7 +62,7 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
     }
 }
 
-/// Task regions suffice when allocations do not repeat, suspend or outlive the task.
+/// Whether any function in the module requires precise collectible storage.
 /// Resource-bearing boundaries and checked builds select collection at their callers.
 pub(crate) fn needs_collector(
     ctx: &Context,
@@ -189,8 +189,7 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    /// Run synchronous module initialization once. A failed or reentrant initializer traps
-    /// consistently instead of exposing partially initialized typed values.
+    /// Run synchronous module initialization once, trapping if initialization fails or re-enters.
     pub(super) fn initialize_module(&mut self, ctx: &mut Context) {
         let Some(status) = self.initialization_status(ctx) else {
             return;
@@ -373,8 +372,8 @@ impl FunctionLowering<'_, '_> {
         task
     }
 
-    /// Release the current task's storage; the collector unregisters its roots first and may
-    /// then reclaim an empty instance heap.
+    /// Release the current task's storage after unregistering its collector roots and reclaiming
+    /// any empty instance heap.
     pub(super) fn task_free(&mut self, ctx: &mut Context) {
         if self.state.collectible {
             self.runtime_void(ctx, Runtime::GcTaskLeave, vec![]);

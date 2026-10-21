@@ -2,7 +2,7 @@
 use super::*;
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
-/// A path through declared fields; reads are checked even if an alias changes the path.
+/// Access path through declared fields whose reads re-verify the discriminant tag.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct Path<'s>(LocalId, Vec<&'s str>);
 pub(super) fn path(expr: &Expr) -> Option<Path<'_>> {

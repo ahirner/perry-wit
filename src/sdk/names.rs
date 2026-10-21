@@ -40,7 +40,7 @@ pub(crate) fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     id
 }
 
-/// Resource identity ignores alias names, unlike declaration identity.
+/// Resolve through all type aliases to the underlying canonical definition.
 pub(crate) fn canonical_type(resolve: &Resolve, mut id: TypeId) -> TypeId {
     while let TypeDefKind::Type(Type::Id(inner)) = resolve.types[id].kind {
         id = inner;

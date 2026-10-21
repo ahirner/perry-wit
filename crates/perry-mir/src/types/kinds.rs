@@ -73,15 +73,14 @@ value_types! {
         String => StringType("perry.string", "string", []);
         /// Immutable arbitrary-precision signed integer, preserving every WIT s64/u64 value.
         BigInt => BigIntType("perry.bigint", "bigint", []);
-        /// A `Uint8Array`: a view `{ length, data }` over bytes in the task region; `subarray`
-        /// views share their bytes.
+        /// A `Uint8Array` view `{ length, data }` over bytes in the task region. Views created
+        /// with `subarray` share the underlying byte buffer.
         Bytes => BytesType("perry.bytes", "Uint8Array", ["Uint8Array"]);
 
         Url => UrlType("perry.url", "URL", ["URL"]);
 
         SearchParams => SearchParamsType("perry.search_params", "URLSearchParams", ["URLSearchParams"]);
         /// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
-        /// Untyped data is a JSON tree, never `any` (subset rule R6).
         Json => JsonType("perry.json", "JSON value", []);
         /// A mutable Date object containing epoch milliseconds or NaN.
         Date => DateType("perry.date", "Date", ["Date"]);
@@ -121,12 +120,11 @@ value_types! {
         /// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
         /// response being built.
         Incoming => IncomingType("perry.incoming", "IncomingRequest", []);
-        /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
-        /// task like every other value (R3, R4).
+        /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value.
         Exception => ExceptionType("perry.exception", "Error", ["Error","TypeError","RangeError","ReferenceError","SyntaxError"]);
         /// Stateful UTF-8 decoder with at most three pending bytes.
         Decoder => DecoderType("perry.decoder", "TextDecoder", ["TextDecoder"]);
-        /// Immutable, statically compiled regex program; no mutable lastIndex state.
+        /// Immutable, statically compiled regular expression program.
         Regex => RegexType("perry.regex", "RegExp", ["RegExp"]);
         /// The finite primitive union `number | string`, with an exact owner slot for its string case.
         NumberString => NumberStringType("perry.number_string", "number | string", []);

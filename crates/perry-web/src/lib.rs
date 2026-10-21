@@ -1,13 +1,13 @@
 //! Fetch API values (`Headers`, constructed `Response` and `Request` objects with byte
 //! bodies) and Web writers over the console outputs (`Writable.toWeb(process.stdout)`).
 //!
-//! A helper library like `perry-std`, linked only into programs that use these classes. Name,
-//! value, method, status text and URL rules come from the fetch helper (`src/helpers/fetch`),
-//! which the network `fetch` uses as well: header names are stored lowercased, values as
-//! trimmed Latin-1 bytes (ByteStrings), and `get` joins duplicates with `, `.
+//! Linked on demand into programs that use these classes. Name,
+//! value, method, status text, and URL validation rules come from the fetch helper
+//! shared with network `fetch`: header names are stored lowercased, values are stored as
+//! trimmed Latin-1 bytes (`ByteString`), and `get` joins duplicate values with `, `.
 //!
-//! Bodies are snapshots taken at construction; reading one (`bytes()`, `text()`) marks it
-//! used and resolves at once, and a second read rejects with `TypeError`, as in Node.
+//! Bodies are snapshots captured at construction. Reading a body (`bytes()`, `text()`) marks it
+//! used and resolves immediately, and a second read rejects with `TypeError` as in Node.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 pub(crate) use perry_abi::{

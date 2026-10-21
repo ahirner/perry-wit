@@ -24,9 +24,7 @@ use pliron::{
 };
 use std::cmp::Ordering::{Equal, Greater, Less};
 
-/// Drop unused CFG arguments, preserving function parameters. Pinned pliron's builtin
-/// FuncOp lacks BlockArgRemoval; without this, SCCP keeps materializing dead arguments
-/// on every iteration. Branch reachability and block removal remain pliron passes.
+/// Remove unused basic-block arguments while preserving entry-block function parameters.
 pub(crate) fn remove_unused_block_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let mut status = IRStatus::Unchanged;
     for function in crate::aggregates::functions(root, ctx) {

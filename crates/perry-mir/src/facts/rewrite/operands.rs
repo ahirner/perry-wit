@@ -214,8 +214,8 @@ fn intrinsic_operand_types(
     }
 }
 
-/// Operand types required by the retyped results, callees and successors of `op`; also
-/// retypes call and await results and marks unconstrained numeric arithmetic.
+/// Compute the operand types required by the retyped results, callees, and successors of `op`.
+/// Retypes call and await results and marks unconstrained numeric arithmetic.
 fn operand_types(
     ctx: &mut Context,
     state: &super::super::State,

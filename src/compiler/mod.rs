@@ -79,8 +79,8 @@ fn compile_typescript_impl(
     compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }
 
-/// Compile against an already resolved world; the component is omitted when `componentize`
-/// is false.
+/// Compile against a resolved world, wrapping the output in a component when `componentize`
+/// is true.
 fn compile_for_world_impl(
     source: &str,
     file_name: &str,
@@ -230,9 +230,9 @@ pub(super) fn emit_component(
     })
 }
 
-/// A linked core module exporting every exported TypeScript function with its raw core
+/// Build a linked core module exporting every exported TypeScript function with its raw core
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
-/// functions that may throw). For tests and inspection; components use [compile_for_world].
+/// functions that may throw). Components use [compile_for_world].
 fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let modules = perry_lower::source_files::load(source, file_name)?;
     compile_core_sources(source, file_name, &modules, false)

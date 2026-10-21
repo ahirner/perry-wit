@@ -1,4 +1,4 @@
-//! Lower the declared HTTP(S) URL surface without dynamic property dispatch.
+//! Lowering for `URL` and `URLSearchParams` constructors, properties, and methods.
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {

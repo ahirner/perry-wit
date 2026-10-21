@@ -1,10 +1,10 @@
 //! Host and runtime services with fixed signatures (`perry.intrinsic`).
 //!
 //! The builder recognizes the standard API (`console.log`, `Math.floor`, string methods,
-//! `Uint8Array`, `JSON`, `Date`, …) and emits one op per service, named by [Intrinsic];
-//! codegen maps each to Wasm instructions or a runtime function and checks that the WIT world
-//! imports what it needs. Some services throw ([Intrinsic::throws]);
-//! their exception contract is queried through [may_throw].
+//! `Uint8Array`, `JSON`, `Date`, and related built-ins) and emits one op per service, named by
+//! [Intrinsic]. Codegen maps each intrinsic to Wasm instructions or a runtime function and
+//! verifies that the WIT world imports the required host interfaces. Services that may throw
+//! report their exception contract through [Intrinsic::throws] and [may_throw].
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OutputContract, ResultType, Signature, Ty, TypePattern};
 use crate::types::{ArrayType, ExceptionType, JsonType, OptionalType, StringType};
@@ -89,7 +89,7 @@ macro_rules! intrinsics {
         intrinsics!(@declare $($inline)* $($($($intrinsic)*)?)*);
     };
     (@declare $($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) , $effect:ident, $allocation:ident $(=> $contract:ident)?;)*) => {
-        /// The services; see each name for the API it implements.
+        /// Built-in runtime and host services, each named after the API it implements.
         #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
         pub enum Intrinsic {

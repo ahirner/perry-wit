@@ -94,8 +94,9 @@ impl Requirements {
     }
 }
 
-/// Only strings and variable-length collections allocate when lowered. Handles do not
-/// traverse their referents; future/stream payloads are handled at their read imports.
+/// Check whether lowering `ty` allocates in the guest. Strings and variable-length
+/// collections allocate on lowering, whereas future and stream payloads allocate at their
+/// read imports.
 fn lowers_allocation(resolve: &Resolve, ty: Type) -> bool {
     let Type::Id(id) = ty else {
         return ty == Type::String;

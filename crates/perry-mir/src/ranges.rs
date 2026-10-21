@@ -1,25 +1,26 @@
-//! Integer ranges (`TODOs.md` P3.5): reads proven in bounds lose their check.
+//! Integer range analysis for eliding bounds checks on proven in-bounds reads.
 //!
 //! The shared numeric analysis supplies non-negative integer ranges, including widened
 //! loop-carried counts. This pass retains object bounds and buffer-detachment legality.
 //!
 //! A conditional branch on `i < length(a)` (or `length(a) > i`, or the negations on the false
-//! edge) with `i` a count proves `0 <= i < length(a)` in the blocks its edge's target
-//! dominates, when that target has no other predecessor. On every path to such a block, the
-//! last execution of the target comes after the last definition of `i`, so the proof holds
-//! for the current value of `i`. There, `a[i]` becomes an unchecked read of the element:
+//! edge) with a non-negative integer `i` proves `0 <= i < length(a)` in the blocks dominated
+//! by that edge's target when the target has a single predecessor. On every path to such a
+//! block, the last execution of the target follows the last definition of `i`, so the proof
+//! holds for the current value of `i`. Within those blocks, `a[i]` rewrites to an unchecked
+//! element read under these conditions:
 //!
-//! - arrays retain a proven index unless an alias is truncated between the length read
-//!   and element read; calls use converged mutation and object-identity facts;
-//! - a `Uint8Array` shrinks to length 0 when its buffer is transferred (a BYOB read), which
-//!   happens only during a call or an `await`. Between the length read and the element read,
-//!   no operation may call, await or read into a view.
+//! - Arrays retain a proven index when every operation between the length read and the element
+//!   read preserves the array length, using converged mutation and object-identity facts for calls.
+//! - A `Uint8Array` shrinks to length 0 only when its buffer is transferred during a BYOB read,
+//!   which requires a call or an `await`. The proof holds when the path between the length read
+//!   and the element read is free of calls, awaits, and view reads.
 //!
-//! The read's result is wrapped back into `T | undefined`; `fold` then removes the
-//! `undefined` tests and coercions of the wrapped value.
+//! The unchecked read's result is wrapped back into `T | undefined`, and `fold` subsequently
+//! eliminates redundant `undefined` tests and coercions on the wrapped value.
 //!
-//! Strings are immutable, so `s.charAt(i)` under a proof of `i < s.length` (a scalar count)
-//! becomes `string_char_at_index` without integrality or range checks.
+//! Strings are immutable, so `s.charAt(i)` under a proof of `i < s.length` rewrites to
+//! `string_char_at_index`.
 use crate::{
     aggregates::{functions, operations},
     attrs::CompareKind,

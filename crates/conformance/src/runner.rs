@@ -1,4 +1,4 @@
-//! Campaign orchestration and structured evidence; no parsing of test-runner output.
+//! Campaign orchestration and structured conformance evidence.
 use crate::{
     execution::{Executor, Limits, check_metamorphic},
     registry::{self, Case, Contract, ExpectedOutcome},
@@ -60,10 +60,9 @@ enum Status {
     Running,
     Passed,
     Failed,
-    /// Failed, and not listed in `passing.txt`: the compiler does not cover it yet.
-    /// Does not fail the campaign.
+    /// Unlisted failing contract tracked as pending work in the campaign summary.
     Pending,
-    /// Listed in `deferred.txt`: outside the accepted domain; not run.
+    /// Listed in `deferred.txt` as outside the accepted domain.
     Deferred,
 }
 #[derive(Serialize)]

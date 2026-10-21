@@ -1,6 +1,6 @@
 //! Single-pass lexical cursor for unpublished schema-specific MIR construction.
 //! A syntax failure supplies closing delimiters while generated decoders unwind.
-//! Dummy values remain inside the atomic construction group; finish raises before publication.
+//! Dummy values remain inside the atomic construction group, and `finish` raises before publication.
 use super::{
     Error, MAX_DEPTH,
     pool::{self, Residue, Text},

@@ -1,6 +1,6 @@
 //! Shared MIR contracts and runtime exports. Runtime rows retain import order.
-//! Bracketed contracts derive fixed carriers; parenthesized signatures describe adapters.
-//! Optional-number results explicitly choose F64 or F64Bits to preserve sentinels.
+//! Bracketed contracts derive fixed carriers, and parenthesized signatures describe adapters.
+//! Optional-number results explicitly choose `F64` or `F64Bits` to preserve sentinels.
 
 #[doc(hidden)]
 #[macro_export]

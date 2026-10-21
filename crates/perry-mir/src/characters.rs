@@ -44,7 +44,8 @@ enum UserAction {
     },
 }
 
-/// A scalar or the empty string. UTF-8 ordering agrees with scalar ordering; -1 precedes NUL.
+/// Extract a single Unicode scalar or `-1` for the empty string. UTF-8 byte order agrees with
+/// scalar order, and `-1` precedes `NUL`.
 fn literal(ctx: &Context, value: Value) -> Option<i32> {
     let constant = Operation::get_op::<StringConstOp>(value.defining_op()?, ctx)?;
     let text = constant.get_attr_perry_string_value(ctx)?;

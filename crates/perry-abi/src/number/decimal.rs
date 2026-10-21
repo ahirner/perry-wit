@@ -30,7 +30,7 @@ pub fn split_sign(input: &[u8]) -> (bool, &[u8]) {
     }
 }
 
-/// Scan an unsigned decimal; syntax errors carry the offset of the expected digit.
+/// Scan an unsigned decimal, reporting syntax errors with the byte offset of the expected digit.
 pub fn scan_decimal<const EXACT: bool>(
     input: &[u8],
     syntax: DecimalSyntax,

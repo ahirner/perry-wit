@@ -1,6 +1,6 @@
-//! `Uint8Array`, `TextEncoder` and `TextDecoder`.
+//! `Uint8Array`, `TextEncoder`, and `TextDecoder`.
 //!
-//! Views share a detachable owner; subarrays preserve offsets and transfer reuses the payload.
+//! Views share a detachable owner, subarrays preserve offsets, and transfer reuses the payload.
 use crate::{
     runtime::{ARRAY_DATA, RANGE_ERROR, alloc, bytes as string_bytes, raise},
     text::{integer, relative},
@@ -178,7 +178,7 @@ pub(crate) extern "C" fn std_bytes_get(bytes: *mut u8, position: f64) -> u64 {
     }
 }
 
-/// `bytes[index] = value`; ignored outside the view, as for typed arrays.
+/// Write `bytes[index] = value`, ignoring out-of-bounds indices per typed-array semantics.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_bytes_set(bytes: *mut u8, position: f64, value: f64) {
     let bytes = slice(bytes);
@@ -229,8 +229,8 @@ pub(crate) unsafe extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end:
     std_bytes_copy(unsafe { std_bytes_subarray(bytes, start, end) })
 }
 
-/// `target.set(source, offset)`; throws `RangeError` when `source` does not fit. Overlapping
-/// views copy as if through a temporary, as the specification requires.
+/// Implement `target.set(source, offset)`, throwing `RangeError` when `source` exceeds the
+/// target bounds. Overlapping views copy as if through an intermediate buffer per specification.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, offset: f64) {
     if !attached(target) || !attached(source) {

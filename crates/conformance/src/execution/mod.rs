@@ -1,4 +1,4 @@
-//! Isolated effectful adapters. Models and observation checks do not perform I/O.
+//! Isolated effectful adapters for Node oracle and Wasmtime component execution.
 //!
 //! [Executor] runs the Node oracle and executes the compiled Wasm component under wasmtime.
 use crate::{
@@ -19,9 +19,7 @@ use std::{
 
 mod oracle;
 mod worker;
-use oracle::{
-    encoded_inputs, is_typechecked, link_handler_types, run_node_oracle, run_tsc_batch,
-};
+use oracle::{encoded_inputs, is_typechecked, link_handler_types, run_node_oracle, run_tsc_batch};
 pub use worker::worker;
 
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -92,7 +90,7 @@ pub(crate) enum Outcome {
         stderr: Vec<u8>,
         max_fuel_used: u64,
         component_bytes: usize,
-        /// Fuel consumed by each call, in input order; empty for the Node oracle.
+        /// Fuel consumed by each call in input order, populated for component executions.
         #[serde(default)]
         fuel_used: Vec<u64>,
     },
@@ -247,7 +245,7 @@ pub fn check_fault(case: &Case, evidence: &Evidence) -> Result<()> {
     }
     Ok(())
 }
-/// The worker's input; borrowed when written, owned when read back.
+/// Input payload for the worker, borrowed during serialization and owned on deserialization.
 #[derive(Serialize, Deserialize)]
 struct Request<'a> {
     case: Cow<'a, Case>,
@@ -308,7 +306,7 @@ pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
     equivalence(case, &evidence.oracle, &evidence.component, evidence)
 }
 
-/// Compares an oracle outcome with a component outcome; `evidence` is reported on failure.
+/// Compare an oracle outcome against a component outcome, reporting `evidence` on mismatch.
 fn equivalence(
     case: &Case,
     oracle: &Outcome,
@@ -368,7 +366,7 @@ fn equivalence(
     Ok(())
 }
 
-/// Capture through files so a full pipe cannot deadlock a child; reap every timeout.
+/// Capture child output through temporary files and reap timed-out processes.
 pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Result<Captured> {
     let logs = tempfile::Builder::new()
         .prefix("process-")
@@ -460,35 +458,37 @@ impl Executor {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let (first_oracle, first_component, rest_components) = thread::scope(|scope| -> Result<_> {
-            let oracle_handle =
-                spawn_worker(scope, || self.run_oracle(first_variant, &first_source, &first_dir))?;
-            let first_comp_handle = spawn_worker(scope, || {
-                self.run_component(first_variant, &first_source, &first_dir)
-            })?;
-            let rest_handles = rest_prepared
-                .iter()
-                .map(|(variant, src, dir)| {
-                    spawn_worker(scope, move || self.run_component(variant, src, dir))
-                })
-                .collect::<Result<Vec<_>>>()?;
+        let (first_oracle, first_component, rest_components) =
+            thread::scope(|scope| -> Result<_> {
+                let oracle_handle = spawn_worker(scope, || {
+                    self.run_oracle(first_variant, &first_source, &first_dir)
+                })?;
+                let first_comp_handle = spawn_worker(scope, || {
+                    self.run_component(first_variant, &first_source, &first_dir)
+                })?;
+                let rest_handles = rest_prepared
+                    .iter()
+                    .map(|(variant, src, dir)| {
+                        spawn_worker(scope, move || self.run_component(variant, src, dir))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
-            let oracle = oracle_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("oracle thread panicked"))??;
-            let (first_comp, first_ctrl) = first_comp_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("component thread panicked"))??;
-            let mut rest_results = Vec::with_capacity(rest_handles.len());
-            for handle in rest_handles {
-                rest_results.push(
-                    handle
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("variant thread panicked"))??,
-                );
-            }
-            Ok((oracle, (first_comp, first_ctrl), rest_results))
-        })?;
+                let oracle = oracle_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("oracle thread panicked"))??;
+                let (first_comp, first_ctrl) = first_comp_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("component thread panicked"))??;
+                let mut rest_results = Vec::with_capacity(rest_handles.len());
+                for handle in rest_handles {
+                    rest_results.push(
+                        handle
+                            .join()
+                            .map_err(|_| anyhow::anyhow!("variant thread panicked"))??,
+                    );
+                }
+                Ok((oracle, (first_comp, first_ctrl), rest_results))
+            })?;
 
         let mut evidence = Vec::with_capacity(variants.len());
         let first_ev = Evidence {

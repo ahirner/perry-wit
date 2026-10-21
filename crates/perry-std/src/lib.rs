@@ -1,10 +1,9 @@
 //! Built-ins of compiled programs beyond the core runtime: ECMAScript string methods,
 //! `Uint8Array` with `TextEncoder`/`TextDecoder`, `JSON` and randomness.
 //!
-//! A helper library like the others (position-independent, imported memory): `src/link`
-//! links it only into modules whose code calls one of its `std_*` exports, and keeps only
-//! the reachable functions. It builds on the core runtime through `__perry_helper` imports
-//! ([perry_abi]), so a program that uses none of it carries none of its code or data.
+//! Compiled as a position-independent helper library over imported linear memory: the linker
+//! includes reachable `std_*` exports on demand and resolves core runtime calls through
+//! `__perry_helper` imports ([perry_abi]).
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 mod bytes;

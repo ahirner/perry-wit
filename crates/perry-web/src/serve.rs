@@ -1,15 +1,15 @@
 //! Serving `wasi:http/handler@0.3.0`: the request a handler receives and the response it
 //! returns.
 //!
-//! [web_serve_request] reads the request's method, scheme, authority, path and headers at
-//! once and starts reading its body as a [crate::readable::Readable] (whose end counts once the trailers
-//! future reports it intact, as for fetched bodies). [web_serve_respond] builds the response
+//! [web_serve_request] reads the request's method, scheme, authority, path, and headers at
+//! once and starts reading its body as a [crate::readable::Readable] whose end is confirmed
+//! once the trailers future reports it intact. [web_serve_respond] builds the response
 //! with the headers added by [web_serve_add_header] and starts writing its body. The host
-//! reads that body only after the export returned the response, so the task keeps running
-//! after `task.return` until the body, the trailers and the transmission are done
-//! ([web_serve_busy]); compiled code returns once ([web_serve_returned]) and then waits.
+//! reads that body after the export returns the response, so the task keeps running
+//! after `task.return` until the body, the trailers, and the transmission complete
+//! ([web_serve_busy]). Compiled code returns the response once ([web_serve_returned]) and then waits.
 //!
-//! Callbacks pass their events to [web_serve_event]; the body's reads use [crate::readable::web_event].
+//! Callbacks pass their events to [web_serve_event], and body reads use [crate::readable::web_event].
 use crate::{
     http_exchange::{Exchange, RESULT_SIZE, Response},
     readable::{Form, drain},
@@ -259,7 +259,7 @@ pub(crate) extern "C" fn web_serve_header_value(s: *mut u8, index: f64) -> *mut 
     bytes_view(len, data as usize as *mut u8)
 }
 
-/// Add a response header; an invalid name or value throws `TypeError`.
+/// Add a response header, throwing `TypeError` when the name or value is invalid.
 ///
 /// # Safety
 /// `name` must be a string and `value` a `Uint8Array`.
@@ -288,8 +288,8 @@ pub(crate) unsafe extern "C" fn web_serve_add_header(s: *mut u8, name: *mut u8, 
     }
 }
 
-/// Create the response (status, the added headers, `body`) and start writing its body;
-/// returns the `response` handle for `task.return`.
+/// Create the response from the status, accumulated headers, and `body`, start writing its
+/// body stream, and return the `response` handle for `task.return`.
 ///
 /// # Safety
 /// `body` must be a `Uint8Array`.

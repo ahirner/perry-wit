@@ -97,7 +97,7 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
-    /// The defined value of `T | undefined`; throws `TypeError` on `undefined`.
+    /// Extract the defined value of `T | undefined`, throwing `TypeError` on `undefined`.
     pub(super) fn defined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if !self.is_optional(ctx, value) {
             return Ok(value);
@@ -296,7 +296,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(value)
     }
 
-    /// An ECMAScript number used as an array index (R8: reads miss with `undefined`).
+    /// An ECMAScript number used as an array index (out-of-bounds reads yield `undefined`).
     pub(super) fn index(&mut self, ctx: &mut Context, index: &'s Expr) -> Result<Value> {
         let index = self.expression(ctx, index)?;
         let index = self.arithmetic(ctx, index);

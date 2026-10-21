@@ -22,8 +22,8 @@ pub fn embed_and_encode(
     encode_resolved(core_wasm, &resolve, world_id)
 }
 
-/// Encodes the exact resolved world without synthesizing or replicating interfaces; a module
-/// using promise signals gets the private [reactions::ANCHOR] export only while encoding.
+/// Encode the resolved world directly. Modules using promise signals carry the
+/// private [reactions::ANCHOR] export only during component encoding.
 pub(crate) fn encode_resolved(
     core_wasm: &[u8],
     resolve: &wit_parser::Resolve,

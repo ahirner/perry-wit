@@ -154,7 +154,7 @@ impl<'s> FunctionBuilder<'s> {
         }))
     }
 
-    /// The box of a `Map`/`Set` or of a view; `None` for plain arrays.
+    /// Return the underlying box of a `Map`, `Set`, or view, or `None` for plain arrays.
     pub(super) fn collection_underlying_box(
         &mut self,
         ctx: &mut Context,
@@ -170,7 +170,7 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
-    /// The entries array of a collection or view; plain arrays are their own entries.
+    /// Return the entries array of a collection or view, or the array itself for plain arrays.
     pub(crate) fn collection_entries_array(
         &mut self,
         ctx: &mut Context,
@@ -377,7 +377,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(next_sz)
     }
 
-    /// A reference-free placeholder of `ty`; `None` for types holding nothing to release.
+    /// Emit a reference-free placeholder of `ty` when `ty` holds references, or `None` for scalar types.
     pub(crate) fn zero_value_for_type(
         &mut self,
         ctx: &mut Context,
@@ -462,7 +462,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// The liveness flag of a `Map`/`Set` entry; `None` for entries without one.
+    /// Load the liveness flag of a `Map` or `Set` entry when the entry carries one.
     pub(crate) fn collection_entry_live(
         &mut self,
         ctx: &mut Context,

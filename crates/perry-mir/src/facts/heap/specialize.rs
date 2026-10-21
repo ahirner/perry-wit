@@ -178,7 +178,7 @@ enum Step {
     Keep,
 }
 
-/// Specialization needs agreement; verification rejects even one lossy slot.
+/// Specialization requires unanimous slot agreement and rejects any lossy slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lossless {
     All,
@@ -186,7 +186,7 @@ enum Lossless {
 }
 
 impl HeapFacts {
-    /// Classify a child without materializing its slot list; reject mismatched object shapes.
+    /// Classify a child slot and verify matching object shapes.
     fn step(
         &self,
         ctx: &Context,

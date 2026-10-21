@@ -9,7 +9,7 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 /// the receiver is an array or string and yields it unchanged.
 pub(super) const ITERATION: &str = "$$perryIteration";
 
-/// Prefix of the names a rewritten loop declares; numbered past any source name using it.
+/// Prefix for synthetic names declared by a rewritten loop, numbered past any colliding source identifier.
 const LOOP_PREFIX: &str = "__perry_loop_";
 
 /// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
@@ -130,9 +130,9 @@ impl VisitMut for Loops {
     }
 }
 
-/// Fills a parsed loop template's placeholders (`<prefix>source`, `<prefix>item` and
-/// `<prefix>body()`) with the loop's parts; the user's parts are not revisited.
-/// [Fill::check] rejects a template that misses or repeats a placeholder.
+/// Fills a parsed loop template's placeholders (`<prefix>source`, `<prefix>item`, and
+/// `<prefix>body()`) with the loop's parts in a single pass.
+/// [Fill::check] verifies that every placeholder was substituted exactly once.
 struct Fill {
     prefix: String,
     source: Option<Box<ast::Expr>>,

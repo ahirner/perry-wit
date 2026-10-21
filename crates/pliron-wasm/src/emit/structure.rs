@@ -1,5 +1,5 @@
-//! Ramsey's dominator-tree structuring: loop headers open a `loop`, merge nodes an enclosing
-//! `block`, conditional branches an `if`; branches become `br` to the matching label.
+//! Ramsey's dominator-tree structuring. Loop headers open a `loop`, merge nodes open an enclosing
+//! `block`, conditional branches open an `if`, and branches lower to `br` targeting the matching label.
 use super::{
     EmitError, EmitResult,
     function::{Frame, FunctionEmitter, successors},
@@ -33,8 +33,8 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// Emit `block` inside one `block` per merge child, outermost first; each merge child
-    /// follows the `end` of its `block`.
+    /// Emit `block` inside one `block` per merge child, ordered outermost first so each merge
+    /// child follows the `end` of its enclosing `block`.
     fn node_within(
         &mut self,
         block: Ptr<BasicBlock>,

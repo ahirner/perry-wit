@@ -1,31 +1,30 @@
-//! perry MIR → pliron `wasm` dialect → core Wasm (`TODOs.md` P4).
+//! perry MIR → pliron `wasm` dialect → core Wasm.
 //!
-//! The output defines and exports linear memory when required, places string constants in data segments
-//! from `DATA_BASE`, and imports runtime functions from `HELPER_MODULE`; `perry-wit`'s linker
-//! resolves those against `perry-runtime` and the helper libraries. Exports are either the raw
-//! functions ([Exports::Raw], for tests) or canonical-ABI component exports
-//! ([Exports::Canonical], see [boundary]). Representation decisions for this first slice:
+//! The output defines and exports linear memory when required, places string constants in data
+//! segments starting at `DATA_BASE`, and imports runtime functions from `HELPER_MODULE` for
+//! `perry-wit`'s linker to resolve against `perry-runtime` and the helper libraries. Exports
+//! are either raw functions ([Exports::Raw]) or canonical-ABI component exports
+//! ([Exports::Canonical], see [boundary]). Value and storage representations follow these rules:
 //!
-//! - `f64` stays `f64`; semantic integers use `i32` through 32 bits and `i64` through 64 bits,
-//!   with narrow results normalized at their wrap points. Records, arrays, strings and
+//! - `f64` stays `f64`, and semantic integers use `i32` through 32 bits and `i64` through 64
+//!   bits, with narrow results normalized at their wrap points. Records, arrays, strings, and
 //!   promises are `i32` addresses.
-//! - `undefined` (R8) is the signalling-NaN bit pattern [perry_abi::UNDEFINED_BITS] for
-//!   numbers, the null address for references and `2` for booleans. Wasm arithmetic only
-//!   produces quiet NaNs, so no computed number can be mistaken for `undefined`;
-//!   `perry.to_number` canonicalizes before arithmetic.
-//! - Records are an `i32` shape id and a parse-source word followed by 8-byte field slots in
-//!   declaration order; arrays and variants use the layouts in [perry_abi::layout].
+//! - `undefined` is the signalling-NaN bit pattern [perry_abi::UNDEFINED_BITS] for
+//!   numbers, the null address for references, and `2` for booleans. Wasm arithmetic only
+//!   produces quiet NaNs, and `perry.to_number` canonicalizes inputs before arithmetic.
+//! - Records consist of an `i32` shape id and a parse-source word followed by 8-byte field
+//!   slots in declaration order. Arrays and variants use the layouts in [perry_abi::layout].
 //! - Unproven and repeated allocations use precise collectible storage. Bounded task storage
 //!   remains available for small synchronous exports and task-owned handle tables.
-//! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_abi::layout::string]);
-//!   constants are static objects in the data segment.
+//! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_abi::layout::string]),
+//!   and string constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
-//!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on
-//!   it. The status reaches the export; P6.1 maps it to the WIT result.
+//!   status after its results (0 for normal completion, or an [ErrorKind] code), and callers
+//!   branch on it. Export wrappers map the status to the declared WIT result or trap.
 //!
-//! Module layout: `module` drives the lowering of a whole module and `function` that of one
-//! function, whose ops `ops` dispatches to the topical modules; `async_split` turns async
-//! functions into state machines and [boundary] binds them to the canonical ABI.
+//! `module` drives the lowering of a whole module and `function` lowers individual functions,
+//! dispatching operations through `ops` to the topical modules. `async_split` transforms async
+//! functions into state machines, and [boundary] binds them to the canonical ABI.
 use anyhow::{Context as _, Result, anyhow};
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
 use perry_mir::ErrorKind;
@@ -69,18 +68,17 @@ pub use memory::explain_tiers;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
-/// First address of static data; address 0 stays null (`undefined` for references).
+/// Starting address of static data, leaving address 0 as the null reference (`undefined`).
 const DATA_BASE: u32 = 16;
 /// The interface `setTimeout` waits on.
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 
 /// How functions are exported.
 pub enum Exports {
-    /// Every exported TypeScript function under its own name, with the core signature of its
+    /// Export every exported TypeScript function under its own name, with the core signature of its
     /// MIR type plus the exception status, as one task per call. An async function's export
-    /// runs through settled awaits and returns its value and status; pending host suspension
-    /// requires component mode.
-    /// For tests and inspection.
+    /// runs through settled awaits and returns its value and status, while pending host suspension
+    /// uses component mode.
     Raw,
     /// Raw exports plus test-only GC stress controls and ownership counters.
     RawChecked,
@@ -148,7 +146,7 @@ pub fn compile(
     Ok(emit_module(ctx, &wasm, &options)?)
 }
 
-/// The status code of an exception kind; 0 means no exception.
+/// Return the non-zero status code for an exception `kind` (0 represents normal completion).
 pub fn status_code(kind: ErrorKind) -> i32 {
     match kind {
         ErrorKind::Any => 3,

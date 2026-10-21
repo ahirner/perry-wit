@@ -194,7 +194,7 @@ impl Range {
     }
 
     /// Join `other` into `self`. When `widen` is false (first expansion), compute the
-    /// exact convex hull clamped to `domain` bounds; when `widen` is true (second or later
+    /// exact convex hull clamped to `domain` bounds. When `widen` is true (second or later
     /// expansion), widen expanding bounds to the enclosing integer domain bounds.
     /// Returns `(joined_range, expanded, widened)`.
     pub(super) fn join_step(
@@ -314,7 +314,7 @@ impl Fact {
 pub(super) enum ResultDomain {
     Inferred,
     Integer(Integer),
-    /// Escaping promises keep their declared payload representation; their callees may
+    /// Escaping promises keep their declared payload representation, while their callees may
     /// still specialize arithmetic using known argument domains.
     Original,
 }

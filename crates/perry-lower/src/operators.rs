@@ -2,7 +2,7 @@
 use super::*;
 use crate::coerce::{expression_hint, merge_absence, merged_type};
 
-/// The truthiness operators `&&` and `||`; `??` tests nullishness and lowers separately.
+/// Short-circuit truthiness operators `&&` and `||`. Nullish coalescing (`??`) lowers separately.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShortCircuit {
     And,
@@ -183,7 +183,7 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
-    /// `left op right` for strict equality and ordering; loose equality is rejected.
+    /// Lower `left op right` for strict equality and relational ordering operators.
     pub(super) fn comparison(
         &mut self,
         ctx: &mut Context,

@@ -182,7 +182,9 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
     let start = std::time::Instant::now();
     let error = runner::replay(&slow_path, executable.clone()).unwrap_err();
     ensure!(
-        error.to_string().contains("oracle: Timeout, component: Timeout"),
+        error
+            .to_string()
+            .contains("oracle: Timeout, component: Timeout"),
         "expected oracle and component timeout: {error:#}"
     );
     assert!(start.elapsed() < Duration::from_millis(2500));

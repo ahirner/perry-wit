@@ -100,13 +100,13 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) wasm: ModuleOp,
     pub(crate) runtime: BTreeSet<Runtime>,
     pub(crate) host: BTreeSet<Host>,
-    /// Interfaces the WIT world imports; `None` when compiling without a world.
+    /// Interfaces imported by the WIT world, or `None` when compiling a standalone core module.
     imports: Option<HashSet<&'e str>>,
     /// Statically bound WIT imports by binding name.
     pub(crate) bindings: HashMap<&'e str, &'e boundary::Import>,
     /// The WIT resources the reachable functions use, by key.
     pub(crate) resources: HashMap<u32, &'e boundary::ResourceDefinition>,
-    /// Async imports with an outstanding transfer; the index is the transfer's kind.
+    /// Async imports with an outstanding transfer, indexed by transfer kind.
     pub(crate) foreign_transfers: Vec<&'e boundary::Import>,
     /// Async functions in dispatch-kind order.
     pub(crate) async_functions: Vec<Identifier>,
@@ -118,9 +118,9 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) reports_rejection: bool,
     /// Whether any function starts a `node:fs` operation (callbacks pass it events).
     pub(crate) uses_fs: bool,
-    /// Whether the module reads `stream<u8>`s (callbacks pass them events; tasks close them).
+    /// Whether the module reads `stream<u8>` handles that receive callback events and close with the task.
     pub(crate) uses_streams: bool,
-    /// Whether the module calls `fetch` (callbacks pass it events; tasks close its handles).
+    /// Whether the module calls `fetch`, routing callback events and closing handles with the task.
     pub(crate) uses_fetch: bool,
     /// `json()` of a body: events also settle the bodies read to their end.
     pub(crate) uses_json_bodies: bool,
@@ -135,7 +135,7 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) json_write_data: Option<u32>,
     pub(crate) json_fields: HashMap<TypeHandle, (u32, usize)>,
     pub(crate) retains_json: bool,
-    /// Whether allocations use precise collectible storage rather than task storage.
+    /// Whether allocations use precise collectible storage.
     pub(crate) collectible: bool,
     pub(crate) program_facts: &'e perry_mir::ProgramFacts,
     pub(crate) live: &'e perry_mir::LiveValues,

@@ -1,4 +1,4 @@
-//! The catalog is a projection of executable contracts, never an input to execution.
+//! Read-only catalog projected from executable conformance contract definitions.
 use crate::{
     execution::{Evidence, check_equivalence},
     program::{Binary, Form, INPUTS, Math, Number, Program, Text},

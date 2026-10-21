@@ -183,7 +183,7 @@ pub fn ascii_digit(byte: u8, radix: u32) -> Option<u32> {
     (digit < radix).then_some(digit)
 }
 
-/// Format any 64-bit magnitude; 66 bytes accommodate a sign and all binary digits.
+/// Format any 64-bit magnitude into `digits`, which has room for a sign and all 64 binary digits.
 pub fn format_integer(magnitude: u64, negative: bool, radix: u32, digits: &mut [u8; 66]) -> &[u8] {
     assert!((2..=36).contains(&radix), "invalid radix");
     let mut magnitude = magnitude;

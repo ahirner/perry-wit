@@ -1,15 +1,15 @@
 //! Perry HIR → perry-mir builder.
 //!
-//! One structural lowering with no representation decisions:
-//! - every local (parameters included) is a `perry.local` slot, and pliron `mem2reg` builds SSA
-//!   joins, loop-carried block arguments and later await continuations;
-//! - contextual inference completes unresolved source types before MIR construction;
-//! - tiers stay `Unassigned` and layouts abstract; later passes decide them.
+//! Structural lowering from HIR into MIR follows three principles:
+//! - Every local (including parameters) lowers to a `perry.local` slot, and pliron `mem2reg`
+//!   constructs SSA joins, loop-carried block arguments, and await continuations.
+//! - Contextual inference completes unresolved source types before MIR construction.
+//! - Allocation tiers start `Unassigned` and layouts remain abstract for downstream MIR and codegen passes.
 //!
-//! [lower_sources] resolves modules, passes the AST through [hir_compat], completes types
-//! with [infer], and builds MIR with [program]. Each function body is lowered by a
-//! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
-//! Unsupported constructs are rejected with a diagnostic.
+//! [lower_sources] resolves modules, passes the AST through `hir_compat`, completes types
+//! with `infer`, and builds MIR with `program`. Each function body is lowered by a
+//! `builder::FunctionBuilder`, whose methods are organized across the topical modules below.
+//! Unsupported constructs produce a source-spanned diagnostic.
 mod aggregates;
 mod array_methods;
 mod bindings;
@@ -121,7 +121,7 @@ fn lower_source(
     lower_sources(ctx, source, file, &modules, foreign)
 }
 
-/// Lower only supplied contents; module identities never acquire host files.
+/// Lower in-memory entry source and preloaded `modules` into a verified MIR module.
 pub fn lower_sources(
     ctx: &mut Context,
     source: &str,
