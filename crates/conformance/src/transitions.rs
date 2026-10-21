@@ -1,7 +1,6 @@
 //! Pure lifecycle model and a source emitter for sequential retained-task traces.
 use crate::{
     execution::{Evidence, Outcome, check_equivalence, number},
-    program::INPUTS,
     registry::Case,
 };
 use anyhow::{Result, ensure};
@@ -124,7 +123,7 @@ pub(crate) fn check(case: &Case, evidence: &Evidence) -> Result<()> {
         let Outcome::Values { observations, .. } = outcome else {
             anyhow::bail!("missing lifecycle observations")
         };
-        for (observation, input) in observations.iter().zip(INPUTS) {
+        for (observation, &input) in observations.iter().zip(case.inputs()) {
             ensure!(
                 observation.value == number(input) && observation.trace == expected,
                 "lifecycle model mismatch: {observation:?}"

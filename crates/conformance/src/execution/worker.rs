@@ -3,7 +3,7 @@ use super::{FactLimits, Fault, Limits, Observation, Outcome, Request, async_wit,
 use crate::{
     fetch::FetchCase,
     handler::HandlerCase,
-    program::{ENV_FIXTURE, FIXTURE, INPUTS, WIT},
+    program::{ENV_FIXTURE, FIXTURE, WIT},
     registry::Case,
     streams::StreamCase,
 };
@@ -487,7 +487,7 @@ async fn observations(
         match case {
             Case::Stream(case) => stream_calls(&mut store, &instance, case, fuel).await?,
             Case::Fetch(case) => fetch_calls(&mut store, &instance, case, fuel).await?,
-            _ => number_calls(&mut store, &instance, artifacts, fault, fuel).await?,
+            _ => number_calls(&mut store, &instance, artifacts, fault, case, fuel).await?,
         }
     };
     Ok(Run {
@@ -643,6 +643,7 @@ async fn number_calls(
     instance: &Instance,
     artifacts: &Path,
     fault: Option<Fault>,
+    case: &Case,
     fuel: u64,
 ) -> Result<Calls> {
     let run = instance
@@ -678,7 +679,7 @@ async fn number_calls(
             run_one(decode_input(&encoded)?, store, &mut calls).await?;
         }
     } else {
-        for input in INPUTS {
+        for &input in case.inputs() {
             run_one(input, store, &mut calls).await?;
         }
     }

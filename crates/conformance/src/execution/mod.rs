@@ -336,12 +336,7 @@ fn equivalence(
         ) => {
             ensure!(a == b, "value or side-effect trace mismatch: {evidence:?}");
             ensure!(
-                a.len()
-                    == if matches!(case, Case::Stream(_) | Case::Fetch(_) | Case::Handler(_)) {
-                        3
-                    } else {
-                        INPUTS.len()
-                    },
+                a.len() == case.inputs().len(),
                 "missing boundary observations"
             );
             ensure!(
@@ -630,7 +625,9 @@ impl Executor {
             } else {
                 None
             };
-            let inputs = custom_inputs.as_deref().unwrap_or_else(|| encoded_inputs());
+            let inputs = custom_inputs
+                .as_deref()
+                .unwrap_or_else(|| &encoded_inputs()[..case.inputs().len()]);
             run_node_oracle(&path, inputs, case)
         }
     }

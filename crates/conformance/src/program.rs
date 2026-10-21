@@ -134,14 +134,19 @@ pub enum Form {
 }
 
 impl Form {
-    /// The metamorphic forms of a direct program; [Form::Direct] comes first.
-    pub(crate) const ALL: [Self; 8] = [
+    /// The synchronous metamorphic forms of a direct program; [Form::Direct] comes first.
+    pub(crate) const ALL: [Self; 6] = [
         Self::Direct,
         Self::Local,
         Self::Permuted,
         Self::Branch,
         Self::Loop,
         Self::InertException,
+    ];
+
+    /// The metamorphic forms of repeated timer observation; [Form::StoredTimer] comes first.
+    pub(crate) const TIMER_OBSERVERS: [Self; 3] = [
+        Self::StoredTimer,
         Self::FirstCompletion,
         Self::LastCompletion,
     ];
@@ -194,9 +199,9 @@ impl Program {
             ),
             Form::FirstCompletion | Form::LastCompletion => {
                 let (first_delay, second_delay) = if self.form == Form::FirstCompletion {
-                    (1, 2)
+                    (0, 1)
                 } else {
-                    (2, 1)
+                    (1, 0)
                 };
                 format!(
                     "const input = {expression}; const first = setTimeout({first_delay}, input); const second = setTimeout({second_delay}, input); const all = Promise.all([first, second, first]); const values = await all; const value = values[0] as number; await first; await second;"
@@ -397,6 +402,55 @@ impl Display for Text {
             Self::Upper(value) => write!(f, "({value}.toUpperCase())"),
             Self::CharAt(value, index) => write!(f, "({value}.charAt({index}))"),
             Self::Slice(value, a, b) => write!(f, "({value}.slice({a}, {b}))"),
+        }
+    }
+}
+
+impl Number {
+    pub(crate) fn uses_input(&self) -> bool {
+        match self {
+            Self::Input => true,
+            Self::Integer(_) | Self::NegativeZero => false,
+            Self::Mark(a)
+            | Self::Call(a)
+            | Self::Math(_, a)
+            | Self::DateTime(a)
+            | Self::TypedJson(a)
+            | Self::ClosedLoop(a, _)
+            | Self::Handled(a) => a.uses_input(),
+            Self::Binary(_, a, b) | Self::Field(a, b) | Self::ByteAlias(a, b) => {
+                a.uses_input() || b.uses_input()
+            }
+            Self::Choose(c, a, b) => c.uses_input() || a.uses_input() || b.uses_input(),
+            Self::Array(a, b, c, _) | Self::ByteGet(a, b, c, _) => {
+                a.uses_input() || b.uses_input() || c.uses_input()
+            }
+            Self::Length(t) | Self::JsonLength(t) | Self::JsonStoredLength(t) => t.uses_input(),
+            Self::IndexOf(t1, t2, n) => t1.uses_input() || t2.uses_input() || n.uses_input(),
+            Self::EncodedLength(t, a, b) => t.uses_input() || a.uses_input() || b.uses_input(),
+        }
+    }
+}
+
+impl Condition {
+    fn uses_input(&self) -> bool {
+        match self {
+            Self::Literal(_) => false,
+            Self::Less(a, b) | Self::Equal(a, b) => a.uses_input() || b.uses_input(),
+            Self::And(a, b) | Self::Or(a, b) => a.uses_input() || b.uses_input(),
+            Self::Not(c) => c.uses_input(),
+        }
+    }
+}
+
+impl Text {
+    fn uses_input(&self) -> bool {
+        match self {
+            Self::Literal(_) => false,
+            Self::Concat(a, b) => a.uses_input() || b.uses_input(),
+            Self::Choose(c, a, b) => c.uses_input() || a.uses_input() || b.uses_input(),
+            Self::Lower(t) | Self::Upper(t) | Self::Slice(t, _, _) => t.uses_input(),
+            Self::CharAt(t, n) => t.uses_input() || n.uses_input(),
         }
     }
 }

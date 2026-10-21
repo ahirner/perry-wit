@@ -1,7 +1,7 @@
 //! The catalog is a projection of executable contracts, never an input to execution.
 use crate::{
     execution::{Evidence, check_equivalence},
-    program::{Binary, Form, Math, Number, Program, Text},
+    program::{Binary, Form, INPUTS, Math, Number, Program, Text},
     strategies,
     transitions::{Action, TimerModel},
 };
@@ -92,6 +92,19 @@ impl Case {
                     }
                 })
                 .collect(),
+            Self::Program(program) if program.form == Form::StoredTimer => Form::TIMER_OBSERVERS
+                .into_iter()
+                .map(|form| {
+                    if form == Form::StoredTimer {
+                        Cow::Borrowed(self)
+                    } else {
+                        Cow::Owned(Self::Program(Program {
+                            expression: program.expression.clone(),
+                            form,
+                        }))
+                    }
+                })
+                .collect(),
             Self::Aggregate(case) if !case.permuted => vec![
                 Cow::Borrowed(self),
                 Cow::Owned(Self::Aggregate(crate::aggregates::AggregateCase {
@@ -108,6 +121,23 @@ impl Case {
             ],
             _ => vec![Cow::Borrowed(self)],
         }
+    }
+    /// Boundary inputs evaluated for this case: all 24 IEEE-754 boundary inputs when the case
+    /// depends on `x`, or 3 instance-reuse calls when `x` is only echoed back.
+    pub(crate) fn inputs(&self) -> &'static [f64] {
+        let uses_all = match self {
+            Self::Lifecycle(_)
+            | Self::Stream(_)
+            | Self::Fetch(_)
+            | Self::Handler(_)
+            | Self::Scaling { .. } => false,
+            Self::Function { source, .. } => {
+                source.contains("produce(x)") || source.contains(",x)")
+            }
+            Self::Program(program) | Self::Fault { program, .. } => program.expression.uses_input(),
+            _ => true,
+        };
+        if uses_all { &INPUTS } else { &INPUTS[..3] }
     }
     pub fn source(&self) -> String {
         match self {
@@ -350,37 +380,12 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             "Repeated timer observation",
             Form::StoredTimer,
         ),
-        ("node.fs.readFile.utf8", "UTF-8 file read", Form::FileRead),
-        (
-            "node.fs.writeFile.text",
-            "Text file round trip",
-            Form::FileRoundTrip,
-        ),
-        (
-            "node.fs.metadata",
-            "File stat and directory listing",
-            Form::FileMetadata,
-        ),
-        (
-            "node.fs.readFile.bytes",
-            "Binary file read and UTF-8 decoding",
-            Form::FileBytes,
-        ),
-        (
-            "node.fs.writeFile.subviews",
-            "Byte view and empty file round trip",
-            Form::FileByteRoundTrip,
-        ),
-        (
-            "node.fs.readFile.recovery",
-            "Repeated rejection followed by successful read",
-            Form::FileRejectedRead,
-        ),
     ] {
         contracts.push(Contract {id,description,specification:"https://nodejs.org/api/",domain:"Retained async operation interleaved with typed numeric evaluation; instance reused across boundary inputs",
             witnesses:vec![Witness{partition:"retained-operation",case:Case::Program(Program{expression:Number::Mark(input()),form})}],
             strategy:n.clone().prop_map(move|expression|Case::Program(Program{expression,form})).boxed(),check:check_equivalence});
     }
+    contracts.extend(crate::capabilities::fs_contracts());
     let regressions = [
         (
             "branch-true",
