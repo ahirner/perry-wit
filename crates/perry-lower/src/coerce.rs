@@ -259,7 +259,9 @@ impl<'s> FunctionBuilder<'s> {
             {
                 return self.project_record(ctx, value, ty == source, dst_rec, target);
             }
-            let code = if let (Ok(src_rec), Ok(dst_rec)) = (
+            let actual = describe_type(ctx, ty);
+            let expected = describe_type(ctx, target);
+            let shape_error = if let (Ok(src_rec), Ok(dst_rec)) = (
                 TypedHandle::<RecordType>::from_handle(source, ctx),
                 TypedHandle::<RecordType>::from_handle(wanted, ctx),
             ) && src_rec.deref(ctx).kind() == dst_rec.deref(ctx).kind()
@@ -267,21 +269,13 @@ impl<'s> FunctionBuilder<'s> {
                     src_rec.deref(ctx).kind(),
                     RecordKind::Object | RecordKind::Tuple
                 ) {
-                DiagnosticCode::IncompatibleRecordLayout
+                ShapeError::IncompatibleRecordLayout { actual, expected }
             } else if absence(ctx, ty) != absence(ctx, target) {
-                DiagnosticCode::AbsenceMismatch
+                ShapeError::AbsenceMismatch { actual, expected }
             } else {
-                DiagnosticCode::UnsupportedType
+                ShapeError::TypeMismatch { actual, expected }
             };
-            Err(PerryDiagnostic::error(
-                code,
-                format!(
-                    "value type {} differs from the expected type {}",
-                    describe_type(ctx, ty),
-                    describe_type(ctx, target)
-                ),
-            )
-            .into())
+            Err(LowerError::new(shape_error).into())
         }
     }
 

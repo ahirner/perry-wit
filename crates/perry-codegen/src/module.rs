@@ -418,10 +418,11 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(perry_wit_diagnostics::PerryDiagnostic::error(
-                perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                format!("{} requires asynchronous module initialization", export.core_name))
-                .with_help("Declare this WIT export async so it can await module initialization and its error channel.").into());
+            return Err(crate::CodegenError::AsyncInitializerRequiresAsyncExport {
+                core_name: export.core_name.clone(),
+                span: perry_mir::source_span(ctx, function),
+            }
+            .into());
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
@@ -431,15 +432,11 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::error(
-                    perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                    format!("{} can throw without a compatible WIT error channel", export.core_name))
-                    .with_help("Declare a WIT result error, or use an async export with wasi:cli/stderr support.");
-                diagnostic.span = functions
-                    .iter()
-                    .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
-                    .and_then(|function| perry_mir::source_span(ctx, function));
-                return Err(diagnostic.into());
+                return Err(crate::CodegenError::MissingErrorChannel {
+                    core_name: export.core_name.clone(),
+                    span: perry_mir::source_span(ctx, function),
+                }
+                .into());
             }
             if export.is_async() {
                 state.reports_rejection = true;
@@ -465,7 +462,11 @@ fn bind_exports(
             &lowered[&function.get_symbol_name(ctx)],
             export,
         )
-        .with_context(|| format!("binding WIT export {}", export.core_name))?;
+        .map_err(|source| crate::CodegenError::ExportBinding {
+            core_name: export.core_name.clone(),
+            span: perry_mir::source_span(ctx, function),
+            source,
+        })?;
     }
     Ok(())
 }

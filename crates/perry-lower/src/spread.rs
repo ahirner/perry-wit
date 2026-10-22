@@ -108,11 +108,7 @@ impl<'s> FunctionBuilder<'s> {
                 perry_hir::ArrayElement::Expr(expression) => (expression, false),
                 perry_hir::ArrayElement::Spread(expression) => (expression, true),
                 perry_hir::ArrayElement::Hole => {
-                    return Err(PerryDiagnostic::error(
-                        DiagnosticCode::UnsupportedSpread,
-                        "sparse array spreads are outside the dense-array profile",
-                    )
-                    .into());
+                    return Err(LowerError::new(LowerErrorKind::UnsupportedSpread).into());
                 }
             };
             let value = if spread {

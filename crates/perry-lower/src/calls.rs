@@ -244,11 +244,16 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some((binding, signature)) = self.shapes.foreign_function(name)
         {
-            ensure!(
-                args.len() == signature.params.len(),
-                "WIT import {binding} expects {} arguments",
-                signature.params.len()
-            );
+            if args.len() != signature.params.len() {
+                let error =
+                    crate::LowerError::new(crate::LowerErrorKind::ImportSignatureMismatch {
+                        binding: binding.to_owned(),
+                        expected: signature.params.len(),
+                        actual: args.len(),
+                    })
+                    .into();
+                return Err(self.shapes.annotate_call(error, byte_offset));
+            }
             let mut values = Vec::new();
             for (arg, (_, ty, _)) in args.iter().zip(&signature.params) {
                 let ty = self.shapes.value_type(ctx, ty)?;

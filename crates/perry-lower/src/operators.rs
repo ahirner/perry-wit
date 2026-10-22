@@ -149,10 +149,9 @@ impl<'s> FunctionBuilder<'s> {
                     BinaryOp::Div => BinaryKind::Div,
                     BinaryOp::Mod => BinaryKind::Rem,
                     other => {
-                        return Err(PerryDiagnostic::error(
-                            DiagnosticCode::UnsupportedOperator,
-                            format!("MIR backend does not support operator {other:?} yet"),
-                        )
+                        return Err(LowerError::new(LowerErrorKind::UnsupportedOperator {
+                            op: format!("{other:?}"),
+                        })
                         .into());
                     }
                 };

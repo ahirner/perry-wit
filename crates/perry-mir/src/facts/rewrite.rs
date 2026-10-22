@@ -340,9 +340,16 @@ fn set_signature(ctx: &mut Context, imp: &Implementation) {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("lossless representation violated: {0}")]
+#[derive(Debug)]
 pub(crate) struct LosslessRepresentationErr(pub String);
+
+impl core::fmt::Display for LosslessRepresentationErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "lossless representation violated: {}", self.0)
+    }
+}
+
+impl core::error::Error for LosslessRepresentationErr {}
 
 fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);

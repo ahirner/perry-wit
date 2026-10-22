@@ -393,9 +393,16 @@ pub struct ProgramFacts {
     heap: heap::HeapFacts,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("function {0} has no effect summary")]
+#[derive(Debug)]
 struct MissingEffects(Identifier);
+
+impl core::fmt::Display for MissingEffects {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "function {} has no effect summary", self.0)
+    }
+}
+
+impl core::error::Error for MissingEffects {}
 
 impl ProgramFacts {
     fn generic_context(&self, name: &Identifier) -> Option<usize> {

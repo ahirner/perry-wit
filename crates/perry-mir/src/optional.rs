@@ -18,15 +18,23 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub(crate) enum OptionalErr {
-    #[error("{0} expects a perry.optional operand")]
     NotOptional(&'static str),
-    #[error("{0} result type does not match its operand")]
     Result(&'static str),
 }
+
+impl core::fmt::Display for OptionalErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotOptional(op) => write!(f, "{op} expects a perry.optional operand"),
+            Self::Result(op) => write!(f, "{op} result type does not match its operand"),
+        }
+    }
+}
+
+impl core::error::Error for OptionalErr {}
 
 /// The `T` of an optional type, if `ty` is one.
 pub fn optional_value(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {

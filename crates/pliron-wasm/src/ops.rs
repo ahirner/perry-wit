@@ -35,19 +35,34 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use thiserror::Error;
 use wasm_encoder::ValType;
 
 /// Verification failures of the value-level ops.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 enum OpErr {
-    #[error("{0} operand or result types do not match its signature")]
     Signature(String),
-    #[error("callee {0} is neither a function nor an import of the enclosing module")]
     UnknownCallee(String),
-    #[error("{0} uses a type that is not a Wasm value type")]
     ValueType(String),
 }
+
+impl core::fmt::Display for OpErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Signature(op) => {
+                write!(f, "{op} operand or result types do not match its signature")
+            }
+            Self::UnknownCallee(callee) => {
+                write!(
+                    f,
+                    "callee {callee} is neither a function nor an import of the enclosing module"
+                )
+            }
+            Self::ValueType(op) => write!(f, "{op} uses a type that is not a Wasm value type"),
+        }
+    }
+}
+
+impl core::error::Error for OpErr {}
 
 fn types_of(values: impl Iterator<Item = Value>, ctx: &Context) -> Option<Vec<ValType>> {
     values.map(|v| val_type(ctx, v.get_type(ctx))).collect()

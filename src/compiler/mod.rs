@@ -71,11 +71,8 @@ fn compile_typescript_impl(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], options.world.as_deref())
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
+    let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
     compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }
 
@@ -102,6 +99,13 @@ fn compile_for_world_with_memory_checks_impl(
     compile_world(source, file_name, resolve, world, true, true)
 }
 
+fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
+    perry_lower::source_files::load(source, file_name).map_err(|error| {
+        perry_lower::LowerError::try_from_anyhow(error)
+            .map_or_else(|error| error, |lower| lower_diagnostic(lower).into())
+    })
+}
+
 fn compile_world(
     source: &str,
     file_name: &str,
@@ -110,7 +114,7 @@ fn compile_world(
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_sources(
         source,
         file_name,
@@ -148,22 +152,14 @@ pub(crate) fn compile_sources(
     let mut foreign = wit_types::foreign(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir =
-        perry_lower::lower_sources(ctx, source, identity, modules, &foreign).map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
-        })?;
-    let mut exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
-    bind::constrain_numbers(ctx, &mir, &exports).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
+    let mir = perry_lower::lower_sources(ctx, source, identity, modules, &foreign)
+        .map_err(map_lower_error)?;
+    let mut exports = bind::exports(ctx, &mir, resolve, world)?;
+    bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
     bind::specialized_implementations(ctx, &mir, &mut exports);
-    bind::check_main(ctx, &mir, &exports).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
-    emit_component(
+    bind::check_main(ctx, &mir, &exports)?;
+    Ok(emit_component(
         ctx,
         &mir,
         &mut analyses,
@@ -176,7 +172,9 @@ pub(crate) fn compile_sources(
         resources,
         true,
     )
-    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
+    .map_err(|error| {
+        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -209,7 +207,7 @@ pub(super) fn emit_component(
         resources,
     };
     let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses).map_err(map_codegen_error)?;
     let (mut core, helpers) = finish(
         core,
         streams.as_ref(),
@@ -234,7 +232,7 @@ pub(super) fn emit_component(
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
 /// functions that may throw). Components use [compile_for_world].
 fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_core_sources(source, file_name, &modules, false)
 }
 
@@ -245,7 +243,7 @@ fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
 /// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
 /// bytes (10). Canonical production components omit these exports.
 fn compile_core_with_memory_checks_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_core_sources(source, file_name, &modules, true)
 }
 
@@ -262,11 +260,15 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
-    link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
+    let core =
+        perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(map_codegen_error)?;
+    let (core, _) =
+        finish(core, None, &link::canonical::Requirements::default()).map_err(|error| {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
+    Ok(link::raw::without_p3(core).map_err(|error| {
+        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })?)
 }
 
 fn lower(
@@ -276,12 +278,53 @@ fn lower(
     modules: &BTreeMap<String, String>,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
-    let mir =
-        perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
-        })?;
+    let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)
+        .map_err(map_lower_error)?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
+}
+
+fn lower_diagnostic(error: perry_lower::LowerError) -> crate::PerryDiagnostic {
+    use perry_lower::{LowerErrorKind, ShapeError};
+    let code = match &error.kind {
+        LowerErrorKind::Parse { .. } => crate::DiagnosticCode::ParseError,
+        LowerErrorKind::ModuleResolution { .. } => crate::DiagnosticCode::ModuleResolution,
+        LowerErrorKind::ImportSignatureMismatch { .. } => {
+            crate::DiagnosticCode::ImportSignatureMismatch
+        }
+        LowerErrorKind::Shape(shape) => match shape {
+            ShapeError::MissingTypeAnnotation => crate::DiagnosticCode::MissingTypeAnnotation,
+            ShapeError::UnsupportedType { .. } | ShapeError::TypeMismatch { .. } => {
+                crate::DiagnosticCode::UnsupportedType
+            }
+            ShapeError::IncompatibleRecordLayout { .. } => {
+                crate::DiagnosticCode::IncompatibleRecordLayout
+            }
+            ShapeError::AbsenceMismatch { .. } => crate::DiagnosticCode::AbsenceMismatch,
+        },
+        LowerErrorKind::MissingRequiredField { .. } => crate::DiagnosticCode::MissingRequiredField,
+        LowerErrorKind::UnsupportedOperator { .. } => crate::DiagnosticCode::UnsupportedOperator,
+        LowerErrorKind::UnsupportedSpread => crate::DiagnosticCode::UnsupportedSpread,
+        LowerErrorKind::UnsupportedExpression(_) => crate::DiagnosticCode::UnsupportedExpression,
+    };
+    let message = error.to_string();
+    let help = error.help();
+    let mut diagnostic =
+        crate::PerryDiagnostic::error(code, message).with_optional_span(error.span);
+    diagnostic.notes = error.notes;
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    diagnostic
+}
+
+fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
+    match perry_lower::LowerError::try_from_anyhow(error) {
+        Ok(lower) => lower_diagnostic(lower),
+        Err(error) => {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
+        }
+    }
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
@@ -289,9 +332,47 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
         })?;
     Ok(analyses)
+}
+
+fn map_codegen_error(error: anyhow::Error) -> crate::PerryDiagnostic {
+    match error.downcast::<perry_codegen::CodegenError>() {
+        Ok(codegen_err) => {
+            let message = codegen_err.to_string();
+            match codegen_err {
+                perry_codegen::CodegenError::AsyncInitializerRequiresAsyncExport {
+                    span, ..
+                } => crate::PerryDiagnostic::error(
+                    crate::DiagnosticCode::MissingErrorChannel,
+                    message,
+                )
+                .with_optional_span(span)
+                .with_help(
+                    "Declare this WIT export async so it can await module initialization and its error channel.",
+                ),
+                perry_codegen::CodegenError::MissingErrorChannel { span, .. } => {
+                    crate::PerryDiagnostic::error(
+                        crate::DiagnosticCode::MissingErrorChannel,
+                        message,
+                    )
+                    .with_optional_span(span)
+                    .with_help(
+                        "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
+                    )
+                }
+                perry_codegen::CodegenError::ExportBinding { span, source, .. } => {
+                    crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, message)
+                        .with_optional_span(span)
+                        .with_source_notes(source.as_ref())
+                }
+            }
+        }
+        Err(error) => {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        }
+    }
 }
 
 fn finish(

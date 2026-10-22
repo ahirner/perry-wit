@@ -122,11 +122,8 @@ pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, S
 /// Compile supplied TypeScript and WIT contents with the embedded standard packages.
 fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::Compiled> {
     let (source, identity, modules) = program(input)?;
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], options.world.as_deref())
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
+    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
     crate::compiler::compile_sources(
         source,
         identity,
@@ -146,11 +143,8 @@ fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
 
 /// Generate declaration contents. Project layout and writing belong to the caller.
 fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], world)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
+    let world = crate::component::wit::select_world(&resolve, package, world)?;
     crate::sdk::declarations(&resolve, world)
 }
 

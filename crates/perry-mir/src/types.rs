@@ -14,7 +14,6 @@ use pliron::{
     result::Result,
     r#type::{Type, TypeHandle, TypedHandle},
 };
-use thiserror::Error;
 
 mod kinds;
 pub use kinds::*;
@@ -76,17 +75,34 @@ pub struct RecordType {
     kind: RecordKind,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 enum RecordErr {
-    #[error("unknown record kind {0}")]
     UnknownKind(String),
-    #[error("record {0} already exists with different fields")]
     Mismatch(String),
-    #[error("record {0} has duplicate field {1}")]
     DuplicateField(String, String),
-    #[error("record {0} is used before its fields are known")]
     Opaque(String),
+    InvalidVariant,
 }
+
+impl core::fmt::Display for RecordErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownKind(kind) => write!(f, "unknown record kind {kind}"),
+            Self::Mismatch(record) => {
+                write!(f, "record {record} already exists with different fields")
+            }
+            Self::DuplicateField(record, field) => {
+                write!(f, "record {record} has duplicate field {field}")
+            }
+            Self::Opaque(record) => {
+                write!(f, "record {record} is used before its fields are known")
+            }
+            Self::InvalidVariant => f.write_str("a variant needs distinct literal tags"),
+        }
+    }
+}
+
+impl core::error::Error for RecordErr {}
 
 impl RecordType {
     /// Get or create the record `name`. Supplying `fields` defines an opaque record, and
@@ -448,15 +464,11 @@ impl VariantType {
 impl Verify for VariantType {
     fn verify(&self, _: &Context) -> Result<()> {
         if self.cases.is_empty() || self.cases.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            input_err_noloc!(InvalidVariant)?;
+            input_err_noloc!(RecordErr::InvalidVariant)?;
         }
         Ok(())
     }
 }
-
-#[derive(Debug, Error)]
-#[error("a variant needs distinct literal tags")]
-struct InvalidVariant;
 
 impl Printable for VariantType {
     fn fmt(

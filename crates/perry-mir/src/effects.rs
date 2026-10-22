@@ -19,12 +19,23 @@ use pliron::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-#[derive(Debug, thiserror::Error)]
-#[error("{function} contains {operation} outside its atomic construction group")]
+#[derive(Debug)]
 struct AtomicConstructionError {
     function: String,
     operation: String,
 }
+
+impl core::fmt::Display for AtomicConstructionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} contains {} outside its atomic construction group",
+            self.function, self.operation
+        )
+    }
+}
+
+impl core::error::Error for AtomicConstructionError {}
 
 /// Failure outcome of a function: synchronous status return (`Throws`) or async promise
 /// rejection (`Rejects`).

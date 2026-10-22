@@ -428,3 +428,73 @@ fn profiling_names_are_optional_in_cli_components() {
         }
     }
 }
+
+#[test]
+fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
+    let bin = env!("CARGO_BIN_EXE_perry-wit");
+    for args in [&["--help"][..], &["gen-types", "--help"][..]] {
+        let out = Command::new(bin).args(args).output().unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("\nOptions:\n"), "{stdout}");
+        assert!(
+            !stdout.lines().any(|line| line.starts_with("        ")),
+            "{stdout}"
+        );
+    }
+    for (args, flag) in [
+        (&["--world"][..], "--world"),
+        (&["--out="][..], "--out"),
+        (&["gen-types", "--wit"][..], "--wit"),
+        (&["gen-types", "--entry="][..], "--entry"),
+    ] {
+        let out = Command::new(bin).args(args).output().unwrap();
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains(&format!("Option '{flag}' requires a value")),
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let run_gen = || {
+        Command::new(bin)
+            .current_dir(dir.path())
+            .arg("gen-types")
+            .output()
+            .unwrap()
+    };
+    let missing_wit = String::from_utf8_lossy(&run_gen().stderr).into_owned();
+    assert!(
+        missing_wit.contains("WIT directory 'wit' does not exist"),
+        "{missing_wit}"
+    );
+    assert_eq!(
+        missing_wit.matches("WitResolution:").count(),
+        1,
+        "{missing_wit}"
+    );
+
+    fs::create_dir(dir.path().join("wit")).unwrap();
+    fs::write(
+        dir.path().join("wit/world.wit"),
+        "world app { export run: func(); }",
+    )
+    .unwrap();
+    let missing_pkg = String::from_utf8_lossy(&run_gen().stderr).into_owned();
+    assert_eq!(
+        missing_pkg
+            .matches("no `package` header was found in any WIT file for this package")
+            .count(),
+        1,
+        "{missing_pkg}"
+    );
+    assert_eq!(
+        missing_pkg.matches("WitResolution:").count(),
+        1,
+        "{missing_pkg}"
+    );
+    assert!(
+        missing_pkg.contains("help: Add a package header"),
+        "{missing_pkg}"
+    );
+}

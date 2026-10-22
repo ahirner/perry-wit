@@ -34,9 +34,16 @@ pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Optio
     verify_err!(pliron::location::Location::Unknown, InvalidVariant)
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("variant operation has an invalid tag or payload type")]
+#[derive(Debug)]
 struct InvalidVariant;
+
+impl core::fmt::Display for InvalidVariant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("variant operation has an invalid tag or payload type")
+    }
+}
+
+impl core::error::Error for InvalidVariant {}
 
 op_schema! {
     pub VariantNewOp(..operands) -> infallible;

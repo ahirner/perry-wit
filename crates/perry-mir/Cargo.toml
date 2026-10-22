@@ -7,11 +7,8 @@ description = "Typed middle IR for perry-wit, built on pliron (TODOs.md P2)"
 
 [dependencies]
 perry-abi.workspace = true
-perry-wit-diagnostics.workspace = true
-serde_json.workspace = true
 pliron.workspace = true
 pliron-control.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 expect-test = "1"

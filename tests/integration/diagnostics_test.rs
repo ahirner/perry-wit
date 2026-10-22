@@ -51,6 +51,12 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     })
     .unwrap_err();
     assert_eq!(parse_error.diagnostics[0].code, DiagnosticCode::ParseError);
+    assert_eq!(
+        perry_wit::compile_core(parse_source, "parse.ts")
+            .unwrap_err()
+            .diagnostics,
+        parse_error.diagnostics
+    );
     let span = parse_error.diagnostics[0].span.as_ref().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
@@ -239,4 +245,64 @@ export async function run():Promise<number>{
 "#;
     let mut program = crate::core_program::Program::checked(source, "inferred.ts");
     assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn export_and_import_mismatches_report_spans_and_actionable_help() {
+    let wit = Wit {
+        application: b"package test:mismatch;
+interface host {
+    ping: func(a: u32, b: u32) -> u32;
+}
+world app {
+    import host;
+    export run: async func(id: u64) -> u64;
+}"
+        .as_slice()
+        .into(),
+        dependencies: vec![],
+    };
+    let check = |source: &str, code, line, needle: &str| {
+        let err = api::compile(
+            &Program {
+                source: Source {
+                    name: Some("src/main.ts".into()),
+                    contents: source.as_bytes().to_vec(),
+                },
+                modules: vec![],
+            },
+            &wit,
+            &Options::default(),
+        )
+        .unwrap_err();
+        let diag = &err.diagnostics[0];
+        assert_eq!(diag.code, code, "{diag}");
+        assert_eq!(diag.span.as_ref().unwrap().start_line, line, "{diag}");
+        assert!(diag.to_string().contains(needle), "{diag}");
+    };
+
+    check(
+        "// header\nfunction run(id: bigint): Promise<bigint> { return Promise.resolve(id); }",
+        DiagnosticCode::ExportMismatch,
+        2,
+        "Add the 'export' keyword to function 'run'",
+    );
+    check(
+        "// header\nexport async function run(id: number): Promise<bigint> { return 1n; }",
+        DiagnosticCode::ExportMismatch,
+        2,
+        "bigint",
+    );
+    check(
+        "// header\nexport function run(id: bigint): bigint { return id; }",
+        DiagnosticCode::ExportMismatch,
+        2,
+        "Add 'async'",
+    );
+    check(
+        "import { ping } from 'test:mismatch/host';\nexport async function run(id: bigint): Promise<bigint> {\n  const x = (ping as any)(1);\n  return id;\n}",
+        DiagnosticCode::ImportSignatureMismatch,
+        3,
+        "expects 2 arguments, got 1",
+    );
 }

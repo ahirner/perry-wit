@@ -1,7 +1,8 @@
 //! Parse TypeScript source into SWC AST modules with spanned syntax diagnostics.
+use crate::{LowerError, LowerErrorKind};
 use anyhow::Result;
+use perry_mir::SourceSpan;
 use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
 
 pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
@@ -20,10 +21,10 @@ pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
                 None,
             );
             let mut parser = Parser::new_from(lexer);
-            let mut diagnostic = PerryDiagnostic::error(
-                DiagnosticCode::ParseError,
-                format!("Parsing {identity}: {error}"),
-            );
+            let mut diagnostic = LowerError::new(LowerErrorKind::Parse {
+                identity: identity.to_owned(),
+                message: error.to_string(),
+            });
             if let Err(failure) = parser.parse_module() {
                 let span = failure.span();
                 diagnostic.span = Some(SourceSpan::new(
@@ -33,13 +34,13 @@ pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
                     span.hi.0.saturating_sub(1) as usize,
                 ));
             }
-            error.context(diagnostic)
+            diagnostic
         })?;
     if let Some(diagnostic) = parsed.diagnostics.iter().next() {
-        return Err(PerryDiagnostic::error(
-            DiagnosticCode::ParseError,
-            format!("Parsing {identity}: {}", diagnostic.message),
-        )
+        return Err(LowerError::new(LowerErrorKind::Parse {
+            identity: identity.to_owned(),
+            message: diagnostic.message.clone(),
+        })
         .with_span(SourceSpan::new(
             identity,
             source,

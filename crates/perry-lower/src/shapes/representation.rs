@@ -62,14 +62,7 @@ impl Shapes<'_> {
                 Ok(PromiseType::get(ctx, settled).into())
             }
             HirType::Unknown => Ok(perry_mir::JsonType::get(ctx).into()),
-            HirType::Any => Err(PerryDiagnostic::error(
-                DiagnosticCode::MissingTypeAnnotation,
-                "the value type cannot be inferred for the MIR backend",
-            )
-            .with_help(
-                "Add a concrete type annotation to this binding, parameter, or function return.",
-            )
-            .into()),
+            HirType::Any => Err(LowerError::new(ShapeError::MissingTypeAnnotation).into()),
             HirType::Generic { base, type_args } => {
                 if base == "WitInput" {
                     let [inner] = type_args.as_slice() else {
@@ -159,10 +152,9 @@ impl Shapes<'_> {
                     .into())
             }
             HirType::Function(_) | HirType::Symbol | HirType::TypeVar(_) => {
-                Err(PerryDiagnostic::error(
-                    DiagnosticCode::UnsupportedType,
-                    format!("MIR backend does not support type {ty:?} yet"),
-                )
+                Err(LowerError::new(ShapeError::UnsupportedType {
+                    ty: format!("{ty:?}"),
+                })
                 .into())
             }
         }

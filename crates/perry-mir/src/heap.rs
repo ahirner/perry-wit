@@ -19,33 +19,61 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub(crate) enum HeapErr {
-    #[error("{0} expects a perry.record, found another type")]
     NotRecord(&'static str),
-    #[error("record enumeration projection must be an array")]
     NotArray,
-    #[error("record enumeration order requires a non-tuple record")]
     NotObject,
-    #[error("record {record} has {expected} fields but perry.alloc supplies {found}")]
     FieldCount {
         record: String,
         expected: usize,
         found: usize,
     },
-    #[error("record {record} field {field} has a different type than its value")]
-    FieldType { record: String, field: String },
-    #[error("record {record} has no field {field}")]
-    NoField { record: String, field: String },
-    #[error("perry.alloc tier {0:?} is not an allocation tier")]
+    FieldType {
+        record: String,
+        field: String,
+    },
+    NoField {
+        record: String,
+        field: String,
+    },
     Tier(Tier),
-    #[error("perry.alloc is missing its allocation tier")]
     MissingTier,
-    #[error("record {0} has an invalid property insertion order")]
     FieldOrder(String),
 }
+
+impl core::fmt::Display for HeapErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotRecord(op) => write!(f, "{op} expects a perry.record, found another type"),
+            Self::NotArray => f.write_str("record enumeration projection must be an array"),
+            Self::NotObject => f.write_str("record enumeration order requires a non-tuple record"),
+            Self::FieldCount {
+                record,
+                expected,
+                found,
+            } => write!(
+                f,
+                "record {record} has {expected} fields but perry.alloc supplies {found}"
+            ),
+            Self::FieldType { record, field } => {
+                write!(
+                    f,
+                    "record {record} field {field} has a different type than its value"
+                )
+            }
+            Self::NoField { record, field } => write!(f, "record {record} has no field {field}"),
+            Self::Tier(tier) => write!(f, "perry.alloc tier {tier:?} is not an allocation tier"),
+            Self::MissingTier => f.write_str("perry.alloc is missing its allocation tier"),
+            Self::FieldOrder(record) => {
+                write!(f, "record {record} has an invalid property insertion order")
+            }
+        }
+    }
+}
+
+impl core::error::Error for HeapErr {}
 
 fn record<'a>(
     ctx: &'a Context,

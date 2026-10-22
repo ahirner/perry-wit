@@ -2,7 +2,7 @@
 //!
 //! Adapted from `pliron-llvm` (Apache-2.0, The pliron contributors).
 
-/// Define `BrOp`, `CondBrOp`, and `ReturnOp` in a module importing pliron and thiserror.
+/// Define `BrOp`, `CondBrOp`, and `ReturnOp` in a module importing pliron.
 /// The predicate checks the dialect's condition type, while operation names and errors remain local.
 #[macro_export]
 macro_rules! control_flow_ops {
@@ -21,10 +21,7 @@ macro_rules! control_flow_ops {
             identifier::Identifier,
             input_err,
             irfmt::{
-                parsers::{
-                    block_opd_parser, delimited_list_parser, spaced,
-                    ssa_opd_parser,
-                },
+                parsers::{block_opd_parser, delimited_list_parser, spaced, ssa_opd_parser},
                 printers::iter_with_sep,
             },
             location::Location,
@@ -36,15 +33,14 @@ macro_rules! control_flow_ops {
             value::Value,
             verify_err,
         };
-        use thiserror::Error;
 
         /// Unconditional branch passing its operands as the destination's block arguments.
         #[pliron_op(
-            name = $branch,
-            format = "succ($0) `(` operands(CharSpace(`,`)) `)`",
-            interfaces = [IsTerminatorInterface, NResultsInterface<0>, OneSuccInterface],
-            verifier = "succ"
-        )]
+                    name = $branch,
+                    format = "succ($0) `(` operands(CharSpace(`,`)) `)`",
+                    interfaces = [IsTerminatorInterface, NResultsInterface<0>, OneSuccInterface],
+                    verifier = "succ"
+                )]
         pub struct BrOp;
 
         impl BrOp {
@@ -64,7 +60,12 @@ macro_rules! control_flow_ops {
                 0..self.get_operation().deref(ctx).get_num_operands()
             }
 
-            fn add_successor_operand(&self, ctx: &mut Context, succ_idx: usize, operand: Value) -> usize {
+            fn add_successor_operand(
+                &self,
+                ctx: &mut Context,
+                succ_idx: usize,
+                operand: Value,
+            ) -> usize {
                 assert_eq!(succ_idx, 0, concat!($branch, " has one successor"));
                 Operation::push_operand(self.get_operation(), ctx, operand)
             }
@@ -82,10 +83,10 @@ macro_rules! control_flow_ops {
 
         /// Conditional branch with separate block arguments for each destination.
         #[pliron_op(
-            name = $conditional,
-            interfaces = [IsTerminatorInterface, NResultsInterface<0>, NSuccsInterface<2>],
-            operands = (condition)
-        )]
+                    name = $conditional,
+                    interfaces = [IsTerminatorInterface, NResultsInterface<0>, NSuccsInterface<2>],
+                    operands = (condition)
+                )]
         pub struct CondBrOp;
 
         impl CondBrOp {
@@ -99,19 +100,41 @@ macro_rules! control_flow_ops {
             ) -> Self {
                 let (operands, sizes) =
                     Self::compute_segment_sizes(vec![vec![condition], then_args, else_args]);
-                let op = Operation::new_op::<Self>(ctx, vec![], operands, vec![then_dest, else_dest], 0);
+                let op =
+                    Operation::new_op::<Self>(ctx, vec![], operands, vec![then_dest, else_dest], 0);
                 op.set_operand_segment_sizes(ctx, sizes);
                 op
             }
         }
 
-        #[derive(Debug, Error)]
+        #[derive(Debug)]
         enum CondBrErr {
-            #[error("{name} condition must be {expected}", name = $conditional, expected = $description)]
             Condition,
-            #[error("{name} needs exactly one condition operand, found {0}", name = $conditional)]
             ConditionCount(u32),
         }
+
+        impl core::fmt::Display for CondBrErr {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self {
+                    Self::Condition => {
+                        write!(
+                            f,
+                            concat!($conditional, " condition must be ", $description)
+                        )
+                    }
+                    Self::ConditionCount(count) => write!(
+                        f,
+                        concat!(
+                            $conditional,
+                            " needs exactly one condition operand, found {}"
+                        ),
+                        count
+                    ),
+                }
+            }
+        }
+
+        impl core::error::Error for CondBrErr {}
 
         impl Verify for CondBrOp {
             fn verify(&self, ctx: &Context) -> Result<()> {
@@ -145,7 +168,12 @@ macro_rules! control_flow_ops {
                 self.segment_range(ctx, succ_idx + 1)
             }
 
-            fn add_successor_operand(&self, ctx: &mut Context, succ_idx: usize, operand: Value) -> usize {
+            fn add_successor_operand(
+                &self,
+                ctx: &mut Context,
+                succ_idx: usize,
+                operand: Value,
+            ) -> usize {
                 self.push_to_segment(ctx, succ_idx + 1, operand)
             }
 
@@ -200,27 +228,36 @@ macro_rules! control_flow_ops {
                         pliron::builtin::op_interfaces::NResultsVerifyErr(0, results.len())
                     )?
                 }
-                let keyword = |word: &'static str| spaced(pliron::combine::parser::char::string(word));
+                let keyword =
+                    |word: &'static str| spaced(pliron::combine::parser::char::string(word));
                 let args = || delimited_list_parser('(', ')', ',', ssa_opd_parser());
-                let ((((condition, then_dest), then_args), (else_dest, else_args)), committed) = keyword("if")
-                    .with(spaced(ssa_opd_parser()))
-                    .and(spaced(block_opd_parser()))
-                    .and(args())
-                    .and(keyword("else").with(spaced(block_opd_parser()).and(args())))
-                    .parse_stream(state_stream)
-                    .into_result()?;
-                let op = CondBrOp::new(state_stream.state.ctx, condition, then_dest, then_args, else_dest, else_args);
+                let ((((condition, then_dest), then_args), (else_dest, else_args)), committed) =
+                    keyword("if")
+                        .with(spaced(ssa_opd_parser()))
+                        .and(spaced(block_opd_parser()))
+                        .and(args())
+                        .and(keyword("else").with(spaced(block_opd_parser()).and(args())))
+                        .parse_stream(state_stream)
+                        .into_result()?;
+                let op = CondBrOp::new(
+                    state_stream.state.ctx,
+                    condition,
+                    then_dest,
+                    then_args,
+                    else_dest,
+                    else_args,
+                );
                 Ok((OpObj::new(op), committed))
             }
         }
 
         /// Function return of zero or more values.
         #[pliron_op(
-            name = $return,
-            format = "operands(CharSpace(`,`))",
-            interfaces = [IsTerminatorInterface, NResultsInterface<0>],
-            verifier = "succ"
-        )]
+                    name = $return,
+                    format = "operands(CharSpace(`,`))",
+                    interfaces = [IsTerminatorInterface, NResultsInterface<0>],
+                    verifier = "succ"
+                )]
         pub struct ReturnOp;
 
         impl ReturnOp {

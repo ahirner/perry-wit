@@ -1,7 +1,8 @@
 //! Original source coordinates for merged AST and HIR declarations.
+use crate::{LowerError, LowerErrorKind};
 use perry_hir::ir::Expr;
+use perry_mir::SourceSpan;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use std::{collections::HashMap, path::PathBuf};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -148,19 +149,28 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
-        let existing = error.downcast_ref::<PerryDiagnostic>().cloned();
-        if existing.as_ref().is_some_and(|d| d.span.is_some()) {
+        if error
+            .downcast_ref::<LowerError>()
+            .is_some_and(|d| d.span.is_some())
+        {
             return error;
         }
         let resolved = self.span(span);
-        if resolved.is_none() && existing.is_some() {
-            return error;
+        match LowerError::try_from_anyhow(error) {
+            Ok(mut diagnostic) => {
+                if resolved.is_some() {
+                    diagnostic.span = resolved;
+                }
+                diagnostic.into()
+            }
+            Err(error) => {
+                let mut diagnostic =
+                    LowerError::new(LowerErrorKind::UnsupportedExpression(error.to_string()));
+                diagnostic.span = resolved;
+                diagnostic.notes = error.chain().skip(1).map(ToString::to_string).collect();
+                diagnostic.into()
+            }
         }
-        let mut diagnostic = existing.unwrap_or_else(|| {
-            PerryDiagnostic::error(DiagnosticCode::UnsupportedExpression, error.to_string())
-        });
-        diagnostic.span = resolved;
-        error.context(diagnostic)
     }
 
     pub(crate) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
