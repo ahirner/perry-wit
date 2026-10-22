@@ -95,6 +95,13 @@ op_schema! {
     error = IncompatibleLayout;
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("aggregate widening requires compatible layouts")]
+#[derive(Debug)]
 struct IncompatibleLayout;
+
+impl core::fmt::Display for IncompatibleLayout {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("aggregate widening requires compatible layouts")
+    }
+}
+
+impl core::error::Error for IncompatibleLayout {}

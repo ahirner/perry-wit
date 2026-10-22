@@ -21,17 +21,25 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub(crate) enum LocalErr {
-    #[error("{0} expects a perry.slot operand")]
     NotSlot(&'static str),
-    #[error("{0} value type differs from the slot's type")]
     Type(&'static str),
-    #[error("allocation info does not belong to this op")]
     Unrelated,
 }
+
+impl core::fmt::Display for LocalErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotSlot(op) => write!(f, "{op} expects a perry.slot operand"),
+            Self::Type(op) => write!(f, "{op} value type differs from the slot's type"),
+            Self::Unrelated => f.write_str("allocation info does not belong to this op"),
+        }
+    }
+}
+
+impl core::error::Error for LocalErr {}
 
 fn slot_value(ctx: &Context, slot: Value, op: &'static str) -> Result<TypeHandle> {
     match TypedHandle::<SlotType>::from_handle(slot.get_type(ctx), ctx) {

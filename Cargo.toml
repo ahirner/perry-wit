@@ -57,7 +57,6 @@ pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
 tempfile = "3.27.0"
-thiserror = "2"
 tokio = "1"
 wasm-encoder = "0.261"
 wasmparser = "0.261"

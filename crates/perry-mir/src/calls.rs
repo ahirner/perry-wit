@@ -20,17 +20,29 @@ use pliron::{
     value::Value,
     verify_err,
 };
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub(crate) enum CallErr {
-    #[error("callee {0} is not a function of the enclosing module")]
     Unknown(String),
-    #[error("call to {0} does not match the callee's signature")]
     Signature(String),
-    #[error("perry.await operand must be a perry.promise of the result type")]
     Await,
+    Timer,
 }
+
+impl core::fmt::Display for CallErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unknown(callee) => write!(f, "callee {callee} is not a function of the enclosing module"),
+            Self::Signature(callee) => write!(f, "call to {callee} does not match the callee's signature"),
+            Self::Await => f.write_str("perry.await operand must be a perry.promise of the result type"),
+            Self::Timer => f.write_str(
+                "perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for CallErr {}
 
 /// Signature `(arguments, results)` of the module-level function `callee` seen from `op`.
 fn callee_signature(
@@ -193,10 +205,6 @@ pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
     function_meta(ctx, function).asynchronous
 }
 
-#[derive(Debug, Error)]
-#[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
-pub(crate) struct TimerErr;
-
 op_schema! {
     /// `setTimeout(delay, value, { signal })` from `node:timers/promises`: a promise that settles
     /// with `value` once `delay` milliseconds (at least 1, as in Node) have passed on the host's
@@ -213,13 +221,13 @@ op_schema! {
     }
     prepare(this) {
         if !(2..=3).contains(&operands.get_num_operands()) {
-            return verify_err!(this.loc(ctx), TimerErr);
+            return verify_err!(this.loc(ctx), CallErr::Timer);
         }
         let value = operands.get_operand(1).get_type(ctx);
     }
     result(ctx, value: TypeHandle): TypeHandle = PromiseType::get(ctx, value).into();
-    error = TimerErr;
+    error = CallErr::Timer;
     check_before Ty::Number.matches(ctx, operands.get_operand(0).get_type(ctx))
         && (operands.get_num_operands() == 2 || Ty::Abort.matches(ctx, operands.get_operand(2).get_type(ctx)))
-        => TimerErr;
+        => CallErr::Timer;
 }

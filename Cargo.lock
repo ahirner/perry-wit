@@ -1525,12 +1525,9 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "perry-abi",
- "perry-wit-diagnostics",
  "pliron",
  "pliron-control",
  "regex",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1645,7 +1642,7 @@ name = "perry-wit-diagnostics"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "serde",
+ "perry-mir",
 ]
 
 [[package]]
@@ -1746,7 +1743,6 @@ version = "0.1.0"
 dependencies = [
  "pliron",
  "pliron-control",
- "thiserror",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
  "wasmprinter 0.261.0",

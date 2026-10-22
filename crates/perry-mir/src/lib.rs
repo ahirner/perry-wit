@@ -105,7 +105,7 @@ pub use collections::{
     StringConstOp, StringLenOp,
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
-pub use diagnostics::{set_source_span, source_span};
+pub use diagnostics::{SourceSpan, set_source_span, source_span};
 pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{
     CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp, RethrowOp,

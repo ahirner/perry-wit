@@ -25,21 +25,29 @@ use pliron::{
     linked_list::LinkedList, op::Op, operation::Operation, result::Result, r#type::Typed,
     value::Value,
 };
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 enum ExceptionErr {
-    #[error("{0} expects a perry.exception operand")]
     Exception(&'static str),
-    #[error("{0} expects a signless i32 status")]
     Status(&'static str),
-    #[error("perry.caught must directly follow an op that may throw")]
     Caught,
-    #[error("perry.error_new takes a perry.string message")]
     Message,
-    #[error("{0} has a wrong result type")]
     Result(&'static str),
 }
+
+impl core::fmt::Display for ExceptionErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Exception(op) => write!(f, "{op} expects a perry.exception operand"),
+            Self::Status(op) => write!(f, "{op} expects a signless i32 status"),
+            Self::Caught => f.write_str("perry.caught must directly follow an op that may throw"),
+            Self::Message => f.write_str("perry.error_new takes a perry.string message"),
+            Self::Result(op) => write!(f, "{op} has a wrong result type"),
+        }
+    }
+}
+
+impl core::error::Error for ExceptionErr {}
 
 op_schema! {
     /// `new Error(message)`, `new TypeError(message)`, `new RangeError(message)` (kind `any` is

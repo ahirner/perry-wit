@@ -19,7 +19,6 @@ use pliron::{
     r#type::{TypeHandle, Typed},
     value::Value,
 };
-use thiserror::Error;
 
 mod catalog;
 mod promises;
@@ -186,13 +185,34 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
     crate::semantics::exception(ctx, op).is_some()
 }
 
-#[derive(Debug, Error)]
-enum IntrinsicErr {
-    #[error("missing intrinsic attribute")]
+#[derive(Debug)]
+pub(super) enum IntrinsicErr {
     Missing,
-    #[error("intrinsic {0} has the wrong operand or result types")]
     Signature(String),
+    Stringify,
+    Combinator,
+    PromiseResult(&'static str),
+    Settled,
 }
+
+impl core::fmt::Display for IntrinsicErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("missing intrinsic attribute"),
+            Self::Signature(name) => write!(f, "intrinsic {name} has the wrong operand or result types"),
+            Self::Stringify => f.write_str(
+                "perry.json_stringify produces a string, or string | undefined for an optional value",
+            ),
+            Self::Combinator => {
+                f.write_str("perry.promise_combinator takes an array of promises of one type")
+            }
+            Self::PromiseResult(op) => write!(f, "{op} has an invalid promise result type"),
+            Self::Settled => f.write_str("perry.settled_field reads a perry.settled value"),
+        }
+    }
+}
+
+impl core::error::Error for IntrinsicErr {}
 
 op_schema! {
     /// A call of a host or runtime service.
@@ -236,10 +256,6 @@ impl OutputContract for Intrinsic {
     }
 }
 
-#[derive(Debug, Error)]
-#[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
-struct StringifyErr;
-
 op_schema! {
     /// `JSON.stringify(value)` of a typed value: records, arrays, strings, numbers, booleans,
     /// `Uint8Array`s, JSON values and their optionals.
@@ -259,7 +275,7 @@ op_schema! {
     result(ctx): impl OutputContract = Accepts(|ctx: &Context, ty| {
         Ty::String.matches(ctx, ty) || Ty::OptString.matches(ctx, ty)
     });
-    error = StringifyErr;
+    error = IntrinsicErr::Stringify;
 }
 
 op_schema! {

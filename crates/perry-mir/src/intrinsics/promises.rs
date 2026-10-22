@@ -5,10 +5,6 @@ use crate::signatures::{Accepts, OutputContract};
 use crate::types::{PromiseType, SettledType};
 use pliron::r#type::{TypeHandle, TypedHandle};
 
-#[derive(Debug, Error)]
-#[error("perry.promise_combinator takes an array of promises of one type")]
-struct CombinatorErr;
-
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
@@ -31,7 +27,7 @@ op_schema! {
         /// `None` unless `promises` is an array of promises.
         pub new(combinator: Combinator, promises: Value) => infer(promises, combinator);
     }
-    attribute(combinator: Combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => CombinatorErr;
+    attribute(combinator: Combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => IntrinsicErr::Combinator;
     prepare(_this) { let combinator = *combinator; }
     result(ctx, promises: Value, combinator: Combinator): TypeHandle = {
         let element = TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
@@ -52,12 +48,8 @@ op_schema! {
         };
         Some(PromiseType::get(ctx, settled).into())
     };
-    error = CombinatorErr;
+    error = IntrinsicErr::Combinator;
 }
-
-#[derive(Debug, Error)]
-#[error("{0} has an invalid promise result type")]
-struct PromiseResultErr(&'static str);
 
 op_schema! {
     /// A promise fulfilled with its operand: a plain value among a combinator's inputs
@@ -68,7 +60,7 @@ op_schema! {
     constructors { pub new(value: Value) => infer(value); }
     result(ctx, value: Value): TypeHandle =
         PromiseType::get(ctx, value.get_type(ctx)).into();
-    error = PromiseResultErr("perry.promise_resolved");
+    error = IntrinsicErr::PromiseResult("perry.promise_resolved");
 }
 
 op_schema! {
@@ -84,12 +76,8 @@ op_schema! {
     result(ctx): impl OutputContract = Accepts(|ctx: &Context, ty: TypeHandle| {
         ty.deref(ctx).is::<PromiseType>()
     });
-    error = PromiseResultErr("perry.promise_rejected");
+    error = IntrinsicErr::PromiseResult("perry.promise_rejected");
 }
-
-#[derive(Debug, Error)]
-#[error("perry.settled_field reads a perry.settled value")]
-struct SettledErr;
 
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]
@@ -113,7 +101,7 @@ op_schema! {
         /// `None` unless `settled` is a `perry.settled` value.
         pub new(field: SettledField, settled: Value) => infer(settled, field);
     }
-    attribute(field: SettledField, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => SettledErr;
+    attribute(field: SettledField, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => IntrinsicErr::Settled;
     prepare(_this) { let field = *field; }
     result(ctx, settled: Value, field: SettledField): TypeHandle = {
         let value = TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
@@ -129,5 +117,5 @@ op_schema! {
             }
         })
     };
-    error = SettledErr;
+    error = IntrinsicErr::Settled;
 }

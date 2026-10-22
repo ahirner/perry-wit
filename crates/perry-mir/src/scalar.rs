@@ -19,7 +19,6 @@ use pliron::{
     r#type::{TypeHandle, Typed},
     value::Value,
 };
-use thiserror::Error;
 
 /// Binary arithmetic over operands and result of one scalar type.
 #[pliron_op(
@@ -90,12 +89,8 @@ op_schema! {
     constructors { pub new(kind: CompareKind, _lhs: Value, _rhs: Value) => infer(); }
     attribute(kind: CompareKind, get_attr_perry_compare_kind, set_attr_perry_compare_kind) = kind;
     result(ctx): Ty = Ty::Predicate;
-    error = CompareResultErr;
+    error = ScalarErr::CompareResult;
 }
-
-#[derive(Debug, Error)]
-#[error("perry.compare must produce a signless i1")]
-pub(crate) struct CompareResultErr;
 
 /// Whether `value` is a signless `i1`, the type of branch conditions.
 pub(crate) fn is_bool(ctx: &Context, value: Value) -> bool {
@@ -130,9 +125,24 @@ op_schema! {
             })
         })
     };
-    error = NumericCastErr;
+    error = ScalarErr::NumericCast;
 }
 
-#[derive(Debug, Error)]
-#[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
-struct NumericCastErr;
+#[derive(Debug)]
+enum ScalarErr {
+    CompareResult,
+    NumericCast,
+}
+
+impl core::fmt::Display for ScalarErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CompareResult => f.write_str("perry.compare must produce a signless i1"),
+            Self::NumericCast => f.write_str(
+                "perry.numeric_cast requires numeric conversion or integer/bigint boxing",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ScalarErr {}
