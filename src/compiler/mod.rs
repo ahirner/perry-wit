@@ -71,10 +71,8 @@ fn compile_typescript_impl(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = component::wit::select_world(&resolve, package, options.world.as_deref())
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
+    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
+    let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
     compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }
 
@@ -149,20 +147,14 @@ pub(crate) fn compile_sources(
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let mir =
         perry_lower::lower_sources(ctx, source, identity, modules, &foreign).map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
+            crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
-    let mut exports = bind::exports(ctx, &mir, resolve, world).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
-    bind::constrain_numbers(ctx, &mir, &exports).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
+    let mut exports = bind::exports(ctx, &mir, resolve, world)?;
+    bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
     bind::specialized_implementations(ctx, &mir, &mut exports);
-    bind::check_main(ctx, &mir, &exports).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::ExportMismatch)
-    })?;
-    emit_component(
+    bind::check_main(ctx, &mir, &exports)?;
+    Ok(emit_component(
         ctx,
         &mir,
         &mut analyses,
@@ -175,7 +167,9 @@ pub(crate) fn compile_sources(
         resources,
         true,
     )
-    .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
+    .map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -262,10 +256,14 @@ pub(crate) fn compile_core_sources(
         Exports::Raw
     };
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
-        crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
     })?;
-    link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
-        .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure))
+    Ok(
+        link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
+            .map_err(|error| {
+                crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+            })?,
+    )
 }
 
 fn lower(
@@ -277,7 +275,7 @@ fn lower(
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let mir =
         perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::UnsupportedExpression)
+            crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
@@ -288,7 +286,7 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
-            crate::CompileError::stage(error, crate::DiagnosticCode::CodegenFailure)
+            crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
         })?;
     Ok(analyses)
 }

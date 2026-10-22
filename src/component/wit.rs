@@ -1,17 +1,131 @@
 //! Versioned WASI and custom WIT package resolution.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use wit_parser::{PackageId, Resolve, SourceMap, UnresolvedPackageGroup};
+
+#[derive(Debug)]
+enum WitError {
+    MissingDirectory {
+        dir: PathBuf,
+    },
+    ParsePackage {
+        dir: PathBuf,
+        missing_package_header: bool,
+        source: anyhow::Error,
+    },
+    ResolveDependencies {
+        target: String,
+        source: anyhow::Error,
+    },
+    SelectWorld {
+        package_name: String,
+        requested: Option<String>,
+        available: Vec<String>,
+        source: anyhow::Error,
+    },
+    EmptySources,
+    InvalidPackageEncoding,
+    Other(anyhow::Error),
+}
+
+impl WitError {
+    fn help(&self) -> Option<String> {
+        match self {
+            Self::MissingDirectory { dir } => Some(format!(
+                "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
+                dir.display()
+            )),
+            Self::ParsePackage {
+                missing_package_header: true,
+                ..
+            } => Some(
+                "Add a package header such as 'package local:app;' at the top of your .wit file, or ensure the directory contains at least one .wit file.".to_owned(),
+            ),
+            Self::SelectWorld {
+                package_name,
+                requested,
+                available,
+                ..
+            } => {
+                let list = available.join(", ");
+                Some(match (available.is_empty(), requested.is_some()) {
+                    (true, _) => {
+                        "Declare a 'world <name> { ... }' block in your WIT package.".to_owned()
+                    }
+                    (false, true) => {
+                        format!("Available worlds in package '{package_name}': {list}.")
+                    }
+                    (false, false) => {
+                        format!("Pass '--world <NAME>' to select a world (available: {list}).")
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for WitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingDirectory { dir } => {
+                write!(f, "WIT directory '{}' does not exist", dir.display())
+            }
+            Self::ParsePackage { dir, .. } => {
+                write!(f, "loading WIT package from {}", dir.display())
+            }
+            Self::ResolveDependencies { target, .. } => {
+                write!(f, "resolving WIT dependencies for {target}")
+            }
+            Self::SelectWorld { source, .. } | Self::Other(source) => write!(f, "{source}"),
+            Self::EmptySources => f.write_str("WIT package has no sources"),
+            Self::InvalidPackageEncoding => {
+                f.write_str("expected an encoded WIT package, not an application component")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ParsePackage { source, .. }
+            | Self::ResolveDependencies { source, .. }
+            | Self::SelectWorld { source, .. }
+            | Self::Other(source) => Some(source.as_ref()),
+            Self::MissingDirectory { .. } | Self::EmptySources | Self::InvalidPackageEncoding => {
+                None
+            }
+        }
+    }
+}
+
+impl From<WitError> for crate::PerryDiagnostic {
+    fn from(error: WitError) -> Self {
+        let help = error.help();
+        let mut diagnostic = Self::error(crate::DiagnosticCode::WitResolution, error.to_string());
+        if let Some(help) = help {
+            diagnostic = diagnostic.with_help(help);
+        }
+        if let Some(source) = std::error::Error::source(&error) {
+            diagnostic = diagnostic.with_source_notes(source);
+        }
+        diagnostic
+    }
+}
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/wasi_packages.rs"));
 }
 
 fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGroup> {
-    ensure!(!sources.is_empty(), "WIT package has no sources");
+    if sources.is_empty() {
+        return Err(crate::PerryDiagnostic::from(WitError::EmptySources).into());
+    }
     let mut map = SourceMap::new();
     for (index, source) in sources.iter().enumerate() {
         map.push_str(
@@ -22,8 +136,9 @@ fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGro
             crate::api::text(&source.contents, source.name.as_deref())?,
         );
     }
-    map.parse()
-        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))
+    map.parse().map_err(|(map, error)| {
+        crate::PerryDiagnostic::from(WitError::Other(anyhow::anyhow!(error.render(&map)))).into()
+    })
 }
 
 /// Resolve only supplied package contents and the compiler's pinned standard packages.
@@ -38,12 +153,17 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
         match package {
             crate::api::Package::Sources(sources) => groups.push(source_package(sources)?),
             crate::api::Package::Encoded(bytes) => {
-                let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) =
-                    wit_parser::decoding::decode(bytes)?
+                let decoded = wit_parser::decoding::decode(bytes)
+                    .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
+                let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded
                 else {
-                    anyhow::bail!("expected an encoded WIT package, not an application component");
+                    return Err(
+                        crate::PerryDiagnostic::from(WitError::InvalidPackageEncoding).into(),
+                    );
                 };
-                let remap = resolve.merge(decoded)?;
+                let remap = resolve
+                    .merge(decoded)
+                    .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
                 if index == 0 {
                     application = Some(remap.packages[package.index()]);
                 }
@@ -55,9 +175,12 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
     } else {
         // push_groups needs a main package; the marker only anchors explicit dependencies.
         UnresolvedPackageGroup::parse("dependencies.wit", "package perry:compiler-dependencies;")
-            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?
+            .map_err(|(map, error)| {
+                crate::PerryDiagnostic::from(WitError::Other(anyhow::anyhow!(error.render(&map))))
+            })?
     };
-    let package = resolve_with(main, &mut resolve, groups, false)?;
+    let package = resolve_with(main, &mut resolve, groups, false)
+        .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
     Ok((resolve, application.unwrap_or(package)))
 }
 
@@ -103,35 +226,32 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
 
 pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     if !wit_dir.exists() {
-        return Err(crate::PerryDiagnostic::error(
-            crate::DiagnosticCode::WitResolution,
-            format!("WIT directory '{}' does not exist", wit_dir.display()),
-        )
-        .with_help(format!(
-            "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
-            wit_dir.display()
-        ))
+        return Err(crate::PerryDiagnostic::from(WitError::MissingDirectory {
+            dir: wit_dir.to_path_buf(),
+        })
         .into());
     }
     let mut resolve = Resolve::new();
-    let main = UnresolvedPackageGroup::parse_dir(wit_dir).map_err(|error| {
-        let mut diag = crate::PerryDiagnostic::error(
-            crate::DiagnosticCode::WitResolution,
-            format!("loading WIT package from {}", wit_dir.display()),
-        );
-        if error
+    let main = UnresolvedPackageGroup::parse_dir(wit_dir).map_err(|source| {
+        let missing_package_header = source
             .chain()
-            .any(|c| c.to_string().contains("no `package` header was found"))
-        {
-            diag = diag.with_help(
-                "Add a package header such as 'package local:app;' at the top of your .wit file, or ensure the directory contains at least one .wit file.",
-            );
-        }
-        error.context(diag)
+            .any(|c| c.to_string().contains("no `package` header was found"));
+        crate::PerryDiagnostic::from(WitError::ParsePackage {
+            dir: wit_dir.to_path_buf(),
+            missing_package_header,
+            source,
+        })
     })?;
-    let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
+    let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)
+        .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
     resolve_with(main, &mut resolve, deps, true)
-        .with_context(|| format!("resolving WIT dependencies for {}", wit_dir.display()))
+        .map_err(|source| {
+            crate::PerryDiagnostic::from(WitError::ResolveDependencies {
+                target: wit_dir.display().to_string(),
+                source,
+            })
+            .into()
+        })
         .map(|package| (resolve, package))
 }
 
@@ -140,26 +260,15 @@ pub(crate) fn select_world(
     package: PackageId,
     world: Option<&str>,
 ) -> Result<wit_parser::WorldId> {
-    resolve.select_world(&[package], world).map_err(|error| {
-        let worlds = &resolve.packages[package].worlds;
-        let available = worlds
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let help = match (worlds.is_empty(), world.is_some()) {
-            (true, _) => "Declare a 'world <name> { ... }' block in your WIT package.".to_owned(),
-            (false, true) => format!(
-                "Available worlds in package '{}': {available}.",
-                resolve.packages[package].name
-            ),
-            (false, false) => {
-                format!("Pass '--world <NAME>' to select a world (available: {available}).")
-            }
-        };
-        crate::PerryDiagnostic::error(crate::DiagnosticCode::WitResolution, error.to_string())
-            .with_help(help)
-            .into()
+    resolve.select_world(&[package], world).map_err(|source| {
+        let available = resolve.packages[package].worlds.keys().cloned().collect();
+        crate::PerryDiagnostic::from(WitError::SelectWorld {
+            package_name: resolve.packages[package].name.to_string(),
+            requested: world.map(str::to_owned),
+            available,
+            source,
+        })
+        .into()
     })
 }
 

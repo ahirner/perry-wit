@@ -65,6 +65,28 @@ impl PerryDiagnostic {
         self.help = Some(help.into());
         self
     }
+    pub fn with_source_notes(mut self, source: &(dyn std::error::Error + 'static)) -> Self {
+        let rendered = self.to_string();
+        let mut current = Some(source);
+        while let Some(cause) = current {
+            if cause.downcast_ref::<PerryDiagnostic>().is_some()
+                || cause.downcast_ref::<CompileError>().is_some()
+            {
+                current = cause.source();
+                continue;
+            }
+            let message = cause.to_string().trim().to_owned();
+            if !message.is_empty()
+                && message != self.message.trim()
+                && message != rendered.trim()
+                && !self.notes.iter().any(|note| note.trim() == message)
+            {
+                self.notes.push(message);
+            }
+            current = cause.source();
+        }
+        self
+    }
 }
 
 impl fmt::Display for PerryDiagnostic {
@@ -96,20 +118,22 @@ pub struct CompileError {
     source: anyhow::Error,
 }
 
-impl CompileError {
-    pub fn stage(error: anyhow::Error, code: DiagnosticCode) -> anyhow::Error {
-        if error.downcast_ref::<PerryDiagnostic>().is_some()
-            || error.downcast_ref::<CompileError>().is_some()
-        {
-            error
-        } else {
-            let diagnostic = PerryDiagnostic::error(code, error.to_string());
-            error.context(diagnostic)
+impl From<PerryDiagnostic> for CompileError {
+    fn from(diagnostic: PerryDiagnostic) -> Self {
+        let source = anyhow::Error::new(diagnostic.clone());
+        Self {
+            diagnostics: vec![diagnostic],
+            source,
         }
     }
+}
 
+impl CompileError {
     pub fn from_error(error: anyhow::Error, fallback: DiagnosticCode) -> Self {
-        if let Some(inner) = error.downcast_ref::<CompileError>() {
+        if let Some(inner) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<CompileError>())
+        {
             return Self {
                 diagnostics: inner.diagnostics.clone(),
                 source: error,
@@ -123,25 +147,9 @@ impl CompileError {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<PerryDiagnostic>())
                     .cloned()
-            });
-        let mut diagnostic =
-            diagnostic.unwrap_or_else(|| PerryDiagnostic::error(fallback, error.to_string()));
-        let rendered = diagnostic.to_string();
-        for cause in error.chain() {
-            if cause.downcast_ref::<PerryDiagnostic>().is_some()
-                || cause.downcast_ref::<CompileError>().is_some()
-            {
-                continue;
-            }
-            let message = cause.to_string().trim().to_owned();
-            if !message.is_empty()
-                && message != diagnostic.message.trim()
-                && message != rendered.trim()
-                && !diagnostic.notes.iter().any(|note| note.trim() == message)
-            {
-                diagnostic.notes.push(message);
-            }
-        }
+            })
+            .unwrap_or_else(|| PerryDiagnostic::error(fallback, error.to_string()));
+        let diagnostic = diagnostic.with_source_notes(error.as_ref());
         Self {
             diagnostics: vec![diagnostic],
             source: error,
