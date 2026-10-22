@@ -115,6 +115,10 @@ impl PerryDiagnostic {
         self.span = Some(span);
         self
     }
+    pub fn with_optional_span(mut self, span: Option<SourceSpan>) -> Self {
+        self.span = span;
+        self
+    }
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
@@ -181,16 +185,21 @@ impl CompileError {
         let mut diagnostic =
             diagnostic.unwrap_or_else(|| PerryDiagnostic::error(fallback, error.to_string()));
         let rendered = diagnostic.to_string();
-        diagnostic.notes.extend(
-            error
-                .chain()
-                .filter(|cause| {
-                    cause.downcast_ref::<PerryDiagnostic>().is_none()
-                        && cause.downcast_ref::<CompileError>().is_none()
-                })
-                .map(ToString::to_string)
-                .filter(|message| message != &diagnostic.message && message != &rendered),
-        );
+        for cause in error.chain() {
+            if cause.downcast_ref::<PerryDiagnostic>().is_some()
+                || cause.downcast_ref::<CompileError>().is_some()
+            {
+                continue;
+            }
+            let message = cause.to_string().trim().to_owned();
+            if !message.is_empty()
+                && message != diagnostic.message.trim()
+                && message != rendered.trim()
+                && !diagnostic.notes.iter().any(|note| note.trim() == message)
+            {
+                diagnostic.notes.push(message);
+            }
+        }
         Self {
             diagnostics: vec![diagnostic],
             source: error,

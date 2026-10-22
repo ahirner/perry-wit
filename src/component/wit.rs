@@ -102,13 +102,65 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
 }
 
 pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
+    if !wit_dir.exists() {
+        return Err(crate::PerryDiagnostic::error(
+            crate::DiagnosticCode::WitResolution,
+            format!("WIT directory '{}' does not exist", wit_dir.display()),
+        )
+        .with_help(format!(
+            "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
+            wit_dir.display()
+        ))
+        .into());
+    }
     let mut resolve = Resolve::new();
-    let main = UnresolvedPackageGroup::parse_dir(wit_dir)
-        .with_context(|| format!("loading WIT package from {}", wit_dir.display()))?;
+    let main = UnresolvedPackageGroup::parse_dir(wit_dir).map_err(|error| {
+        let mut diag = crate::PerryDiagnostic::error(
+            crate::DiagnosticCode::WitResolution,
+            format!("loading WIT package from {}", wit_dir.display()),
+        );
+        if error
+            .chain()
+            .any(|c| c.to_string().contains("no `package` header was found"))
+        {
+            diag = diag.with_help(
+                "Add a package header such as 'package local:app;' at the top of your .wit file, or ensure the directory contains at least one .wit file.",
+            );
+        }
+        error.context(diag)
+    })?;
     let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
     resolve_with(main, &mut resolve, deps, true)
         .with_context(|| format!("resolving WIT dependencies for {}", wit_dir.display()))
         .map(|package| (resolve, package))
+}
+
+pub(crate) fn select_world(
+    resolve: &Resolve,
+    package: PackageId,
+    world: Option<&str>,
+) -> Result<wit_parser::WorldId> {
+    resolve.select_world(&[package], world).map_err(|error| {
+        let worlds = &resolve.packages[package].worlds;
+        let available = worlds
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let help = match (worlds.is_empty(), world.is_some()) {
+            (true, _) => "Declare a 'world <name> { ... }' block in your WIT package.".to_owned(),
+            (false, true) => format!(
+                "Available worlds in package '{}': {available}.",
+                resolve.packages[package].name
+            ),
+            (false, false) => {
+                format!("Pass '--world <NAME>' to select a world (available: {available}).")
+            }
+        };
+        crate::PerryDiagnostic::error(crate::DiagnosticCode::WitResolution, error.to_string())
+            .with_help(help)
+            .into()
+    })
 }
 
 /// Resolve a WIT package given as source, with the ambient WASI packages.

@@ -53,8 +53,7 @@ pub fn generate_sdk_files(
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], options.world.as_deref())
+    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     let artifacts = declarations(&resolve, world)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;

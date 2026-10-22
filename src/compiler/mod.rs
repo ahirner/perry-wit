@@ -73,8 +73,7 @@ fn compile_typescript_impl(
 ) -> Result<Compiled> {
     let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], options.world.as_deref())
+    let world = component::wit::select_world(&resolve, package, options.world.as_deref())
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }

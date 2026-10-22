@@ -420,8 +420,11 @@ fn bind_exports(
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
             return Err(perry_wit_diagnostics::PerryDiagnostic::error(
                 perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                format!("{} requires asynchronous module initialization", export.core_name))
-                .with_help("Declare this WIT export async so it can await module initialization and its error channel.").into());
+                format!("{} requires asynchronous module initialization", export.core_name),
+            )
+            .with_optional_span(perry_mir::source_span(ctx, function))
+            .with_help("Declare this WIT export async so it can await module initialization and its error channel.")
+            .into());
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
@@ -431,15 +434,13 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::error(
+                return Err(perry_wit_diagnostics::PerryDiagnostic::error(
                     perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                    format!("{} can throw without a compatible WIT error channel", export.core_name))
-                    .with_help("Declare a WIT result error, or use an async export with wasi:cli/stderr support.");
-                diagnostic.span = functions
-                    .iter()
-                    .find(|function| function.get_symbol_name(ctx).as_ref() == export.function)
-                    .and_then(|function| perry_mir::source_span(ctx, function));
-                return Err(diagnostic.into());
+                    format!("{} can throw without a compatible WIT error channel", export.core_name),
+                )
+                .with_optional_span(perry_mir::source_span(ctx, function))
+                .with_help("Declare a WIT result error, or use an async export with wasi:cli/stderr support.")
+                .into());
             }
             if export.is_async() {
                 state.reports_rejection = true;
@@ -465,7 +466,15 @@ fn bind_exports(
             &lowered[&function.get_symbol_name(ctx)],
             export,
         )
-        .with_context(|| format!("binding WIT export {}", export.core_name))?;
+        .map_err(|error| {
+            error.context(
+                perry_wit_diagnostics::PerryDiagnostic::error(
+                    perry_wit_diagnostics::DiagnosticCode::ExportMismatch,
+                    format!("binding WIT export {}", export.core_name),
+                )
+                .with_optional_span(perry_mir::source_span(ctx, function)),
+            )
+        })?;
     }
     Ok(())
 }

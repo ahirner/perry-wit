@@ -1,7 +1,7 @@
 //! Binding WIT world exports to exported TypeScript functions.
 use crate::abi::export_names::core_export_name;
 use crate::abi::types::{Contract, Input, convert, primitive};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_mir::is_exported;
 use pliron::{
@@ -13,6 +13,17 @@ use pliron::{
     op::Op,
 };
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+
+fn export_mismatch(
+    span: Option<crate::SourceSpan>,
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> anyhow::Error {
+    crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, message)
+        .with_optional_span(span)
+        .with_help(help)
+        .into()
+}
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
 pub(crate) fn constrain_numbers(
@@ -39,6 +50,24 @@ pub(crate) fn constrain_numbers(
             perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
         let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
+        if !export.is_command() && args.len() != export.params.len() {
+            return Err(export_mismatch(
+                perry_mir::source_span(ctx, function),
+                format!(
+                    "{} takes {} parameters but the WIT export {} has {}",
+                    export.function,
+                    args.len(),
+                    export.core_name,
+                    export.params.len()
+                ),
+                format!(
+                    "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
+                    export.function,
+                    export.params.len(),
+                    export.core_name
+                ),
+            ));
+        }
         if args.len() != export.params.len()
             || results.len() != usize::from(export.result.is_some())
         {
@@ -58,10 +87,16 @@ pub(crate) fn constrain_numbers(
                 .deref(ctx)
                 .downcast_ref::<pliron::builtin::types::IntegerType>()
                 .is_some_and(|int| int.width() == 64);
-            ensure!(
-                !wide || source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int,
-                "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
-            );
+            if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
+                return Err(export_mismatch(
+                    perry_mir::source_span(ctx, function),
+                    "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
+                    format!(
+                        "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
+                        export.function, export.core_name
+                    ),
+                ));
+            }
             if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
                 || (!wide
                     && (source.deref(ctx).is::<FP64Type>()
@@ -102,13 +137,16 @@ pub(crate) fn exports(
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
     crate::abi::export_names::validate_implementation_names(resolve, world)?;
-    let mut exported = std::collections::HashSet::new();
+    let mut exported = std::collections::HashMap::new();
+    let mut unexported = std::collections::HashMap::new();
     let mut main_present = false;
     for function in module_functions(ctx, mir) {
         let name = function.get_symbol_name(ctx);
         main_present |= name.as_ref() == perry_lower::MAIN;
         if is_exported(ctx, &function) {
-            exported.insert(name.to_string());
+            exported.insert(name.to_string(), function);
+        } else {
+            unexported.insert(name.to_string(), perry_mir::source_span(ctx, &function));
         }
     }
 
@@ -124,26 +162,63 @@ pub(crate) fn exports(
         {
             let found = exported.remove(&implementation);
             // A command's `wasi:cli/run.run` may be the module's top-level statements.
-            let command = !found && is_cli_run(&core_name) && main_present;
-            ensure!(
-                found || command,
-                "WIT export {core_name} needs an exported TypeScript function {implementation}"
-            );
-            if command {
-                bound.push(Export {
-                    core_name,
-                    function: perry_lower::MAIN.to_string(),
-                    params: vec![],
-                    result: None,
-                    kind: ExportKind::Async {
-                        task_return: (
-                            format!("[export]{}", resolve.name_world_key(entry.key)),
-                            function.name.clone(),
+            let command = found.is_none() && is_cli_run(&core_name) && main_present;
+            let Some(mir_function) = found else {
+                if command {
+                    bound.push(Export {
+                        core_name,
+                        function: perry_lower::MAIN.to_string(),
+                        params: vec![],
+                        result: None,
+                        kind: ExportKind::Async {
+                            task_return: (
+                                format!("[export]{}", resolve.name_world_key(entry.key)),
+                                function.name.clone(),
+                            ),
+                            command: true,
+                        },
+                    });
+                    continue;
+                }
+                let (span, help) = match unexported.get(&implementation) {
+                    Some(span) => (
+                        span.clone(),
+                        format!("Add the 'export' keyword to function '{implementation}'."),
+                    ),
+                    None => (
+                        None,
+                        format!(
+                            "Export 'export function {implementation}(...)' from your entry module, or run 'perry-wit gen-types' to generate the expected declarations."
                         ),
-                        command: true,
+                    ),
+                };
+                return Err(export_mismatch(
+                    span,
+                    format!(
+                        "WIT export {core_name} needs an exported TypeScript function {implementation}"
+                    ),
+                    help,
+                ));
+            };
+            let is_async = perry_mir::is_async(ctx, &mir_function);
+            if is_async != function.kind.is_async() {
+                return Err(export_mismatch(
+                    perry_mir::source_span(ctx, &mir_function),
+                    format!(
+                        "{implementation} is {}async but the WIT export {core_name} is {}async",
+                        if is_async { "" } else { "not " },
+                        if function.kind.is_async() { "" } else { "not " },
+                    ),
+                    if function.kind.is_async() {
+                        format!(
+                            "Add 'async' to 'export async function {implementation}(...)' so it matches the WIT export."
+                        )
+                    } else {
+                        format!(
+                            "Remove 'async' from 'export function {implementation}(...)' or declare the WIT export 'async'."
+                        )
                     },
-                });
-                continue;
+                ));
             }
             let params = function
                 .params
@@ -197,10 +272,13 @@ fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
 
 /// Require a command world (`wasi:cli/run`) when top-level statements are present.
 pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
-    ensure!(
-        !has_main(ctx, mir) || exports.iter().any(Export::is_command),
-        "top-level statements need a command world (one exporting wasi:cli/run)"
-    );
+    if has_main(ctx, mir) && !exports.iter().any(Export::is_command) {
+        return Err(export_mismatch(
+            None,
+            "top-level statements need a command world (one exporting wasi:cli/run)",
+            "Move top-level executable statements into an exported function, or select a command world exporting 'wasi:cli/run'.",
+        ));
+    }
     Ok(())
 }
 

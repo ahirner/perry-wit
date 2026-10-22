@@ -124,8 +124,7 @@ fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::
     let (source, identity, modules) = program(input)?;
     let (resolve, package) = crate::component::wit::resolve_contents(wit)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], options.world.as_deref())
+    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     crate::compiler::compile_sources(
         source,
@@ -148,8 +147,7 @@ fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
 fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
     let (resolve, package) = crate::component::wit::resolve_contents(wit)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
-    let world = resolve
-        .select_world(&[package], world)
+    let world = crate::component::wit::select_world(&resolve, package, world)
         .map_err(|error| crate::CompileError::stage(error, crate::DiagnosticCode::WitResolution))?;
     crate::sdk::declarations(&resolve, world)
 }
