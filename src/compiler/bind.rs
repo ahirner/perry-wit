@@ -47,12 +47,12 @@ enum BindError {
 }
 
 impl BindError {
-    fn span(&self) -> Option<crate::SourceSpan> {
+    fn into_span(self) -> Option<crate::SourceSpan> {
         match self {
             Self::ArityMismatch { span, .. }
             | Self::WideIntegerRequiresBigInt { span, .. }
             | Self::MissingExport { span, .. }
-            | Self::AsyncMismatch { span, .. } => span.clone(),
+            | Self::AsyncMismatch { span, .. } => span,
             Self::TopLevelRequiresCommandWorld | Self::UnsupportedAbiType(_) => None,
         }
     }
@@ -160,9 +160,11 @@ impl std::error::Error for BindError {}
 
 impl From<BindError> for crate::PerryDiagnostic {
     fn from(error: BindError) -> Self {
-        let mut diagnostic = Self::error(crate::DiagnosticCode::ExportMismatch, error.to_string())
-            .with_optional_span(error.span());
-        if let Some(help) = error.help() {
+        let message = error.to_string();
+        let help = error.help();
+        let mut diagnostic = Self::error(crate::DiagnosticCode::ExportMismatch, message)
+            .with_optional_span(error.into_span());
+        if let Some(help) = help {
             diagnostic = diagnostic.with_help(help);
         }
         diagnostic
@@ -276,15 +278,12 @@ pub(crate) fn exports(
         crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, e.to_string())
     })?;
     let mut exported = std::collections::HashMap::new();
-    let mut unexported = std::collections::HashMap::new();
     let mut main_present = false;
     for function in module_functions(ctx, mir) {
         let name = function.get_symbol_name(ctx);
         main_present |= name.as_ref() == perry_lower::MAIN;
         if is_exported(ctx, &function) {
             exported.insert(name.to_string(), function);
-        } else {
-            unexported.insert(name.to_string(), perry_mir::source_span(ctx, &function));
         }
     }
 
@@ -318,13 +317,18 @@ pub(crate) fn exports(
                     });
                     continue;
                 }
-                let span = unexported.get(&implementation).cloned().flatten();
-                let is_unexported = unexported.contains_key(&implementation);
+                let unexported = module_functions(ctx, mir).into_iter().find(|candidate| {
+                    !is_exported(ctx, candidate)
+                        && candidate.get_symbol_name(ctx).as_ref() == implementation
+                });
+                let span = unexported
+                    .as_ref()
+                    .and_then(|candidate| perry_mir::source_span(ctx, candidate));
                 return Err(crate::PerryDiagnostic::from(BindError::MissingExport {
                     span,
                     core_name,
                     implementation,
-                    is_unexported,
+                    is_unexported: unexported.is_some(),
                 })
                 .into());
             };

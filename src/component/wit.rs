@@ -23,7 +23,7 @@ enum WitError {
     },
     SelectWorld {
         package_name: String,
-        requested: Option<String>,
+        has_requested_world: bool,
         available: Vec<String>,
         source: anyhow::Error,
     },
@@ -47,23 +47,26 @@ impl WitError {
             ),
             Self::SelectWorld {
                 package_name,
-                requested,
+                has_requested_world,
                 available,
                 ..
-            } => {
-                let list = available.join(", ");
-                Some(match (available.is_empty(), requested.is_some()) {
-                    (true, _) => {
-                        "Declare a 'world <name> { ... }' block in your WIT package.".to_owned()
-                    }
-                    (false, true) => {
-                        format!("Available worlds in package '{package_name}': {list}.")
-                    }
-                    (false, false) => {
-                        format!("Pass '--world <NAME>' to select a world (available: {list}).")
-                    }
-                })
-            }
+            } => Some(match (available.is_empty(), *has_requested_world) {
+                (true, _) => {
+                    "Declare a 'world <name> { ... }' block in your WIT package.".to_owned()
+                }
+                (false, true) => {
+                    format!(
+                        "Available worlds in package '{package_name}': {}.",
+                        available.join(", ")
+                    )
+                }
+                (false, false) => {
+                    format!(
+                        "Pass '--world <NAME>' to select a world (available: {}).",
+                        available.join(", ")
+                    )
+                }
+            }),
             _ => None,
         }
     }
@@ -93,10 +96,10 @@ impl fmt::Display for WitError {
 impl std::error::Error for WitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ParsePackage { source, .. }
-            | Self::ResolveDependencies { source, .. }
-            | Self::SelectWorld { source, .. }
-            | Self::Other(source) => Some(source.as_ref()),
+            Self::ParsePackage { source, .. } | Self::ResolveDependencies { source, .. } => {
+                Some(source.as_ref())
+            }
+            Self::SelectWorld { source, .. } | Self::Other(source) => source.source(),
             Self::MissingDirectory { .. } | Self::EmptySources | Self::InvalidPackageEncoding => {
                 None
             }
@@ -130,13 +133,10 @@ fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGro
     for (index, source) in sources.iter().enumerate() {
         let text = crate::api::text(&source.contents, source.name.as_deref())
             .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
-        map.push_str(
-            source
-                .name
-                .as_deref()
-                .unwrap_or(&format!("source-{index}.wit")),
-            text,
-        );
+        match source.name.as_deref() {
+            Some(name) => map.push_str(name, text),
+            None => map.push_str(&format!("source-{index}.wit"), text),
+        }
     }
     map.parse().map_err(|(map, error)| {
         crate::PerryDiagnostic::from(WitError::Other(anyhow::anyhow!(error.render(&map)))).into()
@@ -196,6 +196,13 @@ pub(crate) fn resolve_embedded_source(name: &str, source: &str) -> Result<(Resol
     })
 }
 
+fn parse_dir(path: &Path) -> Result<UnresolvedPackageGroup> {
+    let mut map = SourceMap::default();
+    map.push_dir(path)?;
+    map.parse()
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))
+}
+
 fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<UnresolvedPackageGroup>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -206,7 +213,7 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
     for entry in entries {
         let path = entry.path();
         let group = if path.is_dir() {
-            UnresolvedPackageGroup::parse_dir(&path)?
+            parse_dir(&path)?
         } else {
             match path.extension().and_then(|ext| ext.to_str()) {
                 Some("wit") => {
@@ -234,7 +241,7 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         .into());
     }
     let mut resolve = Resolve::new();
-    let main = UnresolvedPackageGroup::parse_dir(wit_dir).map_err(|source| {
+    let main = parse_dir(wit_dir).map_err(|source| {
         let missing_package_header = source
             .chain()
             .any(|c| c.to_string().contains("no `package` header was found"));
@@ -266,7 +273,7 @@ pub(crate) fn select_world(
         let available = resolve.packages[package].worlds.keys().cloned().collect();
         crate::PerryDiagnostic::from(WitError::SelectWorld {
             package_name: resolve.packages[package].name.to_string(),
-            requested: world.map(str::to_owned),
+            has_requested_world: world.is_some(),
             available,
             source,
         })

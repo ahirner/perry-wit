@@ -100,7 +100,10 @@ fn compile_for_world_with_memory_checks_impl(
 }
 
 fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
-    perry_lower::source_files::load(source, file_name).map_err(map_lower_error)
+    perry_lower::source_files::load(source, file_name).map_err(|error| {
+        perry_lower::LowerError::try_from_anyhow(error)
+            .map_or_else(|error| error, |lower| lower_diagnostic(lower).into())
+    })
 }
 
 fn compile_world(
@@ -150,10 +153,7 @@ pub(crate) fn compile_sources(
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let mir = perry_lower::lower_sources(ctx, source, identity, modules, &foreign)
-        .map_err(map_lower_error)
-        .map_err(|error| {
-            crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
-        })?;
+        .map_err(map_lower_error)?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
@@ -173,7 +173,7 @@ pub(crate) fn compile_sources(
         true,
     )
     .map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
     })?)
 }
 
@@ -260,17 +260,15 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)
-        .map_err(map_codegen_error)
-        .map_err(|error| {
-            crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    let core =
+        perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(map_codegen_error)?;
+    let (core, _) =
+        finish(core, None, &link::canonical::Requirements::default()).map_err(|error| {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
         })?;
-    Ok(
-        link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
-            .map_err(|error| {
-                crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
-            })?,
-    )
+    Ok(link::raw::without_p3(core).map_err(|error| {
+        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+    })?)
 }
 
 fn lower(
@@ -281,10 +279,7 @@ fn lower(
     foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)
-        .map_err(map_lower_error)
-        .map_err(|error| {
-            crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
-        })?;
+        .map_err(map_lower_error)?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
 }
@@ -312,22 +307,24 @@ fn lower_diagnostic(error: perry_lower::LowerError) -> crate::PerryDiagnostic {
         LowerErrorKind::UnsupportedSpread => crate::DiagnosticCode::UnsupportedSpread,
         LowerErrorKind::UnsupportedExpression(_) => crate::DiagnosticCode::UnsupportedExpression,
     };
+    let message = error.to_string();
     let help = error.help();
-    let message = error.message();
     let mut diagnostic =
         crate::PerryDiagnostic::error(code, message).with_optional_span(error.span);
+    diagnostic.notes = error.notes;
     if let Some(help) = help {
         diagnostic = diagnostic.with_help(help);
     }
     diagnostic
 }
 
-fn map_lower_error(error: anyhow::Error) -> anyhow::Error {
-    if let Some(lower_err) = error.downcast_ref::<perry_lower::LowerError>().cloned() {
-        let diagnostic = lower_diagnostic(lower_err).with_source_notes(error.as_ref());
-        return error.context(diagnostic);
+fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
+    match perry_lower::LowerError::try_from_anyhow(error) {
+        Ok(lower) => lower_diagnostic(lower),
+        Err(error) => {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
+        }
     }
-    error
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
@@ -335,16 +332,16 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")
         .map_err(|error| {
-            crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
         })?;
     Ok(analyses)
 }
 
-fn map_codegen_error(error: anyhow::Error) -> anyhow::Error {
+fn map_codegen_error(error: anyhow::Error) -> crate::PerryDiagnostic {
     match error.downcast::<perry_codegen::CodegenError>() {
         Ok(codegen_err) => {
             let message = codegen_err.to_string();
-            let diagnostic = match codegen_err {
+            match codegen_err {
                 perry_codegen::CodegenError::AsyncInitializerRequiresAsyncExport {
                     span, ..
                 } => crate::PerryDiagnostic::error(
@@ -370,10 +367,11 @@ fn map_codegen_error(error: anyhow::Error) -> anyhow::Error {
                         .with_optional_span(span)
                         .with_source_notes(source.as_ref())
                 }
-            };
-            diagnostic.into()
+            }
         }
-        Err(error) => error,
+        Err(error) => {
+            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        }
     }
 }
 

@@ -84,7 +84,7 @@ fn run() -> Result<()> {
         return run_gen_types(&args[2..]);
     }
 
-    let mut ts_file_path: Option<String> = None;
+    let mut ts_file_path: Option<&str> = None;
     let mut out_file_path: Option<String> = None;
     let mut options = CompileOptions {
         wit_dir: PathBuf::from("wit"),
@@ -110,12 +110,12 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             _ if !arg.starts_with('-') => {
-                if let Some(existing) = &ts_file_path {
+                if let Some(existing) = ts_file_path {
                     bail!(
                         "Unexpected argument '{arg}' (input file already set to '{existing}')\nTry 'perry-wit --help' for usage."
                     );
                 }
-                ts_file_path = Some(arg.clone());
+                ts_file_path = Some(arg);
             }
             _ => bail!("Unknown argument: {arg}\nTry 'perry-wit --help' for usage."),
         }
@@ -128,7 +128,7 @@ fn run() -> Result<()> {
     };
 
     let out_file_path = out_file_path.unwrap_or_else(|| {
-        let p = Path::new(&ts_file_path);
+        let p = Path::new(ts_file_path);
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
         format!("dist/{stem}.wasm")
     });
@@ -137,7 +137,7 @@ fn run() -> Result<()> {
         options.core_only = true;
     }
 
-    let ts_file = Path::new(&ts_file_path);
+    let ts_file = Path::new(ts_file_path);
     println!("Compiling {}...", ts_file.display());
     let compiled = compile_file(ts_file, &options)?;
     if explain_tiers {

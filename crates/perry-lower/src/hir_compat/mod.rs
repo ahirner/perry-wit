@@ -58,7 +58,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         let diagnostic = LowerError::new(LowerErrorKind::UnsupportedExpression(format!(
             "failed to lower {identity}: {error:#}"
         )));
-        let error = error.context(diagnostic);
+        let error = diagnostic.into();
         match span {
             Some(span) => locations.annotate(error, span),
             None => error,

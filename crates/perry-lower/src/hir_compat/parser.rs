@@ -34,7 +34,7 @@ pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
                     span.hi.0.saturating_sub(1) as usize,
                 ));
             }
-            error.context(diagnostic)
+            diagnostic
         })?;
     if let Some(diagnostic) = parsed.diagnostics.iter().next() {
         return Err(LowerError::new(LowerErrorKind::Parse {

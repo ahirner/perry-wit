@@ -30,7 +30,7 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
         ),
     ] {
         let diagnostic = rejection(source, "case.ts");
-        assert_eq!(diagnostic.message(), message);
+        assert_eq!(diagnostic.to_string(), message);
         let span = diagnostic.span.expect("source location");
         assert_eq!((span.start_line, span.start_column), location);
     }
@@ -181,7 +181,7 @@ fn recursive_class_calls_have_located_diagnostics() {
         let source =
             format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
         let diagnostic = rejection(&source, "classes.ts");
-        let message = diagnostic.message();
+        let message = diagnostic.to_string();
         assert!(
             message.contains("recursive inline") && message.contains(target),
             "{source}\n{diagnostic:?}"

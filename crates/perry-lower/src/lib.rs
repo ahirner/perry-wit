@@ -118,28 +118,33 @@ pub enum ShapeError {
 }
 
 impl ShapeError {
-    pub fn message(&self) -> String {
-        match self {
-            Self::MissingTypeAnnotation => {
-                "the value type cannot be inferred for the MIR backend".to_owned()
-            }
-            Self::UnsupportedType { ty } => {
-                format!("MIR backend does not support type {ty} yet")
-            }
-            Self::IncompatibleRecordLayout { actual, expected }
-            | Self::AbsenceMismatch { actual, expected }
-            | Self::TypeMismatch { actual, expected } => {
-                format!("value type {actual} differs from the expected type {expected}")
-            }
-        }
-    }
-
     pub fn help(&self) -> Option<&'static str> {
         match self {
             Self::MissingTypeAnnotation => Some(
                 "Add a concrete type annotation to this binding, parameter, or function return.",
             ),
             _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ShapeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTypeAnnotation => {
+                f.write_str("the value type cannot be inferred for the MIR backend")
+            }
+            Self::UnsupportedType { ty } => {
+                write!(f, "MIR backend does not support type {ty} yet")
+            }
+            Self::IncompatibleRecordLayout { actual, expected }
+            | Self::AbsenceMismatch { actual, expected }
+            | Self::TypeMismatch { actual, expected } => {
+                write!(
+                    f,
+                    "value type {actual} differs from the expected type {expected}"
+                )
+            }
         }
     }
 }
@@ -178,37 +183,42 @@ impl From<ShapeError> for LowerErrorKind {
 }
 
 impl LowerErrorKind {
-    pub fn message(&self) -> String {
+    pub fn help(&self) -> Option<&'static str> {
         match self {
-            Self::Parse { identity, message } => format!("Parsing {identity}: {message}"),
+            Self::Shape(shape) => shape.help(),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LowerErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse { identity, message } => write!(f, "Parsing {identity}: {message}"),
             Self::ModuleResolution { name, parent } => {
-                format!("Cannot resolve '{name}' from {}", parent.display())
+                write!(f, "Cannot resolve '{name}' from {}", parent.display())
             }
             Self::ImportSignatureMismatch {
                 binding,
                 expected,
                 actual,
             } => {
-                format!("WIT import {binding} expects {expected} arguments, got {actual}")
+                write!(
+                    f,
+                    "WIT import {binding} expects {expected} arguments, got {actual}"
+                )
             }
-            Self::Shape(shape) => shape.message(),
+            Self::Shape(shape) => shape.fmt(f),
             Self::MissingRequiredField { fields } => {
-                format!("missing required record fields: {}", fields.join(", "))
+                write!(f, "missing required record fields: {}", fields.join(", "))
             }
             Self::UnsupportedOperator { op } => {
-                format!("MIR backend does not support operator {op} yet")
+                write!(f, "MIR backend does not support operator {op} yet")
             }
             Self::UnsupportedSpread => {
-                "sparse array spreads are outside the dense-array profile".to_owned()
+                f.write_str("sparse array spreads are outside the dense-array profile")
             }
-            Self::UnsupportedExpression(message) => message.clone(),
-        }
-    }
-
-    pub fn help(&self) -> Option<&'static str> {
-        match self {
-            Self::Shape(shape) => shape.help(),
-            _ => None,
+            Self::UnsupportedExpression(message) => f.write_str(message),
         }
     }
 }
@@ -218,6 +228,7 @@ impl LowerErrorKind {
 pub struct LowerError {
     pub kind: LowerErrorKind,
     pub span: Option<perry_mir::SourceSpan>,
+    pub notes: Vec<String>,
 }
 
 impl LowerError {
@@ -225,6 +236,7 @@ impl LowerError {
         Self {
             kind: kind.into(),
             span: None,
+            notes: Vec::new(),
         }
     }
 
@@ -233,18 +245,32 @@ impl LowerError {
         self
     }
 
-    pub fn message(&self) -> String {
-        self.kind.message()
-    }
-
     pub fn help(&self) -> Option<&'static str> {
         self.kind.help()
+    }
+
+    /// Extract a [`LowerError`] from `error`, prepending any outer `anyhow` context notes.
+    pub fn try_from_anyhow(error: anyhow::Error) -> std::result::Result<Self, anyhow::Error> {
+        if error.downcast_ref::<Self>().is_none() {
+            return Err(error);
+        }
+        let mut prefix: Vec<String> = error
+            .chain()
+            .take_while(|cause| cause.downcast_ref::<Self>().is_none())
+            .map(ToString::to_string)
+            .collect();
+        let mut diagnostic = error.downcast::<Self>()?;
+        if !prefix.is_empty() {
+            prefix.append(&mut diagnostic.notes);
+            diagnostic.notes = prefix;
+        }
+        Ok(diagnostic)
     }
 }
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message())
+        self.kind.fmt(f)
     }
 }
 

@@ -54,7 +54,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
     let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
     let artifacts = declarations(&resolve, world).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::WitResolution)
     })?;
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
