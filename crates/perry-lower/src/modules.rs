@@ -195,10 +195,10 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         .into_iter()
         .find(|path| sources.contains_key(path.to_string_lossy().as_ref()))
         .ok_or_else(|| {
-            perry_wit_diagnostics::PerryDiagnostic::error(
-                perry_wit_diagnostics::DiagnosticCode::ModuleResolution,
-                format!("Cannot resolve '{name}' from {}", parent.display()),
-            )
+            crate::LowerError::new(crate::LowerErrorKind::ModuleResolution {
+                name: name.to_owned(),
+                parent: parent.to_path_buf(),
+            })
             .into()
         })
 }

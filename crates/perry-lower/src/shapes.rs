@@ -10,10 +10,10 @@
 //! WIT types are passed by the compiler as *foreign* HIR types under their SDK names (prefixed `wit:`),
 //! and imports of those names resolve to them. Finite variants retain their case-specific payload types.
 //! Options distinguish admitted null and undefined states, and tuples use `{ _0: A, _1: B }`.
+use crate::{LowerError, ShapeError};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use pliron::printable::Printable as _;
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},

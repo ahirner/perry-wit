@@ -1510,7 +1510,6 @@ dependencies = [
  "perry-hir",
  "perry-mir",
  "perry-parser",
- "perry-wit-diagnostics",
  "pliron",
  "swc_common",
  "swc_ecma_parser",

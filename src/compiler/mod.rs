@@ -145,8 +145,9 @@ pub(crate) fn compile_sources(
     let mut foreign = wit_types::foreign(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir =
-        perry_lower::lower_sources(ctx, source, identity, modules, &foreign).map_err(|error| {
+    let mir = perry_lower::lower_sources(ctx, source, identity, modules, &foreign)
+        .map_err(map_lower_error)
+        .map_err(|error| {
             crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
@@ -275,12 +276,54 @@ fn lower(
     modules: &BTreeMap<String, String>,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
-    let mir =
-        perry_lower::lower_sources(ctx, source, file_name, modules, foreign).map_err(|error| {
+    let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)
+        .map_err(map_lower_error)
+        .map_err(|error| {
             crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         })?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
+}
+
+fn lower_diagnostic(error: perry_lower::LowerError) -> crate::PerryDiagnostic {
+    use perry_lower::{LowerErrorKind, ShapeError};
+    let code = match &error.kind {
+        LowerErrorKind::Parse { .. } => crate::DiagnosticCode::ParseError,
+        LowerErrorKind::ModuleResolution { .. } => crate::DiagnosticCode::ModuleResolution,
+        LowerErrorKind::ImportSignatureMismatch { .. } => {
+            crate::DiagnosticCode::ImportSignatureMismatch
+        }
+        LowerErrorKind::Shape(shape) => match shape {
+            ShapeError::MissingTypeAnnotation => crate::DiagnosticCode::MissingTypeAnnotation,
+            ShapeError::UnsupportedType { .. } | ShapeError::TypeMismatch { .. } => {
+                crate::DiagnosticCode::UnsupportedType
+            }
+            ShapeError::IncompatibleRecordLayout { .. } => {
+                crate::DiagnosticCode::IncompatibleRecordLayout
+            }
+            ShapeError::AbsenceMismatch { .. } => crate::DiagnosticCode::AbsenceMismatch,
+        },
+        LowerErrorKind::MissingRequiredField { .. } => crate::DiagnosticCode::MissingRequiredField,
+        LowerErrorKind::UnsupportedOperator { .. } => crate::DiagnosticCode::UnsupportedOperator,
+        LowerErrorKind::UnsupportedSpread => crate::DiagnosticCode::UnsupportedSpread,
+        LowerErrorKind::UnsupportedExpression(_) => crate::DiagnosticCode::UnsupportedExpression,
+    };
+    let help = error.help();
+    let message = error.message();
+    let mut diagnostic =
+        crate::PerryDiagnostic::error(code, message).with_optional_span(error.span);
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    diagnostic
+}
+
+fn map_lower_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(lower_err) = error.downcast_ref::<perry_lower::LowerError>().cloned() {
+        let diagnostic = lower_diagnostic(lower_err).with_source_notes(error.as_ref());
+        return error.context(diagnostic);
+    }
+    error
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {

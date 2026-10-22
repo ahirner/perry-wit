@@ -12,7 +12,6 @@ perry-parser.workspace = true
 perry-hir.workspace = true
 pliron.workspace = true
 anyhow.workspace = true
-perry-wit-diagnostics.workspace = true
 swc_ecma_visit = "29.0"
 swc_ecma_parser = "45.1"
 swc_common = "26.0"

@@ -55,10 +55,9 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()
             .and_then(|error| error.span);
-        let diagnostic = PerryDiagnostic::error(
-            DiagnosticCode::UnsupportedExpression,
-            format!("failed to lower {identity}: {error:#}"),
-        );
+        let diagnostic = LowerError::new(LowerErrorKind::UnsupportedExpression(format!(
+            "failed to lower {identity}: {error:#}"
+        )));
         let error = error.context(diagnostic);
         match span {
             Some(span) => locations.annotate(error, span),

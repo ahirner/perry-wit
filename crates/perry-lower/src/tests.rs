@@ -6,7 +6,7 @@ fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow:
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
-fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic {
+fn rejection(source: &str, file: &str) -> crate::LowerError {
     lower_without_foreign(&mut Context::new(), source, file)
         .err()
         .expect("rejection")
@@ -30,7 +30,7 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
         ),
     ] {
         let diagnostic = rejection(source, "case.ts");
-        assert_eq!(diagnostic.message, message);
+        assert_eq!(diagnostic.message(), message);
         let span = diagnostic.span.expect("source location");
         assert_eq!((span.start_line, span.start_column), location);
     }
@@ -181,8 +181,9 @@ fn recursive_class_calls_have_located_diagnostics() {
         let source =
             format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
         let diagnostic = rejection(&source, "classes.ts");
+        let message = diagnostic.message();
         assert!(
-            diagnostic.message.contains("recursive inline") && diagnostic.message.contains(target),
+            message.contains("recursive inline") && message.contains(target),
             "{source}\n{diagnostic:?}"
         );
         let span = diagnostic.span.expect("source location");

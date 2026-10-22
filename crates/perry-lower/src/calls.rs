@@ -245,15 +245,13 @@ impl<'s> FunctionBuilder<'s> {
             && let Some((binding, signature)) = self.shapes.foreign_function(name)
         {
             if args.len() != signature.params.len() {
-                let error = perry_wit_diagnostics::PerryDiagnostic::error(
-                    perry_wit_diagnostics::DiagnosticCode::ImportSignatureMismatch,
-                    format!(
-                        "WIT import {binding} expects {} arguments, got {}",
-                        signature.params.len(),
-                        args.len()
-                    ),
-                )
-                .into();
+                let error =
+                    crate::LowerError::new(crate::LowerErrorKind::ImportSignatureMismatch {
+                        binding: binding.to_owned(),
+                        expected: signature.params.len(),
+                        actual: args.len(),
+                    })
+                    .into();
                 return Err(self.shapes.annotate_call(error, byte_offset));
             }
             let mut values = Vec::new();
