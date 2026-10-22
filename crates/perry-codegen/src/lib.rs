@@ -66,6 +66,54 @@ mod variants;
 
 pub use memory::explain_tiers;
 
+/// Structured boundary errors emitted during Wasm lowering.
+#[derive(Debug)]
+pub enum CodegenError {
+    AsyncInitializerRequiresAsyncExport {
+        core_name: String,
+        span: Option<perry_mir::SourceSpan>,
+    },
+    MissingErrorChannel {
+        core_name: String,
+        span: Option<perry_mir::SourceSpan>,
+    },
+    ExportBinding {
+        core_name: String,
+        span: Option<perry_mir::SourceSpan>,
+        source: anyhow::Error,
+    },
+}
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AsyncInitializerRequiresAsyncExport { core_name, .. } => {
+                write!(f, "{core_name} requires asynchronous module initialization")
+            }
+            Self::MissingErrorChannel { core_name, .. } => {
+                write!(
+                    f,
+                    "{core_name} can throw without a compatible WIT error channel"
+                )
+            }
+            Self::ExportBinding { core_name, .. } => {
+                write!(f, "binding WIT export {core_name}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ExportBinding { source, .. } => Some(source.as_ref()),
+            Self::AsyncInitializerRequiresAsyncExport { .. } | Self::MissingErrorChannel { .. } => {
+                None
+            }
+        }
+    }
+}
+
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
 /// Starting address of static data, leaving address 0 as the null reference (`undefined`).

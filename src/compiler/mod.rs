@@ -202,7 +202,7 @@ pub(super) fn emit_component(
         resources,
     };
     let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses).map_err(map_codegen_error)?;
     let (mut core, helpers) = finish(
         core,
         streams.as_ref(),
@@ -255,9 +255,11 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
-    })?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)
+        .map_err(map_codegen_error)
+        .map_err(|error| {
+            crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        })?;
     Ok(
         link::raw::without_p3(finish(core, None, &link::canonical::Requirements::default())?.0)
             .map_err(|error| {
@@ -289,6 +291,43 @@ fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<A
             crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
         })?;
     Ok(analyses)
+}
+
+fn map_codegen_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<perry_codegen::CodegenError>() {
+        Ok(codegen_err) => {
+            let message = codegen_err.to_string();
+            let diagnostic = match codegen_err {
+                perry_codegen::CodegenError::AsyncInitializerRequiresAsyncExport {
+                    span, ..
+                } => crate::PerryDiagnostic::error(
+                    crate::DiagnosticCode::MissingErrorChannel,
+                    message,
+                )
+                .with_optional_span(span)
+                .with_help(
+                    "Declare this WIT export async so it can await module initialization and its error channel.",
+                ),
+                perry_codegen::CodegenError::MissingErrorChannel { span, .. } => {
+                    crate::PerryDiagnostic::error(
+                        crate::DiagnosticCode::MissingErrorChannel,
+                        message,
+                    )
+                    .with_optional_span(span)
+                    .with_help(
+                        "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
+                    )
+                }
+                perry_codegen::CodegenError::ExportBinding { span, source, .. } => {
+                    crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, message)
+                        .with_optional_span(span)
+                        .with_source_notes(source.as_ref())
+                }
+            };
+            diagnostic.into()
+        }
+        Err(error) => error,
+    }
 }
 
 fn finish(

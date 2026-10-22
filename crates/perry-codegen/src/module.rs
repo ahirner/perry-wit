@@ -418,12 +418,10 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(perry_wit_diagnostics::PerryDiagnostic::error(
-                perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                format!("{} requires asynchronous module initialization", export.core_name),
-            )
-            .with_optional_span(perry_mir::source_span(ctx, function))
-            .with_help("Declare this WIT export async so it can await module initialization and its error channel.")
+            return Err(crate::CodegenError::AsyncInitializerRequiresAsyncExport {
+                core_name: export.core_name.clone(),
+                span: perry_mir::source_span(ctx, function),
+            }
             .into());
         }
         if !export.is_command()
@@ -434,12 +432,10 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                return Err(perry_wit_diagnostics::PerryDiagnostic::error(
-                    perry_wit_diagnostics::DiagnosticCode::MissingErrorChannel,
-                    format!("{} can throw without a compatible WIT error channel", export.core_name),
-                )
-                .with_optional_span(perry_mir::source_span(ctx, function))
-                .with_help("Declare a WIT result error, or use an async export with wasi:cli/stderr support.")
+                return Err(crate::CodegenError::MissingErrorChannel {
+                    core_name: export.core_name.clone(),
+                    span: perry_mir::source_span(ctx, function),
+                }
                 .into());
             }
             if export.is_async() {
@@ -466,14 +462,10 @@ fn bind_exports(
             &lowered[&function.get_symbol_name(ctx)],
             export,
         )
-        .map_err(|error| {
-            error.context(
-                perry_wit_diagnostics::PerryDiagnostic::error(
-                    perry_wit_diagnostics::DiagnosticCode::ExportMismatch,
-                    format!("binding WIT export {}", export.core_name),
-                )
-                .with_optional_span(perry_mir::source_span(ctx, function)),
-            )
+        .map_err(|source| crate::CodegenError::ExportBinding {
+            core_name: export.core_name.clone(),
+            span: perry_mir::source_span(ctx, function),
+            source,
         })?;
     }
     Ok(())

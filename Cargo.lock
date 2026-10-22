@@ -1412,7 +1412,6 @@ dependencies = [
  "anyhow",
  "perry-abi",
  "perry-mir",
- "perry-wit-diagnostics",
  "pliron",
  "pliron-wasm",
  "regex-automata",
