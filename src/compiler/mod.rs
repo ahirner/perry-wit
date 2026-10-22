@@ -99,6 +99,10 @@ fn compile_for_world_with_memory_checks_impl(
     compile_world(source, file_name, resolve, world, true, true)
 }
 
+fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
+    perry_lower::source_files::load(source, file_name).map_err(map_lower_error)
+}
+
 fn compile_world(
     source: &str,
     file_name: &str,
@@ -107,7 +111,7 @@ fn compile_world(
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_sources(
         source,
         file_name,
@@ -228,7 +232,7 @@ pub(super) fn emit_component(
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
 /// functions that may throw). Components use [compile_for_world].
 fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_core_sources(source, file_name, &modules, false)
 }
 
@@ -239,7 +243,7 @@ fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
 /// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
 /// bytes (10). Canonical production components omit these exports.
 fn compile_core_with_memory_checks_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = perry_lower::source_files::load(source, file_name)?;
+    let modules = load_source_files(source, file_name)?;
     compile_core_sources(source, file_name, &modules, true)
 }
 

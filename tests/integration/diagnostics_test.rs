@@ -51,6 +51,12 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     })
     .unwrap_err();
     assert_eq!(parse_error.diagnostics[0].code, DiagnosticCode::ParseError);
+    assert_eq!(
+        perry_wit::compile_core(parse_source, "parse.ts")
+            .unwrap_err()
+            .diagnostics,
+        parse_error.diagnostics
+    );
     let span = parse_error.diagnostics[0].span.as_ref().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));

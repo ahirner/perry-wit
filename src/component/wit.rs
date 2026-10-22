@@ -128,12 +128,14 @@ fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGro
     }
     let mut map = SourceMap::new();
     for (index, source) in sources.iter().enumerate() {
+        let text = crate::api::text(&source.contents, source.name.as_deref())
+            .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
         map.push_str(
             source
                 .name
                 .as_deref()
                 .unwrap_or(&format!("source-{index}.wit")),
-            crate::api::text(&source.contents, source.name.as_deref())?,
+            text,
         );
     }
     map.parse().map_err(|(map, error)| {
