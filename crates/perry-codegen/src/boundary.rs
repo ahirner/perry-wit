@@ -614,6 +614,13 @@ impl FunctionLowering<'_, '_> {
         if let Some(target) = ty.integer_type(ctx)
             && (matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64) || is_numeric_type(ctx, mir_ty))
         {
+            if matches!(ty, AbiType::S64 | AbiType::U64)
+                && crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, signed)| {
+                    bits == 64 && signed != matches!(ty, AbiType::S64)
+                })
+            {
+                self.check_integer_signedness(ctx, value.scalar()?);
+            }
             return self.cast_value(ctx, value, mir_ty, target)?.scalar();
         }
         if matches!(ty, AbiType::F32 | AbiType::F64)
@@ -634,8 +641,16 @@ impl FunctionLowering<'_, '_> {
                 return self.lower_resource(ctx, *key, *owned, mir_ty, value);
             }
             AbiType::Bool => return Ok(value),
-            AbiType::S8 | AbiType::S16 | AbiType::S32 => NumOpcode::I32TruncSatF64S,
-            AbiType::U8 | AbiType::U16 | AbiType::U32 => NumOpcode::I32TruncSatF64U,
+            AbiType::S8
+            | AbiType::S16
+            | AbiType::S32
+            | AbiType::U8
+            | AbiType::U16
+            | AbiType::U32 => {
+                expect_number(ctx, mir_ty, ty)?;
+                let signed = matches!(ty, AbiType::S8 | AbiType::S16 | AbiType::S32);
+                return Ok(self.int32_bits(ctx, value, signed, None));
+            }
             AbiType::S64 | AbiType::U64 => {
                 return self.lower_integer(ctx, matches!(ty, AbiType::S64), mir_ty, value);
             }

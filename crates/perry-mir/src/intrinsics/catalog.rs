@@ -43,6 +43,7 @@ macro_rules! intrinsic_catalog {
                 BytesAt = "bytes_at" (Bytes, Index) -> (NumberOrInteger), Pure, None => ByteValue;
                 BytesByteInput = "bytes_byte_input" (Bytes) -> (ByteInput), Effectful, None;
                 UrlSearchParams = "url_search_params" (Url) -> (SearchParams), Pure, None;
+                EncoderNew = "encoder_new" () -> (Encoder), Pure, None;
                 DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), Pure, None;
                 DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), Pure, None;
                 JsonSpread = "json_spread" (Aggregate, Aggregate) -> (), Effectful, Conservative;

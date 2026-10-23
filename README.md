@@ -7,7 +7,7 @@ It lowers TypeScript through [Perry](https://www.perryts.com) HIR and typed SSA 
 
 ## Quickstart
 
-A WIT world declares the exports; `kebab-case` WIT names map to `camelCase` TypeScript functions:
+A WIT world declares the exports. `kebab-case` WIT names map to `camelCase` TypeScript functions:
 
 ```wit check=quickstart
 package example:filter@0.1.0;

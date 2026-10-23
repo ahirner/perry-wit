@@ -17,7 +17,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Strings
 
-- Strings are UTF-8 and index by Unicode scalar value, not UTF-16 code unit. Indices agree with Node.js for text in the Basic Multilingual Plane; a character outside it counts once instead of twice.
+- Strings are UTF-8 and index by Unicode scalar value, not UTF-16 code unit. Indices agree with Node.js for text in the Basic Multilingual Plane. Characters outside it count as one scalar value.
 - `charCodeAt`, `String.fromCharCode` and lone surrogate escapes (`\uD800` to `\uDFFF`) are compile errors. Use `codePointAt` and `String.fromCodePoint`.
 - Text arriving through the Canonical ABI, `JSON.parse` or `TextDecoder` is validated as UTF-8.
 
@@ -34,7 +34,5 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 - `for await` over a byte stream releases the reader lock and cancels the stream when the loop exits early. Releasing a reader lock rejects pending reads but keeps buffered chunks for the next reader.
 
 ## Standard Library
-
-`TextEncoder` instances must be used inline (`new TextEncoder().encode(text)`).
 
 {{#include stdlib-inventory.md}}

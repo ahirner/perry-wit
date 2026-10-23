@@ -91,6 +91,7 @@ type_kinds! {
     Json = JsonType::get(ctx).into();
     JsonTraversal = crate::types::JsonTraversalType::get(ctx).into();
     Date = DateType::get(ctx).into();
+    Encoder = crate::types::EncoderType::get(ctx).into();
     Decoder = crate::types::DecoderType::get(ctx).into();
     Regex = crate::types::RegexType::get(ctx).into();
     Exception = ExceptionType::get(ctx).into();

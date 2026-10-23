@@ -21,10 +21,10 @@ TypeScript ──► Source ──► HIR ──► Contract ──► MIR ─�
 | 3. Contract resolution | HIR and WIT | Checks export signatures, requires `async func` for every function that can suspend, maps each native operation to the WASI import it uses, and lays out Canonical ABI scratch areas. |
 | 4. MIR lowering | pliron MIR | `catch` and `finally` share unwinding blocks. Heap pointers live in root frames that survive suspension. |
 | 5. Optimization | SSA MIR | `mem2reg` runs once, then canonicalization, SCCP, `ProgramFacts`, CFG simplification and DCE repeat until fixed point. |
-| 6. Code generation | core Wasm (`pliron-wasm`) | Structures control flow with Ramsey's dominator-tree method ([Ramsey 2022]). Single-use values defined in the same block become expression trees on the operand stack. Links the referenced helper functions. |
-| 7. Component encoding | WASI 0.3 component | Emits [Canonical ABI] lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>` and `finish_<export>`. |
+| 6. Code generation | core Wasm (`pliron-wasm`) | Structures control flow with Ramsey's dominator-tree method [[1]](#ref-1). Single-use values defined in the same block become expression trees on the operand stack. Links the referenced helper functions. |
+| 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>` and `finish_<export>`. |
 
-`ProgramFacts` infers numeric refinements (integer type and interval), effects and parameter provenance across functions, recursive calls included.
+`ProgramFacts` infers numeric refinements (integer type and interval), effects and parameter provenance across functions, including recursive calls. The numeric analysis propagates ranges forward and widths backward [[3]](#ref-3).
 Numeric refinements select `i32`, `i64` or `f64` representations (see [Numbers](https://ahirner.github.io/perry-wit/docs/numbers.html)) and elide bounds checks on proven in-bounds array reads.
 Threshold widening and dataflow presence tracking are planned.
 `JSON.parse` and `JSON.stringify` on statically known shapes lower to specialized decoders and deep copies.
@@ -38,13 +38,13 @@ A component has one linear memory, and the compiler picks its allocation strateg
 - **Precise collection** otherwise. Allocations live in non-moving storage (size-class pages with mark bitmaps), compiled safe points publish exact roots, and pending host operations pin the buffers they use. When a call ends with no roots, pins or tasks left, the heap is collected.
 
 Escape analysis assigns non-escaping records in synchronous functions to stack frame slots freed on return.
-Canonical ABI buffers stay pinned while the host lowers a value; lifting moves the payload to an ordinary owner or frees it after a copy.
+Canonical ABI buffers stay pinned while the host lowers a value. Lifting moves the payload to an ordinary owner or frees it after copying.
 
 The linker places helper data and the shared stack at the start of linear memory. The `talc` allocator claims the remaining bytes of the initial pages before growing memory, and task regions allocate in 4 KiB chunks, keeping small components within a single 64 KiB page.
 
 ## Async
 
-Each `async` call has a task record holding its settlement state, outcome and observers in the guest heap. A settled outcome is kept for repeated observation ([Liskov & Shrira 1988], §3); later observers borrow it instead of copying its object graph.
+Each `async` call has a task record holding its settlement state, outcome and observers in the guest heap. A settled outcome is retained for repeated observation [[4]](#ref-4), §3. Later observers borrow it without copying its object graph.
 Observers of one promise share a single native completion, whose callback resumes them in registration order.
 `Promise.all`, `allSettled` and `race` register as observers of their inputs and count settlements, so long dependency chains advance through host events with bounded guest stack depth.
 A pending host operation keeps its buffers pinned until the host acknowledges completion or cancellation.
@@ -56,10 +56,7 @@ Codegen copies only the functions and data sections a program references into th
 
 ## References
 
-- **[Liskov & Shrira 1988]**: B. Liskov, L. Shrira. *Promises: Linguistic Support for Efficient Asynchronous Procedure Calls in Distributed Systems*. ACM PLDI, pp. 260-267, 1988.
-- **[Ramsey 2022]**: N. Ramsey. *Beyond Relooper: Recursive Translation of Unstructured Control Flow to Structured Control Flow (Functional Pearl)*. Proceedings of the ACM on Programming Languages 6(ICFP), 2022.
-- **[Canonical ABI]**: WebAssembly Community Group. *Canonical ABI Explainer*. WebAssembly/component-model, living design document.
-
-[Liskov & Shrira 1988]: https://doi.org/10.1145/53990.54016
-[Ramsey 2022]: https://doi.org/10.1145/3547621
-[Canonical ABI]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md
+1. <a id="ref-1"></a>N. Ramsey. [*Beyond Relooper: Recursive Translation of Unstructured Control Flow to Structured Control Flow (Functional Pearl)*](https://doi.org/10.1145/3547621). Proceedings of the ACM on Programming Languages 6(ICFP), 2022.
+2. <a id="ref-2"></a>WebAssembly Community Group. [*Canonical ABI Explainer*](https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md). WebAssembly/component-model, living design document.
+3. <a id="ref-3"></a>M. Stephenson, J. Babb, S. Amarasinghe. [*Bitwidth Analysis with Application to Silicon Compilation*](https://doi.org/10.1145/349299.349317). ACM PLDI, 2000.
+4. <a id="ref-4"></a>B. Liskov, L. Shrira. [*Promises: Linguistic Support for Efficient Asynchronous Procedure Calls in Distributed Systems*](https://doi.org/10.1145/53990.54016). ACM PLDI, pp. 260-267, 1988.

@@ -61,9 +61,24 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
     }
   }
 
+  const architecture = await readFile(join(repository, 'ARCHITECTURE.md'), 'utf8');
+  await writeFile(join(generated, 'ARCHITECTURE.md'), architecture.replaceAll('https://ahirner.github.io/perry-wit/docs/', ''));
   await writeFile(join(bookDir, 'src/conformance-catalog.md'), conformanceDoc);
   await writeFile(join(bookDir, 'src/stdlib-inventory.md'), await inventory(repository, api));
   await writeFile(join(bookDir, 'src/embedding-example.rs'), doctest(await readFile(join(repository, 'src/api.rs'), 'utf8'), 'compile'));
+}
+
+/** Compile the homepage's TypeScript and WIT example and run its export once with Wasmtime. */
+export async function checkHomepage({ html, generated, api }) {
+  const section = html.match(/<section class="editors"[\s\S]*?<\/section>/)?.[0] ?? '';
+  const [ts, wit] = [...section.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)]
+    .map(match => match[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
+  if (!ts || !wit) throw new Error('site/index.html needs a TypeScript and a WIT block in .editors');
+  const component = compile(api, 'site/index.html', ts, wit).component.stripped;
+  const file = join(generated, 'homepage.wasm');
+  await writeFile(file, component);
+  const greeting = invoke(file, 'greet("World")');
+  if (greeting !== '"Hello, World"') throw new Error(`site/index.html example printed ${greeting}`);
 }
 
 /** Replace `{{#include path}}` lines with the file they name, relative to the page. */
@@ -154,7 +169,7 @@ const GLOBALS = [
   ['Time', 'Temporal.PlainDate.compare', 'Temporal.PlainDate.compare(Temporal.PlainDate.from("2024-02-29"), Temporal.PlainDate.from("2024-03-01"))'],
   ['Time', 'Temporal.PlainDateTime.from', 'Temporal.PlainDateTime.from("2024-02-29T10:00")'],
   ['Binary, text', 'Uint8Array', 'new Uint8Array(4)'],
-  ['Binary, text', 'TextEncoder', 'new TextEncoder().encode("x")'],
+  ['Binary, text', 'TextEncoder', 'new TextEncoder()'],
   ['Binary, text', 'TextDecoder', 'new TextDecoder().decode(new Uint8Array(1))'],
   ['Collections', 'Map', 'new Map<string, number>()'],
   ['Collections', 'Set', 'new Set<number>()'],

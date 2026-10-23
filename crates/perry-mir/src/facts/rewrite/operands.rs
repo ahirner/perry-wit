@@ -460,9 +460,7 @@ fn coerce_operands(
             let widened_int = if !state.is_constrained(orig_res) {
                 val_int.unconstrained()
             } else if let Some(req_int) = state
-                .required
-                .get(&orig_res)
-                .copied()
+                .width(orig_res)
                 .or_else(|| state.representation(orig_res))
             {
                 let common = val_int.common(req_int);

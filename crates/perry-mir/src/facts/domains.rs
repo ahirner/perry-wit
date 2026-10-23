@@ -109,6 +109,15 @@ impl Integer {
             })
     }
 
+    /// The Wasm register type holding this one: 8- and 16-bit types widen to 32 bits, so
+    /// values computed in them need no masking until they leave.
+    pub(super) fn register(self) -> Self {
+        Self {
+            bits: self.bits.max(32),
+            ..self
+        }
+    }
+
     pub(super) fn unconstrained(self) -> Self {
         Self { bits: 64, ..self }
     }
@@ -190,23 +199,23 @@ impl Range {
     }
 
     pub(super) fn join(self, other: Self, domain: Option<Integer>) -> Self {
-        self.join_step(other, domain, true).0
+        self.join_step(other, domain, true).range
     }
 
     /// Join `other` into `self`. When `widen` is false (first expansion), compute the
     /// exact convex hull clamped to `domain` bounds. When `widen` is true (second or later
     /// expansion), widen expanding bounds to the enclosing integer domain bounds.
-    /// Returns `(joined_range, expanded, widened)`.
-    pub(super) fn join_step(
-        self,
-        other: Self,
-        domain: Option<Integer>,
-        widen: bool,
-    ) -> (Self, bool, bool) {
+    pub(super) fn join_step(self, other: Self, domain: Option<Integer>, widen: bool) -> JoinStep {
+        let step = |range, expanded, widened, clamped| JoinStep {
+            range,
+            expanded,
+            widened,
+            clamped,
+        };
         match (self, other) {
-            (Self::Bottom, range) => (range, false, false),
-            (range, Self::Bottom) => (range, false, false),
-            (Self::Unknown, _) | (_, Self::Unknown) => (Self::Unknown, false, false),
+            (Self::Bottom, range) => step(range, false, false, false),
+            (range, Self::Bottom) => step(range, false, false, false),
+            (Self::Unknown, _) | (_, Self::Unknown) => step(Self::Unknown, false, false, false),
             (Self::Bounds(old), Self::Bounds(new)) => {
                 let limits = domain.map_or(
                     Interval {
@@ -219,7 +228,7 @@ impl Range {
                 let expand_upper = new.upper > old.upper;
                 let expanded = expand_lower || expand_upper;
                 if !expanded {
-                    return (Self::Bounds(old), false, false);
+                    return step(Self::Bounds(old), false, false, false);
                 }
                 let lower = if expand_lower {
                     if widen {
@@ -243,10 +252,24 @@ impl Range {
                 let widened = widen
                     && ((expand_lower && lower < new.lower.max(limits.lower))
                         || (expand_upper && upper > new.upper.min(limits.upper)));
-                (joined, true, widened)
+                let clamped = !widen
+                    && ((expand_lower && new.lower < limits.lower)
+                        || (expand_upper && new.upper > limits.upper));
+                step(joined, true, widened, clamped)
             }
         }
     }
+}
+
+/// The outcome of [Range::join_step].
+pub(super) struct JoinStep {
+    pub(super) range: Range,
+    /// The interval grew.
+    pub(super) expanded: bool,
+    /// Widening moved a bound past the incoming value, to the domain bounds.
+    pub(super) widened: bool,
+    /// An exact (not widening) step cut the incoming interval to the domain bounds.
+    pub(super) clamped: bool,
 }
 
 /// Literal integer values are eligible for specialization, but do not themselves impose
@@ -580,7 +603,7 @@ impl Solver {
                 Fact::Original
             };
         }
-        match (common_int, state.required.get(&result).copied()) {
+        match (common_int, state.width(result)) {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
             (Some(input), None) => Fact::Integer(input),
             (None, Some(required)) => Fact::Integer(required),

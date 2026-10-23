@@ -19,6 +19,7 @@ use pliron::{
         attributes::{FPDoubleAttr, IntegerAttr},
         op_interfaces::BranchOpInterface,
         ops::ConstantOp,
+        types::FP64Type,
     },
     context::{Context, Ptr},
     op::Op,
@@ -256,6 +257,15 @@ impl FunctionLowering<'_, '_> {
             let source = operand.get_type(ctx);
             let target = op.deref(ctx).get_result(0).get_type(ctx);
             let value = self.mapped_value(ctx, operand)?;
+            // A number's proven interval lets its conversion to a narrow integer skip work.
+            if source.deref(ctx).is::<FP64Type>()
+                && let Some((8 | 16 | 32, signed)) = crate::numeric::integer(ctx, target)
+            {
+                let bounds = self.state.program_facts.integral_interval(ctx, operand);
+                let value = self.narrow_number(ctx, value.scalar()?, target, signed, bounds);
+                self.define(ctx, op, value);
+                return Ok(());
+            }
             let value = self.cast_value(ctx, value, source, target)?;
             self.define_value(ctx, op, value);
             return Ok(());

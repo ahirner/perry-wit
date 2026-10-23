@@ -845,12 +845,14 @@ export function literals(): string {
 #[test]
 fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
     let mut instance = Instance::compile(
-        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; export constant: func() -> u64; }",
-        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; } export function constant(): bigint { return 18446744073709551616n; }",
+        "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; export constant: func() -> u64; export reinterpret: func(value: s64) -> u64; }",
+        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; } export function constant(): bigint { return 18446744073709551616n; } export function reinterpret(value: bigint): bigint { return value; }",
     )?;
     assert!(instance.call::<_, u64>("unsigned", (u64::MAX,)).is_err());
     assert!(instance.call::<_, i64>("signed", (i64::MIN,)).is_err());
     assert!(instance.call::<_, u64>("constant", ()).is_err());
+    // A bigint kept in an `i64` register is checked like one on the heap.
+    assert!(instance.call::<_, u64>("reinterpret", (-1i64,)).is_err());
     Ok(())
 }
 

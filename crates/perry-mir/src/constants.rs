@@ -148,6 +148,9 @@ impl ConstFoldInterface for NumericCastOp {
                 integer.width() == 64,
                 integer.signedness() != Signedness::Unsigned,
             ) {
+                (false, _) if matches!(integer.width(), 8 | 16 | 32) => {
+                    u64::from(int32_bits(value))
+                }
                 (false, true) => value as i32 as u64,
                 (false, false) => value as u32 as u64,
                 (true, true) => value as i64 as u64,
@@ -332,5 +335,16 @@ impl BranchOpFoldInterface for CondBrOp {
         rewriter.insert_operation(ctx, branch);
         rewriter.replace_operation(ctx, self.get_operation(), branch);
         IRStatus::Changed
+    }
+}
+
+/// The bits ECMAScript `ToInt32` and `ToUint32` (and their narrower forms) give `value`, as the
+/// code generated for a runtime conversion computes them: truncate, map `NaN` and infinities to
+/// 0, wrap modulo 2^32. The remainder of an integral `f64` by 2^32 is exact.
+fn int32_bits(value: f64) -> u32 {
+    if value.is_finite() {
+        (value.trunc() % 4_294_967_296.0) as i64 as u32
+    } else {
+        0
     }
 }

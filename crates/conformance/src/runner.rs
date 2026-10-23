@@ -78,7 +78,7 @@ struct ContractResult {
     domain: &'static str,
     status: Status,
     partitions: Vec<PartitionResult>,
-    expected_outcomes: Vec<ExpectedOutcome>,
+    expected_outcomes: &'static [ExpectedOutcome],
     generated_cases: u32,
     executions: u32,
     error: Option<String>,
@@ -187,7 +187,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &Path) -> Result<()> {
     ensure!(
         contract
-            .catalog()
+            .catalog()?
             .expected_outcomes
             .contains(&case.expected_outcome()),
         "generated input changes the contract's declared expected outcome"
@@ -252,7 +252,10 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
     eprintln!("Conformance evidence: {}", directory.display());
     write_json(
         &output.join("catalog.json"),
-        &contracts.iter().map(Contract::catalog).collect::<Vec<_>>(),
+        &contracts
+            .iter()
+            .map(Contract::catalog)
+            .collect::<Result<Vec<_>>>()?,
     )?;
     let (source_sha256, revision) = identity()?;
     let mut report = Report {
@@ -264,26 +267,29 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         source_unchanged: false,
         contracts: contracts
             .iter()
-            .map(|c| ContractResult {
-                id: c.id,
-                description: c.description,
-                specification: c.specification,
-                domain: c.domain,
-                expected_outcomes: c.catalog().expected_outcomes,
-                status: Status::NotRun,
-                partitions: c
-                    .witnesses
-                    .iter()
-                    .map(|w| PartitionResult {
-                        id: w.partition,
-                        status: Status::NotRun,
-                    })
-                    .collect(),
-                generated_cases: 0,
-                executions: 0,
-                error: None,
+            .map(|c| {
+                let entry = c.catalog()?;
+                Ok(ContractResult {
+                    id: c.id,
+                    description: entry.description,
+                    specification: entry.specification,
+                    domain: entry.domain,
+                    expected_outcomes: entry.expected_outcomes,
+                    status: Status::NotRun,
+                    partitions: c
+                        .witnesses
+                        .iter()
+                        .map(|w| PartitionResult {
+                            id: w.partition,
+                            status: Status::NotRun,
+                        })
+                        .collect(),
+                    generated_cases: 0,
+                    executions: 0,
+                    error: None,
+                })
             })
-            .collect(),
+            .collect::<Result<_>>()?,
     };
     let executor = Executor::new(executable, settings.limits);
     write_json(&output.join("report.json"), &report)?;

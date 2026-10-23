@@ -15,22 +15,27 @@
 <div class="cta"><a class="button primary" href="play/">Try the playground</a><a class="button" href="docs/index.html">Read the handbook</a></div>
 <section class="editors" aria-label="Example">
 <div><h2><span>TypeScript</span><span class="note">index.ts</span></h2>
-<pre><code><!-- example:merge_docs/index.ts --></code></pre></div>
+<pre><code>export function greet(name: string): string {
+  return "Hello, " + name;
+}</code></pre></div>
 <div><h2><span>WIT</span><span class="note">world.wit</span></h2>
-<pre><code><!-- example:merge_docs/world.wit --></code></pre></div>
+<pre><code>package example:greeting;
+world greeting {
+  export greet: func(name: string) -&gt; string;
+}</code></pre></div>
 </section>
 <h2 id="what-to-build">What to build</h2>
 <section class="cards" aria-label="What to build">
-<article class="card"><h3>Typed library components</h3><p>The WIT world declares the exports and generates the <code>.d.ts</code> types. A component exporting a string function is about 3 KB, and each call's temporaries are freed when it returns.</p><a href="docs/authoring.html">Authoring</a></article>
-<article class="card"><h3>Concurrent I/O</h3><p><code>fetch</code>, streams, timers and files suspend through WASI 0.3 callbacks and resume directly from host events. {{contractCount}} contracts verify equivalence against Node.js.</p><a href="docs/semantics.html">Semantics</a></article>
-<article class="card"><h3>Integer-typed numbers</h3><p>WIT <code>u8</code> to <code>u64</code> refine TypeScript's <code>number</code>. Arithmetic proven to stay in range compiles to integer instructions instead of floating point.</p><a href="docs/numbers.html">Numbers</a></article>
-<article class="card"><h3>Compilers in your host</h3><p>Compile tenant TypeScript in-memory from Rust with <code>perry_wit::api</code>, or run the compiler itself as a WASI 0.2 component.</p><a href="docs/embedding.html">Embedding</a></article>
+<article class="card"><h3>HTTP services</h3><p>Write <code>handle(request)</code> against generated types and serve it as <code>wasi:http/handler@0.3.0</code>. <code>fetch</code>, streams and timers suspend through WASI 0.3 callbacks and resume directly from host events.</p><a href="docs/authoring.html#http-handlers">HTTP handlers</a></article>
+<article class="card"><h3>Typed components</h3><p>The WIT world declares the exports and generates the <code>.d.ts</code> types. A component exporting a string function is about 3 KB, and {{contractCount}} contracts verify equivalence against Node.js.</p><a href="docs/authoring.html">Authoring</a></article>
+<article class="card"><h3>Integer-typed numbers</h3><p>WIT <code>u8</code> to <code>u64</code> refine TypeScript's <code>number</code>. In-range arithmetic compiles to integer instructions.</p><a href="docs/numbers.html">Numbers</a></article>
+<article class="card"><h3>Compile on the fly</h3><p>Compile tenant TypeScript in-memory from Rust with <code>perry_wit::api</code>, or run the compiler itself as a WASI 0.2 component.</p><a href="docs/embedding.html">Embedding</a></article>
 </section>
 <h2 id="artifacts">Artifacts</h2>
 <ul class="artifacts">
-<li><strong>CLI</strong>: build the compiler from its Nix flake.<pre><code>nix build github:ahirner/perry-wit</code></pre></li>
-<li><strong>Rust library</strong>: compile in-memory sources from Rust. <a href="rust/perry_wit/api/index.html">API documentation</a></li>
-<li><strong>Wasm compiler</strong>: the compiler itself as a WASI 0.2 component. <a href="downloads/perry-wit.wasm">perry-wit.wasm</a> · <a href="downloads/compiler.wit">compiler.wit</a> · <a href="downloads/THIRD-PARTY-NOTICES.txt">notices</a></li>
+<li>Download prebuilt binaries from <a href="https://github.com/ahirner/perry-wit/releases">Releases</a>, or build from Nix flake outputs, e.g.<pre><code>nix build github:ahirner/perry-wit</code></pre></li>
+<li><strong>Main Rust crate</strong>: <code>perry_wit</code> · <a href="rust/perry_wit/api/index.html">API documentation</a></li>
+<li><strong>Wasm compiler</strong>: <a href="downloads/perry-wit.wasm">perry-wit.wasm</a> · <a href="downloads/compiler.wit">compiler.wit</a> · <a href="downloads/THIRD-PARTY-NOTICES.txt">notices</a></li>
 </ul>
 </main>
 <!-- footer -->

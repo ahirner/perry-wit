@@ -1,9 +1,9 @@
 # Authoring
 
 A component is a TypeScript entry module plus a WIT world.
-Perry-WIT supports three kinds: library components that export WIT functions, commands that run top-level code, and HTTP handlers.
+Perry-WIT builds typed components that export WIT functions, CLI commands that run top-level code, and HTTP handlers.
 
-## Library Components
+## Typed Components
 
 The WIT world declares the exports.
 A `kebab-case` WIT name maps to a `camelCase` TypeScript export, and functions not named in WIT stay private to the module.
@@ -36,7 +36,7 @@ perry-wit gen-types --wit wit --world task --entry src/index.ts -o .perry/types
 tsc --noEmit -p .perry/types
 ```
 
-WIT integer types appear as `number` and `bigint`; see [Numbers](numbers.md) for how the compiler uses them.
+WIT integer types appear as `number` and `bigint`. See [Numbers](numbers.md) for how the compiler uses them.
 
 ## Commands
 
@@ -79,12 +79,14 @@ The world ships in `wit/http-handler`:
 ```ts check=handler
 import type { Request, Response } from "./handler-types/world";
 
+const encoder = new TextEncoder();
+
 export function handle(request: Request): Response {
   const path = request.pathWithQuery ?? "/";
   return {
     status: 200,
-    headers: [["content-type", new TextEncoder().encode("text/plain")]],
-    body: new TextEncoder().encode(request.method.tag + " " + path + "\n"),
+    headers: [["content-type", encoder.encode("text/plain")]],
+    body: encoder.encode(`${request.method.tag} ${path}\n`),
   };
 }
 ```
@@ -92,12 +94,11 @@ export function handle(request: Request): Response {
 ```sh
 perry-wit gen-types --wit wit/http-handler --world handler -o handler-types --no-tsconfig
 perry-wit handler.ts --wit wit/http-handler --world handler -o handler.wasm
+wasmtime serve -S p3=y -W component-model-async=y handler.wasm
 ```
 
 The adapter reads the whole request body before calling `handle`.
 An uncaught exception becomes a `500` response, and the instance keeps serving later requests.
-
-Known issue: under `wasmtime serve` 50.0.0 the adapter currently throws a `TypeError` for every request, so the server answers `500`. The conformance contract `wasi.http.handler`, which calls the export through `wasmtime-wasi-http` directly, passes.
 
 ## New Projects
 

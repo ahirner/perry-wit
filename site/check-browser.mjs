@@ -67,8 +67,10 @@ try {
       assert.equal(await page.locator('.artifacts > li').count(), 3);
       assert.equal(await page.locator('.artifacts details').count(), 0);
       assert.equal((await page.locator('.artifacts pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
-      assert.match(await page.locator('.artifacts li').last().innerText(), /Wasm compiler.*the compiler itself/);
+      assert.equal(await page.locator('.artifacts a').first().getAttribute('href'), 'https://github.com/ahirner/perry-wit/releases');
+      assert.match(await page.locator('.artifacts li').last().innerText(), /Wasm compiler.*perry-wit\.wasm/);
       for (const href of await page.locator('.artifacts a').evaluateAll(links => links.map(link => link.getAttribute('href')))) {
+        if (/^https?:/.test(href)) continue;
         assert((await readFile(join(directory, href))).length > 0, `Missing resource: ${href}`);
       }
       for (const [docPage, expectedText] of [
@@ -83,6 +85,7 @@ try {
         const html = await readFile(join(directory, docPage), 'utf8');
         assert(html.includes(expectedText), `Expected "${expectedText}" in ${docPage}`);
         for (const [, rawHref] of html.matchAll(/href="([^"#?]+)"/g)) {
+          assert(!rawHref.startsWith('https://ahirner.github.io/perry-wit/'), `Use relative link instead of "${rawHref}" in ${docPage}`);
           if (/^(https?:|mailto:|data:|javascript:)/.test(rawHref)) continue;
           const target = resolve(dirname(join(directory, docPage)), rawHref);
           const resolved = (await stat(target).catch(() => null))?.isDirectory() ? join(target, 'index.html') : target;

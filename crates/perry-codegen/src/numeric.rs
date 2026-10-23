@@ -76,6 +76,62 @@ fn fixed_width_tag(bits: u32, signed: bool) -> Result<i32> {
 }
 
 impl FunctionLowering<'_, '_> {
+    /// ECMAScript `ToInt32` of an `f64`, as the `i32` bits `ToUint32`, `ToInt16` and the other
+    /// narrower conversions share: truncate, map `NaN` and infinities to 0, wrap modulo 2^32.
+    /// `bounds`, an interval `ProgramFacts` proved for `x`, selects a cheaper exact sequence:
+    /// one saturating truncation inside the 32-bit range of `signed`, or a 64-bit truncation
+    /// and wrap within ±2^62, where rounding a large `f64` cannot reach the `i64` limits.
+    /// Only an unbounded `x` needs the reduction
+    /// `x - trunc(x / 2^32) * 2^32`, which is exact and lies within (-2^32, 2^32).
+    pub(crate) fn int32_bits(
+        &mut self,
+        ctx: &mut Context,
+        x: Value,
+        signed: bool,
+        bounds: Option<(i128, i128)>,
+    ) -> Value {
+        let range = if signed {
+            (i128::from(i32::MIN), i128::from(i32::MAX))
+        } else {
+            (0, i128::from(u32::MAX))
+        };
+        let x = match bounds {
+            Some((lower, upper)) if lower >= range.0 && upper <= range.1 => {
+                let truncate = if signed {
+                    NumOpcode::I32TruncSatF64S
+                } else {
+                    NumOpcode::I32TruncSatF64U
+                };
+                return self.num(ctx, truncate, vec![x]);
+            }
+            Some((lower, upper)) if lower >= -(1 << 62) && upper <= 1 << 62 => x,
+            _ => {
+                let scale_down = self.f64_const(ctx, 1.0 / 4_294_967_296.0);
+                let scale_up = self.f64_const(ctx, 4_294_967_296.0);
+                let wraps = self.num(ctx, NumOpcode::F64Mul, vec![x, scale_down]);
+                let wraps = self.num(ctx, NumOpcode::F64Trunc, vec![wraps]);
+                let wrapped = self.num(ctx, NumOpcode::F64Mul, vec![wraps, scale_up]);
+                self.num(ctx, NumOpcode::F64Sub, vec![x, wrapped])
+            }
+        };
+        let integer = self.num(ctx, NumOpcode::I64TruncSatF64S, vec![x]);
+        self.num(ctx, NumOpcode::I32WrapI64, vec![integer])
+    }
+
+    /// A number as the 32-bit or narrower integer `target`, converted like ECMAScript
+    /// (`ToInt32` and its narrower forms): see [Self::int32_bits] for `bounds`.
+    pub(crate) fn narrow_number(
+        &mut self,
+        ctx: &mut Context,
+        x: Value,
+        target: TypeHandle,
+        signed: bool,
+        bounds: Option<(i128, i128)>,
+    ) -> Value {
+        let bits = self.int32_bits(ctx, x, signed, bounds);
+        self.normalize_integer(ctx, bits, target)
+    }
+
     pub(crate) fn normalize_integer(
         &mut self,
         ctx: &mut Context,
@@ -137,6 +193,13 @@ impl FunctionLowering<'_, '_> {
             .into();
             let raw = self.numeric_cast(ctx, value, source, wide)?;
             return self.lift_integer(ctx, signed, target, raw);
+        }
+        // A number becomes a 32-bit or narrower integer as in ECMAScript (`ToInt32` and its
+        // narrower forms), the conversion typed arrays and JavaScript component bindings use.
+        if source.deref(ctx).is::<FP64Type>()
+            && let Some((8 | 16 | 32, signed)) = integer(ctx, target)
+        {
+            return Ok(self.narrow_number(ctx, value, target, signed, None));
         }
         let opcode = match (integer(ctx, source), integer(ctx, target)) {
             (Some((from, signed)), Some((to, _))) => {

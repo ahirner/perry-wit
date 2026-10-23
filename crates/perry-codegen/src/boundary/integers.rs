@@ -55,14 +55,27 @@ impl FunctionLowering<'_, '_> {
         let invalid = self.num(ctx, NumOpcode::I32Or, vec![invalid, extra_len]);
         // An invalid canonical value cannot cross the boundary. Compiled bigint arithmetic
         // remains outside the transport domain, so overflow is never silently truncated.
-        let valid = self.new_block(ctx, vec![]);
-        let trap = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, invalid, (trap, vec![]), (valid, vec![]));
-        self.block = trap;
-        self.trap(ctx);
-        self.block = valid;
+        self.trap_if(ctx, invalid);
         let zero = self.i64_const(ctx, 0);
         let inverted = self.num(ctx, NumOpcode::I64Sub, vec![zero, magnitude]);
         Ok(self.select(ctx, negative, inverted, magnitude))
+    }
+
+    /// Trap when a 64-bit `raw` value crosses to the other signedness with its top bit set:
+    /// that value is out of range either way, so a register-held bigint is checked like a heap one.
+    pub(super) fn check_integer_signedness(&mut self, ctx: &mut Context, raw: Value) {
+        let zero = self.i64_const(ctx, 0);
+        let outside = self.num(ctx, NumOpcode::I64LtS, vec![raw, zero]);
+        self.trap_if(ctx, outside);
+    }
+
+    /// Continue only when `condition` is false; otherwise trap.
+    fn trap_if(&mut self, ctx: &mut Context, condition: Value) {
+        let valid = self.new_block(ctx, vec![]);
+        let trap = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, condition, (trap, vec![]), (valid, vec![]));
+        self.block = trap;
+        self.trap(ctx);
+        self.block = valid;
     }
 }

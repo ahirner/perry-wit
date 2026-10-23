@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { transpileBytes } from '@bytecodealliance/jco-transpile';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
-import { prepareBook } from './docs.mjs';
+import { checkHomepage, prepareBook } from './docs.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(root);
@@ -32,7 +32,6 @@ await mkdir(join(output, 'downloads'), { recursive: true });
 for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
 const bookDir = join(generated, 'book');
 await cp(join(repository, 'docs'), bookDir, { recursive: true });
-await cp(join(repository, 'ARCHITECTURE.md'), join(generated, 'ARCHITECTURE.md'));
 await cp(join(repository, 'template'), join(generated, 'template'), { recursive: true });
 for (const wit of ['compiler', 'http-handler']) await cp(join(repository, 'wit', wit), join(generated, 'wit', wit), { recursive: true });
 let conformanceDoc;
@@ -46,14 +45,8 @@ if (process.env.PERRY_CONFORMANCE_DOC) {
 const contractCount = conformanceDoc.match(/\*\*(\d+)\*\* capability contracts/)?.[1];
 if (!contractCount) throw new Error('Failed to extract capability contract count from conformance catalog');
 const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
-const escapeHtml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 for (const page of ['index.html', 'play/index.html']) {
-  let html = await readFile(join(output, page), 'utf8');
-  // The homepage shows a bundled example verbatim; the examples below compile it.
-  for (const [placeholder, path] of html.matchAll(/<!-- example:([\w/.-]+) -->/g)) {
-    const source = escapeHtml((await readFile(join(repository, 'examples', path), 'utf8')).trimEnd());
-    html = html.replace(placeholder, () => source);
-  }
+  const html = await readFile(join(output, page), 'utf8');
   await writeFile(join(output, page), html.replaceAll('{{contractCount}}', contractCount).replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion)));
 }
 await cp(compiler, join(output, 'downloads/perry-wit.wasm'));
@@ -102,6 +95,7 @@ const { instantiateCompiler } = await import('./play/compiler-host.js');
 const { api } = await instantiateCompiler(compilerBytes);
 
 await prepareBook({ repository, bookDir, generated, api, conformanceDoc });
+await checkHomepage({ html: await readFile(join(root, 'index.html'), 'utf8'), generated, api });
 execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
 
 const exampleFiles = new Map();

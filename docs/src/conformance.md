@@ -20,7 +20,7 @@ Each case declares what must happen:
 
 `crates/conformance/passing.txt` lists the contracts that must pass.
 A listed contract that fails is a regression, and an unlisted contract that passes fails the run until it is added, so the list only grows.
-`crates/conformance/deferred.txt` lists contracts outside the supported domain, each with its reason; they are not run.
+`crates/conformance/deferred.txt` lists contracts outside the supported domain with their exclusion rationale.
 
 ```sh
 cargo run -p perry-conformance -- check
@@ -29,7 +29,7 @@ cargo run -p perry-conformance -- list
 cargo run -p perry-conformance -- doc
 ```
 
-`--select` filters by contract ID prefix; `doc` prints the catalog table below.
+`--select` filters by contract ID prefix. `doc` prints the catalog table below.
 
 ## Catalog
 

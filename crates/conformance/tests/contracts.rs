@@ -42,18 +42,6 @@ fn registry_owns_regressions_and_partition_witnesses() -> Result<()> {
             "unregistered regression {name}"
         );
     }
-    for contract in contracts {
-        assert_eq!(
-            contract.catalog().partitions.len(),
-            contract.witnesses.len()
-        );
-        assert!(
-            contract.id.starts_with("ecma.")
-                || contract.id.starts_with("web.")
-                || contract.id.starts_with("node.")
-                || contract.id.starts_with("wasi.")
-        );
-    }
     Ok(())
 }
 

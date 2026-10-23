@@ -164,9 +164,6 @@ pub struct Witness {
 }
 pub struct Contract {
     pub id: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) specification: &'static str,
-    pub(crate) domain: &'static str,
     pub witnesses: Vec<Witness>,
     pub(crate) strategy: BoxedStrategy<Case>,
     pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
@@ -178,34 +175,49 @@ impl Contract {
         strategy: BoxedStrategy<Case>,
         check: fn(&Case, &Evidence) -> Result<()>,
     ) -> Self {
-        let meta = crate::catalog::entry(id);
         Self {
-            id: meta.id,
-            description: meta.description,
-            specification: meta.specification,
-            domain: meta.domain,
+            id,
             witnesses,
             strategy,
             check,
         }
     }
 
-    pub fn catalog(&self) -> CatalogEntry {
-        let mut expected_outcomes = Vec::new();
+    /// The contract's documented metadata from the static catalog.
+    pub fn catalog(&self) -> Result<&'static CatalogEntry> {
+        crate::catalog::entry(self.id)
+            .with_context(|| format!("contract {} has no catalog entry", self.id))
+    }
+
+    /// Ensure the catalog entry describes exactly these witnesses: their partitions in order
+    /// and their distinct expected outcomes in first-appearance order.
+    fn check_catalog(&self, entry: &CatalogEntry) -> Result<()> {
+        ensure!(
+            crate::catalog::namespace(self.id).is_some(),
+            "contract {} has no known namespace",
+            self.id
+        );
+        ensure!(
+            self.witnesses
+                .iter()
+                .map(|witness| witness.partition)
+                .eq(entry.partitions.iter().copied()),
+            "catalog partitions of {} differ from its witnesses",
+            self.id
+        );
+        let mut outcomes = Vec::new();
         for witness in &self.witnesses {
-            let expected = witness.case.expected_outcome();
-            if !expected_outcomes.contains(&expected) {
-                expected_outcomes.push(expected);
+            let outcome = witness.case.expected_outcome();
+            if !outcomes.contains(&outcome) {
+                outcomes.push(outcome);
             }
         }
-        CatalogEntry {
-            id: self.id,
-            description: self.description,
-            specification: self.specification,
-            domain: self.domain,
-            partitions: self.witnesses.iter().map(|w| w.partition).collect(),
-            expected_outcomes,
-        }
+        ensure!(
+            outcomes == entry.expected_outcomes,
+            "catalog outcomes of {} differ from its witnesses",
+            self.id
+        );
+        Ok(())
     }
 }
 
@@ -589,16 +601,27 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ensure!(!reason.is_empty(), "deferred contract {id} needs a reason");
         ensure!(!crate::passing(id), "{id} is both passing and deferred");
     }
-    let projected: Vec<CatalogEntry> = contracts.iter().map(Contract::catalog).collect();
+    let entries = crate::catalog::ENTRIES;
     ensure!(
-        projected == crate::catalog::entries(),
-        "catalog::entries() is out of sync with executable contracts"
+        contracts.len() == entries.len(),
+        "the catalog lists {} contracts, the registry defines {}",
+        entries.len(),
+        contracts.len()
     );
+    for (contract, entry) in contracts.iter().zip(entries) {
+        ensure!(
+            contract.id == entry.id,
+            "catalog order differs at {}: expected {}",
+            contract.id,
+            entry.id
+        );
+        contract.check_catalog(entry)?;
+    }
     Ok(contracts)
 }
 
+/// The handbook's catalog page, after checking the catalog against the registry.
 pub fn markdown() -> Result<String> {
-    let all = contracts(0)?;
-    let entries: Vec<CatalogEntry> = all.iter().map(Contract::catalog).collect();
-    Ok(crate::catalog::render_markdown(&entries))
+    contracts(0)?;
+    crate::catalog::render_markdown(crate::catalog::ENTRIES).map_err(anyhow::Error::msg)
 }

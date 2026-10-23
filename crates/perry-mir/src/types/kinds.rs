@@ -122,6 +122,8 @@ value_types! {
         Incoming => IncomingType("perry.incoming", "IncomingRequest", []);
         /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value.
         Exception => ExceptionType("perry.exception", "Error", ["Error","TypeError","RangeError","ReferenceError","SyntaxError"]);
+        /// A `TextEncoder`: stateless, so every instance is the same static UTF-8 encoder.
+        Encoder => EncoderType("perry.encoder", "TextEncoder", ["TextEncoder"]);
         /// Stateful UTF-8 decoder with at most three pending bytes.
         Decoder => DecoderType("perry.decoder", "TextDecoder", ["TextDecoder"]);
         /// Immutable, statically compiled regular expression program.

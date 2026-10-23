@@ -25,7 +25,7 @@ fn main() -> Result<()> {
                     &registry::contracts(0)?
                         .iter()
                         .map(|c| c.catalog())
-                        .collect::<Vec<_>>()
+                        .collect::<Result<Vec<_>>>()?
                 )?
             );
             Ok(())

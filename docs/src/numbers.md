@@ -1,29 +1,38 @@
 # Numbers
 
-TypeScript has one `number` type (IEEE 754 binary64) plus `bigint`.
-WIT has `u8` through `u64`, `s8` through `s64`, `f32` and `f64`.
-Perry-WIT reads a WIT integer type in a signature as a refinement of `number`: a `u8` parameter is a `number` that is an integer in `0..=255`.
-Generated `.d.ts` files still declare `number`, so sources stay valid TypeScript, while the compiler keeps the refinement and uses it to choose machine types.
+WIT provides fixed-width integers (`u8`..`u64`, `s8`..`s64`) alongside `f32` and `f64`, while TypeScript provides `number` (IEEE 754 `f64`) and `bigint`.
 
-## Inferred Refinements
+| WIT type | `.d.ts` type | Guest representation |
+| :--- | :--- | :--- |
+| `u8`, `u16`, `u32`, `s8`, `s16`, `s32` | `number` | Refined `number` (`i32`, `i64` or `f64`) |
+| `u64`, `s64` | `bigint` | `i64` at boundaries, arbitrary-width `bigint` in guest |
+| `f32`, `f64` | `number` | `f64` |
 
-Every numeric SSA value carries a refinement made of an optional integer type (width and signedness) and an interval `[min, max]`.
-`ProgramFacts` propagates refinements forward through arithmetic, branches and calls (recursive calls included) and required widths backward, until fixed point.
-An interval at a join point may grow exactly once; after that it widens to the bounds of its integer type, so loops converge.
-After the analysis, a value with an integer refinement lowers to `i32` when it fits 32 bits and to `i64` otherwise; a value without one stays `f64`.
+Keeping `u8`..`s32` as `number` in generated `.d.ts` files lets guest code use standard TypeScript arithmetic while giving the compiler range information to emit integer instructions.
 
-Combining two integer types takes their least upper bound:
+## Refinement Analysis
+
+Each numeric SSA value carries an optional integer type (width, signedness) and a value interval `[min, max]`.
+`ProgramFacts` propagates ranges forward through arithmetic, branches and calls (including recursion) and propagates required register widths backward to a fixed point [[1]](#ref-1).
+
+- **Register selection**: Refined integers whose interval fits in 32 bits lower to `i32`. Wider refined integers lower to `i64`. Unrefined values stay in `f64`.
+- **Register-width intermediates**: Required widths stay at register size (32 or 64 bits) during computation. Narrowing to 8 or 16 bits happens only at the WIT boundary.
+- **Literals**: An integer literal adopts a required width only when its value fits. Larger literals stay in `f64` until converted at the boundary.
+- **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type. A specialized loop counter wraps at 32 or 64 bits on overflow.
+- **Bounds checks**: When an index interval proves `0 <= i < length`, the array read elides its bounds check.
+
+### Type Join
+
+Combining two operands takes the least upper bound of their refinements:
 
 | Operands | Join | Reason |
 | :--- | :--- | :--- |
-| `u8`, `u16` | `u16` | Same signedness: the wider type. |
-| `u8`, `s8` | `s16` | Must hold both `0..=255` and `-128..=127`. |
-| `u16`, `s16` | `s32` | Same, one width up. |
-| `u32`, `s32` | `s64` | Same, one width up. |
-| `u8`, `s32` | `s32` | The signed type is already wider. |
-| any integer, unrefined `number` | `f64` | An unrefined `number` may be fractional. |
-
-The interval then decides whether a result fits a 32-bit register and, for an array index, whether the bounds check can be dropped.
+| `u8`, `u16` | `u16` | Wider type of the same signedness. |
+| `u8`, `s8` | `s16` | Holds both `0..=255` and `-128..=127`. |
+| `u16`, `s16` | `s32` | Next signed width up. |
+| `u32`, `s32` | `s64` | Next signed width up. |
+| `u8`, `s32` | `s32` | Signed operand is already wider. |
+| integer, unrefined `number` | `f64` | Unrefined `number` may be fractional. |
 
 ## Generated Code
 
@@ -51,55 +60,41 @@ Compiling this pair with `--core-only` emits:
 {{#include numerics-wat.md}}
 
 - **`combine-delta`**: The export adapter `$wit_combine_delta` masks `base` (`i32.and`) and sign-extends `delta` (`i32.extend8_s`). The sum lies in `-128..=382`, so the body adds in `i32` with no float conversion.
-- **`scale-bytes`**: The product of two `u32` values is below 2<sup>64</sup>, so `i64.mul` computes it exactly. Converting that exact product to `f64` rounds once, which gives the same value as JavaScript's floating-point multiplication. `/` is not integer division, so the division stays in `f64`.
+- **`scale-bytes`**: The product of two `u32` values is below 2<sup>64</sup>, so `i64.mul` computes it exactly. Converting that exact product to `f64` rounds once, matching JavaScript floating-point multiplication. `/` is floating-point division, so the division stays in `f64`.
 
-## Boundaries
+## Boundary Conversion
 
-The export adapter masks incoming `u8` and `u16` arguments and sign-extends `s8` and `s16` arguments.
-Outgoing values follow two rules:
-
-- A result computed on the integer path wraps modulo 2<sup>N</sup>.
-- A result computed in `f64` truncates toward zero and saturates to the 32-bit range of its signedness (`NaN` becomes `0`). An 8- or 16-bit result then keeps its low bits.
-
-ECMAScript's `ToUint32` and `ToInt32` wrap modulo 2<sup>32</sup> instead, so `f64` results outside the 32-bit range differ from what JavaScript would produce.
-`u64` and `s64` appear as `bigint` in `.d.ts` files; their bits pass through unchanged, and a `bigint` result outside the declared type traps, even when the export returns a `result`.
-Within guest code, `bigint` supports `+`, `-`, unary `-`, comparison and `toString()` at any width; `*`, `/`, `%` and `BigInt(number)` work on values that fit in 64 bits.
+- **Incoming `u8`..`s16`**: The export adapter masks `u8` and `u16` arguments and sign-extends `s8` and `s16` arguments.
+- **Outgoing `u8`..`s32`**: Values convert with JavaScript typed-array semantics (`ToUint8` through `ToInt32`), truncating toward zero, mapping `NaN` and `±Infinity` to `0`, and wrapping modulo 2<sup>N</sup>. Integer and `f64` code paths produce identical results.
+- **`u64`, `s64` (`bigint`)**: Out-of-range `bigint` returns trap at the boundary. Inside guest code, `+`, `-`, unary `-`, comparisons and `toString()` support arbitrary width. `*`, `/`, `%` and `BigInt(number)` require 64-bit operands.
 
 ```wit check=boundaries
 package example:boundaries@0.1.0;
 
 world boundaries {
   export scale8: func(a: u8, b: u8) -> u8;
-  export add32: func(a: u32, b: u32) -> u32;
   export to-u8: func(x: f64) -> u8;
-  export to-s8: func(x: f64) -> s8;
-  export to-u32: func(x: f64) -> u32;
   export to-s32: func(x: f64) -> s32;
-  export to-u64: func(x: s64) -> u64;
   export dec-u64: func(x: u64) -> u64;
 }
 ```
 
 ```ts check=boundaries
 export function scale8(a: number, b: number): number { return a * b; }
-export function add32(a: number, b: number): number { return a + b; }
 export function toU8(x: number): number { return x; }
-export function toS8(x: number): number { return x; }
-export function toU32(x: number): number { return x; }
 export function toS32(x: number): number { return x; }
-export function toU64(x: bigint): bigint { return x; }
 export function decU64(x: bigint): bigint { return x - 1n; }
 ```
 
 <!-- invoke: boundaries -->
-| Call | Result | Rule |
+| Call | Result | JavaScript |
 | :--- | :--- | :--- |
-| `scale8(200, 2)` | `144` | 400 wraps modulo 2<sup>8</sup>. |
-| `add32(4294967295, 1)` | `0` | Wraps modulo 2<sup>32</sup>. |
-| `to-u8(300.7)` | `44` | Truncates to 300, then keeps the low 8 bits. |
-| `to-u8(-1)` | `0` | Saturates at 0 before narrowing. |
-| `to-s8(200)` | `-56` | Keeps the low 8 bits as a signed value. |
-| `to-u32(4294967301)` | `4294967295` | Saturates at 2<sup>32</sup> - 1. |
-| `to-s32(3000000000)` | `2147483647` | Saturates at 2<sup>31</sup> - 1. |
-| `to-u64(-1)` | `18446744073709551615` | Bits pass through unchanged. |
-| `dec-u64(0)` | trap | -1 is outside `u64`. |
+| `scale8(200, 2)` | `144` | `new Uint8Array([400])[0]` |
+| `to-u8(-1)` | `255` | `new Uint8Array([-1])[0]` |
+| `to-s32(3000000000)` | `-1294967296` | `3000000000 \| 0` |
+| `dec-u64(1)` | `0` | `1n - 1n` |
+| `dec-u64(0)` | trap | `-1n` is outside `u64` |
+
+## References
+
+1. <a id="ref-1"></a>M. Stephenson, J. Babb, S. Amarasinghe. [*Bitwidth Analysis with Application to Silicon Compilation*](https://doi.org/10.1145/349299.349317). ACM PLDI, 2000.

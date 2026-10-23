@@ -179,9 +179,8 @@ fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
 /// };
 ///
 /// let compiled = api::compile(&program, &wit, &Options::default())?;
-/// let component = compiled.component.expect("component output");
-/// assert!(!component.bytes.is_empty());
 /// assert!(!compiled.core.is_empty());
+/// assert!(compiled.component.is_some_and(|component| !component.bytes.is_empty()));
 /// # Ok(())
 /// # }
 /// ```
