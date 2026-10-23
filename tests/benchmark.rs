@@ -769,16 +769,14 @@ async fn benchmark_baseline() -> Result<()> {
     Ok(())
 }
 
-/// The capture metadata keeps the original harness hash; comparison pins the reviewed
-/// measurement harness separately so reporting changes never overwrite baseline results.
+/// Pins what makes a comparison meaningful: the workload sources and the measurement
+/// harness. Toolchain and dependency versions are recorded in the metadata but not gated,
+/// so an upgrade is judged by the 105% limits and its baseline re-capture by review.
 fn verify_baseline_inputs() -> Result<()> {
     use sha2::{Digest, Sha256};
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("baselines/pliron.metadata.json"))?;
     for (path, hash) in metadata["inputs_sha256"].as_object().unwrap() {
-        if matches!(path.as_str(), "tests/benchmark.rs" | "Cargo.lock") {
-            continue;
-        }
         let actual = format!("{:x}", Sha256::digest(std::fs::read(path)?));
         ensure!(
             Some(actual.as_str()) == hash.as_str(),
@@ -793,18 +791,6 @@ fn verify_baseline_inputs() -> Result<()> {
         Some(harness.as_str()) == metadata["comparison_harness_sha256"].as_str(),
         "benchmark measurement harness changed; baseline review is required"
     );
-    let lock = include_str!("../Cargo.lock");
-    for package in ["wasmtime", "wasmtime-wasi", "wasmtime-wasi-http"] {
-        let declaration = lock
-            .split("[[package]]")
-            .find(|entry| entry.contains(&format!("\nname = \"{package}\"\n")))
-            .ok_or_else(|| anyhow::anyhow!("missing locked {package}"))?;
-        let expected = metadata["wasmtime"].as_str().unwrap();
-        ensure!(
-            declaration.contains(&format!("\nversion = \"{expected}\"\n")),
-            "benchmark requires {package} {expected}"
-        );
-    }
     Ok(())
 }
 

@@ -10,7 +10,7 @@ impl<'s> FunctionBuilder<'s> {
         source: &'s Expr,
         element: Option<TypeHandle>,
     ) -> Result<Value> {
-        let expected = if matches!(source, Expr::Array(items) if items.is_empty()) {
+        let expected = if matches!(source, Expr::Array(items, _) if items.is_empty()) {
             element.map(|element| ArrayType::get(ctx, element).into())
         } else {
             None

@@ -307,7 +307,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let number = FP64Type::get(ctx).into();
         let numbers = ArrayType::get(ctx, number).into();
-        let expected = matches!(source, Expr::Array(_)).then_some(numbers);
+        let expected = matches!(source, Expr::Array(_, _)).then_some(numbers);
         let value = self.expression_with(ctx, source, expected)?;
         let value = self.defined(ctx, value)?;
         let value = self.arithmetic(ctx, value);

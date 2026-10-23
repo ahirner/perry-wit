@@ -9,8 +9,8 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             Constructor::Map { types, init } => {
                 let types = types.map(|(key, value)| (key.clone(), value.clone()));
                 let inferred = init.map(|init| {
-                    if let Expr::Array(entries) = init
-                        && let Some(Expr::Array(pair)) = entries.first()
+                    if let Expr::Array(entries, _) = init
+                        && let Some(Expr::Array(pair, _)) = entries.first()
                         && let [key, value] = pair.as_slice()
                     {
                         HirType::Array(Box::new(HirType::Tuple(vec![
@@ -199,7 +199,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             },
             _ => HirType::Any,
         },
-        Expr::Array(elements) => {
+        Expr::Array(elements, _) => {
             let mut types = elements.iter().map(|element| expression(element, env));
             let first = types.next().unwrap_or(HirType::Any);
             let second = types.next();
@@ -223,7 +223,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             }
         }
 
-        Expr::ArrayFrom(source) => {
+        Expr::ArrayFrom(source, _) => {
             if let Expr::Object(props) = source.as_ref()
                 && props.iter().any(|(k, _)| k == "length")
             {

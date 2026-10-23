@@ -205,7 +205,7 @@ impl<'s> FunctionBuilder<'s> {
                     bail!("Promise.{property} takes one array");
                 };
                 let inputs = match inputs {
-                    Expr::Array(items) => self.combinator_inputs(ctx, items)?,
+                    Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
                     inputs => self.expression(ctx, inputs)?,
                 };
                 let op = PromiseCombinatorOp::new(ctx, combinator, inputs)

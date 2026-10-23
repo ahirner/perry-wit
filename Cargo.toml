@@ -1,6 +1,6 @@
 [package]
 name = "perry-wit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 default-run = "perry-wit"
 description = "Compile TypeScript into WASI 0.3 WebAssembly components"
@@ -47,12 +47,12 @@ http = "1"
 http-body-util = "0.1"
 libm = "0.2"
 perry-abi = { path = "crates/perry-abi" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "fbea15a351f9ea15af69b18e5276908bb48990df" }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
 perry-runtime = { path = "crates/perry-runtime" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "957bef3e132932b6ba66173762b84c3e3508b7ba", default-features = false }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "58797e44a51220e62bac7c91bab458c6a0e08a9b", default-features = false }
 pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
@@ -61,9 +61,9 @@ tokio = "1"
 wasm-encoder = "0.261"
 wasmparser = "0.261"
 wasmprinter = "0.261.0"
-wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
-wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p3"] }
-wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p3", "default-send-request"] }
+wasmtime = { version = "=50.0.0", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p3"] }
+wasmtime-wasi-http = { version = "=50.0.0", default-features = false, features = ["p3", "default-send-request"] }
 wit-parser = "0.261"
 
 [profile.dev]
@@ -100,13 +100,13 @@ serde_json.workspace = true
 wit-bindgen = "0.62"
 
 [build-dependencies]
-wat = "1.261.0"
+wat = "~1.261.0"
 wasmparser.workspace = true
 
 [dev-dependencies]
 sha2 = "0.10"
 serde = { workspace = true, features = ["derive"] }
-wat = "1.261.0"
+wat = "~1.261.0"
 bytes.workspace = true
 http.workspace = true
 http-body = "1"
