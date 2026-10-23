@@ -97,17 +97,32 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         expr: &'s Expr,
     ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-        let (fields, names, args) = match expr {
-            Expr::Object(fields) => (&fields[..], &[][..], &[][..]),
+        let (fields, defined, names, args) = match expr {
+            Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
+            // Perry HIR keeps a literal that repeats a key with an effectful value as its
+            // source-ordered definitions; later pairs overwrite earlier ones, as in a literal.
+            Expr::ObjectSpread { parts } if parts.iter().all(|(key, _)| key.is_some()) => {
+                (&[][..], &parts[..], &[][..], &[][..])
+            }
             Expr::New {
                 class_name, args, ..
-            } => (&[][..], self.shapes.literal_fields(class_name)?, &args[..]),
+            } => (
+                &[][..],
+                &[][..],
+                self.shapes.literal_fields(class_name)?,
+                &args[..],
+            ),
             _ => return None,
         };
         Some(
             fields
                 .iter()
                 .map(|(name, value)| (name.as_str(), value))
+                .chain(
+                    defined
+                        .iter()
+                        .filter_map(|(name, value)| Some((name.as_deref()?, value))),
+                )
                 .chain(names.iter().copied().zip(args)),
         )
     }

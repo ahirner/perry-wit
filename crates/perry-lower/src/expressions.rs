@@ -479,7 +479,7 @@ impl<'s> FunctionBuilder<'s> {
                 class_name, args, ..
             } => self.object_literal(ctx, class_name, args, expected)?,
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
-            Expr::Array(items)
+            Expr::Array(items, _)
                 if expected.is_some_and(|ty| {
                     TypedHandle::<RecordType>::from_handle(present_type(ctx, ty), ctx)
                         .is_ok_and(|record| record.deref(ctx).kind() == RecordKind::Tuple)
@@ -489,9 +489,9 @@ impl<'s> FunctionBuilder<'s> {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 self.record_literal(ctx, &names, items, expected, RecordKind::Tuple)?
             }
-            Expr::Array(items) => self.array_literal(ctx, items, expected)?,
+            Expr::Array(items, _) => self.array_literal(ctx, items, expected)?,
             Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
-            Expr::ArrayFrom(iterable) => self.array_from(ctx, iterable, None, expected)?,
+            Expr::ArrayFrom(iterable, _) => self.array_from(ctx, iterable, None, expected)?,
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,

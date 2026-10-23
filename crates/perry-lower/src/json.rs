@@ -37,7 +37,7 @@ impl<'s> FunctionBuilder<'s> {
         let keys = if callback {
             self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
         } else {
-            let expected = matches!(replacer, Expr::Array(items) if items.is_empty())
+            let expected = matches!(replacer, Expr::Array(items, _) if items.is_empty())
                 .then(|| ArrayType::get(ctx, StringType::get(ctx).into()).into());
             let keys = self.expression_with(ctx, replacer, expected)?;
             self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, keys))

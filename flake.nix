@@ -30,13 +30,13 @@
             overlays = [ (import rust-overlay) ];
           };
 
-        wasmtimeVersion = "49.0.2";
+        wasmtimeVersion = "50.0.0";
         cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         wasmtimeAsset = {
-          aarch64-darwin = { target = "aarch64-macos"; hash = "sha256-6lp5JhyqOYGbhj/YUIeUKM+QVINT4eXPm8vMTnrd8sE="; };
-          x86_64-darwin = { target = "x86_64-macos"; hash = "sha256-skUT7/9qXb6xluKgEJe6YyqLDqFWO6KXraJs6zqgZ9k="; };
-          aarch64-linux = { target = "aarch64-linux"; hash = "sha256-yhSYjG2j2SUSvZw7rWy9BrH1dDtpEannCfGm+jBjfX8="; };
-          x86_64-linux = { target = "x86_64-linux"; hash = "sha256-pNbp46WmD1J893k9Z0xIkwyAwuiXeZW4onXK0yVLkyI="; };
+          aarch64-darwin = { target = "aarch64-macos"; hash = "sha256-Mj3AmNwEVdYPOWxARifpZ7cDP/z6Kav/+yQxJs+CydY="; };
+          x86_64-darwin = { target = "x86_64-macos"; hash = "sha256-rRTZ+2pR0WMzGEJtbfIXNBJ/rdyB/hijr9cMWWTqvrU="; };
+          aarch64-linux = { target = "aarch64-linux"; hash = "sha256-EPmtH4U50uBOBBzGIt5qJwEJqx5Dpr4faYQ8IIIWaDI="; };
+          x86_64-linux = { target = "x86_64-linux"; hash = "sha256-d8Ge4EN5kfmseDe5wmnZxwdnRPhdrSY/6lIUzCcjx/8="; };
         }.${system};
         wasmtimeCli = assert cargoManifest.workspace.dependencies.wasmtime.version == "=${wasmtimeVersion}";
           pkgs.stdenvNoCC.mkDerivation {
