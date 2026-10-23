@@ -64,6 +64,8 @@ try {
       page.on('pageerror', error => console.error(name, error));
       await page.goto(`${origin}${prefix}`);
       assert(!requests.some(path => /\.wasm$|\/assets\/|\.js$/.test(path)), 'Homepage must load no scripts or compiler');
+      assert.equal(await page.locator('.cards .card').count(), 4);
+      assert.equal(await page.locator('.stats > div').count(), 4);
       assert.equal(await page.locator('.build > li').count(), 3);
       assert.equal(await page.locator('.build details').count(), 0);
       assert.equal((await page.locator('.build pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
@@ -71,6 +73,11 @@ try {
       for (const href of await page.locator('.build a').evaluateAll(links => links.map(link => link.getAttribute('href')))) {
         assert((await readFile(join(directory, href))).length > 0, `Missing resource: ${href}`);
       }
+      for (const docPage of ['docs/index.html', 'docs/architecture.html', 'docs/semantics.html', 'docs/numerical-tower.html', 'docs/conformance.html']) {
+        assert((await readFile(join(directory, docPage), 'utf8')).includes('Perry-WIT'), `Missing or empty doc page: ${docPage}`);
+      }
+      assert((await readFile(join(directory, 'docs/conformance.html'), 'utf8')).includes('ecma.number.arithmetic'), 'Conformance catalog must be embedded in docs/conformance.html');
+      assert((await readFile(join(directory, 'docs/architecture.html'), 'utf8')).includes('Iteration Until Convergence'), 'Architecture doc must include root ARCHITECTURE.md');
       assert.equal(await page.locator('footer a[href*="downloads/"], footer a[href*="rust/"]').count(), 0);
       assert.equal(await page.locator('footer span').innerText(), `Perry-WIT v${compilerVersion}`);
       const footerText = await page.locator('footer').innerText();

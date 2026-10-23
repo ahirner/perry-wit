@@ -30,6 +30,10 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        "doc" => {
+            print!("{}", registry::markdown()?);
+            Ok(())
+        }
         "check" => {
             let mut settings = Settings::default();
             while let Some(flag) = args.next() {
@@ -52,7 +56,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => bail!(
-            "Usage: perry-conformance list | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] | replay CASE.json"
+            "Usage: perry-conformance list | doc | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] | replay CASE.json"
         ),
     }
 }

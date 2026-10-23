@@ -1,4 +1,6 @@
 //! Read-only catalog projected from executable conformance contract definitions.
+pub use crate::catalog::CatalogEntry;
+pub(crate) use crate::catalog::ExpectedOutcome;
 use crate::{
     execution::{Evidence, check_equivalence},
     program::{Binary, Form, INPUTS, Math, Number, Program, Text},
@@ -58,14 +60,6 @@ pub enum Case {
         factor: u32,
         max_growth: u32,
     },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExpectedOutcome {
-    EquivalentExecution,
-    CompilerRejection,
-    InjectedFaultDetection,
-    BoundedGrowth,
 }
 impl Case {
     pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
@@ -176,15 +170,6 @@ pub struct Contract {
     pub witnesses: Vec<Witness>,
     pub(crate) strategy: BoxedStrategy<Case>,
     pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
-}
-#[derive(Serialize)]
-pub struct CatalogEntry {
-    pub id: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) specification: &'static str,
-    pub(crate) domain: &'static str,
-    pub partitions: Vec<&'static str>,
-    pub(crate) expected_outcomes: Vec<ExpectedOutcome>,
 }
 impl Contract {
     pub fn catalog(&self) -> CatalogEntry {
@@ -444,29 +429,72 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 case: Case::Program(serde_json::from_str(json)?),
             });
     }
-    for (id, source) in [
-        ("ecma.json.command", include_str!("../cases/json.ts")),
-        ("ecma.command.arrays", include_str!("../cases/arrays.ts")),
-        ("ecma.command.text", include_str!("../cases/text.ts")),
-        ("ecma.command.records", include_str!("../cases/records.ts")),
-        ("ecma.command.numbers", include_str!("../cases/numbers.ts")),
-        ("ecma.command.web", include_str!("../cases/web.ts")),
+    for (id, description, source) in [
+        (
+            "ecma.json.command",
+            "CLI JSON serialization and schema-guided parsing",
+            include_str!("../cases/json.ts"),
+        ),
+        (
+            "ecma.command.arrays",
+            "CLI dense array manipulation and iteration",
+            include_str!("../cases/arrays.ts"),
+        ),
+        (
+            "ecma.command.text",
+            "CLI UTF-8 string formatting and regular expressions",
+            include_str!("../cases/text.ts"),
+        ),
+        (
+            "ecma.command.records",
+            "CLI closed record layouts and nested objects",
+            include_str!("../cases/records.ts"),
+        ),
+        (
+            "ecma.command.numbers",
+            "CLI numeric formatting and boundary arithmetic",
+            include_str!("../cases/numbers.ts"),
+        ),
+        (
+            "ecma.command.web",
+            "CLI Web API codecs and byte views",
+            include_str!("../cases/web.ts"),
+        ),
         (
             "ecma.command.temporal",
+            "CLI ISO Temporal calendar and instant operations",
             include_str!("../cases/temporal.ts"),
         ),
         (
             "web.console.routing",
+            "Standard output and error stream routing via console",
             include_str!("../cases/console_streams.ts"),
         ),
-        ("ecma.promise.all", include_str!("../cases/promise_all.ts")),
+        (
+            "ecma.promise.all",
+            "Concurrent Promise.all settlement ordering",
+            include_str!("../cases/promise_all.ts"),
+        ),
         (
             "web.performance.monotonic",
+            "Monotonic clock reads via performance.now",
             include_str!("../cases/clocks.ts"),
         ),
-        ("ecma.date.clock", include_str!("../cases/date.ts")),
-        ("web.crypto.random", include_str!("../cases/random.ts")),
-        ("node.process.environment", include_str!("../cases/env.ts")),
+        (
+            "ecma.date.clock",
+            "Platform wall-clock reads and ISO Date formatting",
+            include_str!("../cases/date.ts"),
+        ),
+        (
+            "web.crypto.random",
+            "Cryptographic random byte fill via crypto.getRandomValues",
+            include_str!("../cases/random.ts"),
+        ),
+        (
+            "node.process.environment",
+            "Environment variable reads via process.env",
+            include_str!("../cases/env.ts"),
+        ),
     ] {
         let case = Case::Command {
             source: source.into(),
@@ -474,7 +502,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         };
         contracts.push(Contract {
             id,
-            description: id,
+            description,
             specification: "https://nodejs.org/api/",
             domain: "Standard CLI source; exact output bytes and successful exit",
             witnesses: vec![Witness {
@@ -589,5 +617,16 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ensure!(!reason.is_empty(), "deferred contract {id} needs a reason");
         ensure!(!crate::passing(id), "{id} is both passing and deferred");
     }
+    let projected: Vec<CatalogEntry> = contracts.iter().map(Contract::catalog).collect();
+    ensure!(
+        projected == crate::catalog::entries(),
+        "catalog::entries() is out of sync with executable contracts"
+    );
     Ok(contracts)
+}
+
+pub fn markdown() -> Result<String> {
+    let all = contracts(0)?;
+    let entries: Vec<CatalogEntry> = all.iter().map(Contract::catalog).collect();
+    Ok(crate::catalog::render_markdown(&entries))
 }

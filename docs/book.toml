@@ -1,0 +1,13 @@
+[book]
+title = "Perry-WIT Handbook"
+description = "Ahead-of-time TypeScript to WASI 0.3 WebAssembly component compiler"
+authors = ["Perry-WIT Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/ahirner/perry-wit"
+additional-css = ["theme.css"]
+no-section-label = true

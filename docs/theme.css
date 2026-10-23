@@ -1,0 +1,93 @@
+:root {
+  --content-max-width: 880px;
+  --pw-diagram-bg: rgba(127, 127, 127, 0.05);
+  --pw-diagram-border: rgba(127, 127, 127, 0.24);
+  --pw-node-bg: rgba(127, 127, 127, 0.09);
+  --pw-accent: #1d4ed8;
+  --pw-accent-soft: rgba(29, 78, 216, 0.12);
+}
+
+.ayu,
+.coal,
+.navy {
+  --pw-diagram-bg: rgba(255, 255, 255, 0.03);
+  --pw-diagram-border: rgba(255, 255, 255, 0.18);
+  --pw-node-bg: rgba(255, 255, 255, 0.06);
+  --pw-accent: #60a5fa;
+  --pw-accent-soft: rgba(96, 165, 250, 0.15);
+}
+
+.content main {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  line-height: 1.65;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+  letter-spacing: -0.015em;
+}
+
+.content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+  font-size: 0.94rem;
+}
+
+.content table th,
+.content table td {
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.content pre {
+  border-radius: 6px;
+}
+
+.pw-diagram {
+  margin: 1.5rem 0;
+  padding: 1.25rem;
+  border: 1px solid var(--pw-diagram-border);
+  border-radius: 8px;
+  background: var(--pw-diagram-bg);
+  overflow-x: auto;
+}
+
+.pw-diagram svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.pw-diagram figcaption {
+  margin-top: 0.75rem;
+  text-align: center;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.pw-nav-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.25rem 0 1.75rem;
+}
+
+.pw-nav-links a {
+  display: inline-block;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--pw-diagram-border);
+  border-radius: 6px;
+  background: var(--pw-node-bg);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.pw-nav-links a:hover {
+  border-color: var(--pw-accent);
+}

@@ -30,10 +30,22 @@ await mkdir(join(output, 'play/assets/engine'), { recursive: true });
 await mkdir(join(output, 'downloads'), { recursive: true });
 for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
 const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
-for (const page of ['index.html', 'play/index.html']) {
+for (const [page, rootPrefix] of [['index.html', './'], ['play/index.html', '../']]) {
   const html = await readFile(join(output, page), 'utf8');
-  await writeFile(join(output, page), html.replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion)));
+  await writeFile(join(output, page), html.replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion).replaceAll('{{root}}', rootPrefix)));
 }
+const bookDir = join(generated, 'book');
+await cp(join(repository, 'docs'), bookDir, { recursive: true });
+await cp(join(repository, 'ARCHITECTURE.md'), join(generated, 'ARCHITECTURE.md'));
+const conformanceDoc = process.env.PERRY_CONFORMANCE_DOC
+  ? await readFile(process.env.PERRY_CONFORMANCE_DOC, 'utf8')
+  : execFileSync('cargo', ['run', '--locked', '-q', '-p', 'perry-conformance', '--', 'doc'], {
+      cwd: repository,
+      encoding: 'utf8',
+      env: { ...process.env, PERRY_HELPER_TARGET_DIR: process.env.PERRY_HELPER_TARGET_DIR || join(repository, 'target/embedded-helpers') },
+    });
+await writeFile(join(bookDir, 'src/conformance-catalog.md'), conformanceDoc);
+execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
 await cp(compiler, join(output, 'downloads/perry-wit.wasm'));
 await cp(join(repository, 'wit/compiler/world.wit'), join(output, 'downloads/compiler.wit'));
 await writeFile(join(output, 'downloads/compiler.metadata.json'), metadata);
@@ -135,6 +147,6 @@ const report = {
   workerJavaScript: await size(['play/assets/worker.js']),
   jcoEngines: await size(await assets('play/assets/engine')),
 };
-if (report.htmlAndCss > 10 * 1024) throw new Error(`HTML/CSS budget exceeded: ${report.htmlAndCss} bytes`);
+if (report.htmlAndCss > 14 * 1024) throw new Error(`HTML/CSS budget exceeded: ${report.htmlAndCss} bytes`);
 await writeFile(join(output, 'sizes.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));

@@ -17,7 +17,7 @@ Perry-WIT compiles static TypeScript directly to WebAssembly components targetin
    Suspension, resumption, and asynchronous transfers are managed by the host via WASI 0.3 Component Model primitives. Guest task records and observer lists maintain Promise identity, repeated observation, and combinator settlements. Continuations are scheduled directly by native P3 wakeups.
 
 5. **Authoritative WIT**
-   Pinned official WASI definitions specify built-in platform capabilities, while application WIT files define internal interfaces. The SDK and compiler share unified export conventions, ensuring helper names do not leak into host protocols.
+   Pinned official WASI definitions specify built-in platform capabilities, while application WIT files define internal interfaces. The SDK and compiler share unified export conventions, keeping helper symbols internal to the guest module.
 
 6. **Unified Guest Heap**
    Pure algorithms rely on compact Rust helpers compiled directly into the guest module. Dynamic allocations, root frames, canonical scratch buffers, and suspended task states follow an explicit, single-heap ownership model managed by `talc`.
@@ -27,47 +27,17 @@ Perry-WIT compiles static TypeScript directly to WebAssembly components targetin
 
 ## Lowering
 
-The compiler layers cooperate to transform high-level TypeScript into validated WASI 0.3 WebAssembly components:
+The compiler transforms static TypeScript and resolved WIT contracts into validated WASI 0.3 WebAssembly components across seven stages:
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                     Compiler Frontend                       │
-│    ESM Loader  •  Source AST  •  Static Source Validation   │
-│    WIT Import Binding (bind_source)  •  Command Adapter     │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                     Perry HIR Lowering                      │
-│    Lexical Scopes  •  Guarded Initializer  •  Control Flow  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                     Contract Resolution                     │
-│    Signature Checks  •  WIT World Match  •  Suspension Check│
-│    Canonical ABI Plans  •  Scratch Buffer Layouts           │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                     Typed MIR Lowering                      │
-│   Local Slots  •  Block Joins  •  Root Frames  •  Builders  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                      Optimization Loop                      │
-│   mem2reg  •  SCCP  •  ProgramFacts  •  CFG Simplification  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                       Code Generation                       │
-│   Dominator Tree Structuring  •  Operand Stack Scheduling   │
-│   Linked Guest Helpers (JSON, Time, Text, Search Bytecode)  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                  Component Model Encoding                   │
-│    Canonical ABI Adapters  •  Resolved WIT  •  Encoder      │
-└─────────────────────────────────────────────────────────────┘
-```
+| Stage | Representation | Primary Responsibilities |
+| :--- | :--- | :--- |
+| **1. Source Analysis** | TypeScript AST | Local ESM resolution, lexical binding analysis, WIT import binding (`bind_source`), command adapter synthesis. |
+| **2. Perry HIR Lowering** | Perry HIR | Guarded module-scope initializer extraction, retained global bindings, structured control-flow lowering. |
+| **3. Contract Resolution** | Perry HIR + WIT | Export signature verification, `async func` suspension validation, capability plans, Canonical ABI scratch layouts. |
+| **4. Typed MIR Lowering** | Pliron MIR | Mutable local slots, basic-block joins, shared exception unwinding paths, suspension-safe GC root frames. |
+| **5. Optimization** | Pliron SSA MIR | `mem2reg` slot promotion followed by an iterative fixed-point loop (`SCCP`, `ProgramFacts`, CFG simplification, DCE). |
+| **6. Code Generation** | Core Wasm (`pliron-wasm`) | Ramsey dominator-tree control flow structuring, operand stack scheduling, capability-pruned Rust helper relocation. |
+| **7. Component Encoding** | WASI 0.3 Component | Canonical ABI lift/lower adapters, stackless P3 async callback synthesis, WIT metadata embedding. |
 
 ### 1. Source Analysis
 
@@ -112,9 +82,19 @@ Runtime builders assemble scheduling hooks, combinators, scalar capabilities, pr
 
 Pliron pass pipelines optimize the typed intermediate representation through an iterative fixed-point loop:
 
+```text
+                       ┌─────────────────────── Iteration Until Convergence ───────────────────────┐
+                       │                                                                           │
+                       ▼                                                                           │
+Typed MIR ──► mem2reg (SSA) ──► Canonicalize ──► SCCP ──► ProgramFacts ──► CFG Simplify & DCE ─────┘
+                                                             │
+                                                             ▼
+                                                Specialized MIR + Range Facts
+```
+
 - **Slot Promotion**: Local variable slots promote to SSA values and block arguments via `mem2reg`.
 - **Pass Pipeline**: Canonicalization, sparse conditional constant propagation (SCCP), control flow graph simplification, and dead code elimination iterate to convergence.
-- **Fact Propagation**: `ProgramFacts` propagates representations, bitwidth demand, and interval ranges across SSA values and function boundaries. Intermediate integer expressions widen to subsuming types or evaluate in 64-bit `i64` registers when unconstrained to prevent premature overflow without heap allocation. Range bounds analysis eliminates redundant array bounds checks. Staged threshold widening and dataflow presence tracking remain planned future refinements.
+- **Fact Propagation**: `ProgramFacts` propagates representations, bitwidth demand, and interval ranges across SSA values and function boundaries. Intermediate integer expressions widen to subsuming types or evaluate in 64-bit `i64` registers when unconstrained to prevent premature overflow without heap allocation. Range bounds analysis eliminates redundant array bounds checks.
 - **JSON Lowering**: Statically typed JSON serialization and parsing lower directly to specialized MIR decoders and schema-normalizing deep copies for known object shapes.
 
 ### 6. Code Generation
@@ -174,8 +154,8 @@ Asynchronous TypeScript functions execute eagerly until they reach an initial su
 ### Execution
 Completed tasks store their settlement state and outcome value for repeated observation.
 
-Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
-Awaits on already-settled promises advance inline on the stackless state machine. Pending observers of the same promise share a single native completion whose callback resumes registered frames in registration order. The host runtime determines the scheduling order across distinct completion events.
+Continuations schedule directly through native WASI 0.3 wakeups on the stackless state machine.
+Awaits on already-settled promises advance inline without suspension latency. Pending observers of the same promise share a single native completion whose callback resumes registered frames in registration order. The host runtime determines the scheduling order across distinct completion events.
 
 ### Settlement
 Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.
@@ -216,21 +196,12 @@ Static data segments required by helper routines are placed contiguously above u
 ## Verification
 
 ```text
-  Ordinary TypeScript ──────────── Node execution
-          │                            │
-          │       compare supported    │
-          │       source behavior      │
-          ▼                            │
-     Perry compiler                    │
-          │                            │
-          ▼                            │
-      Component ────────────── observable results
-          │
-          ▼
-  Controlled Wasmtime host
-  • exact imports/exports and canonical types
-  • gated concurrency, cancellation, and completion
-  • native resource tables and memory limits
+                                 ┌──► Node.js Oracle ──────────────────────────────┐
+                                 │                                                 ▼
+Capability Contract + Variants ──┤                                      Equivalence & Scaling
+                                 │                                             Ratchet
+                                 └──► Perry-WIT ──► Controlled Wasmtime P3 Host ───▲
+                                                    (ABI, Fuel, Memory & Resources)
 ```
 
 Verification rests on two complementary boundaries:
