@@ -104,44 +104,28 @@ fn case(workload: &str, base: u32) -> Case {
 
 pub(crate) fn contracts() -> Vec<Contract> {
     [
-        (
-            "wasi.execution.scaling.retained_records",
-            RETAINED_RECORDS,
-            "Pushing n records into a local array and reading them back costs O(n) guest fuel",
-        ),
-        (
-            "wasi.execution.scaling.number_push",
-            NUMBER_PUSH,
-            "Pushing n numbers into a dense array and summing them costs O(n) guest fuel",
-        ),
+        ("wasi.execution.scaling.retained_records", RETAINED_RECORDS),
+        ("wasi.execution.scaling.number_push", NUMBER_PUSH),
         (
             "wasi.execution.scaling.temporary_records",
             TEMPORARY_RECORDS,
-            "One temporary record per loop iteration costs O(n) guest fuel in total",
         ),
-        (
-            "wasi.execution.scaling.string_append",
-            STRING_APPEND,
-            "Appending one character n times costs at most n·log n guest fuel",
-        ),
-        (
-            "wasi.execution.scaling.collection_churn",
-            COLLECTION_CHURN,
-            "Abandoned Set/Map iterators and insert-delete churn cost O(n) guest fuel",
-        ),
+        ("wasi.execution.scaling.string_append", STRING_APPEND),
+        ("wasi.execution.scaling.collection_churn", COLLECTION_CHURN),
     ]
     .into_iter()
-    .map(|(id, workload, description)| Contract {
-        id,
-        description,
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
-        domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
-        witnesses: vec![Witness {
-            partition: "n-128",
-            case: case(workload, 128),
-        }],
-        strategy: (32u32..=128).prop_map(move |base| case(workload, base)).boxed(),
-        check: check_scaling,
+    .map(|(id, workload)| {
+        Contract::new(
+            id,
+            vec![Witness {
+                partition: "n-128",
+                case: case(workload, 128),
+            }],
+            (32u32..=128)
+                .prop_map(move |base| case(workload, base))
+                .boxed(),
+            check_scaling,
+        )
     })
     .collect()
 }

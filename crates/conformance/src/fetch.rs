@@ -66,22 +66,19 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-pub(crate) fn contract() -> Contract {
-    let case = |bytes, status, limit, truncated| {
+fn fetch_contract(id: &'static str, byob: bool) -> Contract {
+    let case = move |bytes, status, limit, truncated| {
         Case::Fetch(FetchCase {
             bytes,
             status,
             limit,
             truncated,
-            byob: false,
+            byob,
         })
     };
-    Contract {
-        id: "web.fetch.bounded_body",
-        description: "Headers-first Fetch, bounded byte consumption, completion failure and reuse",
-        specification: "https://fetch.spec.whatwg.org/",
-        domain: "GET loopback HTTP; 200 and 404; binary bodies, explicit body cap and producer truncation; three calls per instance",
-        witnesses: vec![
+    Contract::new(
+        id,
+        vec![
             Witness {
                 partition: "empty",
                 case: case(vec![], 200, 0, false),
@@ -103,7 +100,7 @@ pub(crate) fn contract() -> Contract {
                 case: case(vec![17; 30], 200, 64, true),
             },
         ],
-        strategy: (
+        (
             prop::collection::vec(any::<u8>(), 0..=256),
             prop::sample::select(vec![200u16, 404]),
             0usize..=256,
@@ -119,26 +116,13 @@ pub(crate) fn contract() -> Contract {
             })
             .boxed(),
         check,
-    }
+    )
+}
+
+pub(crate) fn contract() -> Contract {
+    fetch_contract("web.fetch.bounded_body", false)
 }
 
 pub(crate) fn byob_contract() -> Contract {
-    let mut contract = contract();
-    contract.id = "web.fetch.bounded_byob_body";
-    contract.description = "BYOB bounded Fetch consumes directly into its final buffer";
-    for witness in &mut contract.witnesses {
-        if let Case::Fetch(case) = &mut witness.case {
-            case.byob = true;
-        }
-    }
-    contract.strategy = contract
-        .strategy
-        .prop_map(|mut case| {
-            if let Case::Fetch(fetch) = &mut case {
-                fetch.byob = true;
-            }
-            case
-        })
-        .boxed();
-    contract
+    fetch_contract("web.fetch.bounded_byob_body", true)
 }

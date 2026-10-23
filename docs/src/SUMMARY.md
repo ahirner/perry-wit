@@ -2,17 +2,17 @@
 
 [Overview](index.md)
 
-# Foundations
-
-- [Architecture](architecture.md)
-- [Semantics](semantics.md)
-- [Numerical Tower](numerical-tower.md)
-
-# Component Development
+# Guide
 
 - [Authoring](authoring.md)
 - [Embedding](embedding.md)
 
-# Verification
+# Reference
 
+- [Semantics](semantics.md)
+- [Numbers](numbers.md)
 - [Conformance](conformance.md)
+
+# Internals
+
+- [Architecture](architecture.md)

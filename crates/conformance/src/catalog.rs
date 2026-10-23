@@ -1,5 +1,4 @@
 //! Static conformance catalog verified against executable contract definitions.
-#![allow(unexpected_cfgs)]
 use std::fmt::Write;
 
 /// Contracts the compiler must pass, one id per line. The list only grows: a listed contract
@@ -605,6 +604,14 @@ pub(crate) fn entries() -> Vec<CatalogEntry> {
     ]
 }
 
+#[cfg(not(conformance_doc_bin))]
+pub(crate) fn entry(id: &str) -> CatalogEntry {
+    entries()
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .unwrap_or_else(|| panic!("unknown contract in catalog: {id}"))
+}
+
 pub(crate) fn render_markdown(all: &[CatalogEntry]) -> String {
     let mut ecma = Vec::new();
     let mut web = Vec::new();
@@ -615,16 +622,13 @@ pub(crate) fn render_markdown(all: &[CatalogEntry]) -> String {
     let mut pending_count = 0usize;
 
     for entry in all {
-        let status = if passing(entry.id) {
+        if passing(entry.id) {
             passing_count += 1;
-            "Passing".to_string()
-        } else if let Some(reason) = deferred(entry.id) {
+        } else if deferred(entry.id).is_some() {
             deferred_count += 1;
-            format!("Deferred ({reason})")
         } else {
             pending_count += 1;
-            "Pending".to_string()
-        };
+        }
         let outcomes = entry
             .expected_outcomes
             .iter()
@@ -637,63 +641,47 @@ pub(crate) fn render_markdown(all: &[CatalogEntry]) -> String {
             .map(|p| format!("`{p}`"))
             .collect::<Vec<_>>()
             .join(", ");
+        // Only a URL specification becomes a link; others (internal cost bounds) stay plain.
+        let contract = if entry.specification.starts_with("https://") {
+            format!("[`{}`]({})", entry.id, entry.specification)
+        } else {
+            format!("`{}`", entry.id)
+        };
         let row = format!(
-            "| [`{}`]({}) | {} | {} | {} | {} | {} |\n",
-            entry.id,
-            entry.specification,
-            entry.description,
-            outcomes,
-            partitions,
-            entry.domain,
-            status
+            "| {contract} | {} | {} | {} | {} |\n",
+            entry.description, outcomes, partitions, entry.domain,
         );
         match entry.id.split_once('.').map(|(prefix, _)| prefix) {
             Some("ecma") => ecma.push(row),
             Some("web") => web.push(row),
             Some("node") => node.push(row),
             Some("wasi") => wasi.push(row),
-            _ => {}
+            other => panic!("unknown contract namespace in {}: {other:?}", entry.id),
         }
     }
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "The executable registry tracks **{}** capability contracts (**{}** passing, **{}** deferred, **{}** pending).\n",
+        "The registry holds **{}** capability contracts: **{}** passing, **{}** deferred, **{}** pending.\n",
         all.len(),
         passing_count,
         deferred_count,
         pending_count
     );
 
-    for (heading, summary, rows) in [
-        (
-            "ECMAScript",
-            "Core language semantics, numeric arithmetic, aggregates, collections, strings, JSON, dates, Temporal, promises, and CLI execution equivalence.",
-            &ecma,
-        ),
-        (
-            "Web Platform",
-            "Standard web interfaces including Fetch, ReadableStream, BYOB readers, Headers, Request, Response, TextEncoder, TextDecoder, Web Crypto, monotonic clocks, and Console streams.",
-            &web,
-        ),
-        (
-            "Node Compatibility",
-            "Node.js built-in module contracts across `node:fs/promises`, `node:timers/promises`, stream adapters, and `process` environment/exit handling.",
-            &node,
-        ),
-        (
-            "WASI 0.3 Host",
-            "Component Model boundary contracts, `wasi:http/handler@0.3.0`, native P3 byte streams, linear fuel scaling bounds, and fault-injection detection.",
-            &wasi,
-        ),
+    for (heading, rows) in [
+        ("ECMAScript", &ecma),
+        ("Web Platform", &web),
+        ("Node.js", &node),
+        ("WASI 0.3 Host", &wasi),
     ] {
-        let _ = writeln!(out, "### {heading}\n\n{summary}\n");
+        let _ = writeln!(out, "### {heading}\n");
         let _ = writeln!(
             out,
-            "| Contract | Capability | Outcome | Partitions | Domain | Status |"
+            "| Contract | Capability | Outcome | Partitions | Domain |"
         );
-        let _ = writeln!(out, "| :--- | :--- | :--- | :--- | :--- | :--- |");
+        let _ = writeln!(out, "| :--- | :--- | :--- | :--- | :--- |");
         for row in rows {
             out.push_str(row);
         }

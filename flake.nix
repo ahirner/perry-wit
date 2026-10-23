@@ -199,7 +199,7 @@
         conformanceDoc = pkgs.runCommand "perry-conformance-doc" {
           nativeBuildInputs = [ toolchain ];
         } ''
-          rustc --edition=2024 --cfg conformance_doc_bin ${./crates/conformance}/src/catalog.rs -o conformance-doc
+          rustc --edition=2024 --check-cfg 'cfg(conformance_doc_bin)' --cfg conformance_doc_bin ${./crates/conformance}/src/catalog.rs -o conformance-doc
           ./conformance-doc > "$out"
         '';
 

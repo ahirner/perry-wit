@@ -172,6 +172,24 @@ pub struct Contract {
     pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
 }
 impl Contract {
+    pub(crate) fn new(
+        id: &'static str,
+        witnesses: Vec<Witness>,
+        strategy: BoxedStrategy<Case>,
+        check: fn(&Case, &Evidence) -> Result<()>,
+    ) -> Self {
+        let meta = crate::catalog::entry(id);
+        Self {
+            id: meta.id,
+            description: meta.description,
+            specification: meta.specification,
+            domain: meta.domain,
+            witnesses,
+            strategy,
+            check,
+        }
+    }
+
     pub fn catalog(&self) -> CatalogEntry {
         let mut expected_outcomes = Vec::new();
         for witness in &self.witnesses {
@@ -193,16 +211,12 @@ impl Contract {
 
 fn expression_contract(
     id: &'static str,
-    description: &'static str,
     strategy: BoxedStrategy<Number>,
     examples: Vec<(&'static str, Number)>,
 ) -> Contract {
-    Contract {
+    Contract::new(
         id,
-        description,
-        specification: "https://tc39.es/ecma262/",
-        domain: "Bounded typed functions, control flow, closed aggregates, byte aliases, JSON conversion and exceptions over the IEEE-754 boundary corpus; BMP strings; direct/local/branch/loop/inert-exception forms and overlapping timer completion schedules",
-        witnesses: examples
+        examples
             .into_iter()
             .map(|(partition, expression)| Witness {
                 partition,
@@ -212,7 +226,7 @@ fn expression_contract(
                 }),
             })
             .collect(),
-        strategy: strategy
+        strategy
             .prop_map(|expression| {
                 Case::Program(Program {
                     expression,
@@ -220,8 +234,8 @@ fn expression_contract(
                 })
             })
             .boxed(),
-        check: check_equivalence,
-    }
+        check_equivalence,
+    )
 }
 
 pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
@@ -232,7 +246,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     let mut contracts = vec![
         expression_contract(
             "ecma.number.arithmetic",
-            "IEEE arithmetic and evaluation order",
             n.clone(),
             vec![
                 ("signed-zero", Number::NegativeZero),
@@ -253,7 +266,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.math.rounding",
-            "Numeric Math operations",
             (
                 prop::sample::select(vec![
                     Math::Floor,
@@ -274,7 +286,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.string.operations",
-            "String search, casing, slicing and length",
             t.clone().prop_map(|v| Number::Length(Box::new(v))).boxed(),
             vec![
                 ("unicode-and-nul", Number::Length(literal())),
@@ -296,7 +307,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.array.dense",
-            "Dense numeric arrays preserve values and effects",
             (n.clone(), n.clone(), n.clone(), 0u8..3)
                 .prop_map(|(a, b, c, i)| Number::Array(Box::new(a), Box::new(b), Box::new(c), i))
                 .boxed(),
@@ -304,7 +314,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.object.records",
-            "Record fields preserve values and effects",
             (n.clone(), n.clone())
                 .prop_map(|(a, b)| Number::Field(Box::new(a), Box::new(b)))
                 .boxed(),
@@ -315,7 +324,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.date.epoch",
-            "Date TimeClip and epoch reads",
             n.clone()
                 .prop_map(|v| Number::DateTime(Box::new(v)))
                 .boxed(),
@@ -323,7 +331,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.uint8array.conversion",
-            "Byte conversion and indexed access",
             (n.clone(), n.clone(), n.clone(), 0u8..3)
                 .prop_map(|(a, b, c, i)| Number::ByteGet(Box::new(a), Box::new(b), Box::new(c), i))
                 .boxed(),
@@ -331,7 +338,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "web.textencoder.subviews",
-            "UTF-8 encoding and byte subviews",
             (t.clone(), n.clone(), n.clone())
                 .prop_map(|(a, b, c)| Number::EncodedLength(Box::new(a), Box::new(b), Box::new(c)))
                 .boxed(),
@@ -342,7 +348,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.json.roundtrip",
-            "JSON text survives direct and stored decoding",
             (t, any::<bool>())
                 .prop_map(|(v, stored)| {
                     if stored {
@@ -358,17 +363,24 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             ],
         ),
     ];
-    for (id, description, form) in [
-        ("node.timers.promises.value", "Timer result", Form::Timer),
-        (
-            "node.timers.promises.observers",
-            "Repeated timer observation",
-            Form::StoredTimer,
-        ),
+    for (id, form) in [
+        ("node.timers.promises.value", Form::Timer),
+        ("node.timers.promises.observers", Form::StoredTimer),
     ] {
-        contracts.push(Contract {id,description,specification:"https://nodejs.org/api/",domain:"Retained async operation interleaved with typed numeric evaluation; instance reused across boundary inputs",
-            witnesses:vec![Witness{partition:"retained-operation",case:Case::Program(Program{expression:Number::Mark(input()),form})}],
-            strategy:n.clone().prop_map(move|expression|Case::Program(Program{expression,form})).boxed(),check:check_equivalence});
+        contracts.push(Contract::new(
+            id,
+            vec![Witness {
+                partition: "retained-operation",
+                case: Case::Program(Program {
+                    expression: Number::Mark(input()),
+                    form,
+                }),
+            }],
+            n.clone()
+                .prop_map(move |expression| Case::Program(Program { expression, form }))
+                .boxed(),
+            check_equivalence,
+        ));
     }
     contracts.extend(crate::capabilities::fs_contracts());
     let regressions = [
@@ -429,96 +441,47 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 case: Case::Program(serde_json::from_str(json)?),
             });
     }
-    for (id, description, source) in [
-        (
-            "ecma.json.command",
-            "CLI JSON serialization and schema-guided parsing",
-            include_str!("../cases/json.ts"),
-        ),
-        (
-            "ecma.command.arrays",
-            "CLI dense array manipulation and iteration",
-            include_str!("../cases/arrays.ts"),
-        ),
-        (
-            "ecma.command.text",
-            "CLI UTF-8 string formatting and regular expressions",
-            include_str!("../cases/text.ts"),
-        ),
-        (
-            "ecma.command.records",
-            "CLI closed record layouts and nested objects",
-            include_str!("../cases/records.ts"),
-        ),
-        (
-            "ecma.command.numbers",
-            "CLI numeric formatting and boundary arithmetic",
-            include_str!("../cases/numbers.ts"),
-        ),
-        (
-            "ecma.command.web",
-            "CLI Web API codecs and byte views",
-            include_str!("../cases/web.ts"),
-        ),
+    for (id, source) in [
+        ("ecma.json.command", include_str!("../cases/json.ts")),
+        ("ecma.command.arrays", include_str!("../cases/arrays.ts")),
+        ("ecma.command.text", include_str!("../cases/text.ts")),
+        ("ecma.command.records", include_str!("../cases/records.ts")),
+        ("ecma.command.numbers", include_str!("../cases/numbers.ts")),
+        ("ecma.command.web", include_str!("../cases/web.ts")),
         (
             "ecma.command.temporal",
-            "CLI ISO Temporal calendar and instant operations",
             include_str!("../cases/temporal.ts"),
         ),
         (
             "web.console.routing",
-            "Standard output and error stream routing via console",
             include_str!("../cases/console_streams.ts"),
         ),
-        (
-            "ecma.promise.all",
-            "Concurrent Promise.all settlement ordering",
-            include_str!("../cases/promise_all.ts"),
-        ),
+        ("ecma.promise.all", include_str!("../cases/promise_all.ts")),
         (
             "web.performance.monotonic",
-            "Monotonic clock reads via performance.now",
             include_str!("../cases/clocks.ts"),
         ),
-        (
-            "ecma.date.clock",
-            "Platform wall-clock reads and ISO Date formatting",
-            include_str!("../cases/date.ts"),
-        ),
-        (
-            "web.crypto.random",
-            "Cryptographic random byte fill via crypto.getRandomValues",
-            include_str!("../cases/random.ts"),
-        ),
-        (
-            "node.process.environment",
-            "Environment variable reads via process.env",
-            include_str!("../cases/env.ts"),
-        ),
+        ("ecma.date.clock", include_str!("../cases/date.ts")),
+        ("web.crypto.random", include_str!("../cases/random.ts")),
+        ("node.process.environment", include_str!("../cases/env.ts")),
     ] {
         let case = Case::Command {
             source: source.into(),
             exit: ExitStatus::Success,
         };
-        contracts.push(Contract {
+        contracts.push(Contract::new(
             id,
-            description,
-            specification: "https://nodejs.org/api/",
-            domain: "Standard CLI source; exact output bytes and successful exit",
-            witnesses: vec![Witness {
+            vec![Witness {
                 partition: "standard-source",
                 case: case.clone(),
             }],
-            strategy: Just(case).boxed(),
-            check: check_equivalence,
-        });
+            Just(case).boxed(),
+            check_equivalence,
+        ));
     }
-    contracts.push(Contract {
-        id: "node.timers.promises.lifecycle",
-        description: "Start, host release, completion, cancellation, observation and reuse",
-        specification: "https://nodejs.org/api/timers.html",
-        domain: "Complete sequential lifecycle traces with controlled Node/WASI clocks; no claim of exhaustive async scheduling",
-        witnesses: vec![
+    contracts.push(Contract::new(
+        "node.timers.promises.lifecycle",
+        vec![
             Witness {
                 partition: "settlement-and-reobserve",
                 case: Case::Lifecycle(crate::transitions::complete_trace(vec![
@@ -544,11 +507,13 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ])),
             },
         ],
-        strategy: TimerModel::sequential_strategy(1..=12)
-            .prop_map(|(_, actions, _)| Case::Lifecycle(crate::transitions::complete_trace(actions)))
+        TimerModel::sequential_strategy(1..=12)
+            .prop_map(|(_, actions, _)| {
+                Case::Lifecycle(crate::transitions::complete_trace(actions))
+            })
             .boxed(),
-        check: crate::transitions::check,
-    });
+        crate::transitions::check,
+    ));
     for (id, fault) in [
         (
             "wasi.execution.detect_value_fault",
@@ -570,8 +535,15 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             },
             fault,
         };
-        contracts.push(Contract{id,description:"Injected faults must be distinguished from the unchanged program",specification:"https://component-model.bytecodealliance.org/",domain:"Value corruption, omitted effects, and retained host resources; only the component adapter is faulted",
-            witnesses:vec![Witness{partition:"injected-fault",case:case(Number::Input)}],strategy:n.clone().prop_map(case).boxed(),check:crate::execution::check_fault});
+        contracts.push(Contract::new(
+            id,
+            vec![Witness {
+                partition: "injected-fault",
+                case: case(Number::Input),
+            }],
+            n.clone().prop_map(case).boxed(),
+            crate::execution::check_fault,
+        ));
     }
     contracts.push(crate::streams::contract());
     contracts.push(crate::streams::byob_contract());

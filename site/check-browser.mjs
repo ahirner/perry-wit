@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile, readdir, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { resolve, extname, join } from 'node:path';
+import { readFile, readdir, mkdir, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
+import { resolve, dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { chromium, webkit } from 'playwright-core';
 
@@ -64,20 +64,31 @@ try {
       page.on('pageerror', error => console.error(name, error));
       await page.goto(`${origin}${prefix}`);
       assert(!requests.some(path => /\.wasm$|\/assets\/|\.js$/.test(path)), 'Homepage must load no scripts or compiler');
-      assert.equal(await page.locator('.cards .card').count(), 4);
-      assert.equal(await page.locator('.stats > div').count(), 4);
-      assert.equal(await page.locator('.build > li').count(), 3);
-      assert.equal(await page.locator('.build details').count(), 0);
-      assert.equal((await page.locator('.build pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
-      assert.match(await page.locator('.build li').last().innerText(), /Wasm compiler.*the compiler itself/);
-      for (const href of await page.locator('.build a').evaluateAll(links => links.map(link => link.getAttribute('href')))) {
+      assert.equal(await page.locator('.artifacts > li').count(), 3);
+      assert.equal(await page.locator('.artifacts details').count(), 0);
+      assert.equal((await page.locator('.artifacts pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
+      assert.match(await page.locator('.artifacts li').last().innerText(), /Wasm compiler.*the compiler itself/);
+      for (const href of await page.locator('.artifacts a').evaluateAll(links => links.map(link => link.getAttribute('href')))) {
         assert((await readFile(join(directory, href))).length > 0, `Missing resource: ${href}`);
       }
-      for (const docPage of ['docs/index.html', 'docs/architecture.html', 'docs/semantics.html', 'docs/numerical-tower.html', 'docs/conformance.html']) {
-        assert((await readFile(join(directory, docPage), 'utf8')).includes('Perry-WIT'), `Missing or empty doc page: ${docPage}`);
+      for (const [docPage, expectedText] of [
+        ['docs/index.html', 'Where to Start'],
+        ['docs/authoring.html', 'wasi:cli/command@0.3.0'],
+        ['docs/embedding.html', 'package perry:compiler@0.1.1;'],
+        ['docs/semantics.html', 'Number.isSafeInteger'],
+        ['docs/numbers.html', 'i64.mul'],
+        ['docs/conformance.html', 'ecma.number.arithmetic'],
+        ['docs/architecture.html', 'resolved WIT world'],
+      ]) {
+        const html = await readFile(join(directory, docPage), 'utf8');
+        assert(html.includes(expectedText), `Expected "${expectedText}" in ${docPage}`);
+        for (const [, rawHref] of html.matchAll(/href="([^"#?]+)"/g)) {
+          if (/^(https?:|mailto:|data:|javascript:)/.test(rawHref)) continue;
+          const target = resolve(dirname(join(directory, docPage)), rawHref);
+          const resolved = (await stat(target).catch(() => null))?.isDirectory() ? join(target, 'index.html') : target;
+          assert((await stat(resolved).catch(() => null))?.isFile(), `Broken link "${rawHref}" in ${docPage}`);
+        }
       }
-      assert((await readFile(join(directory, 'docs/conformance.html'), 'utf8')).includes('ecma.number.arithmetic'), 'Conformance catalog must be embedded in docs/conformance.html');
-      assert((await readFile(join(directory, 'docs/architecture.html'), 'utf8')).includes('Iteration Until Convergence'), 'Architecture doc must include root ARCHITECTURE.md');
       assert.equal(await page.locator('footer a[href*="downloads/"], footer a[href*="rust/"]').count(), 0);
       assert.equal(await page.locator('footer span').innerText(), `Perry-WIT v${compilerVersion}`);
       const footerText = await page.locator('footer').innerText();

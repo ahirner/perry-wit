@@ -9,5 +9,6 @@ src = "src"
 default-theme = "light"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/ahirner/perry-wit"
-additional-css = ["theme.css"]
 no-section-label = true
+additional-css = ["theme.css"]
+additional-js = ["nav.js"]

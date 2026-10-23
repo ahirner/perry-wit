@@ -83,64 +83,79 @@ await errors.write(input);await errors.close();errors.releaseLock();
 }
 pub(crate) fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
-    for (id, description, specification, operation, asynchronous) in [
-        (
-            "ecma.uint8array.set",
-            "Overlapping byte copies and atomic range rejection",
-            "https://tc39.es/ecma262/#sec-%typedarray%.prototype.set",
-            SET,
-            false,
-        ),
-        (
-            "web.response.bytes",
-            "Constructed response snapshot, body use and repeated consumption",
-            "https://fetch.spec.whatwg.org/",
-            RESPONSE,
-            true,
-        ),
-        (
-            "web.request.bytes",
-            "Constructed request snapshot, body use and repeated consumption",
-            "https://fetch.spec.whatwg.org/",
-            REQUEST,
-            true,
-        ),
+    for (id, operation, asynchronous) in [
+        ("ecma.uint8array.set", SET, false),
+        ("web.response.bytes", RESPONSE, true),
+        ("web.request.bytes", REQUEST, true),
     ] {
         let build = move |bytes| bytes_function(bytes, operation, asynchronous);
-        contracts.push(Contract{id,description,specification,domain:"Uint8Array sources of 0..256 bytes; each source evaluated over every IEEE-754 boundary input; byte reads checked explicitly",witnesses:vec![Witness{partition:"empty",case:build(vec![])},Witness{partition:"binary-subview",case:build(vec![0,255,128,1,17])}],strategy:prop::collection::vec(any::<u8>(),0..=256).prop_map(build).boxed(),check:check_equivalence});
+        contracts.push(Contract::new(
+            id,
+            vec![
+                Witness {
+                    partition: "empty",
+                    case: build(vec![]),
+                },
+                Witness {
+                    partition: "binary-subview",
+                    case: build(vec![0, 255, 128, 1, 17]),
+                },
+            ],
+            prop::collection::vec(any::<u8>(), 0..=256)
+                .prop_map(build)
+                .boxed(),
+            check_equivalence,
+        ));
     }
-    contracts.push(Contract{id:"node.stream.writable_to_web",description:"Queued acknowledged writes, writer locks and closed-writer rejection",specification:"https://nodejs.org/api/stream.html#streamwritabletowebstreamwritable",domain:"stdout/stderr Uint8Array writes and subviews; two queued writes, repeat observation, close, rejected released-writer use and a new stdio wrapper; exact output bytes",witnesses:vec![Witness{partition:"empty",case:writer(vec![])},Witness{partition:"binary-and-close",case:writer(vec![0,255,128,10,13])}],strategy:prop::collection::vec(any::<u8>(),1..=256).prop_map(writer).boxed(),check:check_equivalence});
+    contracts.push(Contract::new(
+        "node.stream.writable_to_web",
+        vec![
+            Witness {
+                partition: "empty",
+                case: writer(vec![]),
+            },
+            Witness {
+                partition: "binary-and-close",
+                case: writer(vec![0, 255, 128, 10, 13]),
+            },
+        ],
+        prop::collection::vec(any::<u8>(), 1..=256)
+            .prop_map(writer)
+            .boxed(),
+        check_equivalence,
+    ));
     let callback_timer = Case::Reject {
         source: "import {setTimeout} from 'node:timers';setTimeout(()=>{},1);".into(),
         diagnostic: "Unsupported capability import".into(),
     };
-    contracts.push(Contract {
-        id: "node.timers.callbacks.unsupported",
-        description: "Explicit compiler rejection of callback timers",
-        specification: "https://nodejs.org/api/timers.html",
-        domain: "Callback timers are outside the supported source domain",
-        witnesses: vec![Witness {
+    contracts.push(Contract::new(
+        "node.timers.callbacks.unsupported",
+        vec![Witness {
             partition: "callback-timer",
             case: callback_timer.clone(),
         }],
-        strategy: Just(callback_timer).boxed(),
-        check: check_equivalence,
-    });
+        Just(callback_timer).boxed(),
+        check_equivalence,
+    ));
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
-    contracts.push(Contract {
-        id: "ecma.error.values",
-        description: "Error messages, causes and identity across promise rejection and rethrow",
-        specification: "https://tc39.es/ecma262/#sec-error-objects",
-        domain: "TypeError with a string message and cause; repeated awaits, all/allSettled/race, rethrow and finally; hidden built-in fields; Unicode messages of 0..32 scalar values",
-        witnesses: vec![
-            Witness { partition: "empty-message", case: error_case(String::new()) },
-            Witness { partition: "nul-and-unicode", case: error_case("failed\0é雪😀".into()) },
+    contracts.push(Contract::new(
+        "ecma.error.values",
+        vec![
+            Witness {
+                partition: "empty-message",
+                case: error_case(String::new()),
+            },
+            Witness {
+                partition: "nul-and-unicode",
+                case: error_case("failed\0é雪😀".into()),
+            },
         ],
-        strategy: prop::collection::vec(any::<char>(), 0..=32)
-            .prop_map(|chars| error_case(chars.into_iter().collect())).boxed(),
-        check: check_equivalence,
-    });
+        prop::collection::vec(any::<char>(), 0..=32)
+            .prop_map(|chars| error_case(chars.into_iter().collect()))
+            .boxed(),
+        check_equivalence,
+    ));
     contracts
 }
 
@@ -255,12 +270,9 @@ fn additional_contracts() -> Vec<Contract> {
         exit: ExitStatus::Failure,
     };
     vec![
-        Contract {
-            id: "node.fs.directories",
-            description: "Directory creation, listing, metadata and deletion",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "One directory and binary file; exact size, one listed entry, cleanup and reuse across the numeric boundary corpus",
-            witnesses: vec![
+        Contract::new(
+            "node.fs.directories",
+            vec![
                 Witness {
                     partition: "empty-file",
                     case: directory(vec![]),
@@ -270,17 +282,14 @@ fn additional_contracts() -> Vec<Contract> {
                     case: directory(vec![0, 255, 128]),
                 },
             ],
-            strategy: prop::collection::vec(any::<u8>(), 0..=256)
+            prop::collection::vec(any::<u8>(), 0..=256)
                 .prop_map(directory)
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "web.textdecoder.streaming",
-            description: "Fatal UTF-8 decoding across byte boundaries",
-            specification: "https://encoding.spec.whatwg.org/",
-            domain: "Fatal UTF-8, one-byte chunks, final flush; compare successful prefix bytes and normalized decoding failure",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "web.textdecoder.streaming",
+            vec![
                 Witness {
                     partition: "empty",
                     case: decoder(vec![]),
@@ -298,17 +307,14 @@ fn additional_contracts() -> Vec<Contract> {
                     case: decoder(vec![65, 0xf0, 0x9f]),
                 },
             ],
-            strategy: prop::collection::vec(any::<u8>(), 0..=32)
+            prop::collection::vec(any::<u8>(), 0..=32)
                 .prop_map(decoder)
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "web.headers.multimap",
-            description: "Header name folding, joined duplicates and mutations",
-            specification: "https://fetch.spec.whatwg.org/",
-            domain: "ASCII values, case-insensitive names, whitespace trimming, append/get/set/has/delete",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "web.headers.multimap",
+            vec![
                 Witness {
                     partition: "empty-value",
                     case: headers(String::new()),
@@ -318,15 +324,12 @@ fn additional_contracts() -> Vec<Contract> {
                     case: headers("  first  ".into()),
                 },
             ],
-            strategy: "[a-zA-Z0-9 ]{0,32}".prop_map(headers).boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "ecma.temporal.iso",
-            description: "Typed ISO Instant, PlainDate and PlainDateTime values",
-            specification: "https://tc39.es/proposal-temporal/",
-            domain: "Integral epoch milliseconds in +/-8640000000000000, ISO formatting and leap-day addition; pinned Node Temporal enabled explicitly",
-            witnesses: vec![
+            "[a-zA-Z0-9 ]{0,32}".prop_map(headers).boxed(),
+            check_equivalence,
+        ),
+        Contract::new(
+            "ecma.temporal.iso",
+            vec![
                 Witness {
                     partition: "negative-millisecond",
                     case: temporal(-1),
@@ -344,17 +347,14 @@ fn additional_contracts() -> Vec<Contract> {
                     case: temporal(8640000000000000),
                 },
             ],
-            strategy: (-8640000000000000i64..=8640000000000000)
+            (-8640000000000000i64..=8640000000000000)
                 .prop_map(temporal)
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.process.exit_status",
-            description: "Explicit failure status and immediate process exit",
-            specification: "https://nodejs.org/api/process.html",
-            domain: "Exit status 1 via process.exitCode or process.exit; exact preceding output and unreachable following output",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.process.exit_status",
+            vec![
                 Witness {
                     partition: "exit-code",
                     case: exit(false),
@@ -364,9 +364,9 @@ fn additional_contracts() -> Vec<Contract> {
                     case: exit(true),
                 },
             ],
-            strategy: any::<bool>().prop_map(exit).boxed(),
-            check: check_equivalence,
-        },
+            any::<bool>().prop_map(exit).boxed(),
+            check_equivalence,
+        ),
     ]
 }
 
@@ -404,7 +404,31 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
     }
 }
 fn combinator_contracts() -> Vec<Contract> {
-    [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+    [
+        ("ecma.promise.all_settled", true),
+        ("ecma.promise.race", false),
+    ]
+    .into_iter()
+    .map(|(id, settled)| {
+        Contract::new(
+            id,
+            vec![
+                Witness {
+                    partition: "zero",
+                    case: combinator(0, settled),
+                },
+                Witness {
+                    partition: "negative",
+                    case: combinator(-7, settled),
+                },
+            ],
+            (-32i16..=32)
+                .prop_map(move |value| combinator(value, settled))
+                .boxed(),
+            check_equivalence,
+        )
+    })
+    .collect()
 }
 
 fn retained_fs_witness(form: Form) -> Witness {
@@ -613,109 +637,91 @@ pub(crate) fn fs_contracts() -> Vec<Contract> {
             .prop_map(|chars| chars.into_iter().collect::<String>())
     };
     vec![
-        Contract {
-            id: "node.fs.readFile.utf8",
-            description: "UTF-8 file read across retained and dynamic Unicode payloads",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained async UTF-8 read interleaved with numeric evaluation, plus dynamic Unicode/NUL payloads of 0..48 scalar values and concurrent reads",
-            witnesses: vec![
+        Contract::new(
+            "node.fs.readFile.utf8",
+            vec![
                 retained_fs_witness(Form::FileRead),
                 Witness {
                     partition: "unicode-and-concurrent-read",
                     case: fs_read_utf8_case("é\0漢𝄞😀\nline2".into()),
                 },
             ],
-            strategy: unicode_text().prop_map(fs_read_utf8_case).boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.fs.writeFile.text",
-            description: "Text file round trip, overwrite and truncation",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained JSON text round trip plus sequential UTF-8 writes testing file truncation and growth across arbitrary Unicode strings",
-            witnesses: vec![
+            unicode_text().prop_map(fs_read_utf8_case).boxed(),
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.fs.writeFile.text",
+            vec![
                 retained_fs_witness(Form::FileRoundTrip),
                 Witness {
                     partition: "overwrite-and-truncate",
                     case: fs_write_text_case("initial-long-payload-é\0漢".into(), "short".into()),
                 },
             ],
-            strategy: (unicode_text(), unicode_text())
+            (unicode_text(), unicode_text())
                 .prop_map(|(a, b)| fs_write_text_case(a, b))
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.fs.metadata",
-            description: "File stat and directory listing across dynamic files and cleanup",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained stat/readdir on fixture plus multi-file creation, exact byte-length stat verification, directory entry count and unlink cleanup",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.fs.metadata",
+            vec![
                 retained_fs_witness(Form::FileMetadata),
                 Witness {
                     partition: "multi-file-stat-and-unlink",
                     case: fs_metadata_case(vec![0, 1, 255, 128, 42], "extra\0é".into()),
                 },
             ],
-            strategy: (prop::collection::vec(any::<u8>(), 0..=256), unicode_text())
+            (prop::collection::vec(any::<u8>(), 0..=256), unicode_text())
                 .prop_map(|(bytes, text)| fs_metadata_case(bytes, text))
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.fs.readFile.bytes",
-            description: "Binary file read, buffer isolation and UTF-8 decoding",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained binary read plus arbitrary 0..256-byte payloads, returned Uint8Array mutation isolation across repeated reads and TextDecoder verification",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.fs.readFile.bytes",
+            vec![
                 retained_fs_witness(Form::FileBytes),
                 Witness {
                     partition: "binary-buffer-isolation",
                     case: fs_read_bytes_case(vec![0, 255, 128, 1, 0, 42, 199]),
                 },
             ],
-            strategy: prop::collection::vec(any::<u8>(), 0..=256)
+            prop::collection::vec(any::<u8>(), 0..=256)
                 .prop_map(fs_read_bytes_case)
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.fs.writeFile.subviews",
-            description: "Byte view and empty file round trip across arbitrary subarray slices",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained subarray write plus arbitrary 0..128-byte buffers and subarray(start, end) slices, post-write view mutation isolation and empty subview truncation",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.fs.writeFile.subviews",
+            vec![
                 retained_fs_witness(Form::FileByteRoundTrip),
                 Witness {
                     partition: "arbitrary-subview-slice",
                     case: fs_write_subview_case(vec![19, 0, 255, 128, 42, 20, 77], 1, 5),
                 },
             ],
-            strategy: (
+            (
                 prop::collection::vec(any::<u8>(), 0..=128),
                 0usize..=128,
                 0usize..=128,
             )
                 .prop_map(|(bytes, start, end)| fs_write_subview_case(bytes, start, end))
                 .boxed(),
-            check: check_equivalence,
-        },
-        Contract {
-            id: "node.fs.readFile.recovery",
-            description: "Repeated rejection across missing UTF-8, binary and stat calls followed by recovery",
-            specification: "https://nodejs.org/api/fs.html",
-            domain: "Retained rejected readFile plus repeated rejection observation across UTF-8 readFile, binary readFile and stat, followed by successful write/read recovery",
-            witnesses: vec![
+            check_equivalence,
+        ),
+        Contract::new(
+            "node.fs.readFile.recovery",
+            vec![
                 retained_fs_witness(Form::FileRejectedRead),
                 Witness {
                     partition: "multi-op-rejection-recovery",
                     case: fs_recovery_case(vec![7, 0, 254, 128]),
                 },
             ],
-            strategy: prop::collection::vec(any::<u8>(), 0..=128)
+            prop::collection::vec(any::<u8>(), 0..=128)
                 .prop_map(fs_recovery_case)
                 .boxed(),
-            check: check_equivalence,
-        },
+            check_equivalence,
+        ),
     ]
 }

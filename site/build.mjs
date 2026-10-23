@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { transpileBytes } from '@bytecodealliance/jco-transpile';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
+import { prepareBook } from './docs.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(root);
@@ -29,23 +30,32 @@ await rm(output, { recursive: true, force: true });
 await mkdir(join(output, 'play/assets/engine'), { recursive: true });
 await mkdir(join(output, 'downloads'), { recursive: true });
 for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
-const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
-for (const [page, rootPrefix] of [['index.html', './'], ['play/index.html', '../']]) {
-  const html = await readFile(join(output, page), 'utf8');
-  await writeFile(join(output, page), html.replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion).replaceAll('{{root}}', rootPrefix)));
-}
 const bookDir = join(generated, 'book');
 await cp(join(repository, 'docs'), bookDir, { recursive: true });
 await cp(join(repository, 'ARCHITECTURE.md'), join(generated, 'ARCHITECTURE.md'));
-const conformanceDoc = process.env.PERRY_CONFORMANCE_DOC
-  ? await readFile(process.env.PERRY_CONFORMANCE_DOC, 'utf8')
-  : execFileSync('cargo', ['run', '--locked', '-q', '-p', 'perry-conformance', '--', 'doc'], {
-      cwd: repository,
-      encoding: 'utf8',
-      env: { ...process.env, PERRY_HELPER_TARGET_DIR: process.env.PERRY_HELPER_TARGET_DIR || join(repository, 'target/embedded-helpers') },
-    });
-await writeFile(join(bookDir, 'src/conformance-catalog.md'), conformanceDoc);
-execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
+await cp(join(repository, 'template'), join(generated, 'template'), { recursive: true });
+for (const wit of ['compiler', 'http-handler']) await cp(join(repository, 'wit', wit), join(generated, 'wit', wit), { recursive: true });
+let conformanceDoc;
+if (process.env.PERRY_CONFORMANCE_DOC) {
+  conformanceDoc = await readFile(process.env.PERRY_CONFORMANCE_DOC, 'utf8');
+} else {
+  const catalogBin = join(generated, 'perry-conformance-doc');
+  execFileSync('rustc', ['--edition=2024', '--check-cfg', 'cfg(conformance_doc_bin)', '--cfg', 'conformance_doc_bin', join(repository, 'crates/conformance/src/catalog.rs'), '-o', catalogBin], { stdio: 'inherit' });
+  conformanceDoc = execFileSync(catalogBin, { encoding: 'utf8' });
+}
+const contractCount = conformanceDoc.match(/\*\*(\d+)\*\* capability contracts/)?.[1];
+if (!contractCount) throw new Error('Failed to extract capability contract count from conformance catalog');
+const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
+const escapeHtml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+for (const page of ['index.html', 'play/index.html']) {
+  let html = await readFile(join(output, page), 'utf8');
+  // The homepage shows a bundled example verbatim; the examples below compile it.
+  for (const [placeholder, path] of html.matchAll(/<!-- example:([\w/.-]+) -->/g)) {
+    const source = escapeHtml((await readFile(join(repository, 'examples', path), 'utf8')).trimEnd());
+    html = html.replace(placeholder, () => source);
+  }
+  await writeFile(join(output, page), html.replaceAll('{{contractCount}}', contractCount).replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion)));
+}
 await cp(compiler, join(output, 'downloads/perry-wit.wasm'));
 await cp(join(repository, 'wit/compiler/world.wit'), join(output, 'downloads/compiler.wit'));
 await writeFile(join(output, 'downloads/compiler.metadata.json'), metadata);
@@ -90,6 +100,10 @@ await build({
 
 const { instantiateCompiler } = await import('./play/compiler-host.js');
 const { api } = await instantiateCompiler(compilerBytes);
+
+await prepareBook({ repository, bookDir, generated, api, conformanceDoc });
+execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
+
 const exampleFiles = new Map();
 for (const name of await readdir(join(repository, 'examples'), { recursive: true })) {
   if (/\.(ts|wit|json|wasm)$/.test(name)) exampleFiles.set(name, new Uint8Array(await readFile(join(repository, 'examples', name))));
@@ -140,13 +154,17 @@ for (const [name, references] of [
 }
 const size = async names => (await Promise.all(names.map(async name => (await stat(join(output, name))).size))).reduce((a, b) => a + b, 0);
 const assets = async path => (await readdir(join(output, path), { recursive: true })).filter(name => /\.(js|wasm)$/.test(name)).map(name => `${path}/${name}`);
+const homeHtmlAndCss = await size(['index.html', 'style.css']);
+const playHtmlAndCss = await size(['play/index.html', 'style.css']);
 const report = {
+  homeHtmlAndCss,
+  playHtmlAndCss,
   htmlAndCss: await size(['index.html', 'play/index.html', 'style.css']),
   uiJavaScript: await size(['play/app.js', 'play/workspace.js']),
   compilerComponent: await size(['downloads/perry-wit.wasm']),
   workerJavaScript: await size(['play/assets/worker.js']),
   jcoEngines: await size(await assets('play/assets/engine')),
 };
-if (report.htmlAndCss > 14 * 1024) throw new Error(`HTML/CSS budget exceeded: ${report.htmlAndCss} bytes`);
+if (homeHtmlAndCss > 10 * 1024 || playHtmlAndCss > 10 * 1024) throw new Error(`HTML/CSS budget exceeded: home=${homeHtmlAndCss}, play=${playHtmlAndCss} bytes`);
 await writeFile(join(output, 'sizes.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));

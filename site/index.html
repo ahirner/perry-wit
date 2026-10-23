@@ -3,71 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Compile static TypeScript ahead-of-time into WASI 0.3 WebAssembly components with Perry-WIT.">
-<title>Perry-WIT · TypeScript to WASI 0.3 WebAssembly Components</title>
+<meta name="description" content="Compile static TypeScript ahead of time into WASI 0.3 WebAssembly components with Perry-WIT.">
+<title>Perry-WIT · TypeScript to WebAssembly Components</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header><a class="brand" href="./">Perry-WIT</a><nav aria-label="Primary"><a href="docs/index.html">Handbook</a><a href="docs/numerical-tower.html">Numerics</a><a href="docs/conformance.html">Conformance</a><a href="rust/perry_wit/api/index.html">Rust API</a><a href="play/">Playground</a></nav></header>
+<header><a class="brand" href="./">Perry-WIT</a><nav aria-label="Primary"><a href="docs/index.html">Handbook</a><a href="play/">Playground</a></nav></header>
 <main class="home">
-<h1>TypeScript to WebAssembly Components</h1>
-<p class="lead">Compile static TypeScript ahead-of-time into native WASI 0.3 WebAssembly components — instant cold starts, single-page <code>64 KiB</code> memory footprints, and stackless async I/O without an embedded JavaScript engine.</p>
-<div class="cta"><a class="button primary" href="play/">Try the playground</a><a class="button" href="docs/index.html">Read the handbook</a><a class="button" href="docs/conformance.html">Conformance matrix</a></div>
-<section class="stats" aria-label="Runtime characteristics">
-<div><strong>64 KiB</strong><span>Baseline linear memory (1 Wasm page)</span></div>
-<div><strong>Zero VM</strong><span>Direct SSA MIR to native Wasm codegen</span></div>
-<div><strong>WASI 0.3</strong><span>Stackless coroutines &amp; native byte streams</span></div>
-<div><strong>O(n) Ratchet</strong><span>Differential Node.js &amp; fuel scaling checks</span></div>
+<h1>TypeScript to WebAssembly components</h1>
+<p class="lead">Perry-WIT compiles static TypeScript ahead of time into standalone WASI 0.3 components. A WIT world defines the contract and lowers directly to WebAssembly instructions.</p>
+<div class="cta"><a class="button primary" href="play/">Try the playground</a><a class="button" href="docs/index.html">Read the handbook</a></div>
+<section class="editors" aria-label="Example">
+<div><h2><span>TypeScript</span><span class="note">index.ts</span></h2>
+<pre><code><!-- example:merge_docs/index.ts --></code></pre></div>
+<div><h2><span>WIT</span><span class="note">world.wit</span></h2>
+<pre><code><!-- example:merge_docs/world.wit --></code></pre></div>
 </section>
-<section class="editors" aria-label="Envoy auth filter example">
-<div><h2><span>TypeScript · Edge Auth Filter</span><span class="note">filter.ts</span></h2>
-<pre><code>import { verifyHmac } from "envoy:crypto/hmac@0.3.0";
-import { checkQuota } from "envoy:ratelimit/quota@0.3.0";
-
-export async function onRequestHeaders(
-  token: string,
-  route: string
-): Promise&lt;{ allow: boolean; tenant: string; status: number }&gt; {
-  const claims = verifyHmac(token);
-  if (!claims.valid) return { allow: false, tenant: "", status: 401 };
-  const remaining = await checkQuota(claims.tenant, route);
-  return {
-    allow: remaining &gt; 0,
-    tenant: claims.tenant,
-    status: remaining &gt; 0 ? 200 : 429,
-  };
-}</code></pre></div>
-<div><h2><span>WIT · Component Contract</span><span class="note">world.wit</span></h2>
-<pre><code>package envoy:auth-filter@0.3.0;
-
-world http-filter {
-  import envoy:crypto/hmac@0.3.0;
-  import envoy:ratelimit/quota@0.3.0;
-
-  record decision {
-    allow: bool,
-    tenant: string,
-    status: u16,
-  }
-
-  export on-request-headers: async func(
-    token: string,
-    route: string
-  ) -&gt; decision;
-}</code></pre></div>
+<h2 id="what-to-build">What to build</h2>
+<section class="cards" aria-label="What to build">
+<article class="card"><h3>Typed library components</h3><p>The WIT world declares the exports and generates the <code>.d.ts</code> types. A component exporting a string function is about 3 KB, and each call's temporaries are freed when it returns.</p><a href="docs/authoring.html">Authoring</a></article>
+<article class="card"><h3>Concurrent I/O</h3><p><code>fetch</code>, streams, timers and files suspend through WASI 0.3 callbacks and resume directly from host events. {{contractCount}} contracts verify equivalence against Node.js.</p><a href="docs/semantics.html">Semantics</a></article>
+<article class="card"><h3>Integer-typed numbers</h3><p>WIT <code>u8</code> to <code>u64</code> refine TypeScript's <code>number</code>. Arithmetic proven to stay in range compiles to integer instructions instead of floating point.</p><a href="docs/numbers.html">Numbers</a></article>
+<article class="card"><h3>Compilers in your host</h3><p>Compile tenant TypeScript in-memory from Rust with <code>perry_wit::api</code>, or run the compiler itself as a WASI 0.2 component.</p><a href="docs/embedding.html">Embedding</a></article>
 </section>
-<h2 id="what-to-build">What to Build</h2>
-<section class="cards" aria-label="Component architectures">
-<article class="card"><h3>Envoy Edge Proxy Plugins</h3><p>Compile stateless header routing, HMAC/JWT verification, and rate-limit policy filters into isolated Wasm components with sub-millisecond instantiation and deterministic post-return memory reclamation.</p><a href="docs/authoring.html">Component authoring →</a></article>
-<article class="card"><h3>WASI 0.3 HTTP Services</h3><p>Export <code>wasi:http/handler@0.3.0</code> with zero-copy <code>Uint8Array</code> streaming bodies, concurrent outbound <code>fetch</code> pipelines, and per-request task isolation.</p><a href="docs/authoring.html#http-handlers">HTTP handler guide →</a></article>
-<article class="card"><h3>Multi-Tenant UDF Sandboxes</h3><p>Embed <code>perry_wit::api::compile</code> in Rust hosts or execute the self-hosted Wasm compiler in the browser to turn tenant TypeScript rules into fuel-metered components on demand.</p><a href="docs/embedding.html">Embedding guide →</a></article>
-<article class="card"><h3>Typed Numeric Kernels</h3><p>Bridge ECMAScript <code>f64</code> numbers with WIT fixed-width integers (<code>u8</code>–<code>u64</code>) through a subsumption join lattice and overflow-free <code>i64</code> intermediate register promotion.</p><a href="docs/numerical-tower.html">Numerical tower →</a></article>
-</section>
-<h2 id="build">Build</h2>
-<ul class="build">
-<li><strong>CLI</strong> — build the compiler from its Nix flake (<a href="docs/authoring.html">authoring guide</a>).<pre><code>nix build github:ahirner/perry-wit</code></pre></li>
-<li><strong>Rust library</strong> — compile in-memory source buffers from Rust. <a href="rust/perry_wit/api/index.html">API documentation</a> · <a href="docs/embedding.html">Embedding guide</a>.</li>
-<li><strong>Wasm compiler</strong> — the compiler itself, packaged as a portable component. <a href="downloads/perry-wit.wasm">Download .wasm</a> · <a href="downloads/compiler.wit">Compiler API (WIT)</a> · <a href="downloads/THIRD-PARTY-NOTICES.txt">Wasm distribution notices</a>.</li>
+<h2 id="artifacts">Artifacts</h2>
+<ul class="artifacts">
+<li><strong>CLI</strong>: build the compiler from its Nix flake.<pre><code>nix build github:ahirner/perry-wit</code></pre></li>
+<li><strong>Rust library</strong>: compile in-memory sources from Rust. <a href="rust/perry_wit/api/index.html">API documentation</a></li>
+<li><strong>Wasm compiler</strong>: the compiler itself as a WASI 0.2 component. <a href="downloads/perry-wit.wasm">perry-wit.wasm</a> · <a href="downloads/compiler.wit">compiler.wit</a> · <a href="downloads/THIRD-PARTY-NOTICES.txt">notices</a></li>
 </ul>
 </main>
 <!-- footer -->

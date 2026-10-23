@@ -1,30 +1,18 @@
-# Perry-WIT Handbook
+# Overview
 
-Perry-WIT compiles static TypeScript ahead-of-time into standalone WebAssembly components targeting **WASI 0.3 (Preview 3)**. The compiler lowers TypeScript through Perry HIR and typed SSA MIR (`pliron`) straight into native WebAssembly instructions, emitting self-contained components with instant startup, single-page (`64 KiB`) baseline memory footprints, and native stackless coroutine suspension.
+Perry-WIT compiles a static subset of TypeScript ahead of time into WebAssembly components for WASI 0.3.
+The WIT world is the contract: it fixes the exported functions, the host capabilities a program may import, and the integer types of its numbers.
 
-<div class="pw-nav-links">
-  <a href="../index.html">Landing Page</a>
-  <a href="../play/index.html">Browser Playground</a>
-  <a href="../rust/perry_wit/api/index.html">Rust Embedding API</a>
-  <a href="conformance.html">Conformance Matrix</a>
-</div>
+- **Direct WebAssembly codegen.** TypeScript lowers through typed SSA to native WebAssembly instructions; a component exporting a string function is about 3 KB.
+- **Memory stays flat across calls.** Each call's temporaries are freed when it returns. The test suite runs 1,000 calls with a nested record argument within two 64 KiB pages.
+- **WIT integer types refine `number`.** A `u8` parameter is a `number` known to be an integer in `0..=255`. Arithmetic proven to stay in range compiles to `i32` or `i64` instructions instead of floating point.
+- **Callback-driven WASI 0.3 async.** `await` suspends through WASI 0.3 callbacks, and the host resumes the waiting task directly.
+- **Differential conformance against Node.js.** Each conformance contract runs the same program under Node.js and Wasmtime and compares observable results.
 
-## Design Guarantees
+## Where to Start
 
-| Guarantee | Mechanism |
-| :--- | :--- |
-| **Ahead-of-Time Codegen** | TypeScript functions lower directly to WebAssembly instructions and SSA registers without an embedded JavaScript VM. |
-| **Native WASI 0.3 Async** | Promises, streams, and timers suspend and resume through stackless Component Model callbacks rather than guest polling loops. |
-| **Static Contract Enforcement** | Source validation reconciles TypeScript exports and imports against the resolved WIT world before code generation begins. |
-| **Single-Heap Ownership** | Managed records, UTF-8 strings, and Canonical ABI scratch buffers share a unified `talc` linear memory space with deterministic post-return reclamation. |
-| **Stratified Numerics** | Unconstrained numbers evaluate as `f64`, WIT-constrained widths specialize to native `i32`/`i64` instructions, and intermediate integer arithmetic promotes to `i64` registers. |
-| **Differential Verification** | Capability contracts execute identically against both a Node.js oracle and a resource-metered Wasmtime P3 host. |
-
-## Handbook Structure
-
-- **[Architecture](architecture.md)** covers the seven-stage lowering pipeline, the iterative `pliron` optimization loop, unified linear memory tiers, WASI 0.3 concurrency, and freestanding Rust guest helpers.
-- **[Semantics](semantics.md)** specifies the static TypeScript execution model, value representations, exception propagation, asynchronous stream lifecycles, and the supported standard library surface.
-- **[Numerical Tower](numerical-tower.md)** details numeric representation stratification, the mixed-width subsumption join lattice, `i64` intermediate register promotion, and `bigint` boundary rules.
-- **[Authoring](authoring.md)** walks through building library components, CLI commands, and WASI 0.3 HTTP handlers alongside WIT type generation and Nix project scaffolding.
-- **[Embedding](embedding.md)** documents in-memory compilation through the `perry_wit::api` Rust crate and the self-hosted `perry:compiler/api` WebAssembly component.
-- **[Conformance](conformance.md)** explains the differential oracle methodology, linear fuel scaling ratchets, and the complete capability contract catalog generated from the test registry.
+- To write and build a component, read [Authoring](authoring.md), then [Semantics](semantics.md) for what compiles.
+- To compile TypeScript inside your own Rust host or a browser, read [Embedding](embedding.md).
+- To type numeric interfaces with WIT integers, read [Numbers](numbers.md).
+- To see how far Node.js equivalence is tested, read [Conformance](conformance.md).
+- To change the compiler, read [Architecture](architecture.md).

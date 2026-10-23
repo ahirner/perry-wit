@@ -52,12 +52,9 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
 }
 pub(crate) fn contract() -> Contract {
     let case = |bytes, status| Case::Handler(HandlerCase { bytes, status });
-    Contract {
-        id: "wasi.http.handler",
-        description: "Native HTTP ABI with WIT-generated request and response declarations",
-        specification: "https://github.com/WebAssembly/wasi-http",
-        domain: "PUT requests with binary bodies up to 64 KiB, duplicate headers, statuses 200/201/404; three exchanges reuse one component instance",
-        witnesses: vec![
+    Contract::new(
+        "wasi.http.handler",
+        vec![
             Witness {
                 partition: "empty",
                 case: case(vec![], 200),
@@ -71,12 +68,12 @@ pub(crate) fn contract() -> Contract {
                 case: case((0..65536).map(|i| i as u8).collect(), 404),
             },
         ],
-        strategy: (
+        (
             prop::collection::vec(any::<u8>(), 0..=256),
             prop::sample::select(vec![200u16, 201, 404]),
         )
             .prop_map(move |(bytes, status)| case(bytes, status))
             .boxed(),
         check,
-    }
+    )
 }

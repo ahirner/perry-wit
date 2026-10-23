@@ -1,86 +1,25 @@
 # Embedding
 
-Perry-WIT is architected as an embeddable, deterministic library with no runtime dependency on external system toolchains, LLVM, or Cargo. Hosts can invoke the compiler directly from Rust or execute the self-hosted WebAssembly compiler component inside any WASI-capable runtime.
+The compiler ships as the `perry_wit` Rust crate and as a standalone WASI 0.2 component.
+Prebuilt guest helper modules are embedded in the compiler binary, so compilation runs entirely in memory.
 
-## Rust Compiler API
+## Rust
 
-The [`perry_wit::api`](../rust/perry_wit/api/index.html) module compiles in-memory TypeScript source modules and WIT package definitions directly into validated WASI 0.3 WebAssembly component bytes:
+[`perry_wit::api::compile`](../rust/perry_wit/api/fn.compile.html) compiles an entry module, auxiliary ESM modules and WIT packages from byte buffers:
 
 ```rust
-use perry_wit::api::{self, Options, Program, Wit};
-
-let program = Program {
-    source: br#"
-        export function authorize(token: string): boolean {
-            return token.startsWith("Bearer ") && token.length > 16;
-        }
-    "#
-    .as_slice()
-    .into(),
-    modules: vec![],
-};
-
-let wit = Wit {
-    application: br#"
-        package envoy:auth@0.1.0;
-        world filter {
-            export authorize: func(token: string) -> bool;
-        }
-    "#
-    .as_slice()
-    .into(),
-    dependencies: vec![],
-};
-
-let compiled = api::compile(&program, &wit, &Options::default())?;
-assert!(!compiled.bytes.is_empty());
+{{#include embedding-example.rs}}
 ```
 
-- **Zero Filesystem Side Effects**: `api::compile` resolves relative ESM imports from `Program::modules` and WIT package dependencies from `Wit::dependencies` entirely in memory.
-- **Embedded Guest Helpers**: Freestanding Rust guest helpers (JSON, UTF-8, calendar arithmetic, URL parsing) are pre-compiled to `wasm32-unknown-unknown` at compiler build time and embedded into the `perry_wit` crate binary.
-- **Structured Diagnostics**: Compilation errors return structured source spans, offending AST constructs, and WIT contract mismatch descriptions.
+Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
 
-## Self-Hosted WebAssembly Component
+## WebAssembly Component
 
-Perry-WIT itself compiles to a standalone WASI WebAssembly component (`perry-wit-compiler.wasm`) implementing the `perry:compiler/api` WIT world:
+[`downloads/perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
 
 ```wit
-package perry:compiler@0.1.0;
-
-interface api {
-  record module-file {
-    path: string,
-    contents: list<u8>,
-  }
-  record compile-request {
-    source: list<u8>,
-    modules: list<module-file>,
-    wit-application: list<u8>,
-    wit-dependencies: list<module-file>,
-    world-name: option<string>,
-    core-only: bool,
-    keep-names: bool,
-  }
-  compile: func(req: compile-request) -> result<list<u8>, string>;
-}
-
-world compiler {
-  export api;
-}
+{{#include ../../wit/compiler/world.wit}}
 ```
 
-This self-contained compiler artifact enables:
-
-- **Browser Compilation**: The [interactive playground](../play/index.html) runs `perry-wit-compiler.wasm` entirely client-side inside the browser to compile TypeScript and WIT edits into runnable WASI 0.3 components in milliseconds.
-- **Sandboxed Multi-Tenant Control Planes**: Edge gateways and serverless platforms can compile tenant-submitted TypeScript plugins inside a memory- and fuel-limited Wasm sandbox before deploying the resulting component.
-
-## Resource Budgets
-
-Compiled components adhere to strict runtime budgets enforced in CI:
-
-| Metric | Guarantee | Verification |
-| :--- | :--- | :--- |
-| **Baseline Linear Memory** | `64 KiB` (1 Wasm page) for minimal components | Enforced by component budget tests across scalar and string exports. |
-| **Sustained Allocation Churn** | Zero unbounded heap growth across serial calls | `cabi_post_<export>` and loop-level mark-sweep reclaim temporary graphs deterministically. |
-| **Fuel Scaling** | Linear $O(n)$ instruction scaling ($n \to 4n \le 6\times$ fuel) | Verified by differential scaling ratchets in `perry-conformance`. |
-| **Binary Footprint** | Capability-pruned helper relocation | Unreferenced guest helpers and static data segments are stripped during codegen. |
+The [playground](../play/index.html) runs it in a Web Worker.
+Because the `api` export operates on in-memory buffers, a server can instantiate it with empty filesystem preopens, fuel limits and memory caps to compile untrusted TypeScript.

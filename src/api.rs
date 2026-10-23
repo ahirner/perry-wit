@@ -148,6 +148,43 @@ fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
     crate::sdk::declarations(&resolve, world)
 }
 
+/// Compile in-memory TypeScript source modules and WIT package definitions into a
+/// validated WASI 0.3 WebAssembly component.
+///
+/// ```
+/// # fn main() -> Result<(), perry_wit::CompileError> {
+/// use perry_wit::api::{self, Options, Program, Wit};
+///
+/// let program = Program {
+///     source: br#"
+///         export function authorize(token: string): boolean {
+///             return token.startsWith("Bearer ") && token.length > 16;
+///         }
+///     "#
+///     .as_slice()
+///     .into(),
+///     modules: vec![],
+/// };
+///
+/// let wit = Wit {
+///     application: br#"
+///         package example:auth@0.1.0;
+///         world filter {
+///             export authorize: func(token: string) -> bool;
+///         }
+///     "#
+///     .as_slice()
+///     .into(),
+///     dependencies: vec![],
+/// };
+///
+/// let compiled = api::compile(&program, &wit, &Options::default())?;
+/// let component = compiled.component.expect("component output");
+/// assert!(!component.bytes.is_empty());
+/// assert!(!compiled.core.is_empty());
+/// # Ok(())
+/// # }
+/// ```
 pub fn compile(
     input: &Program,
     wit: &Wit,
