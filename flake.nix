@@ -196,6 +196,13 @@
           '';
         });
 
+        conformanceDoc = pkgs.runCommand "perry-conformance-doc" {
+          nativeBuildInputs = [ toolchain ];
+        } ''
+          rustc --edition=2024 --check-cfg 'cfg(conformance_doc_bin)' --cfg conformance_doc_bin ${./crates/conformance}/src/catalog.rs -o conformance-doc
+          ./conformance-doc > "$out"
+        '';
+
         siteSource = pkgs.lib.cleanSourceWith { src = ./.; filter = authoredSourceFilter; };
         site = pkgs.buildNpmPackage {
           pname = "perry-wit-site";
@@ -208,10 +215,11 @@
             hash = "sha256-TtHGWMCM3i57L3BPFptDXSZvDboAWDVkdLC+MiNc9xk=";
           };
           npmFlags = [ "--ignore-scripts" ];
-          nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools ];
+          nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools pkgs.mdbook ];
           PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
           PERRY_NATIVE_COMPILER = "${perryWitBin}/bin/perry-wit";
           PERRY_RUSTDOC = "${perryWitBin}/share/doc/perry-wit";
+          PERRY_CONFORMANCE_DOC = conformanceDoc;
           buildPhase = ''
             runHook preBuild
             node site/build.mjs
@@ -387,6 +395,7 @@
             pkgs.nodejs
             pkgs.python3
             pkgs.typescript
+            pkgs.mdbook
             pkgs.pkg-config
             pkgs.cacert
           ];

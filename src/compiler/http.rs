@@ -59,8 +59,8 @@ function __perryRequestMethod(tag: string, other: string | undefined): __PerryMe
   }
 }
 
-function __perryRequestScheme(present: boolean, tag: string, other: string | undefined): __PerryScheme | undefined {
-  if (!present) return undefined;
+function __perryRequestScheme(present: boolean, tag: string, other: string | undefined): __PerryScheme | null {
+  if (!present) return null;
   switch (tag) {
     case 'http': return { tag: 'http' };
     case 'https': return { tag: 'https' };
@@ -79,8 +79,8 @@ export async function __perryHttpHandle(__perryHandle: number): Promise<number> 
   const response = AWAIT handle({
     method: __perryRequestMethod(__perryMethod(incoming), __perryMethodOther(incoming)),
     scheme: __perryRequestScheme(__perryHasScheme(incoming), __perryScheme(incoming), __perrySchemeOther(incoming)),
-    authority: __perryAuthority(incoming),
-    pathWithQuery: __perryPath(incoming),
+    authority: __perryAuthority(incoming) ?? null,
+    pathWithQuery: __perryPath(incoming) ?? null,
     headers,
     body,
   });

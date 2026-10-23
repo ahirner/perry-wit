@@ -153,7 +153,7 @@ impl Solver {
         let state = &mut self.analysis.states[id];
         let representation = Representation::value(
             self.analysis.keys[id].specialize && !state.original_payloads.contains(&value),
-            state.required.get(&value).copied(),
+            state.width(value),
         );
         let (changed, widened) = state
             .facts
@@ -245,8 +245,8 @@ impl Solver {
             BuiltinContract::Round => {
                 let input = operation.get_operand(0);
                 let state = &self.analysis.states[id];
-                let fact = match (state.fact(input), state.required.get(&result)) {
-                    (Fact::Integer(integer), _) | (_, Some(&integer)) => Fact::Integer(integer),
+                let fact = match (state.fact(input), state.width(result)) {
+                    (Fact::Integer(integer), _) | (_, Some(integer)) => Fact::Integer(integer),
                     (Fact::Numeric, None) if self.analysis.keys[id].specialize => Fact::Numeric,
                     _ => Fact::Original,
                 };
@@ -365,9 +365,7 @@ impl Solver {
                         } else {
                             Integer::I32
                         };
-                        interval
-                            .include(state.required.get(&value).copied().unwrap_or(base))
-                            .into()
+                        interval.include(state.width(value).unwrap_or(base)).into()
                     }
                     _ => ArgumentDomain::Original,
                 }
@@ -380,7 +378,7 @@ impl Solver {
                 |(position, value)| match declared(&body.declared_results, position) {
                     _ if preserve_result => ResultDomain::Original,
                     Some(declared) => ResultDomain::Integer(declared),
-                    None => state.required.get(&value).copied().into(),
+                    None => state.width(value).into(),
                 },
             )
             .collect();
@@ -422,11 +420,19 @@ impl Solver {
             Constraint::Edge { from, to } => {
                 self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index))?;
                 self.propagate_origins(id, from, to);
+                // Joined promises share one payload representation, and no cast converts a
+                // promise; unequal payload widths keep the original number payload.
+                let state = &self.analysis.states[id];
+                let (source, target) = (state.fact(from), state.fact(to));
                 if from.get_type(ctx).deref(ctx).is::<PromiseType>()
-                    && (self.analysis.states[id].original_payloads.contains(&from)
-                        || self.analysis.states[id].original_payloads.contains(&to)
-                        || self.analysis.states[id].fact(from) == Fact::Original
-                        || self.analysis.states[id].fact(to) == Fact::Original)
+                    && (state.original_payloads.contains(&from)
+                        || state.original_payloads.contains(&to)
+                        || source == Fact::Original
+                        || target == Fact::Original
+                        || source
+                            .integer()
+                            .zip(target.integer())
+                            .is_some_and(|(source, target)| source != target))
                 {
                     self.preserve_promise_payload(id, from);
                     self.preserve_promise_payload(id, to);
@@ -543,8 +549,7 @@ impl Solver {
                     let declared = declared(&body.declared_args, position);
                     let parameter = body.parameters[position];
                     let child_state = &self.analysis.states[child];
-                    let required =
-                        declared.or_else(|| child_state.required.get(&parameter).copied());
+                    let required = declared.or_else(|| child_state.width(parameter));
                     let is_cons = declared.is_some()
                         || (call_constrained && child_state.is_constrained(parameter));
                     self.demand(id, input, required, is_cons);
@@ -741,8 +746,9 @@ impl Solver {
         let range = if let Some(facts) = heap_facts {
             facts.range
         } else if let Some(range) = const_interval {
-            let required = self.analysis.states[id].required.get(&result).copied();
-            Range::clamp(range, fact.integer().or(required))
+            // A literal keeps its exact value; a demanded width it does not fit leaves it
+            // unspecialized rather than clamped.
+            Range::clamp(range, fact.integer())
         } else if kind == OperationKind::Length
             || kind == OperationKind::Intrinsic(Intrinsic::BytesLength)
         {

@@ -104,13 +104,7 @@ impl ContextPlan {
                 calls.push((
                     child,
                     call_res.map(|r| state.is_constrained(r)),
-                    call_res.and_then(|r| {
-                        state
-                            .required
-                            .get(&r)
-                            .copied()
-                            .or_else(|| state.representation(r))
-                    }),
+                    call_res.and_then(|r| state.width(r).or_else(|| state.representation(r))),
                 ));
             }
         }

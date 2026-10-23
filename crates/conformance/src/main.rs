@@ -25,9 +25,13 @@ fn main() -> Result<()> {
                     &registry::contracts(0)?
                         .iter()
                         .map(|c| c.catalog())
-                        .collect::<Vec<_>>()
+                        .collect::<Result<Vec<_>>>()?
                 )?
             );
+            Ok(())
+        }
+        "doc" => {
+            print!("{}", registry::markdown()?);
             Ok(())
         }
         "check" => {
@@ -52,7 +56,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => bail!(
-            "Usage: perry-conformance list | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] | replay CASE.json"
+            "Usage: perry-conformance list | doc | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] | replay CASE.json"
         ),
     }
 }

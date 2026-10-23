@@ -1,4 +1,6 @@
 //! Read-only catalog projected from executable conformance contract definitions.
+pub use crate::catalog::CatalogEntry;
+pub(crate) use crate::catalog::ExpectedOutcome;
 use crate::{
     execution::{Evidence, check_equivalence},
     program::{Binary, Form, INPUTS, Math, Number, Program, Text},
@@ -58,14 +60,6 @@ pub enum Case {
         factor: u32,
         max_growth: u32,
     },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExpectedOutcome {
-    EquivalentExecution,
-    CompilerRejection,
-    InjectedFaultDetection,
-    BoundedGrowth,
 }
 impl Case {
     pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
@@ -170,54 +164,71 @@ pub struct Witness {
 }
 pub struct Contract {
     pub id: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) specification: &'static str,
-    pub(crate) domain: &'static str,
     pub witnesses: Vec<Witness>,
     pub(crate) strategy: BoxedStrategy<Case>,
     pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
 }
-#[derive(Serialize)]
-pub struct CatalogEntry {
-    pub id: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) specification: &'static str,
-    pub(crate) domain: &'static str,
-    pub partitions: Vec<&'static str>,
-    pub(crate) expected_outcomes: Vec<ExpectedOutcome>,
-}
 impl Contract {
-    pub fn catalog(&self) -> CatalogEntry {
-        let mut expected_outcomes = Vec::new();
+    pub(crate) fn new(
+        id: &'static str,
+        witnesses: Vec<Witness>,
+        strategy: BoxedStrategy<Case>,
+        check: fn(&Case, &Evidence) -> Result<()>,
+    ) -> Self {
+        Self {
+            id,
+            witnesses,
+            strategy,
+            check,
+        }
+    }
+
+    /// The contract's documented metadata from the static catalog.
+    pub fn catalog(&self) -> Result<&'static CatalogEntry> {
+        crate::catalog::entry(self.id)
+            .with_context(|| format!("contract {} has no catalog entry", self.id))
+    }
+
+    /// Ensure the catalog entry describes exactly these witnesses: their partitions in order
+    /// and their distinct expected outcomes in first-appearance order.
+    fn check_catalog(&self, entry: &CatalogEntry) -> Result<()> {
+        ensure!(
+            crate::catalog::namespace(self.id).is_some(),
+            "contract {} has no known namespace",
+            self.id
+        );
+        ensure!(
+            self.witnesses
+                .iter()
+                .map(|witness| witness.partition)
+                .eq(entry.partitions.iter().copied()),
+            "catalog partitions of {} differ from its witnesses",
+            self.id
+        );
+        let mut outcomes = Vec::new();
         for witness in &self.witnesses {
-            let expected = witness.case.expected_outcome();
-            if !expected_outcomes.contains(&expected) {
-                expected_outcomes.push(expected);
+            let outcome = witness.case.expected_outcome();
+            if !outcomes.contains(&outcome) {
+                outcomes.push(outcome);
             }
         }
-        CatalogEntry {
-            id: self.id,
-            description: self.description,
-            specification: self.specification,
-            domain: self.domain,
-            partitions: self.witnesses.iter().map(|w| w.partition).collect(),
-            expected_outcomes,
-        }
+        ensure!(
+            outcomes == entry.expected_outcomes,
+            "catalog outcomes of {} differ from its witnesses",
+            self.id
+        );
+        Ok(())
     }
 }
 
 fn expression_contract(
     id: &'static str,
-    description: &'static str,
     strategy: BoxedStrategy<Number>,
     examples: Vec<(&'static str, Number)>,
 ) -> Contract {
-    Contract {
+    Contract::new(
         id,
-        description,
-        specification: "https://tc39.es/ecma262/",
-        domain: "Bounded typed functions, control flow, closed aggregates, byte aliases, JSON conversion and exceptions over the IEEE-754 boundary corpus; BMP strings; direct/local/branch/loop/inert-exception forms and overlapping timer completion schedules",
-        witnesses: examples
+        examples
             .into_iter()
             .map(|(partition, expression)| Witness {
                 partition,
@@ -227,7 +238,7 @@ fn expression_contract(
                 }),
             })
             .collect(),
-        strategy: strategy
+        strategy
             .prop_map(|expression| {
                 Case::Program(Program {
                     expression,
@@ -235,8 +246,8 @@ fn expression_contract(
                 })
             })
             .boxed(),
-        check: check_equivalence,
-    }
+        check_equivalence,
+    )
 }
 
 pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
@@ -247,7 +258,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     let mut contracts = vec![
         expression_contract(
             "ecma.number.arithmetic",
-            "IEEE arithmetic and evaluation order",
             n.clone(),
             vec![
                 ("signed-zero", Number::NegativeZero),
@@ -268,7 +278,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.math.rounding",
-            "Numeric Math operations",
             (
                 prop::sample::select(vec![
                     Math::Floor,
@@ -289,7 +298,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.string.operations",
-            "String search, casing, slicing and length",
             t.clone().prop_map(|v| Number::Length(Box::new(v))).boxed(),
             vec![
                 ("unicode-and-nul", Number::Length(literal())),
@@ -311,7 +319,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.array.dense",
-            "Dense numeric arrays preserve values and effects",
             (n.clone(), n.clone(), n.clone(), 0u8..3)
                 .prop_map(|(a, b, c, i)| Number::Array(Box::new(a), Box::new(b), Box::new(c), i))
                 .boxed(),
@@ -319,7 +326,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.object.records",
-            "Record fields preserve values and effects",
             (n.clone(), n.clone())
                 .prop_map(|(a, b)| Number::Field(Box::new(a), Box::new(b)))
                 .boxed(),
@@ -330,7 +336,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.date.epoch",
-            "Date TimeClip and epoch reads",
             n.clone()
                 .prop_map(|v| Number::DateTime(Box::new(v)))
                 .boxed(),
@@ -338,7 +343,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.uint8array.conversion",
-            "Byte conversion and indexed access",
             (n.clone(), n.clone(), n.clone(), 0u8..3)
                 .prop_map(|(a, b, c, i)| Number::ByteGet(Box::new(a), Box::new(b), Box::new(c), i))
                 .boxed(),
@@ -346,7 +350,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "web.textencoder.subviews",
-            "UTF-8 encoding and byte subviews",
             (t.clone(), n.clone(), n.clone())
                 .prop_map(|(a, b, c)| Number::EncodedLength(Box::new(a), Box::new(b), Box::new(c)))
                 .boxed(),
@@ -357,7 +360,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ),
         expression_contract(
             "ecma.json.roundtrip",
-            "JSON text survives direct and stored decoding",
             (t, any::<bool>())
                 .prop_map(|(v, stored)| {
                     if stored {
@@ -373,17 +375,24 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             ],
         ),
     ];
-    for (id, description, form) in [
-        ("node.timers.promises.value", "Timer result", Form::Timer),
-        (
-            "node.timers.promises.observers",
-            "Repeated timer observation",
-            Form::StoredTimer,
-        ),
+    for (id, form) in [
+        ("node.timers.promises.value", Form::Timer),
+        ("node.timers.promises.observers", Form::StoredTimer),
     ] {
-        contracts.push(Contract {id,description,specification:"https://nodejs.org/api/",domain:"Retained async operation interleaved with typed numeric evaluation; instance reused across boundary inputs",
-            witnesses:vec![Witness{partition:"retained-operation",case:Case::Program(Program{expression:Number::Mark(input()),form})}],
-            strategy:n.clone().prop_map(move|expression|Case::Program(Program{expression,form})).boxed(),check:check_equivalence});
+        contracts.push(Contract::new(
+            id,
+            vec![Witness {
+                partition: "retained-operation",
+                case: Case::Program(Program {
+                    expression: Number::Mark(input()),
+                    form,
+                }),
+            }],
+            n.clone()
+                .prop_map(move |expression| Case::Program(Program { expression, form }))
+                .boxed(),
+            check_equivalence,
+        ));
     }
     contracts.extend(crate::capabilities::fs_contracts());
     let regressions = [
@@ -472,25 +481,19 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             source: source.into(),
             exit: ExitStatus::Success,
         };
-        contracts.push(Contract {
+        contracts.push(Contract::new(
             id,
-            description: id,
-            specification: "https://nodejs.org/api/",
-            domain: "Standard CLI source; exact output bytes and successful exit",
-            witnesses: vec![Witness {
+            vec![Witness {
                 partition: "standard-source",
                 case: case.clone(),
             }],
-            strategy: Just(case).boxed(),
-            check: check_equivalence,
-        });
+            Just(case).boxed(),
+            check_equivalence,
+        ));
     }
-    contracts.push(Contract {
-        id: "node.timers.promises.lifecycle",
-        description: "Start, host release, completion, cancellation, observation and reuse",
-        specification: "https://nodejs.org/api/timers.html",
-        domain: "Complete sequential lifecycle traces with controlled Node/WASI clocks; no claim of exhaustive async scheduling",
-        witnesses: vec![
+    contracts.push(Contract::new(
+        "node.timers.promises.lifecycle",
+        vec![
             Witness {
                 partition: "settlement-and-reobserve",
                 case: Case::Lifecycle(crate::transitions::complete_trace(vec![
@@ -516,11 +519,13 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ])),
             },
         ],
-        strategy: TimerModel::sequential_strategy(1..=12)
-            .prop_map(|(_, actions, _)| Case::Lifecycle(crate::transitions::complete_trace(actions)))
+        TimerModel::sequential_strategy(1..=12)
+            .prop_map(|(_, actions, _)| {
+                Case::Lifecycle(crate::transitions::complete_trace(actions))
+            })
             .boxed(),
-        check: crate::transitions::check,
-    });
+        crate::transitions::check,
+    ));
     for (id, fault) in [
         (
             "wasi.execution.detect_value_fault",
@@ -542,8 +547,15 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             },
             fault,
         };
-        contracts.push(Contract{id,description:"Injected faults must be distinguished from the unchanged program",specification:"https://component-model.bytecodealliance.org/",domain:"Value corruption, omitted effects, and retained host resources; only the component adapter is faulted",
-            witnesses:vec![Witness{partition:"injected-fault",case:case(Number::Input)}],strategy:n.clone().prop_map(case).boxed(),check:crate::execution::check_fault});
+        contracts.push(Contract::new(
+            id,
+            vec![Witness {
+                partition: "injected-fault",
+                case: case(Number::Input),
+            }],
+            n.clone().prop_map(case).boxed(),
+            crate::execution::check_fault,
+        ));
     }
     contracts.push(crate::streams::contract());
     contracts.push(crate::streams::byob_contract());
@@ -589,5 +601,27 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         ensure!(!reason.is_empty(), "deferred contract {id} needs a reason");
         ensure!(!crate::passing(id), "{id} is both passing and deferred");
     }
+    let entries = crate::catalog::ENTRIES;
+    ensure!(
+        contracts.len() == entries.len(),
+        "the catalog lists {} contracts, the registry defines {}",
+        entries.len(),
+        contracts.len()
+    );
+    for (contract, entry) in contracts.iter().zip(entries) {
+        ensure!(
+            contract.id == entry.id,
+            "catalog order differs at {}: expected {}",
+            contract.id,
+            entry.id
+        );
+        contract.check_catalog(entry)?;
+    }
     Ok(contracts)
+}
+
+/// The handbook's catalog page, after checking the catalog against the registry.
+pub fn markdown() -> Result<String> {
+    contracts(0)?;
+    crate::catalog::render_markdown(crate::catalog::ENTRIES).map_err(anyhow::Error::msg)
 }

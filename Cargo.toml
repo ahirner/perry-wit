@@ -39,6 +39,7 @@ members = [
 [workspace.lints.rust]
 # Items are `pub` only where another crate uses them.
 unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(conformance_doc_bin)'] }
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -834,13 +834,10 @@ pub(crate) fn contract() -> Contract {
             }),
         },
     ];
-    Contract {
-        id: "ecma.aggregate.specialization",
-        description: "Orthogonal aggregate layout specialization across recursive shapes, exact 64-bit parseInt, origin scaling, and WIT boundaries",
-        specification: "https://tc39.es/ecma262/",
-        domain: "Product of flat/nested/self-recursive/mutually-recursive/array-bearing records, multi-field/list/option WIT exports, float/NaN/-0.0/int-arith/wide-parseInt value sources, branch joins, shared helpers, array concat/spread, and >32-origin summarization",
+    Contract::new(
+        "ecma.aggregate.specialization",
         witnesses,
-        strategy: aggregate_case_strategy().prop_map(Case::Aggregate).boxed(),
-        check: check_equivalence,
-    }
+        aggregate_case_strategy().prop_map(Case::Aggregate).boxed(),
+        check_equivalence,
+    )
 }

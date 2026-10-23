@@ -252,6 +252,7 @@ impl<'s> FunctionBuilder<'s> {
                 let text = self.string_operand(ctx, text)?;
                 self.intrinsic(ctx, Intrinsic::TextEncode, vec![text])
             }
+            Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
             Expr::TextDecoderNew {
                 label,
                 fatal,

@@ -403,15 +403,12 @@ pub(crate) fn contract() -> Contract {
             }),
         },
     ];
-    Contract {
-        id: "ecma.collection.iterators",
-        description: "Live Set and Map iterators across active, paused, and abandoned lifetimes under delete compaction and clear",
-        specification: "https://tc39.es/ecma262/#sec-keyed-collections",
-        domain: "Orthogonal state-machine sequences of NewIter, partial Step and ForEach with in-body mutations, Insert/InsertBatch, Delete/DeleteBatch across the 32-tombstone compaction threshold, Clear, and abandoned cursor churn over Set.values, Set.entries, Map.keys, Map.values, and Map.entries; Node is the oracle",
+    Contract::new(
+        "ecma.collection.iterators",
         witnesses,
-        strategy: collection_case_strategy()
+        collection_case_strategy()
             .prop_map(Case::Collection)
             .boxed(),
-        check: check_equivalence,
-    }
+        check_equivalence,
+    )
 }

@@ -154,6 +154,11 @@ impl FunctionLowering<'_, '_> {
             | Intrinsic::DateSet
             | Intrinsic::DateIso
             | Intrinsic::DateJson => Some(self.date_intrinsic(ctx, intrinsic, args)?),
+            // Encoders carry no state: each one is the static "utf-8" string's address.
+            Intrinsic::EncoderNew => {
+                let encoding = self.state.data.string("utf-8");
+                Some(self.i32_const(ctx, encoding as i32))
+            }
             Intrinsic::DecoderFatal | Intrinsic::DecoderIgnoreBom => {
                 let offset = if intrinsic == Intrinsic::DecoderFatal {
                     0

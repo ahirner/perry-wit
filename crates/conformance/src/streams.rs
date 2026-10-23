@@ -128,20 +128,17 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-pub(crate) fn contract() -> Contract {
+fn stream_contract(id: &'static str, byob: bool) -> Contract {
     let case = |length, cancel| {
         Case::Stream(StreamCase {
             bytes: (0..length).map(|i| (i * 37 + i / 251) as u8).collect(),
             cancel,
-            byob: false,
+            byob,
         })
     };
-    Contract {
-        id: "wasi.streams.incoming_bytes",
-        description: "Owned WIT byte streams use Web readers and acknowledged Web writes",
-        specification: "https://streams.spec.whatwg.org/",
-        domain: "Three calls per instance; input chunks of 8192 bytes; 64 KiB guest memory; exact output bytes, locking, cancellation and completion",
-        witnesses: vec![
+    Contract::new(
+        id,
+        vec![
             Witness {
                 partition: "empty",
                 case: case(0, false),
@@ -163,37 +160,23 @@ pub(crate) fn contract() -> Contract {
                 case: case(16385, true),
             },
         ],
-        strategy: (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
-            .prop_map(|(bytes, cancel)| {
+        (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
+            .prop_map(move |(bytes, cancel)| {
                 Case::Stream(StreamCase {
                     bytes,
                     cancel,
-                    byob: false,
+                    byob,
                 })
             })
             .boxed(),
         check,
-    }
+    )
+}
+
+pub(crate) fn contract() -> Contract {
+    stream_contract("wasi.streams.incoming_bytes", false)
 }
 
 pub(crate) fn byob_contract() -> Contract {
-    let mut contract = contract();
-    contract.id = "web.streams.byob_reader";
-    contract.description = "BYOB readers transfer shared buffers and fill visible views directly";
-    contract.domain = "Uint8Array destinations with offsets, alias detachment, buffer reuse, min:8192, short EOF, locking and cancellation; three calls per instance; exact output bytes within 64 KiB guest memory";
-    for witness in &mut contract.witnesses {
-        if let Case::Stream(case) = &mut witness.case {
-            case.byob = true;
-        }
-    }
-    contract.strategy = (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
-        .prop_map(|(bytes, cancel)| {
-            Case::Stream(StreamCase {
-                bytes,
-                cancel,
-                byob: true,
-            })
-        })
-        .boxed();
-    contract
+    stream_contract("web.streams.byob_reader", true)
 }

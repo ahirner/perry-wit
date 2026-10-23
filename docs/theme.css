@@ -1,0 +1,216 @@
+:root {
+  --content-max-width: 920px;
+  --mono-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.light,
+.rust,
+html:not(.js) {
+  --bg: #f6f6f3;
+  --fg: #1d211f;
+  --sidebar-bg: #ecefe9;
+  --sidebar-fg: #1d211f;
+  --sidebar-non-existant: #59615b;
+  --sidebar-active: #17643d;
+  --sidebar-spacer: #d0d7ce;
+  --scrollbar: #949e97;
+  --icons: #59615b;
+  --icons-hover: #1d211f;
+  --links: #17643d;
+  --inline-code-color: #1d211f;
+  --theme-popup-bg: #ffffff;
+  --theme-popup-border: #949e97;
+  --theme-hover: #e7eae6;
+  --quote-bg: #e7eae6;
+  --quote-border: #949e97;
+  --table-border-color: #d0d7ce;
+  --table-header-bg: #e7eae6;
+  --table-alternate-bg: #eff2ed;
+  --searchbar-border-color: #949e97;
+  --searchbar-bg: #ffffff;
+  --searchbar-fg: #1d211f;
+  --sidebar-header-border-color: #17643d;
+  --code-bg: #ffffff;
+  --code-border: #949e97;
+}
+
+.ayu,
+.coal,
+.navy {
+  --bg: #141816;
+  --fg: #e6ebe7;
+  --sidebar-bg: #0e1210;
+  --sidebar-fg: #e6ebe7;
+  --sidebar-non-existant: #9eaba2;
+  --sidebar-active: #9bddad;
+  --sidebar-spacer: #222a25;
+  --scrollbar: #5b685f;
+  --icons: #9eaba2;
+  --icons-hover: #e6ebe7;
+  --links: #9bddad;
+  --inline-code-color: #e6ebe7;
+  --theme-popup-bg: #0e1210;
+  --theme-popup-border: #5b685f;
+  --theme-hover: #222a25;
+  --quote-bg: #222a25;
+  --quote-border: #5b685f;
+  --table-border-color: #2b352f;
+  --table-header-bg: #222a25;
+  --table-alternate-bg: #181e1b;
+  --searchbar-border-color: #5b685f;
+  --searchbar-bg: #0e1210;
+  --searchbar-fg: #e6ebe7;
+  --sidebar-header-border-color: #9bddad;
+  --code-bg: #0e1210;
+  --code-border: #5b685f;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.js) {
+    --bg: #141816;
+    --fg: #e6ebe7;
+    --sidebar-bg: #0e1210;
+    --sidebar-fg: #e6ebe7;
+    --sidebar-non-existant: #9eaba2;
+    --sidebar-active: #9bddad;
+    --sidebar-spacer: #222a25;
+    --links: #9bddad;
+    --inline-code-color: #e6ebe7;
+    --table-border-color: #2b352f;
+    --table-header-bg: #222a25;
+    --table-alternate-bg: #181e1b;
+    --sidebar-header-border-color: #9bddad;
+    --code-bg: #0e1210;
+    --code-border: #5b685f;
+  }
+}
+
+html {
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+body {
+  font-size: 1.5rem;
+  line-height: 1.55;
+}
+
+.menu-title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.content main h1 {
+  font-size: 2.8rem;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin-block: 1.6rem 1rem;
+}
+
+.content main h2 {
+  font-size: 1.9rem;
+  letter-spacing: -0.01em;
+  border-bottom: 1px solid var(--table-border-color);
+  padding-bottom: 0.35rem;
+}
+
+.content main h3 {
+  font-size: 1.55rem;
+}
+
+.content a {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+pre {
+  background: var(--code-bg) !important;
+  border: 1px solid var(--code-border);
+  border-radius: 2px;
+  padding: 1.1rem;
+}
+
+pre > code,
+.hljs {
+  background: transparent !important;
+  color: var(--fg) !important;
+  font-size: 1.3rem;
+  line-height: 1.6;
+}
+
+:not(pre) > code {
+  background: var(--table-header-bg);
+  padding: 0.1rem 0.4rem;
+  border-radius: 2px;
+  font-size: 0.88em;
+}
+
+table {
+  width: 100%;
+  margin: 1.4rem 0;
+  font-size: 1.38rem;
+}
+
+table th,
+table td {
+  padding: 0.65rem 1rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.chapter li.part-title {
+  font: 700 1.1rem/1.4 var(--mono-font);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--sidebar-non-existant);
+  margin: 1.8rem 0 0.4rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--sidebar-spacer);
+}
+
+.chapter > li.chapter-item {
+  margin-block-start: 0.45em;
+}
+
+.chapter > li.chapter-item > .chapter-link-wrapper > a {
+  font-weight: 600;
+  font-size: 1.45rem;
+}
+
+.on-this-page {
+  margin: 0.35rem 0 0.65rem 0.8rem;
+  border-inline-start: 2px solid var(--sidebar-spacer);
+  padding-left: 1rem;
+}
+
+.chapter li.header-item {
+  margin-block-end: 0.3em;
+  line-height: 1.35em;
+}
+
+.chapter li.header-item a.header-in-summary {
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--sidebar-non-existant);
+}
+
+.chapter li.header-item a.header-in-summary.current-header,
+.chapter li.header-item a.header-in-summary:hover {
+  color: var(--sidebar-active);
+  font-weight: 600;
+}
+
+.pw-site-nav {
+  display: inline-flex;
+  gap: 1.2rem;
+  margin-inline-end: 1.2rem;
+  font-size: 1.4rem;
+}
+
+.pw-site-nav a {
+  color: var(--icons);
+  text-decoration: none;
+}
+
+.pw-site-nav a:hover {
+  color: var(--links);
+}

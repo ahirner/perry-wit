@@ -150,6 +150,25 @@ fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
     Ok(())
 }
 
+/// Demands of mixed signedness merge before widening to a register: `u8` and `s8` meet at
+/// `s16`, held in an `i32`, rather than at `s64`.
+#[test]
+fn mixed_signedness_demands_stay_in_32_bit_registers() -> Result<()> {
+    let compiled = compile(
+        "export function run(flag:boolean, limit:number):number { \
+           const value = flag ? 3 : 200; return value < limit ? value : 0; }",
+        "func(flag:bool,limit:s8)->u8",
+    )?;
+    let wat = wasmprinter::print_bytes(&compiled.core)?;
+    assert!(!wat.contains("i64."), "{wat}");
+    let mut program = Program::from_wasm(compiled.core);
+    for (flag, limit, expected) in [(1, 5, 3), (1, 2, 0), (0, 127, 0)] {
+        let result = program.call("run", &[Val::I32(flag), Val::I32(limit)]).0[0];
+        assert_eq!(result.unwrap_i32() & 0xff, expected, "run({flag}, {limit})");
+    }
+    Ok(())
+}
+
 #[test]
 fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
     let compiled = compile(

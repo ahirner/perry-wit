@@ -98,7 +98,9 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
     let (mut store, instance) =
         crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
     let run = instance.get_typed_func::<(bool,), (i8,)>(&mut store, "run")?;
-    assert_eq!(run.call(&mut store, (true,))?, (7,));
+    // The literal 200 does not fit `s8`, so it keeps its value until the return wraps it,
+    // and the branch reads no element: JavaScript's result for both inputs.
+    assert_eq!(run.call(&mut store, (true,))?, (-56,));
     assert_eq!(run.call(&mut store, (false,))?, (-56,));
     for initializer in ["{ index: [1].length }", "{ index: supplied }"] {
         let source = format!(
@@ -175,14 +177,14 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
             "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }",
             "func(a:u8,b:u8)->u8",
             (250, 10),
-            252,
+            4,
         ),
         (
             "mixed_width_wrap",
             "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
             "func(a:u8,b:u16)->u8",
             (250, 0),
-            12,
+            244,
         ),
         (
             "mixed_width_widen_return",

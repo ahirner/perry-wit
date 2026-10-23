@@ -7,6 +7,9 @@ pub(super) struct ValueFacts {
     pub(super) range: Range,
     pub(super) outcome: Outcomes,
     expanded: bool,
+    /// An integer literal outside the demanded width reached this value on an exact (not
+    /// widening) join, so narrowing it would change the value rather than wrap an overflow.
+    pub(super) inexact: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -55,17 +58,22 @@ impl ValueFacts {
     /// immediately, while SSA values and return summaries allow one exact expansion first.
     pub(super) fn join(&mut self, other: Self, representation: Representation) -> (bool, bool) {
         let (domain, bounds) = representation.resolve(self.domain.join(other.domain));
-        let (range, expanded, widened) = self.range.join_step(
+        let step = self.range.join_step(
             other.range,
             bounds,
             self.expanded || matches!(representation, Representation::Storage(_)),
         );
         let outcome = self.outcome.join(other.outcome);
-        let changed = (domain, range, outcome) != (self.domain, self.range, self.outcome);
+        let inexact = self.inexact
+            || other.inexact
+            || (step.clamped && matches!(domain, Fact::Literal { .. }));
+        let changed = (domain, step.range, outcome, inexact)
+            != (self.domain, self.range, self.outcome, self.inexact);
         self.domain = domain;
-        self.range = range;
+        self.range = step.range;
         self.outcome = outcome;
-        self.expanded |= expanded;
-        (changed, widened)
+        self.expanded |= step.expanded;
+        self.inexact = inexact;
+        (changed, step.widened)
     }
 }

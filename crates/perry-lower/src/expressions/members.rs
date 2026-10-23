@@ -80,7 +80,7 @@ impl<'s> FunctionBuilder<'s> {
         let ty = value.get_type(ctx);
         Ok(match (kind(ctx, value)?, property) {
             (Kind::Url, field) => self.url_field(ctx, value, field)?,
-            (Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),
+            (Kind::Encoder | Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),
             (Kind::Decoder, "fatal" | "ignoreBOM") => {
                 let intrinsic = if property == "fatal" {
                     Intrinsic::DecoderFatal

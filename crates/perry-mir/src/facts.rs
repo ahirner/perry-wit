@@ -341,6 +341,7 @@ struct ResultFact {
 }
 
 impl State {
+    /// Record that `value` must be representable as `required`, merged with earlier demands.
     fn demand(&mut self, value: Value, required: Option<Integer>, constrained: bool) -> bool {
         let mut changed = constrained && self.constrained.insert(value);
         if let Some(required) = required {
@@ -366,10 +367,28 @@ impl State {
     fn is_constrained(&self, value: Value) -> bool {
         self.constrained.contains(&value)
     }
+    /// The width demands put on `value`, at register size (32 or 64 bits): values compute in
+    /// registers, and only explicit casts narrow them further, so a narrow consumer never
+    /// changes what other uses of the value observe.
+    fn width(&self, value: Value) -> Option<Integer> {
+        self.required.get(&value).copied().map(Integer::register)
+    }
+
     fn representation(&self, value: Value) -> Option<Integer> {
         match self.fact(value) {
             Fact::Integer(integer) => Some(integer),
-            Fact::Literal { .. } => self.required.get(&value).copied(),
+            // A literal takes a demanded width only when every value it can hold fits.
+            Fact::Literal { .. } => {
+                let facts = self.value(value);
+                self.width(value).filter(|&required| {
+                    !facts.inexact
+                        && match facts.range {
+                            Range::Bounds(interval) => interval.fits(required),
+                            Range::Bottom => true,
+                            Range::Unknown => false,
+                        }
+                })
+            }
             _ => None,
         }
     }
@@ -430,6 +449,23 @@ impl ProgramFacts {
             },
             |&id| Ok(&self.states[id].summary),
         )
+    }
+
+    /// The interval `value` lies in under every call context of its function, when proven.
+    /// A bounded value is integral even if its type is a number: intervals start from integer
+    /// constants and grow only through `+`, `-` and `*` of bounded operands.
+    pub fn integral_interval(&self, ctx: &Context, value: Value) -> Option<(i128, i128)> {
+        let mut parent = value.get_parent_block(ctx)?.deref(ctx).get_parent_op(ctx);
+        while let Some(op) = parent {
+            if let Some(&context) = self.generic.get(&op) {
+                return match self.states.get(context)?.range(value) {
+                    Range::Bounds(Interval { lower, upper }) => Some((lower, upper)),
+                    Range::Bottom | Range::Unknown => None,
+                };
+            }
+            parent = op.deref(ctx).get_parent_op(ctx);
+        }
+        None
     }
 
     /// Non-negative integral values, including loop-carried counts after range widening.
