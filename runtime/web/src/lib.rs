@@ -2,7 +2,7 @@
 //! bodies) and Web writers over the console outputs (`Writable.toWeb(process.stdout)`).
 //!
 //! Linked on demand into programs that use these classes. Name,
-//! value, method, status text, and URL validation rules come from the fetch helper
+//! value, method, status text, and URL validation rules come from `perry-fetch`,
 //! shared with network `fetch`: header names are stored lowercased, values are stored as
 //! trimmed Latin-1 bytes (`ByteString`), and `get` joins duplicate values with `, `.
 //!

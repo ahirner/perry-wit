@@ -1,4 +1,4 @@
-//! Allocation-free JSON conventions shared by compiler passes and linked helpers.
+//! Allocation-free JSON conventions shared by compiler passes and linked standard libraries.
 pub mod kind {
     pub const UNDEFINED: u32 = 0;
     pub const NULL: u32 = 1;

@@ -63,7 +63,7 @@ For streams, backward liveness analysis detects when `reader.read()` or `writer.
 Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing avoids re-scanning ASCII strings.
 Canonical ABI return areas are zero-initialized and rooted before the host populates them, and export adapters release canonical scratch storage only after `task.return` completes or all pending host operations acknowledge cancellation.
 
-Static data starts at address `16`, above the reference sentinels, followed by relocated runtime data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
+Static data starts at address `16`, above the reference sentinels, followed by relocated library data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
 
 ## Async
 
@@ -84,7 +84,7 @@ Standard-library functions implement UTF-8 validation, Unicode normalization, re
 
 Runtime release builds use optimization level 2, fat LTO and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
 
-During linking, a reachability pass from the runtime calls emitted by MIR strips unused functions, globals, element tables and data segments, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
+During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals, element tables and data segments, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
 
 Run compiler tests with `cargo test --workspace --locked`. Run runtime host tests separately with `cargo test --manifest-path runtime/Cargo.toml --workspace --locked`, then exercise the collector with `cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked`. The compiler integration suite tests the embedded modules through the linker and Wasmtime.
 

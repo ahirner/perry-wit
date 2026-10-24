@@ -142,7 +142,7 @@ pub unsafe fn alloc_shaped(size: u32, shape: &'static [u32]) -> *mut u8 {
     unsafe { imports::perry_alloc_shaped(size, shape.as_ptr()) }
 }
 
-/// Allocate a native helper object, tracing the listed pointer or Buffer fields.
+/// Allocate a native object, tracing the listed pointer or Buffer fields.
 #[macro_export]
 macro_rules! object {
     ($ty:ty; $($($field:tt).+),* $(,)?) => {{
@@ -277,7 +277,7 @@ pub fn take_status() -> u32 {
 
 /// Format `value` into `output` according to ECMAScript `Number::toString`, returning the byte length.
 pub fn number_format(value: f64, output: &mut [u8; 40]) -> usize {
-    // SAFETY: the number helper writes at most 40 bytes.
+    // SAFETY: the number formatter writes at most 40 bytes.
     unsafe { imports::number_format(value, output.as_mut_ptr()) as usize }
 }
 
@@ -560,7 +560,7 @@ pub fn json_syntax_message(input: &[u8], offset: u32) -> *mut u8 {
     unsafe { message.into_string() }
 }
 
-/// The message of a live exception supplied by the compiler or another helper.
+/// The message of a live exception supplied by the compiler or a linked library.
 #[allow(clippy::not_unsafe_ptr_arg_deref, unused_unsafe)]
 pub fn exception_message(exception: *mut u8) -> *mut u8 {
     unsafe { imports::perry_exception_message(exception) }
@@ -569,7 +569,7 @@ pub fn exception_message(exception: *mut u8) -> *mut u8 {
 /// Box a supported thrown value, retaining reference payloads through their runtime tag.
 #[allow(unused_unsafe)]
 pub fn exception_value(tag: u32, value: u64) -> *mut u8 {
-    // SAFETY: helper callers select the payload representation named by tag.
+    // SAFETY: callers select the payload representation named by tag.
     unsafe { imports::perry_exception_new(THROWN_VALUE, tag, value) }
 }
 

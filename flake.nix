@@ -134,7 +134,7 @@
           '';
         });
 
-        # Compiler with the embedded runtime libraries
+        # Compiler with the embedded runtime artifacts
         perryWitBin = craneLib.buildPackage (compilerArgs // {
           inherit cargoArtifacts;
           postBuild = ''cargo doc --locked --release --no-deps --lib -p perry-wit'';
@@ -148,7 +148,7 @@
           '';
         });
 
-        # Precompiled Wasm runtime libraries
+        # Precompiled Wasm runtime artifacts
         runtimeLibraries = pkgs.runCommand "perry-wit-runtime-libraries-0.1.0" {} ''
           mkdir -p "$out/lib"
           cp ${perryWitBin}/lib/perry-wit-runtime/*.wasm "$out/lib/"

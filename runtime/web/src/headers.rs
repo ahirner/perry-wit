@@ -2,7 +2,7 @@
 use crate::*;
 
 /// A header list: 16-byte fields (`name`, `name_len`, `value`, `value_len`) in insertion
-/// order, the layout the fetch helper reads.
+/// order, the layout `perry-fetch` reads.
 #[repr(C)]
 pub(crate) struct Headers {
     fields: Buffer,
@@ -89,7 +89,7 @@ fn name(operation: &[u8], name: *mut u8) -> Option<&'static [u8]> {
     // SAFETY: compiled code passes strings.
     let text = unsafe { bytes(name) };
     let output = alloc(text.len() as u32);
-    // SAFETY: helper call with an input string and a disjoint output of the same size.
+    // SAFETY: validation reads an input string and writes a disjoint output of the same size.
     let len = unsafe {
         helper::fetch_header_name(text.as_ptr(), text.len() as u32, output, text.len() as u32)
     };
@@ -97,7 +97,7 @@ fn name(operation: &[u8], name: *mut u8) -> Option<&'static [u8]> {
         type_error(&[operation, b": \"", text, b"\" is an invalid header name."]);
         return None;
     }
-    // SAFETY: the helper wrote `len` bytes.
+    // SAFETY: validation wrote `len` bytes.
     Some(unsafe { slice(output as u32, len) })
 }
 
@@ -106,7 +106,7 @@ fn value(operation: &[u8], value: *mut u8) -> Option<&'static [u8]> {
     // SAFETY: compiled code passes strings.
     let text = unsafe { bytes(value) };
     let output = alloc(text.len() as u32);
-    // SAFETY: helper call with an input string and a disjoint output of the same size.
+    // SAFETY: validation reads an input string and writes a disjoint output of the same size.
     let len = unsafe {
         helper::fetch_header_value(text.as_ptr(), text.len() as u32, output, text.len() as u32)
     };
@@ -114,7 +114,7 @@ fn value(operation: &[u8], value: *mut u8) -> Option<&'static [u8]> {
         type_error(&[operation, b": \"", text, b"\" is an invalid header value."]);
         return None;
     }
-    // SAFETY: the helper wrote `len` bytes.
+    // SAFETY: validation wrote `len` bytes.
     Some(unsafe { slice(output as u32, len) })
 }
 

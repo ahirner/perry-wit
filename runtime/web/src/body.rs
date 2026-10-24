@@ -152,9 +152,9 @@ fn settle_json(promise: *mut u8, contents: &[u8]) {
     }
 }
 
-/// `JSON.parse` through the JSON helper: the graph's root, or `None` for invalid text.
+/// Decode a JSON graph, returning its root or an error byte offset.
 fn parse_json(text: &[u8]) -> Result<*mut u8, u32> {
-    // SAFETY: helper calls on a live input and a fresh disjoint output of the measured size.
+    // SAFETY: codec calls on a live input and a fresh disjoint output of the measured size.
     unsafe {
         let measured = helper::json_measure(text.as_ptr(), text.len() as u32);
         if measured >> 32 != 0 {
@@ -207,7 +207,7 @@ pub(crate) unsafe extern "C" fn web_response_new(
     }
     // SAFETY: compiled code passes a string.
     let reason = unsafe { bytes(status_text) };
-    // SAFETY: helper call on an input string.
+    // SAFETY: status-text validation reads an input string.
     if unsafe { helper::fetch_status_text(reason.as_ptr(), reason.len() as u32) } == INVALID {
         perry_rt_sys::raise(TYPE_ERROR, "Invalid statusText");
         return core::ptr::null_mut();
@@ -274,7 +274,7 @@ fn request<'a>(r: *mut u8) -> &'a Request {
     unsafe { &*(r as *const Request) }
 }
 
-/// Methods the fetch helper normalizes, by its tag.
+/// Normalized methods indexed by the tag returned by `perry-fetch`.
 const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "DELETE", "", "OPTIONS"];
 
 /// Construct `new Request(url, { method, headers, body })`, where `text` marks a string body.
@@ -297,7 +297,7 @@ pub(crate) unsafe extern "C" fn web_request_new(
                 return core::ptr::null_mut();
             }
         };
-    // SAFETY: the helper wrote six little-endian lengths, then the URL at 32.
+    // SAFETY: URL normalization wrote six little-endian lengths, then the URL at 32.
     let normalized = unsafe { from_bytes(slice(output as u32 + 32, word(output, 20))) };
     let method = match METHODS.get(tag as usize).copied().unwrap_or("") {
         "" => method,

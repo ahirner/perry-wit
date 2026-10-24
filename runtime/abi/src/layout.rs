@@ -1,4 +1,4 @@
-//! Wasm32 aggregate layouts shared by generated code and linked helpers.
+//! Wasm32 aggregate layouts shared by generated code and runtime artifacts.
 #[macro_use]
 #[path = "layout/time.rs"]
 pub mod time;
@@ -78,7 +78,7 @@ pub mod variant {
     pub const RETAINED_SIZE: u32 = SIZE + 8;
 }
 
-/// Native helpers and Wasm code share this definition, including string headers.
+/// String headers shared by runtime libraries and generated Wasm code.
 pub mod string {
     pub const LEN: u32 = 0;
     pub const SCALARS: u32 = 4;

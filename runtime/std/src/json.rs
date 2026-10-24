@@ -1,6 +1,6 @@
 //! JSON values (`JSON.parse`) and the writer behind typed `JSON.stringify`.
 //!
-//! Parsed values are nodes of the JSON helper's graph: `kind: u32` at
+//! Parsed values are nodes of the JSON codec's graph: `kind: u32` at
 //! 0, `next: u32` at 4, the payload at 8 (a number, a boolean, or a string's data and byte
 //! length), `first: u32` at 16, `count: u32` at 20, and `key: u32` at 24 (a string node). The
 //! null address represents `undefined`.

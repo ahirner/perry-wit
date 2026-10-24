@@ -1,4 +1,4 @@
-//! Checked byte ranges shared by the JSON and time helper adapters.
+//! Checked byte ranges shared by the JSON and time codec adapters.
 
 use core::slice;
 

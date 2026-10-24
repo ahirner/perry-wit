@@ -1,4 +1,4 @@
-//! Byte scans shared by the runtime and allocating helpers.
+//! Byte scans shared by the instance runtime and standard libraries.
 
 /// Compact scalar counter for minimal runtime components.
 pub fn scalars_length(bytes: &[u8]) -> u32 {
@@ -8,7 +8,7 @@ pub fn scalars_length(bytes: &[u8]) -> u32 {
         .sum()
 }
 
-/// Eight-byte scalar counter for bulk helper input and output.
+/// Eight-byte scalar counter for bulk UTF-8 input and output.
 #[inline]
 pub fn scalars_length_wide(bytes: &[u8]) -> u32 {
     let (words, tail) = bytes.as_chunks::<8>();

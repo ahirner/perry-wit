@@ -1,5 +1,5 @@
-//! Guest helper libraries: parsing, reachability analysis, and relocations for prebuilt
-//! `wasm32-unknown-unknown` helper artifacts.
+//! Parsing, reachability analysis and relocation of prebuilt
+//! `wasm32-unknown-unknown` runtime artifacts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,7 +65,7 @@ impl LibraryId {
             "json_descriptor_decode_cursor" => Self::JsonCursor,
             "json_descriptor_copy" => Self::JsonCopy,
             entry if entry.starts_with("json_") => Self::Json,
-            // The time helper exports every `time_` entry, so new ones cannot drift out of a list.
+            // The time library exports every `time_` entry, so new ones cannot drift out of a list.
             entry if entry.starts_with("time_") => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
@@ -99,7 +99,7 @@ impl LibraryId {
     }
 }
 
-/// One placement policy for both the guest allocator and linked Rust helpers.
+/// Static data and shadow-stack placement for all linked runtime artifacts.
 pub(crate) struct HelperMemory {
     end: u32,
     pub(crate) needs_stack: bool,
@@ -137,7 +137,7 @@ impl HelperMemory {
         Ok(base)
     }
 
-    /// The end of the placed static data, where the helper stack's reservation starts.
+    /// The end of the placed static data, where the shared shadow-stack reservation starts.
     #[allow(dead_code)]
     pub(crate) fn data_end(&self) -> u32 {
         self.end
@@ -235,7 +235,7 @@ impl ControlFlowGraph<()> for HelperCalls<'_> {
 }
 
 impl<'a> Library<'a> {
-    /// Bound the deepest linear-memory shadow-stack frame chain among reachable helpers.
+    /// Bound the deepest linear-memory shadow-stack frame chain among reachable library functions.
     /// Recursive components that allocate no frame contribute only their callees' depth.
     /// Growing recursion, unrecognized stack writes, and indirect calls retain the
     /// conservative reservation.
@@ -695,7 +695,7 @@ impl<'a> Library<'a> {
         Ok(reachable)
     }
 
-    /// Relocation and constructor entry points must survive helper reachability pruning.
+    /// Relocation and constructor entry points must survive library reachability pruning.
     pub(crate) fn initializers(&self) -> impl Iterator<Item = u32> + '_ {
         [
             self.module.start,

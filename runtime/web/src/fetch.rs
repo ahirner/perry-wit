@@ -1,6 +1,6 @@
 //! `fetch(url, { method, headers, body })` over `wasi:http/client@0.3.0`.
 //!
-//! An operation builds the request using the URL, method, and header rules of the fetch helper,
+//! An operation builds the request using the URL, method, and header rules of `perry-fetch`,
 //! sends it as an async-lowered call, and settles its promise with a `Response` once the
 //! response head arrives. The body is a [crate::readable::Readable] over the response's
 //! `stream<u8>`. Its end is confirmed once the trailers future reports that the body arrived
@@ -115,7 +115,7 @@ pub(crate) unsafe extern "C" fn web_fetch(
                 return promise;
             }
         };
-    // SAFETY: the helper wrote [secure, authority, path, path, length, length+fragment].
+    // SAFETY: URL normalization wrote [secure, authority, path, path, length, length+fragment].
     let (secure, authority, path, end) = unsafe {
         (
             word(output, 0),

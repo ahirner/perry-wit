@@ -153,7 +153,7 @@ pub(crate) unsafe extern "C" fn perry_array_grow_collectible(array: *mut u8, ref
     }
 }
 
-/// Helper arrays have statically known element representation.
+/// Create an array with a statically known element representation.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8 {
     #[cfg(feature = "collectible")]
@@ -166,7 +166,7 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
     }
 }
 
-/// Grow a helper array whose reference flag matches its construction.
+/// Grow an array whose reference flag matches its construction.
 ///
 /// # Safety
 /// `array` is a live exclusively owned array created with the same `references` flag.

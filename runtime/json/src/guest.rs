@@ -13,7 +13,7 @@ use perry_rt_sys::guest_memory as memory;
 /// Validate strict UTF-8 JSON and return its required graph storage size in bytes.
 ///
 /// # Safety
-/// Nonempty inputs must be initialized guest-owned memory outside the helper's
+/// Nonempty inputs must be initialized guest-owned memory outside the library's
 /// stack/data, and remain unchanged for this call. The guest must be single-threaded.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
@@ -33,7 +33,7 @@ pub(crate) unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
 /// Validation and capacity failures leave the output unchanged.
 ///
 /// # Safety
-/// Both ranges must be guest-owned storage outside helper stack/data. The input
+/// Both ranges must be guest-owned storage outside library stack/data. The input
 /// must be initialized and immutable, and the output must be exclusively writable during
 /// this single-threaded call. Checked disjointness prevents input/output aliasing.
 #[unsafe(no_mangle)]

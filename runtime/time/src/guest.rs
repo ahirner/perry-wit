@@ -31,7 +31,7 @@ pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32, output:
 }
 
 /// # Safety
-/// Output must be exclusively guest-owned outside helper stack/data during this call.
+/// Output must be exclusively guest-owned outside library stack/data during this call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
     // SAFETY: the caller owns output; transform checks its guest-memory range.
@@ -44,7 +44,7 @@ pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity:
 
 /// # Safety
 /// Input/output must be guest-owned, initialized/exclusive respectively, outside
-/// helper stack/data, and remain valid during this single-threaded call.
+/// library stack/data, and remain valid during this single-threaded call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
@@ -52,7 +52,7 @@ pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, outp
 }
 
 /// # Safety
-/// Output must be exclusively guest-owned outside helper stack/data during this call.
+/// Output must be exclusively guest-owned outside library stack/data during this call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
     // SAFETY: no input range; output ownership is the caller's contract.
@@ -61,7 +61,7 @@ pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) ->
 
 /// # Safety
 /// The input range must be initialized, and the output range must be exclusively owned and disjoint.
-/// Both ranges must be outside helper stack/data.
+/// Both ranges must be outside library stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_instant_ms(input: u32, output: u32) -> u64 {
     unsafe {
@@ -108,7 +108,7 @@ pub(crate) unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, o
 }
 
 /// # Safety
-/// Output must be exclusively guest-owned outside helper stack/data during this call.
+/// Output must be exclusively guest-owned outside library stack/data during this call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
     year: f64,
@@ -126,7 +126,7 @@ pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
 }
 
 /// # Safety
-/// Output must be exclusively guest-owned outside helper stack/data during this call.
+/// Output must be exclusively guest-owned outside library stack/data during this call.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_date_time_from_fields(
     year: f64,
@@ -206,7 +206,7 @@ pub(crate) unsafe extern "C" fn time_plain_add_calendar(
 
 /// # Safety
 /// Both input ranges must be initialized, and the output range must be exclusively owned and disjoint from both.
-/// All ranges must be outside helper stack/data.
+/// All ranges must be outside library stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_until_part(
     a: u32,
@@ -250,7 +250,7 @@ pub(crate) unsafe extern "C" fn time_plain_until_part(
 
 /// # Safety
 /// The input range must be initialized, and the output range must be exclusively owned and disjoint.
-/// Both ranges must be outside helper stack/data.
+/// Both ranges must be outside library stack/data.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32, output: u32) -> u64 {
     unsafe {
@@ -357,7 +357,7 @@ unsafe fn transform<const N: usize>(
         *bytes = unsafe { input.bytes() };
     }
     // SAFETY: ranges are in bounds and disjoint; the caller supplies initialization
-    // and exclusive output ownership outside the helper's own stack/data.
+    // and exclusive output ownership outside the library's own stack/data.
     let result = operation(borrowed, unsafe { output.bytes_mut() });
     match result {
         Ok(length) => length as u64,

@@ -607,7 +607,7 @@ pub unsafe extern "C" fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mu
     }
 }
 
-/// Grow private helper storage, attempting non-moving growth first for collectible payloads.
+/// Grow private runtime storage, attempting non-moving growth first for collectible payloads.
 ///
 /// # Safety
 /// `old` is null or exclusively owned storage of `old_size` bytes. `initialized <= old_size`

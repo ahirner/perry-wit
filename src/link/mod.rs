@@ -1,8 +1,8 @@
-//! Guest helper linker and relocation.
+//! Link the instance runtime and standard libraries into guest modules.
 //!
-//! Resolves symbolic helper calls (from module `"__perry_helper"`) in the emitted core Wasm,
+//! Resolves symbolic calls from module `"__perry_helper"` in the emitted core Wasm,
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
-//! libraries: `perry-runtime` and the computation helpers.
+//! instance runtime and standard libraries.
 
 pub(crate) mod raw;
 
@@ -98,7 +98,7 @@ pub(crate) struct StreamAnchor {
     pub(crate) index: u32,
 }
 
-/// Placeholder module of byte-stream built-ins in helper libraries (`perry-web`).
+/// Placeholder module of byte-stream built-ins used by `perry-web`.
 const CANON_MODULE: &str = "perry:canon";
 
 impl StreamAnchor {
@@ -122,13 +122,13 @@ impl StreamAnchor {
     }
 }
 
-/// Link `perry:helper/*` imports for standalone core-module tests.
+/// Link runtime and standard-library calls for standalone core-module tests.
 #[cfg(test)]
 fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
-/// Link `perry:helper/*` imports and rewrite canonical stream placeholders for `core_wasm`.
+/// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
@@ -264,7 +264,7 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    // Allocate memory and table placements for each helper library
+    // Allocate memory and table placements for each linked library.
     struct LibPlacement {
         memory_base: u32,
         table_base: u32,
@@ -322,7 +322,7 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    // 4. Assign indices to the selected helper functions
+    // 4. Assign indices to the selected library functions.
     let mut current_helper_func_idx = helper_func_start_idx;
     let mut entry_index = BTreeMap::<(LibraryId, &str), u32>::new();
     for prep in &mut prepared_libs {
@@ -403,7 +403,7 @@ pub(crate) fn link_helpers_with(
         )?;
     }
 
-    // Helper initialization
+    // Library initialization
     let mut helper_inits = Vec::new();
     for (prep, folded) in prepared_libs.iter().zip(&folded) {
         for orig in prep.lib.initializers() {

@@ -107,7 +107,7 @@ pub(crate) struct PlainDateTime {
 }
 
 impl PlainDateTime {
-    /// Checked helper storage: ISO day number from 1970-01-01 and nanoseconds within that day.
+    /// Checked storage: ISO day number from 1970-01-01 and nanoseconds within that day.
     pub(crate) fn from_day_and_nanosecond(day: i32, nanosecond: u64) -> Result<Self, Error> {
         if nanosecond >= NANOS_PER_DAY as u64 {
             return Err(Error::Range);

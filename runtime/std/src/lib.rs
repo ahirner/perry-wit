@@ -1,7 +1,7 @@
 //! Built-ins of compiled programs beyond the core runtime: ECMAScript string methods,
 //! `Uint8Array` with `TextEncoder`/`TextDecoder`, `JSON` and randomness.
 //!
-//! Compiled as a position-independent helper library over imported linear memory: the linker
+//! Compiled as a position-independent standard library over imported linear memory: the linker
 //! includes reachable `std_*` exports on demand and resolves core runtime calls through
 //! `__perry_helper` imports ([perry_rt_sys]).
 #![no_std]
