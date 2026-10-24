@@ -23,7 +23,7 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 | 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
 | 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
 
-Top-level statements collect into one function. Without exported functions it is the `wasi:cli/run` body. Otherwise it initializes the module once, and `wasi:cli/run` and every export wait for it. Module bindings persist across calls.
+Top-level statements collect into one function: the `wasi:cli/run` body in a command-only module, or a one-time initializer that `wasi:cli/run` and every export await before running. Module bindings persist across calls.
 
 `ProgramFacts` infers numeric refinements (integer type and interval with two-step loop widening), purity and allocation effects, and parameter escape provenance across functions, including recursive call cycles. The numeric analysis propagates ranges forward and bitwidth demand backward [[3]](#ref-3).
 Numeric refinements select `i32`, `i64`, or `f64` representations, specialize synchronous callees for the integer argument types known at each call site, and elide bounds checks on proven in-bounds array reads.
@@ -60,7 +60,7 @@ A component has one linear memory, and the compiler picks its heap strategy per 
 - **Precise collection** otherwise. Objects up to 512 bytes allocate from non-moving 1 KiB pages across 11 size classes (powers of two and three-quarter midpoints) with mark bitmaps and lazy sweep. A larger object gets a dedicated page rounded up to a 1 KiB multiple, allocated from `talc` and marked and swept like the rest. Each record type carries a static pointer-offset descriptor so byte buffers and scalar payloads are never scanned for pointers. Compiled safe points clear dead reference slots in suspended async frames, publish exact live roots, and collect mid-call as well as when the last active task ends.
 
 Non-escaping scalar records that still require an address (such as arguments passed to a non-retaining callee) pack into a single per-function activation frame (up to 448 bytes), reusing the same slots across loop iterations and freeing the frame on return.
-For streams, backward liveness analysis detects when `reader.read()` or `writer.write()` results do not outlive the next operation on the same stream, leasing and reusing a single promise, `{ done, value }` record, and chunk buffer in constant memory.
+For streams, backward liveness analysis detects when `reader.read()` or `writer.write()` results die before the next operation on the same stream, leasing and reusing a single promise, `{ done, value }` record, and chunk buffer in constant memory.
 
 Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing avoids re-scanning ASCII strings.
 Canonical ABI return areas are zero-initialized and rooted before the host populates them, and export adapters release canonical scratch storage only after `task.return` completes or all pending host operations acknowledge cancellation.

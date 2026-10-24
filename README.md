@@ -70,4 +70,4 @@ nix build .#example-merge-task  # reference component
 
 Human and AI contributors are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).
 
-Register every new capability contract, input domain and boundary diagnostic in `crates/conformance`.
+Register every new capability contract, input domain and boundary diagnostic in `perry-conformance`.

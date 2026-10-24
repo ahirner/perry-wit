@@ -15,7 +15,7 @@ Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values h
 
 ## WebAssembly Component
 
-[`downloads/perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
+[`perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
 
 ```wit
 {{#include ../../wit/compiler/world.wit}}

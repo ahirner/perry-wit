@@ -18,9 +18,9 @@ Each case declares what must happen:
 
 ## Expected-Pass List
 
-`crates/conformance/passing.txt` lists the contracts that must pass.
+`passing.txt` in `perry-conformance` lists the contracts that must pass.
 A listed contract that fails is a regression, and an unlisted contract that passes fails the run until it is added, so the list only grows.
-`crates/conformance/deferred.txt` lists contracts outside the supported domain with their exclusion rationale.
+`deferred.txt` records contracts outside the supported domain with their exclusion rationale.
 
 ```sh
 cargo run -p perry-conformance -- check
