@@ -62,7 +62,7 @@ world greeting {
 <section class="cards">
 <article class="card"><h3>HTTP services</h3><p>Serve <code>handle(request)</code> as <code>wasi:http/handler@0.3.0</code>. <code>fetch</code>, streams, timers and Promise combinators suspend through WASI 0.3 callbacks and resume directly from host events.</p><a href="docs/authoring.html#http-handlers">HTTP handlers</a></article>
 <article class="card"><h3>Type-safe components</h3><p>Generated <code>.d.ts</code> brings editor completion and <code>tsc</code> checks for WIT records, lists, variants and results. Write library functions or CLI commands with top-level <code>await</code>. Start with a Nix template.</p><a href="docs/authoring.html">Authoring</a></article>
-<article class="card"><h3>Integer types</h3><p>Use ordinary TypeScript syntax for native signed and unsigned arithmetic. WIT ranges let the compiler widen only when needed and eliminate redundant array bounds checks.</p><a href="docs/numbers.html">Numbers</a></article>
+<article class="card"><h3>Integer types</h3><p>Use ordinary TypeScript syntax for native signed and unsigned arithmetic. WIT ranges let the compiler widen only when needed and eliminate redundant array bounds checks.</p><a href="docs/semantics.html#numbers">Numbers</a></article>
 <article class="card"><h3>Compile on the fly</h3><p>Compile tenant TypeScript in memory through Rust's <code>perry_wit::api</code>, or run the WASI 0.2 compiler with fuel and memory limits. Helpers ship with the compiler, so compilation needs neither Rust nor LLVM.</p><a href="docs/embedding.html">Embedding</a></article>
 </section>
 <h2 id="artifacts">Artifacts</h2>

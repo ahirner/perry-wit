@@ -36,7 +36,7 @@ perry-wit gen-types --wit wit --world task --entry src/index.ts -o .perry/types
 tsc --noEmit -p .perry/types
 ```
 
-WIT integer types appear as `number` and `bigint`. See [Numbers](numbers.md) for how the compiler uses them.
+WIT integer types appear as `number` and `bigint`. See [Semantics](semantics.md) for how the compiler uses them.
 
 ## Commands
 

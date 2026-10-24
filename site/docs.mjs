@@ -61,8 +61,7 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
     }
   }
 
-  const architecture = await readFile(join(repository, 'ARCHITECTURE.md'), 'utf8');
-  await writeFile(join(generated, 'ARCHITECTURE.md'), architecture.replaceAll('https://ahirner.github.io/perry-wit/docs/', ''));
+  await writeFile(join(generated, 'ARCHITECTURE.md'), await readFile(join(repository, 'ARCHITECTURE.md'), 'utf8'));
   await writeFile(join(bookDir, 'src/conformance-catalog.md'), conformanceDoc);
   await writeFile(join(bookDir, 'src/stdlib-inventory.md'), await inventory(repository, api));
   await writeFile(join(bookDir, 'src/embedding-example.rs'), doctest(await readFile(join(repository, 'src/api.rs'), 'utf8'), 'compile'));

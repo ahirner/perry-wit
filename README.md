@@ -41,7 +41,7 @@ perry-wit src/index.ts --wit wit --world auth-filter -o dist/auth.wasm
 wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'verify-token("Bearer tok_live_98a")' dist/auth.wasm
 ```
 
-The [Authoring](https://ahirner.github.io/perry-wit/docs/authoring.html) chapter covers commands, HTTP handlers and the project template.
+The handbook's Authoring chapter covers commands, HTTP handlers and the project template.
 
 ## Development
 
