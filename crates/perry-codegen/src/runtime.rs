@@ -1,4 +1,4 @@
-//! Runtime and helper-library functions imported by compiled code, each declared once
+//! Runtime and standard-library functions imported by compiled code, each declared once
 //! with its Wasm signature. Calls reference a [Runtime] variant, and each used function is
 //! emitted once in the module's import section.
 use perry_mir::Intrinsic;

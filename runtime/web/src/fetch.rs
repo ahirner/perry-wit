@@ -115,7 +115,7 @@ pub(crate) unsafe extern "C" fn web_fetch(
                 return promise;
             }
         };
-    // SAFETY: URL normalization wrote [secure, authority, path, path, length, length+fragment].
+    // SAFETY: the helper wrote [secure, authority, path, path, length, length+fragment].
     let (secure, authority, path, end) = unsafe {
         (
             word(output, 0),

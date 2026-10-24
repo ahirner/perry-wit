@@ -1,4 +1,4 @@
-//! Dynamic numeric functions (`parseInt`, `Number.prototype.toString`).
+//! Dynamic numeric helpers (`parseInt`, `Number.prototype.toString`).
 
 use crate::text::view;
 use perry_rt_sys::layout::numeric;

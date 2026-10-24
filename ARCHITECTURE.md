@@ -4,23 +4,24 @@ Perry-WIT compiles static TypeScript into WASI 0.3 components through Perry HIR 
 
 ## Pipeline
 
-The resolved WIT world feeds the compiler pipeline:
+The resolved WIT world feeds four compiler stages:
 
 ```text
-TypeScript ──► Source analysis ──► Frontend ──► Elaboration ──► Contract binding
-                                                                    │
-.wasm ◄── Component encoding ◄── Code generation ◄── Optimization ◄── MIR
+                  ┌──────────────────────────────────────┬── resolved WIT world ──┬────────────┐
+                  ▼                                      ▼                        ▼            ▼
+TypeScript ──► Source ──► Frontend ──► Elaborate ──► Contract ──► Optimize ──► Codegen ──► Component ──► .wasm
+                  1           2            3             4            5           6            7
 ```
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
 | 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
 | 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
-| 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
-| 4. Contract binding | pliron MIR and WIT | Checks export signatures, requires `async func` for every function that can suspend, maps each native operation to its WASI import and lays out Canonical ABI scratch areas. |
-| 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point, guarded by a lexicographical IR complexity measure. |
-| 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees and links referenced runtime and standard-library functions. |
-| 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>` and `finish_<export>`. |
+| 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
+| 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
+| 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
+| 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
 
 Top-level statements collect into one function. Without exported functions it is the `wasi:cli/run` body. Otherwise it initializes the module once, and `wasi:cli/run` and every export wait for it. Module bindings persist across calls.
 
@@ -34,7 +35,7 @@ Constants rematerialize at use sites, single-use expressions in the same basic b
 
 ## Workspace
 
-The compiler workspace assigns each stage to a crate:
+The compiler workspace separates these responsibilities:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -84,7 +85,7 @@ Standard-library functions implement UTF-8 validation, Unicode normalization, re
 
 Runtime release builds use optimization level 2, fat LTO and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
 
-During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals, element tables and data segments, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
+During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals and element tables, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
 
 Run compiler tests with `cargo test --workspace --locked`. Run runtime host tests separately with `cargo test --manifest-path runtime/Cargo.toml --workspace --locked`, then exercise the collector with `cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked`. The compiler integration suite tests the embedded modules through the linker and Wasmtime.
 

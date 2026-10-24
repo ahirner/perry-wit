@@ -49,7 +49,7 @@ value_types! {
         UrlType("perry.url", ["URL"]);
 
         SearchParamsType("perry.search_params", ["URLSearchParams"]);
-        /// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
+        /// A parsed JSON value (`JSON.parse`): a node of the JSON codec's graph, or `undefined`.
         JsonType("perry.json", []);
         /// A mutable Date object containing epoch milliseconds or NaN.
         DateType("perry.date", ["Date"]);

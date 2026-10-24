@@ -1,9 +1,9 @@
 //! perry MIR → pliron `wasm` dialect → core Wasm.
 //!
 //! The output defines and exports linear memory when required, places string constants in data
-//! segments starting at `DATA_BASE`, and imports runtime functions from `HELPER_MODULE` for
-//! `perry-wit`'s linker to resolve against `perry-runtime` and the helper libraries. Exports
-//! are either raw functions ([Exports::Raw]) or canonical-ABI component exports
+//! segments starting at `DATA_BASE`, and imports runtime and standard-library functions from
+//! `HELPER_MODULE` for `perry-wit`'s linker to resolve against `perry-runtime` and the standard
+//! libraries. Exports are either raw functions ([Exports::Raw]) or canonical-ABI component exports
 //! ([Exports::Canonical], see [boundary]). Value and storage representations follow these rules:
 //!
 //! - `f64` stays `f64`, and semantic integers use `i32` through 32 bits and `i64` through 64
@@ -120,7 +120,7 @@ impl std::error::Error for CodegenError {
     }
 }
 
-/// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
+/// Import module of runtime and standard-library functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
 /// Starting address of static data, leaving address 0 as the null reference (`undefined`).
 const DATA_BASE: u32 = 16;
@@ -148,7 +148,7 @@ pub enum Exports {
 }
 
 /// Lower a canonicalized MIR module and encode it as a core Wasm module that still imports
-/// runtime functions from `HELPER_MODULE`.
+/// runtime and standard-library functions from `HELPER_MODULE`.
 pub fn compile(
     ctx: &mut Context,
     mir: &ModuleOp,

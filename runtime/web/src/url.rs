@@ -28,7 +28,7 @@ fn normalize(input: &[u8]) -> Option<*mut u8> {
         .checked_mul(4)?
         .checked_add(64)?;
     let output = alloc(capacity);
-    // SAFETY: disjoint, initialized input and writable output; URL normalization never allocates.
+    // SAFETY: disjoint, initialized input and writable output; the helper never allocates.
     let length =
         unsafe { helper::fetch_url_value(input.as_ptr(), input.len() as u32, output, capacity) };
     (length != u32::MAX).then(|| unsafe { adopt(output, length) })
