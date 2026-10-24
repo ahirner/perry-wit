@@ -2,7 +2,7 @@
   {
     "workload": "text",
     "bytes": 15959,
-    "core_bytes": 16524,
+    "core_bytes": 15827,
     "defined_functions": 46,
     "helper_functions": 43,
     "optimization": {
@@ -16,7 +16,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 479,
     "invocation_fuel": 70522,
     "warm_fuel": 56209,
     "initial_memory": 65536,
@@ -25,7 +25,7 @@
   {
     "workload": "io (64 KiB)",
     "bytes": 46437,
-    "core_bytes": 44454,
+    "core_bytes": 39907,
     "defined_functions": 126,
     "helper_functions": 112,
     "optimization": {
@@ -39,7 +39,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16406,
+    "initialization_fuel": 2143,
     "invocation_fuel": 648046,
     "warm_fuel": 629344,
     "initial_memory": 65536,
@@ -48,7 +48,7 @@
   {
     "workload": "incoming-stream (4 MiB)",
     "bytes": 38394,
-    "core_bytes": 39672,
+    "core_bytes": 36545,
     "defined_functions": 127,
     "helper_functions": 113,
     "optimization": {
@@ -62,7 +62,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16392,
+    "initialization_fuel": 5315,
     "invocation_fuel": 159628720,
     "warm_fuel": 159614362,
     "initial_memory": 65536,
@@ -71,7 +71,7 @@
   {
     "workload": "bounded-http-exact (4 MiB)",
     "bytes": 65627,
-    "core_bytes": 63442,
+    "core_bytes": 59269,
     "defined_functions": 146,
     "helper_functions": 138,
     "optimization": {
@@ -85,7 +85,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16405,
+    "initialization_fuel": 5711,
     "invocation_fuel": 13685602,
     "warm_fuel": 13654386,
     "initial_memory": 65536,
@@ -94,7 +94,7 @@
   {
     "workload": "bounded-http-overflow",
     "bytes": 65627,
-    "core_bytes": 63442,
+    "core_bytes": 59269,
     "defined_functions": 146,
     "helper_functions": 138,
     "optimization": {
@@ -108,7 +108,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16405,
+    "initialization_fuel": 5711,
     "invocation_fuel": 13674620,
     "warm_fuel": 13643740,
     "initial_memory": 65536,
@@ -117,7 +117,7 @@
   {
     "workload": "unbounded-http-bytes (4 MiB)",
     "bytes": 64214,
-    "core_bytes": 61888,
+    "core_bytes": 57132,
     "defined_functions": 156,
     "helper_functions": 142,
     "optimization": {
@@ -131,7 +131,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16407,
+    "initialization_fuel": 5673,
     "invocation_fuel": 15999786,
     "warm_fuel": 11447565,
     "initial_memory": 65536,
@@ -139,8 +139,8 @@
   },
   {
     "workload": "scalar % loop (n = 10⁶)",
-    "bytes": 3006,
-    "core_bytes": 3006,
+    "bytes": 2850,
+    "core_bytes": 2850,
     "defined_functions": 11,
     "helper_functions": 10,
     "optimization": {
@@ -154,7 +154,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 252,
     "invocation_fuel": 28000010,
     "initial_memory": 65536,
     "memory": 65536,
@@ -174,8 +174,8 @@
   },
   {
     "workload": "temporary record per iteration (n = 10⁶)",
-    "bytes": 3009,
-    "core_bytes": 3009,
+    "bytes": 2853,
+    "core_bytes": 2853,
     "defined_functions": 11,
     "helper_functions": 10,
     "optimization": {
@@ -189,7 +189,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 252,
     "invocation_fuel": 30000010,
     "initial_memory": 65536,
     "memory": 65536,
@@ -209,8 +209,8 @@
   },
   {
     "workload": "push records, then sum (n = 10⁶)",
-    "bytes": 18417,
-    "core_bytes": 18417,
+    "bytes": 17676,
+    "core_bytes": 17676,
     "defined_functions": 50,
     "helper_functions": 48,
     "optimization": {
@@ -224,7 +224,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 445,
     "invocation_fuel": 719941352,
     "initial_memory": 65536,
     "memory": 49479680,
@@ -244,8 +244,8 @@
   },
   {
     "workload": "push numbers, then sum (n = 10⁶)",
-    "bytes": 18235,
-    "core_bytes": 18235,
+    "bytes": 17510,
+    "core_bytes": 17510,
     "defined_functions": 49,
     "helper_functions": 47,
     "optimization": {
@@ -259,7 +259,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 445,
     "invocation_fuel": 128488987,
     "initial_memory": 65536,
     "memory": 15990784,
@@ -279,8 +279,8 @@
   },
   {
     "workload": "allocation-free direct calls (n = 10⁶)",
-    "bytes": 284,
-    "core_bytes": 284,
+    "bytes": 216,
+    "core_bytes": 216,
     "defined_functions": 3,
     "helper_functions": 0,
     "optimization": {
@@ -314,8 +314,8 @@
   },
   {
     "workload": "byte indexing (n = 10⁶)",
-    "bytes": 16488,
-    "core_bytes": 16488,
+    "bytes": 15836,
+    "core_bytes": 15836,
     "defined_functions": 45,
     "helper_functions": 43,
     "optimization": {
@@ -329,7 +329,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 2038,
     "invocation_fuel": 245113360,
     "initial_memory": 65536,
     "memory": 1114112,
@@ -349,8 +349,8 @@
   },
   {
     "workload": "string append (n = 10⁶)",
-    "bytes": 15104,
-    "core_bytes": 15104,
+    "bytes": 14516,
+    "core_bytes": 14516,
     "defined_functions": 40,
     "helper_functions": 38,
     "optimization": {
@@ -364,7 +364,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 511,
     "invocation_fuel": 78749829,
     "initial_memory": 65536,
     "memory": 2555904,
@@ -384,8 +384,8 @@
   },
   {
     "workload": "compile: property chain, depth 32",
-    "bytes": 2511,
-    "core_bytes": 2511,
+    "bytes": 2330,
+    "core_bytes": 2330,
     "defined_functions": 13,
     "helper_functions": 11,
     "optimization": {
@@ -403,7 +403,7 @@
   {
     "workload": "example: merge_task",
     "bytes": 20283,
-    "core_bytes": 20826,
+    "core_bytes": 19891,
     "defined_functions": 57,
     "helper_functions": 50,
     "optimization": {
@@ -421,7 +421,7 @@
   {
     "workload": "example: template task",
     "bytes": 3468,
-    "core_bytes": 3748,
+    "core_bytes": 3336,
     "defined_functions": 26,
     "helper_functions": 23,
     "optimization": {
@@ -439,7 +439,7 @@
   {
     "workload": "WIT s8 addition",
     "bytes": 113,
-    "core_bytes": 123,
+    "core_bytes": 54,
     "defined_functions": 2,
     "helper_functions": 0,
     "optimization": {
@@ -461,7 +461,7 @@
   {
     "workload": "WIT u8 addition",
     "bytes": 122,
-    "core_bytes": 132,
+    "core_bytes": 63,
     "defined_functions": 2,
     "helper_functions": 0,
     "optimization": {
@@ -483,7 +483,7 @@
   {
     "workload": "WIT s16 addition",
     "bytes": 113,
-    "core_bytes": 123,
+    "core_bytes": 54,
     "defined_functions": 2,
     "helper_functions": 0,
     "optimization": {
@@ -505,7 +505,7 @@
   {
     "workload": "WIT u16 addition",
     "bytes": 125,
-    "core_bytes": 135,
+    "core_bytes": 66,
     "defined_functions": 2,
     "helper_functions": 0,
     "optimization": {
@@ -527,7 +527,7 @@
   {
     "workload": "WIT s32 addition",
     "bytes": 100,
-    "core_bytes": 89,
+    "core_bytes": 41,
     "defined_functions": 1,
     "helper_functions": 0,
     "optimization": {
@@ -549,7 +549,7 @@
   {
     "workload": "WIT u32 addition",
     "bytes": 100,
-    "core_bytes": 89,
+    "core_bytes": 41,
     "defined_functions": 1,
     "helper_functions": 0,
     "optimization": {
@@ -571,7 +571,7 @@
   {
     "workload": "WIT s64 addition",
     "bytes": 6542,
-    "core_bytes": 6859,
+    "core_bytes": 6448,
     "defined_functions": 27,
     "helper_functions": 24,
     "optimization": {
@@ -585,7 +585,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 1845,
     "invocation_fuel": 2766,
     "initial_memory": 65536,
     "memory": 65536
@@ -593,7 +593,7 @@
   {
     "workload": "WIT u64 addition",
     "bytes": 6500,
-    "core_bytes": 6817,
+    "core_bytes": 6406,
     "defined_functions": 27,
     "helper_functions": 24,
     "optimization": {
@@ -607,7 +607,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 1845,
     "invocation_fuel": 2752,
     "initial_memory": 65536,
     "memory": 65536
@@ -615,7 +615,7 @@
   {
     "workload": "WIT backward result width",
     "bytes": 118,
-    "core_bytes": 128,
+    "core_bytes": 59,
     "defined_functions": 2,
     "helper_functions": 0,
     "optimization": {
@@ -637,7 +637,7 @@
   {
     "workload": "WIT shared helper",
     "bytes": 320,
-    "core_bytes": 318,
+    "core_bytes": 156,
     "defined_functions": 5,
     "helper_functions": 0,
     "optimization": {
@@ -659,7 +659,7 @@
   {
     "workload": "WIT recursion",
     "bytes": 115,
-    "core_bytes": 102,
+    "core_bytes": 59,
     "defined_functions": 1,
     "helper_functions": 0,
     "optimization": {
@@ -681,7 +681,7 @@
   {
     "workload": "successful unwrap reuse",
     "bytes": 2900,
-    "core_bytes": 3123,
+    "core_bytes": 2809,
     "defined_functions": 22,
     "helper_functions": 19,
     "optimization": {
@@ -695,7 +695,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16385,
+    "initialization_fuel": 252,
     "invocation_fuel": 2318,
     "initial_memory": 65536,
     "memory": 65536
@@ -703,7 +703,7 @@
   {
     "workload": "async frame liveness",
     "bytes": 20334,
-    "core_bytes": 20992,
+    "core_bytes": 19379,
     "defined_functions": 70,
     "helper_functions": 62,
     "optimization": {
@@ -717,7 +717,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 16389,
+    "initialization_fuel": 593,
     "invocation_fuel": 17356,
     "warm_fuel": 3704,
     "initial_memory": 65536,

@@ -60,7 +60,7 @@ cargo test --test benchmark -- --ignored                   # sizes, fuel and mem
 nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, site, SDK sync, template and example runs
 ```
 
-When a change moves benchmark numbers on purpose, run the benchmark with `PERRY_EXPECT_BENCH=1` and commit the rewritten `tests/benchmark.json` together with the change.
+Benchmark sizes exclude custom sections such as debug names. Initialization fuel includes explicit data copying, with Wasmtime's platform-specific copy-on-write initialization disabled. When a change moves benchmark numbers on purpose, run the benchmark with `PERRY_EXPECT_BENCH=1` and commit the rewritten `tests/benchmark.json` together with the change.
 CI additionally runs the collectible runtime tests (`--all-features`), Clippy for both workspaces and all conformance contracts.
 
 ### Flake outputs

@@ -3,8 +3,10 @@
 //!
 //! Every workload's sizes, fuel, memory and optimization statistics must equal
 //! `tests/benchmark.json`. `PERRY_EXPECT_BENCH=1` rewrites that record instead, so its git
-//! history tracks each change. `bytes` measures stripped components or named raw modules;
-//! `core_bytes` the named core module. `initialization_fuel` measures instantiation,
+//! history tracks each change. `bytes` measures stripped components or stripped raw modules;
+//! `core_bytes` excludes core custom sections, including build-dependent debug names.
+//! Instantiation copies data explicitly, independent of host copy-on-write support.
+//! `initialization_fuel` measures instantiation,
 //! `invocation_fuel` the first export call and `warm_fuel` the second component call.
 //!
 //! The printed table adds median milliseconds per call for orientation; timing is never
@@ -172,7 +174,10 @@ impl Row {
 
 fn engine(fuel: bool) -> Result<Engine> {
     let mut config = Config::new();
-    config.wasm_component_model_async(true).consume_fuel(fuel);
+    config
+        .wasm_component_model_async(true)
+        .consume_fuel(fuel)
+        .memory_init_cow(false);
     Ok(Engine::new(&config)?)
 }
 
@@ -240,6 +245,21 @@ fn defined_functions(core: &[u8]) -> Result<u32> {
     Ok(0)
 }
 
+fn stripped_core_size(core: &[u8]) -> Result<usize> {
+    let mut bytes = core.len();
+    let mut section_start = wasm_encoder::Module::HEADER.len();
+    for payload in wasmparser::Parser::new(0).parse_all(core) {
+        if let Some((id, range)) = payload?.as_section() {
+            let section_end = usize::try_from(range.end)?;
+            if id == 0 {
+                bytes -= section_end - section_start;
+            }
+            section_start = section_end;
+        }
+    }
+    Ok(bytes)
+}
+
 /// Measure instantiation, first invocation, the warmed call, and timed samples.
 async fn measure<F, Fut>(
     workload: &str,
@@ -288,7 +308,7 @@ where
     Ok(Row {
         workload: workload.into(),
         bytes: Some(bytes.len()),
-        core_bytes: Some(compiled.core.len()),
+        core_bytes: Some(stripped_core_size(&compiled.core)?),
         defined_functions: Some(defined_functions(&compiled.core)?),
         helper_functions: Some(helper_functions(&compiled.allocation_report)?),
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
@@ -562,9 +582,7 @@ export function run(n: number): number {
     for (workload, source) in workloads {
         let (wasm, mut row) = raw_module(format!("{workload} (n = 10⁶)"), source)?;
         for metered in [true, false] {
-            let mut config = Config::new();
-            config.consume_fuel(metered);
-            let engine = Engine::new(&config)?;
+            let engine = engine(metered)?;
             let module = wasmtime::Module::new(&engine, &wasm)?;
             let mut store = Store::new(&engine, Memory::default());
             store.limiter(|memory| memory);
@@ -665,10 +683,11 @@ fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
         &mut analyses,
     )?)?;
     let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let bytes = stripped_core_size(&wasm)?;
     let row = Row {
         workload,
-        bytes: Some(wasm.len()),
-        core_bytes: Some(wasm.len()),
+        bytes: Some(bytes),
+        core_bytes: Some(bytes),
         defined_functions: Some(defined_functions(&wasm)?),
         helper_functions: Some(defined_functions(&wasm)? - defined_functions(&emitted)?),
         optimization: Some(optimization),
@@ -728,7 +747,7 @@ fn examples() -> Result<Vec<Row>> {
                     .stripped
                     .len(),
             ),
-            core_bytes: Some(compiled.core.len()),
+            core_bytes: Some(stripped_core_size(&compiled.core)?),
             defined_functions: Some(defined_functions(&compiled.core)?),
             helper_functions: Some(helper_functions(&compiled.allocation_report)?),
             optimization: Some(optimization_statistics(&compiled.allocation_report)?),
@@ -942,7 +961,7 @@ fn measure_core(
                 .stripped
                 .len(),
         ),
-        core_bytes: Some(compiled.core.len()),
+        core_bytes: Some(stripped_core_size(&compiled.core)?),
         defined_functions: Some(defined_functions(&compiled.core)?),
         helper_functions: Some(helper_functions(&compiled.allocation_report)?),
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
@@ -956,12 +975,14 @@ fn measure_core(
 }
 
 #[test]
-fn timed_calls_account_for_warmup_separately() -> Result<()> {
+fn fuel_accounting_separates_initialization_and_calls() -> Result<()> {
     let engine = engine(true)?;
     let module = wasmtime::Module::new(
         &engine,
         wat::parse_str(
             r#"(module
+              (memory 1)
+              (data (i32.const 0) "test")
               (global $calls (mut i32) (i32.const 0))
               (func $start nop)
               (start $start)
@@ -973,7 +994,7 @@ fn timed_calls_account_for_warmup_separately() -> Result<()> {
     let mut store = store(&engine, None, true)?;
     let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
     let before = store.get_fuel()?;
-    ensure!(before < u64::MAX, "start function must consume fuel");
+    assert_eq!(u64::MAX - before, 8, "initialization fuel");
     let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
     let mut results = Vec::new();
     let (times, warmed, first) = timed!(store, 2, {
