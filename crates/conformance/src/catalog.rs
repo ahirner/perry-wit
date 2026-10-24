@@ -459,6 +459,14 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::CompilerRejection],
     },
     CatalogEntry {
+        id: "ecma.module.unawaited_initialization",
+        description: "Explicit compiler rejection of module initialization that entry points cannot await",
+        specification: "https://tc39.es/ecma262/#sec-moduleevaluation",
+        domain: "Synchronous top-level statements of a module with exported functions that start asynchronous work without awaiting it",
+        partitions: &["unawaited-async-call"],
+        expected_outcomes: &[ExpectedOutcome::CompilerRejection],
+    },
+    CatalogEntry {
         id: "node.fs.directories",
         description: "Directory creation, listing, metadata and deletion",
         specification: "https://nodejs.org/api/fs.html",
@@ -491,7 +499,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         id: "ecma.temporal.iso",
         description: "Typed ISO Instant, PlainDate and PlainDateTime values",
         specification: "https://tc39.es/proposal-temporal/",
-        domain: "Integral epoch milliseconds in +/-8640000000000000, ISO formatting and leap-day addition; pinned Node Temporal enabled explicitly",
+        domain: "Integral epoch milliseconds in +/-8640000000000000, ISO formatting, leap-day addition and the ISO 8601 calendarId",
         partitions: &[
             "negative-millisecond",
             "epoch",

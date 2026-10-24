@@ -15,7 +15,6 @@ pub(crate) fn assert_numbers(source: &str, cases: &[(&str, &[f64], f64)]) -> Res
         )?;
     }
     let output = Command::new("node")
-        .arg("--experimental-strip-types")
         .arg(script.path())
         .output()
         .context("Node oracle")?;

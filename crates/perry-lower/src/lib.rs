@@ -104,7 +104,8 @@ use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBind
 use coerce::{Kind, is_integer64, kind, void_type};
 use program::{Builtin, Signature};
 
-/// The function holding a module's top-level statements, if it has any.
+/// The function `wasi:cli/run` binds to: the top-level statements of a module without exported
+/// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
 /// Type-shape and coercion errors during HIR-to-MIR lowering.

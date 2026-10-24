@@ -151,6 +151,9 @@ impl HirTypeFacts for FunctionEnv<'_> {
                 | "millisecond" | "microsecond" | "nanosecond",
             )
             | ("Temporal.Instant", "epochMilliseconds") => return Some(HirType::Number),
+            ("Temporal.PlainDate" | "Temporal.PlainDateTime", "calendarId") => {
+                return Some(HirType::String);
+            }
             _ => {}
         }
         let ty = self

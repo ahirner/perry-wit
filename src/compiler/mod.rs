@@ -342,6 +342,13 @@ fn map_codegen_error(error: anyhow::Error) -> crate::PerryDiagnostic {
         Ok(codegen_err) => {
             let message = codegen_err.to_string();
             match codegen_err {
+                perry_codegen::CodegenError::PendingInitialization { span } => {
+                    crate::PerryDiagnostic::error(crate::DiagnosticCode::CodegenFailure, message)
+                        .with_optional_span(span)
+                        .with_help(
+                            "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
+                        )
+                }
                 perry_codegen::CodegenError::AsyncInitializerRequiresAsyncExport {
                     span, ..
                 } => crate::PerryDiagnostic::error(

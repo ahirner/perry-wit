@@ -383,10 +383,16 @@ fn is_cli_run(core_name: &str) -> bool {
     core_name.starts_with("wasi:cli/run@") && core_name.ends_with("#run")
 }
 
+/// Whether `perry_main` holds the top-level statements rather than awaiting initialization.
 fn has_main(ctx: &Context, mir: &ModuleOp) -> bool {
-    module_functions(ctx, mir)
+    let names: Vec<_> = module_functions(ctx, mir)
         .iter()
-        .any(|f| f.get_symbol_name(ctx).as_ref() == perry_lower::MAIN)
+        .map(|f| f.get_symbol_name(ctx))
+        .collect();
+    names.iter().any(|name| name.as_ref() == perry_lower::MAIN)
+        && !names
+            .iter()
+            .any(|name| name.as_ref() == perry_mir::INITIALIZER)
 }
 
 fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {

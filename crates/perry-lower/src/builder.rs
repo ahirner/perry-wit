@@ -201,9 +201,7 @@ impl<'s> FunctionBuilder<'s> {
             let await_ = AwaitOp::new(ctx, promise)?;
             builder.append_value(ctx, &await_);
         }
-        if matches!(signature.name.as_ref(), perry_mir::INITIALIZER | MAIN)
-            && !shapes.static_fields.is_empty()
-        {
+        if signature.top_level && !shapes.static_fields.is_empty() {
             let mut static_inits: Vec<_> = shapes.static_fields.values().copied().collect();
             static_inits.sort_by_key(|(id, _)| *id);
             for (id, field) in static_inits {

@@ -12,6 +12,8 @@ pub(super) struct Signature<'s> {
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
+    /// Runs the module's top-level statements and static field initializers.
+    pub(super) top_level: bool,
     pub(super) params: Vec<ParamSig<'s>>,
     pub(super) returns_never: bool,
     pub(super) result: Option<BindingType>,
@@ -169,6 +171,7 @@ pub(super) fn build_module(
                 await_initialization: function.is_exported
                     && function.is_async
                     && locations.async_init(),
+                top_level: false,
                 name: identifier(&function.name)?,
                 params,
                 returns_never: matches!(function.return_type, HirType::Never),
@@ -185,40 +188,51 @@ pub(super) fn build_module(
                 if hir_compat::is_import_initializer(callee))
         });
     if has_init {
-        // Top-level statements (with top-level `await`) form the async main function of a
-        // command (`wasi:cli/run`), settling `undefined`.
+        // Without exported functions, the top-level statements (with top-level `await`) form
+        // the body of a command's `wasi:cli/run`. With exported functions they initialize the
+        // module once before the first entry point, and `run` only awaits that initialization.
         let persistent = hir.functions.iter().any(|f| f.is_exported);
-        let signature = Signature {
-            name: identifier(if persistent {
-                perry_mir::INITIALIZER
-            } else {
-                MAIN
-            })?,
-            is_async: !persistent || locations.async_init(),
-            await_initialization: false,
-            params: vec![],
-            returns_never: false,
-            result: if persistent && !locations.async_init() {
-                None
-            } else {
-                Some(BindingType::plain(
-                    shapes.settled_type(ctx, &HirType::Void)?,
-                ))
+        let async_init = locations.async_init();
+        let settled = BindingType::plain(shapes.settled_type(ctx, &HirType::Void)?);
+        let mut entries = vec![(
+            Signature {
+                name: identifier(if persistent {
+                    perry_mir::INITIALIZER
+                } else {
+                    MAIN
+                })?,
+                is_async: !persistent || async_init,
+                await_initialization: false,
+                top_level: true,
+                params: vec![],
+                returns_never: false,
+                result: (!persistent || async_init).then_some(settled),
             },
-        };
-        let func = FunctionBuilder::lower_body(
-            ctx,
-            &signature,
-            &hir.init,
-            &signatures,
-            &shapes,
-            &builtins,
-        )
-        .context("lowering top-level statements")?;
-        if signature.is_async {
-            set_async(ctx, &func);
+            hir.init.as_slice(),
+        )];
+        if persistent {
+            entries.push((
+                Signature {
+                    name: identifier(MAIN)?,
+                    is_async: true,
+                    await_initialization: async_init,
+                    top_level: false,
+                    params: vec![],
+                    returns_never: false,
+                    result: Some(settled),
+                },
+                &[],
+            ));
         }
-        module.append_operation(ctx, func.get_operation(), 0);
+        for (signature, body) in &entries {
+            let func =
+                FunctionBuilder::lower_body(ctx, signature, body, &signatures, &shapes, &builtins)
+                    .context("lowering top-level statements")?;
+            if signature.is_async {
+                set_async(ctx, &func);
+            }
+            module.append_operation(ctx, func.get_operation(), 0);
+        }
     }
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)

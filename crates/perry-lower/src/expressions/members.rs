@@ -152,6 +152,8 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Instant, "epochMilliseconds") => {
                 self.intrinsic(ctx, Intrinsic::InstantMs, vec![value])
             }
+            // Every supported date uses the ISO 8601 calendar.
+            (Kind::PlainDate | Kind::PlainDateTime, "calendarId") => self.string(ctx, "iso8601"),
             (Kind::PlainDate | Kind::PlainDateTime, field) => {
                 self.temporal_field(ctx, value, field)?
             }

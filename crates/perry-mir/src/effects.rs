@@ -311,7 +311,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 effects.may_collect |= !atomic && allocation != Allocation::None;
                 effects.may_suspend |= wait || async_call;
                 effects.may_reenter |= foreign;
-                effects.host_work |= foreign
+                effects.host_work |= kind == OperationKind::Foreign(crate::foreign::Phase::Start)
                     || kind == OperationKind::Timer
                     || intrinsic.is_some()
                         && operation.results().any(|value| {

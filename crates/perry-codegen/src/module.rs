@@ -390,6 +390,18 @@ fn bind_exports(
         .effects(&Identifier::new(perry_mir::INITIALIZER));
     let initialization_escapes =
         initialization.is_some_and(|summary| summary.effects.failure.escapes());
+    // Entry points wait for an asynchronous initializer, but not for work a synchronous one starts.
+    if matches!(state.initializer, Some(Initializer::Sync(_)))
+        && initialization
+            .is_some_and(|summary| summary.effects.may_suspend || summary.effects.host_work)
+    {
+        return Err(crate::CodegenError::PendingInitialization {
+            span: mir_functions
+                .get(perry_mir::INITIALIZER)
+                .and_then(|function| perry_mir::source_span(ctx, function)),
+        }
+        .into());
+    }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
         imports
             .iter()

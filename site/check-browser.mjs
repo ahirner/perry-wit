@@ -65,9 +65,9 @@ try {
       page.on('pageerror', error => console.error(name, error));
       await page.goto(`${origin}${prefix}`);
       assert(!requests.some(path => /\.wasm$|\/assets\//.test(path)), 'Homepage must not load the compiler or playground assets');
-      assert.deepEqual(requests.filter(path => /\.js$/.test(path)), [`${prefix}highlight.js`]);
-      assert.match(await page.locator('[data-language=typescript] code').innerText(), /return "Hello, " \+ name;/, 'TypeScript remains readable without the CDN');
-      assert.match(await page.locator('[data-language=wit] code').innerText(), /export greet: func\(name: string\) -> string;/, 'WIT remains readable without the CDN');
+      assert.deepEqual(requests.filter(path => /\.js$/.test(path)), [], 'Homepage must not load JavaScript');
+      assert.match(await page.locator('[data-language=typescript] code').innerText(), /return "Hello, " \+ name;/);
+      assert.match(await page.locator('[data-language=wit] code').innerText(), /export greet: func\(name: string\) -> string;/);
       assert.equal(await page.locator('.artifacts > li').count(), 3);
       assert.equal(await page.locator('.artifacts details').count(), 0);
       assert.equal((await page.locator('.artifacts pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
@@ -87,7 +87,7 @@ try {
         ['docs/architecture.html', 'resolved WIT world'],
       ]) {
         const html = await readFile(join(directory, docPage), 'utf8');
-        assert(html.includes(expectedText), `Expected "${expectedText}" in ${docPage}`);
+        assert(html.replace(/<[^>]*>/g, '').includes(expectedText), `Expected "${expectedText}" in ${docPage}`);
         for (const [, rawHref] of html.matchAll(/href="([^"#?]+)"/g)) {
           assert(!rawHref.startsWith('https://ahirner.github.io/perry-wit/'), `Use relative link instead of "${rawHref}" in ${docPage}`);
           if (/^(https?:|mailto:|data:|javascript:)/.test(rawHref)) continue;
@@ -96,6 +96,27 @@ try {
           assert((await stat(resolved).catch(() => null))?.isFile(), `Broken link "${rawHref}" in ${docPage}`);
         }
       }
+      // Without JavaScript, the homepage and handbook follow the dark preference with highlighted code.
+      const plain = await browser.newContext({ javaScriptEnabled: false, colorScheme: 'dark' });
+      await plain.route(`${origin}/**`, async route => {
+        const path = decodeURIComponent(new URL(route.request().url()).pathname.slice(prefix.length)) || 'index.html';
+        await route.fulfill({ body: await readFile(join(directory, path)), contentType: mime[extname(path)] || 'application/octet-stream' });
+      });
+      const plainPage = await plain.newPage();
+      for (const path of ['', 'docs/authoring.html', 'docs/embedding.html']) {
+        await plainPage.goto(`${origin}${prefix}${path}`);
+        const [background, highlighted] = await plainPage.evaluate(() => {
+          const span = document.querySelector('pre code span[class]');
+          const hex = getComputedStyle(span).getPropertyValue('--shiki-dark').trim().slice(1);
+          const rgb = `rgb(${[0, 2, 4].map(at => parseInt(hex.slice(at, at + 2), 16)).join(', ')})`;
+          // mdBook paints the page background on the root element, the homepage on the body.
+          const page = [document.body, document.documentElement].map(element => getComputedStyle(element).backgroundColor).find(color => color !== 'rgba(0, 0, 0, 0)');
+          return [page, getComputedStyle(span).color === rgb];
+        });
+        assert.equal(background, 'rgb(37, 43, 51)', `${path || 'homepage'} must be dark without JavaScript`);
+        assert(highlighted, `${path || 'homepage'} code must use the dark palette without JavaScript`);
+      }
+      await plain.close();
       assert.equal(await page.locator('footer a[href*="downloads/"], footer a[href*="rust/"]').count(), 0);
       assert.equal(await page.locator('footer span').innerText(), `Perry-WIT v${compilerVersion}`);
       const footerText = await page.locator('footer').innerText();

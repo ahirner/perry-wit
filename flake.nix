@@ -30,6 +30,8 @@
             overlays = [ (import rust-overlay) ];
           };
 
+        # Node.js 26 enables Temporal by default, which the conformance oracle compares against.
+        nodejs = pkgs.nodejs_26;
         wasmtimeVersion = "50.0.0";
         cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         wasmtimeAsset = {
@@ -206,13 +208,14 @@
         siteSource = pkgs.lib.cleanSourceWith { src = ./.; filter = authoredSourceFilter; };
         site = pkgs.buildNpmPackage {
           pname = "perry-wit-site";
+          inherit nodejs;
           version = cargoManifest.package.version;
           dontFixup = true;
           src = siteSource;
           npmRoot = "site";
           npmDeps = pkgs.fetchNpmDeps {
             src = pkgs.lib.cleanSourceWith { src = ./site; filter = authoredSourceFilter; };
-            hash = "sha256-TtHGWMCM3i57L3BPFptDXSZvDboAWDVkdLC+MiNc9xk=";
+            hash = "sha256-HVyTUkc1wePoDWyDEgC34ozTNiFK/mJJWBqPXVPTDzs=";
           };
           npmFlags = [ "--ignore-scripts" ];
           nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools pkgs.mdbook ];
@@ -290,7 +293,7 @@
         mkSdkShell = { wit ? "wit", world ? null, entry ? "src/index.ts", ... }:
           pkgs.mkShell {
             name = "perry-wit-sdk";
-            packages = [ perryWitBin pkgs.nodejs pkgs.typescript wasmtimeCli pkgs.wasm-tools ];
+            packages = [ perryWitBin nodejs pkgs.typescript wasmtimeCli pkgs.wasm-tools ];
             WASI_WIT_PATH = wasiP3Wit;
             shellHook = ''
               ${perryWitBin}/bin/perry-wit gen-types --no-tsconfig \
@@ -392,7 +395,7 @@
             toolchain
             wasmtimeCli
             pkgs.wasm-tools
-            pkgs.nodejs
+            nodejs
             pkgs.python3
             pkgs.typescript
             pkgs.mdbook
@@ -419,7 +422,7 @@
         };
 
         devShells.browser = pkgs.mkShell {
-          packages = [ pkgs.nodejs pkgs.playwright-driver.browsers ]
+          packages = [ nodejs pkgs.playwright-driver.browsers ]
             # Headless WPE WebKit still needs an EGL provider on Linux.
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mesa.llvmpipeHook ];
           PLAYWRIGHT_BROWSERS_PATH = pkgs.playwright-driver.browsers;
