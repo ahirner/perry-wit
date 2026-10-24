@@ -78,7 +78,7 @@ try {
         assert((await readFile(join(directory, href))).length > 0, `Missing resource: ${href}`);
       }
       for (const [docPage, expectedText] of [
-        ['docs/index.html', 'Where to Start'],
+        ['docs/index.html', 'Memory stays flat across calls'],
         ['docs/authoring.html', 'wasi:cli/command@0.3.0'],
         ['docs/embedding.html', 'package perry:compiler@0.1.1;'],
         ['docs/semantics.html', 'i64.mul'],
