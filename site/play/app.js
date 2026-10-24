@@ -1,4 +1,5 @@
 import { compileRequest, decode, directory, encode, packagePrograms, readFolder, worldNames } from './workspace.js';
+import '../highlight.js';
 
 const $ = id => document.getElementById(id);
 let workspace;
@@ -73,6 +74,7 @@ function setEditor(id, bytes) {
   editor.value = decode(bytes);
   editor.setSelectionRange(0, 0);
   editor.scrollTop = editor.scrollLeft = 0;
+  editor.dispatchEvent(new Event('editorchange'));
 }
 function setArguments(value) {
   $('args').value = value;
