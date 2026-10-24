@@ -9,6 +9,7 @@ pub fn scalars_length(bytes: &[u8]) -> u32 {
 }
 
 /// Eight-byte scalar counter for bulk helper input and output.
+#[inline]
 pub fn scalars_length_wide(bytes: &[u8]) -> u32 {
     let (words, tail) = bytes.as_chunks::<8>();
     let mut continuations = 0;

@@ -388,10 +388,11 @@
           wasi-wit = checkP3Wit;
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
+            cargoExtraArgs = "--all";
           };
           perry-runtime-fmt = craneLib.cargoFmt {
             inherit src;
-            cargoExtraArgs = "--manifest-path runtime/Cargo.toml";
+            cargoExtraArgs = "--all --manifest-path runtime/Cargo.toml";
           };
           inherit runtimeLibraries exampleMergeTask perryWitBin perryWitWasm site templateComponent checkTemplate sdkSyncCheck;
         };

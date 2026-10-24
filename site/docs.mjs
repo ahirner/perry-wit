@@ -267,19 +267,19 @@ const GLOBALS = [
 ];
 const PROBE_WIT = 'package docs:probe;\n\nworld probe {\n  include wasi:cli/command@0.3.0;\n  import wasi:http/client@0.3.0;\n}\n';
 
-// Method registry variants are prefixed by their receiver; longer prefixes come first.
-const RECEIVERS = [
+// Display names for the receiver kinds in the frontend method registry.
+const RECEIVERS = new Map([
   ['PlainDateTime', 'Temporal.PlainDateTime'], ['PlainDate', 'Temporal.PlainDate'], ['Instant', 'Temporal.Instant'],
-  ['SearchParams', 'URLSearchParams'], ['ByobReader', 'ReadableStreamBYOBReader'], ['Collection', 'Array, Map, Set'],
-  ['Temporal', 'Temporal.PlainDate, Temporal.PlainDateTime'], ['Response', 'Response'], ['Request', 'Request'],
+  ['SearchParams', 'URLSearchParams'], ['ByobReader', 'ReadableStreamBYOBReader'],
+  ['Response', 'Response'], ['Request', 'Request'],
   ['Writable', 'WritableStream'], ['Readable', 'ReadableStream'], ['Headers', 'Headers'], ['Decoder', 'TextDecoder'],
   ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['Stats', 'fs.Stats'],
   ['Regex', 'RegExp'], ['Abort', 'AbortController'], ['Writer', 'WritableStreamDefaultWriter'],
-  ['Reader', 'ReadableStreamDefaultReader'], ['Read', 'ReadableStream read result'], ['Date', 'Date'], ['Map', 'Map'],
+  ['Reader', 'ReadableStreamDefaultReader'], ['ReadResult', 'ReadableStream read result'], ['Date', 'Date'], ['Map', 'Map'],
   ['Set', 'Set'], ['Url', 'URL'],
-];
+]);
 
-/** The inventory: probed globals, then methods and module functions read from the lowering tables. */
+/** The inventory: probed globals, then methods and module functions read from compiler tables. */
 async function inventory(repository, api) {
   const lines = GLOBALS.map(([, , statement], index) => /^(console\.|process\.)/.test(statement) ? `${statement};` : `const probe${index} = ${statement};`);
   try {
@@ -292,17 +292,28 @@ async function inventory(repository, api) {
   for (const [group, label] of GLOBALS) globals.set(group, [...(globals.get(group) ?? []), label]);
 
   const lower = join(repository, 'crates/perry-lower/src');
-  const registry = (await readFile(join(lower, 'methods/registry.rs'), 'utf8')).split('\n');
+  const registry = (await readFile(join(repository, 'crates/perry-frontend/src/methods/registry.rs'), 'utf8')).split('\n');
+  const implementations = await readFile(join(lower, 'methods.rs'), 'utf8');
+  const rejected = new Set([...implementations.matchAll(/^\s*([A-Z]\w*)\([^;\n]*\)\s*=>\s*code\s*\{\s*bail!\(/gm)].map(match => match[1]));
   const methods = new Map();
-  registry.forEach((line, index) => {
+  let receivers = [];
+  for (const line of registry) {
+    const group = line.match(/^\s*(Receiver::.*),\s*"[^"]+"\s*\{$/);
+    if (group) {
+      receivers = [...group[1].matchAll(/Receiver::(Map|Set)\b|Kind::(\w+)/g)].map(([, collection, kind]) => {
+        const name = RECEIVERS.get(collection || kind);
+        if (!name) throw new Error(`Unknown method registry receiver: ${collection || kind}`);
+        return name;
+      });
+      continue;
+    }
     const entry = line.match(/^\s*([A-Z][A-Za-z]+?)\s+("[^"]+"(?:\s*\|\s*"[^"]+")*)\s+/);
     // An entry whose body only reports an error documents a rejection, not support.
-    if (!entry || /^\s*bail!\(/.test(registry[index + 1] ?? '')) return;
-    const receiver = RECEIVERS.find(([prefix]) => entry[1].startsWith(prefix));
-    if (!receiver) throw new Error(`Unknown method registry receiver: ${entry[1]}`);
+    if (!entry || rejected.has(entry[1])) continue;
+    if (receivers.length === 0) throw new Error(`No method registry receiver for ${entry[1]}`);
     const names = [...entry[2].matchAll(/"([^"]+)"/g)].map(match => match[1]).filter(name => !name.startsWith('$$'));
-    methods.set(receiver[1], new Set([...(methods.get(receiver[1]) ?? []), ...names]));
-  });
+    for (const receiver of receivers) methods.set(receiver, new Set([...(methods.get(receiver) ?? []), ...names]));
+  }
   const expressions = await readFile(join(lower, 'expressions.rs'), 'utf8');
   const program = await readFile(join(lower, 'program.rs'), 'utf8');
   const math = [...new Set([...expressions.matchAll(/Expr::Math([A-Za-z]+)\b/g)].map(match => match[1].replace(/Spread$/, '').toLowerCase()))];

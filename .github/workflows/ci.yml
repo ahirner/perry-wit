@@ -37,6 +37,7 @@ jobs:
     - name: Run tests, benchmarks, conformance, and clippy
       run: |
         nix develop -c bash -euo pipefail -c '
+          cargo fetch --manifest-path runtime/Cargo.toml --locked
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
           cargo test --manifest-path runtime/Cargo.toml --workspace --locked
