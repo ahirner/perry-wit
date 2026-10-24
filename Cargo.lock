@@ -1519,7 +1519,6 @@ dependencies = [
  "pliron",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "tokio",
  "wasm-encoder 0.261.0",

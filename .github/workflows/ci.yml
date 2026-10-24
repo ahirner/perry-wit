@@ -46,15 +46,6 @@ jobs:
           cargo run --locked -p perry-conformance -- check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         '
-      env:
-        PERRY_BENCH_BASELINE: tests/baselines/pliron.json
-        PERRY_BENCH_REPORT: benchmark-report.json
-    - uses: actions/upload-artifact@v7
-      if: always()
-      with:
-        name: compiler-benchmark-report
-        path: benchmark-report.json
-        if-no-files-found: warn
 
   flake-build:
     strategy:
