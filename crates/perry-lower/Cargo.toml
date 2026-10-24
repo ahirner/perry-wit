@@ -8,6 +8,7 @@ description = "Perry HIR to perry-mir builder (TODOs.md P2.2)"
 [dependencies]
 perry-mir.workspace = true
 perry-frontend.workspace = true
+perry-wit-diagnostics.workspace = true
 pliron.workspace = true
 anyhow.workspace = true
 

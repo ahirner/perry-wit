@@ -1,7 +1,11 @@
 use super::*;
+use crate::shapes::{
+    TypeId,
+    generics::{Declaration, Resolver, substitute_id},
+};
 use perry_hir::walker::walk_expr_children_mut;
 
-pub(crate) enum Node<'a> {
+pub(super) enum Node<'a> {
     Binding(&'a mut LocalId, &'a mut HirType),
     Local(&'a mut LocalId),
     Type(&'a mut HirType),
@@ -56,7 +60,7 @@ pub(super) fn visit_expr(expr: &mut Expr, visit: &mut impl Visitor) -> Result<()
     visit.node(Node::Expression(expr))
 }
 
-pub(crate) fn visit_body(statements: &mut [Stmt], visit: &mut impl Visitor) -> Result<()> {
+pub(super) fn visit_body(statements: &mut [Stmt], visit: &mut impl Visitor) -> Result<()> {
     for statement in statements {
         match statement {
             Stmt::Let { id, ty, init, .. } => {
@@ -134,7 +138,7 @@ pub(crate) fn visit_body(statements: &mut [Stmt], visit: &mut impl Visitor) -> R
     Ok(())
 }
 
-pub(crate) trait Visitor: Sized {
+pub(super) trait Visitor: Sized {
     fn node(&mut self, node: Node<'_>) -> Result<()>;
 
     fn expression(&mut self, expr: &mut Expr) -> Result<()> {
@@ -148,7 +152,7 @@ impl<F: FnMut(Node<'_>) -> Result<()>> Visitor for F {
     }
 }
 
-pub(crate) fn function(
+pub(super) fn function(
     function: &mut perry_hir::ir::Function,
     visit: &mut impl Visitor,
 ) -> Result<()> {
@@ -189,6 +193,72 @@ pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) 
     });
 }
 
+fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {
+    let mut ty = TypeId::intern(env.ctx, ty);
+    for _ in 0..128 {
+        let (base, arguments) = match ty.hir(env.ctx) {
+            HirType::Named(name) => {
+                if name
+                    .strip_prefix("perry:types/")
+                    .and_then(shapes::perry_integer_spec)
+                    .is_some()
+                {
+                    return None;
+                }
+                if !env.decls.is_user_type(name) {
+                    if env.decls.integer_imports.contains_key(name.as_str()) {
+                        return None;
+                    }
+                    let imported = env.decls.imported_types.get(name.as_str()).copied();
+                    if imported.is_none()
+                        && let Some(kind) = Kind::builtin(name)
+                    {
+                        return matches!(kind, Kind::Reader | Kind::ByobReader).then_some(kind);
+                    }
+                    let mut entry = imported.or_else(|| env.decls.foreign.get(name))?;
+                    while let crate::hir::Foreign::Input(inner) = entry {
+                        entry = inner;
+                    }
+                    let crate::hir::Foreign::Type(target) = entry else {
+                        return None;
+                    };
+                    ty = TypeId::intern(env.ctx, target);
+                    continue;
+                }
+                (name.as_str(), &[][..])
+            }
+            HirType::Generic { base, type_args } => {
+                if base == "WitInput" || (base == "Readonly" && !env.decls.is_user_type(base)) {
+                    let [inner] = type_args.as_slice() else {
+                        return None;
+                    };
+                    ty = TypeId::intern(env.ctx, inner);
+                    continue;
+                }
+                (base.as_str(), type_args.as_slice())
+            }
+            _ => return None,
+        };
+        let arguments = TypeId::intern_slice(env.ctx, arguments);
+        if !env.decls.is_user_type(base) && matches!(base, "Exclude" | "Extract" | "NonNullable") {
+            ty = Resolver::new(env.ctx, env.decls).utility_type(base, &arguments, 0)?;
+            continue;
+        }
+        if env.decls.interfaces.contains_key(base)
+            || env.classes.iter().any(|class| class.name == base)
+        {
+            return None;
+        }
+        let (_, alias) = env.decls.type_aliases.get(base)?;
+        let bindings = Declaration::Alias(alias)
+            .bind(env.ctx, base, &arguments)
+            .ok()?;
+        let mut remaining = usize::MAX;
+        ty = substitute_id(env.ctx, &alias.ty, &bindings, &mut remaining).ok()?;
+    }
+    None
+}
+
 pub(super) fn scan(
     statements: &[Stmt],
     env: &mut FunctionEnv<'_>,
@@ -207,10 +277,17 @@ pub(super) fn scan(
                     ty,
                     HirType::Generic { base, type_args }
                         if matches!(base.as_str(), "Map" | "Set") && type_args.is_empty()
-                ))
+                )
+                || (env.metadata.inferred_bindings.contains(id)
+                    && reader_kind(ty, env) == Some(Kind::Reader)))
                 && !matches!(init, Expr::Undefined) =>
             {
                 let inferred = expression(init, env);
+                if reader_kind(ty, env) == Some(Kind::Reader)
+                    && reader_kind(&inferred, env) != Some(Kind::ByobReader)
+                {
+                    continue;
+                }
                 if let Some(bindings) = bindings.as_deref_mut()
                     && is_resolvable_type(&inferred)
                 {

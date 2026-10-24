@@ -1455,6 +1455,7 @@ dependencies = [
  "anyhow",
  "perry-frontend",
  "perry-mir",
+ "perry-wit-diagnostics",
  "pliron",
 ]
 

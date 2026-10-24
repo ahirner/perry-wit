@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 pub mod generics;
 mod globals;
 pub use globals::{captured, class_functions, class_functions_mut};
+mod records;
+pub use records::{Classes, RecordId};
 #[derive(Clone, Debug, PartialEq)]
 struct TypeKey(HirType);
 
@@ -174,6 +176,7 @@ pub struct Declarations<'h> {
     pub interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
     class_names: HashSet<String>,
+    records: std::cell::RefCell<records::Records>,
     pub foreign: &'h HashMap<String, crate::hir::Foreign>,
     pub integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
@@ -200,8 +203,8 @@ impl<'h> Declarations<'h> {
             .collect();
         let class_names = classes
             .iter()
-            .filter(|c| !crate::hir_compat::is_object_literal(&c.name))
-            .map(|c| c.name.clone())
+            .filter(|class| !crate::hir_compat::is_object_literal(&class.name))
+            .map(|class| class.name.clone())
             .collect();
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
@@ -240,6 +243,7 @@ impl<'h> Declarations<'h> {
             interfaces,
             type_aliases,
             class_names,
+            records: std::cell::RefCell::default(),
             foreign,
             integer_imports,
             imported_types,
@@ -251,6 +255,15 @@ impl<'h> Declarations<'h> {
         self.interfaces.contains_key(name)
             || self.type_aliases.contains_key(name)
             || self.class_names.contains(name)
+    }
+
+    /// Intern source identity and place its fields in canonical name order.
+    pub fn record_id(
+        &self,
+        instance: Option<&generics::InstanceKey>,
+        fields: &mut [(String, TypeId, bool)],
+    ) -> RecordId {
+        self.records.borrow_mut().intern(instance, fields)
     }
 
     pub fn integer_spec(&self, name: &str) -> Option<(u32, Signedness)> {
@@ -420,23 +433,5 @@ impl HirTypeExt for HirType {
             _ => {}
         }
         f(self);
-    }
-}
-
-/// Canonical structural source identity, independent of its eventual representation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RecordIdentity<K, Name = String>(Vec<(Name, K)>);
-impl<K, Name: Ord> RecordIdentity<K, Name> {
-    pub fn named(mut fields: Vec<(Name, K)>) -> Self {
-        fields.sort_by(|left, right| left.0.cmp(&right.0));
-        Self(fields)
-    }
-}
-impl<K, Name> RecordIdentity<K, Name> {
-    pub fn ordered(fields: Vec<(Name, K)>) -> Self {
-        Self(fields)
-    }
-    pub fn fields(&self) -> &[(Name, K)] {
-        &self.0
     }
 }

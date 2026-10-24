@@ -72,6 +72,7 @@ impl<'s> FunctionBuilder<'s> {
         let (&class_name, &(_, class)) = self
             .shapes
             .classes
+            .named
             .get_key_value(class_name)
             .with_context(|| format!("unknown class {class_name}"))?;
         let mut pre_evaluated: Option<Vec<Value>> = None;
@@ -219,6 +220,7 @@ impl<'s> FunctionBuilder<'s> {
         let (&class_name, &(_, class)) = self
             .shapes
             .classes
+            .named
             .get_key_value(class_name)
             .with_context(|| format!("unknown class {class_name}"))?;
         let rec_val = self.load(ctx, this_slot)?;
@@ -361,12 +363,7 @@ impl<'s> FunctionBuilder<'s> {
         let param_ty = setter
             .params
             .first()
-            .and_then(|param| {
-                self.shapes
-                    .metadata
-                    .parameter_type(param.id, &param.ty)
-                    .resolved()
-            })
+            .and_then(|param| perry_frontend::contextual_type(&param.ty))
             .and_then(|ty| {
                 self.shapes
                     .class_value_type(ctx, owner_class, type_args, ty)
@@ -441,13 +438,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            let param_ty = if self
-                .shapes
-                .metadata
-                .parameter_type(param.id, &param.ty)
-                .resolved()
-                .is_none()
-                && !param.is_rest
+            let param_ty = if perry_frontend::contextual_type(&param.ty).is_none() && !param.is_rest
             {
                 None
             } else {
@@ -504,13 +495,7 @@ impl<'s> FunctionBuilder<'s> {
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
-                    } else if this
-                        .shapes
-                        .metadata
-                        .return_type(func, &func.return_type)
-                        .resolved()
-                        .is_none()
-                    {
+                    } else if perry_frontend::contextual_type(&func.return_type).is_none() {
                         InlineResult::Inferred
                     } else {
                         this.shapes

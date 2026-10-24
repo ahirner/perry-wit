@@ -1,7 +1,7 @@
 # Embedding
 
 The compiler ships as the `perry_wit` Rust crate and as a standalone WASI 0.2 component.
-Prebuilt guest helper modules are embedded in the compiler binary, so compilation runs entirely in memory.
+Precompiled runtime libraries are embedded in the compiler binary, so compilation runs entirely in memory.
 
 ## Rust
 

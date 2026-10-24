@@ -1,5 +1,6 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
+use crate::diagnostics::annotate;
 
 pub(super) struct ParamSig<'s> {
     pub(super) source: &'s perry_frontend::hir::ir::Param,
@@ -83,42 +84,42 @@ pub(super) fn build_module(
                 "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
             );
         if matches!(source, "fs" | "node:fs") {
-            return Err(locations.annotate_import(
+            return Err(annotate(
                 anyhow!(
                     "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
                 ),
-                source,
+                locations.import_span(source),
             ));
         }
         if module.is_none() && builtin {
-            return Err(locations.annotate_import(
+            return Err(annotate(
                 anyhow!(
                     "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
                 ),
-                source,
+                locations.import_span(source),
             ));
         }
         let Some(module) = module else { continue };
         for specifier in &import.specifiers {
             let perry_frontend::hir::ir::ImportSpecifier::Named { imported, local } = specifier
             else {
-                return Err(locations.annotate_import(
+                return Err(annotate(
                     anyhow!("only named imports from {source} are supported yet"),
-                    source,
+                    locations.import_span(source),
                 ));
             };
             let builtin = Builtin::from_import(module, imported)
                 .with_context(|| format!("{imported} from {source} is not supported yet"))
-                .map_err(|error| locations.annotate_import(error, source))?;
+                .map_err(|error| annotate(error, locations.import_span(source)))?;
             builtins.insert(local.as_str(), builtin);
         }
     }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
         if function.is_generator {
-            return Err(locations.annotate_function(
+            return Err(annotate(
                 anyhow!("generator function {} is not supported yet", function.name),
-                &function.name,
+                locations.function_span(&function.name),
             ));
         }
 
@@ -156,7 +157,7 @@ pub(super) fn build_module(
             (ty, true) => shapes.settled_type(ctx, ty).map(Some),
             (ty, false) => shapes.value_type(ctx, ty).map(Some),
         }
-        .map_err(|error| locations.annotate_function(error, &function.name))
+        .map_err(|error| annotate(error, locations.function_span(&function.name)))
         .with_context(|| format!("result of {}", function.name))?;
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
@@ -237,7 +238,7 @@ pub(super) fn build_module(
     }
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
-            .map_err(|error| locations.annotate_function(error, &function.name))
+            .map_err(|error| annotate(error, locations.function_span(&function.name)))
             .with_context(|| format!("lowering function {}", function.name))?;
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::set_source_span(ctx, &func, &span);

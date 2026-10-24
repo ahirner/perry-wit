@@ -93,11 +93,11 @@ jobs:
         name: perry-wit-${{ matrix.target }}
         path: dist/perry-wit-${{ matrix.target }}.tar.gz
         if-no-files-found: error
-    - name: Package core helpers and Wasm compiler
+    - name: Package runtime libraries and Wasm compiler
       if: matrix.os == 'ubuntu-latest'
       run: |
-        nix build -L .#core-helpers --out-link result-helpers
-        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib
+        nix build -L .#runtime-libraries --out-link result-runtime-libraries
+        tar -czf dist/perry-wit-runtime-libraries.tar.gz -C result-runtime-libraries lib
         nix build -L .#perry-wit-wasm --out-link result-compiler
         mkdir -p dist/compiler
         cp result-compiler/lib/perry-wit.wasm dist/compiler/
@@ -106,8 +106,8 @@ jobs:
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:
-        name: perry-wit-core-helpers
-        path: dist/perry-wit-core-helpers.tar.gz
+        name: perry-wit-runtime-libraries
+        path: dist/perry-wit-runtime-libraries.tar.gz
         if-no-files-found: error
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'

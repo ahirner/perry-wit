@@ -1,8 +1,7 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use crate::{LowerError, LowerErrorKind};
 use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::SourceSpan;
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use std::{collections::HashMap, path::PathBuf};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -69,12 +68,12 @@ impl<'s> Locations<'s> {
         module.visit_mut_with(&mut Preserver(&mut self.operators));
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<Span> {
+    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
         let [Expr::String(token), _] = parts else {
             return None;
         };
         let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
-        self.operators.get(index).copied()
+        self.operators.get(index).and_then(|span| self.span(*span))
     }
 
     pub fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
@@ -97,59 +96,37 @@ impl<'s> Locations<'s> {
             .and_then(|info| self.span(info.span))
     }
 
-    pub fn annotate_function(&self, error: anyhow::Error, name: &str) -> anyhow::Error {
-        let span = self
-            .functions
-            .get(name)
-            .map_or(swc_common::DUMMY_SP, |info| info.span);
-        self.annotate(error, span)
+    pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
+        self.span(Span::new(
+            swc_common::BytePos(start),
+            swc_common::BytePos(start.saturating_add(len)),
+        ))
     }
 
-    pub fn annotate_offset(&self, error: anyhow::Error, start: u32, len: u32) -> anyhow::Error {
-        if start == 0 {
-            return error;
-        }
-        self.annotate(
-            error,
-            Span::new(
-                swc_common::BytePos(start),
-                swc_common::BytePos(start.saturating_add(len)),
-            ),
-        )
+    pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+        self.calls
+            .get(&byte_offset)
+            .and_then(|span| self.span(*span))
+            .or_else(|| self.offset_span(byte_offset, 1))
+    }
+
+    pub fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+        self.members
+            .get(&byte_offset)
+            .and_then(|span| self.span(*span))
+            .or_else(|| self.call_span(byte_offset))
+    }
+
+    pub fn type_span(&self, name: &str) -> Option<SourceSpan> {
+        self.types.get(name).and_then(|span| self.span(*span))
+    }
+
+    pub fn import_span(&self, source: &str) -> Option<SourceSpan> {
+        self.imports.get(source).and_then(|span| self.span(*span))
     }
 
     pub fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        if byte_offset == 0 {
-            return error;
-        }
-        let span = self.calls.get(&byte_offset).copied().unwrap_or_else(|| {
-            Span::new(
-                swc_common::BytePos(byte_offset),
-                swc_common::BytePos(byte_offset.saturating_add(1)),
-            )
-        });
-        self.annotate(error, span)
-    }
-
-    pub fn annotate_member(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        match self.members.get(&byte_offset) {
-            Some(&span) => self.annotate(error, span),
-            None => self.annotate_call(error, byte_offset),
-        }
-    }
-
-    pub fn annotate_type(&self, error: anyhow::Error, name: &str) -> anyhow::Error {
-        match self.types.get(name) {
-            Some(&span) => self.annotate(error, span),
-            None => error,
-        }
-    }
-
-    pub fn annotate_import(&self, error: anyhow::Error, source: &str) -> anyhow::Error {
-        match self.imports.get(source) {
-            Some(&span) => self.annotate(error, span),
-            None => error,
-        }
+        Self::attach(error, self.call_span(byte_offset))
     }
 
     fn span(&self, span: Span) -> Option<SourceSpan> {
@@ -162,28 +139,16 @@ impl<'s> Locations<'s> {
     }
 
     pub fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
-        if error
-            .downcast_ref::<LowerError>()
-            .is_some_and(|d| d.span.is_some())
-        {
-            return error;
+        Self::attach(error, self.span(span))
+    }
+
+    fn attach(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
+        let mut diagnostic =
+            PerryDiagnostic::from_error(error, DiagnosticCode::UnsupportedExpression);
+        if diagnostic.span.is_none() {
+            diagnostic.span = span;
         }
-        let resolved = self.span(span);
-        match LowerError::try_from_anyhow(error) {
-            Ok(mut diagnostic) => {
-                if resolved.is_some() {
-                    diagnostic.span = resolved;
-                }
-                diagnostic.into()
-            }
-            Err(error) => {
-                let mut diagnostic =
-                    LowerError::new(LowerErrorKind::UnsupportedExpression(error.to_string()));
-                diagnostic.span = resolved;
-                diagnostic.notes = error.chain().skip(1).map(ToString::to_string).collect();
-                diagnostic.into()
-            }
-        }
+        diagnostic.into()
     }
 
     pub fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {

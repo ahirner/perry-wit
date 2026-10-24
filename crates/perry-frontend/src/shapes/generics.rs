@@ -54,6 +54,8 @@ pub enum DeclarationId {
     Utility(Utility),
 }
 
+pub type InstanceKey = (DeclarationId, Vec<TypeId>);
+
 /// The generic declaration an instantiation expands.
 #[derive(Clone, Copy)]
 pub enum Declaration<'a> {

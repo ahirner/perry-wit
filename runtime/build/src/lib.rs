@@ -15,7 +15,9 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
         fs::remove_dir_all(output)?;
     }
     fs::create_dir_all(output)?;
-    println!("cargo:rerun-if-changed={}", runtime.display());
+    for input in ["Cargo.toml", "Cargo.lock", ".cargo", "undefined.txt"] {
+        println!("cargo:rerun-if-changed={}", runtime.join(input).display());
+    }
     println!("cargo:rerun-if-env-changed=PERRY_RUNTIME_TARGET_DIR");
     println!("cargo:rerun-if-env-changed=PERRY_PREBUILT_RUNTIME_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
@@ -54,6 +56,21 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
         .as_array()
         .ok_or("runtime packages missing")?;
     for package in packages {
+        let manifest = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .ok_or("runtime package manifest missing")?,
+        );
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        let directory = manifest
+            .parent()
+            .ok_or("runtime package directory missing")?;
+        for input in ["src", "build.rs"] {
+            let input = directory.join(input);
+            if input.exists() {
+                println!("cargo:rerun-if-changed={}", input.display());
+            }
+        }
         let Some(artifacts) = package["metadata"]["perry"]["artifacts"].as_array() else {
             continue;
         };

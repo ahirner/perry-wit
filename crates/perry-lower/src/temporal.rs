@@ -466,7 +466,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, intrinsic, vec![arg]))
     }
 
-    /// A field of a `PlainDate` or `PlainDateTime` (`time-helper` part numbers).
+    /// A field of a `PlainDate` or `PlainDateTime` (`perry-time` part numbers).
     pub(super) fn temporal_field(
         &mut self,
         ctx: &mut Context,

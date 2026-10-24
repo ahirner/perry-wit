@@ -1,17 +1,12 @@
-//! Logical value families and their opaque MIR types.
+//! Opaque MIR types and reference-representation queries.
 use super::{ArrayType, RecordType, ResourceType, SettledType, VariantType};
-use pliron::{
-    builtin::types::{FP64Type, IntegerType},
-    context::Context,
-    derive::pliron_type,
-    r#type::TypeHandle,
-};
+use pliron::{context::Context, derive::pliron_type, r#type::TypeHandle};
 
 macro_rules! value_types {
     (
-        opaque { $($(#[$doc:meta])* $kind:ident => $ty:ident($name:literal, $label:literal, [$($alias:literal),*]);)* }
+        opaque { $($(#[$doc:meta])* $ty:ident($name:literal, [$($alias:literal),*]);)* }
         internal { $($(#[$internal_doc:meta])* $internal:ident => $internal_name:literal;)* }
-        structural { $($structural:ident => $structure:ident, $structural_label:literal;)* }
+        structural { $($structure:ident;)* }
     ) => {
         $(
             $(#[$doc])*
@@ -26,42 +21,16 @@ macro_rules! value_types {
             pub struct $internal;
         )*
 
-        /// Source-level families whose values participate in ECMAScript conversions.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum ValueKind { Number, Boolean, $($kind,)* $($structural,)* }
+        /// Whether a MIR value has an opaque or structural reference representation.
+        pub fn is_reference_type(ctx: &Context, ty: TypeHandle) -> bool {
+            let ty = ty.deref(ctx);
+            $(ty.is::<$ty>() ||)* $(ty.is::<$structure>() ||)* false
+        }
 
-        impl ValueKind {
-            pub const fn label(self) -> &'static str {
-                match self {
-                    Self::Number => "number",
-                    Self::Boolean => "boolean",
-                    $(Self::$kind => $label,)*
-                    $(Self::$structural => $structural_label,)*
-                }
-            }
-
-            pub fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
-                let ty = ty.deref(ctx);
-                if ty.is::<FP64Type>() {
-                    return Some(Self::Number);
-                }
-                if let Some(integer) = ty.downcast_ref::<IntegerType>() {
-                    return match integer.width() {
-                        1 => Some(Self::Boolean),
-                        64 => Some(Self::BigInt),
-                        _ => None,
-                    };
-                }
-                $(if ty.is::<$ty>() { return Some(Self::$kind); })*
-                $(if ty.is::<$structure>() { return Some(Self::$structural); })*
-                None
-            }
-
-            pub fn builtin_type(ctx: &Context, name: &str) -> Option<TypeHandle> {
-                match name {
-                    $($($alias => Some($ty::get(ctx).into()),)*)*
-                    _ => None,
-                }
+        pub fn builtin_value_type(ctx: &Context, name: &str) -> Option<TypeHandle> {
+            match name {
+                $($($alias => Some($ty::get(ctx).into()),)*)*
+                _ => None,
             }
         }
     };
@@ -70,66 +39,66 @@ macro_rules! value_types {
 value_types! {
     opaque {
         /// An immutable, validated UTF-8 string indexed by Unicode scalar values.
-        String => StringType("perry.string", "string", []);
+        StringType("perry.string", []);
         /// Immutable arbitrary-precision signed integer, preserving every WIT s64/u64 value.
-        BigInt => BigIntType("perry.bigint", "bigint", []);
+        BigIntType("perry.bigint", []);
         /// A `Uint8Array` view `{ length, data }` over bytes in the task region. Views created
         /// with `subarray` share the underlying byte buffer.
-        Bytes => BytesType("perry.bytes", "Uint8Array", ["Uint8Array"]);
+        BytesType("perry.bytes", ["Uint8Array"]);
 
-        Url => UrlType("perry.url", "URL", ["URL"]);
+        UrlType("perry.url", ["URL"]);
 
-        SearchParams => SearchParamsType("perry.search_params", "URLSearchParams", ["URLSearchParams"]);
+        SearchParamsType("perry.search_params", ["URLSearchParams"]);
         /// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
-        Json => JsonType("perry.json", "JSON value", []);
+        JsonType("perry.json", []);
         /// A mutable Date object containing epoch milliseconds or NaN.
-        Date => DateType("perry.date", "Date", ["Date"]);
+        DateType("perry.date", ["Date"]);
         /// `fs.Stats` of `stat()`: the entry type and size, read through `perry.intrinsic`.
-        Stats => StatsType("perry.stats", "Stats", []);
+        StatsType("perry.stats", []);
         /// A Fetch `Headers` list.
-        Headers => HeadersType("perry.headers", "Headers", ["Headers"]);
+        HeadersType("perry.headers", ["Headers"]);
         /// A Fetch `Response`.
-        Response => ResponseType("perry.response", "Response", ["Response"]);
+        ResponseType("perry.response", ["Response"]);
         /// A Fetch `Request`.
-        Request => RequestType("perry.request", "Request", ["Request"]);
+        RequestType("perry.request", ["Request"]);
         /// A Web `WritableStream` over a console output (`Writable.toWeb(process.stdout)`).
-        Writable => WritableType("perry.writable", "WritableStream", ["WritableStream"]);
+        WritableType("perry.writable", ["WritableStream"]);
         /// A `WritableStreamDefaultWriter`.
-        Writer => WriterType("perry.writer", "WritableStreamDefaultWriter", ["WritableStreamDefaultWriter"]);
+        WriterType("perry.writer", ["WritableStreamDefaultWriter"]);
         /// A `ReadableStream<Uint8Array>` over a WIT `stream<u8>`.
-        Readable => ReadableType("perry.readable", "ReadableStream", ["ReadableStream"]);
+        ReadableType("perry.readable", ["ReadableStream"]);
         /// A detachable `ArrayBuffer` backing mutable byte views.
-        ByteBuffer => ByteBufferType("perry.byte_buffer", "ArrayBuffer", ["ArrayBuffer"]);
+        ByteBufferType("perry.byte_buffer", ["ArrayBuffer"]);
         /// A `ReadableStreamBYOBReader`.
-        ByobReader => ByobReaderType("perry.byob_reader", "ReadableStreamBYOBReader", ["ReadableStreamBYOBReader"]);
+        ByobReaderType("perry.byob_reader", ["ReadableStreamBYOBReader"]);
         /// A `ReadableStreamDefaultReader`.
-        Reader => ReaderType("perry.reader", "ReadableStreamDefaultReader", ["ReadableStreamDefaultReader"]);
+        ReaderType("perry.reader", ["ReadableStreamDefaultReader"]);
         /// A reader's `{ done, value }`.
-        ReadResult => ReadResultType("perry.read_result", "ReadableStreamReadResult", ["ReadableStreamReadResult"]);
+        ReadResultType("perry.read_result", ["ReadableStreamReadResult"]);
         /// A `Temporal.Instant`: 16 opaque bytes, little-endian `i128` epoch nanoseconds
-        /// (the `time-helper` codec).
-        Instant => InstantType("perry.instant", "Temporal.Instant", ["Temporal.Instant"]);
+        /// (the `perry-time` codec).
+        InstantType("perry.instant", ["Temporal.Instant"]);
         /// A `Temporal.PlainDate`: 16 opaque bytes, an `i32` epoch day and zero nanoseconds.
-        PlainDate => PlainDateType("perry.plain_date", "Temporal.PlainDate", ["Temporal.PlainDate"]);
+        PlainDateType("perry.plain_date", ["Temporal.PlainDate"]);
         /// A `Temporal.PlainDateTime`: 16 opaque bytes, an `i32` epoch day and the `u64`
         /// nanosecond of that day.
-        PlainDateTime => PlainDateTimeType("perry.plain_date_time", "Temporal.PlainDateTime", ["Temporal.PlainDateTime"]);
+        PlainDateTimeType("perry.plain_date_time", ["Temporal.PlainDateTime"]);
         /// An `AbortController` and its `AbortSignal` (one object): aborting rejects the timers that
         /// watch it.
-        Abort => AbortType("perry.abort", "AbortController", ["AbortController","AbortSignal"]);
+        AbortType("perry.abort", ["AbortController","AbortSignal"]);
         /// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
         /// response being built.
-        Incoming => IncomingType("perry.incoming", "IncomingRequest", []);
+        IncomingType("perry.incoming", []);
         /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value.
-        Exception => ExceptionType("perry.exception", "Error", ["Error","TypeError","RangeError","ReferenceError","SyntaxError"]);
+        ExceptionType("perry.exception", ["Error","TypeError","RangeError","ReferenceError","SyntaxError"]);
         /// A `TextEncoder`: stateless, so every instance is the same static UTF-8 encoder.
-        Encoder => EncoderType("perry.encoder", "TextEncoder", ["TextEncoder"]);
+        EncoderType("perry.encoder", ["TextEncoder"]);
         /// Stateful UTF-8 decoder with at most three pending bytes.
-        Decoder => DecoderType("perry.decoder", "TextDecoder", ["TextDecoder"]);
+        DecoderType("perry.decoder", ["TextDecoder"]);
         /// Immutable, statically compiled regular expression program.
-        Regex => RegexType("perry.regex", "RegExp", ["RegExp"]);
+        RegexType("perry.regex", ["RegExp"]);
         /// The finite primitive union `number | string`, with an exact owner slot for its string case.
-        NumberString => NumberStringType("perry.number_string", "number | string", []);
+        NumberStringType("perry.number_string", []);
     }
     internal {
         /// Suspended JSON serialization between replacer calls.
@@ -143,10 +112,10 @@ value_types! {
         TransferType => "perry.transfer";
     }
     structural {
-        Array => ArrayType, "array";
-        Record => RecordType, "record";
-        Variant => VariantType, "variant";
-        Resource => ResourceType, "WIT resource";
-        Settled => SettledType, "PromiseSettlementResult";
+        ArrayType;
+        RecordType;
+        VariantType;
+        ResourceType;
+        SettledType;
     }
 }

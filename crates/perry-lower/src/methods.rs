@@ -22,48 +22,8 @@ impl ReceiverExt for Receiver {
         } else if set_entry_type(ctx, ty).is_some() {
             Self::Set
         } else {
-            Self::Value(source_kind(kind(ctx, value)?))
+            Self::Value(kind(ctx, value)?)
         })
-    }
-}
-fn source_kind(kind: Kind) -> perry_frontend::methods::Kind {
-    use perry_frontend::methods::Kind as Source;
-    match kind {
-        Kind::Number => Source::Number,
-        Kind::Boolean => Source::Boolean,
-        Kind::String => Source::String,
-        Kind::BigInt => Source::BigInt,
-        Kind::Bytes => Source::Bytes,
-        Kind::Url => Source::Url,
-        Kind::SearchParams => Source::SearchParams,
-        Kind::Json => Source::Json,
-        Kind::Date => Source::Date,
-        Kind::Stats => Source::Stats,
-        Kind::Headers => Source::Headers,
-        Kind::Response => Source::Response,
-        Kind::Request => Source::Request,
-        Kind::Writable => Source::Writable,
-        Kind::Writer => Source::Writer,
-        Kind::Readable => Source::Readable,
-        Kind::ByteBuffer => Source::ByteBuffer,
-        Kind::ByobReader => Source::ByobReader,
-        Kind::Reader => Source::Reader,
-        Kind::ReadResult => Source::ReadResult,
-        Kind::Instant => Source::Instant,
-        Kind::PlainDate => Source::PlainDate,
-        Kind::PlainDateTime => Source::PlainDateTime,
-        Kind::Abort => Source::Abort,
-        Kind::Incoming => Source::Incoming,
-        Kind::Exception => Source::Exception,
-        Kind::Encoder => Source::Encoder,
-        Kind::Decoder => Source::Decoder,
-        Kind::Regex => Source::Regex,
-        Kind::NumberString => Source::NumberString,
-        Kind::Array => Source::Array,
-        Kind::Record => Source::Record,
-        Kind::Variant => Source::Variant,
-        Kind::Resource => Source::Resource,
-        Kind::Settled => Source::Settled,
     }
 }
 pub(super) trait CallExt<'s> {

@@ -2,10 +2,8 @@
 use anyhow::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
-mod diagnostics;
 mod open_types;
-pub use diagnostics::{LowerError, LowerErrorKind, ShapeError};
-pub use open_types::{TypeState, contextual_type, has_reader_overload};
+pub use open_types::{TypeState, binding_type, contextual_type};
 mod absence;
 pub mod collections;
 pub mod completion;
@@ -64,7 +62,6 @@ pub fn load_sources<'s>(
     let mut lowered = hir_compat::lower(loaded, identity)?;
     infer::specialize_functions(ctx, &mut lowered.module, &lowered.metadata, foreign)?;
     infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
-    open_types::mark(&mut lowered.module, &mut lowered.metadata);
     Ok(Program {
         module: lowered.module,
         metadata: lowered.metadata,

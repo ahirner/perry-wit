@@ -50,8 +50,15 @@ export async function sumBytes(input: ReadableStream<Uint8Array>): Promise<numbe
     reader.releaseLock(); return total;
 }
 
+function openByob(input: ReadableStream<Uint8Array>) {
+    return input.getReader({mode: "byob"});
+}
+
+type ReaderAlias = ReadableStreamDefaultReader;
+
 export async function shortEof(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
-    const reader = input.getReader({mode: "byob"});
+    const opened = openByob(input) as ReaderAlias;
+    const reader = opened as ReadableStreamBYOBReader;
     const result = await reader.read(new Uint8Array(8), {min: 8});
     const bytes = result.value; if (bytes === undefined) throw 1;
     const output = new Uint8Array(10); output[0] = result.done ? 1 : 0; output[1] = bytes.length;

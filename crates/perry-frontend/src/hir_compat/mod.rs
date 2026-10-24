@@ -1,10 +1,11 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
-use crate::{LowerError, LowerErrorKind, modules};
+use crate::modules;
 use anyhow::{Context as _, Result, anyhow, bail};
 use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
@@ -29,27 +30,9 @@ pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
 
 pub struct Metadata<'s> {
-    pub(crate) unannotated_bindings: HashSet<LocalId>,
-    pub(crate) open_types: crate::open_types::OpenTypes,
     pub locations: locations::Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
-}
-
-impl Metadata<'_> {
-    pub fn binding_type<'t>(&self, id: LocalId, ty: &'t HirType) -> crate::TypeState<'t> {
-        self.open_types.binding(id, ty)
-    }
-    pub fn parameter_type<'t>(&self, id: LocalId, ty: &'t HirType) -> crate::TypeState<'t> {
-        self.open_types.parameter(id, ty)
-    }
-    pub fn return_type<'t>(
-        &self,
-        function: &perry_hir::ir::Function,
-        ty: &'t HirType,
-    ) -> crate::TypeState<'t> {
-        self.open_types.result(function, ty)
-    }
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -62,7 +45,6 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let mut locations = loaded.locations;
     locations.collect(&ast);
     let spans = source::validate(&ast, &locations)?;
-    let unannotated_spans = source::unannotated_bindings(&ast);
     let mut constructors = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
@@ -80,9 +62,10 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()
             .and_then(|error| error.span);
-        let diagnostic = LowerError::new(LowerErrorKind::UnsupportedExpression(format!(
-            "failed to lower {identity}: {error:#}"
-        )));
+        let diagnostic = PerryDiagnostic::error(
+            DiagnosticCode::UnsupportedExpression,
+            format!("failed to lower {identity}: {error:#}"),
+        );
         let error = diagnostic.into();
         match span {
             Some(span) => locations.annotate(error, span),
@@ -95,20 +78,9 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         .iter()
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
-    let unannotated_bindings = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| {
-            unannotated_spans
-                .contains(&(span.start, span.end))
-                .then_some(*id)
-        })
-        .collect();
     Ok(LoweredHir {
         module,
         metadata: Metadata {
-            unannotated_bindings,
-            open_types: crate::open_types::OpenTypes::default(),
             locations,
             inferred_bindings,
             constructors,
@@ -127,73 +99,6 @@ pub fn is_import_initializer(callee: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn open_types_preserve_source_annotation_origins() {
-        let source = r#"
-export function inspect(value:any):number {
-    let open;
-    const dynamic:any = value;
-    return 1;
-}
-class Reader {
-    open(value) { return value; }
-    dynamic(value:any):any { return value; }
-}
-"#;
-        let modules = std::collections::BTreeMap::new();
-        let foreign = HashMap::new();
-        let program = crate::load_sources(
-            &mut pliron::context::Context::new(),
-            source,
-            "origins.ts",
-            &modules,
-            &foreign,
-        )
-        .unwrap();
-        let function = program
-            .module()
-            .functions
-            .iter()
-            .find(|function| function.name == "inspect")
-            .unwrap();
-        let metadata = program.metadata();
-        let mut checked_bindings = 0;
-        for statement in &function.body {
-            if let Stmt::Let { id, name, ty, .. } = statement {
-                match name.as_str() {
-                    "open" => {
-                        checked_bindings += 1;
-                        assert_eq!(metadata.binding_type(*id, ty), crate::TypeState::Open);
-                    }
-                    "dynamic" => {
-                        checked_bindings += 1;
-                        assert_eq!(metadata.binding_type(*id, ty), crate::TypeState::Dynamic)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        assert_eq!(checked_bindings, 2);
-        let class = program
-            .module()
-            .classes
-            .iter()
-            .find(|class| class.name == "Reader")
-            .unwrap();
-        for method in &class.methods {
-            let state = if method.name == "open" {
-                crate::TypeState::Open
-            } else {
-                crate::TypeState::Dynamic
-            };
-            assert_eq!(
-                metadata.parameter_type(method.params[0].id, &method.params[0].ty),
-                state
-            );
-            assert_eq!(metadata.return_type(method, &method.return_type), state);
-        }
-    }
 
     #[test]
     fn constructor_preservation_respects_lexical_bindings() {
@@ -231,25 +136,6 @@ function builtin() { return new Set<string>(); }
             }
         }
     }
-}
-
-/// Source fields carried by a synthesized object-literal class.
-pub fn object_literal_shapes(module: &HirModule) -> HashMap<&str, Vec<&str>> {
-    module
-        .classes
-        .iter()
-        .filter(|class| is_object_literal(&class.name))
-        .map(|class| {
-            (
-                class.name.as_str(),
-                class
-                    .fields
-                    .iter()
-                    .map(|field| field.name.as_str())
-                    .collect(),
-            )
-        })
-        .collect()
 }
 
 pub fn describe_expression(expression: &Expr) -> String {

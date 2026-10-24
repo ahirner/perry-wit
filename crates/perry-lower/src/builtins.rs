@@ -176,7 +176,7 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        if self.shapes.classes.contains_key(ty) {
+        if self.shapes.classes.named.contains_key(ty) {
             let is_inst = self
                 .shapes
                 .class_of_type(ctx, value.get_type(ctx))

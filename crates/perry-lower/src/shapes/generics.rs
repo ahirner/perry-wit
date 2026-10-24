@@ -13,7 +13,7 @@ impl<'h> DeclarationLookup<'h> for Shapes<'h> {
         self.decls.type_alias(name)
     }
     fn class(&self, name: &str) -> Option<(usize, &'h Class)> {
-        self.classes.get(name).copied()
+        self.classes.named.get(name).copied()
     }
 }
 
@@ -25,7 +25,7 @@ impl<'s> Shapes<'s> {
         type_args: &[TypeId],
         ty: &HirType,
     ) -> Result<TypeHandle> {
-        let Some((_, class)) = self.classes.get(class_name) else {
+        let Some((_, class)) = self.classes.named.get(class_name) else {
             return self.value_type(ctx, ty);
         };
         if class.type_params.is_empty() {
@@ -75,7 +75,6 @@ impl<'s> Shapes<'s> {
                     .source_record(
                         ctx,
                         Some(&key),
-                        false,
                         properties
                             .iter()
                             .map(|(n, ty, opt)| (n.as_str(), ty.hir(ctx), *opt))
@@ -136,7 +135,6 @@ impl<'s> Shapes<'s> {
                     .source_record(
                         ctx,
                         Some(&key),
-                        nominal,
                         properties
                             .iter()
                             .map(|(name, ty, optional)| (name.as_str(), ty.hir(ctx), *optional))
@@ -159,7 +157,6 @@ impl<'s> Shapes<'s> {
                     self.source_record(
                         ctx,
                         Some(&key),
-                        false,
                         obj.properties
                             .iter()
                             .map(|(name, p)| (name.as_str(), &p.ty, p.optional))

@@ -84,7 +84,7 @@ impl Kind {
             Self::Settled => "PromiseSettlementResult",
         }
     }
-    fn builtin(name: &str) -> Option<Self> {
+    pub(crate) fn builtin(name: &str) -> Option<Self> {
         match name {
             "Uint8Array" => Some(Self::Bytes),
             "URL" => Some(Self::Url),

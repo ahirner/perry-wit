@@ -99,10 +99,7 @@ fn compile_for_world_with_memory_checks_impl(
 }
 
 fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
-    perry_frontend::source_files::load(source, file_name).map_err(|error| {
-        perry_lower::LowerError::try_from_anyhow(error)
-            .map_or_else(|error| error, |lower| lower_diagnostic(lower).into())
-    })
+    perry_frontend::source_files::load(source, file_name)
 }
 
 fn compile_world(
@@ -285,43 +282,9 @@ fn lower(
     Ok((mir, analyses))
 }
 
-fn lower_diagnostic(error: perry_lower::LowerError) -> crate::PerryDiagnostic {
-    use perry_lower::{LowerErrorKind, ShapeError};
-    let code = match &error.kind {
-        LowerErrorKind::Parse { .. } => crate::DiagnosticCode::ParseError,
-        LowerErrorKind::ModuleResolution { .. } => crate::DiagnosticCode::ModuleResolution,
-        LowerErrorKind::ImportSignatureMismatch { .. } => {
-            crate::DiagnosticCode::ImportSignatureMismatch
-        }
-        LowerErrorKind::Shape(shape) => match shape {
-            ShapeError::MissingTypeAnnotation => crate::DiagnosticCode::MissingTypeAnnotation,
-            ShapeError::UnsupportedType { .. } | ShapeError::TypeMismatch { .. } => {
-                crate::DiagnosticCode::UnsupportedType
-            }
-            ShapeError::IncompatibleRecordLayout { .. } => {
-                crate::DiagnosticCode::IncompatibleRecordLayout
-            }
-            ShapeError::AbsenceMismatch { .. } => crate::DiagnosticCode::AbsenceMismatch,
-        },
-        LowerErrorKind::MissingRequiredField { .. } => crate::DiagnosticCode::MissingRequiredField,
-        LowerErrorKind::UnsupportedOperator { .. } => crate::DiagnosticCode::UnsupportedOperator,
-        LowerErrorKind::UnsupportedSpread => crate::DiagnosticCode::UnsupportedSpread,
-        LowerErrorKind::UnsupportedExpression(_) => crate::DiagnosticCode::UnsupportedExpression,
-    };
-    let message = error.to_string();
-    let help = error.help();
-    let mut diagnostic =
-        crate::PerryDiagnostic::error(code, message).with_optional_span(error.span);
-    diagnostic.notes = error.notes;
-    if let Some(help) = help {
-        diagnostic = diagnostic.with_help(help);
-    }
-    diagnostic
-}
-
 fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
     match perry_lower::LowerError::try_from_anyhow(error) {
-        Ok(lower) => lower_diagnostic(lower),
+        Ok(lower) => lower.into(),
         Err(error) => {
             crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         }

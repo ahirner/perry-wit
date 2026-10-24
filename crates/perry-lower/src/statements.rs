@@ -348,12 +348,11 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        let type_state = self.shapes.metadata.binding_type(id, ty);
+        let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
         let declared = type_state
             .resolved()
             .map(|ty| self.shapes.value_type(ctx, ty))
             .transpose()?;
-        let reader_overload = init.is_some_and(perry_frontend::has_reader_overload);
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });
@@ -375,8 +374,7 @@ impl<'s> FunctionBuilder<'s> {
         let carrier = match (declared, init) {
             (Some(ty), Some(value))
                 if self.shapes.metadata.inferred_bindings.contains(&id)
-                    && (present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty)
-                        || reader_overload) =>
+                    && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
             {
                 value.get_type(ctx)
             }

@@ -1,7 +1,6 @@
 //! Map frontend declarations and record identities to MIR representations.
 //!
-//! The frontend canonicalizes structural fields. Nominal classes and recursive declarations
-//! reserve fresh MIR record handles, and object construction evaluates fields in source order.
+//! Frontend record identities map to carriers; object construction evaluates fields in source order.
 use crate::{LowerError, ShapeError};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
@@ -20,60 +19,20 @@ use std::{
 
 mod collection_types;
 pub(crate) use perry_frontend::shapes::TypeId;
-use perry_frontend::shapes::{Declarations, RecordIdentity, captured};
+use perry_frontend::shapes::{Classes, Declarations, RecordId, captured, generics::InstanceKey};
 
 mod generics;
 mod representation;
 use perry_frontend::shapes::perry_integer_spec;
 use representation::integer_mir_carrier;
 
-pliron::dict_key!(MIR_RECORD_INTERNER, "perry_mir_record_interner");
-pliron::context_registration!(register_mir_record_interner);
-type RecordKey = (RecordKind, RecordIdentity<TypeHandle>);
-struct RecordInterner {
-    records: std::sync::Mutex<HashMap<RecordKey, TypedHandle<RecordType>>>,
-    next_record: std::sync::atomic::AtomicUsize,
-}
-fn register_mir_record_interner(ctx: &mut Context) {
-    let idx = ctx.aux_data.insert(Box::new(RecordInterner {
-        records: std::sync::Mutex::new(HashMap::new()),
-        next_record: std::sync::atomic::AtomicUsize::new(0),
-    }));
-    ctx.aux_data_map.insert(MIR_RECORD_INTERNER.clone(), idx);
-}
-fn record_interner(ctx: &Context) -> &RecordInterner {
-    let idx = ctx.aux_data_map[&MIR_RECORD_INTERNER];
-    ctx.aux_data[idx]
-        .downcast_ref::<RecordInterner>()
-        .expect("record interner registered on Context")
-}
 fn fresh_record(
     ctx: &Context,
     kind: RecordKind,
     fields: Option<Vec<(String, TypeHandle)>>,
 ) -> Result<TypedHandle<RecordType>> {
-    let interner = record_interner(ctx);
-    loop {
-        let id = interner
-            .next_record
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        let name = identifier(&format!("shape_{id}"))?;
-        let Ok(record) = RecordType::get_kind(ctx, name.clone(), None, kind) else {
-            continue;
-        };
-        if record.deref(ctx).fields().is_ok() {
-            continue;
-        }
-        return match fields {
-            Some(fields) => RecordType::get_kind(ctx, name, Some(fields), kind)
-                .map_err(|e| anyhow!("{}", e.disp(ctx))),
-            None => Ok(record),
-        };
-    }
+    RecordType::fresh(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
 }
-
-type InstanceKey = (perry_frontend::shapes::generics::DeclarationId, Vec<TypeId>);
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
 /// annotated with a width-specific integer type.
@@ -115,7 +74,7 @@ pub(super) struct Shapes<'h> {
     pub(super) global_ids: HashSet<perry_frontend::hir::types::LocalId>,
     pub(super) type_env: perry_frontend::hir::HirTypeEnv,
     pub(super) decls: Declarations<'h>,
-    pub(super) classes: HashMap<&'h str, (usize, &'h perry_frontend::hir::ir::Class)>,
+    pub(super) classes: Classes<'h>,
     pub(super) static_fields: HashMap<
         (&'h str, &'h str),
         (
@@ -124,7 +83,6 @@ pub(super) struct Shapes<'h> {
         ),
     >,
     pub(super) class_records: RefCell<HashMap<TypeHandle, (&'h str, Vec<TypeId>)>>,
-    object_literal_shapes: HashMap<&'h str, Vec<&'h str>>,
     function_names: HashSet<&'h str>,
     local_source_spans:
         &'h HashMap<perry_frontend::hir::types::LocalId, perry_frontend::hir::ir::LocalSourceSpan>,
@@ -134,6 +92,7 @@ pub(super) struct Shapes<'h> {
     pending: RefCell<HashMap<InstanceKey, PendingShape>>,
     /// Resolved nominal instances keyed by declaration identity and type arguments.
     named: RefCell<HashMap<InstanceKey, TypeHandle>>,
+    records: RefCell<HashMap<RecordId, TypedHandle<RecordType>>>,
     inputs: RefCell<HashMap<TypeHandle, TypeHandle>>,
 }
 
@@ -155,20 +114,20 @@ impl<'h> Shapes<'h> {
             &hir.classes,
             foreign,
         );
-        let mut classes = HashMap::new();
+        let classes = Classes::new(&hir.classes);
         let mut static_fields = HashMap::new();
         let mut next_static_id = 0x8000_0000u32;
-        let object_literal_shapes = crate::hir_compat::object_literal_shapes(hir);
-        for (idx, class) in hir.classes.iter().enumerate() {
-            if !crate::hir_compat::is_object_literal(&class.name) {
-                classes.insert(class.name.as_str(), (idx, class));
-                for field in &class.static_fields {
-                    static_fields.insert(
-                        (class.name.as_str(), field.name.as_str()),
-                        (next_static_id, field),
-                    );
-                    next_static_id += 1;
-                }
+        for class in hir
+            .classes
+            .iter()
+            .filter(|class| classes.named.contains_key(class.name.as_str()))
+        {
+            for field in &class.static_fields {
+                static_fields.insert(
+                    (class.name.as_str(), field.name.as_str()),
+                    (next_static_id, field),
+                );
+                next_static_id += 1;
             }
         }
         let function_names = hir
@@ -177,7 +136,7 @@ impl<'h> Shapes<'h> {
             .map(|function| function.name.as_str())
             .collect();
         let mut global_ids = captured(hir);
-        if !hir.functions.is_empty() || !classes.is_empty() {
+        if !hir.functions.is_empty() || !classes.named.is_empty() {
             global_ids.extend(static_fields.values().map(|(id, _)| *id));
         }
         Shapes {
@@ -190,12 +149,12 @@ impl<'h> Shapes<'h> {
             classes,
             static_fields,
             class_records: RefCell::new(HashMap::new()),
-            object_literal_shapes,
             function_names,
             local_source_spans: &hir.local_source_spans,
             metadata,
             pending: RefCell::new(HashMap::new()),
             named: RefCell::new(HashMap::new()),
+            records: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
         }
     }
@@ -206,10 +165,11 @@ impl<'h> Shapes<'h> {
         id: perry_frontend::hir::types::LocalId,
     ) -> anyhow::Error {
         match self.local_source_spans.get(&id) {
-            Some(span) => self.metadata.locations.annotate_offset(
+            Some(span) => crate::diagnostics::annotate(
                 error,
-                span.start,
-                span.end.saturating_sub(span.start),
+                self.metadata
+                    .locations
+                    .offset_span(span.start, span.end.saturating_sub(span.start)),
             ),
             None => error,
         }
@@ -221,13 +181,11 @@ impl<'h> Shapes<'h> {
         byte_offset: u32,
         len: u32,
     ) -> anyhow::Error {
-        self.metadata
-            .locations
-            .annotate_offset(error, byte_offset, len)
+        crate::diagnostics::annotate(error, self.metadata.locations.offset_span(byte_offset, len))
     }
 
     pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        self.metadata.locations.annotate_call(error, byte_offset)
+        crate::diagnostics::annotate(error, self.metadata.locations.call_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -329,7 +287,7 @@ impl<'h> Shapes<'h> {
             &'h perry_frontend::hir::ir::Class,
         ) -> Option<&'h perry_frontend::hir::ir::Function>,
     ) -> Option<(&'h str, &'h perry_frontend::hir::ir::Function)> {
-        let (&owner_name, &(_, class)) = self.classes.get_key_value(class_name)?;
+        let (&owner_name, &(_, class)) = self.classes.named.get_key_value(class_name)?;
         Some((owner_name, find(class)?))
     }
 
@@ -380,8 +338,9 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        self.resolve_named(ctx, name)
-            .map_err(|error| self.metadata.locations.annotate_type(error, name))
+        self.resolve_named(ctx, name).map_err(|error| {
+            crate::diagnostics::annotate(error, self.metadata.locations.type_span(name))
+        })
     }
 
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
@@ -400,7 +359,7 @@ impl<'h> Shapes<'h> {
             if let Some(entry) = self.decls.imported_types.get(name) {
                 return self.foreign_value_type(ctx, entry);
             }
-            if let Some(ty) = perry_mir::ValueKind::builtin_type(ctx, name) {
+            if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
                 return Ok(ty);
             }
             if let Some(entry) = self.decls.foreign.get(name) {
@@ -418,26 +377,23 @@ impl<'h> Shapes<'h> {
         &self,
         ctx: &Context,
         named: Option<&InstanceKey>,
-        nominal: bool,
         fields: Vec<(&str, &HirType, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
-        let identity = RecordIdentity::named(
-            fields
-                .into_iter()
-                .map(|(name, ty, optional)| (name, (ty, optional)))
-                .collect(),
-        );
-        let fields: Vec<_> = identity
-            .fields()
-            .iter()
-            .map(|(name, (ty, optional))| (*name, *ty, *optional))
+        let mut fields: Vec<_> = fields
+            .into_iter()
+            .map(|(name, ty, optional)| (name.to_owned(), TypeId::intern(ctx, ty), optional))
             .collect();
+        let identity = self.decls.record_id(named, &mut fields);
+        if let Some(record) = self.records.borrow().get(&identity) {
+            return Ok(*record);
+        }
         if let Some(named) = named {
             let reentry = self.pending.borrow().get(named).copied();
             match reentry {
                 Some(PendingShape::Recursive(reserved)) => return Ok(reserved),
                 Some(PendingShape::Resolving) => {
                     let reserved = fresh_record(ctx, RecordKind::Object, None)?;
+                    self.records.borrow_mut().insert(identity, reserved);
                     self.pending
                         .borrow_mut()
                         .insert(named.clone(), PendingShape::Recursive(reserved));
@@ -453,6 +409,7 @@ impl<'h> Shapes<'h> {
         let typed = fields
             .iter()
             .map(|(field, ty, optional)| {
+                let ty = ty.hir(ctx);
                 let ty = if !*optional
                     && let Some(int_ty) = self.integer_type(ctx, ty)
                     && int_ty.deref(ctx).width() == 64
@@ -475,14 +432,17 @@ impl<'h> Shapes<'h> {
             _ => None,
         });
         let typed = typed?;
-        match reserved {
+        let record = match reserved {
             Some(record) => {
                 let name = record.deref(ctx).name().clone();
                 RecordType::get(ctx, name, Some(typed)).map_err(|e| anyhow!("{}", e.disp(ctx)))
             }
-            None if nominal => fresh_record(ctx, RecordKind::Object, Some(typed)),
+            None if let Some(record) = self.records.borrow().get(&identity) => Ok(*record),
+            None if identity.is_nominal() => fresh_record(ctx, RecordKind::Object, Some(typed)),
             None => self.mir_record(ctx, typed),
-        }
+        }?;
+        self.records.borrow_mut().insert(identity, record);
+        Ok(record)
     }
 
     /// A record from MIR field types, in any order.
@@ -508,34 +468,11 @@ impl<'h> Shapes<'h> {
         kind: RecordKind,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        let identity = if kind == RecordKind::Object {
-            RecordIdentity::named(fields)
-        } else {
-            RecordIdentity::ordered(fields)
-        };
-        let key = (kind, identity);
-        let interner = record_interner(ctx);
-        if let Some(record) = interner
-            .records
-            .lock()
-            .expect("record interner lock poisoned")
-            .get(&key)
-        {
-            return Ok(*record);
-        }
-        let record = fresh_record(ctx, kind, Some(key.1.fields().to_vec()))?;
-        interner
-            .records
-            .lock()
-            .expect("record interner lock poisoned")
-            .insert(key, record);
-        Ok(record)
+        RecordType::structural(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.
     pub(super) fn literal_fields(&self, class_name: &str) -> Option<&[&'h str]> {
-        self.object_literal_shapes
-            .get(class_name)
-            .map(Vec::as_slice)
+        self.classes.literal_fields(class_name)
     }
 }

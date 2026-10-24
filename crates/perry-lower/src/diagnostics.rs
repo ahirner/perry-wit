@@ -43,14 +43,6 @@ impl std::fmt::Display for ShapeError {
 /// Domain error kinds emitted by the HIR-to-MIR lowerer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerErrorKind {
-    Parse {
-        identity: String,
-        message: String,
-    },
-    ModuleResolution {
-        name: String,
-        parent: std::path::PathBuf,
-    },
     ImportSignatureMismatch {
         binding: String,
         expected: usize,
@@ -85,10 +77,6 @@ impl LowerErrorKind {
 impl std::fmt::Display for LowerErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Parse { identity, message } => write!(f, "Parsing {identity}: {message}"),
-            Self::ModuleResolution { name, parent } => {
-                write!(f, "Cannot resolve '{name}' from {}", parent.display())
-            }
             Self::ImportSignatureMismatch {
                 binding,
                 expected,
@@ -166,3 +154,57 @@ impl std::fmt::Display for LowerError {
 }
 
 impl std::error::Error for LowerError {}
+
+impl From<LowerError> for perry_wit_diagnostics::PerryDiagnostic {
+    fn from(error: LowerError) -> Self {
+        use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+        let code = match &error.kind {
+            LowerErrorKind::ImportSignatureMismatch { .. } => {
+                DiagnosticCode::ImportSignatureMismatch
+            }
+            LowerErrorKind::Shape(shape) => match shape {
+                ShapeError::MissingTypeAnnotation => DiagnosticCode::MissingTypeAnnotation,
+                ShapeError::UnsupportedType { .. } | ShapeError::TypeMismatch { .. } => {
+                    DiagnosticCode::UnsupportedType
+                }
+                ShapeError::IncompatibleRecordLayout { .. } => {
+                    DiagnosticCode::IncompatibleRecordLayout
+                }
+                ShapeError::AbsenceMismatch { .. } => DiagnosticCode::AbsenceMismatch,
+            },
+            LowerErrorKind::MissingRequiredField { .. } => DiagnosticCode::MissingRequiredField,
+            LowerErrorKind::UnsupportedOperator { .. } => DiagnosticCode::UnsupportedOperator,
+            LowerErrorKind::UnsupportedSpread => DiagnosticCode::UnsupportedSpread,
+            LowerErrorKind::UnsupportedExpression(_) => DiagnosticCode::UnsupportedExpression,
+        };
+        let mut diagnostic = PerryDiagnostic::error(code, error.to_string());
+        diagnostic.help = error.help().map(str::to_owned);
+        diagnostic.span = error.span;
+        diagnostic.notes = error.notes;
+        diagnostic
+    }
+}
+
+pub(crate) fn annotate(
+    error: anyhow::Error,
+    span: Option<perry_wit_diagnostics::SourceSpan>,
+) -> anyhow::Error {
+    match LowerError::try_from_anyhow(error) {
+        Ok(mut diagnostic) => {
+            if diagnostic.span.is_none() {
+                diagnostic.span = span;
+            }
+            diagnostic.into()
+        }
+        Err(error) => {
+            let mut diagnostic = perry_wit_diagnostics::PerryDiagnostic::from_error(
+                error,
+                perry_wit_diagnostics::DiagnosticCode::UnsupportedExpression,
+            );
+            if diagnostic.span.is_none() {
+                diagnostic.span = span;
+            }
+            diagnostic.into()
+        }
+    }
+}

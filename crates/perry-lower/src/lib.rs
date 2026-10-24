@@ -21,6 +21,7 @@ mod coerce;
 mod collections;
 mod control_flow;
 mod dates;
+mod diagnostics;
 mod expressions;
 mod foreign;
 mod host;
@@ -83,7 +84,7 @@ use shapes::{BindingType, Shapes, identifier};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding};
-use coerce::{Kind, is_integer64, kind, void_type};
+use coerce::{Kind, KindExt, is_integer64, kind, void_type};
 use methods::{CallExt, ReceiverExt};
 use program::{Builtin, Signature};
 
@@ -91,7 +92,8 @@ use program::{Builtin, Signature};
 /// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
-pub use perry_frontend::{LowerError, LowerErrorKind, ShapeError, hir};
+pub use diagnostics::{LowerError, LowerErrorKind, ShapeError};
+pub use perry_frontend::hir;
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` symbols by SDK name: WIT types and functions the program imports.

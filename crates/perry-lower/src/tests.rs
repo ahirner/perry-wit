@@ -6,12 +6,17 @@ fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow:
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
-fn rejection(source: &str, file: &str) -> crate::LowerError {
-    lower_without_foreign(&mut Context::new(), source, file)
+fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic {
+    let error = lower_without_foreign(&mut Context::new(), source, file)
         .err()
-        .expect("rejection")
-        .downcast()
-        .expect("located diagnostic")
+        .expect("rejection");
+    match crate::LowerError::try_from_anyhow(error) {
+        Ok(error) => error.into(),
+        Err(error) => perry_wit_diagnostics::PerryDiagnostic::from_error(
+            error,
+            perry_wit_diagnostics::DiagnosticCode::UnsupportedExpression,
+        ),
+    }
 }
 
 /// Verify diagnostic source spans alongside the message table in `diagnostics_test`.
@@ -35,9 +40,21 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
         ),
     ] {
         let diagnostic = rejection(source, "case.ts");
-        assert_eq!(diagnostic.to_string(), message);
+        assert_eq!(diagnostic.message, message);
         let span = diagnostic.span.expect("source location");
         assert_eq!((span.start_line, span.start_column), location);
+    }
+
+    for source in [
+        "export function run(): number { const reader = 3 as ReadableStreamDefaultReader; return reader; }",
+        "class ReadableStreamBYOBReader {} export function run(): number { const reader = new ReadableStreamBYOBReader() as ReadableStreamDefaultReader; return 1; }",
+    ] {
+        let diagnostic = rejection(source, "reader-assertion.ts");
+        assert_eq!(
+            diagnostic.code,
+            perry_wit_diagnostics::DiagnosticCode::UnsupportedType,
+        );
+        assert!(diagnostic.span.is_some());
     }
 }
 
@@ -63,6 +80,13 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
 
 #[test]
 fn generic_collections_keep_concrete_payloads() -> anyhow::Result<()> {
+    use pliron::{
+        builtin::{
+            op_interfaces::SymbolOpInterface, type_interfaces::FunctionTypeInterface,
+            types::FunctionType,
+        },
+        r#type::TypedHandle,
+    };
     let ctx = &mut Context::new();
     let source = r#"
 function index<T extends {id:string}>(xs:T[]):Map<string,T> {
@@ -74,6 +98,10 @@ function index<T extends {id:string}>(xs:T[]):Map<string,T> {
     return result;
 }
 function forward<T extends {id:string}>(xs:T[]):Map<string,T> { return index(xs); }
+interface Link { id:string; next:Link }
+interface LinkAlias { id:string; next:Link }
+export function recursiveAlias(value:LinkAlias):Map<string,LinkAlias> { return index([value]); }
+export function recursiveLink(value:Link):Map<string,Link> { return index([value]); }
 function unique<T>(xs:T[]) { return new Set<T>(xs); }
 function fromMap<T>(values:Map<string,T>):T|undefined { return values.get("a"); }
 function first<T>(xs:T[]):T { return xs[0]; }
@@ -118,6 +146,23 @@ export function run(input:string):string {
             printed.contains(expected),
             "missing {expected} in:\n{printed}"
         );
+    }
+    let functions = perry_mir::functions(module.get_operation(), ctx);
+    let mut recursive_type = None;
+    for name in ["recursiveAlias", "recursiveLink"] {
+        let function = functions
+            .iter()
+            .find(|function| function.get_symbol_name(ctx).as_ref() == name)
+            .unwrap();
+        let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?
+            .deref(ctx)
+            .arg_types()[0];
+        let record = TypedHandle::<perry_mir::RecordType>::from_handle(ty, ctx)?;
+        assert_eq!(record.deref(ctx).field("next").unwrap().1, ty);
+        if let Some(previous) = recursive_type {
+            assert_eq!(ty, previous);
+        }
+        recursive_type = Some(ty);
     }
     Ok(())
 }
@@ -186,7 +231,7 @@ fn recursive_class_calls_have_located_diagnostics() {
         let source =
             format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
         let diagnostic = rejection(&source, "classes.ts");
-        let message = diagnostic.to_string();
+        let message = &diagnostic.message;
         assert!(
             message.contains("recursive inline") && message.contains(target),
             "{source}\n{diagnostic:?}"

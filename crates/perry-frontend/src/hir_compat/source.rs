@@ -91,39 +91,3 @@ fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
         _ => {}
     }
 }
-
-pub(super) fn unannotated_bindings(module: &ast::Module) -> HashSet<(u32, u32)> {
-    use swc_common::Spanned as _;
-    #[derive(Default)]
-    struct Collector(HashSet<(u32, u32)>);
-    impl Visit for Collector {
-        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            collect_pat(&declaration.name, &mut self.0);
-            declaration.visit_children_with(self);
-        }
-        fn visit_param(&mut self, parameter: &ast::Param) {
-            let mut bindings = HashSet::new();
-            collect_pat(&parameter.pat, &mut bindings);
-            if !bindings.is_empty() {
-                self.0.insert((parameter.span.lo.0, parameter.span.hi.0));
-                self.0.extend(bindings);
-            }
-            parameter.visit_children_with(self);
-        }
-        fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
-            for parameter in &arrow.params {
-                let mut bindings = HashSet::new();
-                collect_pat(parameter, &mut bindings);
-                if !bindings.is_empty() {
-                    let span = parameter.span();
-                    self.0.insert((span.lo.0, span.hi.0));
-                    self.0.extend(bindings);
-                }
-            }
-            arrow.visit_children_with(self);
-        }
-    }
-    let mut collector = Collector::default();
-    module.visit_with(&mut collector);
-    collector.0
-}

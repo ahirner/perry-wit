@@ -120,7 +120,6 @@ impl Shapes<'_> {
                     .source_record(
                         ctx,
                         None,
-                        false,
                         object
                             .properties
                             .iter()
