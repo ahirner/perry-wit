@@ -73,7 +73,7 @@ fn linked_time_and_json_share_memory_and_keep_exact_immutable_values() -> Result
             .write(&mut guest.store, INPUT as usize, b"[1,true]")?;
         assert_eq!(json.call(&mut guest.store, (INPUT, 8))? >> 32, 0);
     }
-    // Helper stack contents may change; static data and its preceding guest data may not.
+    // Shadow-stack contents may change; static data and its preceding guest data may not.
     let mut placement = libraries::HelperMemory::new(59_004);
     placement.place(&libraries::Library::parse(libraries::JSON)?, None)?;
     placement.place(&libraries::Library::parse(libraries::TIME)?, None)?;

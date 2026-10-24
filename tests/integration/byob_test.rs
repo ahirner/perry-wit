@@ -50,8 +50,15 @@ export async function sumBytes(input: ReadableStream<Uint8Array>): Promise<numbe
     reader.releaseLock(); return total;
 }
 
+function openByob(input: ReadableStream<Uint8Array>) {
+    return input.getReader({mode: "byob"});
+}
+
+type ReaderAlias = ReadableStreamDefaultReader;
+
 export async function shortEof(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
-    const reader = input.getReader({mode: "byob"});
+    const opened = openByob(input) as ReaderAlias;
+    const reader = opened as ReadableStreamBYOBReader;
     const result = await reader.read(new Uint8Array(8), {min: 8});
     const bytes = result.value; if (bytes === undefined) throw 1;
     const output = new Uint8Array(10); output[0] = result.done ? 1 : 0; output[1] = bytes.length;
@@ -193,7 +200,10 @@ fn check_typescript(source: &str) -> Result<()> {
     let path = directory.path().join("byob.ts");
     std::fs::write(&path, source)?;
     let checked = std::process::Command::new("tsc")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/crates/perry-frontend/src/sdk/runtime.d.ts"
+        ))
         .current_dir(directory.path())
         .args(["--noEmit", "--strict", "--target", "ES2022"])
         .arg(path)

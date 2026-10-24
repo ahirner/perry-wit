@@ -1,23 +1,19 @@
 //! Deterministic compiler and guest benchmarks.
 //! Run with `cargo test --test benchmark -- --ignored --nocapture`.
 //!
-//! `PERRY_BENCH_REPORT` writes measured rows; `PERRY_BENCH_BASELINE` compares each
-//! deterministic metric with its recorded value (at most 105%, zero stays zero).
-//! The comparison never updates the baseline. `tests/baselines/pliron.metadata.json`
-//! records its compiler revision, input hashes, dependency versions and options.
-//! `bytes` measures stripped components or named raw modules, matching the original
-//! campaign; `core_bytes` always measures the named core module before componentization.
-//! `initialization_fuel` measures instantiation and `invocation_fuel` the first export
-//! call. The historical `fuel` metric retains its captured convention: a warmed
-//! component call, a first core-fixture call, or instantiation plus a raw microbenchmark.
+//! Every workload's sizes, fuel, memory and optimization statistics must equal
+//! `tests/benchmark.json`. `PERRY_EXPECT_BENCH=1` rewrites that record instead, so its git
+//! history tracks each change. `bytes` measures stripped components or stripped raw modules;
+//! `core_bytes` excludes core custom sections, including build-dependent debug names.
+//! Instantiation copies data explicitly, independent of host copy-on-write support.
+//! `initialization_fuel` measures instantiation,
+//! `invocation_fuel` the first export call and `warm_fuel` the second component call.
 //!
-//! It prints a Markdown table: component bytes (stripped), guest fuel per call and guest
-//! memory, which are deterministic and machine-independent, and median milliseconds per call
-//! for orientation. The committed table lives in `TODOs.md`. Workloads: the legacy
-//! measurement set (text, file I/O, a 4 MiB `stream<u8>`, a 4 MiB HTTP body read bounded and
-//! whole), the critique microbenchmarks as core modules, the compile time of a deep property
-//! chain, and the example components.
-use anyhow::{Result, ensure};
+//! The printed table adds median milliseconds per call for orientation; timing is never
+//! recorded. Workloads: component exports (text, file I/O, a 4 MiB `stream<u8>`, a 4 MiB
+//! HTTP body read bounded and whole), microbenchmarks as core modules, the compile time of a
+//! deep property chain, the example components and the optimization fixtures.
+use anyhow::{Context as _, Result, bail, ensure};
 use http_body_util::{BodyExt, Full};
 use perry_wit::{compile_core, compile_for_world, component::wit::resolve_wit};
 use std::{future::Future, time::Instant};
@@ -30,10 +26,7 @@ use wasmtime_wasi_http::{
     Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
 };
 
-#[path = "benchmark/gate.rs"]
-mod gate;
-use gate::compare_baseline;
-
+const RECORD: &str = "tests/benchmark.json";
 const MIB4: usize = 4 * 1024 * 1024;
 const SAMPLES: usize = 5;
 
@@ -123,23 +116,33 @@ impl WasiHttpView for Host {
     }
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize)]
 struct Row {
     workload: String,
-    compilation_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     core_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     defined_functions: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     helper_functions: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optimization: Option<std::collections::BTreeMap<String, u64>>,
-    fuel: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     initialization_fuel: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     invocation_fuel: Option<u64>,
-    memory: Option<usize>,
-    milliseconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warm_fuel: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     initial_memory: Option<usize>,
-    compile_milliseconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     counters: Option<Vec<u64>>,
+    #[serde(skip)]
+    milliseconds: Option<f64>,
 }
 
 impl Row {
@@ -171,7 +174,10 @@ impl Row {
 
 fn engine(fuel: bool) -> Result<Engine> {
     let mut config = Config::new();
-    config.wasm_component_model_async(true).consume_fuel(fuel);
+    config
+        .wasm_component_model_async(true)
+        .consume_fuel(fuel)
+        .memory_init_cow(false);
     Ok(Engine::new(&config)?)
 }
 
@@ -197,22 +203,14 @@ fn store(engine: &Engine, root: Option<&std::path::Path>, metered: bool) -> Resu
     Ok(store)
 }
 
-struct Compilation {
-    output: perry_wit::Compiled,
-    milliseconds: f64,
-}
-
-fn component(source: &str, wit: &str, world: &str) -> Result<Compilation> {
-    let started = Instant::now();
+fn component(source: &str, wit: &str, world: &str) -> Result<perry_wit::Compiled> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), wit)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some(world))?;
-    let output = compile_for_world(source, "bench.ts", &resolve, world, true)?;
-    Ok(Compilation {
-        output,
-        milliseconds: started.elapsed().as_secs_f64() * 1000.0,
-    })
+    Ok(compile_for_world(
+        source, "bench.ts", &resolve, world, true,
+    )?)
 }
 
 fn optimization_statistics(report: &str) -> Result<std::collections::BTreeMap<String, u64>> {
@@ -247,10 +245,25 @@ fn defined_functions(core: &[u8]) -> Result<u32> {
     Ok(0)
 }
 
-/// Measure instantiation, first invocation, the historical warmed call, and timed samples.
+fn stripped_core_size(core: &[u8]) -> Result<usize> {
+    let mut bytes = core.len();
+    let mut section_start = wasm_encoder::Module::HEADER.len();
+    for payload in wasmparser::Parser::new(0).parse_all(core) {
+        if let Some((id, range)) = payload?.as_section() {
+            let section_end = usize::try_from(range.end)?;
+            if id == 0 {
+                bytes -= section_end - section_start;
+            }
+            section_start = section_end;
+        }
+    }
+    Ok(bytes)
+}
+
+/// Measure instantiation, first invocation, the warmed call, and timed samples.
 async fn measure<F, Fut>(
     workload: &str,
-    compilation: &Compilation,
+    compiled: &perry_wit::Compiled,
     root: Option<&std::path::Path>,
     call: F,
 ) -> Result<Row>
@@ -258,13 +271,12 @@ where
     F: Fn(Store<Host>, Instance) -> Fut,
     Fut: Future<Output = Result<(Store<Host>, Vec<std::time::Duration>, u64, u64)>>,
 {
-    let compiled = &compilation.output;
     let bytes = &compiled
         .component
         .as_ref()
-        .expect("component benchmark")
+        .with_context(|| format!("{workload}: compiler did not produce a component"))?
         .stripped;
-    let mut fuel = None;
+    let mut warm_fuel = None;
     let mut initialization_fuel = None;
     let mut invocation_fuel = None;
     let mut memory = None;
@@ -282,7 +294,7 @@ where
         let initialization = spent(&store, before);
         let (store, times, used, first_used) = call(store, instance).await?;
         if metered {
-            fuel = Some(used);
+            warm_fuel = Some(used);
             initialization_fuel = Some(initialization);
             invocation_fuel = Some(first_used);
             memory = Some(store.data().memory.bytes);
@@ -296,14 +308,13 @@ where
     Ok(Row {
         workload: workload.into(),
         bytes: Some(bytes.len()),
-        core_bytes: Some(compiled.core.len()),
+        core_bytes: Some(stripped_core_size(&compiled.core)?),
         defined_functions: Some(defined_functions(&compiled.core)?),
         helper_functions: Some(helper_functions(&compiled.allocation_report)?),
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
-        compile_milliseconds: Some(compilation.milliseconds),
-        fuel,
         initialization_fuel,
         invocation_fuel,
+        warm_fuel,
         memory,
         milliseconds,
         initial_memory,
@@ -496,7 +507,7 @@ export async function run(url: string, limit: number): Promise<number> {{
     Ok(rows)
 }
 
-/// The critique's microbenchmarks as raw core modules, at n = 10⁶.
+/// Microbenchmarks as raw core modules, at n = 10⁶.
 fn microbenchmarks() -> Result<Vec<Row>> {
     let workloads = [
         (
@@ -569,48 +580,9 @@ export function run(n: number): number {
     ];
     let mut rows = Vec::new();
     for (workload, source) in workloads {
-        let started = Instant::now();
-        let wasm = compile_core(source, "bench.ts")?;
-        let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let mut row = Row {
-            workload: format!("{workload} (n = 10⁶)"),
-            bytes: Some(wasm.len()),
-            core_bytes: Some(wasm.len()),
-            defined_functions: Some(defined_functions(&wasm)?),
-            fuel: None,
-            memory: None,
-            milliseconds: None,
-            ..Row::default()
-        };
-        row.compile_milliseconds = Some(compile_ms);
-        // Inspect the same raw pipeline separately, outside the compilation timing.
-        // The linked-minus-emitted function count measures helpers without naming heuristics.
-        {
-            use pliron::{context::Context, op::Op, printable::Printable};
-            let ctx = &mut Context::new();
-            let mir = perry_lower::lower_sources(
-                ctx,
-                source,
-                "bench.ts",
-                &Default::default(),
-                &Default::default(),
-            )?;
-            let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
-                .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-            let exports = perry_codegen::Exports::Raw;
-            row.optimization = Some(optimization_statistics(&perry_codegen::explain_tiers(
-                ctx,
-                &mir,
-                &exports,
-                &mut analyses,
-            )?)?);
-            let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-            row.helper_functions = Some(defined_functions(&wasm)? - defined_functions(&emitted)?);
-        }
+        let (wasm, mut row) = raw_module(format!("{workload} (n = 10⁶)"), source)?;
         for metered in [true, false] {
-            let mut config = Config::new();
-            config.consume_fuel(metered);
-            let engine = Engine::new(&config)?;
+            let engine = engine(metered)?;
             let module = wasmtime::Module::new(&engine, &wasm)?;
             let mut store = Store::new(&engine, Memory::default());
             store.limiter(|memory| memory);
@@ -622,7 +594,9 @@ export function run(n: number): number {
                 row.initial_memory = Some(store.data().bytes);
                 row.initialization_fuel = Some(u64::MAX - store.get_fuel()?);
             }
-            let run = instance.get_func(&mut store, "run").unwrap();
+            let run = instance
+                .get_func(&mut store, "run")
+                .with_context(|| format!("{workload}: missing run export"))?;
             let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
             let n = Val::F64(1_000_000f64.to_bits());
             let before = store.get_fuel().unwrap_or(0);
@@ -646,7 +620,6 @@ export function run(n: number): number {
                 ensure!(results[1].unwrap_i32() == 0, "{workload}: exception");
             }
             if metered {
-                row.fuel = Some(u64::MAX - store.get_fuel()?);
                 row.invocation_fuel = Some(before - store.get_fuel()?);
                 let memory = instance.get_memory(&mut store, "memory");
                 row.memory = Some(memory.map_or(store.data().bytes, |m| {
@@ -665,7 +638,9 @@ export function run(n: number): number {
         instance
             .get_typed_func::<i32, ()>(&mut store, "__perry_gc_debug")?
             .call(&mut store, 4)?;
-        let run = instance.get_func(&mut store, "run").unwrap();
+        let run = instance
+            .get_func(&mut store, "run")
+            .with_context(|| format!("{workload}: missing instrumented run export"))?;
         let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
         run.call(
             &mut store,
@@ -683,7 +658,45 @@ export function run(n: number): number {
     Ok(rows)
 }
 
-/// Compile time of a property chain 32 levels deep (exponential on the legacy backend).
+/// A raw core module and its static metrics: sizes, function counts and optimization
+/// statistics. The linked-minus-emitted function count measures helpers without naming
+/// heuristics.
+fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
+    use pliron::{context::Context, op::Op, printable::Printable};
+    let wasm = compile_core(source, "bench.ts")?;
+    // Inspect the same raw pipeline separately.
+    let ctx = &mut Context::new();
+    let mir = perry_lower::lower_sources(
+        ctx,
+        source,
+        "bench.ts",
+        &Default::default(),
+        &Default::default(),
+    )?;
+    let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
+        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let exports = perry_codegen::Exports::Raw;
+    let optimization = optimization_statistics(&perry_codegen::explain_tiers(
+        ctx,
+        &mir,
+        &exports,
+        &mut analyses,
+    )?)?;
+    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let bytes = stripped_core_size(&wasm)?;
+    let row = Row {
+        workload,
+        bytes: Some(bytes),
+        core_bytes: Some(bytes),
+        defined_functions: Some(defined_functions(&wasm)?),
+        helper_functions: Some(defined_functions(&wasm)? - defined_functions(&emitted)?),
+        optimization: Some(optimization),
+        ..Row::default()
+    };
+    Ok((wasm, row))
+}
+
+/// Compile time of a property chain 32 levels deep, with the module's static metrics.
 fn compile_time() -> Result<Row> {
     let mut source = String::from("interface N0 { v: number }\n");
     for level in 1..=32 {
@@ -696,13 +709,11 @@ fn compile_time() -> Result<Row> {
     source.push_str(".v; }\n");
     let started = Instant::now();
     compile_core(&source, "chain.ts")?;
+    let milliseconds = started.elapsed().as_secs_f64() * 1000.0;
+    let (_, row) = raw_module("compile: property chain, depth 32".into(), &source)?;
     Ok(Row {
-        workload: "compile: property chain, depth 32".into(),
-        bytes: None,
-        fuel: None,
-        memory: None,
-        milliseconds: Some(started.elapsed().as_secs_f64() * 1000.0),
-        ..Row::default()
+        milliseconds: Some(milliseconds),
+        ..row
     })
 }
 
@@ -723,22 +734,23 @@ fn examples() -> Result<Vec<Row>> {
             "task",
         ),
     ] {
-        let started = Instant::now();
         let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
         let world = resolve.select_world(&[package], Some(world))?;
         let source_text = std::fs::read_to_string(source)?;
         let compiled = compile_for_world(&source_text, source, &resolve, world, true)?;
         rows.push(Row {
             workload: workload.into(),
-            bytes: Some(compiled.component.unwrap().stripped.len()),
-            core_bytes: Some(compiled.core.len()),
+            bytes: Some(
+                compiled
+                    .component
+                    .context("example compilation did not produce a component")?
+                    .stripped
+                    .len(),
+            ),
+            core_bytes: Some(stripped_core_size(&compiled.core)?),
             defined_functions: Some(defined_functions(&compiled.core)?),
             helper_functions: Some(helper_functions(&compiled.allocation_report)?),
             optimization: Some(optimization_statistics(&compiled.allocation_report)?),
-            compile_milliseconds: Some(started.elapsed().as_secs_f64() * 1000.0),
-            fuel: None,
-            memory: None,
-            milliseconds: None,
             ..Row::default()
         });
     }
@@ -747,8 +759,7 @@ fn examples() -> Result<Vec<Row>> {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "performance campaign; run explicitly"]
-async fn benchmark_baseline() -> Result<()> {
-    verify_baseline_inputs()?;
+async fn benchmark() -> Result<()> {
     let mut rows = components().await?;
     rows.extend(microbenchmarks()?);
     rows.push(compile_time()?);
@@ -756,42 +767,55 @@ async fn benchmark_baseline() -> Result<()> {
     rows.extend(optimization_fixtures().await?);
     println!("| Workload | Component bytes | Fuel per call | Guest memory bytes | Median ms |");
     println!("|---|---:|---:|---:|---:|");
-    if let Ok(path) = std::env::var("PERRY_BENCH_REPORT") {
-        std::fs::write(path, serde_json::to_vec_pretty(&rows)?)?;
-    }
-    if let Ok(path) = std::env::var("PERRY_BENCH_BASELINE") {
-        let baseline: Vec<Row> = serde_json::from_slice(&std::fs::read(path)?)?;
-        compare_baseline(&baseline, &rows)?;
-    }
-    for row in rows {
+    for row in &rows {
         println!("{}", row.markdown());
     }
-    Ok(())
+    let current = serde_json::to_string_pretty(&rows)? + "\n";
+    match std::env::var("PERRY_EXPECT_BENCH") {
+        Ok(value) if value == "1" => Ok(std::fs::write(RECORD, current)?),
+        Err(std::env::VarError::NotPresent) => {
+            let recorded = std::fs::read_to_string(RECORD)?;
+            ensure!(
+                recorded == current,
+                "{RECORD} differs; rerun with PERRY_EXPECT_BENCH=1 and commit the record if the change is intended:\n{}",
+                differences(&recorded, &current)?.join("\n")
+            );
+            Ok(())
+        }
+        other => bail!("PERRY_EXPECT_BENCH must be 1, found {other:?}"),
+    }
 }
 
-/// Pins what makes a comparison meaningful: the workload sources and the measurement
-/// harness. Toolchain and dependency versions are recorded in the metadata but not gated,
-/// so an upgrade is judged by the 105% limits and its baseline re-capture by review.
-fn verify_baseline_inputs() -> Result<()> {
-    use sha2::{Digest, Sha256};
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("baselines/pliron.metadata.json"))?;
-    for (path, hash) in metadata["inputs_sha256"].as_object().unwrap() {
-        let actual = format!("{:x}", Sha256::digest(std::fs::read(path)?));
-        ensure!(
-            Some(actual.as_str()) == hash.as_str(),
-            "benchmark input changed: {path}; baseline review is required"
-        );
+/// One line per workload field whose recorded and current values differ.
+fn differences(recorded: &str, current: &str) -> Result<Vec<String>> {
+    use serde_json::{Map, Value};
+    use std::collections::{BTreeMap, BTreeSet};
+    let index = |text: &str| -> Result<BTreeMap<String, Map<String, Value>>> {
+        let rows: Vec<Map<String, Value>> = serde_json::from_str(text)?;
+        rows.into_iter()
+            .map(|row| {
+                let workload = row.get("workload").and_then(Value::as_str);
+                Ok((workload.context("row without workload")?.to_owned(), row))
+            })
+            .collect()
+    };
+    let (before, after) = (index(recorded)?, index(current)?);
+    let mut lines = Vec::new();
+    for workload in before.keys().chain(after.keys()).collect::<BTreeSet<_>>() {
+        let (old, new) = (before.get(workload), after.get(workload));
+        let fields: BTreeSet<_> = old.into_iter().chain(new).flat_map(Map::keys).collect();
+        for field in fields {
+            let value = |row: Option<&Map<String, Value>>| {
+                row.and_then(|row| row.get(field))
+                    .map_or("–".into(), Value::to_string)
+            };
+            let (old, new) = (value(old), value(new));
+            if old != new {
+                lines.push(format!("{workload} {field}: {old} -> {new}"));
+            }
+        }
     }
-    let mut harness = Sha256::new();
-    harness.update(include_bytes!("benchmark.rs"));
-    harness.update(include_bytes!("benchmark/gate.rs"));
-    let harness = format!("{:x}", harness.finalize());
-    ensure!(
-        Some(harness.as_str()) == metadata["comparison_harness_sha256"].as_str(),
-        "benchmark measurement harness changed; baseline review is required"
-    );
-    Ok(())
+    Ok(lines)
 }
 
 async fn optimization_fixtures() -> Result<Vec<Row>> {
@@ -900,12 +924,11 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
 
 fn measure_core(
     workload: &str,
-    compilation: &Compilation,
+    compiled: &perry_wit::Compiled,
     export: &str,
     args: &[Val],
     expected: Val,
 ) -> Result<Row> {
-    let compiled = &compilation.output;
     let engine = engine(true)?;
     let module = wasmtime::Module::new(&engine, &compiled.core)?;
     let mut store = Store::new(&engine, Memory::default());
@@ -914,7 +937,7 @@ fn measure_core(
     let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
     let run = instance
         .get_func(&mut store, export)
-        .expect("fixture export");
+        .with_context(|| format!("{workload}: missing {export} export"))?;
     let mut results = [Val::I32(0)];
     let before = store.get_fuel()?;
     let start = Instant::now();
@@ -934,16 +957,14 @@ fn measure_core(
             compiled
                 .component
                 .as_ref()
-                .expect("fixture component")
+                .with_context(|| format!("{workload}: compiler did not produce a component"))?
                 .stripped
                 .len(),
         ),
-        core_bytes: Some(compiled.core.len()),
+        core_bytes: Some(stripped_core_size(&compiled.core)?),
         defined_functions: Some(defined_functions(&compiled.core)?),
         helper_functions: Some(helper_functions(&compiled.allocation_report)?),
         optimization: Some(optimization_statistics(&compiled.allocation_report)?),
-        compile_milliseconds: Some(compilation.milliseconds),
-        fuel: Some(fuel),
         initialization_fuel: Some(u64::MAX - before),
         invocation_fuel: Some(fuel),
         initial_memory: Some(store.data().initial.unwrap_or(0)),
@@ -954,12 +975,14 @@ fn measure_core(
 }
 
 #[test]
-fn timed_calls_account_for_warmup_separately() -> Result<()> {
+fn fuel_accounting_separates_initialization_and_calls() -> Result<()> {
     let engine = engine(true)?;
     let module = wasmtime::Module::new(
         &engine,
         wat::parse_str(
             r#"(module
+              (memory 1)
+              (data (i32.const 0) "test")
               (global $calls (mut i32) (i32.const 0))
               (func $start nop)
               (start $start)
@@ -971,7 +994,7 @@ fn timed_calls_account_for_warmup_separately() -> Result<()> {
     let mut store = store(&engine, None, true)?;
     let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
     let before = store.get_fuel()?;
-    ensure!(before < u64::MAX, "start function must consume fuel");
+    assert_eq!(u64::MAX - before, 8, "initialization fuel");
     let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
     let mut results = Vec::new();
     let (times, warmed, first) = timed!(store, 2, {

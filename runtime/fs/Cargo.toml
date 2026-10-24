@@ -1,0 +1,18 @@
+[package]
+workspace = ".."
+name = "perry-fs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "node:fs/promises over wasi:filesystem, linked into perry-wit components on demand"
+
+[dependencies]
+perry-rt-sys.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "fs", profile = "release" },
+]

@@ -1,10 +1,9 @@
 //! Perry-WIT: compiles TypeScript directly into WASI 0.3 WebAssembly components.
 //!
-//! Pipeline: TypeScript → Perry HIR → Perry MIR (`perry_mir`, lowered by `perry_lower`) →
-//! `wasm` dialect (`perry_codegen`, `pliron_wasm`) → core Wasm → linked with
-//! `perry_runtime` and the helper libraries → component.
+//! Pipeline: TypeScript → specialized HIR (`perry_frontend`) → eager MIR (`perry_lower`,
+//! `perry_mir`) → Wasm dialect (`perry_codegen`, `pliron_wasm`) → linked core Wasm → component.
+//! Runtime libraries are built in their own workspace and embedded through `perry_rt_build`.
 
-mod abi;
 pub mod api;
 mod audit;
 pub mod compiler;

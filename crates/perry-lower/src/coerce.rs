@@ -23,7 +23,6 @@ pub(super) fn merge_absence(
         (Some(_), Some(_)) => Some(perry_mir::Absence::Both),
     }
 }
-
 /// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
 /// from `T | null`.
 pub(super) fn admitting(
@@ -58,7 +57,70 @@ pub(super) fn merged_type(
     })
 }
 
-pub(super) use perry_mir::ValueKind as Kind;
+pub(super) use perry_frontend::methods::Kind;
+
+pub(super) trait KindExt {
+    fn of(ctx: &Context, ty: TypeHandle) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl KindExt for Kind {
+    fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+        let ty = ty.deref(ctx);
+        if ty.is::<FP64Type>() {
+            return Some(Self::Number);
+        }
+        if let Some(integer) = ty.downcast_ref::<IntegerType>() {
+            return match integer.width() {
+                1 => Some(Self::Boolean),
+                64 => Some(Self::BigInt),
+                _ => None,
+            };
+        }
+        macro_rules! reference_kinds {
+            ($($kind:ident => $mir:ident),+ $(,)?) => { $(
+                if ty.is::<perry_mir::$mir>() { return Some(Self::$kind); }
+            )+ };
+        }
+        reference_kinds! {
+            String => StringType,
+            BigInt => BigIntType,
+            Bytes => BytesType,
+            Url => UrlType,
+            SearchParams => SearchParamsType,
+            Json => JsonType,
+            Date => DateType,
+            Stats => StatsType,
+            Headers => HeadersType,
+            Response => ResponseType,
+            Request => RequestType,
+            Writable => WritableType,
+            Writer => WriterType,
+            Readable => ReadableType,
+            ByteBuffer => ByteBufferType,
+            ByobReader => ByobReaderType,
+            Reader => ReaderType,
+            ReadResult => ReadResultType,
+            Instant => InstantType,
+            PlainDate => PlainDateType,
+            PlainDateTime => PlainDateTimeType,
+            Abort => AbortType,
+            Incoming => IncomingType,
+            Exception => ExceptionType,
+            Encoder => EncoderType,
+            Decoder => DecoderType,
+            Regex => RegexType,
+            NumberString => NumberStringType,
+            Array => ArrayType,
+            Record => RecordType,
+            Variant => VariantType,
+            Resource => ResourceType,
+            Settled => SettledType,
+        }
+        None
+    }
+}
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     Kind::of(ctx, value.get_type(ctx)).context("unsupported value type in expression")

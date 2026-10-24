@@ -551,7 +551,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "wasi.execution.scaling.retained_records",
         description: "Pushing n records into a local array and reading them back costs O(n) guest fuel",
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
+        specification: "Implementation cost bound, not an ECMAScript requirement",
         domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
         partitions: &["n-128"],
         expected_outcomes: &[ExpectedOutcome::BoundedGrowth],
@@ -559,7 +559,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "wasi.execution.scaling.number_push",
         description: "Pushing n numbers into a dense array and summing them costs O(n) guest fuel",
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
+        specification: "Implementation cost bound, not an ECMAScript requirement",
         domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
         partitions: &["n-128"],
         expected_outcomes: &[ExpectedOutcome::BoundedGrowth],
@@ -567,7 +567,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "wasi.execution.scaling.temporary_records",
         description: "One temporary record per loop iteration costs O(n) guest fuel in total",
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
+        specification: "Implementation cost bound, not an ECMAScript requirement",
         domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
         partitions: &["n-128"],
         expected_outcomes: &[ExpectedOutcome::BoundedGrowth],
@@ -575,7 +575,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "wasi.execution.scaling.string_append",
         description: "Appending one character n times costs at most n·log n guest fuel",
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
+        specification: "Implementation cost bound, not an ECMAScript requirement",
         domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
         partitions: &["n-128"],
         expected_outcomes: &[ExpectedOutcome::BoundedGrowth],
@@ -583,7 +583,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "wasi.execution.scaling.collection_churn",
         description: "Abandoned Set/Map iterators and insert-delete churn cost O(n) guest fuel",
-        specification: "TODOs.md P0.1 (implementation cost bound, not an ECMAScript requirement)",
+        specification: "Implementation cost bound, not an ECMAScript requirement",
         domain: "Warm-up n, n, and 4n calls on one instance; n in 32..=128 generated, 128 directed; values equal Node, fuel ratio of the last two calls at most 6",
         partitions: &["n-128"],
         expected_outcomes: &[ExpectedOutcome::BoundedGrowth],

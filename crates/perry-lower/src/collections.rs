@@ -81,77 +81,14 @@ impl EntryKind {
     }
 }
 
-/// `keys()`, `values()` or `entries()`, the iterator methods of `Map`, `Set` and arrays.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum IteratorMethod {
-    Keys,
-    Values,
-    Entries,
+pub(super) use perry_frontend::collections::{CollectionViewKind, IteratorMethod};
+pub(super) trait CollectionViewExt {
+    fn record_kind(self) -> RecordKind;
+    fn source(self) -> EntryKind;
 }
-
-impl IteratorMethod {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Keys => "keys",
-            Self::Values => "values",
-            Self::Entries => "entries",
-        }
-    }
-
-    /// The live view this method returns on a `Map`.
-    pub(super) fn map_view(self) -> CollectionViewKind {
-        match self {
-            Self::Keys => CollectionViewKind::MapKeys,
-            Self::Values => CollectionViewKind::MapValues,
-            Self::Entries => CollectionViewKind::MapEntries,
-        }
-    }
-
-    /// The live view this method returns on a `Set`, whose keys are its values.
-    pub(super) fn set_view(self) -> CollectionViewKind {
-        match self {
-            Self::Keys | Self::Values => CollectionViewKind::SetValues,
-            Self::Entries => CollectionViewKind::SetEntries,
-        }
-    }
-}
-
-/// A live iterator view over a `Map` or `Set` box.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CollectionViewKind {
-    MapKeys,
-    MapValues,
-    MapEntries,
-    SetValues,
-    SetEntries,
-}
-
-impl CollectionViewKind {
-    const ALL: [Self; 5] = [
-        Self::MapKeys,
-        Self::MapValues,
-        Self::MapEntries,
-        Self::SetValues,
-        Self::SetEntries,
-    ];
-
-    /// The generic name inference gives the view (`MapKeys<K, V>`, `SetValues<T>`).
-    pub(super) fn type_name(self) -> &'static str {
-        match self {
-            Self::MapKeys => "MapKeys",
-            Self::MapValues => "MapValues",
-            Self::MapEntries => "MapEntries",
-            Self::SetValues => "SetValues",
-            Self::SetEntries => "SetEntries",
-        }
-    }
-
-    pub(super) fn from_type_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|view| view.type_name() == name)
-    }
-
+impl CollectionViewExt for CollectionViewKind {
     /// The view's record role.
-    pub(super) fn record_kind(self) -> RecordKind {
+    fn record_kind(self) -> RecordKind {
         match self {
             Self::MapKeys => RecordKind::MapKeys,
             Self::MapValues => RecordKind::MapValues,
@@ -162,7 +99,7 @@ impl CollectionViewKind {
     }
 
     /// The collection the view reads.
-    pub(super) fn source(self) -> EntryKind {
+    fn source(self) -> EntryKind {
         match self {
             Self::MapKeys | Self::MapValues | Self::MapEntries => EntryKind::Map,
             Self::SetValues | Self::SetEntries => EntryKind::Set,

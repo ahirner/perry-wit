@@ -1,7 +1,7 @@
 # Embedding
 
 The compiler ships as the `perry_wit` Rust crate and as a standalone WASI 0.2 component.
-Prebuilt guest helper modules are embedded in the compiler binary, so compilation runs entirely in memory.
+The runtime and standard libraries are precompiled and embedded in the compiler binary, so compilation runs entirely in memory.
 
 ## Rust
 
@@ -15,7 +15,7 @@ Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values h
 
 ## WebAssembly Component
 
-[`downloads/perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
+[`perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
 
 ```wit
 {{#include ../../wit/compiler/world.wit}}

@@ -6,8 +6,8 @@ Perry-WIT builds typed components that export WIT functions, CLI commands that r
 ## Typed Components
 
 The WIT world declares the exports.
-A `kebab-case` WIT name maps to a `camelCase` TypeScript export, and functions not named in WIT stay private to the module.
-The starter template (`template/`) contains this pair:
+Each `kebab-case` WIT export binds to the matching `camelCase` TypeScript export; remaining module functions stay internal.
+The starter template contains this pair:
 
 ```wit check=task
 {{#include ../../template/wit/world.wit}}
@@ -24,7 +24,7 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("h
 
 - An `async func` in WIT binds to an `async function` returning a `Promise`.
 - A `result<T, E>` export returns `T` directly, and a thrown exception becomes `err`. Returning `{ ok: true, value }` or `{ ok: false, error }` also works.
-- `--core-only` writes the core module without the component wrapper. `--keep-names` keeps function names for guest profiling.
+- `--core-only` emits the standalone core WebAssembly module. `--keep-names` preserves function names in the custom `name` section for guest profiling.
 - WASI 0.3 packages resolve from `WASI_WIT_PATH`. Packages in `wit/deps` take precedence over them.
 
 ## Generated Types

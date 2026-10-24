@@ -3,10 +3,9 @@ name = "perry-codegen"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Lowers perry MIR to the pliron `wasm` dialect and links the perry runtime (TODOs.md P4)"
+description = "Lowers perry MIR to the pliron `wasm` dialect and core Wasm"
 
 [dependencies]
-serde_json.workspace = true
 anyhow.workspace = true
 perry-abi.workspace = true
 perry-mir.workspace = true

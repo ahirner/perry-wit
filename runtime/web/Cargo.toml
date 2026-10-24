@@ -1,0 +1,18 @@
+[package]
+workspace = ".."
+name = "perry-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Fetch API values (Headers, Response, Request), linked into perry-wit components on demand"
+
+[dependencies]
+perry-rt-sys.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "web", profile = "release" },
+]

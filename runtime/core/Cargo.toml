@@ -1,0 +1,24 @@
+[package]
+workspace = ".."
+name = "perry-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Runtime linked into perry-wit components"
+
+[features]
+collectible = ["talc/counters"]
+
+[dependencies]
+perry-abi.workspace = true
+libm.workspace = true
+talc = { version = "5.1.1", default-features = false }
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "runtime", profile = "compact" },
+  { name = "runtime-collectible", profile = "release", features = ["collectible"] },
+]

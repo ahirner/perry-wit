@@ -7,7 +7,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn bind_parameter(
         &mut self,
         ctx: &mut Context,
-        param: &'s perry_hir::ir::Param,
+        param: &'s perry_frontend::hir::ir::Param,
         value: Option<Value>,
         mut expected: Option<BindingType>,
     ) -> Result<()> {

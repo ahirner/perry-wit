@@ -1,7 +1,9 @@
 //! How MIR types are represented in Wasm values and memory slots.
 pub(crate) use crate::values::Carriers;
 use anyhow::{Result, bail};
-use perry_mir::{ByteInputType, OptionalType, PromiseType, SlotType, TransferType, ValueKind};
+use perry_mir::{
+    ByteInputType, OptionalType, PromiseType, SlotType, TransferType, is_reference_type,
+};
 use pliron::{
     builtin::{
         attributes::FPDoubleAttr,
@@ -62,7 +64,7 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
             width => bail!("integers of width {width} are not supported"),
         };
     }
-    if ValueKind::of(ctx, ty).is_some()
+    if is_reference_type(ctx, ty)
         || deref.is::<PromiseType>()
         || deref.is::<ByteInputType>()
         || deref.is::<TransferType>()

@@ -46,7 +46,7 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
                 return self
                     .expression_with(ctx, last, expected)
-                    .map_err(|error| self.shapes.metadata.locations.annotate(error, span));
+                    .map_err(|error| crate::diagnostics::annotate(error, Some(span)));
             }
             for effect in effects {
                 self.effect(ctx, effect)?;
@@ -293,7 +293,7 @@ impl<'s> FunctionBuilder<'s> {
                     && int_ty.deref(ctx).width() == 64
                 {
                     int_ty.into()
-                } else if matches!(ty, HirType::Any | HirType::Unknown) {
+                } else if perry_frontend::contextual_type(ty).is_none() {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
                     self.shapes.value_type(ctx, ty)?
@@ -382,10 +382,10 @@ impl<'s> FunctionBuilder<'s> {
                 property,
                 byte_offset,
             } => self.property_get(ctx, object, property).map_err(|error| {
-                self.shapes
-                    .metadata
-                    .locations
-                    .annotate_member(error, *byte_offset)
+                crate::diagnostics::annotate(
+                    error,
+                    self.shapes.metadata.locations.member_span(*byte_offset),
+                )
             })?,
             Expr::PropertySet {
                 object,
@@ -473,7 +473,7 @@ impl<'s> FunctionBuilder<'s> {
                 args,
                 type_args,
                 ..
-            } if self.shapes.classes.contains_key(class_name.as_str()) => {
+            } if self.shapes.classes.named.contains_key(class_name.as_str()) => {
                 self.class_new(ctx, class_name, args, type_args, expected)?
             }
             Expr::New {
@@ -502,7 +502,6 @@ impl<'s> FunctionBuilder<'s> {
                 index,
                 value,
             } => self.set_index(ctx, object, index, value)?,
-            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };
         self.narrow_primitive(ctx, expr, value)

@@ -1,8 +1,8 @@
 //! Binding WIT world exports to exported TypeScript functions.
-use crate::abi::export_names::core_export_name;
-use crate::abi::types::{Contract, Input, convert, primitive};
 use anyhow::Result;
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
+use perry_contract::export_names::core_export_name;
+use perry_contract::types::{Contract, Input, convert};
 use perry_mir::is_exported;
 use pliron::{
     builtin::{
@@ -274,7 +274,7 @@ pub(crate) fn exports(
     world_id: WorldId,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
-    crate::abi::export_names::validate_implementation_names(resolve, world).map_err(|e| {
+    perry_contract::export_names::validate_implementation_names(resolve, world).map_err(|e| {
         crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, e.to_string())
     })?;
     let mut exported = std::collections::HashMap::new();
@@ -288,7 +288,7 @@ pub(crate) fn exports(
     }
 
     let mut bound = Vec::new();
-    for entry in crate::abi::world_functions(resolve, world.exports.iter()) {
+    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
         let function = entry.function;
         let implementation = entry.implementation_name(resolve, world);
         let core_name = if entry.interface.is_some() {
@@ -436,7 +436,7 @@ fn stream_functions<'a>(
     export: bool,
 ) -> impl Iterator<Item = crate::link::StreamAnchor> + 'a {
     let prefix = if export { "[export]" } else { "" };
-    crate::abi::world_functions(resolve, items).filter_map(move |entry| {
+    perry_contract::world_functions(resolve, items).filter_map(move |entry| {
         let index = entry
             .function
             .find_futures_and_streams(resolve)
@@ -459,11 +459,11 @@ fn stream_functions<'a>(
 pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
         Ok(match contract {
-            Contract::Scalar(ty) => primitive!(ty, abi).ok_or_else(|| {
+            Contract::Scalar(ty) => scalar_type(ty).ok_or_else(|| {
                 crate::PerryDiagnostic::from(BindError::UnsupportedAbiType(format!("{ty:?}")))
             })?,
             Contract::Resource { id, owned } => AbiType::Resource {
-                key: crate::sdk::canonical_type(resolve, id).index() as u32,
+                key: perry_contract::names::canonical_type(resolve, id).index() as u32,
                 owned,
             },
             Contract::Bytes => AbiType::List(Box::new(AbiType::U8)),
@@ -498,5 +498,23 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
                 .into());
             }
         })
+    })
+}
+
+fn scalar_type(ty: Type) -> Option<AbiType> {
+    Some(match ty {
+        Type::Bool => AbiType::Bool,
+        Type::U8 => AbiType::U8,
+        Type::S8 => AbiType::S8,
+        Type::U16 => AbiType::U16,
+        Type::S16 => AbiType::S16,
+        Type::U32 => AbiType::U32,
+        Type::S32 => AbiType::S32,
+        Type::U64 => AbiType::U64,
+        Type::S64 => AbiType::S64,
+        Type::F32 => AbiType::F32,
+        Type::F64 => AbiType::F64,
+        Type::String => AbiType::String,
+        Type::Char | Type::ErrorContext | Type::Id(_) => return None,
     })
 }

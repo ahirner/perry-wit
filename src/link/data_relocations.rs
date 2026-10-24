@@ -1,4 +1,4 @@
-//! Resolve constant helper data addresses before instantiation.
+//! Resolve constant library data addresses before instantiation.
 use super::libraries::{Global, Library};
 use std::{borrow::Cow, collections::BTreeSet};
 use wasmparser::Operator;

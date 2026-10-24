@@ -37,21 +37,15 @@ jobs:
     - name: Run tests, benchmarks, conformance, and clippy
       run: |
         nix develop -c bash -euo pipefail -c '
+          cargo fetch --manifest-path runtime/Cargo.toml --locked
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
-          cargo test -p perry-runtime --all-features --locked
+          cargo test --manifest-path runtime/Cargo.toml --workspace --locked
+          cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked
+          cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
           cargo run --locked -p perry-conformance -- check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         '
-      env:
-        PERRY_BENCH_BASELINE: tests/baselines/pliron.json
-        PERRY_BENCH_REPORT: benchmark-report.json
-    - uses: actions/upload-artifact@v7
-      if: always()
-      with:
-        name: compiler-benchmark-report
-        path: benchmark-report.json
-        if-no-files-found: warn
 
   flake-build:
     strategy:
@@ -91,11 +85,11 @@ jobs:
         name: perry-wit-${{ matrix.target }}
         path: dist/perry-wit-${{ matrix.target }}.tar.gz
         if-no-files-found: error
-    - name: Package core helpers and Wasm compiler
+    - name: Package runtime libraries and Wasm compiler
       if: matrix.os == 'ubuntu-latest'
       run: |
-        nix build -L .#core-helpers --out-link result-helpers
-        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib
+        nix build -L .#runtime-libraries --out-link result-runtime-libraries
+        tar -czf dist/perry-wit-runtime-libraries.tar.gz -C result-runtime-libraries lib
         nix build -L .#perry-wit-wasm --out-link result-compiler
         mkdir -p dist/compiler
         cp result-compiler/lib/perry-wit.wasm dist/compiler/
@@ -104,8 +98,8 @@ jobs:
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:
-        name: perry-wit-core-helpers
-        path: dist/perry-wit-core-helpers.tar.gz
+        name: perry-wit-runtime-libraries
+        path: dist/perry-wit-runtime-libraries.tar.gz
         if-no-files-found: error
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'

@@ -43,7 +43,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Async
 
-- An `async` function runs until its first suspension. Awaiting an already settled promise continues without suspending.
+- An `async` function runs eagerly until its first suspension. Awaiting an already settled promise continues inline.
 - There is no microtask queue in the guest. Waiting tasks resume from WASI 0.3 callbacks, so the order of continuations for different host events follows the host, not Node.js. Observers of the same promise resume in registration order.
 - `Promise.race` leaves the losing tasks running. They must settle before the export returns, or the call traps.
 - `ReadableStream` supports default readers (`getReader()`), `for await` loops, BYOB readers (`getReader({ mode: "byob" })` with `read(view, { min })` into a caller-provided `Uint8Array`) and explicit cancellation. `for await` over a byte stream releases the reader lock and cancels the stream when the loop exits early. Releasing a reader lock rejects pending reads but keeps buffered chunks for the next reader.
@@ -109,7 +109,7 @@ Compiling this pair with `--core-only` emits:
 
 {{#include numerics-wat.md}}
 
-- **`combine-delta`**: The export adapter `$wit_combine_delta` masks `base` (`i32.and`) and sign-extends `delta` (`i32.extend8_s`). The sum lies in `-128..=382`, so the body adds in `i32` with no float conversion.
+- **`combine-delta`**: The export adapter `$wit_combine_delta` masks `base` (`i32.and`) and sign-extends `delta` (`i32.extend8_s`). The sum lies in `-128..=382`, so the body adds directly in `i32`.
 - **`scale-bytes`**: The product of two `u32` values is below 2<sup>64</sup>, so `i64.mul` computes it exactly. Converting that exact product to `f64` rounds once, matching JavaScript floating-point multiplication. `/` is floating-point division, so the division stays in `f64`.
 
 ### Boundary Conversion

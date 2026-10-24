@@ -63,7 +63,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_spread(
         &mut self,
         ctx: &mut Context,
-        items: &'s [perry_hir::ArrayElement],
+        items: &'s [perry_frontend::hir::ArrayElement],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let mut element = expected
@@ -74,14 +74,14 @@ impl<'s> FunctionBuilder<'s> {
             let env = &self.shapes.type_env;
             element = items.iter().find_map(|item| {
                 let (expression, spread) = match item {
-                    perry_hir::ArrayElement::Expr(Expr::Null | Expr::Undefined)
-                    | perry_hir::ArrayElement::Hole => return None,
-                    perry_hir::ArrayElement::Expr(expr) => (expr, false),
-                    perry_hir::ArrayElement::Spread(expr) => (expr, true),
+                    perry_frontend::hir::ArrayElement::Expr(Expr::Null | Expr::Undefined)
+                    | perry_frontend::hir::ArrayElement::Hole => return None,
+                    perry_frontend::hir::ArrayElement::Expr(expr) => (expr, false),
+                    perry_frontend::hir::ArrayElement::Spread(expr) => (expr, true),
                 };
-                let ty = perry_hir::infer_expr_type(expression, env);
+                let ty = perry_frontend::hir::infer_expr_type(expression, env);
                 let ty = if spread {
-                    crate::shapes::generics::iterated_element(ty).ok()?
+                    perry_frontend::shapes::generics::iterated_element(ty).ok()?
                 } else {
                     ty
                 };
@@ -90,8 +90,10 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(base) = element {
                 let states = items.iter().fold(absence(ctx, base), |states, item| {
                     let state = match item {
-                        perry_hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
-                        perry_hir::ArrayElement::Expr(Expr::Undefined) => Some(Absence::Undefined),
+                        perry_frontend::hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
+                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined) => {
+                            Some(Absence::Undefined)
+                        }
                         _ => None,
                     };
                     crate::coerce::merge_absence(states, state)
@@ -105,9 +107,9 @@ impl<'s> FunctionBuilder<'s> {
         let mut result = None;
         for item in items {
             let (expression, spread) = match item {
-                perry_hir::ArrayElement::Expr(expression) => (expression, false),
-                perry_hir::ArrayElement::Spread(expression) => (expression, true),
-                perry_hir::ArrayElement::Hole => {
+                perry_frontend::hir::ArrayElement::Expr(expression) => (expression, false),
+                perry_frontend::hir::ArrayElement::Spread(expression) => (expression, true),
+                perry_frontend::hir::ArrayElement::Hole => {
                     return Err(LowerError::new(LowerErrorKind::UnsupportedSpread).into());
                 }
             };
@@ -160,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         callee: &'s Expr,
-        args: &'s [perry_hir::CallArg],
+        args: &'s [perry_frontend::hir::CallArg],
     ) -> Result<Value> {
         if let Expr::FuncRef(id) = callee {
             return self.func_call_spread(ctx, *id, args);
@@ -183,13 +185,13 @@ impl<'s> FunctionBuilder<'s> {
             self.store(ctx, acc_slot, init);
             for argument in args {
                 match argument {
-                    perry_hir::CallArg::Expr(expr) => {
+                    perry_frontend::hir::CallArg::Expr(expr) => {
                         let val = self.number_operand(ctx, expr)?;
                         let cur = self.load(ctx, acc_slot)?;
                         let next = self.intrinsic(ctx, op, vec![cur, val]);
                         self.store(ctx, acc_slot, next);
                     }
-                    perry_hir::CallArg::Spread(expr) => {
+                    perry_frontend::hir::CallArg::Spread(expr) => {
                         self.fold_math_spread(ctx, op, acc_slot, expr)?;
                     }
                 }
@@ -219,7 +221,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         object: &'s Expr,
-        args: &'s [perry_hir::CallArg],
+        args: &'s [perry_frontend::hir::CallArg],
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
@@ -231,12 +233,12 @@ impl<'s> FunctionBuilder<'s> {
         let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
         for argument in args {
             match argument {
-                perry_hir::CallArg::Expr(expression) => {
+                perry_frontend::hir::CallArg::Expr(expression) => {
                     let value = self.expression(ctx, expression)?;
                     let source = self.concat_segment(ctx, value, element)?;
                     self.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, source));
                 }
-                perry_hir::CallArg::Spread(expression) => {
+                perry_frontend::hir::CallArg::Spread(expression) => {
                     let source = self.spread_value(ctx, expression, Some(element))?;
                     self.array_element(ctx, source)?;
                     let limit = self.array_length(ctx, source);
@@ -263,21 +265,21 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         receiver: Value,
-        args: &'s [perry_hir::CallArg],
+        args: &'s [perry_frontend::hir::CallArg],
     ) -> Result<Value> {
         let text = StringType::get(ctx).into();
         let result = self.entry_slot(ctx, text);
         self.store(ctx, result, receiver);
         for argument in args {
             match argument {
-                perry_hir::CallArg::Expr(expression) => {
+                perry_frontend::hir::CallArg::Expr(expression) => {
                     let value = self.expression(ctx, expression)?;
                     let value = self.display(ctx, value)?;
                     let previous = self.load(ctx, result)?;
                     let joined = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
                     self.store(ctx, result, joined);
                 }
-                perry_hir::CallArg::Spread(expression) => {
+                perry_frontend::hir::CallArg::Spread(expression) => {
                     let source = self.spread_value(ctx, expression, Some(text))?;
                     let source = self.defined(ctx, source)?;
                     self.array_element(ctx, source)?;
@@ -307,18 +309,18 @@ impl<'s> FunctionBuilder<'s> {
     fn collect_spread_args(
         &mut self,
         ctx: &mut Context,
-        args: &'s [perry_hir::CallArg],
+        args: &'s [perry_frontend::hir::CallArg],
         elem_ty: TypeHandle,
     ) -> Result<Value> {
         let arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
         for argument in args {
             match argument {
-                perry_hir::CallArg::Expr(expr) => {
+                perry_frontend::hir::CallArg::Expr(expr) => {
                     let v = self.expression_with(ctx, expr, Some(elem_ty))?;
                     let v = self.fit(ctx, v, elem_ty)?;
                     self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, v));
                 }
-                perry_hir::CallArg::Spread(expr) => {
+                perry_frontend::hir::CallArg::Spread(expr) => {
                     let src = self.spread_value(ctx, expr, Some(elem_ty))?;
                     let src = self.defined(ctx, src)?;
                     let target_arr_ty = ArrayType::get(ctx, elem_ty).into();
@@ -334,7 +336,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         id: FuncId,
-        args: &'s [perry_hir::CallArg],
+        args: &'s [perry_frontend::hir::CallArg],
     ) -> Result<Value> {
         let signature = self
             .signatures
@@ -347,11 +349,11 @@ impl<'s> FunctionBuilder<'s> {
         while values.len() < fixed_len && arg_idx < args.len() {
             let param = &params[values.len()];
             match &args[arg_idx] {
-                perry_hir::CallArg::Expr(expr) => {
+                perry_frontend::hir::CallArg::Expr(expr) => {
                     values.push(self.bind_fixed_arg(ctx, param, Some(expr))?);
                     arg_idx += 1;
                 }
-                perry_hir::CallArg::Spread(expr) => {
+                perry_frontend::hir::CallArg::Spread(expr) => {
                     let src = self.expression(ctx, expr)?;
                     let src = self.defined(ctx, src)?;
                     if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)

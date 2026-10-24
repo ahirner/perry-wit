@@ -1,8 +1,8 @@
-//! Guest helper linker and relocation.
+//! Link the instance runtime and standard libraries into guest modules.
 //!
-//! Resolves symbolic helper calls (from module `"__perry_helper"`) in the emitted core Wasm,
+//! Resolves symbolic calls from module `"__perry_helper"` in the emitted core Wasm,
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
-//! libraries: `perry-runtime` and the computation helpers.
+//! instance runtime and standard libraries.
 
 pub(crate) mod raw;
 
@@ -98,7 +98,7 @@ pub(crate) struct StreamAnchor {
     pub(crate) index: u32,
 }
 
-/// Placeholder module of byte-stream built-ins in helper libraries (`perry-web`).
+/// Placeholder module of byte-stream built-ins used by `perry-web`.
 const CANON_MODULE: &str = "perry:canon";
 
 impl StreamAnchor {
@@ -122,13 +122,13 @@ impl StreamAnchor {
     }
 }
 
-/// Link `perry:helper/*` imports for standalone core-module tests.
+/// Link runtime and standard-library calls for standalone core-module tests.
 #[cfg(test)]
 fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
 }
 
-/// Link `perry:helper/*` imports and rewrite canonical stream placeholders for `core_wasm`.
+/// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
 pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
@@ -264,7 +264,7 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    // Allocate memory and table placements for each helper library
+    // Allocate memory and table placements for each linked library.
     struct LibPlacement {
         memory_base: u32,
         table_base: u32,
@@ -322,7 +322,7 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    // 4. Assign indices to the selected helper functions
+    // 4. Assign indices to the selected library functions.
     let mut current_helper_func_idx = helper_func_start_idx;
     let mut entry_index = BTreeMap::<(LibraryId, &str), u32>::new();
     for prep in &mut prepared_libs {
@@ -403,7 +403,7 @@ pub(crate) fn link_helpers_with(
         )?;
     }
 
-    // Helper initialization
+    // Library initialization
     let mut helper_inits = Vec::new();
     for (prep, folded) in prepared_libs.iter().zip(&folded) {
         for orig in prep.lib.initializers() {
@@ -603,11 +603,13 @@ pub(crate) fn link_helpers_with(
     }
     for ((prep, placement), folded) in prepared_libs.iter().zip(&lib_placements).zip(&folded) {
         let mut append = |offset: u32, contents: &[u8]| {
-            new_data.active(
-                0,
-                &ConstExpr::i32_const((placement.memory_base + offset) as i32),
-                contents.iter().copied(),
-            );
+            for (start, bytes) in nonzero_runs(contents) {
+                new_data.active(
+                    0,
+                    &ConstExpr::i32_const((placement.memory_base + offset + start as u32) as i32),
+                    bytes.iter().copied(),
+                );
+            }
         };
         if let Some(folded) = folded {
             for (offset, contents) in &folded.segments {
@@ -672,4 +674,25 @@ pub(crate) fn link_helpers_with(
         .validate_all(&result)
         .map_err(LinkError::Validation)?;
     Ok((result, current_helper_func_idx - helper_func_start_idx))
+}
+
+/// Zero runs longer than an active segment's header (flags, offset expression and length).
+const ZERO_RUN_SPLIT: usize = 8;
+
+/// Offsets and bytes of `contents` without its leading and trailing zeros, split at zero runs
+/// longer than [ZERO_RUN_SPLIT]. Library data lands in fresh linear memory, which is zeroed.
+fn nonzero_runs(contents: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+    let mut positions = contents
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &byte)| (byte != 0).then_some(index))
+        .peekable();
+    std::iter::from_fn(move || {
+        let start = positions.next()?;
+        let mut end = start + 1;
+        while let Some(index) = positions.next_if(|&index| index - end <= ZERO_RUN_SPLIT) {
+            end = index + 1;
+        }
+        Some((start, &contents[start..end]))
+    })
 }

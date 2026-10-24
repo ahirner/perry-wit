@@ -141,7 +141,7 @@ macro_rules! intrinsic_catalog {
                 PerformanceNow = "perry_performance_now" [PerformanceNow = "performance_now" () -> (Number), Effectful, None;];
                 DateNow = "perry_date_now" [DateNow = "date_now" () -> (Number), Effectful, None;];
                 NumberFormat = "number_format" (F64, I32) -> I32;
-                // Further runtime and helper-library functions, by name.
+                // Further runtime and standard-library functions, by name.
                 FsClose = "fs_close" () -> I32;
                 FsEvent = "fs_event" (I32, I32, I32) -> I32;
                 FsMkdir = "fs_mkdir" [FsMkdir = "fs_mkdir" (String) -> (PromiseVoid), Effectful, Conservative;];

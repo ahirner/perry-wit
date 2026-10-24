@@ -113,24 +113,7 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         init: Option<&'e Expr>,
     ) -> Result<Vec<(&'s str, &'e Expr)>> {
-        const NOT_LITERAL: &str = "init objects must be object literals yet";
-        match init {
-            None | Some(Expr::Undefined) => Ok(Vec::new()),
-            Some(Expr::New {
-                class_name, args, ..
-            }) => {
-                let names = self
-                    .shapes
-                    .literal_fields(class_name)
-                    .context(NOT_LITERAL)?;
-                ensure!(
-                    names.len() == args.len(),
-                    "init object arity differs from its shape"
-                );
-                Ok(names.iter().copied().zip(args.iter()).collect())
-            }
-            Some(_) => bail!(NOT_LITERAL),
-        }
+        hir_compat::init_fields(init, |name| self.shapes.literal_fields(name))
     }
 
     pub(super) fn fetch(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
@@ -277,10 +260,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        let property =
-            crate::methods::Method::lookup(crate::methods::Receiver::of(ctx, receiver)?, method)
-                .is_some_and(crate::methods::Method::is_property)
-                && args.is_empty();
+        let property = hir_compat::native_member_is_property(
+            crate::methods::Receiver::of(ctx, receiver)?,
+            method,
+            args,
+        );
         self.web_member(ctx, receiver, method, (!property).then_some(args))
     }
 

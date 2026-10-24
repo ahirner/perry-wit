@@ -1,11 +1,5 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
-mod codegen;
-mod names;
-pub(crate) use names::{
-    NamedType, canonical_type, collect_world_types, declaration_id, to_camel_case, to_pascal_case,
-};
-
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -153,28 +147,22 @@ pub(crate) fn declarations(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> Result<Vec<crate::api::Artifact>> {
-    let world = &resolve.worlds[world];
-    let dts = codegen::generate_world_declarations(resolve, world)?;
-    Ok(vec![
-        crate::api::Artifact {
-            name: "world.d.ts".into(),
-            contents: format!("/// <reference path=\"./runtime.d.ts\" />\n/// <reference path=\"./imports.d.ts\" />\n{dts}").into_bytes(),
-        },
-        crate::api::Artifact {
-            name: "imports.d.ts".into(),
-            contents: codegen::generate_import_declarations(resolve, world).into_bytes(),
-        },
-        crate::api::Artifact {
-            name: "runtime.d.ts".into(),
-            contents: include_bytes!("runtime.d.ts").to_vec(),
-        },
-    ])
+    Ok(perry_frontend::sdk::declarations(resolve, world)?
+        .into_iter()
+        .map(|declaration| crate::api::Artifact {
+            name: declaration.name,
+            contents: declaration.contents,
+        })
+        .collect())
 }
 
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
 pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
     fs::create_dir_all(out_dir)?;
-    fs::write(out_dir.join("runtime.d.ts"), include_str!("runtime.d.ts"))?;
+    fs::write(
+        out_dir.join("runtime.d.ts"),
+        perry_frontend::sdk::RUNTIME_DECLARATIONS,
+    )?;
     Ok(())
 }
 

@@ -1,6 +1,5 @@
-//! TODOs.md P0.1: compile time must stay polynomial in expression nesting.
-//! The legacy backend's type inference multiplied compile time by about 8 per extra `.c`;
-//! the MIR builder types each expression once.
+//! Compile time must stay polynomial in expression nesting: the MIR builder types each
+//! expression once.
 use perry_wit::compile_core;
 use std::{
     sync::mpsc,

@@ -314,7 +314,6 @@ impl<'s> FunctionBuilder<'s> {
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
-            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
             other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
@@ -346,44 +345,11 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
-        // type. An explicit type the subset cannot represent is an error, not a fallback.
-        // `Array(Any)` is such a binding too (array destructuring's element source).
-        let declared = match ty {
-            HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_) => None,
-            HirType::Array(element)
-                if matches!(
-                    **element,
-                    HirType::Any | HirType::Unknown | HirType::Never | HirType::TypeVar(_)
-                ) =>
-            {
-                None
-            }
-            HirType::Generic { base, type_args }
-                if matches!(
-                    base.as_str(),
-                    "Map"
-                        | "ReadonlyMap"
-                        | "MapKeys"
-                        | "MapValues"
-                        | "MapEntries"
-                        | "Set"
-                        | "ReadonlySet"
-                        | "SetValues"
-                        | "SetEntries"
-                        | "Array"
-                        | "ReadonlyArray"
-                        | "Record"
-                ) && (type_args.is_empty()
-                    || type_args.iter().any(|t| {
-                        matches!(t, HirType::Any | HirType::Unknown | HirType::TypeVar(_))
-                    })) =>
-            {
-                None
-            }
-            ty if !self.shapes.is_explicit_binding(id) && infer::contains_type_var(ty) => None,
-            ty => Some(self.shapes.value_type(ctx, ty)?),
-        };
+        let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
+        let declared = type_state
+            .resolved()
+            .map(|ty| self.shapes.value_type(ctx, ty))
+            .transpose()?;
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });
@@ -401,20 +367,20 @@ impl<'s> FunctionBuilder<'s> {
             integer = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok();
         }
         let is_never = matches!(ty, HirType::Never);
-        // Inferred bindings preserve absence states and the selected reader mode.
-        // HIR's getReader signature assumes the default overload.
+        // Inferred bindings preserve the initializer's absence states.
         let carrier = match (declared, init) {
             (Some(ty), Some(value))
                 if self.shapes.metadata.inferred_bindings.contains(&id)
-                    && (present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty)
-                        || (ty.deref(ctx).is::<ReaderType>()
-                            && kind(ctx, value)? == Kind::ByobReader)) =>
+                    && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
             {
                 value.get_type(ctx)
             }
             (Some(ty), _) => ty,
             (None, Some(value)) => value.get_type(ctx),
             (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
+            (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
+                return Err(LowerError::new(ShapeError::MissingTypeAnnotation).into());
+            }
             (None, None) => bail!("an untyped binding needs an initializer"),
         };
         let binding = BindingType { carrier, integer };
