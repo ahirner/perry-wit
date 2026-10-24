@@ -4,7 +4,6 @@ mod bind;
 mod http;
 mod imports;
 mod resources;
-mod wit_types;
 
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
@@ -100,10 +99,7 @@ fn compile_for_world_with_memory_checks_impl(
 }
 
 fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
-    perry_lower::source_files::load(source, file_name).map_err(|error| {
-        perry_lower::LowerError::try_from_anyhow(error)
-            .map_or_else(|error| error, |lower| lower_diagnostic(lower).into())
-    })
+    perry_frontend::source_files::load(source, file_name)
 }
 
 fn compile_world(
@@ -149,11 +145,12 @@ pub(crate) fn compile_sources(
         );
     }
     let ctx = &mut Context::new();
-    let mut foreign = wit_types::foreign(resolve, Some(world));
+    let mut foreign = perry_frontend::wit::WorldTypes::new(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let mir = perry_lower::lower_sources(ctx, source, identity, modules, &foreign)
+    let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())
         .map_err(map_lower_error)?;
+    let mir = perry_lower::lower_program(ctx, &program).map_err(map_lower_error)?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
@@ -276,51 +273,18 @@ fn lower(
     source: &str,
     file_name: &str,
     modules: &BTreeMap<String, String>,
-    foreign: &std::collections::HashMap<String, perry_lower::hir::Foreign>,
+    foreign: &perry_frontend::wit::WorldTypes,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
-    let mir = perry_lower::lower_sources(ctx, source, file_name, modules, foreign)
+    let program = perry_frontend::load_sources(ctx, source, file_name, modules, foreign.foreign())
         .map_err(map_lower_error)?;
+    let mir = perry_lower::lower_program(ctx, &program).map_err(map_lower_error)?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
 }
 
-fn lower_diagnostic(error: perry_lower::LowerError) -> crate::PerryDiagnostic {
-    use perry_lower::{LowerErrorKind, ShapeError};
-    let code = match &error.kind {
-        LowerErrorKind::Parse { .. } => crate::DiagnosticCode::ParseError,
-        LowerErrorKind::ModuleResolution { .. } => crate::DiagnosticCode::ModuleResolution,
-        LowerErrorKind::ImportSignatureMismatch { .. } => {
-            crate::DiagnosticCode::ImportSignatureMismatch
-        }
-        LowerErrorKind::Shape(shape) => match shape {
-            ShapeError::MissingTypeAnnotation => crate::DiagnosticCode::MissingTypeAnnotation,
-            ShapeError::UnsupportedType { .. } | ShapeError::TypeMismatch { .. } => {
-                crate::DiagnosticCode::UnsupportedType
-            }
-            ShapeError::IncompatibleRecordLayout { .. } => {
-                crate::DiagnosticCode::IncompatibleRecordLayout
-            }
-            ShapeError::AbsenceMismatch { .. } => crate::DiagnosticCode::AbsenceMismatch,
-        },
-        LowerErrorKind::MissingRequiredField { .. } => crate::DiagnosticCode::MissingRequiredField,
-        LowerErrorKind::UnsupportedOperator { .. } => crate::DiagnosticCode::UnsupportedOperator,
-        LowerErrorKind::UnsupportedSpread => crate::DiagnosticCode::UnsupportedSpread,
-        LowerErrorKind::UnsupportedExpression(_) => crate::DiagnosticCode::UnsupportedExpression,
-    };
-    let message = error.to_string();
-    let help = error.help();
-    let mut diagnostic =
-        crate::PerryDiagnostic::error(code, message).with_optional_span(error.span);
-    diagnostic.notes = error.notes;
-    if let Some(help) = help {
-        diagnostic = diagnostic.with_help(help);
-    }
-    diagnostic
-}
-
 fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
     match perry_lower::LowerError::try_from_anyhow(error) {
-        Ok(lower) => lower_diagnostic(lower),
+        Ok(lower) => lower.into(),
         Err(error) => {
             crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
         }

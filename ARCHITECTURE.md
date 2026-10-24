@@ -4,24 +4,26 @@ Perry-WIT compiles static TypeScript into WASI 0.3 components through Perry HIR 
 
 ## Pipeline
 
-The resolved WIT world feeds four compiler stages:
+The resolved WIT world feeds five compiler stages:
 
 ```text
-                  ┌───────────────────┬───── resolved WIT world ───────┬────────────┐
-                  ▼                   ▼                                ▼            ▼
-TypeScript ──► Source ──► HIR ──► Contract ──► MIR ──► Optimize ──► Codegen ──► Component ──► .wasm
-                  1        2          3         4          5           6            7
+                  ┌───────────┬─── resolved WIT world ───┬────────────────────────┬────────────┐
+                  ▼           ▼                          ▼                        ▼            ▼
+TypeScript ──► Source ──► Frontend ──► Elaborate ──► Contract ──► Optimize ──► Codegen ──► Component ──► .wasm
+                  1           2            3             4            5           6            7
 ```
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
 | 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. HIR lowering | Perry HIR | Collects top-level statements into one function. Without exported functions it is the `wasi:cli/run` body. Otherwise it initializes the module once, and `wasi:cli/run` and every export wait for it. Module bindings persist across calls. |
-| 3. Contract resolution | HIR, WIT | Checks export signatures, requires `async func` for every function that can suspend, maps each native operation to the WASI import it uses, and lays out Canonical ABI scratch areas. |
-| 4. MIR lowering | pliron MIR | Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, types WIT imports under their SDK declaration names, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
+| 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
-| 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, and links referenced helper functions. |
+| 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
 | 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
+
+Top-level statements collect into one function. Without exported functions it is the `wasi:cli/run` body. Otherwise it initializes the module once, and `wasi:cli/run` and every export wait for it. Module bindings persist across calls.
 
 `ProgramFacts` infers numeric refinements (integer type and interval with two-step loop widening), purity and allocation effects, and parameter escape provenance across functions, including recursive call cycles. The numeric analysis propagates ranges forward and bitwidth demand backward [[3]](#ref-3).
 Numeric refinements select `i32`, `i64`, or `f64` representations, specialize synchronous callees for the integer argument types known at each call site, and elide bounds checks on proven in-bounds array reads.
@@ -30,6 +32,24 @@ Repeated string appends reuse spare capacity in place when ownership is unique, 
 
 During code generation, optional values avoid boxing by reserving sentinel encodings inside the value's own representation. `undefined`, `null` and an omitted property are the signaling-NaN payloads `0x7ff0000000000001` to `0x7ff0000000000003` in an `f64`, the addresses `0` to `2` for heap references, and `2` to `4` for booleans. WebAssembly arithmetic only produces quiet NaNs, so a computed number never matches a sentinel.
 Constants rematerialize at use sites, single-use expressions in the same basic block stay on the WebAssembly operand stack when effect and trap ordering permits, and remaining values share WebAssembly locals across non-overlapping live ranges.
+
+## Workspace
+
+The compiler workspace separates these responsibilities:
+
+| Crate | Responsibility |
+| --- | --- |
+| `perry-contract` | Traverses resolved WIT contracts and defines source naming conventions. |
+| `perry-frontend` | Loads source modules, reads Perry HIR, applies compatibility rewrites, resolves types, specializes instances and generates the TypeScript view of WIT. |
+| `perry-lower` | Elaborates the frontend program into eager MIR, completes types from context and chooses representations. |
+| `perry-mir` | Defines typed executable IR and its analyses. |
+| `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
+| `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
+| `pliron-control`, `pliron-wasm` | Provide control-flow and Wasm dialect infrastructure. |
+| `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
+| `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
+
+The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
 
 ## Memory
 
@@ -45,7 +65,7 @@ For streams, backward liveness analysis detects when `reader.read()` or `writer.
 Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing avoids re-scanning ASCII strings.
 Canonical ABI return areas are zero-initialized and rooted before the host populates them, and export adapters release canonical scratch storage only after `task.return` completes or all pending host operations acknowledge cancellation.
 
-Static data starts at address `16`, above the reference sentinels, followed by relocated helper data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
+Static data starts at address `16`, above the reference sentinels, followed by relocated library data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
 
 ## Async
 
@@ -58,10 +78,17 @@ Non-winning branches in `Promise.race` continue as background tasks, and the exp
 
 Readable stream readers decouple public read promises from native transfer completion: releasing a reader lock rejects pending reads while preserving buffered chunks for subsequent readers, explicit cancellation retains the native transfer owner and its pinned buffers until the host acknowledges cancellation, and `for await` loops cancel and unlock the stream on early exit while giving loop exceptions precedence over cancellation errors.
 
-## Helpers
+## Runtime
 
-Freestanding `#![no_std]` Rust helpers for UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math are precompiled to `wasm32-unknown-unknown` and embedded in the compiler binary, requiring no Rust or LLVM toolchain at user compile time.
-During linking, a reachability pass from the helper calls emitted by MIR strips unused functions, globals, element tables, and data segments, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack, and `talc` allocator.
+`runtime/` is a separate Cargo workspace containing the freestanding `#![no_std]` runtime and standard libraries. `perry-abi` supplies layouts, pure algorithms and the Wasm panic handler. `perry-rt-sys` supplies imports, guest-memory access and native stand-ins. `perry-runtime` owns allocation and instance state.
+
+Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. The compiler build script embeds the resulting artifacts and the pinned WASI WIT packages, so compiling TypeScript requires no Rust or LLVM toolchain. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
+
+Runtime release builds use optimization level 2, fat LTO and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
+
+During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals and element tables, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
+
+Runtime crates run their unit tests on the host in their own workspace. The compiler integration suite tests the embedded modules through the linker and Wasmtime.
 
 ## References
 

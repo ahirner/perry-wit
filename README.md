@@ -3,7 +3,7 @@
 **Perry-WIT** compiles a static subset of TypeScript ahead-of-time into WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
 Rather than embedding a JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
-[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime helpers a program reaches.
+[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime and standard-library functions a program reaches.
 An integer `add` export compiles to 100 bytes, and a string `trim` export stays under 6 KiB.
 
 - **Dual-mode authoring**: Write CLI commands with top-level `await`, export typed functions or HTTP handlers, or do both in one module, whose top-level code then initializes state once before any export runs.
@@ -47,15 +47,15 @@ The handbook's Authoring chapter covers commands, HTTP handlers and the project 
 ## Development
 
 Enter the pinned development shell with `direnv allow` or `nix develop`.
-It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT_PATH` to the WASI 0.3 packages, and shares helper builds through `PERRY_HELPER_TARGET_DIR`.
+It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT_PATH` to the WASI 0.3 packages, and shares runtime builds through `PERRY_RUNTIME_TARGET_DIR`.
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fetch --manifest-path runtime/Cargo.toml --locked   # once: runtime builds run offline
 cargo test --workspace
-cargo run -p perry-conformance -- check
-nix flake check
+nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, site, SDK sync, template and example runs
 ```
+
+CI additionally runs the runtime tests, Clippy for both workspaces, the fuel benchmark and the conformance check.
 
 ### Flake outputs
 

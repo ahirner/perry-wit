@@ -13,27 +13,18 @@ homepage = "https://ahirner.github.io/perry-wit/"
 workspace = true
 
 [workspace]
+exclude = ["runtime"]
 members = [
-  ".",
-  "crates/text-helper",
-  "crates/normalization-helper",
-  "crates/fetch-helper",
-  "crates/json-helper",
-  "crates/number-helper",
-  "crates/decimal-helper",
-  "crates/time-helper",
   "crates/conformance",
   "crates/perry-mir",
   "crates/perry-lower",
+  "crates/perry-frontend",
+  "crates/perry-contract",
   "crates/pliron-wasm",
   "crates/pliron-control",
-  "crates/perry-runtime",
-  "crates/perry-abi",
-  "crates/perry-std",
-  "crates/perry-fs",
-  "crates/perry-web",
   "crates/perry-codegen",
   "crates/perry-diagnostics",
+  "crates/perry-rt-build",
 ]
 
 [workspace.lints.rust]
@@ -46,17 +37,18 @@ anyhow = "1.0"
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
-libm = "0.2"
-perry-abi = { path = "crates/perry-abi" }
+perry-abi = { path = "runtime/abi" }
+perry-contract = { path = "crates/perry-contract" }
+perry-frontend = { path = "crates/perry-frontend" }
 perry-hir = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
-perry-runtime = { path = "crates/perry-runtime" }
 pliron = { git = "https://github.com/pliron-org/pliron", rev = "58797e44a51220e62bac7c91bab458c6a0e08a9b", default-features = false }
 pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
+sha2 = "0.10"
 tempfile = "3.27.0"
 tokio = "1"
 wasm-encoder = "0.261"
@@ -65,6 +57,7 @@ wasmprinter = "0.261.0"
 wasmtime = { version = "=50.0.0", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
 wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p3"] }
 wasmtime-wasi-http = { version = "=50.0.0", default-features = false, features = ["p3", "default-send-request"] }
+wat = "~1.261.0"
 wit-parser = "0.261"
 
 [profile.dev]
@@ -84,12 +77,13 @@ panic = "abort"
 strip = true
 
 [dependencies]
+perry-contract.workspace = true
+perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }
 perry-lower = { path = "crates/perry-lower" }
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true
-perry-parser.workspace = true
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmparser.workspace = true
 wit-parser.workspace = true
@@ -101,13 +95,12 @@ serde_json.workspace = true
 wit-bindgen = "0.62"
 
 [build-dependencies]
-wat = "~1.261.0"
-wasmparser.workspace = true
+perry-rt-build = { path = "crates/perry-rt-build" }
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2.workspace = true
 serde = { workspace = true, features = ["derive"] }
-wat = "~1.261.0"
+wat.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body = "1"
@@ -117,5 +110,5 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-http.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile.workspace = true
-perry-json-helper = { path = "crates/json-helper" }
+perry-json = { path = "runtime/json" }
 wasmprinter.workspace = true

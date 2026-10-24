@@ -1,31 +1,9 @@
 //! Source schemas to the existing MIR representation contracts.
-use super::generics::Resolver;
 use super::*;
 use crate::collections::CollectionViewKind;
+use perry_frontend::shapes::generics::Resolver;
 
-pub(crate) fn perry_integer_spec(name: &str) -> Option<(u32, Signedness)> {
-    Some(match name {
-        "u8" => (8, Signedness::Unsigned),
-        "s8" => (8, Signedness::Signed),
-        "u16" => (16, Signedness::Unsigned),
-        "s16" => (16, Signedness::Signed),
-        "u32" => (32, Signedness::Unsigned),
-        "s32" => (32, Signedness::Signed),
-        "u64" => (64, Signedness::Unsigned),
-        "s64" => (64, Signedness::Signed),
-        _ => return None,
-    })
-}
-
-pub(crate) fn integer_hir_carrier(width: u32) -> HirType {
-    if width == 64 {
-        HirType::BigInt
-    } else {
-        HirType::Number
-    }
-}
-
-pub(crate) fn integer_mir_carrier(ctx: &Context, width: u32) -> TypeHandle {
+pub(super) fn integer_mir_carrier(ctx: &Context, width: u32) -> TypeHandle {
     if width == 64 {
         perry_mir::BigIntType::get(ctx).into()
     } else {
@@ -142,7 +120,6 @@ impl Shapes<'_> {
                     .source_record(
                         ctx,
                         None,
-                        false,
                         object
                             .properties
                             .iter()

@@ -1,7 +1,9 @@
-//! Built-in method metadata shared by lowering, inference and HIR name preservation.
+//! MIR lowering of the frontend method catalog.
 use super::*;
 use crate::array_methods::{Direction, FindResult, Mutation, Quantifier, Search, Transform};
-use crate::collections::{SetOperation, SetRelation, kv_entry_types, set_entry_type};
+use crate::collections::{
+    IteratorMethod, SetOperation, SetRelation, dict_entry_types, kv_entry_types, set_entry_type,
+};
 
 mod intrinsic;
 use intrinsic::{
@@ -9,44 +11,13 @@ use intrinsic::{
     IntrinsicCall, Return,
 };
 
-pub(super) const PUSH: &str = "$$perryArrayPush";
-pub(super) const CONCAT: &str = "$$perryArrayConcat";
-pub(super) const METHOD_PREFIX: &str = "$$perryMethod_";
+pub(super) use perry_frontend::methods::{Call, CallReceiver, Receiver};
 
-enum Preservation {
-    Upstream,
-    Always,
-    Push,
-    Concat,
-    Arguments,
+pub(super) trait ReceiverExt {
+    fn of(ctx: &Context, value: Value) -> Result<Receiver>;
 }
-
-impl Preservation {
-    fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
-        match self {
-            Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Concat => Some(CONCAT.into()),
-            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
-            _ => None,
-        }
-    }
-}
-
-pub(super) enum CallReceiver<'s> {
-    Expression(&'s Expr),
-    Local(LocalId),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Receiver {
-    Value(Kind),
-    Map,
-    Set,
-}
-
-impl Receiver {
-    pub(super) fn of(ctx: &Context, value: Value) -> Result<Self> {
+impl ReceiverExt for Receiver {
+    fn of(ctx: &Context, value: Value) -> Result<Self> {
         let ty = value.get_type(ctx);
         Ok(if crate::collections::map_entry_types(ctx, ty).is_some() {
             Self::Map
@@ -56,216 +27,34 @@ impl Receiver {
             Self::Value(kind(ctx, value)?)
         })
     }
-
-    fn inferred(ctx: &Context, ty: &HirType) -> Option<Self> {
-        Some(match ty {
-            HirType::Array(_) | HirType::Tuple(_) => Self::Value(Kind::Array),
-            HirType::String => Self::Value(Kind::String),
-            HirType::Number => Self::Value(Kind::Number),
-            HirType::Boolean => Self::Value(Kind::Boolean),
-            HirType::Named(name) | HirType::Generic { base: name, .. } => match name.as_str() {
-                "Map" | "ReadonlyMap" => Self::Map,
-                "Set" | "ReadonlySet" => Self::Set,
-                "Stats" | "fs.Stats" => Self::Value(Kind::Stats),
-                _ => Self::Value(Kind::of(ctx, Kind::builtin_type(ctx, name)?)?),
-            },
-            _ => return None,
-        })
-    }
+}
+pub(super) trait CallExt<'s> {
+    fn lower(
+        self,
+        builder: &mut FunctionBuilder<'s>,
+        ctx: &mut Context,
+        receiver: Value,
+    ) -> Result<Option<Value>>;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum MethodResult {
-    Mapped,
-    FlatMapped,
-    Receiver,
-    Flat,
-    Element,
-    At,
-    Reduced,
-    Void,
-    String,
-    Strings,
-    NullableStrings,
-    Number,
-    Boolean,
-    Lookup,
-    Duration,
-    OptionalNumber,
-    NullableString,
-    IteratorKeys,
-    IteratorValues,
-    IteratorEntries,
-    Native(Kind),
-    Promise(Kind),
-    PromiseVoid,
-    PromiseJson,
-    Nullable(Kind),
-    Optional(Kind),
-    StreamReader,
-}
-
-macro_rules! arguments {
-    ($args:ident;) => {
-        match $args {
-            [] => Some(()),
-            _ => None,
-        }
-    };
-    ($args:ident; $all:ident:rest) => {
-        Some(($args,))
-    };
-    ($args:ident; $first:ident) => {
-        match $args {
-            [first] => Some((first,)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident:optional) => {
-        match $args {
-            [] => Some((None,)),
-            [first] => Some((Some(first),)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident, $second:ident) => {
-        match $args {
-            [first, second] => Some((first, second)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident, $second:ident:optional) => {
-        match $args {
-            [first] => Some((first, None)),
-            [first, second] => Some((first, Some(second))),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident:optional, $second:ident:optional) => {
-        match $args {
-            [] => Some((None, None)),
-            [first] => Some((Some(first), None)),
-            [first, second] => Some((Some(first), Some(second))),
-            _ => None,
-        }
-    };
-}
-
-macro_rules! argument_type {
-    ($name:ident) => { &'s Expr };
-    ($name:ident:optional) => { Option<&'s Expr> };
-    ($name:ident:rest) => { &'s [Expr] };
-}
-
-macro_rules! argument_values {
-    ($arg:ident) => {
-        Some(*$arg).into_iter()
-    };
-    ($arg:ident:optional) => {
-        $arg.iter().copied()
-    };
-    ($arg:ident:rest) => {
-        $arg.iter()
-    };
-}
-
-macro_rules! registry {
-    ($builder:ident, $ctx:ident, $receiver:ident;
-        $( $family:pat, $class:literal $setup:tt {
-            $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident
-                [$($argument:ident $(:$mode:ident)?),*] => $action:ident $lower:tt, $requirement:literal;
-            )*
-        } )*
-    ) => {
-        #[derive(Clone, Copy)]
-        pub(super) enum Method { $($($variant,)*)* }
-
-        impl Method {
-            pub(super) fn lookup(receiver: Receiver, name: &str) -> Option<Self> {
-                match (receiver, name) {
-                    $($(($family, $($name)|+) => Some(Self::$variant),)*)*
-                    _ => None,
-                }
-            }
-
-            pub(super) fn is_property(self) -> bool {
-                match self { $($(Self::$variant => registry!(@property $form),)*)* }
-            }
-
-            pub(super) fn result(self) -> MethodResult {
-                match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
-            }
-
-            pub(super) fn inferred(ctx: &Context, receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
-                if let Some(receiver) = Receiver::inferred(ctx, receiver) {
-                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result);
-                }
-                if property { return None; }
-                let mut result = None;
-                $($(if registry!(@property $form) == property && matches!(name, $($name)|+) {
-                    let rule = MethodResult::$result $(($result_arg))?;
-                    if result.is_some_and(|previous| previous != rule) { return None; }
-                    result = Some(rule);
-                })*)*
-                result
-            }
-
-            pub(super) fn rewrite(name: &str, count: usize, spread: bool) -> Option<String> {
-                $($(if matches!(name, $($name)|+) {
-                    if let Some(rewritten) = Preservation::$preserve.rewrite(name, count, spread) {
-                        return Some(rewritten);
-                    }
-                })*)*
-                None
-            }
-        }
-
-        pub(super) enum Call<'s> {
-            $($($variant($(argument_type!($argument $(:$mode)?)),*),)*)*
-        }
-
-        impl<'s> Call<'s> {
-            pub(super) fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
-                Self::member(receiver, name, Some(args))
-            }
-
-            pub(super) fn member(receiver: Receiver, name: &str, args: Option<&'s [Expr]>) -> Result<Option<Self>> {
-                let Some(method) = Method::lookup(receiver, name).filter(|m| m.is_property() == args.is_none()) else { return Ok(None) };
-                let args = args.unwrap_or(&[]);
-                Ok(Some(match method {
-                    $($(Method::$variant => {
-                        let Some(($($argument,)*)) = arguments!(args; $($argument $(:$mode)?),*) else {
-                            bail!("{}.{} {}", $class, name, $requirement);
-                        };
-                        Self::$variant($($argument),*)
-                    },)*)*
-                }))
-            }
-
-            pub(super) fn result(&self) -> MethodResult {
-                match self { $($(Self::$variant(..) => MethodResult::$result $(($result_arg))?,)*)* }
-            }
-
-            pub(super) fn argument(&self, index: usize) -> Option<&'s Expr> {
-                match self {
-                    $($(Self::$variant($($argument),*) => std::iter::empty()
-                        $(.chain(argument_values!($argument $(:$mode)?)))*.nth(index),)*)*
-                }
-            }
-
-            pub(super) fn lower(
-                self, $builder: &mut FunctionBuilder<'s>, $ctx: &mut Context, $receiver: Value,
+/// Implements `Call::lower` from the lowering column of `perry_frontend::method_catalog`.
+/// Every catalog row carries a recipe, so each `Call` variant has exactly one arm.
+macro_rules! lower_calls {
+    ($( $family:pat, $class:literal {
+        $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident
+            [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
+        )*
+    } )*) => {
+        impl<'s> CallExt<'s> for Call<'s> {
+            fn lower(
+                self, b: &mut FunctionBuilder<'s>, ctx: &mut Context, receiver: Value,
             ) -> Result<Option<Value>> {
-                match self { $($(Self::$variant($($argument),*) => registry!(@lower $setup ($builder, $ctx, $receiver) $action $lower),)*)* }
+                match self { $($(
+                    Call::$variant($($argument),*) => lower_calls!(@invoke (b, ctx, receiver) $action $recipe),
+                )*)* }
             }
         }
     };
-    (@property Method) => { false };
-    (@property Property) => { true };
-    (@lower { $($setup:tt)* } ($b:ident, $ctx:ident, $receiver:ident) $action:ident $lower:tt) => {{
-        $($setup)* registry!(@invoke ($b, $ctx, $receiver) $action $lower)
-    }};
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) code $lower:block) => { $lower };
     (@invoke ($b:ident, $ctx:ident, $receiver:ident) value ($method:ident($($arg:expr),*))) => {
         $b.$method($ctx, $receiver $(, $arg)*).map(Some)
     };
@@ -275,133 +64,346 @@ macro_rules! registry {
     (@invoke ($b:ident, $ctx:ident, $receiver:ident) intrinsic ($intrinsic:ident)) => {
         Ok($b.call_intrinsic($ctx, Intrinsic::$intrinsic, vec![$receiver]))
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) intrinsic ($intrinsic:ident, $args:expr, [$($argument:expr),*], $result:ident)) => {
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident)
+        intrinsic ($intrinsic:ident, $args:expr, [$($argument:expr),*], $result:ident)) => {
         IntrinsicCall { intrinsic: Intrinsic::$intrinsic, arguments: &[$($argument),*], result: Return::$result }
             .lower($b, $ctx, $receiver, $args)
     };
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident) receiver ()) => { Ok(Some($receiver)) };
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident) reject ($message:literal)) => { bail!($message) };
 }
 
-include!("methods/registry.rs");
-impl<'s> Call<'s> {
-    pub(super) fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
-        match expr {
-            Expr::SetAdd { set_id, value } => {
-                return Some((CallReceiver::Local(*set_id), Self::SetAdd(value)));
-            }
-            Expr::ArrayPush {
-                array_id, value, ..
-            } => {
-                return Some((
-                    CallReceiver::Local(*array_id),
-                    Self::ArrayPush(std::slice::from_ref(value.as_ref())),
-                ));
-            }
-            _ => {}
+perry_frontend::method_catalog!(lower_calls);
+
+fn map_types(ctx: &Context, map: Value) -> Result<(TypeHandle, TypeHandle)> {
+    let (key, value, _) =
+        kv_entry_types(ctx, map.get_type(ctx)).context("method receiver must be a Map")?;
+    Ok((key, value))
+}
+
+fn set_element(ctx: &Context, set: Value) -> Result<TypeHandle> {
+    let (element, _) =
+        set_entry_type(ctx, set.get_type(ctx)).context("method receiver must be a Set")?;
+    Ok(element)
+}
+
+/// Catalog recipes that combine several builder operations.
+impl<'s> FunctionBuilder<'s> {
+    fn iterator_method(
+        &mut self,
+        ctx: &mut Context,
+        collection: Value,
+        method: IteratorMethod,
+    ) -> Result<Value> {
+        ensure!(
+            dict_entry_types(ctx, collection.get_type(ctx)).is_none(),
+            "dictionary values have no iterator method"
+        );
+        self.collection_iterator(ctx, collection, method)
+    }
+
+    fn map_get(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
+        let (key_type, value_type) = map_types(ctx, map)?;
+        let key = self.expression_with(ctx, key, Some(key_type))?;
+        self.kv_get(ctx, map, key, key_type, value_type)
+    }
+
+    fn map_set(
+        &mut self,
+        ctx: &mut Context,
+        map: Value,
+        key: &'s Expr,
+        value: &'s Expr,
+    ) -> Result<Value> {
+        let (key_type, value_type) = map_types(ctx, map)?;
+        let key = self.expression_with(ctx, key, Some(key_type))?;
+        let value = self.expression_with(ctx, value, Some(value_type))?;
+        self.kv_set(ctx, map, key, value)
+    }
+
+    fn map_has(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
+        let (key_type, _) = map_types(ctx, map)?;
+        let key = self.expression_with(ctx, key, Some(key_type))?;
+        self.kv_has(ctx, map, key, key_type)
+    }
+
+    fn map_delete(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
+        let (key_type, _) = map_types(ctx, map)?;
+        let key = self.expression_with(ctx, key, Some(key_type))?;
+        self.kv_delete(ctx, map, key, key_type)
+    }
+
+    fn set_insert(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
+        let element = set_element(ctx, set)?;
+        let value = self.expression_with(ctx, value, Some(element))?;
+        self.set_add(ctx, set, value, element)
+    }
+
+    fn set_contains(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
+        let element = set_element(ctx, set)?;
+        let value = self.expression_with(ctx, value, Some(element))?;
+        self.kv_has(ctx, set, value, element)
+    }
+
+    fn set_remove(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
+        let element = set_element(ctx, set)?;
+        let value = self.expression_with(ctx, value, Some(element))?;
+        self.set_delete(ctx, set, value, element)
+    }
+
+    fn set_operation(
+        &mut self,
+        ctx: &mut Context,
+        set: Value,
+        other: &'s Expr,
+        operation: SetOperation,
+    ) -> Result<Value> {
+        let element = set_element(ctx, set)?;
+        self.set_binary_op(ctx, set, other, element, operation)
+    }
+
+    fn set_relation(
+        &mut self,
+        ctx: &mut Context,
+        set: Value,
+        other: &'s Expr,
+        relation: SetRelation,
+    ) -> Result<Value> {
+        let element = set_element(ctx, set)?;
+        self.set_relation_op(ctx, set, other, element, relation)
+    }
+
+    fn string_concat(&mut self, ctx: &mut Context, text: Value, args: &'s [Expr]) -> Result<Value> {
+        let mut segments = Vec::with_capacity(args.len());
+        for argument in args {
+            let value = self.expression(ctx, argument)?;
+            segments.push(self.display(ctx, value)?);
         }
-        let (receiver, call): (&Expr, Self) = match expr {
-            Expr::DateGetTime(date) | Expr::DateValueOf(date) => (date, Self::DateGetTime(&[])),
-            Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
-            Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),
-            Expr::UrlInstanceToString(url) | Expr::UrlInstanceToJSON(url) => {
-                (url, Self::UrlString(&[]))
-            }
-            Expr::UrlSearchParamsAppend {
-                params,
-                name,
-                value,
-            } => (params, Self::SearchParamsAppend(name, value)),
-            Expr::DateGetUtcFullYear(date) | Expr::DateGetFullYear(date) => {
-                (date, Self::DateGetFullYear(&[]))
-            }
-            Expr::DateGetUtcMonth(date) | Expr::DateGetMonth(date) => {
-                (date, Self::DateGetMonth(&[]))
-            }
-            Expr::DateGetUtcDate(date) | Expr::DateGetDate(date) => (date, Self::DateGetDate(&[])),
-            Expr::DateGetUtcDay(date) | Expr::DateGetDay(date) => (date, Self::DateGetDay(&[])),
-            Expr::DateGetUtcHours(date) | Expr::DateGetHours(date) => {
-                (date, Self::DateGetHours(&[]))
-            }
-            Expr::DateGetUtcMinutes(date) | Expr::DateGetMinutes(date) => {
-                (date, Self::DateGetMinutes(&[]))
-            }
-            Expr::DateGetUtcSeconds(date) | Expr::DateGetSeconds(date) => {
-                (date, Self::DateGetSeconds(&[]))
-            }
-            Expr::DateGetUtcMilliseconds(date) | Expr::DateGetMilliseconds(date) => {
-                (date, Self::DateGetMilliseconds(&[]))
-            }
-            Expr::DateGetTimezoneOffset(date) => (date, Self::DateGetTimezoneOffset(&[])),
-            Expr::DateSetUtcFullYear { date, args } | Expr::DateSetFullYear { date, args } => {
-                (date, Self::DateSetFullYear(args))
-            }
-            Expr::DateSetUtcMonth { date, args } | Expr::DateSetMonth { date, args } => {
-                (date, Self::DateSetMonth(args))
-            }
-            Expr::DateSetUtcDate { date, args } | Expr::DateSetDate { date, args } => {
-                (date, Self::DateSetDate(args))
-            }
-            Expr::DateSetUtcHours { date, args } | Expr::DateSetHours { date, args } => {
-                (date, Self::DateSetHours(args))
-            }
-            Expr::DateSetUtcMinutes { date, args } | Expr::DateSetMinutes { date, args } => {
-                (date, Self::DateSetMinutes(args))
-            }
-            Expr::DateSetUtcSeconds { date, args } | Expr::DateSetSeconds { date, args } => {
-                (date, Self::DateSetSeconds(args))
-            }
-            Expr::DateSetUtcMilliseconds { date, args }
-            | Expr::DateSetMilliseconds { date, args } => (date, Self::DateSetMilliseconds(args)),
-            Expr::DateSetTime { date, args } => (date, Self::DateSetTime(args)),
-            Expr::StringSplit(text, separator) => (text, Self::StringSplit(separator)),
-            Expr::StringCodePointAt { string, index } => {
-                (string, Self::StringCodePointAt(std::slice::from_ref(index)))
-            }
-            Expr::ArrayMap { array, callback } => (array, Self::ArrayMap(callback)),
-            Expr::ArrayFilter { array, callback } => (array, Self::ArrayFilter(callback)),
-            Expr::ArrayFlatMap { array, callback } => (array, Self::ArrayFlatMap(callback)),
-            Expr::ArrayFind { array, callback } => (array, Self::ArrayFind(callback)),
-            Expr::ArrayFindIndex { array, callback } => (array, Self::ArrayFindIndex(callback)),
-            Expr::ArraySome { array, callback } => (array, Self::ArraySome(callback)),
-            Expr::ArrayEvery { array, callback } => (array, Self::ArrayEvery(callback)),
-            Expr::ArraySort { array, comparator } => (
-                array,
-                Self::ArraySort((!matches!(**comparator, Expr::Undefined)).then_some(comparator)),
-            ),
-            Expr::ArrayToSorted { array, comparator } => (
-                array,
-                Self::ArrayToSorted(
-                    comparator
-                        .as_deref()
-                        .filter(|c| !matches!(c, Expr::Undefined)),
-                ),
-            ),
-            Expr::ArrayIncludes {
-                array,
-                value,
-                from_index,
-            } => (array, Self::ArrayIncludes(value, from_index.as_deref())),
-            Expr::ArrayIndexOf {
-                array,
-                value,
-                from_index,
-            } => (array, Self::ArrayIndexOf(value, from_index.as_deref())),
-            Expr::MapClear(source) => (source, Self::MapClear()),
-            Expr::SetClear(source) => (source, Self::SetClear()),
-            Expr::MapKeys(source) | Expr::ArrayKeys(source) => (source, Self::CollectionKeys()),
-            Expr::MapValues(source) | Expr::SetValues(source) | Expr::ArrayValues(source) => {
-                (source, Self::CollectionValues())
-            }
-            Expr::MapEntries(source) | Expr::ArrayEntries(source) => {
-                (source, Self::CollectionEntries())
-            }
-            Expr::MapGet { map, key } => (map, Self::MapGet(key)),
-            Expr::MapSet { map, key, value } => (map, Self::MapSet(key, value)),
-            Expr::MapHas { map, key } => (map, Self::MapHas(key)),
-            Expr::MapDelete { map, key } => (map, Self::MapDelete(key)),
-            Expr::SetHas { set, value } => (set, Self::SetHas(value)),
-            Expr::SetDelete { set, value } => (set, Self::SetDelete(value)),
-            _ => return None,
+        let mut result = text;
+        for segment in segments {
+            result = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, result, segment));
+        }
+        Ok(result)
+    }
+
+    fn string_normalize(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        form: Option<&'s Expr>,
+    ) -> Result<Option<Value>> {
+        let form = match form {
+            None | Some(Expr::Undefined) => self.string(ctx, "NFC"),
+            Some(arg) => self.string_operand(ctx, arg)?,
         };
-        Some((CallReceiver::Expression(receiver), call))
+        Ok(self.call_intrinsic(ctx, Intrinsic::StringNormalize, vec![text, form]))
+    }
+
+    fn locale_compare(&mut self, ctx: &mut Context, text: Value, other: &'s Expr) -> Result<Value> {
+        let other = self.string_operand(ctx, other)?;
+        self.compare_sign(ctx, text, other)
+    }
+
+    fn string_split(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        separator: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let separator = self.expression(ctx, separator)?;
+        let separator = self.defined(ctx, separator)?;
+        let intrinsic = match kind(ctx, separator)? {
+            Kind::String => Intrinsic::StringSplit,
+            Kind::Regex => Intrinsic::RegexSplit,
+            _ => bail!("string.split requires a string or literal regex separator"),
+        };
+        Ok(self.call_intrinsic(ctx, intrinsic, vec![text, separator]))
+    }
+
+    fn string_match(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        regex: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+        Ok(self.call_intrinsic(ctx, Intrinsic::RegexMatch, vec![text, regex]))
+    }
+
+    fn string_search(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        regex: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+        ensure!(
+            !FunctionBuilder::regex_global(ctx, regex)?,
+            "Regex search supports only the u and s flags"
+        );
+        Ok(self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex]))
+    }
+
+    fn regex_test_text(
+        &mut self,
+        ctx: &mut Context,
+        regex: Value,
+        text: &'s Expr,
+    ) -> Result<Value> {
+        ensure!(
+            !FunctionBuilder::regex_global(ctx, regex)?,
+            "Regex search supports only the u and s flags"
+        );
+        let text = self.string_operand(ctx, text)?;
+        Ok(self.regex_test(ctx, regex, text))
+    }
+
+    fn regex_exec(
+        &mut self,
+        ctx: &mut Context,
+        regex: Value,
+        text: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let text = self.string_operand(ctx, text)?;
+        Ok(self.call_intrinsic(ctx, Intrinsic::RegexExec, vec![text, regex]))
+    }
+
+    fn search_params_append(
+        &mut self,
+        ctx: &mut Context,
+        params: Value,
+        name: &'s Expr,
+        value: &'s Expr,
+    ) -> Result<Value> {
+        let name = self.string_operand(ctx, name)?;
+        let value = self.string_operand(ctx, value)?;
+        self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![params, name, value]);
+        let ty = void_type(ctx);
+        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+    }
+
+    fn abort_controller(&mut self, ctx: &mut Context, controller: Value) -> Result<Option<Value>> {
+        self.intrinsic_void(ctx, Intrinsic::AbortAbort, vec![controller]);
+        Ok(None)
+    }
+
+    fn number_to_string(
+        &mut self,
+        ctx: &mut Context,
+        number: Value,
+        radix: Option<&'s Expr>,
+    ) -> Result<Option<Value>> {
+        let number = self.arithmetic(ctx, number);
+        Ok(match radix {
+            None | Some(Expr::Undefined) => {
+                self.call_intrinsic(ctx, Intrinsic::NumberToString, vec![number])
+            }
+            Some(radix) => {
+                let radix = self.number_operand(ctx, radix)?;
+                self.call_intrinsic(ctx, Intrinsic::NumberToStringRadix, vec![number, radix])
+            }
+        })
+    }
+
+    fn bytes_set(
+        &mut self,
+        ctx: &mut Context,
+        bytes: Value,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        let source = args.first().context("set needs a source")?;
+        let source = self.expression(ctx, source)?;
+        let source = self.defined(ctx, source)?;
+        let source = match kind(ctx, source)? {
+            Kind::Bytes => source,
+            Kind::Array => self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![source]),
+            _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
+        };
+        let offset = self.number_or(ctx, args.get(1), 0.0)?;
+        self.intrinsic_void(ctx, Intrinsic::BytesSetFrom, vec![bytes, source, offset]);
+        Ok(None)
+    }
+
+    fn plain_date_equals(
+        &mut self,
+        ctx: &mut Context,
+        date: Value,
+        other: &'s Expr,
+    ) -> Result<Value> {
+        let other = self.coerce_plain_date(ctx, other, None)?;
+        let left = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![date]);
+        let right = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![other]);
+        Ok(self.compare(ctx, CompareKind::Eq, left, right))
+    }
+
+    fn plain_date_until(
+        &mut self,
+        ctx: &mut Context,
+        date: Value,
+        other: &'s Expr,
+        options: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let other = self.coerce_plain_date(ctx, other, None)?;
+        self.temporal_until(ctx, date, other, options)
+    }
+
+    fn plain_date_since(
+        &mut self,
+        ctx: &mut Context,
+        date: Value,
+        other: &'s Expr,
+        options: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let other = self.coerce_plain_date(ctx, other, None)?;
+        self.temporal_until(ctx, other, date, options)
+    }
+
+    fn writer_write(
+        &mut self,
+        ctx: &mut Context,
+        writer: Value,
+        chunk: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let (chunk, _) = self.body_init(ctx, Some(chunk))?;
+        let chunk = self.defined(ctx, chunk)?;
+        Ok(self.call_intrinsic(ctx, Intrinsic::WriterWrite, vec![writer, chunk]))
+    }
+
+    fn readable_get_reader(
+        &mut self,
+        ctx: &mut Context,
+        readable: Value,
+        options: Option<&'s Expr>,
+    ) -> Result<Option<Value>> {
+        let intrinsic = if let Some(options) = options {
+            let fields = self.init_fields(Some(options))?;
+            ensure!(
+                fields.len() == 1
+                    && fields[0].0 == "mode"
+                    && matches!(fields[0].1, Expr::String(mode) if mode == "byob"),
+                "getReader supports only {{mode: 'byob'}}"
+            );
+            Intrinsic::ReadableGetByobReader
+        } else {
+            Intrinsic::ReadableGetReader
+        };
+        Ok(self.call_intrinsic(ctx, intrinsic, vec![readable]))
+    }
+
+    fn reader_read_byob(
+        &mut self,
+        ctx: &mut Context,
+        reader: Value,
+        view: &'s Expr,
+        options: Option<&'s Expr>,
+    ) -> Result<Option<Value>> {
+        let view = self.typed_operand(ctx, view, Kind::Bytes, "a Uint8Array")?;
+        let fields = self.init_fields(options)?;
+        ensure!(
+            fields.is_empty() || (fields.len() == 1 && fields[0].0 == "min"),
+            "BYOB read supports only {{min}}"
+        );
+        let minimum = self.number_or(ctx, fields.first().map(|(_, value)| *value), 1.0)?;
+        Ok(self.call_intrinsic(ctx, Intrinsic::ReaderReadByob, vec![reader, view, minimum]))
     }
 }

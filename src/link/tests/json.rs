@@ -1,5 +1,5 @@
 use anyhow::Result;
-use perry_json_helper as json;
+use perry_json as json;
 use wasmtime::{
     Engine, Global, GlobalType, Instance, Linker, Memory, MemoryType, Module, Mutability, Store,
     Val, ValType,
@@ -7,7 +7,7 @@ use wasmtime::{
 
 use crate::link::{self, libraries};
 
-const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json.wasm"));
+const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json.wasm"));
 const INPUT: u32 = 262_144;
 const GRAPH: u32 = 327_680;
 
@@ -127,7 +127,7 @@ fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<(
     Ok(())
 }
 
-/// The graph the host build of the helper populates at `GRAPH`.
+/// The graph the host JSON codec populates at `GRAPH`.
 fn host_graph(input: &str) -> Vec<u8> {
     let mut graph = vec![0; json::measure(input).unwrap()];
     json::populate(input, &mut graph, GRAPH).unwrap();

@@ -1,21 +1,15 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use crate::sdk::{NamedType, canonical_type, to_camel_case, to_pascal_case};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
-use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
-use std::collections::{BTreeMap, HashMap};
-use wit_parser::{Resolve, TypeDefKind, TypeId, WorldId, WorldItem};
-
-pub(super) fn source_type(resolve: &Resolve, id: TypeId) -> Option<HirType> {
-    Some(HirType::Named(
-        NamedType::get(resolve, canonical_type(resolve, id))?.qualified(),
-    ))
-}
+use perry_contract::names::canonical_type;
+use perry_frontend::wit::{ResourceOperation as SourceResourceOperation, WorldTypes};
+use std::collections::BTreeMap;
+use wit_parser::{Resolve, TypeDefKind, WorldId, WorldItem};
 
 pub(super) fn definitions(
     resolve: &Resolve,
     world: WorldId,
-    foreign: &mut HashMap<String, Foreign>,
+    types: &mut WorldTypes,
     bindings: &mut Vec<Import>,
 ) -> Result<Vec<ResourceDefinition>> {
     let mut definitions = BTreeMap::new();
@@ -46,42 +40,16 @@ pub(super) fn definitions(
                         exported,
                     },
                 );
-                let resource =
-                    source_type(resolve, *id).context("resource has no WIT declaration name")?;
-                let suffix = to_pascal_case(name);
-                let mut helpers = vec![(
-                    format!("drop{suffix}"),
-                    ResourceOperation::Drop,
-                    resource.clone(),
-                    HirType::Void,
-                )];
-                if exported {
-                    helpers.extend([
-                        (
-                            format!("new{suffix}"),
-                            ResourceOperation::New,
-                            HirType::Number,
-                            resource.clone(),
-                        ),
-                        (
-                            format!("{}Rep", to_camel_case(name)),
-                            ResourceOperation::Representation,
-                            resource.clone(),
-                            HirType::Number,
-                        ),
-                    ]);
-                }
-                for (name, operation, input, output) in helpers {
-                    let binding = format!("{module}#{name}");
-                    foreign.insert(
-                        binding.clone(),
-                        Foreign::Function(FunctionType {
-                            params: vec![("value".into(), input, false)],
-                            return_type: Box::new(output),
-                            is_async: false,
-                            is_generator: false,
-                        }),
-                    );
+                for helper in types.resource_helpers(resolve, *id, &module, name, exported)? {
+                    let operation = match helper.operation {
+                        SourceResourceOperation::Drop => ResourceOperation::Drop,
+                        SourceResourceOperation::New => ResourceOperation::New,
+                        SourceResourceOperation::Representation => {
+                            ResourceOperation::Representation
+                        }
+                    };
+                    let binding = helper.binding;
+                    let name = helper.name;
                     bindings.retain(|old| old.binding != binding);
                     bindings.push(Import {
                         binding,

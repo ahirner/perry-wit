@@ -1,6 +1,7 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
-use crate::{inline::InlineResult, shapes::TypeId};
+use crate::inline::InlineResult;
+use perry_frontend::shapes::TypeId;
 
 enum ClassArguments<'a, 's> {
     Expressions(&'s [Expr]),
@@ -15,7 +16,7 @@ enum ClassReceiver {
 
 pub(super) enum ClassExpansion<'s> {
     Callable(&'s Function),
-    Fields(&'s perry_hir::ir::Class),
+    Fields(&'s perry_frontend::hir::ir::Class),
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -71,6 +72,7 @@ impl<'s> FunctionBuilder<'s> {
         let (&class_name, &(_, class)) = self
             .shapes
             .classes
+            .named
             .get_key_value(class_name)
             .with_context(|| format!("unknown class {class_name}"))?;
         let mut pre_evaluated: Option<Vec<Value>> = None;
@@ -218,6 +220,7 @@ impl<'s> FunctionBuilder<'s> {
         let (&class_name, &(_, class)) = self
             .shapes
             .classes
+            .named
             .get_key_value(class_name)
             .with_context(|| format!("unknown class {class_name}"))?;
         let rec_val = self.load(ctx, this_slot)?;
@@ -360,8 +363,7 @@ impl<'s> FunctionBuilder<'s> {
         let param_ty = setter
             .params
             .first()
-            .map(|p| &p.ty)
-            .filter(|ty| !matches!(ty, HirType::Any | HirType::Unknown))
+            .and_then(|param| perry_frontend::contextual_type(&param.ty))
             .and_then(|ty| {
                 self.shapes
                     .class_value_type(ctx, owner_class, type_args, ty)
@@ -436,7 +438,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) && !param.is_rest
+            let param_ty = if perry_frontend::contextual_type(&param.ty).is_none() && !param.is_rest
             {
                 None
             } else {
@@ -493,7 +495,7 @@ impl<'s> FunctionBuilder<'s> {
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
-                    } else if matches!(func.return_type, HirType::Any | HirType::Unknown) {
+                    } else if perry_frontend::contextual_type(&func.return_type).is_none() {
                         InlineResult::Inferred
                     } else {
                         this.shapes

@@ -1,0 +1,17 @@
+[package]
+workspace = ".."
+name = "perry-number"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+perry-rt-sys.workspace = true
+ryu-js = { version = "1.0.3", features = ["small"] }
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "number", profile = "release" },
+]

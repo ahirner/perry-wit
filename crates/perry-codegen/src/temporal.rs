@@ -19,7 +19,7 @@ impl FunctionLowering<'_, '_> {
         vec![data, len]
     }
 
-    /// Call a `time-helper` codec that writes into `capacity` new opaque bytes (passed
+    /// Call a `perry-time` codec that writes into `capacity` new opaque bytes (passed
     /// after `args`, with the capacity for text results) and returns `status << 32 | length`.
     /// Throws `RangeError` on failure and returns the buffer and written length on success.
     fn time_codec(

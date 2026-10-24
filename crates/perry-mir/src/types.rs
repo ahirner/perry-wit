@@ -17,6 +17,7 @@ use pliron::{
 
 mod kinds;
 pub use kinds::*;
+mod records;
 
 macro_rules! record_kinds {
     ($($kind:ident => $name:literal),+ $(,)?) => {

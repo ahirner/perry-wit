@@ -7,7 +7,7 @@
 //! `wasi:http` response from the returned one through the services of `perry:http-server`
 //! (`perry-web`'s `serve` module). The response body is written after `task.return`, so the
 //! export runs until the host has read it.
-use super::{Compiled, emit_component, lower, wit_types};
+use super::{Compiled, emit_component, lower};
 use crate::component;
 use anyhow::{Context as _, Result};
 use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
@@ -112,7 +112,7 @@ pub(crate) fn compile(
         &program,
         file_name,
         modules,
-        &wit_types::foreign(types, Some(types_world)),
+        &perry_frontend::wit::WorldTypes::new(types, Some(types_world)),
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;

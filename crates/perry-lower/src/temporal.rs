@@ -1,6 +1,6 @@
 //! ISO Temporal factories, calendar accessors and day/calendar arithmetic.
 use super::*;
-use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as CalendarUnit};
+use perry_mir::{CalendarUnit, DatePart, DurationPart, Overflow};
 
 #[derive(Clone, Copy)]
 enum Fields {
@@ -97,34 +97,9 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         expr: &'s Expr,
     ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-        let (fields, defined, names, args) = match expr {
-            Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
-            // Perry HIR keeps a literal that repeats a key with an effectful value as its
-            // source-ordered definitions; later pairs overwrite earlier ones, as in a literal.
-            Expr::ObjectSpread { parts } if parts.iter().all(|(key, _)| key.is_some()) => {
-                (&[][..], &parts[..], &[][..], &[][..])
-            }
-            Expr::New {
-                class_name, args, ..
-            } => (
-                &[][..],
-                &[][..],
-                self.shapes.literal_fields(class_name)?,
-                &args[..],
-            ),
-            _ => return None,
-        };
-        Some(
-            fields
-                .iter()
-                .map(|(name, value)| (name.as_str(), value))
-                .chain(
-                    defined
-                        .iter()
-                        .filter_map(|(name, value)| Some((name.as_deref()?, value))),
-                )
-                .chain(names.iter().copied().zip(args)),
-        )
+        crate::hir_compat::object_literal_pairs(expr, |class_name| {
+            self.shapes.literal_fields(class_name)
+        })
     }
 
     fn temporal_fields(
@@ -491,7 +466,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, intrinsic, vec![arg]))
     }
 
-    /// A field of a `PlainDate` or `PlainDateTime` (`time-helper` part numbers).
+    /// A field of a `PlainDate` or `PlainDateTime` (`perry-time` part numbers).
     pub(super) fn temporal_field(
         &mut self,
         ctx: &mut Context,

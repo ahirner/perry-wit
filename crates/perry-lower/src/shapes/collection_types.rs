@@ -1,6 +1,6 @@
 //! MIR records of `Map`, `Set`, their live views, dictionaries and pairs.
 use super::*;
-use crate::collections::{CollectionViewKind, EntryKind, StorageField as Field};
+use crate::collections::{CollectionViewExt, CollectionViewKind, EntryKind, StorageField as Field};
 
 impl Shapes<'_> {
     /// The `tuple` record `[first, second]`: iterated entries and `[key, value]` pairs.
