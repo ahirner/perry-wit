@@ -312,7 +312,7 @@ pub(crate) unsafe extern "C" fn web_request_new(
     // SAFETY: the helper wrote six little-endian lengths, then the URL at 32.
     let normalized = unsafe { from_bytes(slice(output as u32 + 32, word(output, 20))) };
     let method = match METHODS.get(tag as usize) {
-        Some(name) if !name.text.is_empty() => from_static(*name),
+        Some(name) if !name.as_str().is_empty() => from_static(*name),
         _ => method,
     };
     let r = perry_rt_sys::object!(Request; body.data, body.stream, url, method, headers);

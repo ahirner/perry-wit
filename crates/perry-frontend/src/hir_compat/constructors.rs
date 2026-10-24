@@ -27,7 +27,7 @@ pub enum Constructor<'a> {
 impl Constructors {
     /// Move the type arguments of the aliases [preserve] declared into their constructors,
     /// removing those aliases from `module`.
-    pub fn collect_types(&mut self, module: &mut HirModule) -> Result<()> {
+    pub(super) fn collect_types(&mut self, module: &mut HirModule) -> Result<()> {
         for alias in std::mem::take(&mut module.type_aliases) {
             let Some(index) = alias
                 .name

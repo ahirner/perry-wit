@@ -41,7 +41,7 @@ pub(super) fn call(
         return expression(object, env);
     }
     let source = strip_nullish(expression(object, env)).0;
-    if let Some(rule) = Method::inferred(env.ctx, &source, name, false) {
+    if let Some(rule) = Method::inferred(&source, name, false) {
         return result(expr, object, |index| args.get(index), rule, env);
     }
     if let Expr::PropertyGet {

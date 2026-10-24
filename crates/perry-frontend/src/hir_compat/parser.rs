@@ -4,7 +4,7 @@ use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
 
-pub fn parse(source: &str, identity: &str) -> Result<ast::Module> {
+pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
     let mut cache = Default::default();
     let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
         .map_err(|error| {

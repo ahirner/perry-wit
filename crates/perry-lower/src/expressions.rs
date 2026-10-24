@@ -502,10 +502,7 @@ impl<'s> FunctionBuilder<'s> {
                 index,
                 value,
             } => self.set_index(ctx, object, index, value)?,
-            other => bail!(
-                "MIR backend does not support expression {} yet",
-                hir_compat::describe_expression(other)
-            ),
+            other => bail!("MIR backend does not support expression {other:?} yet"),
         };
         self.narrow_primitive(ctx, expr, value)
     }

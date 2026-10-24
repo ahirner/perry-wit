@@ -5,7 +5,8 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub mod generics;
 mod globals;
-pub use globals::{captured, class_functions, class_functions_mut};
+pub(crate) use globals::class_functions_mut;
+pub use globals::{captured, class_functions};
 mod records;
 pub use records::{Classes, RecordId};
 #[derive(Clone, Debug, PartialEq)]
@@ -173,8 +174,8 @@ fn hash_hir_type<H: std::hash::Hasher>(ty: &HirType, state: &mut H) {
 }
 
 pub struct Declarations<'h> {
-    pub interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
-    pub type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
+    pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
+    pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
     class_names: HashSet<String>,
     records: std::cell::RefCell<records::Records>,
     pub foreign: &'h HashMap<String, crate::hir::Foreign>,
@@ -368,7 +369,7 @@ pub fn perry_integer_spec(name: &str) -> Option<(u32, Signedness)> {
     })
 }
 
-pub fn integer_hir_carrier(width: u32) -> HirType {
+fn integer_hir_carrier(width: u32) -> HirType {
     if width == 64 {
         HirType::BigInt
     } else {

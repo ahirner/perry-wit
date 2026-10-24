@@ -17,20 +17,22 @@ mod constructors;
 pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
-pub mod locations;
+mod locations;
+pub use locations::Locations;
 mod methods;
 mod parser;
-pub use parser::parse;
+pub(crate) use parser::parse;
 mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
-pub mod source;
+mod source;
+pub(crate) use source::validate;
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
 
 pub struct Metadata<'s> {
-    pub locations: locations::Locations<'s>,
+    pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
 }
@@ -88,7 +90,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     })
 }
 
-pub fn is_object_literal(name: &str) -> bool {
+pub(crate) fn is_object_literal(name: &str) -> bool {
     name.starts_with("__AnonShape_")
 }
 
@@ -136,13 +138,6 @@ function builtin() { return new Set<string>(); }
             }
         }
     }
-}
-
-pub fn describe_expression(expression: &Expr) -> String {
-    format!("{expression:?}")
-}
-pub fn describe_statement(statement: &Stmt) -> String {
-    format!("{statement:?}")
 }
 
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.

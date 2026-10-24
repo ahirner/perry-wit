@@ -12,7 +12,7 @@ pub(super) enum Node<'a> {
     Expression(&'a mut Expr),
 }
 
-pub(super) fn visit_expr(expr: &mut Expr, visit: &mut impl Visitor) -> Result<()> {
+pub(super) fn visit_expr<V: Visitor>(expr: &mut Expr, visit: &mut V) -> Result<(), V::Error> {
     match expr {
         Expr::Call { type_args, .. }
         | Expr::CallSpread { type_args, .. }
@@ -60,7 +60,10 @@ pub(super) fn visit_expr(expr: &mut Expr, visit: &mut impl Visitor) -> Result<()
     visit.node(Node::Expression(expr))
 }
 
-pub(super) fn visit_body(statements: &mut [Stmt], visit: &mut impl Visitor) -> Result<()> {
+pub(super) fn visit_body<V: Visitor>(
+    statements: &mut [Stmt],
+    visit: &mut V,
+) -> Result<(), V::Error> {
     for statement in statements {
         match statement {
             Stmt::Let { id, ty, init, .. } => {
@@ -139,23 +142,27 @@ pub(super) fn visit_body(statements: &mut [Stmt], visit: &mut impl Visitor) -> R
 }
 
 pub(super) trait Visitor: Sized {
-    fn node(&mut self, node: Node<'_>) -> Result<()>;
+    type Error;
 
-    fn expression(&mut self, expr: &mut Expr) -> Result<()> {
+    fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error>;
+
+    fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
         visit_expr(expr, self)
     }
 }
 
 impl<F: FnMut(Node<'_>) -> Result<()>> Visitor for F {
+    type Error = anyhow::Error;
+
     fn node(&mut self, node: Node<'_>) -> Result<()> {
         self(node)
     }
 }
 
-pub(super) fn function(
+pub(super) fn function<V: Visitor>(
     function: &mut perry_hir::ir::Function,
-    visit: &mut impl Visitor,
-) -> Result<()> {
+    visit: &mut V,
+) -> Result<(), V::Error> {
     for param in &mut function.params {
         visit.node(Node::Binding(&mut param.id, &mut param.ty))?;
         if let Some(default) = &mut param.default {
@@ -169,18 +176,19 @@ pub(super) fn function(
 pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId, &mut HirType)) {
     struct Locals<'a, F>(&'a mut F);
     impl<F: FnMut(LocalId, &mut HirType)> Visitor for Locals<'_, F> {
-        fn node(&mut self, node: Node<'_>) -> Result<()> {
+        type Error = std::convert::Infallible;
+
+        fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error> {
             if let Node::Binding(id, ty) = node {
                 self.0(*id, ty);
             }
             Ok(())
         }
-        fn expression(&mut self, _: &mut Expr) -> Result<()> {
+        fn expression(&mut self, _: &mut Expr) -> Result<(), Self::Error> {
             Ok(())
         }
     }
-    // Locals never produces an error or descends into nested function scopes.
-    let _ = visit_body(statements, &mut Locals(visit));
+    let Ok(()) = visit_body(statements, &mut Locals(visit));
 }
 
 pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {

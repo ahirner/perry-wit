@@ -91,7 +91,7 @@ fn normalize_utf8(input: &str, out_ptr: u32, compose: bool, compat: bool) -> u64
                 run.push(curr, &mut sink, compose);
             }
         }
-        if sink.overflow {
+        if sink.overflowed() {
             return u64::MAX;
         }
     }

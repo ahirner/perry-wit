@@ -306,7 +306,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             object, property, ..
         } => {
             let source = strip_nullish(expression(object, env)).0;
-            let builtin = crate::methods::Method::inferred(env.ctx, &source, property, true);
+            let builtin = crate::methods::Method::inferred(&source, property, true);
             let fallback = |env: &mut FunctionEnv<'_>| match builtin {
                 Some(rule) => methods::result(expr, object, |_| None, rule, env),
                 None => perry_hir::infer_expr_type(expr, env),
@@ -394,9 +394,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             let source = strip_nullish(expression(object, env)).0;
             let rule = args
                 .is_empty()
-                .then(|| crate::methods::Method::inferred(env.ctx, &source, method, true))
+                .then(|| crate::methods::Method::inferred(&source, method, true))
                 .flatten()
-                .or_else(|| crate::methods::Method::inferred(env.ctx, &source, method, false));
+                .or_else(|| crate::methods::Method::inferred(&source, method, false));
             match rule {
                 Some(rule) => methods::result(expr, object, |index| args.get(index), rule, env),
                 None => perry_hir::infer_expr_type(expr, env),

@@ -6,7 +6,7 @@ use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 /// Validate string literals / `String.fromCodePoint` and collect untyped variable bindings in one pass.
-pub fn validate(
+pub(crate) fn validate(
     module: &ast::Module,
     locations: &locations::Locations<'_>,
 ) -> Result<HashSet<(u32, u32)>> {

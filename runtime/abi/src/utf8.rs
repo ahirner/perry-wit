@@ -14,8 +14,8 @@ pub const fn scalars_length(bytes: &[u8]) -> u32 {
 /// Static UTF-8 text with its scalar count, built by [static_text!](crate::static_text).
 #[derive(Clone, Copy)]
 pub struct StaticText {
-    pub text: &'static str,
-    pub scalars: u32,
+    text: &'static str,
+    scalars: u32,
 }
 
 impl StaticText {
@@ -24,6 +24,14 @@ impl StaticText {
             text,
             scalars: scalars_length(text.as_bytes()),
         }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.text
+    }
+
+    pub const fn scalar_len(self) -> u32 {
+        self.scalars
     }
 }
 

@@ -66,6 +66,6 @@ mod tests {
         }
         assert_eq!(scalars_length(b""), 0);
         assert_eq!(scalars_length_wide(b""), 0);
-        assert_eq!(crate::static_text!("é漢🙂\0").scalars, 4);
+        assert_eq!(crate::static_text!("é漢🙂\0").scalar_len(), 4);
     }
 }

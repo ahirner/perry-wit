@@ -15,7 +15,7 @@ type Exports = BTreeMap<String, String>;
 
 pub(crate) struct Loaded<'s> {
     pub(crate) module: ast::Module,
-    pub(crate) locations: crate::hir_compat::locations::Locations<'s>,
+    pub(crate) locations: crate::hir_compat::Locations<'s>,
 }
 
 pub(crate) fn load<'s>(
@@ -25,12 +25,7 @@ pub(crate) fn load<'s>(
     foreign: &HashMap<String, crate::hir::Foreign>,
 ) -> Result<Loaded<'s>> {
     let mut initial = parse(source, file)?;
-    let foreign: BTreeSet<_> = foreign
-        .iter()
-        .filter(|&(_, item)| !matches!(item, crate::hir::Foreign::Function(_)))
-        .map(|(name, _)| name.clone())
-        .collect();
-    wit_imports(&mut initial, &foreign, Path::new(file), sources);
+    wit_imports(&mut initial, foreign, Path::new(file), sources);
     let needs_graph = initial.body.iter().any(|item| match item {
         ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
             local(&import.src.value.to_string_lossy())
@@ -41,7 +36,7 @@ pub(crate) fn load<'s>(
         _ => false,
     });
     if !needs_graph {
-        let mut locations = crate::hir_compat::locations::Locations::default();
+        let mut locations = crate::hir_compat::Locations::default();
         locations.add(PathBuf::from(file), source, 0);
         return Ok(Loaded {
             module: initial,
@@ -59,7 +54,7 @@ pub(crate) fn load<'s>(
             types: BTreeSet::new(),
             next: 0,
             next_span: 0,
-            locations: crate::hir_compat::locations::Locations::default(),
+            locations: crate::hir_compat::Locations::default(),
             entry_path: normalize(Path::new(file)),
             entry_source: source,
         };
@@ -122,7 +117,7 @@ pub(crate) fn load<'s>(
 /// SDK types are supplied from the selected WIT world, including in-memory test sources.
 fn wit_imports(
     module: &mut ast::Module,
-    foreign: &BTreeSet<String>,
+    foreign: &HashMap<String, crate::hir::Foreign>,
     parent: &Path,
     sources: &BTreeMap<String, String>,
 ) {
@@ -135,7 +130,10 @@ fn wit_imports(
                     let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
                     let name: &str = imported.as_deref().unwrap_or(&named.local.sym);
                     (import.type_only || named.is_type_only)
-                        && (foreign.contains(name) || matches!(name, "WitInput" | "WitResource"))
+                        && (foreign
+                            .get(name)
+                            .is_some_and(|item| !matches!(item, crate::hir::Foreign::Function(_)))
+                            || matches!(name, "WitInput" | "WitResource"))
                 }
                 _ => false,
             })
@@ -219,9 +217,9 @@ pub(crate) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_
         .filter(|name| local(name))
 }
 
-struct Graph<'a> {
+struct Graph<'a, 'f> {
     sources: &'a BTreeMap<String, String>,
-    foreign: BTreeSet<String>,
+    foreign: &'f HashMap<String, crate::hir::Foreign>,
     loaded: BTreeMap<PathBuf, Exports>,
     active: BTreeSet<PathBuf>,
     body: Vec<ast::ModuleItem>,
@@ -229,11 +227,11 @@ struct Graph<'a> {
     types: BTreeSet<String>,
     next: usize,
     next_span: u32,
-    locations: crate::hir_compat::locations::Locations<'a>,
+    locations: crate::hir_compat::Locations<'a>,
     entry_path: PathBuf,
     entry_source: &'a str,
 }
-impl Graph<'_> {
+impl Graph<'_, '_> {
     /// The function declaration recorded at `index` of the body.
     fn function(&self, index: usize) -> Result<&ast::FnDecl> {
         match &self.body[index] {
@@ -260,7 +258,7 @@ impl Graph<'_> {
         Ok(path)
     }
     fn module(&mut self, path: &Path, mut module: ast::Module) -> Result<Exports> {
-        wit_imports(&mut module, &self.foreign, path, self.sources);
+        wit_imports(&mut module, self.foreign, path, self.sources);
         // Each parser invocation owns a source map; give merged bindings disjoint spans.
         struct Rebase {
             offset: u32,
@@ -287,7 +285,7 @@ impl Graph<'_> {
         self.locations.add(path.to_owned(), text, self.next_span);
         module.visit_mut_with(&mut rebase);
         self.next_span = rebase.end + 1;
-        super::hir_compat::source::validate(&module, &self.locations)?;
+        super::hir_compat::validate(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {

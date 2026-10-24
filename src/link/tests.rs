@@ -101,8 +101,8 @@ fn library_data_skips_zero_runs_longer_than_a_segment_header() {
     contents.extend([0; 9]);
     contents.extend([4, 0, 0]);
     assert_eq!(
-        super::nonzero_runs(&contents),
+        super::nonzero_runs(&contents).collect::<Vec<_>>(),
         [(2, &[1, 2, 0, 0, 3][..]), (16, &[4][..])]
     );
-    assert!(super::nonzero_runs(&[0; 4]).is_empty());
+    assert!(super::nonzero_runs(&[0; 4]).next().is_none());
 }

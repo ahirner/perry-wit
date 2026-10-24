@@ -314,10 +314,7 @@ impl<'s> FunctionBuilder<'s> {
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
-            other => bail!(
-                "MIR backend does not support statement {} yet",
-                hir_compat::describe_statement(other)
-            ),
+            other => bail!("MIR backend does not support statement {other:?} yet"),
         }
         Ok(())
     }

@@ -4,7 +4,6 @@ use perry_hir::{
     ir::Expr,
     types::{LocalId, Type as HirType},
 };
-use pliron::context::Context;
 /// Source-level families used by built-in method signatures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -114,9 +113,9 @@ impl Kind {
         }
     }
 }
-pub const PUSH: &str = "$$perryArrayPush";
-pub const CONCAT: &str = "$$perryArrayConcat";
-pub const METHOD_PREFIX: &str = "$$perryMethod_";
+pub(crate) const PUSH: &str = "$$perryArrayPush";
+pub(crate) const CONCAT: &str = "$$perryArrayConcat";
+pub(crate) const METHOD_PREFIX: &str = "$$perryMethod_";
 
 enum Preservation {
     Upstream,
@@ -151,7 +150,7 @@ pub enum Receiver {
 }
 
 impl Receiver {
-    fn inferred(_ctx: &Context, ty: &HirType) -> Option<Self> {
+    fn inferred(ty: &HirType) -> Option<Self> {
         Some(match ty {
             HirType::Array(_) | HirType::Tuple(_) => Self::Value(Kind::Array),
             HirType::String => Self::Value(Kind::String),
@@ -169,7 +168,7 @@ impl Receiver {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum MethodResult {
+pub(crate) enum MethodResult {
     Mapped,
     FlatMapped,
     Receiver,
@@ -271,26 +270,26 @@ macro_rules! registry {
         } )*
     ) => {
         #[derive(Clone, Copy)]
-        pub enum Method { $($($variant,)*)* }
+        pub(crate) enum Method { $($($variant,)*)* }
 
         impl Method {
-            pub fn lookup(receiver: Receiver, name: &str) -> Option<Self> {
+            pub(crate) fn lookup(receiver: Receiver, name: &str) -> Option<Self> {
                 match (receiver, name) {
                     $($(($family, $($name)|+) => Some(Self::$variant),)*)*
                     _ => None,
                 }
             }
 
-            pub fn is_property(self) -> bool {
+            pub(crate) fn is_property(self) -> bool {
                 match self { $($(Self::$variant => registry!(@property $form),)*)* }
             }
 
-            pub fn result(self) -> MethodResult {
+            fn result(self) -> MethodResult {
                 match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
             }
 
-            pub fn inferred(ctx: &Context, receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
-                if let Some(receiver) = Receiver::inferred(ctx, receiver) {
+            pub(crate) fn inferred(receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
+                if let Some(receiver) = Receiver::inferred(receiver) {
                     return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result);
                 }
                 if property { return None; }
@@ -303,7 +302,7 @@ macro_rules! registry {
                 result
             }
 
-            pub fn rewrite(name: &str, count: usize, spread: bool) -> Option<String> {
+            pub(crate) fn rewrite(name: &str, count: usize, spread: bool) -> Option<String> {
                 $($(if matches!(name, $($name)|+) {
                     if let Some(rewritten) = Preservation::$preserve.rewrite(name, count, spread) {
                         return Some(rewritten);
@@ -335,11 +334,11 @@ macro_rules! registry {
                 }))
             }
 
-            pub fn result(&self) -> MethodResult {
+            pub(crate) fn result(&self) -> MethodResult {
                 match self { $($(Self::$variant(..) => MethodResult::$result $(($result_arg))?,)*)* }
             }
 
-            pub fn argument(&self, index: usize) -> Option<&'s Expr> {
+            pub(crate) fn argument(&self, index: usize) -> Option<&'s Expr> {
                 match self {
                     $($(Self::$variant($($argument),*) => std::iter::empty()
                         $(.chain(argument_values!($argument $(:$mode)?)))*.nth(index),)*)*

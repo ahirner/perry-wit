@@ -82,9 +82,9 @@ pub(crate) unsafe fn bytes(string: *mut u8) -> &'static [u8] {
 #[inline(always)]
 pub(crate) fn from_static(text: crate::utf8::StaticText) -> *mut u8 {
     new(
-        text.text.len() as u32,
-        text.scalars,
-        text.text.as_ptr() as *mut u8,
+        text.as_str().len() as u32,
+        text.scalar_len(),
+        text.as_str().as_ptr() as *mut u8,
         ptr::null_mut(),
     )
 }

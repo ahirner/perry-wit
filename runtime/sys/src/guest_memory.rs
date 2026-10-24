@@ -6,7 +6,7 @@ use core::slice;
 #[derive(Clone, Copy)]
 pub struct GuestRange {
     pointer: usize,
-    pub length: usize,
+    length: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -32,6 +32,10 @@ impl GuestRange {
             && other.length != 0
             && self.pointer < other.pointer + other.length
             && other.pointer < self.pointer + self.length
+    }
+
+    pub fn byte_len(self) -> usize {
+        self.length
     }
 
     /// # Safety
@@ -64,10 +68,10 @@ pub unsafe fn str_from_raw<'a>(ptr: u32, byte_len: u32) -> &'a str {
 }
 
 pub struct OutSink {
-    pub out_ptr: u32,
-    pub byte_len: u32,
-    pub scalar_len: u32,
-    pub overflow: bool,
+    out_ptr: u32,
+    byte_len: u32,
+    scalar_len: u32,
+    overflow: bool,
 }
 
 impl OutSink {
@@ -109,5 +113,9 @@ impl OutSink {
         } else {
             u64::from(self.byte_len) | (u64::from(self.scalar_len) << 32)
         }
+    }
+
+    pub fn overflowed(&self) -> bool {
+        self.overflow
     }
 }

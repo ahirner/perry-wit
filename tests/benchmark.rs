@@ -254,7 +254,7 @@ where
     let bytes = &compiled
         .component
         .as_ref()
-        .expect("component benchmark")
+        .with_context(|| format!("{workload}: compiler did not produce a component"))?
         .stripped;
     let mut warm_fuel = None;
     let mut initialization_fuel = None;
@@ -576,7 +576,9 @@ export function run(n: number): number {
                 row.initial_memory = Some(store.data().bytes);
                 row.initialization_fuel = Some(u64::MAX - store.get_fuel()?);
             }
-            let run = instance.get_func(&mut store, "run").unwrap();
+            let run = instance
+                .get_func(&mut store, "run")
+                .with_context(|| format!("{workload}: missing run export"))?;
             let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
             let n = Val::F64(1_000_000f64.to_bits());
             let before = store.get_fuel().unwrap_or(0);
@@ -618,7 +620,9 @@ export function run(n: number): number {
         instance
             .get_typed_func::<i32, ()>(&mut store, "__perry_gc_debug")?
             .call(&mut store, 4)?;
-        let run = instance.get_func(&mut store, "run").unwrap();
+        let run = instance
+            .get_func(&mut store, "run")
+            .with_context(|| format!("{workload}: missing instrumented run export"))?;
         let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
         run.call(
             &mut store,
@@ -717,7 +721,13 @@ fn examples() -> Result<Vec<Row>> {
         let compiled = compile_for_world(&source_text, source, &resolve, world, true)?;
         rows.push(Row {
             workload: workload.into(),
-            bytes: Some(compiled.component.unwrap().stripped.len()),
+            bytes: Some(
+                compiled
+                    .component
+                    .context("example compilation did not produce a component")?
+                    .stripped
+                    .len(),
+            ),
             core_bytes: Some(compiled.core.len()),
             defined_functions: Some(defined_functions(&compiled.core)?),
             helper_functions: Some(helper_functions(&compiled.allocation_report)?),
@@ -908,7 +918,7 @@ fn measure_core(
     let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
     let run = instance
         .get_func(&mut store, export)
-        .expect("fixture export");
+        .with_context(|| format!("{workload}: missing {export} export"))?;
     let mut results = [Val::I32(0)];
     let before = store.get_fuel()?;
     let start = Instant::now();
@@ -928,7 +938,7 @@ fn measure_core(
             compiled
                 .component
                 .as_ref()
-                .expect("fixture component")
+                .with_context(|| format!("{workload}: compiler did not produce a component"))?
                 .stripped
                 .len(),
         ),

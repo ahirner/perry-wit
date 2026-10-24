@@ -28,7 +28,7 @@ pub struct Locations<'s> {
 
 impl<'s> Locations<'s> {
     /// Preserve spans for unsupported binary operators as inert sequences before HIR erases binary spans.
-    pub fn preserve_operators(&mut self, module: &mut ast::Module) {
+    pub(super) fn preserve_operators(&mut self, module: &mut ast::Module) {
         struct Preserver<'a>(&'a mut Vec<Span>);
         impl VisitMut for Preserver<'_> {
             // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
@@ -76,7 +76,7 @@ impl<'s> Locations<'s> {
         self.operators.get(index).and_then(|span| self.span(*span))
     }
 
-    pub fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
+    pub(crate) fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
         self.files.push((file, source, offset));
     }
 
@@ -84,7 +84,7 @@ impl<'s> Locations<'s> {
         self.async_init
     }
 
-    pub fn has_explicit_return(&self, name: &str) -> bool {
+    pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
         self.functions
             .get(name)
             .is_some_and(|info| info.explicit_return)
@@ -125,7 +125,7 @@ impl<'s> Locations<'s> {
         self.imports.get(source).and_then(|span| self.span(*span))
     }
 
-    pub fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+    pub(crate) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
         Self::attach(error, self.call_span(byte_offset))
     }
 
@@ -138,7 +138,7 @@ impl<'s> Locations<'s> {
         })
     }
 
-    pub fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
+    pub(crate) fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
         Self::attach(error, self.span(span))
     }
 
@@ -151,7 +151,7 @@ impl<'s> Locations<'s> {
         diagnostic.into()
     }
 
-    pub fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
+    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
             locations: &'a mut Locations<'s>,
             in_fn: bool,

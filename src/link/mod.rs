@@ -681,26 +681,18 @@ const ZERO_RUN_SPLIT: usize = 8;
 
 /// Offsets and bytes of `contents` without its leading and trailing zeros, split at zero runs
 /// longer than [ZERO_RUN_SPLIT]. Library data lands in fresh linear memory, which is zeroed.
-fn nonzero_runs(contents: &[u8]) -> Vec<(usize, &[u8])> {
-    let mut runs = Vec::new();
-    let mut start = None;
-    let mut end = 0;
-    for (index, &byte) in contents.iter().enumerate() {
-        if byte == 0 {
-            continue;
+fn nonzero_runs(contents: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+    let mut positions = contents
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &byte)| (byte != 0).then_some(index))
+        .peekable();
+    std::iter::from_fn(move || {
+        let start = positions.next()?;
+        let mut end = start + 1;
+        while let Some(index) = positions.next_if(|&index| index - end <= ZERO_RUN_SPLIT) {
+            end = index + 1;
         }
-        match start {
-            Some(first) if index - end > ZERO_RUN_SPLIT => {
-                runs.push((first, &contents[first..end]));
-                start = Some(index);
-            }
-            Some(_) => {}
-            None => start = Some(index),
-        }
-        end = index + 1;
-    }
-    if let Some(first) = start {
-        runs.push((first, &contents[first..end]));
-    }
-    runs
+        Some((start, &contents[start..end]))
+    })
 }

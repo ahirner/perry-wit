@@ -257,9 +257,9 @@ pub fn from_static(text: StaticText) -> *mut u8 {
     // SAFETY: static UTF-8 with its scalar count.
     unsafe {
         adopt_counted(
-            text.text.as_ptr() as *mut u8,
-            text.text.len() as u32,
-            text.scalars,
+            text.as_str().as_ptr() as *mut u8,
+            text.as_str().len() as u32,
+            text.scalar_len(),
         )
     }
 }

@@ -15,7 +15,7 @@ pub fn class_functions(class: &Class) -> impl Iterator<Item = &Function> {
         .chain(class.setters.iter().map(|(_, method)| method))
 }
 
-pub fn class_functions_mut(class: &mut Class) -> impl Iterator<Item = &mut Function> {
+pub(crate) fn class_functions_mut(class: &mut Class) -> impl Iterator<Item = &mut Function> {
     class
         .constructor
         .iter_mut()

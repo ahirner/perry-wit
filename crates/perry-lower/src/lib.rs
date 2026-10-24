@@ -32,7 +32,6 @@ mod operators;
 mod program;
 mod shapes;
 use perry_frontend::hir_compat;
-pub use perry_frontend::source_files;
 mod spread;
 mod statements;
 mod temporal;
@@ -104,7 +103,7 @@ fn lower_source(
     file: &str,
     foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<ModuleOp> {
-    let modules = source_files::load(source, file)?;
+    let modules = perry_frontend::source_files::load(source, file)?;
     lower_sources(ctx, source, file, &modules, foreign)
 }
 

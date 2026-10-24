@@ -57,7 +57,7 @@ pub(crate) unsafe extern "C" fn json_populate(
         Ok(required) => required,
         Err(error) => return codec_failure(error),
     };
-    if required > destination.length {
+    if required > destination.byte_len() {
         return failure(4, 0);
     }
     // SAFETY: output is in bounds, disjoint from input, and exclusively guest-owned.
