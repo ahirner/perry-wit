@@ -98,18 +98,14 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
     Some(unsafe { slice(body.data as u32, body.len) })
 }
 
-/// Read the whole body as `form`, consuming its snapshot on first read.
-#[inline]
-fn read(object: *mut u8, form: Form) -> *mut u8 {
+/// Read the whole body as `form`, consuming its snapshot on first read. A snapshot settles
+/// through `settle`, which each consumer instantiates, so only `json()` reaches the parser.
+fn read(object: *mut u8, form: Form, settle: impl FnOnce(*mut u8, &[u8])) -> *mut u8 {
     let promise = promise_new();
     if !body(object).stream.is_null() {
         drain(body(object).stream, form, promise);
     } else if let Some(contents) = consume(object, promise) {
-        if form == Form::Json {
-            settle_json(promise, contents);
-        } else {
-            settle_body(promise, form, contents);
-        }
+        settle(promise, contents);
     }
     promise
 }
@@ -117,19 +113,23 @@ fn read(object: *mut u8, form: Form) -> *mut u8 {
 /// `await body.bytes()`: a `Uint8Array` of the body.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_body_bytes(object: *mut u8) -> *mut u8 {
-    read(object, Form::Bytes)
+    read(object, Form::Bytes, |promise, contents| {
+        settle_body(promise, Form::Bytes, contents)
+    })
 }
 
 /// `await body.text()`: the body decoded as UTF-8 (BOM removed, invalid bytes replaced).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_body_text(object: *mut u8) -> *mut u8 {
-    read(object, Form::Text)
+    read(object, Form::Text, |promise, contents| {
+        settle_body(promise, Form::Text, contents)
+    })
 }
 
 /// `await body.json()`: the body's text parsed as JSON (`SyntaxError` if it is not).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
-    let promise = read(object, Form::Json);
+    let promise = read(object, Form::Json, settle_json);
     web_json_settle();
     promise
 }
