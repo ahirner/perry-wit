@@ -1,7 +1,16 @@
 # perry-wit
 
-**Perry-WIT** compiles a static subset of TypeScript ahead of time into WebAssembly components for **WASI 0.3**.
-It lowers TypeScript through [Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to WebAssembly instructions, freeing each call's temporaries on return and suspending `await` through WASI 0.3 callbacks.
+**Perry-WIT** compiles a static subset of TypeScript ahead-of-time into WebAssembly components targeting **WASI 0.3 (Preview 3)**.
+
+Rather than embedding a JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
+[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions.
+An `add(s32, s32) -> s32` export compiles to a 100-byte component.
+
+- **Dual-mode authoring**: Write standalone CLI commands using top-level `await`, export typed functions matching a WIT interface, or combine both in a single source file.
+- **Node-compatible**: Share code between Node.js test harnesses and native Wasm components using standard static ESM imports with matching type definitions.
+- **WIT-refined numbers**: Specialize `u8`–`s64` parameters and in-range arithmetic to native `i32` and `i64` instructions while preserving IEEE 754 `f64` semantics for unconstrained `number` values.
+- **Tiered memory reclamation**: Eliminate non-escaping aggregates by SROA, reuse and free per-function activation frame slots on function return, and reclaim heap allocations at loop safe points and export post-return hooks.
+- **Callback-driven concurrency**: Suspend `await` and Promise combinators directly on host-side WASI 0.3 callbacks.
 
 [Homepage](https://ahirner.github.io/perry-wit/) · [Handbook](https://ahirner.github.io/perry-wit/docs/) · [Playground](https://ahirner.github.io/perry-wit/play/) · [Rust API](https://ahirner.github.io/perry-wit/rust/perry_wit/api/index.html) · [Architecture](ARCHITECTURE.md)
 
@@ -47,10 +56,17 @@ cargo run -p perry-conformance -- check
 nix flake check
 ```
 
-`nix build .#perry-wit` builds the CLI, `nix build .#site` the homepage, handbook and playground, and `nix build .#example-merge-task` or `.#template-component` the reference components.
+### Flake outputs
+
+```sh
+nix build .#perry-wit           # compiler CLI
+nix build .#site                # homepage, handbook and playground
+nix build .#template-component  # starter template component
+nix build .#example-merge-task  # reference component
+```
 
 ## Contributing
 
-Human and AI contributors are welcome: “Act always so as to increase the number of choices” ([Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster)).
+Human and AI contributors are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).
 
 Register every new capability contract, input domain and boundary diagnostic in `crates/conformance`.
