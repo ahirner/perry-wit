@@ -29,7 +29,7 @@ await mkdir(generated, { recursive: true });
 await rm(output, { recursive: true, force: true });
 await mkdir(join(output, 'play/assets/engine'), { recursive: true });
 await mkdir(join(output, 'downloads'), { recursive: true });
-for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
+for (const file of ['index.html', 'style.css', 'highlight.js', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
 const bookDir = join(generated, 'book');
 await cp(join(repository, 'docs'), bookDir, { recursive: true });
 await cp(join(repository, 'template'), join(generated, 'template'), { recursive: true });
@@ -135,12 +135,12 @@ for (const name of packages) {
 await writeFile(join(output, 'downloads/THIRD-PARTY-NOTICES.txt'), notices);
 const revision = createHash('sha256');
 revision.update(compilerBytes);
-for (const name of ['style.css', 'play/app.js', 'play/workspace.js', 'play/examples.json', 'play/assets/worker.js']) revision.update(await readFile(join(output, name)));
+for (const name of ['style.css', 'highlight.js', 'play/app.js', 'play/workspace.js', 'play/examples.json', 'play/assets/worker.js']) revision.update(await readFile(join(output, name)));
 const version = revision.digest('hex').slice(0, 12);
 for (const [name, references] of [
-  ['index.html', ['style.css']],
+  ['index.html', ['style.css', 'highlight.js']],
   ['play/index.html', ['../style.css', 'app.js']],
-  ['play/app.js', ['./workspace.js', './examples.json', './assets/worker.js']],
+  ['play/app.js', ['../highlight.js', './workspace.js', './examples.json', './assets/worker.js']],
 ]) {
   let contents = await readFile(join(output, name), 'utf8');
   for (const reference of references) contents = contents.replaceAll(reference, `${reference}?v=${version}`);
@@ -153,12 +153,13 @@ const playHtmlAndCss = await size(['play/index.html', 'style.css']);
 const report = {
   homeHtmlAndCss,
   playHtmlAndCss,
+  highlightJavaScript: await size(['highlight.js']),
   htmlAndCss: await size(['index.html', 'play/index.html', 'style.css']),
   uiJavaScript: await size(['play/app.js', 'play/workspace.js']),
   compilerComponent: await size(['downloads/perry-wit.wasm']),
   workerJavaScript: await size(['play/assets/worker.js']),
   jcoEngines: await size(await assets('play/assets/engine')),
 };
-if (homeHtmlAndCss > 10 * 1024 || playHtmlAndCss > 10 * 1024) throw new Error(`HTML/CSS budget exceeded: home=${homeHtmlAndCss}, play=${playHtmlAndCss} bytes`);
+if (homeHtmlAndCss > 15 * 1024 || playHtmlAndCss > 12 * 1024) throw new Error(`HTML/CSS budget exceeded: home=${homeHtmlAndCss}, play=${playHtmlAndCss} bytes`);
 await writeFile(join(output, 'sizes.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));

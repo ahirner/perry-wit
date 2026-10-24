@@ -9,7 +9,7 @@ An `add(s32, s32) -> s32` export compiles to a 100-byte component.
 - **Dual-mode authoring**: Write standalone CLI commands using top-level `await`, export typed functions matching a WIT interface, or combine both in a single source file.
 - **Node-compatible**: Share code between Node.js test harnesses and native Wasm components using standard static ESM imports with matching type definitions.
 - **WIT-refined numbers**: Specialize `u8`–`s64` parameters and in-range arithmetic to native `i32` and `i64` instructions while preserving IEEE 754 `f64` semantics for unconstrained `number` values.
-- **Tiered memory reclamation**: Eliminate non-escaping aggregates by SROA, reuse and free per-function activation frame slots on function return, and reclaim heap allocations at loop safe points and export post-return hooks.
+- **Tiered memory reclamation**: Eliminate non-escaping aggregates by SROA, reuse bounded activation frames for eligible scalar records, and reclaim temporary storage through task regions or precise collection at safe points and export post-return hooks.
 - **Callback-driven concurrency**: Suspend `await` and Promise combinators directly on host-side WASI 0.3 callbacks.
 
 [Homepage](https://ahirner.github.io/perry-wit/) · [Handbook](https://ahirner.github.io/perry-wit/docs/) · [Playground](https://ahirner.github.io/perry-wit/play/) · [Rust API](https://ahirner.github.io/perry-wit/rust/perry_wit/api/index.html) · [Architecture](ARCHITECTURE.md)

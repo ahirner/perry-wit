@@ -3,33 +3,67 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Compile static TypeScript ahead of time into WASI 0.3 WebAssembly components with Perry-WIT.">
+<meta name="description" content="Static TypeScript to small WASI 0.3 components. Typed WIT interfaces, native integers, host-driven async and an embeddable compiler.">
 <title>Perry-WIT · TypeScript to WebAssembly Components</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header><a class="brand" href="./">Perry-WIT</a><nav aria-label="Primary"><a href="docs/index.html">Handbook</a><a href="play/">Playground</a></nav></header>
 <main class="home">
-<h1>TypeScript to WebAssembly components</h1>
-<p class="lead">Perry-WIT compiles static TypeScript ahead of time into standalone WASI 0.3 components. A WIT world defines the contract and lowers directly to WebAssembly instructions.</p>
-<div class="cta"><a class="button primary" href="play/">Try the playground</a><a class="button" href="docs/index.html">Read the handbook</a></div>
-<section class="editors" aria-label="Example">
-<div><h2><span>TypeScript</span><span class="note">index.ts</span></h2>
+<section class="hero">
+<div class="hero-copy">
+<div>
+<p class="lead">Perry-WIT compiles a static subset of TypeScript into standalone WASI 0.3 components, without bundling a JavaScript engine.</p>
+<p class="hero-details">A simple integer add fits in 100 bytes. Components can keep state between calls while the runtime reclaims temporary allocations. <a href="docs/conformance.html">{{contractCount}}&nbsp;conformance&nbsp;contracts</a> compare results with Node.js.</p>
+</div>
+<div class="cta"><a class="button primary" href="play/">Try the playground <span aria-hidden="true" class="start-key">START</span></a></div>
+</div>
+<figure class="component-art">
+<svg viewBox="0 0 380 260" role="img" aria-labelledby="cartridge-title cartridge-desc">
+<title id="cartridge-title">Perry-WIT Personal Component cartridge</title>
+<desc id="cartridge-desc">A software cartridge labelled .wasm, ready to run in a WASI host.</desc>
+<defs>
+<linearGradient id="case" x2=".7" y2="1"><stop stop-color="#f5f7e2"/><stop offset=".45" stop-color="#dce8ca"/><stop offset="1" stop-color="#bdcfa9"/></linearGradient>
+<linearGradient id="label" x2="0" y2="1"><stop stop-color="#fffbe9"/><stop offset="1" stop-color="#ede4bf"/></linearGradient>
+<linearGradient id="contacts" x2="1" y2="1"><stop stop-color="#c39a35"/><stop offset=".35" stop-color="#fff0a5"/><stop offset=".7" stop-color="#e3b84c"/><stop offset="1" stop-color="#b88b26"/></linearGradient>
+<filter id="cartridge-shadow" x="-.2" y="-.2" width="1.5" height="1.5"><feDropShadow dx="3" dy="6" stdDeviation="3" flood-color="#172f23" flood-opacity=".23"/></filter>
+</defs>
+<g transform="rotate(-7 190 130)" stroke="#31513c" stroke-width="2" stroke-linejoin="round" filter="url(#cartridge-shadow)">
+<path d="M87 32h211l15 17v161H71V49Z" fill="#849d74" transform="translate(2 3)" stroke="none"/>
+<path d="M87 32h211l15 17v161H71V49Z" fill="url(#case)"/>
+<path d="M91 34v13h201V34M80 59v140h224" fill="none" stroke="#f8faed"/>
+<rect x="94" y="60" width="196" height="122" rx="6" fill="#31513c"/>
+<rect x="100" y="66" width="184" height="110" rx="3" fill="url(#label)" stroke="#b8c7a6" stroke-width="1"/>
+<path d="M101 75h46" stroke="#35b869" stroke-width="7"/><path d="M147 75h46" stroke="#e5a91f" stroke-width="7"/><path d="M193 75h45" stroke="#e86643" stroke-width="7"/><path d="M238 75h45" stroke="#3b9eff" stroke-width="7"/>
+<path d="M117 189h149m-149 7h149" stroke="#f3f7e3"/><path d="M117 191h149m-149 7h149" stroke="#91aa7f"/>
+<path d="M112 210v22h159v-22" fill="url(#contacts)"/>
+<path d="M127 212v18m16-18v18m16-18v18m16-18v18m16-18v18m16-18v18m16-18v18m16-18v18m16-18v18" stroke="#b38a27"/>
+<circle cx="82" cy="59" r="3" fill="#c1cead" stroke="#78906c"/><circle cx="302" cy="198" r="3" fill="#c1cead" stroke="#78906c"/><path d="M80 59h4m216 139h4" stroke-width="1"/>
+<g fill="#254a35" stroke="none" font-family="ui-monospace,monospace" text-anchor="middle">
+<text x="192" y="100" font-size="10" letter-spacing="3">PERRY-WIT</text>
+<text x="192" y="137" font-size="34" font-weight="700">.wasm</text>
+<text x="192" y="160" font-size="10" letter-spacing="1">PERSONAL COMPONENT</text>
+</g></g></svg>
+<figcaption><strong>Fewer bytes, more delights.</strong><span>Batteries supplied by the host.</span></figcaption>
+</figure>
+</section>
+<section class="editors">
+<div data-language="typescript"><h2><span>TypeScript</span><span class="note">index.ts</span></h2>
 <pre><code>export function greet(name: string): string {
   return "Hello, " + name;
 }</code></pre></div>
-<div><h2><span>WIT</span><span class="note">world.wit</span></h2>
+<div data-language="wit"><h2><span>WIT</span><span class="note">world.wit</span></h2>
 <pre><code>package example:greeting;
 world greeting {
   export greet: func(name: string) -&gt; string;
 }</code></pre></div>
 </section>
 <h2 id="what-to-build">What to build</h2>
-<section class="cards" aria-label="What to build">
-<article class="card"><h3>HTTP services</h3><p>Write <code>handle(request)</code> against generated types and serve it as <code>wasi:http/handler@0.3.0</code>. <code>fetch</code>, streams and timers suspend through WASI 0.3 callbacks and resume directly from host events.</p><a href="docs/authoring.html#http-handlers">HTTP handlers</a></article>
-<article class="card"><h3>Typed components</h3><p>The WIT world declares the exports and generates the <code>.d.ts</code> types. A component exporting a string function is about 3 KB, and {{contractCount}} contracts verify equivalence against Node.js.</p><a href="docs/authoring.html">Authoring</a></article>
-<article class="card"><h3>Integer-typed numbers</h3><p>WIT <code>u8</code> to <code>u64</code> refine TypeScript's <code>number</code>. In-range arithmetic compiles to integer instructions.</p><a href="docs/numbers.html">Numbers</a></article>
-<article class="card"><h3>Compile on the fly</h3><p>Compile tenant TypeScript in-memory from Rust with <code>perry_wit::api</code>, or run the compiler itself as a WASI 0.2 component.</p><a href="docs/embedding.html">Embedding</a></article>
+<section class="cards">
+<article class="card"><h3>HTTP services</h3><p>Serve <code>handle(request)</code> as <code>wasi:http/handler@0.3.0</code>. <code>fetch</code>, streams, timers and Promise combinators suspend through WASI 0.3 callbacks and resume directly from host events.</p><a href="docs/authoring.html#http-handlers">HTTP handlers</a></article>
+<article class="card"><h3>Type-safe components</h3><p>Generated <code>.d.ts</code> brings editor completion and <code>tsc</code> checks for WIT records, lists, variants and results. Write library functions or CLI commands with top-level <code>await</code>. Start with a Nix template.</p><a href="docs/authoring.html">Authoring</a></article>
+<article class="card"><h3>Integer types</h3><p>Use ordinary TypeScript syntax for native signed and unsigned arithmetic. WIT ranges let the compiler widen only when needed and eliminate redundant array bounds checks.</p><a href="docs/numbers.html">Numbers</a></article>
+<article class="card"><h3>Compile on the fly</h3><p>Compile tenant TypeScript in memory through Rust's <code>perry_wit::api</code>, or run the WASI 0.2 compiler with fuel and memory limits. Helpers ship with the compiler, so compilation needs neither Rust nor LLVM.</p><a href="docs/embedding.html">Embedding</a></article>
 </section>
 <h2 id="artifacts">Artifacts</h2>
 <ul class="artifacts">
@@ -39,5 +73,6 @@ world greeting {
 </ul>
 </main>
 <!-- footer -->
+<script type="module" src="highlight.js"></script>
 </body>
 </html>

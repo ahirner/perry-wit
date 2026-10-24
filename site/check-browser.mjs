@@ -60,10 +60,14 @@ try {
           });
         });
       }
+      await context.route('https://esm.sh/**', route => route.abort());
       const page = await context.newPage();
       page.on('pageerror', error => console.error(name, error));
       await page.goto(`${origin}${prefix}`);
-      assert(!requests.some(path => /\.wasm$|\/assets\/|\.js$/.test(path)), 'Homepage must load no scripts or compiler');
+      assert(!requests.some(path => /\.wasm$|\/assets\//.test(path)), 'Homepage must not load the compiler or playground assets');
+      assert.deepEqual(requests.filter(path => /\.js$/.test(path)), [`${prefix}highlight.js`]);
+      assert.match(await page.locator('[data-language=typescript] code').innerText(), /return "Hello, " \+ name;/, 'TypeScript remains readable without the CDN');
+      assert.match(await page.locator('[data-language=wit] code').innerText(), /export greet: func\(name: string\) -> string;/, 'WIT remains readable without the CDN');
       assert.equal(await page.locator('.artifacts > li').count(), 3);
       assert.equal(await page.locator('.artifacts details').count(), 0);
       assert.equal((await page.locator('.artifacts pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
