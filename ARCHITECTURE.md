@@ -1,7 +1,6 @@
 # Perry-WIT Architecture
 
 Perry-WIT compiles static TypeScript into WASI 0.3 components through Perry HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron).
-Observable language and numeric behavior is specified in [Semantics](https://ahirner.github.io/perry-wit/docs/semantics.html) and [Numbers](https://ahirner.github.io/perry-wit/docs/numbers.html).
 
 ## Pipeline
 
@@ -25,7 +24,7 @@ TypeScript ──► Source ──► HIR ──► Contract ──► MIR ─�
 | 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
 
 `ProgramFacts` infers numeric refinements (integer type and interval with two-step loop widening), purity and allocation effects, and parameter escape provenance across functions, including recursive call cycles. The numeric analysis propagates ranges forward and bitwidth demand backward [[3]](#ref-3).
-Numeric refinements select `i32`, `i64`, or `f64` representations (see [Numbers](https://ahirner.github.io/perry-wit/docs/numbers.html)), specialize hot callees for concrete integer argument types, and elide bounds checks on proven in-bounds array reads.
+Numeric refinements select `i32`, `i64`, or `f64` representations, specialize hot callees for concrete integer argument types, and elide bounds checks on proven in-bounds array reads.
 Closed non-escaping records decompose into scalar SSA values, non-escaping record parameters promote to scalar arguments, and `JSON.parse` / `JSON.stringify` on statically known shapes lower to specialized field decoders and schema-normalizing deep copies.
 Repeated string appends reuse spare capacity in place when ownership is unique, and single-character ASCII strings fold to scalar integer comparisons.
 

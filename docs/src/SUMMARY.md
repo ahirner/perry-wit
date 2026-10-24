@@ -10,7 +10,7 @@
 # Reference
 
 - [Semantics](semantics.md)
-- [Numbers](numbers.md)
+- [Standard Library](stdlib.md)
 - [Conformance](conformance.md)
 
 # Internals

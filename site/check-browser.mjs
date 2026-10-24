@@ -81,8 +81,8 @@ try {
         ['docs/index.html', 'Where to Start'],
         ['docs/authoring.html', 'wasi:cli/command@0.3.0'],
         ['docs/embedding.html', 'package perry:compiler@0.1.1;'],
-        ['docs/semantics.html', 'Number.isSafeInteger'],
-        ['docs/numbers.html', 'i64.mul'],
+        ['docs/semantics.html', 'i64.mul'],
+        ['docs/stdlib.html', 'Number.isSafeInteger'],
         ['docs/conformance.html', 'ecma.number.arithmetic'],
         ['docs/architecture.html', 'resolved WIT world'],
       ]) {

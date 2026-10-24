@@ -11,8 +11,9 @@ The WIT world is the contract: it fixes the exported functions, the host capabil
 
 ## Where to Start
 
-- To write and build a component, read [Authoring](authoring.md), then [Semantics](semantics.md) for what compiles.
+- To write and build a component, read [Authoring](authoring.md).
 - To compile TypeScript inside your own Rust host or a browser, read [Embedding](embedding.md).
-- To type numeric interfaces with WIT integers, read [Numbers](numbers.md).
+- To check language rules and WIT integer types, read [Semantics](semantics.md).
+- To look up supported globals, methods and modules, read [Standard Library](stdlib.md).
 - To see how far Node.js equivalence is tested, read [Conformance](conformance.md).
 - To change the compiler, read [Architecture](architecture.md).
