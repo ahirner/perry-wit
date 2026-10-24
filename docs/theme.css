@@ -65,6 +65,50 @@ html:not(.js) {
   --code-border: #79928d;
 }
 
+/* Without JavaScript, mdBook cannot apply a theme class, so follow the system preference. */
+@media (prefers-color-scheme: dark) {
+  html:not(.js) {
+    --bg: #252b33;
+    --fg: #faf1df;
+    --sidebar-bg: #303a43;
+    --sidebar-fg: #faf1df;
+    --sidebar-non-existant: #c6d3c9;
+    --sidebar-active: #b9ed9e;
+    --sidebar-spacer: #526b65;
+    --scrollbar: #79928d;
+    --icons: #c6d3c9;
+    --icons-hover: #faf1df;
+    --links: #b9ed9e;
+    --inline-code-color: #faf1df;
+    --theme-popup-bg: #303a43;
+    --theme-popup-border: #79928d;
+    --theme-hover: #3b4b44;
+    --quote-bg: #494431;
+    --quote-border: #e5a91f;
+    --table-border-color: #526b65;
+    --table-header-bg: #344d5b;
+    --table-alternate-bg: #2e3c39;
+    --searchbar-border-color: #79928d;
+    --searchbar-bg: #303a43;
+    --searchbar-fg: #faf1df;
+    --sidebar-header-border-color: #b9ed9e;
+    --code-bg: #303a43;
+    --code-border: #79928d;
+  }
+
+  html:not(.js) code.nohighlight span {
+    color: var(--shiki-dark);
+  }
+}
+
+/* Code blocks highlighted at build time carry both palettes as custom properties. */
+code.nohighlight span {
+  color: var(--shiki-light);
+}
+
+:is(.ayu, .coal, .navy) code.nohighlight span {
+  color: var(--shiki-dark);
+}
 
 html {
   font-family: system-ui, -apple-system, sans-serif;

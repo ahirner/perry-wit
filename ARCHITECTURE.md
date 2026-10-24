@@ -15,8 +15,8 @@ TypeScript ──► Source ──► HIR ──► Contract ──► MIR ─�
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
-| 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. For a command world, wraps top-level statements in the `wasi:cli/run` export. |
-| 2. HIR lowering | Perry HIR | Moves top-level statements into an initializer that runs once, before the first export call. Module bindings persist across calls. |
+| 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
+| 2. HIR lowering | Perry HIR | Collects top-level statements into one function. Without exported functions it is the `wasi:cli/run` body. Otherwise it initializes the module once, and `wasi:cli/run` and every export wait for it. Module bindings persist across calls. |
 | 3. Contract resolution | HIR, WIT | Checks export signatures, requires `async func` for every function that can suspend, maps each native operation to the WASI import it uses, and lays out Canonical ABI scratch areas. |
 | 4. MIR lowering | pliron MIR | Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
@@ -24,11 +24,11 @@ TypeScript ──► Source ──► HIR ──► Contract ──► MIR ─�
 | 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
 
 `ProgramFacts` infers numeric refinements (integer type and interval with two-step loop widening), purity and allocation effects, and parameter escape provenance across functions, including recursive call cycles. The numeric analysis propagates ranges forward and bitwidth demand backward [[3]](#ref-3).
-Numeric refinements select `i32`, `i64`, or `f64` representations, specialize hot callees for concrete integer argument types, and elide bounds checks on proven in-bounds array reads.
-Closed non-escaping records decompose into scalar SSA values, non-escaping record parameters promote to scalar arguments, and `JSON.parse` / `JSON.stringify` on statically known shapes lower to specialized field decoders and schema-normalizing deep copies.
-Repeated string appends reuse spare capacity in place when ownership is unique, and single-character ASCII strings fold to scalar integer comparisons.
+Numeric refinements select `i32`, `i64`, or `f64` representations, specialize synchronous callees for the integer argument types known at each call site, and elide bounds checks on proven in-bounds array reads.
+Closed non-escaping records decompose into scalar SSA values, read-only record parameters of internal synchronous functions promote to one scalar argument per field read, and `JSON.parse` / `JSON.stringify` on statically known shapes lower to specialized field decoders and schema-normalizing deep copies.
+Repeated string appends reuse spare capacity in place when ownership is unique, and single characters read by indexing stay Unicode scalars through comparisons and appends.
 
-During code generation, optional `undefined` values avoid boxing by using a dedicated quiet-NaN bit pattern for `f64`, `0` for heap references, and `2` for booleans.
+During code generation, optional values avoid boxing by reserving sentinel encodings inside the value's own representation. `undefined`, `null` and an omitted property are the signaling-NaN payloads `0x7ff0000000000001` to `0x7ff0000000000003` in an `f64`, the addresses `0` to `2` for heap references, and `2` to `4` for booleans. WebAssembly arithmetic only produces quiet NaNs, so a computed number never matches a sentinel.
 Constants rematerialize at use sites, single-use expressions in the same basic block stay on the WebAssembly operand stack when effect and trap ordering permits, and remaining values share WebAssembly locals across non-overlapping live ranges.
 
 ## Memory
@@ -36,8 +36,8 @@ Constants rematerialize at use sites, single-use expressions in the same basic b
 A component has one linear memory, and the compiler picks its heap strategy per module from the effect summaries of `ProgramFacts`.
 `perry-wit --explain-tiers` prints the choice:
 
-- **Task regions** when every reachable function allocates a bounded amount, cannot suspend or re-enter, uses no host resources, and the module has no top-level state. Each export call bump-allocates in 4 KiB chunks freed in bulk when the call ends. A synchronous export frees its region in `cabi_post_<export>`, after the host has lifted the results, so arguments and results go with the region.
-- **Precise collection** otherwise. Objects up to 512 bytes allocate from non-moving 1 KiB pages across 11 size classes (powers of two and three-quarter midpoints) with mark bitmaps and lazy sweep, while larger blocks go directly to `talc`. Each record type carries a static pointer-offset descriptor so byte buffers and scalar payloads are never scanned for pointers. Compiled safe points clear dead reference slots in suspended async frames, publish exact live roots, and collect mid-call as well as when the last active task ends.
+- **Task regions** when every reachable function allocates a bounded amount, cannot suspend or re-enter, uses no host resources, and the module has no top-level state. Each export call bump-allocates in chunks that grow from 4 KiB to 64 KiB, with a dedicated chunk per larger object, and frees them in bulk when the call ends. A synchronous export frees its region in `cabi_post_<export>`, after the host has lifted the results, so arguments and results go with the region.
+- **Precise collection** otherwise. Objects up to 512 bytes allocate from non-moving 1 KiB pages across 11 size classes (powers of two and three-quarter midpoints) with mark bitmaps and lazy sweep. A larger object gets a dedicated page rounded up to a 1 KiB multiple, allocated from `talc` and marked and swept like the rest. Each record type carries a static pointer-offset descriptor so byte buffers and scalar payloads are never scanned for pointers. Compiled safe points clear dead reference slots in suspended async frames, publish exact live roots, and collect mid-call as well as when the last active task ends.
 
 Non-escaping scalar records that still require an address (such as arguments passed to a non-retaining callee) pack into a single per-function activation frame (up to 448 bytes), reusing the same slots across loop iterations and freeing the frame on return.
 For streams, backward liveness analysis detects when `reader.read()` or `writer.write()` results do not outlive the next operation on the same stream, leasing and reusing a single promise, `{ done, value }` record, and chunk buffer in constant memory.
@@ -45,7 +45,7 @@ For streams, backward liveness analysis detects when `reader.read()` or `writer.
 Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing avoids re-scanning ASCII strings.
 Canonical ABI return areas are zero-initialized and rooted before the host populates them, and export adapters release canonical scratch storage only after `task.return` completes or all pending host operations acknowledge cancellation.
 
-Static data sits above address `16` (reserving `0` as null), followed by relocated helper data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
+Static data starts at address `16`, above the reference sentinels, followed by relocated helper data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
 
 ## Async
 

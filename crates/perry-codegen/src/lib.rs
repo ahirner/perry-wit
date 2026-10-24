@@ -69,6 +69,9 @@ pub use memory::explain_tiers;
 /// Structured boundary errors emitted during Wasm lowering.
 #[derive(Debug)]
 pub enum CodegenError {
+    PendingInitialization {
+        span: Option<perry_mir::SourceSpan>,
+    },
     AsyncInitializerRequiresAsyncExport {
         core_name: String,
         span: Option<perry_mir::SourceSpan>,
@@ -87,6 +90,9 @@ pub enum CodegenError {
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PendingInitialization { .. } => {
+                write!(f, "top-level statements leave asynchronous work pending")
+            }
             Self::AsyncInitializerRequiresAsyncExport { core_name, .. } => {
                 write!(f, "{core_name} requires asynchronous module initialization")
             }
@@ -107,9 +113,9 @@ impl std::error::Error for CodegenError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ExportBinding { source, .. } => Some(source.as_ref()),
-            Self::AsyncInitializerRequiresAsyncExport { .. } | Self::MissingErrorChannel { .. } => {
-                None
-            }
+            Self::PendingInitialization { .. }
+            | Self::AsyncInitializerRequiresAsyncExport { .. }
+            | Self::MissingErrorChannel { .. } => None,
         }
     }
 }

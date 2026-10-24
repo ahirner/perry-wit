@@ -20,13 +20,7 @@ async function initializeHighlighting() {
       const highlighted = new DOMParser().parseFromString(html, 'text/html').querySelector('code');
       code.replaceChildren(...highlighted.childNodes);
     }
-    for (const editor of document.querySelectorAll('.home .editors [data-language]')) {
-      const code = editor.querySelector('code');
-      renderCode(code, code.textContent, editor.dataset.language);
-      code.dataset.highlighted = 'true';
-    }
-    const inputs = document.querySelectorAll('textarea[data-language]');
-    for (const input of inputs) {
+    for (const input of document.querySelectorAll('textarea[data-language]')) {
       const frame = document.createElement('div');
       frame.className = 'code-editor';
       const layer = document.createElement('pre');
@@ -62,7 +56,6 @@ async function initializeHighlighting() {
       });
       renderInput();
     }
-    if (!inputs.length) highlighter.dispose();
   } catch (error) {
     console.warn('Syntax highlighting unavailable. Showing plain source.', error);
   }

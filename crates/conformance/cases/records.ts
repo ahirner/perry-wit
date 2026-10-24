@@ -227,7 +227,10 @@ class Counter {
   }
 }
 class Holder<T> {
-  constructor(public item: T) {}
+  item: T;
+  constructor(item: T) {
+    this.item = item;
+  }
   unwrap(): T {
     return this.item;
   }

@@ -66,6 +66,9 @@ wasmtime run -S p3=y -W component-model-async=y --dir . app.wasm
 
 `console` writes to WASI standard output and error, `process.env` reads the WASI environment, and `process.exitCode` or `process.exit(code)` sets the exit status.
 
+If the module also exports functions, its top-level statements initialize the module once instead, and `wasi:cli/run` and every export wait for that initialization.
+Top-level statements that start asynchronous work without awaiting it are then a compile error.
+
 ## HTTP Handlers
 
 A module implementing the `perry:http-handler` world receives a request record and returns a response record.

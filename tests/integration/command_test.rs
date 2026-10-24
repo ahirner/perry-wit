@@ -116,6 +116,94 @@ console.log("unreachable");
     Ok(())
 }
 
+/// With exported functions, the top-level statements initialize the module once: `run` and
+/// every export wait for that initialization, whichever entry point the host calls first.
+#[tokio::test(flavor = "current_thread")]
+async fn commands_and_exports_share_one_initialization() -> Result<()> {
+    let world = |export: &str| {
+        format!(
+            "package test:dual; world dual {{ include wasi:cli/command@0.3.0; export double: {export}(x: s32) -> s32; }}"
+        )
+    };
+    for (export, source, results, output) in [
+        (
+            "async func",
+            r#"
+import { setTimeout } from 'node:timers/promises';
+let calls = 0;
+await setTimeout(1);
+console.log("initialized");
+export async function double(x: number): Promise<number> {
+  calls += 1;
+  return x * 2 + calls;
+}
+"#,
+            (3, 4),
+            "initialized\n",
+        ),
+        (
+            "func",
+            "let total = [1, 2, 3].reduce((a, b) => a + b, 34); export function double(x: number): number { total += x; return total; }",
+            (41, 42),
+            "",
+        ),
+    ] {
+        let bytes = Standard.component(&world(export), "dual", "dual.ts", source)?;
+        let engine = async_engine()?;
+        let component = Component::new(&engine, bytes)?;
+        let stdout = MemoryOutput::new(1 << 10);
+        let mut builder = WasiCtx::builder();
+        builder.stdout(stdout.clone());
+        let mut store = wasi_host::store(&engine, Host::new(builder.build()));
+        let instance = wasi_host::linker(&engine)?
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let command = Command::new(&mut store, &instance)?;
+        let double = instance.get_typed_func::<(i32,), (i32,)>(&mut store, "double")?;
+        assert_eq!(
+            double.call_async(&mut store, (1,)).await?.0,
+            results.0,
+            "{export}"
+        );
+        let result = store
+            .run_concurrent(async move |store| command.wasi_cli_run().call_run(store).await)
+            .await??;
+        assert!(result.is_ok(), "{export}");
+        assert_eq!(
+            double.call_async(&mut store, (1,)).await?.0,
+            results.1,
+            "{export}"
+        );
+        assert_eq!(String::from_utf8(stdout.contents().to_vec())?, output);
+    }
+
+    let error = |export: &str, source: &str| {
+        format!(
+            "{:#}",
+            Standard
+                .component(&world(export), "dual", "dual.ts", source)
+                .unwrap_err()
+        )
+    };
+    let pending = error(
+        "async func",
+        "import { readFile } from 'node:fs/promises'; let text = ''; async function load(): Promise<void> { text = await readFile('a.txt', 'utf8'); } load(); export async function double(x: number): Promise<number> { return x + text.length; }",
+    );
+    assert!(
+        pending.contains("top-level statements leave asynchronous work pending"),
+        "{pending}"
+    );
+    let synchronous = error(
+        "func",
+        "import { setTimeout } from 'node:timers/promises'; await setTimeout(1); export function double(x: number): number { return x * 2; }",
+    );
+    assert!(
+        synchronous.contains("double requires asynchronous module initialization"),
+        "{synchronous}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn node_fs_reports_node_errors_and_resolves_paths_like_posix() -> Result<()> {
     let root = tempfile::tempdir()?;

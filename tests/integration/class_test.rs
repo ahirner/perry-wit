@@ -1,3 +1,4 @@
+use crate::core_program::Program;
 use crate::node_oracle::assert_numbers;
 
 #[test]
@@ -112,4 +113,22 @@ export function finiteNesting():number {
             ("finiteNesting", &[], 6.0),
         ],
     )
+}
+
+/// Parameter properties are not erasable TypeScript, so Node runs no oracle for them.
+#[test]
+fn parameter_properties_declare_and_assign_fields() {
+    let mut program = Program::new(
+        r#"
+class Holder<T> {
+    constructor(public item: T, readonly count: number = 2) {}
+    unwrap(): T { return this.item; }
+}
+export function run(x: number): number {
+    const holder = new Holder<number>(x);
+    return holder.unwrap() * holder.count + Object.keys(holder).length;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 20.0), 42.0);
 }

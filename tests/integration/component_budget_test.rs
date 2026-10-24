@@ -43,6 +43,29 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         }
         assert_eq!(memories, 1, "{name}: one linear memory");
     }
+    // The README and homepage quote the exact size of an integer `add` component.
+    let package = resolve.push_str(
+        "add.wit",
+        "package example:add; world adder { export add: func(a: s32, b: s32) -> s32; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("adder"))?;
+    let source = "export function add(a: number, b: number): number { return a + b; }";
+    let compiled = compile_for_world(source, "add", &resolve, world, true)?;
+    let bytes = compiled.component.as_ref().unwrap().stripped.len();
+    for (file, text, claim) in [
+        (
+            "README.md",
+            include_str!("../../README.md"),
+            format!("compiles to a {bytes}-byte component"),
+        ),
+        (
+            "site/index.html",
+            include_str!("../../site/index.html"),
+            format!("fits in {bytes} bytes"),
+        ),
+    ] {
+        assert!(text.contains(&claim), "{file} must state \"{claim}\"");
+    }
     // Core modules link only the runtime helpers a program reaches.
     for (name, source, max_core_bytes) in [
         (

@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { transpileBytes } from '@bytecodealliance/jco-transpile';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
-import { checkHomepage, prepareBook } from './docs.mjs';
+import { checkHomepage, codeHighlighter, highlightBook, highlightHomepage, prepareBook } from './docs.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(root);
@@ -49,6 +49,8 @@ for (const page of ['index.html', 'play/index.html']) {
   const html = await readFile(join(output, page), 'utf8');
   await writeFile(join(output, page), html.replaceAll('{{contractCount}}', contractCount).replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion)));
 }
+const highlight = await codeHighlighter();
+await writeFile(join(output, 'index.html'), highlightHomepage(await readFile(join(output, 'index.html'), 'utf8'), highlight));
 await cp(compiler, join(output, 'downloads/perry-wit.wasm'));
 await cp(join(repository, 'wit/compiler/world.wit'), join(output, 'downloads/compiler.wit'));
 await writeFile(join(output, 'downloads/compiler.metadata.json'), metadata);
@@ -97,6 +99,7 @@ const { api } = await instantiateCompiler(compilerBytes);
 await prepareBook({ repository, bookDir, generated, api, conformanceDoc });
 await checkHomepage({ html: await readFile(join(root, 'index.html'), 'utf8'), generated, api });
 execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
+await highlightBook(join(output, 'docs'), highlight);
 
 const exampleFiles = new Map();
 for (const name of await readdir(join(repository, 'examples'), { recursive: true })) {
@@ -138,7 +141,7 @@ revision.update(compilerBytes);
 for (const name of ['style.css', 'highlight.js', 'play/app.js', 'play/workspace.js', 'play/examples.json', 'play/assets/worker.js']) revision.update(await readFile(join(output, name)));
 const version = revision.digest('hex').slice(0, 12);
 for (const [name, references] of [
-  ['index.html', ['style.css', 'highlight.js']],
+  ['index.html', ['style.css']],
   ['play/index.html', ['../style.css', 'app.js']],
   ['play/app.js', ['../highlight.js', './workspace.js', './examples.json', './assets/worker.js']],
 ]) {
@@ -160,6 +163,7 @@ const report = {
   workerJavaScript: await size(['play/assets/worker.js']),
   jcoEngines: await size(await assets('play/assets/engine')),
 };
-if (homeHtmlAndCss > 15 * 1024 || playHtmlAndCss > 12 * 1024) throw new Error(`HTML/CSS budget exceeded: home=${homeHtmlAndCss}, play=${playHtmlAndCss} bytes`);
+// The homepage carries its highlighted code instead of loading a highlighter.
+if (homeHtmlAndCss > 16 * 1024 || playHtmlAndCss > 12 * 1024) throw new Error(`HTML/CSS budget exceeded: home=${homeHtmlAndCss}, play=${playHtmlAndCss} bytes`);
 await writeFile(join(output, 'sizes.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));

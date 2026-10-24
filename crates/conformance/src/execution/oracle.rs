@@ -197,11 +197,7 @@ impl NodeDaemon {
         let sdk = shared_sdk()?;
         let sandbox = tempfile::Builder::new().prefix("perry-oracle-").tempdir()?;
         let mut child = Command::new("node")
-            .args([
-                "--disable-warning=ExperimentalWarning",
-                "--harmony-temporal",
-                "--experimental-strip-types",
-            ])
+            .arg("--disable-warning=ExperimentalWarning")
             .arg(&sdk.oracle_mjs)
             .env("TZ", "UTC")
             .env("PERRY_ORACLE_SANDBOX", sandbox.path())

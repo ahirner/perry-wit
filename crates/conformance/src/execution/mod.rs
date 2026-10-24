@@ -609,11 +609,7 @@ impl Executor {
         } else if matches!(case, Case::Command { .. }) {
             Ok(Outcome::Command(command(
                 Command::new("node")
-                    .args([
-                        "--no-warnings",
-                        "--harmony-temporal",
-                        "--experimental-transform-types",
-                    ])
+                    .arg("--no-warnings")
                     .arg(&path)
                     .env("PERRY_CONFORMANCE", ENV_FIXTURE)
                     .env("TZ", "UTC"),

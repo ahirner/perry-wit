@@ -137,6 +137,19 @@ pub(crate) fn contracts() -> Vec<Contract> {
         Just(callback_timer).boxed(),
         check_equivalence,
     ));
+    let unawaited_initialization = Case::Reject {
+        source: "import {readFile} from 'node:fs/promises';let text='';async function load():Promise<void>{text=await readFile('a.txt','utf8');}load();export function size():number{return text.length;}".into(),
+        diagnostic: "top-level statements leave asynchronous work pending".into(),
+    };
+    contracts.push(Contract::new(
+        "ecma.module.unawaited_initialization",
+        vec![Witness {
+            partition: "unawaited-async-call",
+            case: unawaited_initialization.clone(),
+        }],
+        Just(unawaited_initialization).boxed(),
+        check_equivalence,
+    ));
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
     contracts.push(Contract::new(
@@ -244,7 +257,7 @@ const instant=Temporal.Instant.fromEpochMilliseconds({epoch});
 const date=Temporal.PlainDate.from('2024-02-28').add({{days:1}});
 const dateTime=Temporal.PlainDateTime.from('2024-02-28T12:30:00.123456789').add({{days:1}});
 trace.push(instant.epochMilliseconds);
-const encoded=new TextEncoder().encode(instant.toString()+'|'+date.toString()+'|'+dateTime.toString());
+const encoded=new TextEncoder().encode(instant.toString()+'|'+date.toString()+'|'+dateTime.toString()+'|'+date.calendarId+'|'+dateTime.calendarId);
 for(let i=0;i<encoded.length;i++){{const byte=encoded[i];if(byte===undefined)throw 90;trace.push(byte);}}
 "#
         ),

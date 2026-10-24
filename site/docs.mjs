@@ -3,7 +3,13 @@
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createOnigurumaEngine } from '@shikijs/engine-oniguruma';
+import { codeToTokensWithThemes, createShikiPrimitiveAsync } from '@shikijs/primitive';
 import { compileRequest, encode } from './play/workspace.js';
+
+// Languages highlighted at build time, by fence or `data-language` name. Other blocks stay plain.
+const LANGUAGES = { ts: 'typescript', typescript: 'typescript', wit: 'wit', wat: 'wasm', sh: 'shellscript', rust: 'rust' };
+const THEMES = { light: 'github-light-high-contrast', dark: 'github-dark-high-contrast' };
 
 /** Write generated pages into `bookDir/src` and check snippets, listings and tables. */
 export async function prepareBook({ repository, bookDir, generated, api, conformanceDoc }) {
@@ -70,14 +76,84 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
 /** Compile the homepage's TypeScript and WIT example and run its export once with Wasmtime. */
 export async function checkHomepage({ html, generated, api }) {
   const section = html.match(/<section class="editors"[\s\S]*?<\/section>/)?.[0] ?? '';
-  const [ts, wit] = [...section.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)]
-    .map(match => match[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
+  const [ts, wit] = [...section.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map(match => decodeHtml(match[1]));
   if (!ts || !wit) throw new Error('site/index.html needs a TypeScript and a WIT block in .editors');
   const component = compile(api, 'site/index.html', ts, wit).component.stripped;
   const file = join(generated, 'homepage.wasm');
   await writeFile(file, component);
   const greeting = invoke(file, 'greet("World")');
   if (greeting !== '"Hello, World"') throw new Error(`site/index.html example printed ${greeting}`);
+}
+
+/**
+ * Highlight code to `<code>` contents. Text in a theme's default color stays bare, and every other
+ * light and dark color pair becomes a class in `palette`, which `paletteStyle` defines.
+ */
+export async function codeHighlighter() {
+  const load = async (kind, name) => (await import(`@shikijs/${kind}/${name}`)).default;
+  const primitive = await createShikiPrimitiveAsync({
+    themes: await Promise.all(Object.values(THEMES).map(name => load('themes', name))),
+    langs: await Promise.all([...new Set(Object.values(LANGUAGES))].map(name => load('langs', name))),
+    engine: createOnigurumaEngine(import('@shikijs/engine-oniguruma/wasm-inlined')),
+  });
+  const defaults = Object.values(THEMES).map(name => primitive.getTheme(name).fg.toLowerCase());
+  return (text, language, palette) => codeToTokensWithThemes(primitive, text, { lang: LANGUAGES[language], themes: THEMES })
+    .map(line => {
+      const runs = [];
+      for (const { content, variants } of line) {
+        const colors = Object.keys(THEMES).map((theme, index) => (variants[theme].color ?? defaults[index]).toLowerCase());
+        // Whitespace shows no color, so it extends the current run.
+        const pair = /^\s*$/.test(content) ? runs.at(-1)?.pair ?? null
+          : colors.every((color, index) => color === defaults[index]) ? null : colors.join(' ');
+        if (pair && !palette.has(pair)) palette.set(pair, `t${palette.size}`);
+        if (runs.at(-1)?.pair === pair) runs.at(-1).text += content;
+        else runs.push({ pair, text: content });
+      }
+      return runs.map(({ pair, text }) => pair ? `<span class="${palette.get(pair)}">${encodeHtml(text)}</span>` : encodeHtml(text)).join('');
+    })
+    .join('\n');
+}
+
+/** A `<style>` element that gives each palette class its light and dark color. */
+function paletteStyle(palette) {
+  const rules = [...palette].map(([pair, name]) => {
+    const [light, dark] = pair.split(' ');
+    return `.${name}{--shiki-light:${light};--shiki-dark:${dark}}`;
+  });
+  return `<style>${rules.join('')}</style>\n`;
+}
+
+/** Highlight the homepage's `.editors` blocks by their `data-language`. */
+export function highlightHomepage(html, highlight) {
+  const palette = new Map();
+  const highlighted = html.replace(/(<div data-language="(\w+)">[\s\S]*?<pre><code>)([\s\S]*?)(?=<\/code>)/g,
+    (_, head, language, code) => head + highlight(decodeHtml(code), language, palette));
+  return highlighted.replace('</head>', paletteStyle(palette) + '</head>');
+}
+
+/** Highlight the code blocks of every handbook page, marked so mdBook's highlight.js skips them. */
+export async function highlightBook(directory, highlight) {
+  for (const name of await readdir(directory)) {
+    if (!name.endsWith('.html')) continue;
+    const file = join(directory, name);
+    const palette = new Map();
+    const html = (await readFile(file, 'utf8')).replace(/<pre(?: class="playground")?><code class="language-(\w+)[^"]*">([\s\S]*?)<\/code><\/pre>/g, (block, language, code) => {
+      if (!LANGUAGES[language]) return block;
+      // Hidden lines are the `fn main` that mdBook wraps around Rust examples.
+      const text = decodeHtml(code.replace(/<span class="boring">[^<]*<\/span>/g, '')).replace(/\n$/, '');
+      return `<pre><code class="nohighlight">${highlight(text, language, palette)}</code></pre>`;
+    });
+    await writeFile(file, palette.size ? html.replace('</head>', paletteStyle(palette) + '</head>') : html);
+  }
+}
+
+function encodeHtml(text) {
+  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function decodeHtml(html) {
+  const entities = { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' };
+  return html.replace(/&(lt|gt|quot|#39|amp);/g, (_, name) => entities[name]);
 }
 
 /** Replace `{{#include path}}` lines with the file they name, relative to the page. */
