@@ -3,14 +3,15 @@
 **Perry-WIT** compiles a static subset of TypeScript ahead-of-time into WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
 Rather than embedding a JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
-[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions.
-An `add(s32, s32) -> s32` export compiles to a 100-byte component.
+[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime helpers a program reaches.
+An integer `add` export compiles to 100 bytes, and a string `trim` export stays under 6 KiB.
 
-- **Dual-mode authoring**: Write standalone CLI commands using top-level `await`, export typed functions matching a WIT interface, or combine both in a single source file.
-- **Node-compatible**: Share code between Node.js test harnesses and native Wasm components using standard static ESM imports with matching type definitions.
-- **WIT-refined numbers**: Specialize `u8`–`s64` parameters and in-range arithmetic to native `i32` and `i64` instructions while preserving IEEE 754 `f64` semantics for unconstrained `number` values.
-- **Tiered memory reclamation**: Eliminate non-escaping aggregates by SROA, reuse bounded activation frames for eligible scalar records, and reclaim temporary storage through task regions or precise collection at safe points and export post-return hooks.
-- **Callback-driven concurrency**: Suspend `await` and Promise combinators directly on host-side WASI 0.3 callbacks.
+- **Dual-mode authoring**: Write CLI commands with top-level `await`, export typed functions or HTTP handlers, or do both in one module, whose top-level code then initializes state once before any export runs.
+- **Node-compatible**: Modules without WIT imports also run under Node.js, and property-based differential contracts (`perry-conformance`) compare their behavior in Node.js and Wasmtime.
+- **WIT-refined numbers**: Specialize `u8`–`s64` parameters and in-range arithmetic to native `i32` and `i64` instructions via forward range and backward bitwidth analysis while preserving IEEE 754 `f64` semantics for unconstrained `number` values.
+- **Tiered memory reclamation**: Persist module-level state across calls while reclaiming temporaries through SROA, bounded activation frames, and per-call task regions or precise safe-point collection.
+- **Callback-driven concurrency**: Lower `async` functions to stackless state machines so `await`, streams, and Promise combinators suspend directly on WASI 0.3 callbacks.
+- **Toolchain-free embedding**: Compile from in-memory buffers via `perry_wit::api` or the standalone WASI 0.2 compiler component (`perry-wit.wasm`) without an external Rust or LLVM toolchain.
 
 [Homepage](https://ahirner.github.io/perry-wit/) · [Handbook](https://ahirner.github.io/perry-wit/docs/) · [Playground](https://ahirner.github.io/perry-wit/play/) · [Rust API](https://ahirner.github.io/perry-wit/rust/perry_wit/api/index.html) · [Architecture](ARCHITECTURE.md)
 

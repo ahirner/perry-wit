@@ -22,6 +22,12 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
             "export function run(input: string): string { return \"TASK_PROCESSED: \" + input; }",
             3522,
         ),
+        // The README quotes this bound.
+        (
+            "trim",
+            "export function run(input: string): string { return input.trim(); }",
+            6 * 1024,
+        ),
     ] {
         let compiled = compile_for_world(source, name, &resolve, world, true)?;
         let bytes = compiled.component.as_ref().unwrap().stripped.len() as u64;
@@ -56,7 +62,9 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         (
             "README.md",
             include_str!("../../README.md"),
-            format!("compiles to a {bytes}-byte component"),
+            format!(
+                "An integer `add` export compiles to {bytes} bytes, and a string `trim` export stays under 6 KiB."
+            ),
         ),
         (
             "site/index.html",

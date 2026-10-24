@@ -1,19 +1,7 @@
 # Overview
 
-Perry-WIT compiles a static subset of TypeScript ahead of time into WebAssembly components for WASI 0.3.
-The WIT world is the contract: it fixes the exported functions, the host capabilities a program may import, and the integer types of its numbers.
+Perry-WIT compiles a static subset of TypeScript ahead of time into WASI 0.3 WebAssembly components. It lowers TypeScript through typed SSA directly to WebAssembly instructions and links only the prebuilt `#![no_std]` helpers a program calls, so a component exporting a string function is about 3 KB. The helpers ship inside the compiler, so compiling needs no Rust or LLVM toolchain, whether you use the CLI, the Rust API or the compiler as a sandboxed WASI 0.2 component (see [Embedding](embedding.md) and [Architecture](architecture.md)).
 
-- **Direct WebAssembly codegen.** TypeScript lowers through typed SSA to native WebAssembly instructions. A component exporting a string function is about 3 KB.
-- **Memory stays flat across calls.** Each call's temporaries are freed when it returns. The test suite runs 1,000 calls with a nested record argument within two 64 KiB pages.
-- **WIT integer types refine `number`.** A `u8` parameter is a `number` known to be an integer in `0..=255`. In-range arithmetic compiles to `i32` or `i64` instructions.
-- **Callback-driven WASI 0.3 async.** `await` suspends through WASI 0.3 callbacks, and the host resumes the waiting task directly.
-- **Differential conformance against Node.js.** Each conformance contract runs the same program under Node.js and Wasmtime and compares observable results.
+Programs are ordinary TypeScript that `tsc` checks against types generated from the WIT world, and modules without WIT imports also run under Node.js. A module can be a CLI command with top-level `await`, export functions or an HTTP handler, or do both, in which case its top-level code initializes state once before the first export runs (see [Authoring](authoring.md)). WIT integer types refine `number`: a `u8` parameter is an integer in `0..=255`. Forward range and backward bitwidth analysis turn in-range arithmetic into `i32` and `i64` instructions and drop proven bounds checks, while other numbers keep IEEE 754 `f64` semantics (see [Semantics](semantics.md) and [Standard Library](stdlib.md)).
 
-## Where to Start
-
-- To write and build a component, read [Authoring](authoring.md).
-- To compile TypeScript inside your own Rust host or a browser, read [Embedding](embedding.md).
-- To check language rules and WIT integer types, read [Semantics](semantics.md).
-- To look up supported globals, methods and modules, read [Standard Library](stdlib.md).
-- To see how far Node.js equivalence is tested, read [Conformance](conformance.md).
-- To change the compiler, read [Architecture](architecture.md).
+Memory stays flat across calls: the test suite runs 1,000 calls with a nested record argument within two 64 KiB pages. When no export can suspend, keep state, hold host resources or allocate without bound, each call allocates from a region freed in bulk when it returns. Otherwise the runtime uses precise mark-and-sweep collection at compiled safe points. `async` functions compile to stackless state machines without a guest microtask queue, so `await`, streams and Promise combinators suspend on WASI 0.3 waitables and resume from host callbacks. Conformance contracts run the same programs under Node.js and Wasmtime, with fuel and memory limits, and compare the results (see [Conformance](conformance.md)).
