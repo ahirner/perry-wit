@@ -73,7 +73,10 @@ fn cargo(runtime: &Path) -> Command {
         .current_dir(runtime)
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("CARGO_INCREMENTAL");
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("CLIPPY_ARGS");
     command
 }
 
