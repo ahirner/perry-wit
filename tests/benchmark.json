@@ -383,7 +383,22 @@
     ]
   },
   {
-    "workload": "compile: property chain, depth 32"
+    "workload": "compile: property chain, depth 32",
+    "bytes": 2511,
+    "core_bytes": 2511,
+    "defined_functions": 13,
+    "helper_functions": 11,
+    "optimization": {
+      "cleanup_rounds": 2,
+      "constraint_visits": 262,
+      "numeric_contexts": 1,
+      "parse_stringify_missed": 0,
+      "parse_stringify_rewrites": 0,
+      "range_widenings": 0,
+      "specializations": 0,
+      "summarized_contexts": 0,
+      "summarized_heap_sets": 0
+    }
   },
   {
     "workload": "example: merge_task",

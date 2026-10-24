@@ -560,38 +560,7 @@ export function run(n: number): number {
     ];
     let mut rows = Vec::new();
     for (workload, source) in workloads {
-        let wasm = compile_core(source, "bench.ts")?;
-        let mut row = Row {
-            workload: format!("{workload} (n = 10⁶)"),
-            bytes: Some(wasm.len()),
-            core_bytes: Some(wasm.len()),
-            defined_functions: Some(defined_functions(&wasm)?),
-            ..Row::default()
-        };
-        // Inspect the same raw pipeline separately.
-        // The linked-minus-emitted function count measures helpers without naming heuristics.
-        {
-            use pliron::{context::Context, op::Op, printable::Printable};
-            let ctx = &mut Context::new();
-            let mir = perry_lower::lower_sources(
-                ctx,
-                source,
-                "bench.ts",
-                &Default::default(),
-                &Default::default(),
-            )?;
-            let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
-                .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
-            let exports = perry_codegen::Exports::Raw;
-            row.optimization = Some(optimization_statistics(&perry_codegen::explain_tiers(
-                ctx,
-                &mir,
-                &exports,
-                &mut analyses,
-            )?)?);
-            let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-            row.helper_functions = Some(defined_functions(&wasm)? - defined_functions(&emitted)?);
-        }
+        let (wasm, mut row) = raw_module(format!("{workload} (n = 10⁶)"), source)?;
         for metered in [true, false] {
             let mut config = Config::new();
             config.consume_fuel(metered);
@@ -667,7 +636,44 @@ export function run(n: number): number {
     Ok(rows)
 }
 
-/// Compile time of a property chain 32 levels deep.
+/// A raw core module and its static metrics: sizes, function counts and optimization
+/// statistics. The linked-minus-emitted function count measures helpers without naming
+/// heuristics.
+fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
+    use pliron::{context::Context, op::Op, printable::Printable};
+    let wasm = compile_core(source, "bench.ts")?;
+    // Inspect the same raw pipeline separately.
+    let ctx = &mut Context::new();
+    let mir = perry_lower::lower_sources(
+        ctx,
+        source,
+        "bench.ts",
+        &Default::default(),
+        &Default::default(),
+    )?;
+    let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
+        .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
+    let exports = perry_codegen::Exports::Raw;
+    let optimization = optimization_statistics(&perry_codegen::explain_tiers(
+        ctx,
+        &mir,
+        &exports,
+        &mut analyses,
+    )?)?;
+    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let row = Row {
+        workload,
+        bytes: Some(wasm.len()),
+        core_bytes: Some(wasm.len()),
+        defined_functions: Some(defined_functions(&wasm)?),
+        helper_functions: Some(defined_functions(&wasm)? - defined_functions(&emitted)?),
+        optimization: Some(optimization),
+        ..Row::default()
+    };
+    Ok((wasm, row))
+}
+
+/// Compile time of a property chain 32 levels deep, with the module's static metrics.
 fn compile_time() -> Result<Row> {
     let mut source = String::from("interface N0 { v: number }\n");
     for level in 1..=32 {
@@ -680,10 +686,11 @@ fn compile_time() -> Result<Row> {
     source.push_str(".v; }\n");
     let started = Instant::now();
     compile_core(&source, "chain.ts")?;
+    let milliseconds = started.elapsed().as_secs_f64() * 1000.0;
+    let (_, row) = raw_module("compile: property chain, depth 32".into(), &source)?;
     Ok(Row {
-        workload: "compile: property chain, depth 32".into(),
-        milliseconds: Some(started.elapsed().as_secs_f64() * 1000.0),
-        ..Row::default()
+        milliseconds: Some(milliseconds),
+        ..row
     })
 }
 

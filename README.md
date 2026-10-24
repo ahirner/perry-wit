@@ -52,14 +52,16 @@ It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT
 ```sh
 cargo fetch --manifest-path runtime/Cargo.toml --locked    # once: runtime builds run offline
 cargo test --workspace                                     # compiler tests; edited runtime modules rebuild
+cargo test -p perry-mir                                    # one compiler crate, without runtime modules or Wasmtime
 cargo test --test integration stream                       # integration tests matching a name
 cargo test --manifest-path runtime/Cargo.toml --workspace  # runtime unit tests
+cargo run -p perry-conformance -- check --select node.fs   # conformance contracts with an ID prefix
 cargo test --test benchmark -- --ignored                   # sizes, fuel and memory against tests/benchmark.json
 nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, site, SDK sync, template and example runs
 ```
 
 When a change moves benchmark numbers on purpose, run the benchmark with `PERRY_EXPECT_BENCH=1` and commit the rewritten `tests/benchmark.json` together with the change.
-CI additionally runs the runtime tests with all features, Clippy for both workspaces and the conformance check.
+CI additionally runs the collectible runtime tests (`--all-features`), Clippy for both workspaces and all conformance contracts.
 
 ### Flake outputs
 
