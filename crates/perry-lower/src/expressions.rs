@@ -293,7 +293,7 @@ impl<'s> FunctionBuilder<'s> {
                     && int_ty.deref(ctx).width() == 64
                 {
                     int_ty.into()
-                } else if matches!(ty, HirType::Any | HirType::Unknown) {
+                } else if perry_frontend::contextual_type(ty).resolved().is_none() {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
                     self.shapes.value_type(ctx, ty)?
@@ -502,8 +502,10 @@ impl<'s> FunctionBuilder<'s> {
                 index,
                 value,
             } => self.set_index(ctx, object, index, value)?,
-            // Perry HIR exposes no variant names, only `Debug`: show the whole node.
-            other => bail!("MIR backend does not support expression {other:?} yet"),
+            other => bail!(
+                "MIR backend does not support expression {} yet",
+                hir_compat::describe_expression(other)
+            ),
         };
         self.narrow_primitive(ctx, expr, value)
     }

@@ -1,6 +1,7 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
-use crate::{inline::InlineResult, shapes::TypeId};
+use crate::inline::InlineResult;
+use perry_frontend::shapes::TypeId;
 
 enum ClassArguments<'a, 's> {
     Expressions(&'s [Expr]),
@@ -15,7 +16,7 @@ enum ClassReceiver {
 
 pub(super) enum ClassExpansion<'s> {
     Callable(&'s Function),
-    Fields(&'s perry_hir::ir::Class),
+    Fields(&'s perry_frontend::hir::ir::Class),
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -360,8 +361,12 @@ impl<'s> FunctionBuilder<'s> {
         let param_ty = setter
             .params
             .first()
-            .map(|p| &p.ty)
-            .filter(|ty| !matches!(ty, HirType::Any | HirType::Unknown))
+            .and_then(|param| {
+                self.shapes
+                    .metadata
+                    .parameter_type(param.id, &param.ty)
+                    .resolved()
+            })
             .and_then(|ty| {
                 self.shapes
                     .class_value_type(ctx, owner_class, type_args, ty)
@@ -436,7 +441,13 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            let param_ty = if matches!(param.ty, HirType::Any | HirType::Unknown) && !param.is_rest
+            let param_ty = if self
+                .shapes
+                .metadata
+                .parameter_type(param.id, &param.ty)
+                .resolved()
+                .is_none()
+                && !param.is_rest
             {
                 None
             } else {
@@ -493,7 +504,13 @@ impl<'s> FunctionBuilder<'s> {
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
-                    } else if matches!(func.return_type, HirType::Any | HirType::Unknown) {
+                    } else if this
+                        .shapes
+                        .metadata
+                        .return_type(func, &func.return_type)
+                        .resolved()
+                        .is_none()
+                    {
                         InlineResult::Inferred
                     } else {
                         this.shapes

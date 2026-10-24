@@ -193,7 +193,10 @@ fn check_typescript(source: &str) -> Result<()> {
     let path = directory.path().join("byob.ts");
     std::fs::write(&path, source)?;
     let checked = std::process::Command::new("tsc")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/crates/perry-frontend/src/sdk/runtime.d.ts"
+        ))
         .current_dir(directory.path())
         .args(["--noEmit", "--strict", "--target", "ES2022"])
         .arg(path)

@@ -13,25 +13,15 @@ homepage = "https://ahirner.github.io/perry-wit/"
 workspace = true
 
 [workspace]
+exclude = ["runtime"]
 members = [
-  ".",
-  "crates/text-helper",
-  "crates/normalization-helper",
-  "crates/fetch-helper",
-  "crates/json-helper",
-  "crates/number-helper",
-  "crates/decimal-helper",
-  "crates/time-helper",
   "crates/conformance",
   "crates/perry-mir",
   "crates/perry-lower",
+  "crates/perry-frontend",
+  "crates/perry-contract",
   "crates/pliron-wasm",
   "crates/pliron-control",
-  "crates/perry-runtime",
-  "crates/perry-abi",
-  "crates/perry-std",
-  "crates/perry-fs",
-  "crates/perry-web",
   "crates/perry-codegen",
   "crates/perry-diagnostics",
 ]
@@ -47,12 +37,13 @@ bytes = "1"
 http = "1"
 http-body-util = "0.1"
 libm = "0.2"
-perry-abi = { path = "crates/perry-abi" }
+perry-abi = { path = "runtime/abi" }
+perry-contract = { path = "crates/perry-contract" }
+perry-frontend = { path = "crates/perry-frontend" }
 perry-hir = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
-perry-runtime = { path = "crates/perry-runtime" }
 pliron = { git = "https://github.com/pliron-org/pliron", rev = "58797e44a51220e62bac7c91bab458c6a0e08a9b", default-features = false }
 pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
@@ -84,12 +75,13 @@ panic = "abort"
 strip = true
 
 [dependencies]
+perry-contract.workspace = true
+perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }
 perry-lower = { path = "crates/perry-lower" }
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true
-perry-parser.workspace = true
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmparser.workspace = true
 wit-parser.workspace = true
@@ -101,8 +93,7 @@ serde_json.workspace = true
 wit-bindgen = "0.62"
 
 [build-dependencies]
-wat = "~1.261.0"
-wasmparser.workspace = true
+perry-rt-build = { path = "runtime/build" }
 
 [dev-dependencies]
 sha2 = "0.10"
@@ -117,5 +108,5 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-http.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile.workspace = true
-perry-json-helper = { path = "crates/json-helper" }
+perry-json = { path = "runtime/json" }
 wasmprinter.workspace = true

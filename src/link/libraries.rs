@@ -10,25 +10,25 @@ use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, TypeRef};
 
-pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/fetch.wasm"));
-pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/text.wasm"));
-pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/time.wasm"));
-const JSON_GRAPH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-graph.wasm"));
-const JSON_CURSOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-cursor.wasm"));
-const JSON_COPY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json-copy.wasm"));
-pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/json.wasm"));
+pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fetch.wasm"));
+pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/text.wasm"));
+pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/time.wasm"));
+const JSON_GRAPH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-graph.wasm"));
+const JSON_CURSOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-cursor.wasm"));
+const JSON_COPY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-copy.wasm"));
+pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json.wasm"));
 const NORMALIZATION: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/helpers/normalization.wasm"));
-const DECIMAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/decimal.wasm"));
-pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/number.wasm"));
+    include_bytes!(concat!(env!("OUT_DIR"), "/runtime/normalization.wasm"));
+const DECIMAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/decimal.wasm"));
+pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/number.wasm"));
 pub(crate) const COLLECTIBLE_RUNTIME: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
-    "/helpers/runtime-collectible.wasm"
+    "/runtime/runtime-collectible.wasm"
 ));
-pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/runtime.wasm"));
-pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/std.wasm"));
-pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/fs.wasm"));
-pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/helpers/web.wasm"));
+pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/runtime.wasm"));
+pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/std.wasm"));
+pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fs.wasm"));
+pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/web.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {

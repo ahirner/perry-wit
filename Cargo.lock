@@ -566,12 +566,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datealgo"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "157452fc58cced4b2dee5d279ab5d7e515fba5cd645caa9412ae9a32a449bcfc"
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1135,12 +1129,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "ixdtf"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4754a1731458af0443709c9667302793d3f63cc90ec4ba4c8259f2b9515478e5"
-
-[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1350,9 +1338,6 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perry-abi"
 version = "0.1.0"
-dependencies = [
- "perry-runtime",
-]
 
 [[package]]
 name = "perry-api-manifest"
@@ -1396,10 +1381,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-decimal-helper"
+name = "perry-contract"
 version = "0.1.0"
 dependencies = [
- "perry-abi",
+ "wit-parser 0.261.0",
 ]
 
 [[package]]
@@ -1417,14 +1402,21 @@ version = "0.5.1663"
 source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
 
 [[package]]
-name = "perry-fetch-helper"
-version = "0.1.0"
-
-[[package]]
-name = "perry-fs"
+name = "perry-frontend"
 version = "0.1.0"
 dependencies = [
- "perry-abi",
+ "anyhow",
+ "perry-contract",
+ "perry-hir",
+ "perry-parser",
+ "perry-wit-diagnostics",
+ "pliron",
+ "serde_json",
+ "swc_common",
+ "swc_ecma_parser",
+ "swc_ecma_transforms_base",
+ "swc_ecma_visit",
+ "wit-parser 0.261.0",
 ]
 
 [[package]]
@@ -1449,11 +1441,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-json-helper"
+name = "perry-json"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "perry-abi",
+ "perry-rt-sys",
 ]
 
 [[package]]
@@ -1461,15 +1453,9 @@ name = "perry-lower"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "perry-abi",
- "perry-hir",
+ "perry-frontend",
  "perry-mir",
- "perry-parser",
  "pliron",
- "swc_common",
- "swc_ecma_parser",
- "swc_ecma_transforms_base",
- "swc_ecma_visit",
 ]
 
 [[package]]
@@ -1478,25 +1464,10 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "perry-abi",
+ "perry-wit-diagnostics",
  "pliron",
  "pliron-control",
  "regex",
-]
-
-[[package]]
-name = "perry-normalization-helper"
-version = "0.1.0"
-dependencies = [
- "icu_normalizer",
- "icu_properties",
- "perry-abi",
-]
-
-[[package]]
-name = "perry-number-helper"
-version = "0.1.0"
-dependencies = [
- "ryu-js",
 ]
 
 [[package]]
@@ -1514,48 +1485,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-rt-build"
+version = "0.1.0"
+dependencies = [
+ "perry-abi",
+ "serde_json",
+ "wasmparser 0.261.0",
+ "wat",
+]
+
+[[package]]
+name = "perry-rt-sys"
+version = "0.1.0"
+dependencies = [
+ "perry-abi",
+ "perry-runtime",
+]
+
+[[package]]
 name = "perry-runtime"
 version = "0.1.0"
 dependencies = [
  "libm",
- "talc",
-]
-
-[[package]]
-name = "perry-std"
-version = "0.1.0"
-dependencies = [
- "arrayvec",
- "libm",
  "perry-abi",
-]
-
-[[package]]
-name = "perry-text-helper"
-version = "0.1.0"
-dependencies = [
- "icu_properties",
-]
-
-[[package]]
-name = "perry-time-helper"
-version = "0.1.0"
-dependencies = [
- "datealgo",
- "ixdtf",
+ "talc",
 ]
 
 [[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
 source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
-
-[[package]]
-name = "perry-web"
-version = "0.1.0"
-dependencies = [
- "perry-abi",
-]
 
 [[package]]
 name = "perry-wit"
@@ -1567,10 +1526,12 @@ dependencies = [
  "http-body",
  "http-body-util",
  "perry-codegen",
- "perry-json-helper",
+ "perry-contract",
+ "perry-frontend",
+ "perry-json",
  "perry-lower",
  "perry-mir",
- "perry-parser",
+ "perry-rt-build",
  "perry-wit-diagnostics",
  "pliron",
  "serde",
@@ -1595,7 +1556,6 @@ name = "perry-wit-diagnostics"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "perry-mir",
 ]
 
 [[package]]

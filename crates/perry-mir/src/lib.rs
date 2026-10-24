@@ -131,6 +131,7 @@ pub use optional::{
     UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, field_order_may_change,
     optional_parts, optional_value, present_type,
 };
+pub use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as CalendarUnit};
 pub use pipeline::{canonicalize, optimization_statistics};
 pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};

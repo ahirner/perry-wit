@@ -1,9 +1,0 @@
-#![cfg_attr(target_arch = "wasm32", no_std)]
-
-#[path = "../../../src/helpers/json.rs"]
-mod implementation;
-
-pub use implementation::*;
-
-#[cfg(target_arch = "wasm32")]
-mod guest;

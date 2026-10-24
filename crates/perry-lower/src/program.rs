@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) struct ParamSig<'s> {
-    pub(super) source: &'s perry_hir::ir::Param,
+    pub(super) source: &'s perry_frontend::hir::ir::Param,
     pub(super) binding: BindingType,
     pub(super) base: BindingType,
 }
@@ -100,7 +100,8 @@ pub(super) fn build_module(
         }
         let Some(module) = module else { continue };
         for specifier in &import.specifiers {
-            let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
+            let perry_frontend::hir::ir::ImportSpecifier::Named { imported, local } = specifier
+            else {
                 return Err(locations.annotate_import(
                     anyhow!("only named imports from {source} are supported yet"),
                     source,

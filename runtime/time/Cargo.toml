@@ -1,0 +1,18 @@
+[package]
+workspace = ".."
+name = "perry-time"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+perry-rt-sys.workspace = true
+datealgo = { version = "0.2.2", default-features = false }
+ixdtf = { version = "0.6.7", default-features = false }
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "time", profile = "release" },
+]

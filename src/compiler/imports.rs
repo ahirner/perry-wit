@@ -1,90 +1,46 @@
-//! World imports described once for source typing and canonical lowering.
-use super::{bind::abi_type, wit_types};
-use crate::sdk::to_camel_case;
+//! Canonical bindings for the functions exposed by the frontend's WIT source view.
+use super::bind::abi_type;
 use perry_codegen::boundary::Import;
-use perry_lower::hir::{Foreign, FunctionType, Type as HirType};
-use std::collections::HashMap;
+use perry_frontend::wit::WorldTypes;
 use wit_parser::{Resolve, WorldId};
 
-pub(super) fn bindings(
-    resolve: &Resolve,
-    world: WorldId,
-    foreign: &mut HashMap<String, Foreign>,
-) -> Vec<Import> {
+pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes) -> Vec<Import> {
     let mut imports = Vec::new();
-    for entry in crate::abi::world_functions(resolve, resolve.worlds[world].imports.iter()) {
+    for entry in perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter()) {
         let module = if entry.interface.is_some() {
             resolve.name_world_key(entry.key)
         } else {
             "$root".into()
         };
         let function = entry.function;
-        {
-            // Unsupported signatures remain unavailable at the source boundary; unrelated
-            // imports such as WASI resources must not prevent compilation of a world.
-            let Some(params) = function
-                .params
-                .iter()
-                .map(|p| {
-                    Some((
-                        p.name.clone(),
-                        HirType::Generic {
-                            base: "WitInput".into(),
-                            type_args: vec![wit_types::ty(
-                                resolve,
-                                crate::abi::types::Input::Reference(p.ty),
-                            )?],
-                        },
-                        false,
-                    ))
-                })
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            let result = match function.result {
-                Some(ty) => match wit_types::ty(resolve, crate::abi::types::Input::Reference(ty)) {
-                    Some(ty) => ty,
-                    None => continue,
-                },
-                None => HirType::Void,
-            };
-            let Ok(abi_params) = function
-                .params
-                .iter()
-                .map(|p| abi_type(resolve, &p.ty))
-                .collect()
-            else {
-                continue;
-            };
-            let Ok(abi_result) = function
-                .result
-                .as_ref()
-                .map(|ty| abi_type(resolve, ty))
-                .transpose()
-            else {
-                continue;
-            };
-            let binding = format!("{module}#{}", to_camel_case(&function.name));
-            foreign.insert(
-                binding.clone(),
-                Foreign::Function(FunctionType {
-                    params,
-                    return_type: Box::new(result),
-                    is_async: function.kind.is_async(),
-                    is_generator: false,
-                }),
-            );
-            imports.push(Import {
-                binding,
-                module: module.clone(),
-                name: function.name.clone(),
-                params: abi_params,
-                result: abi_result,
-                asynchronous: function.kind.is_async(),
-                kind: perry_codegen::boundary::ImportKind::Function,
-            });
-        }
+        let Ok(params) = function
+            .params
+            .iter()
+            .map(|parameter| abi_type(resolve, &parameter.ty))
+            .collect()
+        else {
+            continue;
+        };
+        let Ok(result) = function
+            .result
+            .as_ref()
+            .map(|ty| abi_type(resolve, ty))
+            .transpose()
+        else {
+            continue;
+        };
+        let Some(binding) = types.import_function(resolve, &module, function) else {
+            continue;
+        };
+        imports.push(Import {
+            binding,
+            module,
+            name: function.name.clone(),
+            params,
+            result,
+            asynchronous: function.kind.is_async(),
+            kind: perry_codegen::boundary::ImportKind::Function,
+        });
     }
     imports
 }

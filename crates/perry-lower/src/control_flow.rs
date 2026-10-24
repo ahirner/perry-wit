@@ -38,7 +38,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         discriminant: &'s Expr,
-        cases: &'s [perry_hir::ir::SwitchCase],
+        cases: &'s [perry_frontend::hir::ir::SwitchCase],
         label: Option<&'s str>,
     ) -> Result<()> {
         let value = self.expression(ctx, discriminant)?;
@@ -153,7 +153,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         body: &'s [Stmt],
-        catch: Option<&'s perry_hir::ir::CatchClause>,
+        catch: Option<&'s perry_frontend::hir::ir::CatchClause>,
         finally: Option<&'s [Stmt]>,
     ) -> Result<()> {
         let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();

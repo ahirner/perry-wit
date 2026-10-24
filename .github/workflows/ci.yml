@@ -39,7 +39,9 @@ jobs:
         nix develop -c bash -euo pipefail -c '
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
-          cargo test -p perry-runtime --all-features --locked
+          cargo test --manifest-path runtime/Cargo.toml --workspace --locked
+          cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked
+          cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
           cargo run --locked -p perry-conformance -- check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         '

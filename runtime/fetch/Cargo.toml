@@ -1,0 +1,16 @@
+[package]
+workspace = ".."
+name = "perry-fetch"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "fetch", profile = "release" },
+]
+
+[dependencies]
+perry-rt-sys.workspace = true

@@ -104,15 +104,18 @@
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
-          (path == toString ./src/helpers/undefined.txt) ||
+          (path == toString ./runtime/undefined.txt) ||
           (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = commonFilter;
         };
+        cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+          cargoLockList = [ ./Cargo.lock ./runtime/Cargo.lock ];
+        };
         compilerArgs = {
-          inherit src;
+          inherit src cargoVendorDir;
           pname = "perry-wit";
           version = cargoManifest.package.version;
           strictDeps = true;
@@ -139,7 +142,7 @@
             mkdir -p "$out/share/doc"
             cp -r target/doc "$out/share/doc/perry-wit"
             mkdir -p "$out/lib/perry-wit-helpers"
-            helper_marker=$(find target -path '*/build/perry-wit-*/out/helpers/runtime.wasm' -print -quit)
+            helper_marker=$(find target -path '*/build/perry-wit-*/out/runtime/runtime.wasm' -print -quit)
             test -n "$helper_marker"
             cp "$(dirname "$helper_marker")"/*.wasm "$out/lib/perry-wit-helpers/"
           '';
@@ -164,7 +167,7 @@
         };
         perryWitStatic = staticCraneLib.buildPackage (staticArgs // {
           cargoArtifacts = staticCraneLib.buildDepsOnly staticArgs;
-          PERRY_PREBUILT_HELPERS_DIR = "${coreHelpers}/lib";
+          PERRY_PREBUILT_RUNTIME_DIR = "${coreHelpers}/lib";
         });
 
         perryWitRelease = if pkgs.stdenv.hostPlatform.isLinux then perryWitStatic
@@ -188,7 +191,7 @@
         perryWitWasm = craneLib.buildPackage (wasmArgs // {
           nativeBuildInputs = [ pkgs.python3 pkgs.wasm-tools ];
           cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
-          PERRY_PREBUILT_HELPERS_DIR = "${coreHelpers}/lib";
+          PERRY_PREBUILT_RUNTIME_DIR = "${coreHelpers}/lib";
           installPhaseCommand = ''
             mkdir -p "$out/lib" "$out/share/perry-wit"
             python3 scripts/compiler-metadata.py target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm" \
@@ -386,6 +389,10 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
+          perry-runtime-fmt = craneLib.cargoFmt {
+            inherit src;
+            cargoExtraArgs = "--manifest-path runtime/Cargo.toml";
+          };
           inherit coreHelpers exampleMergeTask perryWitBin perryWitWasm site templateComponent checkTemplate sdkSyncCheck;
         };
 
@@ -407,7 +414,7 @@
 
           shellHook = ''
             export CARGO_TARGET_DIR="$PWD/target"
-            export PERRY_HELPER_TARGET_DIR="$CARGO_TARGET_DIR/embedded-helpers"
+            export PERRY_RUNTIME_TARGET_DIR="$CARGO_TARGET_DIR/embedded-runtime"
             if [ -d wit ] && [ ! -e wit/deps ]; then
               ln -sfn "${wasiP3Wit}" wit/deps
             fi

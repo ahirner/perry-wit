@@ -1,5 +1,5 @@
 //! Allocator roots required by canonical lowering, independent of runtime implementation.
-use crate::abi::world_functions;
+use perry_contract::world_functions;
 use std::collections::BTreeSet;
 use wit_parser::{
     Function, FutureIntrinsic, LiftLowerAbi, ManglingAndAbi, Resolve, StreamIntrinsic, Type,

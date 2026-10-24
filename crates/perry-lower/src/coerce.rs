@@ -17,13 +17,22 @@ pub(super) fn merge_absence(
     left: Option<perry_mir::Absence>,
     right: Option<perry_mir::Absence>,
 ) -> Option<perry_mir::Absence> {
-    match (left, right) {
-        (None, other) | (other, None) => other,
-        (Some(left), Some(right)) if left == right => Some(left),
-        (Some(_), Some(_)) => Some(perry_mir::Absence::Both),
-    }
+    perry_frontend::merge_absence(left.map(frontend_absence), right.map(frontend_absence)).map(
+        |absence| match absence {
+            perry_frontend::Absence::Null => perry_mir::Absence::Null,
+            perry_frontend::Absence::Undefined => perry_mir::Absence::Undefined,
+            perry_frontend::Absence::Both => perry_mir::Absence::Both,
+        },
+    )
 }
 
+fn frontend_absence(absence: perry_mir::Absence) -> perry_frontend::Absence {
+    match absence {
+        perry_mir::Absence::Null => perry_frontend::Absence::Null,
+        perry_mir::Absence::Undefined => perry_frontend::Absence::Undefined,
+        perry_mir::Absence::Both => perry_frontend::Absence::Both,
+    }
+}
 /// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
 /// from `T | null`.
 pub(super) fn admitting(

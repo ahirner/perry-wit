@@ -138,13 +138,12 @@ impl<'s> FunctionBuilder<'s> {
         message: &'s Expr,
         options: &'s Expr,
     ) -> Result<Value> {
-        let error_class = match error_kind {
-            0 => ErrorKind::Any,
-            1 => ErrorKind::TypeError,
-            2 => ErrorKind::RangeError,
-            3 => ErrorKind::ReferenceError,
-            4 => ErrorKind::SyntaxError,
-            _ => bail!("unsupported Error constructor kind {error_kind}"),
+        let error_class = match hir_compat::error_class(error_kind)? {
+            hir_compat::ErrorClass::Any => ErrorKind::Any,
+            hir_compat::ErrorClass::Type => ErrorKind::TypeError,
+            hir_compat::ErrorClass::Range => ErrorKind::RangeError,
+            hir_compat::ErrorClass::Reference => ErrorKind::ReferenceError,
+            hir_compat::ErrorClass::Syntax => ErrorKind::SyntaxError,
         };
         let message = self.string_operand(ctx, message)?;
         let options = self.expression(ctx, options)?;

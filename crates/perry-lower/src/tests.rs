@@ -24,6 +24,11 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
             (5, 13),
         ),
         (
+            "export function run(value) { return value; }",
+            "the value type cannot be inferred for the MIR backend",
+            (1, 21),
+        ),
+        (
             "export function run(x: number): string {\n  return x.toFixed(2);\n}",
             "method toFixed is not supported on number yet",
             (2, 10),

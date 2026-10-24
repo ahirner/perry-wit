@@ -47,7 +47,7 @@ The handbook's Authoring chapter covers commands, HTTP handlers and the project 
 ## Development
 
 Enter the pinned development shell with `direnv allow` or `nix develop`.
-It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT_PATH` to the WASI 0.3 packages, and shares helper builds through `PERRY_HELPER_TARGET_DIR`.
+It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT_PATH` to the WASI 0.3 packages, and shares helper builds through `PERRY_RUNTIME_TARGET_DIR`.
 
 ```sh
 cargo fmt --all -- --check

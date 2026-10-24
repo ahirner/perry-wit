@@ -1,0 +1,20 @@
+[package]
+workspace = ".."
+name = "perry-std"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Built-ins (strings, Uint8Array, JSON, random) linked into perry-wit components on demand"
+
+[dependencies]
+arrayvec = { version = "0.7", default-features = false }
+libm.workspace = true
+perry-rt-sys.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [
+  { name = "std", profile = "release" },
+]

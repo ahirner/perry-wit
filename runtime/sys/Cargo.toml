@@ -1,0 +1,15 @@
+[package]
+workspace = ".."
+name = "perry-rt-sys"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+perry-abi.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+perry-runtime.workspace = true
+
+[lints]
+workspace = true

@@ -6,7 +6,6 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-perry-mir.workspace = true
 
 [lints]
 workspace = true
