@@ -356,7 +356,7 @@ pub(crate) unsafe extern "C" fn json_cursor_finish(value: u32, failed: u32) {
     } else if failed != 0 {
         runtime::raise(
             runtime::TYPE_ERROR,
-            "JSON value does not match the declared schema",
+            perry_rt_sys::static_text!("JSON value does not match the declared schema"),
         );
     }
 }

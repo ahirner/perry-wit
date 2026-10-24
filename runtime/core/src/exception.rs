@@ -79,9 +79,9 @@ pub(crate) extern "C" fn perry_exception_catch(status: u32) -> *mut u8 {
         return pending;
     }
     let message = match status {
-        TYPE_ERROR => "Cannot read properties of undefined",
-        RANGE_ERROR => "Invalid array index",
-        _ => "",
+        TYPE_ERROR => perry_abi::static_text!("Cannot read properties of undefined"),
+        RANGE_ERROR => perry_abi::static_text!("Invalid array index"),
+        _ => perry_abi::static_text!(""),
     };
     let message = crate::string::from_static(message);
     perry_exception_new(status, TAG_STRING, message as usize as u64)
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 
     {
         exception.value as usize as *mut u8
     } else {
-        crate::string::from_static("")
+        crate::string::from_static(perry_abi::static_text!(""))
     }
 }
 

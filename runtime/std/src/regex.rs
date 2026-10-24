@@ -344,7 +344,7 @@ unsafe fn slice_string(string: *mut u8, len: usize, start: usize, end: usize) ->
     if start == 0 && end == len {
         string
     } else if start == end {
-        runtime::from_static("")
+        runtime::from_static(perry_rt_sys::static_text!(""))
     } else {
         unsafe { runtime::string_view(string, start as u32, end as u32) }
     }

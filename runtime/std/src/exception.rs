@@ -78,7 +78,10 @@ pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
     match parts(exception) {
         (THROWN_VALUE, TAG_NUMBER, bits) => f64::from_bits(bits),
         _ => {
-            raise(TYPE_ERROR, "Thrown value is not a number");
+            raise(
+                TYPE_ERROR,
+                perry_rt_sys::static_text!("Thrown value is not a number"),
+            );
             0.0
         }
     }
@@ -90,8 +93,11 @@ pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 
     match parts(exception) {
         (THROWN_VALUE, TAG_STRING, value) => value as usize as *mut u8,
         _ => {
-            raise(TYPE_ERROR, "Thrown value is not a string");
-            from_static("")
+            raise(
+                TYPE_ERROR,
+                perry_rt_sys::static_text!("Thrown value is not a string"),
+            );
+            from_static(perry_rt_sys::static_text!(""))
         }
     }
 }
@@ -101,12 +107,12 @@ pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 
 pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
     use perry_rt_sys::layout::exception::{ERROR, RANGE_ERROR, REFERENCE_ERROR, SYNTAX_ERROR};
     from_static(match parts(exception).0 {
-        TYPE_ERROR => "TypeError",
-        RANGE_ERROR => "RangeError",
-        ERROR => "Error",
-        REFERENCE_ERROR => "ReferenceError",
-        SYNTAX_ERROR => "SyntaxError",
-        _ => "",
+        TYPE_ERROR => perry_rt_sys::static_text!("TypeError"),
+        RANGE_ERROR => perry_rt_sys::static_text!("RangeError"),
+        ERROR => perry_rt_sys::static_text!("Error"),
+        REFERENCE_ERROR => perry_rt_sys::static_text!("ReferenceError"),
+        SYNTAX_ERROR => perry_rt_sys::static_text!("SyntaxError"),
+        _ => perry_rt_sys::static_text!(""),
     })
 }
 
@@ -117,7 +123,10 @@ pub(crate) extern "C" fn std_exception_to_bool(exception: *mut u8) -> u32 {
     match parts(exception) {
         (THROWN_VALUE, TAG_BOOLEAN, value) => u32::from(value != 0),
         _ => {
-            raise(TYPE_ERROR, "Thrown value is not a boolean");
+            raise(
+                TYPE_ERROR,
+                perry_rt_sys::static_text!("Thrown value is not a boolean"),
+            );
             0
         }
     }

@@ -176,9 +176,9 @@ mod tests {
                 perry_abort_watch(signal, 2001, pending);
                 roots::perry_gc_check();
                 region::perry_task_resume(caller);
-                let scope_error = crate::string::from_static(
-                    "AbortSignal cancellation is limited to the current export task",
-                );
+                let scope_error = crate::string::from_static(perry_abi::static_text!(
+                    "AbortSignal cancellation is limited to the current export task"
+                ));
                 perry_abort(signal, scope_error, scope_error);
                 assert_eq!(exception::perry_status(), exception::TYPE_ERROR);
                 assert_eq!(perry_abort_aborted(signal), 0);
@@ -196,7 +196,9 @@ mod tests {
                 let settled = roots::perry_gc_pin(promise);
                 region::perry_subtask_register(2001, promise, 17);
                 perry_abort_watch(signal, 2001, promise);
-                let message = crate::string::from_static("The operation was aborted");
+                let message = crate::string::from_static(perry_abi::static_text!(
+                    "The operation was aborted"
+                ));
                 perry_abort(signal, message, message);
                 perry_abort(signal, message, message);
                 assert_eq!(promise.cast::<u32>().read(), promise::REJECTED);

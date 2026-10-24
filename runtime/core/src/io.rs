@@ -167,7 +167,9 @@ impl Output {
                 self.spare_acks = ack;
                 let promise = core::mem::replace(&mut (*ack).promise, core::ptr::null_mut());
                 if self.state == State::Failed {
-                    let message = crate::string::from_static("Output stream is closed");
+                    let message = crate::string::from_static(perry_abi::static_text!(
+                        "Output stream is closed"
+                    ));
                     let exception = crate::exception::perry_exception_new(
                         crate::exception::ERROR,
                         TAG_STRING,

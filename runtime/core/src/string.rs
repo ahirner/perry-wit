@@ -77,11 +77,14 @@ pub(crate) unsafe fn bytes(string: *mut u8) -> &'static [u8] {
 }
 
 /// A string over static text.
-pub(crate) fn from_static(text: &'static str) -> *mut u8 {
+// Always inline: the text, length and count stay constants instead of an aggregate that
+// the Wasm ABI passes by reference from read-only data.
+#[inline(always)]
+pub(crate) fn from_static(text: crate::utf8::StaticText) -> *mut u8 {
     new(
-        text.len() as u32,
-        scalars_length(text.as_bytes()),
-        text.as_ptr() as *mut u8,
+        text.text.len() as u32,
+        text.scalars,
+        text.text.as_ptr() as *mut u8,
         ptr::null_mut(),
     )
 }

@@ -220,10 +220,10 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
                     length += 1;
                     member = word(node(member), 4);
                 }
-                slots[length] = from_static("tag") as u64;
+                slots[length] = from_static(perry_rt_sys::static_text!("tag")) as u64;
                 length += 1;
                 if payload {
-                    slots[length] = from_static("val") as u64;
+                    slots[length] = from_static(perry_rt_sys::static_text!("val")) as u64;
                     length += 1;
                 }
                 while member != 0 {

@@ -93,7 +93,7 @@ pub(crate) extern "C" fn std_json_replacer_begin(value: *mut u8, keys: *mut u8) 
             text: Buffer::new(),
             frame: core::ptr::null_mut(),
             keys: property_list(keys),
-            key: from_static(""),
+            key: from_static(perry_rt_sys::static_text!("")),
             value,
             depth: 0,
             omitted: false,
@@ -161,7 +161,10 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
                     }),
                     STRING => writer::quote(&mut state.text, string_bytes(value)),
                     BIGINT => {
-                        raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
+                        raise(
+                            TYPE_ERROR,
+                            perry_rt_sys::static_text!("Do not know how to serialize a BigInt"),
+                        );
                         return 0;
                     }
                     _ => {
@@ -169,13 +172,23 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
                         while !ancestor.is_null() {
                             let frame = &*ancestor;
                             if identity(frame.value) == identity(value) {
-                                raise(TYPE_ERROR, "Converting circular structure to JSON");
+                                raise(
+                                    TYPE_ERROR,
+                                    perry_rt_sys::static_text!(
+                                        "Converting circular structure to JSON"
+                                    ),
+                                );
                                 return 0;
                             }
                             ancestor = frame.parent;
                         }
                         if state.depth >= MAX_DEPTH {
-                            raise(TYPE_ERROR, "JSON nesting exceeds the supported depth");
+                            raise(
+                                TYPE_ERROR,
+                                perry_rt_sys::static_text!(
+                                    "JSON nesting exceeds the supported depth"
+                                ),
+                            );
                             return 0;
                         }
                         let length = view::array_length(value);

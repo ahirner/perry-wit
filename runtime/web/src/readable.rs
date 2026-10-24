@@ -227,7 +227,10 @@ fn new_reader(stream: *mut Readable) -> *mut Reader {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
     if readable(stream).locked != 0 {
-        perry_rt_sys::raise(TYPE_ERROR, "Invalid state: ReadableStream is locked");
+        perry_rt_sys::raise(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("Invalid state: ReadableStream is locked"),
+        );
         return core::ptr::null_mut();
     }
     new_reader(stream as *mut Readable) as *mut u8
@@ -242,7 +245,9 @@ pub(crate) extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Invalid state: ReadableStream is locked"),
+            from_static(perry_rt_sys::static_text!(
+                "Invalid state: ReadableStream is locked"
+            )),
         );
     } else {
         source.disturbed = 1;
@@ -338,7 +343,7 @@ fn at_end(r: &mut Reader) {
 /// A truncated body: the read (or drain) rejects as Node's `fetch` does.
 fn fail(r: &mut Reader) {
     if !r.reads.is_null() {
-        return byob::reject(r, "terminated");
+        return byob::reject(r, perry_rt_sys::static_text!("terminated"));
     }
     let promise = if r.drain.is_null() {
         core::mem::replace(&mut r.pending, core::ptr::null_mut())
@@ -346,7 +351,11 @@ fn fail(r: &mut Reader) {
         // SAFETY: drains live as long as their reader.
         unsafe { (*r.drain).promise }
     };
-    reject_with(promise, TYPE_ERROR, from_static("terminated"));
+    reject_with(
+        promise,
+        TYPE_ERROR,
+        from_static(perry_rt_sys::static_text!("terminated")),
+    );
 }
 
 /// Report whether a stream with a pending completion ended intact and settle any waiting final read.
@@ -373,7 +382,10 @@ fn pump(r: &mut Reader) {
             unsafe {
                 (*r.stream).completion = COMPLETION_FAILED;
             }
-            return byob::reject(r, "The closed stream cannot fill the requested minimum");
+            return byob::reject(
+                r,
+                perry_rt_sys::static_text!("The closed stream cannot fill the requested minimum"),
+            );
         }
         // SAFETY: readers retain their stream; helpers do not collect internally.
         let stream = unsafe { &mut *r.stream };
@@ -484,7 +496,9 @@ pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Invalid state: The reader is not attached to a stream"),
+            from_static(perry_rt_sys::static_text!(
+                "Invalid state: The reader is not attached to a stream"
+            )),
         );
         return promise;
     }
@@ -492,7 +506,9 @@ pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Concurrent reads of one reader are not supported"),
+            from_static(perry_rt_sys::static_text!(
+                "Concurrent reads of one reader are not supported"
+            )),
         );
         return promise;
     }
@@ -565,7 +581,9 @@ pub(crate) extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Invalid state: The reader is not attached to a stream"),
+            from_static(perry_rt_sys::static_text!(
+                "Invalid state: The reader is not attached to a stream"
+            )),
         );
         return promise;
     }
@@ -601,7 +619,10 @@ pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
     let copied = if r.copying != 0 { stop_copy(r) >> 4 } else { 0 };
     if !r.reads.is_null() {
         byob::requeue(r, copied);
-        byob::reject(r, "Invalid state: Releasing reader");
+        byob::reject(
+            r,
+            perry_rt_sys::static_text!("Invalid state: Releasing reader"),
+        );
     }
     // SAFETY: readers point at their stream.
     let stream = unsafe { &mut *r.stream };
@@ -613,7 +634,9 @@ pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Invalid state: Releasing reader"),
+            from_static(perry_rt_sys::static_text!(
+                "Invalid state: Releasing reader"
+            )),
         );
     }
     r.released = 1;
@@ -642,7 +665,9 @@ pub(crate) fn drain(stream: *mut Readable, form: Form, promise: *mut u8) {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Body is unusable: Body has already been read"),
+            from_static(perry_rt_sys::static_text!(
+                "Body is unusable: Body has already been read"
+            )),
         );
         return;
     }

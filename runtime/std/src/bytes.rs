@@ -34,7 +34,7 @@ fn attached(bytes: *mut u8) -> bool {
     if unsafe { (*bytes.cast::<Bytes>()).detached() } {
         raise(
             crate::runtime::TYPE_ERROR,
-            "Cannot use a detached ArrayBuffer",
+            perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
         );
         false
     } else {
@@ -96,7 +96,7 @@ pub(crate) unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u
         if (*buffer).detached {
             raise(
                 crate::runtime::TYPE_ERROR,
-                "Cannot use a detached ArrayBuffer",
+                perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
             );
             return core::ptr::null_mut();
         }
@@ -128,7 +128,10 @@ fn index(index: f64, len: usize) -> Option<usize> {
 pub(crate) extern "C" fn std_bytes_new(length: f64) -> *mut u8 {
     let length = integer(length);
     if !(0..=MAX as i64).contains(&length) {
-        raise(RANGE_ERROR, "Invalid typed array length");
+        raise(
+            RANGE_ERROR,
+            perry_rt_sys::static_text!("Invalid typed array length"),
+        );
         return zeroed(0);
     }
     zeroed(length as u32)
@@ -240,7 +243,10 @@ pub(crate) extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, of
     let target_len = unsafe { (*target.cast::<Bytes>()).len as usize };
     let source_len = unsafe { (*source.cast::<Bytes>()).len as usize };
     if offset < 0 || offset as u64 + source_len as u64 > target_len as u64 {
-        raise(RANGE_ERROR, "offset is out of bounds");
+        raise(
+            RANGE_ERROR,
+            perry_rt_sys::static_text!("offset is out of bounds"),
+        );
         return;
     }
     // SAFETY: validated attached ranges; raw pointers permit overlapping aliases.

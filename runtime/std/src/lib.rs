@@ -24,6 +24,9 @@ use perry_rt_sys as runtime;
 /// `toISOString` of an invalid date.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_raise_invalid_date() -> u32 {
-    runtime::raise(runtime::RANGE_ERROR, "Invalid time value");
+    runtime::raise(
+        runtime::RANGE_ERROR,
+        perry_rt_sys::static_text!("Invalid time value"),
+    );
     runtime::take_status()
 }

@@ -213,7 +213,7 @@ pub unsafe fn bytes(string: *mut u8) -> &'static [u8] {
 /// A string copying `bytes` (valid UTF-8) into the task region.
 pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     if bytes.is_empty() {
-        return from_static("");
+        return from_static(static_text!(""));
     }
     let data = alloc_uninit(bytes.len()).write_copy_of_slice(bytes);
     // SAFETY: copied UTF-8 in task storage; the string takes ownership of the allocation.
@@ -250,14 +250,24 @@ pub use byte_buffer::{
 };
 
 /// A string over static text.
-pub fn from_static(text: &'static str) -> *mut u8 {
-    // SAFETY: static UTF-8.
-    unsafe { adopt(text.as_ptr() as *mut u8, text.len() as u32) }
+// Always inline: the text, length and count stay constants instead of an aggregate that
+// the Wasm ABI passes by reference from read-only data.
+#[inline(always)]
+pub fn from_static(text: StaticText) -> *mut u8 {
+    // SAFETY: static UTF-8 with its scalar count.
+    unsafe {
+        adopt_counted(
+            text.text.as_ptr() as *mut u8,
+            text.text.len() as u32,
+            text.scalars,
+        )
+    }
 }
 
 /// Throw an `Error` of `kind` with `message`: the exception becomes pending, and compiled
 /// code finds its status with `perry_status`.
-pub fn raise(kind: u32, message: &'static str) {
+#[inline]
+pub fn raise(kind: u32, message: StaticText) {
     raise_string(kind, from_static(message));
 }
 
@@ -540,7 +550,7 @@ impl Buffer {
     /// `self` must contain `self.len` bytes of valid UTF-8.
     pub unsafe fn into_string(self) -> *mut u8 {
         if self.len == 0 {
-            return from_static("");
+            return from_static(static_text!(""));
         }
         unsafe { adopt(self.ptr, self.len as u32) }
     }

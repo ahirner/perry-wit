@@ -101,7 +101,10 @@ pub(crate) extern "C" fn web_url_new(input: *mut u8, base: *mut u8) -> *mut u8 {
         resolve(text(input), text(base))
     };
     let Some(href) = href else {
-        raise(TYPE_ERROR, "Invalid HTTP(S) URL");
+        raise(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("Invalid HTTP(S) URL"),
+        );
         return core::ptr::null_mut();
     };
     let object = perry_rt_sys::object!(Url; href);
@@ -167,7 +170,7 @@ pub(crate) extern "C" fn web_url_get(value: *mut u8, field: f64) -> *mut u8 {
             origin.extend_from_slice(host);
             return view(origin.as_slice());
         }
-        _ => return from_static(""),
+        _ => return from_static(perry_rt_sys::static_text!("")),
     })
 }
 

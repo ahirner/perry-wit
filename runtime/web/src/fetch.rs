@@ -236,7 +236,7 @@ fn sent(op: &mut Fetch) {
         r.write(Response {
             body: Body::streamed(op.exchange.body),
             status: f64::from(status),
-            status_text: from_static(""),
+            status_text: from_static(perry_rt_sys::static_text!("")),
             headers,
         });
         resolve(op.promise, r as usize as u64);

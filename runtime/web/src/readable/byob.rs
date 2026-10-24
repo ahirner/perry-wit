@@ -38,23 +38,32 @@ pub(super) extern "C" fn web_reader_read_byob(r: *mut u8, view: *mut u8, minimum
     // SAFETY: compiled calls carry a live byte view and a reader.
     let bytes = unsafe { &*view.cast::<perry_rt_sys::Bytes>() };
     if unsafe { bytes.detached() } || bytes.len == 0 {
-        return reject(TYPE_ERROR, "view must have non-zero byteLength");
+        return reject(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("view must have non-zero byteLength"),
+        );
     }
     if !(1.0..18446744073709551616.0).contains(&minimum) {
-        return reject(TYPE_ERROR, "options.min must be a positive integer");
+        return reject(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("options.min must be a positive integer"),
+        );
     }
     let minimum = minimum as u64;
     if minimum > u64::from(bytes.len) {
-        return reject(RANGE_ERROR, "options.min exceeds the view's length");
+        return reject(
+            RANGE_ERROR,
+            perry_rt_sys::static_text!("options.min exceeds the view's length"),
+        );
     }
     if r.released != 0 {
         return reject(
             TYPE_ERROR,
-            "Invalid state: The reader is not attached to a stream",
+            perry_rt_sys::static_text!("Invalid state: The reader is not attached to a stream"),
         );
     }
     if unsafe { (*r.stream).completion == COMPLETION_FAILED } {
-        return reject(TYPE_ERROR, "terminated");
+        return reject(TYPE_ERROR, perry_rt_sys::static_text!("terminated"));
     }
     let request = perry_rt_sys::object!(Read; promise, view, next);
     unsafe {
@@ -137,7 +146,7 @@ pub(super) fn cancel(r: &mut Reader) {
     }
 }
 
-pub(super) fn reject(r: &mut Reader, message: &'static str) {
+pub(super) fn reject(r: &mut Reader, message: perry_rt_sys::StaticText) {
     unsafe {
         while !r.reads.is_null() {
             let request = &mut *r.reads;

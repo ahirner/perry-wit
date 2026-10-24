@@ -603,11 +603,13 @@ pub(crate) fn link_helpers_with(
     }
     for ((prep, placement), folded) in prepared_libs.iter().zip(&lib_placements).zip(&folded) {
         let mut append = |offset: u32, contents: &[u8]| {
-            new_data.active(
-                0,
-                &ConstExpr::i32_const((placement.memory_base + offset) as i32),
-                contents.iter().copied(),
-            );
+            for (start, bytes) in nonzero_runs(contents) {
+                new_data.active(
+                    0,
+                    &ConstExpr::i32_const((placement.memory_base + offset + start as u32) as i32),
+                    bytes.iter().copied(),
+                );
+            }
         };
         if let Some(folded) = folded {
             for (offset, contents) in &folded.segments {
@@ -672,4 +674,33 @@ pub(crate) fn link_helpers_with(
         .validate_all(&result)
         .map_err(LinkError::Validation)?;
     Ok((result, current_helper_func_idx - helper_func_start_idx))
+}
+
+/// Zero runs longer than an active segment's header (flags, offset expression and length).
+const ZERO_RUN_SPLIT: usize = 8;
+
+/// Offsets and bytes of `contents` without its leading and trailing zeros, split at zero runs
+/// longer than [ZERO_RUN_SPLIT]. Library data lands in fresh linear memory, which is zeroed.
+fn nonzero_runs(contents: &[u8]) -> Vec<(usize, &[u8])> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    let mut end = 0;
+    for (index, &byte) in contents.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        match start {
+            Some(first) if index - end > ZERO_RUN_SPLIT => {
+                runs.push((first, &contents[first..end]));
+                start = Some(index);
+            }
+            Some(_) => {}
+            None => start = Some(index),
+        }
+        end = index + 1;
+    }
+    if let Some(first) = start {
+        runs.push((first, &contents[first..end]));
+    }
+    runs
 }

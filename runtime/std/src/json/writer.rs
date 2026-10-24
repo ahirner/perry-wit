@@ -179,8 +179,11 @@ pub(super) fn quote(text: &mut Buffer, bytes: &[u8]) {
 pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
     let w = writer(w);
     if w.failed {
-        raise(TYPE_ERROR, "Converting circular structure to JSON");
-        return from_static("");
+        raise(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("Converting circular structure to JSON"),
+        );
+        return from_static(perry_rt_sys::static_text!(""));
     }
     let text = core::mem::take(&mut w.text);
     let bytes = text.as_slice();
@@ -220,7 +223,10 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                         continue;
                     }
                     BIGINT => {
-                        raise(TYPE_ERROR, "Do not know how to serialize a BigInt");
+                        raise(
+                            TYPE_ERROR,
+                            perry_rt_sys::static_text!("Do not know how to serialize a BigInt"),
+                        );
                         return true;
                     }
                     EXCEPTION => text.extend_from_slice(b"{}"),

@@ -9,6 +9,7 @@ pub mod layout;
 pub mod number;
 pub mod utf8;
 pub mod whitespace;
+pub use utf8::StaticText;
 pub use utf8::scalars_length_wide as scalars_length;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -65,5 +66,6 @@ mod tests {
         }
         assert_eq!(scalars_length(b""), 0);
         assert_eq!(scalars_length_wide(b""), 0);
+        assert_eq!(crate::static_text!("é漢🙂\0").scalars, 4);
     }
 }

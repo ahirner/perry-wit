@@ -23,19 +23,10 @@ alloc_instead_of_core = "warn"
 [profile.release]
 opt-level = 2
 lto = "fat"
+codegen-units = 1
 panic = "abort"
 strip = true
 
 [profile.compact]
 inherits = "release"
-opt-level = "z"
-
-# Artifact crates previously overrode opt-level; their dependencies inherited size optimization.
-[profile.release.package."*"]
-opt-level = "z"
-
-[profile.release.package.perry-abi]
-opt-level = "z"
-
-[profile.release.package.perry-rt-sys]
 opt-level = "z"

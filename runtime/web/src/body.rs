@@ -84,7 +84,9 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
         reject_with(
             promise,
             TYPE_ERROR,
-            from_static("Body is unusable: Body has already been read"),
+            from_static(perry_rt_sys::static_text!(
+                "Body is unusable: Body has already been read"
+            )),
         );
         return None;
     }
@@ -201,7 +203,9 @@ pub(crate) unsafe extern "C" fn web_response_new(
     if !(200.0..=599.0).contains(&status) || status != (status as u32) as f64 {
         perry_rt_sys::raise(
             RANGE_ERROR,
-            "init[\"status\"] must be in the range of 200 to 599, inclusive.",
+            perry_rt_sys::static_text!(
+                "init[\"status\"] must be in the range of 200 to 599, inclusive."
+            ),
         );
         return core::ptr::null_mut();
     }
@@ -209,13 +213,13 @@ pub(crate) unsafe extern "C" fn web_response_new(
     let reason = unsafe { bytes(status_text) };
     // SAFETY: helper call on an input string.
     if unsafe { helper::fetch_status_text(reason.as_ptr(), reason.len() as u32) } == INVALID {
-        perry_rt_sys::raise(TYPE_ERROR, "Invalid statusText");
+        perry_rt_sys::raise(TYPE_ERROR, perry_rt_sys::static_text!("Invalid statusText"));
         return core::ptr::null_mut();
     }
     if !view.is_null() && matches!(status as u32, 204 | 205 | 304) {
         perry_rt_sys::raise(
             TYPE_ERROR,
-            "Response constructor: Invalid response status code",
+            perry_rt_sys::static_text!("Response constructor: Invalid response status code"),
         );
         return core::ptr::null_mut();
     }
@@ -275,7 +279,15 @@ fn request<'a>(r: *mut u8) -> &'a Request {
 }
 
 /// Normalized methods indexed by the tag returned by `perry-fetch`.
-const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "DELETE", "", "OPTIONS"];
+const METHODS: [perry_rt_sys::StaticText; 7] = [
+    perry_rt_sys::StaticText::new("GET"),
+    perry_rt_sys::StaticText::new("HEAD"),
+    perry_rt_sys::StaticText::new("POST"),
+    perry_rt_sys::StaticText::new("PUT"),
+    perry_rt_sys::StaticText::new("DELETE"),
+    perry_rt_sys::StaticText::new(""),
+    perry_rt_sys::StaticText::new("OPTIONS"),
+];
 
 /// Construct `new Request(url, { method, headers, body })`, where `text` marks a string body.
 ///
@@ -299,9 +311,9 @@ pub(crate) unsafe extern "C" fn web_request_new(
         };
     // SAFETY: the helper wrote six little-endian lengths, then the URL at 32.
     let normalized = unsafe { from_bytes(slice(output as u32 + 32, word(output, 20))) };
-    let method = match METHODS.get(tag as usize).copied().unwrap_or("") {
-        "" => method,
-        s => from_static(s),
+    let method = match METHODS.get(tag as usize) {
+        Some(name) if !name.text.is_empty() => from_static(*name),
+        _ => method,
     };
     let r = perry_rt_sys::object!(Request; body.data, body.stream, url, method, headers);
     // SAFETY: a fresh block.

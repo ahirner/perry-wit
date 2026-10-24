@@ -27,6 +27,8 @@ pub fn address(node: *mut u8) -> u32 {
 }
 
 /// A fresh zeroed node of `kind`.
+// Never inline: each inlined copy carries its own shape switch table in library data.
+#[inline(never)]
 pub fn new_node(kind: u32) -> *mut u8 {
     use self::kind::*;
     let shape: &'static [u32] = match kind {

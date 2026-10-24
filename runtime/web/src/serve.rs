@@ -49,10 +49,23 @@ mod http {
     }
 }
 
-const METHODS: [&str; 10] = [
-    "get", "head", "post", "put", "delete", "connect", "options", "trace", "patch", "other",
+const METHODS: [perry_rt_sys::StaticText; 10] = [
+    perry_rt_sys::StaticText::new("get"),
+    perry_rt_sys::StaticText::new("head"),
+    perry_rt_sys::StaticText::new("post"),
+    perry_rt_sys::StaticText::new("put"),
+    perry_rt_sys::StaticText::new("delete"),
+    perry_rt_sys::StaticText::new("connect"),
+    perry_rt_sys::StaticText::new("options"),
+    perry_rt_sys::StaticText::new("trace"),
+    perry_rt_sys::StaticText::new("patch"),
+    perry_rt_sys::StaticText::new("other"),
 ];
-const SCHEMES: [&str; 3] = ["http", "https", "other"];
+const SCHEMES: [perry_rt_sys::StaticText; 3] = [
+    perry_rt_sys::StaticText::new("http"),
+    perry_rt_sys::StaticText::new("https"),
+    perry_rt_sys::StaticText::new("other"),
+];
 
 /// One exchange: the request's parts and the waitables the task still owns (0 when none).
 struct Serve {
@@ -211,7 +224,7 @@ pub(crate) extern "C" fn web_serve_has_scheme(s: *mut u8) -> u32 {
 pub(crate) extern "C" fn web_serve_scheme(s: *mut u8) -> *mut u8 {
     let scheme = serve(s).scheme;
     if scheme.is_null() {
-        from_static("")
+        from_static(perry_rt_sys::static_text!(""))
     } else {
         scheme
     }
@@ -299,7 +312,10 @@ pub(crate) unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body:
     // SAFETY: guaranteed by the caller; the bytes live in the task region until written.
     let body = unsafe { view_bytes(body) };
     if !(100.0..=999.0).contains(&status) || status != f64::from(status as u32) {
-        perry_rt_sys::raise(RANGE_ERROR, "Invalid status code");
+        perry_rt_sys::raise(
+            RANGE_ERROR,
+            perry_rt_sys::static_text!("Invalid status code"),
+        );
         return 0.0;
     }
     // SAFETY: canonical calls on handles this exchange owns.
@@ -324,7 +340,10 @@ pub(crate) unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body:
         s.fields = 0;
         let (response, transmit) = (ends[0], ends[1]);
         if http::set_status(response, status as u32) != 0 {
-            perry_rt_sys::raise(RANGE_ERROR, "Invalid status code");
+            perry_rt_sys::raise(
+                RANGE_ERROR,
+                perry_rt_sys::static_text!("Invalid status code"),
+            );
         }
         s.exchange.write(
             (contents >> 32) as u32,

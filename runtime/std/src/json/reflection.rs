@@ -153,7 +153,7 @@ pub(crate) extern "C" fn std_json_exception_is(value: *mut u8, expected: u32) ->
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_display(value: *mut u8) -> *mut u8 {
     if value.is_null() {
-        return from_static("undefined");
+        return from_static(perry_rt_sys::static_text!("undefined"));
     }
     if let Some(number) = json_number(value) {
         let (tag, bits) = number.into_numeric();
@@ -161,11 +161,15 @@ pub(crate) extern "C" fn std_json_display(value: *mut u8) -> *mut u8 {
     }
     unsafe {
         match word(value, 0) {
-            NULL => from_static("null"),
-            BOOLEAN => from_static(if word(value, 8) == 0 { "false" } else { "true" }),
+            NULL => from_static(perry_rt_sys::static_text!("null")),
+            BOOLEAN => from_static(if word(value, 8) == 0 {
+                perry_rt_sys::static_text!("false")
+            } else {
+                perry_rt_sys::static_text!("true")
+            }),
             STRING => std_json_to_string(value),
             BIGINT => crate::integers::std_bigint_to_string(node(word(value, 8)).cast()),
-            _ => from_static("[object Object]"),
+            _ => from_static(perry_rt_sys::static_text!("[object Object]")),
         }
     }
 }

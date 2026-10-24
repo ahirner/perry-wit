@@ -84,7 +84,7 @@ Readable stream readers decouple public read promises from native transfer compl
 
 Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. The compiler build script embeds the resulting artifacts and the pinned WASI WIT packages, so compiling TypeScript requires no Rust or LLVM toolchain. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
 
-Runtime release builds use optimization level 2, fat LTO and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
+Runtime release builds optimize each artifact as one unit: optimization level 2, fat LTO, one codegen unit and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
 
 During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals and element tables, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
 

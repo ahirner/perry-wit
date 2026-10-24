@@ -101,9 +101,9 @@ pub(crate) unsafe fn validate_request_init(
         return Err(join_bytes(&[b"'", name, b"' is not a valid HTTP method."]));
     }
     if has_body && matches!(tag, 0 | 1) {
-        return Err(from_static(
-            "Request with GET/HEAD method cannot have body.",
-        ));
+        return Err(from_static(perry_rt_sys::static_text!(
+            "Request with GET/HEAD method cannot have body."
+        )));
     }
     if text != 0 {
         headers::set_default(h, b"content-type", b"text/plain;charset=UTF-8");

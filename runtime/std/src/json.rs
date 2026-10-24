@@ -96,7 +96,10 @@ fn string_bytes(node: *mut u8) -> &'static [u8] {
 /// Reading a property of `undefined` or `null` throws, as in ECMAScript.
 fn checked(value: *mut u8) -> bool {
     if value.is_null() || unsafe { word(value, 0) } == NULL {
-        raise(TYPE_ERROR, "Cannot read properties of undefined or null");
+        raise(
+            TYPE_ERROR,
+            perry_rt_sys::static_text!("Cannot read properties of undefined or null"),
+        );
         return false;
     }
     true
@@ -296,7 +299,7 @@ pub(crate) extern "C" fn std_json_length(value: *mut u8) -> u64 {
     }
 }
 
-fn expected(value: *mut u8, kind: u32, what: &'static str) -> bool {
+fn expected(value: *mut u8, kind: u32, what: perry_rt_sys::StaticText) -> bool {
     if value.is_null() || unsafe { word(value, 0) } != kind {
         raise(TYPE_ERROR, what);
         return false;
@@ -320,7 +323,10 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
         NULL => 0.0,
         BOOLEAN => f64::from(unsafe { word(value, 8) }),
         _ => {
-            raise(TYPE_ERROR, "JSON value is not a number");
+            raise(
+                TYPE_ERROR,
+                perry_rt_sys::static_text!("JSON value is not a number"),
+            );
             0.0
         }
     }
@@ -335,7 +341,10 @@ pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
     if let Some(number) = json_number(value) {
         return number.as_f64();
     }
-    raise(TYPE_ERROR, "JSON value is not a number");
+    raise(
+        TYPE_ERROR,
+        perry_rt_sys::static_text!("JSON value is not a number"),
+    );
     0.0
 }
 
@@ -348,7 +357,10 @@ pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(TYPE_ERROR, "JSON value does not match the declared schema");
+    raise(
+        TYPE_ERROR,
+        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
+    );
     0
 }
 
@@ -361,15 +373,22 @@ pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(TYPE_ERROR, "JSON value does not match the declared schema");
+    raise(
+        TYPE_ERROR,
+        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
+    );
     0
 }
 
 /// A JSON string used as `string`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_to_string(value: *mut u8) -> *mut u8 {
-    if !expected(value, STRING, "JSON value is not a string") {
-        return from_static("");
+    if !expected(
+        value,
+        STRING,
+        perry_rt_sys::static_text!("JSON value is not a string"),
+    ) {
+        return from_static(perry_rt_sys::static_text!(""));
     }
     let bytes = string_bytes(value);
     // SAFETY: the parser validated the UTF-8; the bytes live in the task region.
@@ -379,7 +398,11 @@ pub(crate) extern "C" fn std_json_to_string(value: *mut u8) -> *mut u8 {
 /// A JSON boolean used as `boolean`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_to_bool(value: *mut u8) -> u32 {
-    if !expected(value, BOOLEAN, "JSON value is not a boolean") {
+    if !expected(
+        value,
+        BOOLEAN,
+        perry_rt_sys::static_text!("JSON value is not a boolean"),
+    ) {
         return 0;
     }
     unsafe { word(value, 8) }
@@ -415,14 +438,14 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
     if value.is_null() {
-        return from_static("undefined");
+        return from_static(perry_rt_sys::static_text!("undefined"));
     }
     from_static(match unsafe { word(value, 0) } {
-        BOOLEAN => "boolean",
-        NUMBER | INT64 | UINT64 => "number",
-        STRING => "string",
-        BIGINT => "bigint",
-        _ => "object",
+        BOOLEAN => perry_rt_sys::static_text!("boolean"),
+        NUMBER | INT64 | UINT64 => perry_rt_sys::static_text!("number"),
+        STRING => perry_rt_sys::static_text!("string"),
+        BIGINT => perry_rt_sys::static_text!("bigint"),
+        _ => perry_rt_sys::static_text!("object"),
     })
 }
 
@@ -710,13 +733,21 @@ pub(crate) extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 
 /// Check the container before a closed schema reads its declared fields.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_require_object(value: *mut u8) {
-    expected(value, OBJECT, "JSON value is not an object");
+    expected(
+        value,
+        OBJECT,
+        perry_rt_sys::static_text!("JSON value is not an object"),
+    );
 }
 
 /// Start linear traversal of a checked JSON array.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_first(value: *mut u8) -> *mut u8 {
-    if !expected(value, ARRAY, "JSON value is not an array") {
+    if !expected(
+        value,
+        ARRAY,
+        perry_rt_sys::static_text!("JSON value is not an array"),
+    ) {
         return core::ptr::null_mut();
     }
     node(unsafe { word(value, 16) })
