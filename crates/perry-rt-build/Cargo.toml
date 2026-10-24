@@ -1,5 +1,4 @@
 [package]
-workspace = ".."
 name = "perry-rt-build"
 version = "0.1.0"
 edition = "2024"
@@ -8,9 +7,9 @@ description = "Build and validate perry-wit runtime artifacts"
 
 [dependencies]
 perry-abi.workspace = true
-serde_json = "1.0"
-wat = "~1.261.0"
-wasmparser = "0.261"
+serde_json.workspace = true
+wat.workspace = true
+wasmparser.workspace = true
 
 [lints]
 workspace = true

@@ -293,8 +293,6 @@ async function inventory(repository, api) {
 
   const lower = join(repository, 'crates/perry-lower/src');
   const registry = (await readFile(join(repository, 'crates/perry-frontend/src/methods/registry.rs'), 'utf8')).split('\n');
-  const implementations = await readFile(join(lower, 'methods.rs'), 'utf8');
-  const rejected = new Set([...implementations.matchAll(/^\s*([A-Z]\w*)\([^;\n]*\)\s*=>\s*code\s*\{\s*bail!\(/gm)].map(match => match[1]));
   const methods = new Map();
   let receivers = [];
   for (const line of registry) {
@@ -308,8 +306,8 @@ async function inventory(repository, api) {
       continue;
     }
     const entry = line.match(/^\s*([A-Z][A-Za-z]+?)\s+("[^"]+"(?:\s*\|\s*"[^"]+")*)\s+/);
-    // An entry whose body only reports an error documents a rejection, not support.
-    if (!entry || rejected.has(entry[1])) continue;
+    // An entry whose lowering recipe rejects the call documents a rejection, not support.
+    if (!entry || /=>\s*reject\(/.test(line)) continue;
     if (receivers.length === 0) throw new Error(`No method registry receiver for ${entry[1]}`);
     const names = [...entry[2].matchAll(/"([^"]+)"/g)].map(match => match[1]).filter(name => !name.startsWith('$$'));
     for (const receiver of receivers) methods.set(receiver, new Set([...(methods.get(receiver) ?? []), ...names]));

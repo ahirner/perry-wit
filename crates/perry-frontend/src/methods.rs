@@ -266,7 +266,7 @@ macro_rules! argument_values {
 macro_rules! registry {
     ($( $family:pat, $class:literal {
             $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident
-                [$($argument:ident $(:$mode:ident)?),*], $requirement:literal;
+                [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
             )*
         } )*
     ) => {
@@ -345,16 +345,14 @@ macro_rules! registry {
                         $(.chain(argument_values!($argument $(:$mode)?)))*.nth(index),)*)*
                 }
             }
-
-
         }
     };
     (@property Method) => { false };
     (@property Property) => { true };
-
 }
 
-include!("methods/registry.rs");
+mod registry;
+crate::method_catalog!(registry);
 impl<'s> Call<'s> {
     pub fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
         match expr {

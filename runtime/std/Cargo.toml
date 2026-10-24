@@ -7,7 +7,7 @@ publish = false
 description = "Built-ins (strings, Uint8Array, JSON, random) linked into perry-wit components on demand"
 
 [dependencies]
-arrayvec = { version = "0.7", default-features = false }
+arrayvec.workspace = true
 libm.workspace = true
 perry-rt-sys.workspace = true
 

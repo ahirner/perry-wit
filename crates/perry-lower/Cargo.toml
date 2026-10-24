@@ -3,7 +3,7 @@ name = "perry-lower"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Perry HIR to perry-mir builder (TODOs.md P2.2)"
+description = "Elaborates the frontend program into eager perry-mir"
 
 [dependencies]
 perry-mir.workspace = true

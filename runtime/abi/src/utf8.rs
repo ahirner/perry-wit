@@ -1,6 +1,7 @@
 //! Byte scans shared by the instance runtime and standard libraries.
 
 /// Compact scalar counter for minimal runtime components.
+#[inline]
 pub fn scalars_length(bytes: &[u8]) -> u32 {
     bytes
         .iter()

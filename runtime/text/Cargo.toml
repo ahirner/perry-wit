@@ -6,7 +6,7 @@ edition = "2024"
 
 [dependencies]
 perry-rt-sys.workspace = true
-icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_properties.workspace = true
 
 [lints]
 workspace = true

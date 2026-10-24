@@ -7,7 +7,6 @@ edition = "2024"
 [dependencies]
 perry-rt-sys.workspace = true
 datealgo = { version = "0.2.2", default-features = false }
-ixdtf = { version = "0.6.7", default-features = false }
 
 [lints]
 workspace = true

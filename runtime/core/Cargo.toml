@@ -4,7 +4,7 @@ name = "perry-runtime"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Runtime linked into perry-wit components built by the MIR backend (TODOs.md P5)"
+description = "Runtime linked into perry-wit components"
 
 [features]
 collectible = ["talc/counters"]

@@ -5,11 +5,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_properties.workspace = true
 perry-rt-sys.workspace = true
 
 [build-dependencies]
-icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_normalizer.workspace = true
 
 [lints]
 workspace = true

@@ -1,8 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["build", "abi", "sys", "core", "std", "web", "fs", "text", "normalization", "fetch", "number", "decimal", "json", "time"]
+members = ["abi", "sys", "core", "std", "web", "fs", "text", "normalization", "fetch", "number", "decimal", "json", "time"]
 
 [workspace.dependencies]
+arrayvec = { version = "0.7", default-features = false }
+# The build-time normalizer and the runtime properties must share one ICU4X data version.
+icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 libm = "0.2"
 perry-abi = { path = "abi" }
 perry-rt-sys = { path = "sys" }

@@ -48,16 +48,14 @@ The handbook's Authoring chapter covers commands, HTTP handlers and the project 
 
 Enter the pinned development shell with `direnv allow` or `nix develop`.
 It provides Rust, Node.js, TypeScript, Wasmtime and `wasm-tools`, sets `WASI_WIT_PATH` to the WASI 0.3 packages, and shares runtime builds through `PERRY_RUNTIME_TARGET_DIR`.
-Fetch the runtime workspace dependencies before the first compiler build; embedded runtime builds run offline.
 
 ```sh
-cargo fetch --manifest-path runtime/Cargo.toml --locked
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fetch --manifest-path runtime/Cargo.toml --locked   # once: runtime builds run offline
 cargo test --workspace
-cargo run -p perry-conformance -- check
-nix flake check
+nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, site, SDK sync, template and example runs
 ```
+
+CI additionally runs the runtime tests, Clippy for both workspaces, the fuel benchmark and the conformance check.
 
 ### Flake outputs
 

@@ -13,7 +13,7 @@ http.workspace = true
 http-body-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2 = "0.10"
+sha2.workspace = true
 proptest = "1.12"
 proptest-state-machine = "0.9"
 tempfile.workspace = true

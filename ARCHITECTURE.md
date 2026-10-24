@@ -4,11 +4,11 @@ Perry-WIT compiles static TypeScript into WASI 0.3 components through Perry HIR 
 
 ## Pipeline
 
-The resolved WIT world feeds four compiler stages:
+The resolved WIT world feeds five compiler stages:
 
 ```text
-                  ┌──────────────────────────────────────┬── resolved WIT world ──┬────────────┐
-                  ▼                                      ▼                        ▼            ▼
+                  ┌───────────┬─── resolved WIT world ───┬────────────────────────┬────────────┐
+                  ▼           ▼                          ▼                        ▼            ▼
 TypeScript ──► Source ──► Frontend ──► Elaborate ──► Contract ──► Optimize ──► Codegen ──► Component ──► .wasm
                   1           2            3             4            5           6            7
 ```
@@ -16,7 +16,7 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
 | 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
+| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, types WIT imports under their SDK declaration names, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
 | 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
@@ -46,6 +46,7 @@ The compiler workspace separates these responsibilities:
 | `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
 | `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
 | `pliron-control`, `pliron-wasm` | Provide control-flow and Wasm dialect infrastructure. |
+| `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
 | `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
 
 The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
@@ -87,7 +88,7 @@ Runtime release builds use optimization level 2, fat LTO and aborting panics. Th
 
 During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals and element tables, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
 
-Run compiler tests with `cargo test --workspace --locked`. Run runtime host tests separately with `cargo test --manifest-path runtime/Cargo.toml --workspace --locked`, then exercise the collector with `cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked`. The compiler integration suite tests the embedded modules through the linker and Wasmtime.
+Runtime crates run their unit tests on the host in their own workspace. The compiler integration suite tests the embedded modules through the linker and Wasmtime.
 
 ## References
 
