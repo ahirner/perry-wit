@@ -35,6 +35,8 @@ struct Inference<'a> {
     decls: &'a shapes::Declarations<'a>,
     metadata: &'a hir_compat::Metadata<'a>,
     generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
+    open_arrays: HashSet<LocalId>,
+    local_spans: &'a HashMap<LocalId, perry_hir::ir::LocalSourceSpan>,
 }
 
 impl Inference<'_> {
@@ -67,6 +69,8 @@ impl Inference<'_> {
             metadata: self.metadata,
             generic_functions: self.generic_functions,
             instantiated_returns: HashMap::new(),
+            open_arrays: &self.open_arrays,
+            local_spans: self.local_spans,
         }
     }
 }
@@ -181,10 +185,9 @@ fn infer_body_return(
             }
         }
     }
-    if returned
-        .iter()
-        .any(|ty| matches!(ty, HirType::Any | HirType::Unknown))
-    {
+    if returned.iter().any(|ty| {
+        ty.any(&mut |node| matches!(node, HirType::Any | HirType::Unknown | HirType::TypeVar(_)))
+    }) {
         return false;
     }
     if crate::completion::returns_optional(body) {
@@ -225,7 +228,8 @@ pub(crate) fn unresolved_types(
     hir: &mut HirModule,
     metadata: &hir_compat::Metadata<'_>,
     foreign: &HashMap<String, crate::hir::Foreign>,
-) {
+) -> Result<()> {
+    let open_arrays = arrays::open_bindings(hir);
     let inferred = &metadata.inferred_bindings;
     let locations = &metadata.locations;
     let decls = shapes::Declarations::new(
@@ -280,6 +284,8 @@ pub(crate) fn unresolved_types(
         decls: &decls,
         metadata,
         generic_functions: None,
+        open_arrays,
+        local_spans: &hir.local_source_spans,
     };
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
@@ -358,23 +364,14 @@ pub(crate) fn unresolved_types(
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let env = inference.function(&module_env, &hir.classes, &mut locals);
-        walk::resolve_locals(&mut hir.init, env);
+        walk::resolve_locals(&mut hir.init, env, false)?;
     }
     module_env = perry_hir::HirTypeEnv::from_module(hir);
-    let max_iters = hir.functions.len() + hir.classes.len();
+    let max_iters = hir.functions.len() + hir.classes.len() + inference.open_arrays.len();
     for _ in 0..=max_iters {
-        let mut changed = false;
-        while arrays::resolve(
-            &mut hir.init,
-            &mut hir.functions,
-            &mut hir.classes,
-            &hir.globals,
-            &mut module_env,
-            &inference,
-        ) {
-            changed = true;
-            module_env = perry_hir::HirTypeEnv::from_module(hir);
-        }
+        let env = inference.function(&module_env, &hir.classes, &mut locals);
+        let mut changed = walk::resolve_locals(&mut hir.init, env, false)?;
+        module_env = perry_hir::HirTypeEnv::from_module(hir);
         for function in &mut hir.functions {
             if locations.has_explicit_return(&function.name) {
                 continue;
@@ -440,7 +437,7 @@ pub(crate) fn unresolved_types(
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
     let env = inference.function(&module_env, &hir.classes, &mut locals);
-    walk::resolve_locals(&mut hir.init, env);
+    walk::resolve_locals(&mut hir.init, env, true)?;
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
         let env = inference.function_with_params(
@@ -449,7 +446,7 @@ pub(crate) fn unresolved_types(
             &mut locals,
             &function.params,
         );
-        walk::resolve_locals(&mut function.body, env);
+        walk::resolve_locals(&mut function.body, env, true)?;
     }
     for class_idx in 0..hir.classes.len() {
         module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
@@ -468,7 +465,7 @@ pub(crate) fn unresolved_types(
                     &mut locals,
                     &method.params,
                 );
-                walk::resolve_locals(&mut body, env);
+                walk::resolve_locals(&mut body, env, true)?;
             }
             if let Some(method) =
                 shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx)
@@ -478,4 +475,5 @@ pub(crate) fn unresolved_types(
         }
     }
     module_env.set_current_class(None);
+    Ok(())
 }

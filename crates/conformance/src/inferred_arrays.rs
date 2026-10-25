@@ -6,8 +6,6 @@ use crate::{
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const REQUIRES_ELEMENT_TYPE: &str = "an empty array literal needs a declared element type";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Element {
     Number,
@@ -243,7 +241,7 @@ impl ArrayCase {
                 .into_iter()
                 .map(|form| self.emit(form, Some(conflict)))
                 .collect(),
-            diagnostic: REQUIRES_ELEMENT_TYPE.into(),
+            diagnostic: "Unsupported".into(),
         }
     }
 }
@@ -305,64 +303,81 @@ pub(crate) fn contract() -> Contract {
     ];
     for (partition, source) in [
         (
-            "mixed-index-writes",
-            "const a:any[]=[];for(let i=0;i<4;i++)a.push(i);a[0]={value:7};a[1]='payload';",
-        ),
-        ("string-key-write", "const a:any[]=[];a.push(1);a['k']=2;"),
-        (
-            "conflicting-alias",
-            "const a:any[]=[];const alias=a;a.push(1);alias.push('bad');",
+            "number-string-alias-branch",
+            "function make(flag:boolean){const a:any[]=[];const alias=a;if(flag)a.push(1);else alias.push('text');return a;}console.log(JSON.stringify(make(false)),JSON.stringify(make(true)));",
         ),
         (
-            "conflicting-branch",
-            "const a:any[]=[];if(Date.now()>0)a.push(1);else a.push('bad');",
-        ),
-        (
-            "conflicting-conditional-field",
-            "const a:any[]=[];a.push({value:Date.now()>0?1:'bad'});",
-        ),
-        (
-            "conflicting-nested-array",
-            "const a:any[]=[];a.push({values:[1,'bad']});",
-        ),
-        (
-            "conflicting-function-write",
-            "const a:any[]=[];a.push(1);function mutate():void{a.push('bad');}mutate();",
-        ),
-        (
-            "unknown-call",
-            "function mutate(a:number[]):void{a.push(2);}const a:any[]=[];a.push(1);mutate(a);",
-        ),
-        (
-            "closure-capture",
-            "const a:any[]=[];a.push(1);const mutate=()=>{a.push('bad');};mutate();",
+            "typed-mutating-call",
+            "function mutate(a:number[]):void{a.push(2);}const a:any[]=[];a.push(1);mutate(a);console.log(JSON.stringify(a));",
         ),
         (
             "reassigned-alias",
-            "const a:any[]=[];let alias=a;a.push(1);alias=[2];alias.push(3);",
-        ),
-        (
-            "stored-alias",
-            "const a:any[]=[];a.push(1);const holder={items:a};holder.items.push('bad');",
-        ),
-        (
-            "mutable-element-alias",
-            "const a:any[]=[];a.push({tags:['ok']});a[0].tags.push(1);",
+            "const a:any[]=[];let alias=a;a.push(1);alias=[2];alias.push(3);console.log(JSON.stringify(a),JSON.stringify(alias));",
         ),
         (
             "returned-alias",
             "function make():number[]{const a:any[]=[];a.push(1);return a;}console.log(make().length);",
         ),
         (
+            "nested-tuple",
+            "const a:any[]=[];a.push({values:[1,'text']});console.log(JSON.stringify(a));",
+        ),
+    ] {
+        witnesses.push(Witness {
+            partition,
+            case: Case::Command {
+                source: source.into(),
+                exit: ExitStatus::Success,
+            },
+        });
+    }
+    for (partition, source, diagnostic) in [
+        (
+            "mixed-index-writes",
+            "const a:any[]=[];for(let i=0;i<4;i++)a.push(i);a[0]={value:7};a[1]='payload';",
+            "Unsupported",
+        ),
+        (
+            "string-key-write",
+            "const a:any[]=[];a.push(1);a['k']=2;",
+            "Unsupported",
+        ),
+        (
+            "conflicting-conditional-field",
+            "const a:any[]=[];a.push({value:Date.now()>0?1:'bad'});",
+            "Unsupported",
+        ),
+        (
+            "conflicting-function-write",
+            "const a:any[]=[];a.push(1);function mutate():void{a.push('bad');}mutate();",
+            "Unsupported",
+        ),
+        (
+            "closure-capture",
+            "const a:any[]=[];a.push(1);const mutate=()=>{a.push('bad');};mutate();",
+            "Unsupported",
+        ),
+        (
+            "stored-alias",
+            "const a:any[]=[];a.push(1);const holder={items:a};holder.items.push('bad');",
+            "Unsupported",
+        ),
+        (
+            "mutable-element-alias",
+            "const a:any[]=[];a.push({tags:['ok']});a[0].tags.push(1);",
+            "Unsupported",
+        ),
+        (
             "no-writes",
             "const a:any[]=[];console.log(JSON.stringify(a));",
+            "could not be inferred",
         ),
     ] {
         witnesses.push(Witness {
             partition,
             case: Case::Reject {
                 source: source.into(),
-                diagnostic: REQUIRES_ELEMENT_TYPE.into(),
+                diagnostic: diagnostic.into(),
                 form_sources: vec![],
             },
         });

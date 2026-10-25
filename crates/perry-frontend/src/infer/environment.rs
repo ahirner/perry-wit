@@ -9,6 +9,8 @@ pub(super) struct FunctionEnv<'a> {
     pub(super) classes: &'a [perry_hir::ir::Class],
     pub(super) locals: &'a mut HashMap<LocalId, HirType>,
     pub(super) metadata: &'a hir_compat::Metadata<'a>,
+    pub(super) open_arrays: &'a HashSet<LocalId>,
+    pub(super) local_spans: &'a HashMap<LocalId, perry_hir::ir::LocalSourceSpan>,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;

@@ -53,3 +53,53 @@ class Counter {
   }
 }
 console.log(new Counter().count());
+
+function pushedRecords(n: number) {
+  const records: any[] = [];
+  const alias = records;
+  const chain = alias;
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) chain.push({ x: i, label: "a" });
+    else alias.push({ label: "b", x: i });
+  }
+  if (n > 0) records[0].x = 42;
+  return chain;
+}
+for (const n of [0, 3]) console.log("inferred-alias", JSON.stringify(pushedRecords(n)));
+
+function pushedNumbers(flag: boolean): string {
+  const first = [];
+  first.push(1);
+  const second: Array<any> = [];
+  let alias = first;
+  const retained = alias;
+  alias = second;
+  const selected = flag ? first : second;
+  selected.push(2, 3);
+  alias.push(...[4, 5]);
+  return retained.join(",") + "/" + second.join(",");
+}
+console.log("inferred-reassignment", pushedNumbers(false), pushedNumbers(true));
+
+function pushedVariants(flag: boolean): string {
+  const values: any[] = [];
+  if (flag) values.push({ tag: "number", val: 7 });
+  else values.push({ tag: "text", val: "seven" });
+  const value = values[0];
+  return value.tag === "number" ? String(value.val + 1) : value.val.toUpperCase();
+}
+console.log("inferred-variants", pushedVariants(true), pushedVariants(false));
+
+function pushedOptional(flag: boolean): string {
+  const values: any[] = [];
+  if (flag) values.push(7);
+  else values.push(undefined);
+  return values[0] === undefined ? "missing" : String(values[0]);
+}
+function pushedScalarUnion(flag: boolean): string {
+  const values: any[] = [];
+  values.push(flag ? 7 : "seven");
+  const value = values[0];
+  return typeof value + ":" + String(value);
+}
+console.log("inferred-unions", pushedOptional(true), pushedOptional(false), pushedScalarUnion(true), pushedScalarUnion(false));

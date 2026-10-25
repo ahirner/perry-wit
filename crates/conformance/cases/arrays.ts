@@ -39,7 +39,7 @@ console.log("optional", optional.includes(NaN), optional.includes(undefined), op
 console.log("mixed", mixed.includes(NaN), mixed.indexOf(NaN));
 
 // `push` evaluates every argument and spread before the receiver grows.
-const pushed: number[] = [];
+const pushed = [];
 console.log("push-args", pushed.push(1, pushed.length), pushed[1], pushed.push());
 const holder: { items: string[] } = { items: [] };
 try {

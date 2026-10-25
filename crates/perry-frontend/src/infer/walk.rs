@@ -65,12 +65,12 @@ pub(super) fn visit_body<V: Visitor>(
     visit: &mut V,
 ) -> Result<(), V::Error> {
     for statement in statements {
-        visit.statement(statement)?;
+        visit_stmt(statement, visit)?;
     }
     Ok(())
 }
 
-pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Result<(), V::Error> {
+fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Result<(), V::Error> {
     match statement {
         Stmt::Let { id, ty, init, .. } => {
             visit.node(Node::Binding(id, ty))?;
@@ -151,10 +151,6 @@ pub(super) trait Visitor: Sized {
 
     fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error>;
 
-    fn statement(&mut self, statement: &mut Stmt) -> Result<(), Self::Error> {
-        visit_stmt(statement, self)
-    }
-
     fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
         visit_expr(expr, self)
     }
@@ -200,14 +196,68 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
     let Ok(()) = visit_body(statements, &mut Locals(visit));
 }
 
-pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
+pub(super) fn statements<'s>(body: &'s [Stmt], visit: &mut impl FnMut(&'s Stmt)) {
+    for statement in body {
+        visit(statement);
+        match statement {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                statements(then_branch, visit);
+                if let Some(body) = else_branch {
+                    statements(body, visit);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => statements(body, visit),
+            Stmt::For { init, body, .. } => {
+                if let Some(init) = init {
+                    statements(std::slice::from_ref(init), visit);
+                }
+                statements(body, visit);
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                statements(body, visit);
+                if let Some(catch) = catch {
+                    statements(&catch.body, visit);
+                }
+                if let Some(body) = finally {
+                    statements(body, visit);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    statements(&case.body, visit);
+                }
+            }
+            Stmt::Labeled { body, .. } => statements(std::slice::from_ref(body), visit),
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn resolve_locals(
+    statements: &mut [Stmt],
+    mut env: FunctionEnv<'_>,
+    complete: bool,
+) -> Result<bool> {
+    let arrays = arrays::infer(statements, &mut env, complete)?;
     let mut bindings = HashMap::new();
-    scan(statements, &mut env, None, Some(&mut bindings));
+    scan_statements(statements, &mut env, None, Some(&mut bindings));
+    bindings.extend(arrays);
+    let mut changed = false;
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
+            changed |= *ty != inferred;
             *ty = inferred;
         }
     });
+    Ok(changed)
 }
 
 fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {
@@ -279,6 +329,17 @@ fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {
 pub(super) fn scan(
     statements: &[Stmt],
     env: &mut FunctionEnv<'_>,
+    returned: Option<&mut Vec<HirType>>,
+    bindings: Option<&mut HashMap<LocalId, HirType>>,
+) {
+    // Builder constraints are checked after helper return inference has converged.
+    let _ = arrays::infer(statements, env, false);
+    scan_statements(statements, env, returned, bindings);
+}
+
+pub(super) fn scan_statements(
+    statements: &[Stmt],
+    env: &mut FunctionEnv<'_>,
     mut returned: Option<&mut Vec<HirType>>,
     mut bindings: Option<&mut HashMap<LocalId, HirType>>,
 ) {
@@ -290,6 +351,9 @@ pub(super) fn scan(
                 init: Some(init),
                 ..
             } if (matches!(ty, HirType::Any | HirType::Unknown)
+                || (env.metadata.inferred_bindings.contains(id)
+                    && matches!(ty, HirType::Object(_))
+                    && ty.any(&mut |node| matches!(node, HirType::Array(element) if !is_resolvable_type(element))))
                 || matches!(
                     ty,
                     HirType::Generic { base, type_args }
@@ -310,7 +374,10 @@ pub(super) fn scan(
                 {
                     bindings.insert(*id, inferred.clone());
                 }
-                if !matches!(inferred, HirType::Any | HirType::Unknown) {
+                if !matches!(inferred, HirType::Any | HirType::Unknown)
+                    && (is_resolvable_type(&inferred)
+                        || !env.locals.get(id).is_some_and(is_resolvable_type))
+                {
                     env.locals.insert(*id, inferred);
                 }
             }
@@ -340,38 +407,38 @@ pub(super) fn scan(
                 else_branch,
                 ..
             } => {
-                scan(
+                scan_statements(
                     then_branch,
                     env,
                     returned.as_deref_mut(),
                     bindings.as_deref_mut(),
                 );
                 if let Some(body) = else_branch {
-                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                    scan_statements(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 }
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan_statements(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
-                    scan(
+                    scan_statements(
                         std::slice::from_ref(init),
                         env,
                         returned.as_deref_mut(),
                         bindings.as_deref_mut(),
                     );
                 }
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan_statements(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
             }
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan_statements(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 if let Some(catch) = catch {
-                    scan(
+                    scan_statements(
                         &catch.body,
                         env,
                         returned.as_deref_mut(),
@@ -379,12 +446,12 @@ pub(super) fn scan(
                     );
                 }
                 if let Some(body) = finally {
-                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                    scan_statements(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    scan(
+                    scan_statements(
                         &case.body,
                         env,
                         returned.as_deref_mut(),
@@ -393,7 +460,7 @@ pub(super) fn scan(
                 }
             }
             Stmt::Labeled { body, .. } => {
-                scan(
+                scan_statements(
                     std::slice::from_ref(body),
                     env,
                     returned.as_deref_mut(),
