@@ -53,7 +53,7 @@ pub enum Case {
         source: String,
         diagnostic: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        variants: Vec<String>,
+        form_sources: Vec<String>,
     },
     Lifecycle(Vec<Action>),
     /// Calls `run(base)`, `run(base)`, `run(base * factor)` on one instance and bounds fuel growth.
@@ -84,14 +84,14 @@ impl Case {
                 .collect(),
             Self::Reject {
                 diagnostic,
-                variants,
+                form_sources,
                 ..
-            } if !variants.is_empty() => std::iter::once(Cow::Borrowed(self))
-                .chain(variants.iter().map(|source| {
+            } if !form_sources.is_empty() => std::iter::once(Cow::Borrowed(self))
+                .chain(form_sources.iter().map(|source| {
                     Cow::Owned(Self::Reject {
                         source: source.clone(),
                         diagnostic: diagnostic.clone(),
-                        variants: vec![],
+                        form_sources: vec![],
                     })
                 }))
                 .collect(),

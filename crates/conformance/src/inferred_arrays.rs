@@ -132,7 +132,6 @@ impl ArrayCase {
                 for (step, write) in std::iter::once(&seed).chain(&self.writes).enumerate() {
                     let index = write
                         .index
-                        .filter(|_| len > 0)
                         .map(|index| usize::from(index) % len);
                     let value = if form == Form::Helper {
                         format!("make(trace,{})", write.value)
@@ -240,7 +239,7 @@ impl ArrayCase {
     fn rejection(&self, conflict: Conflict) -> Case {
         Case::Reject {
             source: self.emit(Form::Aliased, Some(conflict)),
-            variants: [Form::Branches, Form::Loop, Form::Temporaries]
+            form_sources: [Form::Branches, Form::Loop, Form::Temporaries]
                 .into_iter()
                 .map(|form| self.emit(form, Some(conflict)))
                 .collect(),
@@ -364,7 +363,7 @@ pub(crate) fn contract() -> Contract {
             case: Case::Reject {
                 source: source.into(),
                 diagnostic: REQUIRES_ELEMENT_TYPE.into(),
-                variants: vec![],
+                form_sources: vec![],
             },
         });
     }
