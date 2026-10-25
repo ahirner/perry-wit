@@ -157,11 +157,16 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         status: Value,
     ) -> (Ptr<BasicBlock>, Vec<Value>) {
+        debug_assert!(
+            self.throws,
+            "throwing op in a function classified as non-throwing"
+        );
         // The landing stays in place for later throws of the same op.
         let Some((landing, types)) = self.landing.take() else {
             return (self.throw_block(ctx), vec![status]);
         };
-        let mut args = vec![status];
+        let mut args = Vec::with_capacity(types.len() + 1);
+        args.push(status);
         for &ty in &types {
             args.push(self.zero(ctx, ty));
         }
@@ -171,17 +176,20 @@ impl FunctionLowering<'_, '_> {
 
     /// Branch to the exception handler with `kind` when `failed` is non-zero, continuing on the normal path otherwise.
     pub(crate) fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
-        let status = self.i32_const(ctx, status_code(kind));
-        let status = self.runtime(ctx, Runtime::ExceptionImplicit, vec![failed, status]);
-        self.throw_status_if(ctx, failed, status);
+        let raise = self.new_block(ctx, vec![]);
+        let next = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, failed, (raise, vec![]), (next, vec![]));
+        self.in_block(raise, |b| {
+            let status = b.i32_const(ctx, status_code(kind));
+            let status = b.runtime(ctx, Runtime::ExceptionImplicit, vec![status]);
+            let (target, args) = b.throw_target(ctx, status);
+            b.br(ctx, target, args);
+        });
+        self.block = next;
     }
 
     /// Throw with `status` if `failed` is non-zero.
     pub(crate) fn throw_status_if(&mut self, ctx: &mut Context, failed: Value, status: Value) {
-        debug_assert!(
-            self.throws,
-            "throwing op in a function classified as non-throwing"
-        );
         let throw = self.throw_target(ctx, status);
         let next = self.new_block(ctx, vec![]);
         self.cond_br(ctx, failed, throw, (next, vec![]));

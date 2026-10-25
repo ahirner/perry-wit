@@ -49,6 +49,11 @@ export async function run():Promise<number> {
  const pending=fail();let saved=new Error('placeholder');
  try{await pending;}catch(e){saved=e;}
  try{await pending;}catch(e){if(e!==saved || !(e instanceof TypeError))return 19;}
+ const rows:number[][]=[[1,2],[3,4]];
+ try{throw error;}catch(e){if(e!==error)return 21;}
+ if(rows[0][1]!==2)return 22;
+ try{const missing=rows[2][0];return 23;}
+ catch(e){if(e===error || !(e instanceof TypeError))return 24;}
  try{try{throw error;}finally{return 0;}}catch(e){return 8;}
 }
 export function json():number {

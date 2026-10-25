@@ -122,7 +122,7 @@ macro_rules! intrinsic_catalog {
                 PromiseWait = "perry_promise_wait" (I32, I32, I32);
                 PromiseRethrow = "perry_promise_rethrow" (I32) -> I32;
                 ExceptionNew = "perry_exception_new" (I32, I32, I64) -> I32;
-                ExceptionImplicit = "perry_exception_implicit" (I32, I32) -> I32;
+                ExceptionImplicit = "perry_exception_implicit" (I32) -> I32;
                 ExceptionRaise = "perry_exception_raise" (I32) -> I32;
                 ExceptionCatch = "perry_exception_catch" (I32) -> I32;
                 ExceptionMessage = "perry_exception_message" (I32) -> I32;
