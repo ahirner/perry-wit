@@ -40,6 +40,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 ## Exceptions
 
 - `Error`, `TypeError`, `RangeError`, `ReferenceError` and `SyntaxError` keep `name`, `message` and `cause` through `try`, `catch` and `finally`.
+- A failed implicit check produces a fresh error object when caught. Successful checks bypass the exception runtime; explicitly thrown values retain their identity.
 - An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. Without a `result`, an uncaught exception traps, and a trap does not run pending `finally` blocks.
 
 ## Async
