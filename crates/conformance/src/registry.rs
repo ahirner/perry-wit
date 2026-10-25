@@ -33,6 +33,7 @@ pub enum Case {
     Program(Program),
     Aggregate(crate::aggregates::AggregateCase),
     Collection(crate::collections::CollectionCase),
+    InferredArray(crate::inferred_arrays::ArrayCase),
     Stream(crate::streams::StreamCase),
     Fetch(crate::fetch::FetchCase),
     Handler(crate::handler::HandlerCase),
@@ -51,6 +52,8 @@ pub enum Case {
     Reject {
         source: String,
         diagnostic: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        form_sources: Vec<String>,
     },
     Lifecycle(Vec<Action>),
     /// Calls `run(base)`, `run(base)`, `run(base * factor)` on one instance and bounds fuel growth.
@@ -73,6 +76,25 @@ impl Case {
     /// The case followed by its metamorphic forms, which must observe identically.
     pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
         match self {
+            Self::InferredArray(case) => std::iter::once(Cow::Borrowed(self))
+                .chain(
+                    case.variants()
+                        .map(|case| Cow::Owned(Self::InferredArray(case))),
+                )
+                .collect(),
+            Self::Reject {
+                diagnostic,
+                form_sources,
+                ..
+            } if !form_sources.is_empty() => std::iter::once(Cow::Borrowed(self))
+                .chain(form_sources.iter().map(|source| {
+                    Cow::Owned(Self::Reject {
+                        source: source.clone(),
+                        diagnostic: diagnostic.clone(),
+                        form_sources: vec![],
+                    })
+                }))
+                .collect(),
             Self::Program(program) if program.form == Form::Direct => Form::ALL
                 .into_iter()
                 .map(|form| {
@@ -124,7 +146,8 @@ impl Case {
             | Self::Stream(_)
             | Self::Fetch(_)
             | Self::Handler(_)
-            | Self::Scaling { .. } => false,
+            | Self::Scaling { .. }
+            | Self::InferredArray(_) => false,
             Self::Program(program) | Self::Fault { program, .. } => program.expression.uses_input(),
             _ => true,
         };
@@ -134,6 +157,7 @@ impl Case {
         match self {
             Self::Aggregate(case) => case.source(),
             Self::Collection(case) => case.source(),
+            Self::InferredArray(case) => case.source(),
             Self::Stream(case) => case.source(),
             Self::Fetch(case) => case.source(),
             Self::Handler(case) => case.source(),

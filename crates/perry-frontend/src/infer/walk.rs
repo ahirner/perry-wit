@@ -65,78 +65,83 @@ pub(super) fn visit_body<V: Visitor>(
     visit: &mut V,
 ) -> Result<(), V::Error> {
     for statement in statements {
-        match statement {
-            Stmt::Let { id, ty, init, .. } => {
-                visit.node(Node::Binding(id, ty))?;
-                if let Some(init) = init {
-                    visit.expression(init)?;
-                }
+        visit.statement(statement)?;
+    }
+    Ok(())
+}
+
+pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Result<(), V::Error> {
+    match statement {
+        Stmt::Let { id, ty, init, .. } => {
+            visit.node(Node::Binding(id, ty))?;
+            if let Some(init) = init {
+                visit.expression(init)?;
             }
-            Stmt::Expr(expr) | Stmt::Throw(expr) => visit.expression(expr)?,
-            Stmt::Return(Some(value)) => visit.expression(value)?,
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                visit.expression(condition)?;
-                visit_body(then_branch, visit)?;
-                if let Some(body) = else_branch {
-                    visit_body(body, visit)?;
-                }
-            }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                visit.expression(condition)?;
-                visit_body(body, visit)?;
-            }
-            Stmt::For {
-                init,
-                condition,
-                update,
-                body,
-            } => {
-                if let Some(init) = init {
-                    visit_body(std::slice::from_mut(init), visit)?;
-                }
-                if let Some(condition) = condition {
-                    visit.expression(condition)?;
-                }
-                if let Some(update) = update {
-                    visit.expression(update)?;
-                }
-                visit_body(body, visit)?;
-            }
-            Stmt::Labeled { body, .. } => visit_body(std::slice::from_mut(body), visit)?,
-            Stmt::Try {
-                body,
-                catch,
-                finally,
-            } => {
-                visit_body(body, visit)?;
-                if let Some(catch) = catch {
-                    if let Some((id, _)) = &mut catch.param {
-                        visit.node(Node::Local(id))?;
-                    }
-                    visit_body(&mut catch.body, visit)?;
-                }
-                if let Some(body) = finally {
-                    visit_body(body, visit)?;
-                }
-            }
-            Stmt::Switch {
-                discriminant,
-                cases,
-            } => {
-                visit.expression(discriminant)?;
-                for case in cases {
-                    if let Some(test) = &mut case.test {
-                        visit.expression(test)?;
-                    }
-                    visit_body(&mut case.body, visit)?;
-                }
-            }
-            _ => {}
         }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => visit.expression(expr)?,
+        Stmt::Return(Some(value)) => visit.expression(value)?,
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            visit.expression(condition)?;
+            visit_body(then_branch, visit)?;
+            if let Some(body) = else_branch {
+                visit_body(body, visit)?;
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            visit.expression(condition)?;
+            visit_body(body, visit)?;
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                visit_body(std::slice::from_mut(init), visit)?;
+            }
+            if let Some(condition) = condition {
+                visit.expression(condition)?;
+            }
+            if let Some(update) = update {
+                visit.expression(update)?;
+            }
+            visit_body(body, visit)?;
+        }
+        Stmt::Labeled { body, .. } => visit_body(std::slice::from_mut(body), visit)?,
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            visit_body(body, visit)?;
+            if let Some(catch) = catch {
+                if let Some((id, _)) = &mut catch.param {
+                    visit.node(Node::Local(id))?;
+                }
+                visit_body(&mut catch.body, visit)?;
+            }
+            if let Some(body) = finally {
+                visit_body(body, visit)?;
+            }
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            visit.expression(discriminant)?;
+            for case in cases {
+                if let Some(test) = &mut case.test {
+                    visit.expression(test)?;
+                }
+                visit_body(&mut case.body, visit)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -145,6 +150,10 @@ pub(super) trait Visitor: Sized {
     type Error;
 
     fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error>;
+
+    fn statement(&mut self, statement: &mut Stmt) -> Result<(), Self::Error> {
+        visit_stmt(statement, self)
+    }
 
     fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
         visit_expr(expr, self)

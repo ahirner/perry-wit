@@ -93,8 +93,8 @@ fn injected_faults_shrink_and_replay_through_the_execution_adapter() -> Result<(
         });
         let result = runner.run(&strategy, |case| {
             let artifacts = tempfile::tempdir_in(directory.path()).unwrap();
-            for evidence in executor.check(&case, artifacts.path()).unwrap() {
-                check_fault(&case, &evidence).unwrap();
+            for (variant, evidence) in executor.check(&case, artifacts.path()).unwrap() {
+                check_fault(&variant, &evidence).unwrap();
             }
             Err(TestCaseError::fail("detected injected fault"))
         });
@@ -145,8 +145,8 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
             ),
         };
         let artifacts = tempfile::tempdir_in(directory.path())?;
-        let evidence = executor.check(&case, artifacts.path())?;
-        let evidence = serde_json::to_value(&evidence[0])?;
+        let checked = executor.check(&case, artifacts.path())?;
+        let evidence = serde_json::to_value(&checked[0].1)?;
         let observations = &evidence["oracle"]["detail"]["observations"];
         for boundary in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 4294967295.0] {
             ensure!(
