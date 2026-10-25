@@ -184,6 +184,17 @@ impl Interval {
 }
 
 impl Range {
+    pub(super) fn fits_exact_number(self) -> bool {
+        matches!(
+            self,
+            Self::Bottom
+                | Self::Bounds(Interval {
+                    lower: -9_007_199_254_740_992..,
+                    upper: ..=9_007_199_254_740_992,
+                })
+        )
+    }
+
     /// The bounds of `domain`, or no bound without one.
     pub(super) fn of(domain: Option<Integer>) -> Self {
         domain.map_or(Self::Unknown, |domain| Self::Bounds(domain.bounds()))
@@ -340,15 +351,6 @@ pub(super) enum ResultDomain {
     /// Escaping promises keep their declared payload representation, while their callees may
     /// still specialize arithmetic using known argument domains.
     Original,
-}
-
-impl ResultDomain {
-    pub(super) fn integer(self) -> Option<Integer> {
-        match self {
-            Self::Integer(integer) => Some(integer),
-            Self::Inferred | Self::Original => None,
-        }
-    }
 }
 
 impl From<Option<Integer>> for ResultDomain {
@@ -564,6 +566,9 @@ impl Solver {
             return Fact::Integer(integer);
         }
         let state = &self.analysis.states[id];
+        if state.preserves_original(result) {
+            return Fact::Original;
+        }
         let (mut has_numeric, mut has_original, mut has_64bit, mut all_literal, mut negative) =
             (false, false, false, true, false);
         let mut common_int: Option<Integer> = None;
@@ -603,6 +608,13 @@ impl Solver {
                 Fact::Original
             };
         }
+        let common_int = common_int.map(|integer| {
+            if negative && state.is_constrained(result) {
+                integer.common(Integer::I32)
+            } else {
+                integer
+            }
+        });
         match (common_int, state.width(result)) {
             (Some(input), Some(required)) => Fact::Integer(input.common(required)),
             (Some(input), None) => Fact::Integer(input),

@@ -9,14 +9,36 @@ use crate::{
 use anyhow::{Context as _, Result, bail, ensure};
 use perry_mir::{Intrinsic, NumericType, absence};
 use pliron::{
+    builtin::types::{FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},
     operation::Operation,
-    r#type::{Typed, TypedHandle},
+    r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
+    fn bytes_from_array(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        element: TypeHandle,
+    ) -> Result<Value> {
+        let len = self.load(ctx, MemKind::I32, array, perry_abi::layout::array::LEN);
+        let data = self.load(ctx, MemKind::I32, array, perry_abi::layout::array::DATA);
+        let buffer = self.alloc(ctx, len);
+        let byte_type = IntegerType::get(ctx, 8, Signedness::Unsigned).into();
+        self.counted_loop(ctx, len, |b, ctx, index| {
+            let slot = b.slot_address(ctx, data, index, element);
+            let value = b.load_slot_value(ctx, slot, 0, element)?;
+            let byte = b.cast_value(ctx, value, element, byte_type)?.scalar()?;
+            let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, index]);
+            b.store(ctx, MemKind::I32U8, target, 0, byte);
+            Ok(())
+        })?;
+        Ok(self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, buffer]))
+    }
+
     fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
         ensure!(
             self.state.can_import(interface),
@@ -104,6 +126,16 @@ impl FunctionLowering<'_, '_> {
         if let Some(value) = self.numeric_intrinsic(ctx, op, intrinsic)? {
             self.define_value(ctx, op, value);
             return Ok(());
+        }
+        if intrinsic == Intrinsic::BytesFromArray {
+            let input = op.deref(ctx).get_operand(0);
+            let element = Self::element_type(ctx, input)?;
+            if !element.deref(ctx).is::<FP64Type>() {
+                let array = self.mapped(ctx, input)?;
+                let value = self.bytes_from_array(ctx, array, element)?;
+                self.define(ctx, op, value);
+                return Ok(());
+            }
         }
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {

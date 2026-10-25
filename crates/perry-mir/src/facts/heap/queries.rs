@@ -1,6 +1,7 @@
 //! Alias, JSON-residue, and intervening-mutation queries over converged `HeapFacts`.
 use super::*;
 use crate::effects::Mutation;
+use std::collections::HashSet;
 
 fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);

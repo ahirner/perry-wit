@@ -64,10 +64,10 @@ Keeping `u8`..`s32` as `number` in generated `.d.ts` files lets guest code use s
 ### Refinement Analysis
 
 Each numeric SSA value carries an optional integer type (width, signedness) and a value interval `[min, max]`.
-`ProgramFacts` propagates ranges forward through arithmetic, branches and calls (including recursion) and propagates required register widths backward to a fixed point [[1]](#ref-1).
+`ProgramFacts` propagates ranges forward through arithmetic, branches and calls (including recursion), and propagates required register widths and observation requirements backward through the same worklist to a fixed point [[1]](#ref-1).
 
 - **Register selection**: Refined integers whose interval fits in 32 bits lower to `i32`. Wider refined integers lower to `i64`. Unrefined values stay in `f64`.
-- **Bitwise results**: `&`, `|`, `^`, `~`, `<<`, `>>` and `Math.imul` produce `s32` values and `>>>` produces `u32`, so they lower to `i32` instructions even when their operands are unrefined `f64` values, which convert with `ToInt32`. Only the low 32 bits of each operand reach the result, so refined arithmetic feeding them, such as `(a * b) | 0` on `u32` values, computes in `i32`.
+- **Bitwise results**: `&`, `|`, `^`, `~`, `<<`, `>>` and `Math.imul` produce `s32` values and `>>>` produces `u32`, so they lower to `i32` instructions even when their operands are unrefined `f64` values, which convert with `ToInt32`. When every use needs only the low bits, refined arithmetic feeding them, such as `(a * b) | 0` on `u32` values, computes in `i32`. This deliberately preserves integer wrapping before conversion: at `a = b = 4294967295`, the result is `1`, whereas JavaScript rounds the product before converting and returns `0`. A use that observes the full value, such as arithmetic or a comparison, requires a wider register when the result does not fit; a bitwise consumer then truncates at its own use.
 - **Register-width intermediates**: Required widths stay at register size (32 or 64 bits) during computation. Narrowing to 8 or 16 bits happens only at the WIT boundary.
 - **Literals**: An integer literal adopts a required width only when its value fits. Larger literals stay in `f64` until converted at the boundary.
 - **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type. A specialized loop counter wraps at 32 or 64 bits on overflow.
