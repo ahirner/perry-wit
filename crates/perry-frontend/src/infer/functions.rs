@@ -371,6 +371,7 @@ pub(crate) fn specialize_functions(
     {
         return Ok(());
     }
+    let open_arrays = arrays::open_bindings(hir);
     let mut base = perry_hir::HirTypeEnv::from_module(hir);
     let mut templates = HashMap::new();
     let mut next_function = 0;
@@ -415,6 +416,8 @@ pub(crate) fn specialize_functions(
         decls: &decls,
         metadata,
         generic_functions: Some(&templates),
+        open_arrays,
+        local_spans: &hir.local_source_spans,
     };
     let mut instances = Instances {
         templates: &templates,

@@ -31,7 +31,9 @@ impl Shapes<'_> {
             )
             .into()),
             HirType::Array(element) => {
-                let element_ty = self.value_type(ctx, element)?;
+                let element_ty = self
+                    .value_type(ctx, element)
+                    .with_context(|| format!("unsupported array element type {element:?}"))?;
                 Ok(ArrayType::get(ctx, element_ty).into())
             }
             HirType::Named(name) => self.named(ctx, name),

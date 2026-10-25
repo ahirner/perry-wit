@@ -230,21 +230,81 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
 #[test]
 fn inference_accounts_for_fallthrough_bare_returns_dependencies_and_async_helpers() {
     let source = r#"
-function words(){return ['a'];}
+function words(){const values=[];values.push('a');return values;}
 function joined(){return words().concat('b');}
 function start(){return result();}
 function result(){return 7;}
+const inferredGlobal=[];
+inferredGlobal.push(result());
+function fromGlobal(){return inferredGlobal[0];}
+function constrained(){const values=[];const first:(number|string)[]=values;const alias:(string|number)[]=first;alias.push(3);return String(values[0])==='3'?3:0;}
 function loop(){for(let value=start();value>0;value--)return value;return 0;}
 function maybe(flag:boolean){if(flag)return 7;}
 function bare(flag:boolean){if(flag)return;return 'value';}
 async function helper(){return maybe(false);}
 export async function run():Promise<number>{
     const value=await helper();
-    return value===undefined && bare(true)===undefined && joined().length+loop()===9 ? 0 : 1;
+    return value===undefined && bare(true)===undefined && joined().length+loop()===9 && fromGlobal()+constrained()===10 ? 0 : 1;
 }
 "#;
     let mut program = crate::core_program::Program::checked(source, "inferred.ts");
     assert_eq!(program.outcome("run", &[]), (0.0, 0));
+
+    for (body, expected) in [
+        (
+            "const values:any[]=[]; values.push(); return values.length;",
+            "could not be inferred from local pushes",
+        ),
+        (
+            "const values=[]; const mutate=()=>{values.push(1);}; mutate(); return values.length;",
+            "could not be inferred from local pushes",
+        ),
+        (
+            "const values=[]; values.push(1, true); return values.length;",
+            "unsupported array element type Union([Number, Boolean])",
+        ),
+        (
+            "const values=[]; values.push(1); values.push(values); return values.length;",
+            "array element inference does not converge",
+        ),
+        (
+            "const values=[]; const numbers:number[]=values; const strings:string[]=values; return values.length;",
+            "incompatible concrete element annotations",
+        ),
+        (
+            "const values=[]; const numbers:number[]=values; values.push('text'); return numbers.length;",
+            "differs from the expected type",
+        ),
+        (
+            "const values:unknown[]=[]; values.push(1); return values.length;",
+            "empty array literal needs a declared element type",
+        ),
+        (
+            "const values:never[]=[]; values.push(1); return values.length;",
+            "empty array literal needs a declared element type",
+        ),
+    ] {
+        let source = format!("export function run():number {{\n{body}\n}}");
+        let error = perry_wit::compile_core(&source, "inferred.ts").unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{source}\n{error:#}"
+        );
+        assert_eq!(
+            error
+                .diagnostics
+                .first()
+                .and_then(|diagnostic| {
+                    diagnostic
+                        .span
+                        .as_ref()
+                        .map(|span| span.file.to_string_lossy())
+                })
+                .as_deref(),
+            Some("inferred.ts"),
+            "{error}"
+        );
+    }
 }
 
 #[test]

@@ -1,245 +1,81 @@
+//! Static element constraints for empty arrays and their local aliases.
 use super::*;
-use perry_hir::analysis::{collect_local_refs_expr, collect_local_refs_stmt};
-use std::convert::Infallible;
-use walk::{Node, Visitor};
+use crate::shapes::{
+    TypeId,
+    generics::{ARGUMENT_LIMIT, Declaration, Resolver, substitute_id},
+};
+use perry_hir::{
+    ir::CallArg,
+    walker::{stmt_any_expr, walk_expr_children},
+};
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 
-#[derive(Default)]
-struct Constraints {
-    fresh: HashSet<LocalId>,
-    aliases: HashMap<LocalId, LocalId>,
-    writes: HashMap<LocalId, Vec<HirType>>,
-    escaped: HashSet<LocalId>,
-    element_reads: HashSet<LocalId>,
-}
-
-impl Constraints {
-    fn root(&self, mut id: LocalId) -> LocalId {
-        for _ in 0..self.aliases.len() {
-            let Some(source) = self.aliases.get(&id) else {
-                break;
-            };
-            id = *source;
-        }
-        id
-    }
-
-    fn bindings(self) -> HashMap<LocalId, HirType> {
-        let escaped: HashSet<_> = self.escaped.iter().map(|id| self.root(*id)).collect();
-        let mut elements: HashMap<LocalId, Option<&HirType>> = HashMap::new();
-        for (id, writes) in &self.writes {
-            let root = self.root(*id);
-            if !self.fresh.contains(&root) || escaped.contains(&root) {
-                continue;
-            }
-            for ty in writes {
-                elements
-                    .entry(root)
-                    .and_modify(|element| {
-                        if *element != Some(ty) {
-                            *element = None;
-                        }
-                    })
-                    .or_insert_with(|| is_resolvable_type(ty).then_some(ty));
-            }
-        }
-        for id in &self.element_reads {
-            if let Some(element) = elements.get_mut(&self.root(*id))
-                && !matches!(
-                    element,
-                    Some(HirType::Number | HirType::String | HirType::Boolean | HirType::BigInt)
-                )
-            {
-                *element = None;
-            }
-        }
-        self.fresh
-            .iter()
-            .chain(self.aliases.keys())
-            .filter_map(|id| {
-                let ty = (*elements.get(&self.root(*id))?)?;
-                Some((*id, HirType::Array(Box::new(ty.clone()))))
-            })
-            .collect()
-    }
-}
-
-fn unresolved_array(ty: &HirType) -> bool {
-    match ty {
-        HirType::Any | HirType::Unknown => true,
-        HirType::Array(element) => matches!(**element, HirType::Any | HirType::Unknown),
-        HirType::Generic { base, type_args } if base == "Array" => {
-            type_args.is_empty()
-                || matches!(type_args.as_slice(), [HirType::Any | HirType::Unknown])
-        }
-        _ => false,
-    }
-}
-
-fn element_type(value: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
-    let mut ty = match value {
-        Expr::Conditional {
-            then_expr,
-            else_expr,
-            ..
-        }
-        | Expr::Logical {
-            left: then_expr,
-            right: else_expr,
-            ..
-        } => {
-            let left = element_type(then_expr, env);
-            if left == element_type(else_expr, env) {
-                left
-            } else {
-                HirType::Any
-            }
-        }
-        Expr::Array(values, _) => {
-            let Some(first) = values.first() else {
-                return HirType::Any;
-            };
-            let element = element_type(first, env);
-            if values[1..]
-                .iter()
-                .all(|value| element_type(value, env) == element)
-            {
-                HirType::Array(Box::new(element))
-            } else {
-                HirType::Any
-            }
-        }
-        _ => {
-            let mut ty = expression(value, env);
-            if let HirType::Object(object) = &mut ty {
-                let fields: Option<Vec<_>> = match value {
-                    Expr::New { class_name, .. } => env
-                        .classes
-                        .iter()
-                        .find(|class| {
-                            class.name == *class_name && hir_compat::is_object_literal(class_name)
-                        })
-                        .map(|class| {
-                            class
-                                .fields
-                                .iter()
-                                .map(|field| field.name.as_str())
-                                .collect()
-                        }),
-                    _ => None,
-                };
-                if let Some(pairs) = hir_compat::object_literal_pairs(value, |_| fields.as_deref())
-                {
-                    for (name, value) in pairs {
-                        if let Some(property) = object.properties.get_mut(name) {
-                            property.ty = element_type(value, env);
-                        }
-                    }
-                }
-            }
-            ty
+pub(super) fn open_bindings(module: &HirModule) -> HashSet<LocalId> {
+    let mut open = HashSet::new();
+    let mut collect = |statement: &Stmt| {
+        if let Stmt::Let { id, ty, .. } = statement
+            && matches!(array_element(ty), Some(HirType::Any))
+            && !matches!(ty, HirType::Generic { base, .. } if base == "ReadonlyArray")
+        {
+            open.insert(*id);
         }
     };
-    ty.transform(&mut |ty| match ty {
-        HirType::StringLiteral(_) => *ty = HirType::String,
-        HirType::Int32 => *ty = HirType::Number,
-        HirType::Union(members) => {
-            let mut distinct = Vec::with_capacity(members.len());
-            for member in members.drain(..) {
-                if !distinct.contains(&member) {
-                    distinct.push(member);
-                }
-            }
-            *ty = match <[HirType; 1]>::try_from(distinct) {
-                Ok([member]) => member,
-                Err(distinct) => HirType::Union(distinct),
-            };
-        }
-        _ => {}
-    });
-    ty
-}
-
-struct Collect<'a, 'e> {
-    constraints: &'a mut Constraints,
-    env: FunctionEnv<'e>,
-}
-
-impl Collect<'_, '_> {
-    fn write(&mut self, id: LocalId, value: &Expr) {
-        self.constraints
-            .writes
-            .entry(id)
-            .or_default()
-            .push(element_type(value, &mut self.env));
+    walk::statements(&module.init, &mut collect);
+    for function in &module.functions {
+        walk::statements(&function.body, &mut collect);
     }
-
-    fn is_numeric(&mut self, key: &Expr) -> bool {
-        matches!(
-            expression(key, &mut self.env),
-            HirType::Number | HirType::Int32
-        )
+    for class in &module.classes {
+        for function in shapes::class_functions(class) {
+            walk::statements(&function.body, &mut collect);
+        }
     }
+    open
 }
 
-impl Visitor for Collect<'_, '_> {
-    type Error = Infallible;
-
-    fn statement(&mut self, statement: &mut Stmt) -> Result<(), Infallible> {
-        if let Stmt::Let {
-            id,
-            ty,
-            mutable: false,
-            init: Some(init),
-            ..
-        } = statement
-            && (self.env.metadata.inferred_bindings.contains(id)
-                || matches!(ty, HirType::Any | HirType::Unknown))
-            && !matches!(init, Expr::Array(values, _) if values.is_empty())
+fn array_element(ty: &HirType) -> Option<&HirType> {
+    match ty {
+        HirType::Array(element) => Some(element),
+        HirType::Generic { base, type_args }
+            if matches!(base.as_str(), "Array" | "ReadonlyArray") =>
         {
-            let inferred = element_type(init, &mut self.env);
-            self.env.locals.insert(*id, inferred);
-        }
-        if let Stmt::Let {
-            id,
-            ty,
-            init: Some(init),
-            ..
-        } = statement
-            && unresolved_array(ty)
-        {
-            match init {
-                Expr::Array(values, _) if values.is_empty() => {
-                    self.constraints.fresh.insert(*id);
-                }
-                Expr::LocalGet(source) => {
-                    self.constraints.aliases.insert(*id, *source);
-                    return Ok(());
-                }
-                _ => {}
+            match type_args.as_slice() {
+                [element] => Some(element),
+                _ => None,
             }
         }
-        walk::visit_stmt(statement, self)
+        _ => None,
     }
+}
 
-    fn expression(&mut self, expr: &mut Expr) -> Result<(), Infallible> {
+fn local(expr: &Expr) -> Option<LocalId> {
+    match expr {
+        Expr::LocalGet(id) => Some(*id),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct Constraints<'s> {
+    bindings: HashMap<LocalId, (&'s HirType, Option<&'s Expr>)>,
+    aliases: Vec<(LocalId, LocalId)>,
+    pushes: Vec<(LocalId, &'s Expr, bool)>,
+    indexed: Vec<(LocalId, &'s Expr, &'s Expr)>,
+}
+
+impl<'s> Constraints<'s> {
+    fn expression(&mut self, expr: &'s Expr) {
+        if matches!(expr, Expr::Closure { .. }) {
+            return;
+        }
         match expr {
-            Expr::ArrayPush {
-                array_id, value, ..
-            } => {
-                self.write(*array_id, value);
-                return self.expression(value);
-            }
+            Expr::LocalSet(id, value) => self.alias(*id, value),
             Expr::IndexSet {
                 object,
                 index,
                 value,
             } => {
-                if let Expr::LocalGet(id) = **object
-                    && self.is_numeric(index)
-                {
-                    self.write(id, value);
-                    self.expression(index)?;
-                    return self.expression(value);
+                if let Some(id) = local(object) {
+                    self.indexed.push((id, index, value));
                 }
             }
             Expr::PutValueSet {
@@ -249,177 +85,547 @@ impl Visitor for Collect<'_, '_> {
                 receiver,
                 ..
             } => {
-                if let (Expr::LocalGet(id), Expr::LocalGet(receiver)) = (&**target, &**receiver)
-                    && id == receiver
-                    && self.is_numeric(key)
+                if let Some(id) = local(target)
+                    && local(receiver) == Some(id)
                 {
-                    self.write(*id, value);
-                    self.expression(key)?;
-                    return self.expression(value);
+                    self.indexed.push((id, key, value));
                 }
+            }
+            Expr::ArrayPushSpread { array_id, source } => {
+                self.pushes.push((*array_id, source, true));
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::PropertyGet {
                     object, property, ..
                 } = callee.as_ref()
-                    && let Expr::LocalGet(id) = **object
-                    && hir_compat::method(property).name() == "push"
+                    && let Some(id) = local(object)
+                    && let Ok(Some(crate::methods::Call::ArrayPush(values))) =
+                        crate::methods::Call::parse(
+                            crate::methods::Receiver::Value(Kind::Array),
+                            hir_compat::method(property).name(),
+                            args,
+                        )
                 {
-                    for arg in args {
-                        self.write(id, arg);
-                        self.expression(arg)?;
+                    self.pushes
+                        .extend(values.iter().map(|value| (id, value, false)));
+                }
+            }
+            Expr::CallSpread { callee, args, .. } => {
+                if let Expr::PropertyGet {
+                    object, property, ..
+                } = callee.as_ref()
+                    && hir_compat::method(property).name() == "push"
+                    && let Some(id) = local(object)
+                {
+                    self.pushes
+                        .extend(args.iter().map(|argument| match argument {
+                            CallArg::Expr(value) => (id, value, false),
+                            CallArg::Spread(value) => (id, value, true),
+                        }));
+                }
+            }
+            _ => {
+                if let Some((receiver, crate::methods::Call::ArrayPush(values))) =
+                    crate::methods::Call::expression(expr)
+                {
+                    let id = match receiver {
+                        crate::methods::CallReceiver::Local(id) => Some(id),
+                        crate::methods::CallReceiver::Expression(expr) => local(expr),
+                    };
+                    if let Some(id) = id {
+                        self.pushes
+                            .extend(values.iter().map(|value| (id, value, false)));
                     }
-                    return Ok(());
                 }
             }
-            Expr::JsonStringify(value) if matches!(**value, Expr::LocalGet(_)) => return Ok(()),
-            Expr::JsonStringifyFull(value, replacer, space)
-                if matches!(**value, Expr::LocalGet(_))
-                    && matches!(**replacer, Expr::Null | Expr::Undefined) =>
-            {
-                return self.expression(space);
+        }
+        walk_expr_children(expr, &mut |child| self.expression(child));
+    }
+
+    fn alias(&mut self, id: LocalId, value: &Expr) {
+        match value {
+            Expr::LocalGet(source) => self.aliases.push((id, *source)),
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.alias(id, then_expr);
+                self.alias(id, else_expr);
             }
-            Expr::PropertyGet {
-                object, property, ..
-            } if property == "length" && matches!(**object, Expr::LocalGet(_)) => {
-                return Ok(());
-            }
-            Expr::IndexGet { object, index } => {
-                if let Expr::LocalGet(id) = **object {
-                    self.constraints.element_reads.insert(id);
-                    return self.expression(index);
+            Expr::Sequence(parts) => {
+                if let Some(value) = parts.last() {
+                    self.alias(id, value);
                 }
-            }
-            Expr::Closure { captures, .. } => {
-                self.constraints.escaped.extend(captures.iter().copied());
-                let mut references = Vec::new();
-                collect_local_refs_expr(expr, &mut references, &mut HashSet::new());
-                self.constraints.escaped.extend(references);
-                return Ok(());
             }
             _ => {}
         }
-        walk::visit_expr(expr, self)
-    }
-
-    fn node(&mut self, node: Node<'_>) -> Result<(), Infallible> {
-        if let Node::Expression(
-            Expr::LocalGet(id)
-            | Expr::LocalSet(id, _)
-            | Expr::Update { id, .. }
-            | Expr::ArrayPushSpread { array_id: id, .. }
-            | Expr::ArrayUnshift { array_id: id, .. }
-            | Expr::ArraySplice { array_id: id, .. }
-            | Expr::ArrayCopyWithin { array_id: id, .. }
-            | Expr::ArrayPop(id)
-            | Expr::ArrayShift(id)
-            | Expr::SetAdd { set_id: id, .. },
-        ) = node
-        {
-            self.constraints.escaped.insert(*id);
-        }
-        Ok(())
     }
 }
 
-pub(super) fn resolve(
-    init: &mut [Stmt],
-    functions: &mut [perry_hir::ir::Function],
-    classes: &mut [perry_hir::ir::Class],
-    globals: &[perry_hir::ir::Global],
-    base: &mut perry_hir::HirTypeEnv,
-    inference: &Inference<'_>,
-) -> bool {
-    let mut constraints = Constraints::default();
-    let mut locals = HashMap::new();
-    let mut collect = |body: &mut [Stmt], mut env: FunctionEnv<'_>| {
-        walk::scan(body, &mut env, None, None);
-        let Ok(()) = walk::visit_body(
-            body,
-            &mut Collect {
-                constraints: &mut constraints,
-                env,
-            },
-        );
-    };
-    collect(init, inference.function(base, classes, &mut locals));
-    for function in &mut *functions {
-        collect(
-            &mut function.body,
-            inference.function_with_params(base, classes, &mut locals, &function.params),
-        );
+fn root(parents: &HashMap<LocalId, LocalId>, mut id: LocalId) -> LocalId {
+    while let Some(&parent) = parents.get(&id)
+        && parent != id
+    {
+        id = parent;
     }
-    for class_index in 0..classes.len() {
-        base.set_current_class(Some(classes[class_index].name.clone()));
-        let mut bodies: Vec<_> = shapes::class_functions_mut(&mut classes[class_index])
-            .map(|function| std::mem::take(&mut function.body))
-            .collect();
-        for (function, body) in shapes::class_functions(&classes[class_index]).zip(&mut bodies) {
-            collect(
-                body,
-                inference.function_with_params(base, classes, &mut locals, &function.params),
+    id
+}
+
+fn diagnostic(
+    env: &FunctionEnv<'_>,
+    id: LocalId,
+    code: DiagnosticCode,
+    message: impl Into<String>,
+) -> anyhow::Error {
+    let mut error = PerryDiagnostic::error(code, message);
+    if code == DiagnosticCode::MissingTypeAnnotation {
+        error.help = Some("Add a concrete array element type supported by Perry.".into());
+    }
+    error.span = env.local_spans.get(&id).and_then(|span| {
+        env.metadata
+            .locations
+            .offset_span(span.start, span.end.saturating_sub(span.start))
+    });
+    error.into()
+}
+
+pub(super) fn infer(
+    body: &[Stmt],
+    env: &mut FunctionEnv<'_>,
+    complete: bool,
+) -> Result<HashMap<LocalId, HirType>> {
+    let mut constraints = Constraints::default();
+    walk::statements(body, &mut |statement| {
+        if let Stmt::Let { id, ty, init, .. } = statement {
+            constraints.bindings.insert(*id, (ty, init.as_ref()));
+            if let Some(init) = init {
+                constraints.alias(*id, init);
+            }
+        }
+    });
+    let open =
+        |id: &LocalId| env.open_arrays.contains(id) || env.metadata.inferred_bindings.contains(id);
+    let mut candidates: Vec<_> = constraints
+        .bindings
+        .iter()
+        .filter_map(|(&id, (_, init))| {
+            (open(&id) && matches!(init, Some(Expr::Array(items, _)) if items.is_empty()))
+                .then_some(id)
+        })
+        .collect();
+    candidates.sort_unstable();
+    let Some(&first_candidate) = candidates.first() else {
+        return Ok(HashMap::new());
+    };
+    for statement in body {
+        stmt_any_expr(statement, &mut |expr| {
+            constraints.expression(expr);
+            false
+        });
+    }
+    let mut parents: HashMap<_, _> = constraints.bindings.keys().map(|&id| (id, id)).collect();
+    for &(left, right) in &constraints.aliases {
+        if parents.contains_key(&left) && parents.contains_key(&right) {
+            let left = root(&parents, left);
+            let right = root(&parents, right);
+            parents.insert(left.max(right), left.min(right));
+        }
+    }
+    let groups: HashSet<_> = candidates.iter().map(|&id| root(&parents, id)).collect();
+    let push_groups: HashSet<_> = constraints
+        .pushes
+        .iter()
+        .map(|(id, _, _)| root(&parents, *id))
+        .collect();
+    let mut members: Vec<_> = constraints
+        .bindings
+        .iter()
+        .filter(|(id, _)| groups.contains(&root(&parents, **id)))
+        .map(|(&id, &binding)| (id, binding))
+        .collect();
+    members.sort_unstable_by_key(|(id, _)| *id);
+    let mut fixed = HashMap::new();
+    for &(id, (ty, _)) in &members {
+        if !open(&id)
+            && let Some(array) = Normalizer::new(env, false).resolve(ty, false)?
+            && let Some(element) = array_element(array.hir(env.ctx))
+        {
+            let element = TypeId::intern(env.ctx, element);
+            let group = root(&parents, id);
+            if let Some(other) = fixed.insert(group, element)
+                && other != element
+                && !matches!((other.hir(env.ctx), element.hir(env.ctx)),
+                    (HirType::Union(left), HirType::Union(right))
+                    if left.len() == right.len() && left.iter().all(|ty| right.contains(ty)))
+            {
+                return Err(diagnostic(
+                    env,
+                    id,
+                    DiagnosticCode::UnsupportedType,
+                    format!(
+                        "array aliases have incompatible concrete element annotations: {:?} and {:?}",
+                        other.hir(env.ctx),
+                        element.hir(env.ctx)
+                    ),
+                ));
+            }
+        }
+    }
+    let mut inferred = HashMap::new();
+    for _ in 0..=constraints.bindings.len() + constraints.pushes.len() + constraints.indexed.len() {
+        walk::scan_statements(body, env, None, None);
+        let mut evidence: HashMap<LocalId, Vec<TypeId>> = HashMap::new();
+        for &(id, value, spread) in &constraints.pushes {
+            let group = root(&parents, id);
+            if !groups.contains(&group) || !parents.contains_key(&id) {
+                continue;
+            }
+            let ty = if spread {
+                shapes::generics::iterated_element(expression(value, env)).ok()
+            } else {
+                Some(argument_type(value, env))
+            };
+            if let Some(ty) = ty {
+                let normalized =
+                    Normalizer::new(env, true)
+                        .resolve(&ty, false)
+                        .map_err(|error| {
+                            diagnostic(
+                                env,
+                                id,
+                                DiagnosticCode::MissingTypeAnnotation,
+                                format!("cannot infer the empty array's element type: {error}"),
+                            )
+                        })?;
+                if let Some(ty) = normalized {
+                    evidence.entry(group).or_default().push(ty);
+                }
+            }
+        }
+        for &(id, index, value) in &constraints.indexed {
+            let group = root(&parents, id);
+            if groups.contains(&group)
+                && !push_groups.contains(&group)
+                && matches!(expression(index, env), HirType::Number | HirType::Int32)
+            {
+                let ty = argument_type(value, env);
+                if let Some(ty) = Normalizer::new(env, true).resolve(&ty, false)? {
+                    evidence.entry(group).or_default().push(ty);
+                }
+            }
+        }
+        for &(id, (_, init)) in &members {
+            if let Some(init) = init
+                && !matches!(init, Expr::LocalGet(_) | Expr::Conditional { .. })
+                && !matches!(init, Expr::Array(items, _) if items.is_empty())
+                && let Some(element) = array_element(&expression(init, env))
+                && let Some(element) = Normalizer::new(env, true).resolve(element, false)?
+            {
+                evidence
+                    .entry(root(&parents, id))
+                    .or_default()
+                    .push(element);
+            }
+        }
+        let mut changed = false;
+        for &group in &groups {
+            let element = if let Some(&fixed) = fixed.get(&group) {
+                Some(fixed)
+            } else {
+                let types = evidence.remove(&group).unwrap_or_default();
+                let mut unique = Vec::new();
+                for ty in types {
+                    if !unique.contains(&ty) {
+                        unique.push(ty);
+                    }
+                }
+                if !push_groups.contains(&group) && unique.len() > 1 {
+                    return Err(diagnostic(
+                        env,
+                        group,
+                        DiagnosticCode::UnsupportedType,
+                        format!(
+                            "indexed writes require one uniform array element type, found {:?}",
+                            unique.iter().map(|ty| ty.hir(env.ctx)).collect::<Vec<_>>()
+                        ),
+                    ));
+                }
+                match unique.as_slice() {
+                    [] => None,
+                    [ty] => Some(*ty),
+                    _ => Normalizer::new(env, true).resolve_union(&unique, false)?,
+                }
+            };
+            if let Some(element) = element {
+                changed |= inferred.insert(group, element) != Some(element);
+            }
+        }
+        for &(id, _) in &members {
+            if let Some(element) = inferred.get(&root(&parents, id)) {
+                let element = element.hir(env.ctx);
+                if !matches!(env.locals.get(&id), Some(HirType::Array(current)) if current.as_ref() == element)
+                {
+                    env.locals
+                        .insert(id, HirType::Array(Box::new(element.clone())));
+                }
+            }
+        }
+        if !changed {
+            if complete
+                && let Some(&id) = candidates
+                    .iter()
+                    .find(|id| !inferred.contains_key(&root(&parents, **id)))
+            {
+                return Err(diagnostic(
+                    env,
+                    id,
+                    DiagnosticCode::MissingTypeAnnotation,
+                    "the empty array's element type could not be inferred from local pushes",
+                ));
+            }
+            return Ok(members
+                .into_iter()
+                .filter(|(id, _)| open(id))
+                .filter_map(|(id, _)| {
+                    inferred
+                        .get(&root(&parents, id))
+                        .map(|element| (id, HirType::Array(Box::new(element.hir(env.ctx).clone()))))
+                })
+                .collect());
+        }
+    }
+    Err(diagnostic(
+        env,
+        first_candidate,
+        DiagnosticCode::MissingTypeAnnotation,
+        "array element inference does not converge; a concrete annotation is required",
+    ))
+}
+
+fn argument_type(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
+    if let Expr::Conditional {
+        then_expr,
+        else_expr,
+        ..
+    } = expr
+    {
+        return HirType::Union(vec![
+            argument_type(then_expr, env),
+            argument_type(else_expr, env),
+        ]);
+    }
+    let mut ty = expression(expr, env);
+    if let HirType::Object(object) = &mut ty {
+        let tag = match expr {
+            Expr::Object(properties) => properties
+                .iter()
+                .find(|(name, _)| name == "tag")
+                .map(|(_, value)| value),
+            Expr::New {
+                class_name, args, ..
+            } if hir_compat::is_object_literal(class_name) => env
+                .classes
+                .iter()
+                .find(|class| class.name == *class_name)
+                .and_then(|class| class.fields.iter().position(|field| field.name == "tag"))
+                .and_then(|index| args.get(index)),
+            _ => None,
+        };
+        if let Some(Expr::String(tag)) = tag
+            && let Some(property) = object.properties.get_mut("tag")
+        {
+            property.ty = HirType::StringLiteral(tag.clone());
+        }
+    }
+    ty
+}
+
+struct Normalizer<'a, 'e> {
+    env: &'a FunctionEnv<'e>,
+    widen: bool,
+    remaining: usize,
+    depth: usize,
+    expanding: HashSet<TypeId>,
+}
+
+impl<'a, 'e> Normalizer<'a, 'e> {
+    fn new(env: &'a FunctionEnv<'e>, widen: bool) -> Self {
+        Self {
+            env,
+            widen,
+            remaining: ARGUMENT_LIMIT,
+            depth: 0,
+            expanding: HashSet::new(),
+        }
+    }
+
+    fn resolve(&mut self, ty: &HirType, literal: bool) -> Result<Option<TypeId>> {
+        ensure!(
+            self.remaining > 0 && self.depth < 64,
+            "array element type expands indefinitely"
+        );
+        self.remaining -= 1;
+        self.depth += 1;
+        let result = self.resolve_inner(ty, literal);
+        self.depth -= 1;
+        result
+    }
+
+    fn resolve_union(&mut self, members: &[TypeId], literal: bool) -> Result<Option<TypeId>> {
+        let env = self.env;
+        let mut normalized = Vec::new();
+        for ty in Resolver::new(env.ctx, env.decls).flatten(members, 0) {
+            let Some(ty) = self.resolve(ty.hir(env.ctx), literal)? else {
+                return Ok(None);
+            };
+            if !normalized.contains(&ty) {
+                normalized.push(ty);
+            }
+        }
+        if let [ty] = normalized.as_slice() {
+            return Ok(Some(*ty));
+        }
+        Ok(Some(TypeId::from_owned(
+            env.ctx,
+            HirType::Union(
+                normalized
+                    .into_iter()
+                    .map(|ty| ty.hir(env.ctx).clone())
+                    .collect(),
+            ),
+        )))
+    }
+
+    fn resolve_record<'t>(
+        &mut self,
+        fields: impl IntoIterator<Item = (impl Into<String> + AsRef<str>, &'t HirType, bool)>,
+        index: Option<&HirType>,
+    ) -> Result<Option<TypeId>> {
+        let ctx = self.env.ctx;
+        let mut object = perry_hir::types::ObjectType::default();
+        for (name, ty, optional) in fields {
+            let Some(ty) = self.resolve(ty, name.as_ref() == "tag")? else {
+                return Ok(None);
+            };
+            object.properties.insert(
+                name.into(),
+                perry_hir::types::PropertyInfo {
+                    ty: ty.hir(ctx).clone(),
+                    optional,
+                    readonly: false,
+                },
             );
         }
-        for (function, body) in shapes::class_functions_mut(&mut classes[class_index]).zip(bodies) {
-            function.body = body;
+        if let Some(index) = index {
+            let Some(ty) = self.resolve(index, false)? else {
+                return Ok(None);
+            };
+            object.index_signature = Some(Box::new(ty.hir(ctx).clone()));
         }
+        Ok(Some(TypeId::from_owned(ctx, HirType::Object(object))))
     }
-    base.set_current_class(None);
-    let mut escaped = Vec::new();
-    let computed_members = || classes.iter().flat_map(|class| &class.computed_members);
-    for expr in globals
-        .iter()
-        .filter_map(|global| global.init.as_ref())
-        .chain(classes.iter().flat_map(|class| {
-            class
-                .fields
-                .iter()
-                .chain(&class.static_fields)
-                .flat_map(|field| field.init.iter().chain(&field.key_expr))
-                .chain(class.extends_expr.as_deref())
-                .chain(
-                    class
-                        .decorators
+
+    fn resolve_inner(&mut self, ty: &HirType, literal: bool) -> Result<Option<TypeId>> {
+        let env = self.env;
+        let ty = match ty {
+            HirType::Any | HirType::TypeVar(_) => return Ok(None),
+            HirType::Unknown | HirType::Never if self.widen => return Ok(None),
+            HirType::Int32 if self.widen => HirType::Number,
+            HirType::StringLiteral(_) if self.widen && !literal => HirType::String,
+            HirType::Array(inner) => {
+                let Some(inner) = self.resolve(inner, false)? else {
+                    return Ok(None);
+                };
+                HirType::Array(Box::new(inner.hir(env.ctx).clone()))
+            }
+            HirType::Object(object) => {
+                return self.resolve_record(
+                    object
+                        .properties
                         .iter()
-                        .flat_map(|decorator| &decorator.args),
-                )
-        }))
-        .chain(computed_members().map(|member| &member.key_expr))
-        .chain(
-            functions
-                .iter()
-                .chain(classes.iter().flat_map(shapes::class_functions))
-                .chain(computed_members().map(|member| &member.function))
-                .flat_map(|function| {
-                    function
-                        .params
-                        .iter()
-                        .filter_map(|param| param.default.as_ref())
-                }),
-        )
-    {
-        collect_local_refs_expr(expr, &mut escaped, &mut HashSet::new());
+                        .map(|(name, property)| (name.as_str(), &property.ty, property.optional)),
+                    object.index_signature.as_deref(),
+                );
+            }
+            HirType::Union(members) => {
+                return self.resolve_union(&TypeId::intern_slice(env.ctx, members), literal);
+            }
+            HirType::Named(name) | HirType::Generic { base: name, .. } => {
+                if self.widen
+                    && matches!(ty, HirType::Named(_))
+                    && let Some(carrier) = env.decls.integer_carrier(name)
+                {
+                    return Ok(Some(TypeId::from_owned(
+                        env.ctx,
+                        if carrier == HirType::BigInt {
+                            HirType::BigInt
+                        } else {
+                            HirType::Number
+                        },
+                    )));
+                }
+                let arguments = if let HirType::Generic { type_args, .. } = ty {
+                    type_args.as_slice()
+                } else {
+                    &[]
+                };
+                if let Some((_, alias)) = env.decls.type_aliases.get(name.as_str()) {
+                    let id = TypeId::intern(env.ctx, ty);
+                    if !self.expanding.insert(id) {
+                        return Ok(Some(id));
+                    }
+                    let args = TypeId::intern_slice(env.ctx, arguments);
+                    let bindings = Declaration::Alias(alias).bind(env.ctx, name, &args)?;
+                    let expanded =
+                        substitute_id(env.ctx, &alias.ty, &bindings, &mut self.remaining)?;
+                    let result = self.resolve(expanded.hir(env.ctx), literal);
+                    self.expanding.remove(&id);
+                    return result;
+                }
+                if let Some(element) = array_element(ty) {
+                    let Some(element) = self.resolve(element, false)? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(TypeId::from_owned(
+                        env.ctx,
+                        HirType::Array(Box::new(element.hir(env.ctx).clone())),
+                    )));
+                }
+                if env.decls.interfaces.contains_key(name.as_str())
+                    && let Some(fields) =
+                        Resolver::new(env.ctx, env.decls).record(TypeId::intern(env.ctx, ty), 0)
+                {
+                    let id = TypeId::intern(env.ctx, ty);
+                    if !self.expanding.insert(id) {
+                        return Ok(Some(id));
+                    }
+                    let result = self.resolve_record(
+                        fields
+                            .into_iter()
+                            .map(|(name, ty, optional)| (name, ty.hir(env.ctx), optional)),
+                        None,
+                    );
+                    self.expanding.remove(&id);
+                    return result;
+                }
+                if !is_resolvable_type(ty) {
+                    return Ok(None);
+                }
+                return Ok(Some(TypeId::intern(env.ctx, ty)));
+            }
+            other => {
+                if !is_resolvable_type(other)
+                    && !matches!(
+                        other,
+                        HirType::Null | HirType::Void | HirType::Unknown | HirType::Never
+                    )
+                {
+                    return Ok(None);
+                }
+                return Ok(Some(TypeId::intern(env.ctx, other)));
+            }
+        };
+        Ok(Some(TypeId::from_owned(env.ctx, ty)))
     }
-    for statement in computed_members().flat_map(|member| &member.function.body) {
-        collect_local_refs_stmt(statement, &mut escaped, &mut HashSet::new());
-    }
-    constraints.escaped.extend(escaped);
-    let mut bindings = constraints.bindings();
-    let mut changed = false;
-    let mut apply = |id: LocalId, ty: &mut HirType| {
-        if let Some(inferred) = bindings.remove(&id) {
-            *ty = inferred;
-            changed = true;
-        }
-    };
-    walk::locals_mut(init, &mut apply);
-    for function in &mut *functions {
-        walk::locals_mut(&mut function.body, &mut apply);
-    }
-    for class in &mut *classes {
-        for function in shapes::class_functions_mut(class) {
-            walk::locals_mut(&mut function.body, &mut apply);
-        }
-    }
-    changed
 }
