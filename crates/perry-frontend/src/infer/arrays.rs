@@ -1,5 +1,5 @@
 use super::*;
-use perry_hir::analysis::collect_local_refs_expr;
+use perry_hir::analysis::{collect_local_refs_expr, collect_local_refs_stmt};
 use std::convert::Infallible;
 use walk::{Node, Visitor};
 
@@ -142,6 +142,18 @@ fn element_type(value: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
     ty.transform(&mut |ty| match ty {
         HirType::StringLiteral(_) => *ty = HirType::String,
         HirType::Int32 => *ty = HirType::Number,
+        HirType::Union(members) => {
+            let mut distinct = Vec::with_capacity(members.len());
+            for member in members.drain(..) {
+                if !distinct.contains(&member) {
+                    distinct.push(member);
+                }
+            }
+            *ty = match <[HirType; 1]>::try_from(distinct) {
+                Ok([member]) => member,
+                Err(distinct) => HirType::Union(distinct),
+            };
+        }
         _ => {}
     });
     ty
@@ -159,6 +171,13 @@ impl Collect<'_, '_> {
             .entry(id)
             .or_default()
             .push(element_type(value, &mut self.env));
+    }
+
+    fn is_numeric(&mut self, key: &Expr) -> bool {
+        matches!(
+            expression(key, &mut self.env),
+            HirType::Number | HirType::Int32
+        )
     }
 }
 
@@ -215,7 +234,9 @@ impl Visitor for Collect<'_, '_> {
                 index,
                 value,
             } => {
-                if let Expr::LocalGet(id) = **object {
+                if let Expr::LocalGet(id) = **object
+                    && self.is_numeric(index)
+                {
                     self.write(id, value);
                     self.expression(index)?;
                     return self.expression(value);
@@ -230,10 +251,7 @@ impl Visitor for Collect<'_, '_> {
             } => {
                 if let (Expr::LocalGet(id), Expr::LocalGet(receiver)) = (&**target, &**receiver)
                     && id == receiver
-                    && matches!(
-                        expression(key, &mut self.env),
-                        HirType::Number | HirType::Int32
-                    )
+                    && self.is_numeric(key)
                 {
                     self.write(*id, value);
                     self.expression(key)?;
@@ -348,24 +366,30 @@ pub(super) fn resolve(
     }
     base.set_current_class(None);
     let mut escaped = Vec::new();
-    for init in globals
+    let computed_members = || classes.iter().flat_map(|class| &class.computed_members);
+    for expr in globals
         .iter()
         .filter_map(|global| global.init.as_ref())
-        .chain(
-            classes
-                .iter()
-                .flat_map(|class| class.fields.iter().filter_map(|field| field.init.as_ref())),
-        )
         .chain(classes.iter().flat_map(|class| {
             class
-                .static_fields
+                .fields
                 .iter()
-                .filter_map(|field| field.init.as_ref())
+                .chain(&class.static_fields)
+                .flat_map(|field| field.init.iter().chain(&field.key_expr))
+                .chain(class.extends_expr.as_deref())
+                .chain(
+                    class
+                        .decorators
+                        .iter()
+                        .flat_map(|decorator| &decorator.args),
+                )
         }))
+        .chain(computed_members().map(|member| &member.key_expr))
         .chain(
             functions
                 .iter()
                 .chain(classes.iter().flat_map(shapes::class_functions))
+                .chain(computed_members().map(|member| &member.function))
                 .flat_map(|function| {
                     function
                         .params
@@ -374,7 +398,10 @@ pub(super) fn resolve(
                 }),
         )
     {
-        collect_local_refs_expr(init, &mut escaped, &mut HashSet::new());
+        collect_local_refs_expr(expr, &mut escaped, &mut HashSet::new());
+    }
+    for statement in computed_members().flat_map(|member| &member.function.body) {
+        collect_local_refs_stmt(statement, &mut escaped, &mut HashSet::new());
     }
     constraints.escaped.extend(escaped);
     let mut bindings = constraints.bindings();

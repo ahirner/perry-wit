@@ -30,6 +30,12 @@ function count(n: number): number {
 }
 console.log(count(3), count(1));
 
+let label: "seed" | "next" = items.length > 0 ? "seed" : "next";
+const labels: any[] = [];
+labels.push(label);
+labels.push("tail");
+console.log(JSON.stringify(labels), labels[0].length);
+
 class Counter {
   count(): number {
     const numbers: any[] = [];
@@ -42,6 +48,7 @@ class Counter {
     }
     try { numbers.push(6); throw 1; } catch { numbers.push(7); } finally { numbers.push(8); }
     console.log(JSON.stringify(numbers));
+    console.log(numbers[20] === undefined, numbers[20] + 1);
     return numbers.length;
   }
 }

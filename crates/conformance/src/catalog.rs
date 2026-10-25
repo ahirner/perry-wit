@@ -568,6 +568,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
             "uniform-records-and-aliases",
             "dependent-arrays",
             "mixed-index-writes",
+            "string-key-write",
             "conflicting-alias",
             "conflicting-branch",
             "conflicting-conditional-field",

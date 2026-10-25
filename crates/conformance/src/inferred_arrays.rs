@@ -309,6 +309,7 @@ pub(crate) fn contract() -> Contract {
             "mixed-index-writes",
             "const a:any[]=[];for(let i=0;i<4;i++)a.push(i);a[0]={value:7};a[1]='payload';",
         ),
+        ("string-key-write", "const a:any[]=[];a.push(1);a['k']=2;"),
         (
             "conflicting-alias",
             "const a:any[]=[];const alias=a;a.push(1);alias.push('bad');",
