@@ -181,6 +181,18 @@ impl FunctionLowering<'_, '_> {
                 self.define(ctx, op, value);
                 return Ok(());
             }
+            if mir_ty.deref(ctx).is::<StringType>()
+                && matches!(kind, CompareKind::Eq | CompareKind::Ne)
+            {
+                let equal = self.string_equality(ctx, operands[0], operands[1]);
+                let value = if kind == CompareKind::Ne {
+                    self.num(ctx, NumOpcode::I32Eqz, vec![equal])
+                } else {
+                    equal
+                };
+                self.define(ctx, op, value);
+                return Ok(());
+            }
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
             let value = if inner.deref(ctx).is::<perry_mir::NumberStringType>()
                 || inner.deref(ctx).is::<perry_mir::ValueUnionType>()

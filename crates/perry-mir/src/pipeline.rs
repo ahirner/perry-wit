@@ -154,10 +154,6 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         Ok(result)
     }));
     cleanup.add_pass(PassWrapper::new(
-        "decompose-dictionaries",
-        crate::aggregates::DecomposeDictionaries,
-    ));
-    cleanup.add_pass(PassWrapper::new(
         "decompose-records",
         crate::aggregates::DecomposeRecords,
     ));

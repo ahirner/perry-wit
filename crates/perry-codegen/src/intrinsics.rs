@@ -253,20 +253,6 @@ impl FunctionLowering<'_, '_> {
                 };
                 Some(self.try_string_append(ctx, args[0], args[1], representation))
             }
-            Intrinsic::StringKeyFingerprint => Some(self.string_key_fingerprint(ctx, op, args[0])),
-            Intrinsic::StringKeyEqual => Some(self.string_key_equal(ctx, &args)),
-            Intrinsic::KeyFingerprintAt | Intrinsic::KeyFingerprintStore => {
-                let element = perry_mir::StringType::get(ctx).into();
-                let data = self.load(ctx, MemKind::I32, args[0], perry_abi::layout::array::DATA);
-                let slot = self.slot_address(ctx, data, args[1], element);
-                // Reference slots trace the low 32 bits; private keys cache metadata above them.
-                if intrinsic == Intrinsic::KeyFingerprintAt {
-                    Some(self.load(ctx, MemKind::I32, slot, 4))
-                } else {
-                    self.store(ctx, MemKind::I32, slot, 4, args[2]);
-                    None
-                }
-            }
             Intrinsic::StringScalarLength => {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))

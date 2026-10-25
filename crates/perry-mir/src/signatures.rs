@@ -61,8 +61,6 @@ type_kinds! {
     /// Unicode scalar value, or -1 for the empty result of charAt. Internal MIR only.
     Scalar = Ty::Index.get(ctx),
         accepts Ty::Index.matches(ctx, ty);
-    /// Packed internal key fingerprint with no numeric conversion.
-    KeyFingerprint = IntegerType::get(ctx, 32, Signedness::Signless).into();
     Number = FP64Type::get(ctx).into();
     Numeric = Ty::Number.get(ctx),
         accepts ty.deref(ctx).is::<crate::types::NumericType>()

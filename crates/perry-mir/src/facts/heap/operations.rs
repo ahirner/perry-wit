@@ -342,15 +342,9 @@ impl Solver {
                     }
                 }
             }
-            // Key fingerprints touch only opaque slot metadata, preserving element aliases.
             OperationKind::None
             | OperationKind::Stringify
-            | OperationKind::Intrinsic(
-                Intrinsic::JsonExclude
-                | Intrinsic::JsonInsert
-                | Intrinsic::KeyFingerprintAt
-                | Intrinsic::KeyFingerprintStore,
-            ) => {}
+            | OperationKind::Intrinsic(Intrinsic::JsonExclude | Intrinsic::JsonInsert) => {}
             _ => {
                 // Unmodelled storage may retain aliases or mutate reachable objects.
                 for value in operation.operands() {

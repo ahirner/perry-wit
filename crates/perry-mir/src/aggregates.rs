@@ -42,9 +42,6 @@ use pliron::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-mod dictionaries;
-pub(crate) use dictionaries::DecomposeDictionaries;
-
 /// Callees with at most this many operations are inlined at every call site. Larger leaf
 /// functions are inlined only when they have a single caller and are private to the module.
 const SMALL: usize = 25;
@@ -350,30 +347,6 @@ fn promote(
     Ok(())
 }
 
-enum FieldAccess {
-    Read(FieldGetOp),
-    Write(FieldSetOp),
-}
-
-impl FieldAccess {
-    fn resolve(
-        ctx: &Context,
-        op: Ptr<Operation>,
-        field_index: impl FnOnce(&str) -> Option<usize>,
-    ) -> Option<(usize, Self)> {
-        if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
-            let field = get.get_attr_perry_get_field(ctx)?;
-            let index = field_index(field.as_ref())?;
-            Some((index, Self::Read(get)))
-        } else {
-            let set = Operation::get_op::<FieldSetOp>(op, ctx)?;
-            let field = set.get_attr_perry_set_field(ctx)?;
-            let index = field_index(field.as_ref())?;
-            Some((index, Self::Write(set)))
-        }
-    }
-}
-
 /// Split a record into local field slots when all uses are direct field reads and writes.
 /// Entry slots combined with stores at the original allocation site preserve per-iteration
 /// initialization. A subsequent `mem2reg` pass promotes the slots and inserts control-flow joins.
@@ -381,7 +354,25 @@ pub(crate) struct DecomposeRecords;
 
 impl MatchRewrite for DecomposeRecords {
     fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
-        Operation::get_op::<AllocOp>(op, ctx).is_some()
+        let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) else {
+            return false;
+        };
+        allocation.get_result(ctx).uses(ctx).iter().all(|usage| {
+            usage.find_index(ctx) == 0
+                && (Operation::get_op::<FieldGetOp>(usage.user_op(), ctx).is_some()
+                    || Operation::get_op::<FieldSetOp>(usage.user_op(), ctx).is_some()
+                    || Operation::get_op::<crate::IntrinsicOp>(usage.user_op(), ctx).is_some_and(
+                        |intr| {
+                            matches!(
+                                intr.intrinsic(ctx),
+                                crate::Intrinsic::JsonSpread
+                                    | crate::Intrinsic::JsonExclude
+                                    | crate::Intrinsic::JsonInsert
+                                    | crate::Intrinsic::JsonOrderCopy
+                            )
+                        },
+                    ))
+        })
     }
 
     fn rewrite(
@@ -390,88 +381,52 @@ impl MatchRewrite for DecomposeRecords {
         rewriter: &mut MatchRewriter,
         op: Ptr<Operation>,
     ) -> Result<()> {
-        let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) else {
+        if !self.r#match(ctx, op) {
             return Ok(());
-        };
-        let Some(function) = op
-            .deref(ctx)
-            .get_parent_op(ctx)
-            .and_then(|parent| Operation::get_op::<FuncOp>(parent, ctx))
-        else {
-            return Ok(());
-        };
+        }
+        let allocation = Operation::get_op::<AllocOp>(op, ctx).expect("matched allocation");
+        let function = Operation::get_op::<FuncOp>(
+            op.deref(ctx)
+                .get_parent_op(ctx)
+                .expect("allocation in function"),
+            ctx,
+        )
+        .expect("MIR function");
         let reference = allocation.get_result(ctx);
+        let uses = reference.uses(ctx);
         let record = TypedHandle::<RecordType>::from_handle(reference.get_type(ctx), ctx)?;
-        let (accesses, metadata) = {
-            let definition = record.deref(ctx);
-            let field_indices: HashMap<_, _> = definition
-                .fields()?
-                .iter()
-                .enumerate()
-                .map(|(index, (name, _))| (name.as_str(), index))
-                .collect();
-            let mut accesses = Vec::new();
-            let mut metadata = Vec::new();
-            for usage in reference.uses(ctx) {
-                let user = usage.user_op();
-                if usage.find_index(ctx) != 0 {
-                    return Ok(());
-                }
-                if let Some(access) =
-                    FieldAccess::resolve(ctx, user, |field| field_indices.get(field).copied())
-                {
-                    accesses.push(access);
-                } else if crate::intrinsics::intrinsic_of(ctx, user).is_some_and(|intrinsic| {
-                    matches!(
-                        intrinsic,
-                        crate::Intrinsic::JsonSpread
-                            | crate::Intrinsic::JsonExclude
-                            | crate::Intrinsic::JsonInsert
-                            | crate::Intrinsic::JsonOrderCopy
-                    )
-                }) {
-                    metadata.push(user);
-                } else {
-                    return Ok(());
-                }
-            }
-            (accesses, metadata)
-        };
-        let field_count = record.deref(ctx).fields()?.len();
-        let mut slots = Vec::with_capacity(field_count);
+        let fields = record.deref(ctx).fields()?.to_vec();
+        let initial: Vec<_> = allocation.get_operation().deref(ctx).operands().collect();
+        let mut slots = HashMap::with_capacity(fields.len());
+        let mut ordered_slots = Vec::with_capacity(fields.len());
         rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));
-        for index in 0..field_count {
-            let ty = record.deref(ctx).fields()?[index].1;
+        for (name, ty) in fields {
             let slot = LocalOp::new(ctx, ty);
             rewriter.insert_op(ctx, &slot);
-            slots.push(slot.get_result(ctx));
+            let slot_val = slot.get_result(ctx);
+            ordered_slots.push(slot_val);
+            slots.insert(name, slot_val);
         }
-        rewriter.set_insertion_point_before_operation(op);
-        for (index, &slot) in slots.iter().enumerate() {
-            let value = op.deref(ctx).get_operand(index);
+        rewriter.set_insertion_point_before_operation(allocation.get_operation());
+        for (slot, value) in ordered_slots.into_iter().zip(initial) {
             let store = StoreOp::new(ctx, slot, value);
             rewriter.insert_op(ctx, &store);
         }
-        for (field, access) in accesses {
-            let (user, replacement) = match access {
-                FieldAccess::Read(get) => (
-                    get.get_operation(),
-                    LoadOp::new(ctx, slots[field])?.get_operation(),
-                ),
-                FieldAccess::Write(set) => {
-                    let value = set.get_operation().deref(ctx).get_operand(1);
-                    (
-                        set.get_operation(),
-                        StoreOp::new(ctx, slots[field], value).get_operation(),
-                    )
-                }
-            };
-            rewriter.set_insertion_point_before_operation(user);
-            rewriter.insert_operation(ctx, replacement);
-            rewriter.replace_operation(ctx, user, replacement);
-        }
-        for op in metadata {
-            rewriter.erase_operation(ctx, op);
+        for use_ in uses {
+            let op = use_.user_op();
+            rewriter.set_insertion_point_before_operation(op);
+            if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
+                let load = LoadOp::new(ctx, slots[&get.field(ctx)])?;
+                rewriter.insert_op(ctx, &load);
+                rewriter.replace_operation(ctx, op, load.get_operation());
+            } else if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
+                let value = op.deref(ctx).get_operand(1);
+                let store = StoreOp::new(ctx, slots[&set.field(ctx)], value);
+                rewriter.insert_op(ctx, &store);
+                rewriter.replace_operation(ctx, op, store.get_operation());
+            } else {
+                rewriter.erase_operation(ctx, op);
+            }
         }
         rewriter.erase_operation(ctx, allocation.get_operation());
         Ok(())
