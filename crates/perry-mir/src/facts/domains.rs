@@ -160,17 +160,17 @@ pub(super) enum Range {
 }
 
 impl Interval {
-    /// `Math.abs` over the interval.
-    pub(super) fn abs(self) -> Self {
-        let (lower, upper) = (self.lower.abs(), self.upper.abs());
-        Self {
+    /// `Math.abs` over the interval when both endpoint magnitudes are representable.
+    pub(super) fn checked_abs(self) -> Option<Self> {
+        let (lower, upper) = (self.lower.checked_abs()?, self.upper.checked_abs()?);
+        Some(Self {
             lower: if self.lower <= 0 && self.upper >= 0 {
                 0
             } else {
                 lower.min(upper)
             },
             upper: lower.max(upper),
-        }
+        })
     }
 
     /// `Math.min` (`max: false`) or `Math.max` of values from both intervals.

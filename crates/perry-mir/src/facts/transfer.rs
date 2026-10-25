@@ -273,9 +273,11 @@ impl Solver {
                     });
                 let range = match range {
                     Some(Range::Bottom) => Range::Bottom,
-                    Some(Range::Bounds(interval)) if contract == BuiltinContract::Abs => {
-                        Range::clamp(interval.abs(), fact.integer())
-                    }
+                    Some(Range::Bounds(interval)) if contract == BuiltinContract::Abs => interval
+                        .checked_abs()
+                        .map_or(Range::of(fact.integer()), |interval| {
+                            Range::clamp(interval, fact.integer())
+                        }),
                     Some(Range::Bounds(interval)) => Range::clamp(interval, fact.integer()),
                     None | Some(Range::Unknown) => Range::of(fact.integer()),
                 };

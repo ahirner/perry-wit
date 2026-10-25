@@ -128,6 +128,7 @@ pub enum Form {
     Permuted,
     Branch,
     Loop,
+    LoopCarried,
     InertException,
     Timer,
     StoredTimer,
@@ -143,12 +144,13 @@ pub enum Form {
 
 impl Form {
     /// Synchronous metamorphic forms of a direct program, starting with [Form::Direct].
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Direct,
         Self::Local,
         Self::Permuted,
         Self::Branch,
         Self::Loop,
+        Self::LoopCarried,
         Self::InertException,
     ];
 
@@ -230,6 +232,9 @@ impl Program {
             Form::Loop => {
                 format!("let value = 0; for (let i = 0; i < 1; i++) {{ value = {expression}; }}")
             }
+            Form::LoopCarried => format!(
+                "let value = {expression}; for (let i = 0; i < 4; i++) {{ value = -value; }}"
+            ),
             Form::InertException => {
                 format!("let value = 0; try {{ value = {expression}; }} finally {{ }}")
             }
