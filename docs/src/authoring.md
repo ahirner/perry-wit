@@ -35,7 +35,7 @@ TypeScript `camelCase` export names map to `kebab-case` WIT functions. Exported 
 
 When `./wit` exists (or `--wit <dir>` is passed), `perry-wit` compiles against that WIT package instead of inferring a contract. `--world <name>` selects the world when the package defines more than one.
 
-Pass `--gen-wit` to write the inferred contract to `<wit-dir>/world.wit` (`package local:<world>`, defaulting to `wit/world.wit` and world `app`) and compile against it:
+Pass `--gen-wit` to write the inferred contract to `<wit-dir>/world.wit` (`package local:app`, defaulting to `wit/world.wit` and world `app`) and compile against it:
 
 ```sh
 perry-wit src/index.ts --gen-wit -o dist/task.wasm
