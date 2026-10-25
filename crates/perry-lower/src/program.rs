@@ -189,7 +189,7 @@ pub(super) fn build_module(
             !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
                 if hir_compat::is_import_initializer(callee))
         });
-    if has_init {
+    if has_init || !hir.functions.iter().any(|function| function.is_exported) {
         // Without exported functions, the top-level statements (with top-level `await`) form
         // the body of a command's `wasi:cli/run`. With exported functions they initialize the
         // module once before the first entry point, and `run` only awaits that initialization.

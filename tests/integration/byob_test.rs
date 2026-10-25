@@ -202,7 +202,7 @@ fn check_typescript(source: &str) -> Result<()> {
     let checked = std::process::Command::new("tsc")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/crates/perry-frontend/src/sdk/runtime.d.ts"
+            "/crates/perry-contract/src/sdk/runtime.d.ts"
         ))
         .current_dir(directory.path())
         .args(["--noEmit", "--strict", "--target", "ES2022"])

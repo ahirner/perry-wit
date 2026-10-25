@@ -1,5 +1,5 @@
 //! Binding WIT world exports to exported TypeScript functions.
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
@@ -194,7 +194,8 @@ pub(crate) fn constrain_numbers(
         };
         let existing =
             perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
-        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx)
+            .with_context(|| format!("Invalid function type for '{}'", export.function))?;
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if !export.is_command() && args.len() != export.params.len() {
             return Err(crate::PerryDiagnostic::from(BindError::ArityMismatch {
@@ -212,10 +213,16 @@ pub(crate) fn constrain_numbers(
             continue;
         }
         let mut constrained = false;
-        for (source, abi) in args
+        for (source, abi, result) in args
             .iter_mut()
             .zip(&export.params)
-            .chain(results.iter_mut().zip(export.result.iter()))
+            .map(|(source, abi)| (source, abi, false))
+            .chain(
+                results
+                    .iter_mut()
+                    .zip(export.result.iter())
+                    .map(|(source, abi)| (source, abi, true)),
+            )
         {
             let Some(integer) = abi.integer_type(ctx) else {
                 continue;
@@ -234,6 +241,9 @@ pub(crate) fn constrain_numbers(
                     })
                     .into(),
                 );
+            }
+            if result && wide && source.deref(ctx).is::<perry_mir::BigIntType>() {
+                continue;
             }
             if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
                 || (!wide
@@ -470,6 +480,10 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             Contract::ByteStream => AbiType::ByteStream,
             Contract::List(ty) => AbiType::List(Box::new(ty?)),
             Contract::Option(ty) => AbiType::Option(Box::new(ty?)),
+            Contract::Absent { value, null } => AbiType::Absent {
+                value: Box::new(value?),
+                null,
+            },
             Contract::Result { ok, err } => AbiType::Result {
                 ok: ok.transpose()?.map(Box::new),
                 err: err.transpose()?.map(Box::new),

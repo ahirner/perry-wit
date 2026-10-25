@@ -50,7 +50,9 @@ impl AbiType {
     pub(super) fn has_resources(&self) -> bool {
         match self {
             Self::Resource { .. } => true,
-            Self::List(value) | Self::Option(value) => value.has_resources(),
+            Self::List(value) | Self::Option(value) | Self::Absent { value, .. } => {
+                value.has_resources()
+            }
             Self::Record(fields) => fields.iter().any(|(_, ty)| ty.has_resources()),
             Self::Result { ok, err } => ok.iter().chain(err).any(|ty| ty.has_resources()),
             Self::Variant(cases) => cases

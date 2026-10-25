@@ -3,11 +3,9 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
+use crate::names::{TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children};
+use crate::types::{Contract, Input, convert};
 use anyhow::Result;
-use perry_contract::names::{
-    TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children,
-};
-use perry_contract::types::{Contract, Input, convert};
 use std::{collections::HashSet, fmt::Write as _};
 use wit_parser::{Function, Resolve, Type, TypeDefKind, World, WorldItem, WorldKey};
 
@@ -15,7 +13,13 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
     convert(
         names.resolve,
         input,
-        &|id| names.name(id),
+        &|id| {
+            if crate::types::absence_type(names.resolve, id).is_some() {
+                None
+            } else {
+                names.name(id)
+            }
+        },
         &|contract| match contract {
             Contract::Scalar(ty) => scalar_type(ty).into(),
             Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
@@ -23,6 +27,9 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
             Contract::ByteStream => "ReadableStream<Uint8Array>".into(),
             Contract::List(ty) => format!("Array<{ty}>"),
             Contract::Option(ty) => format!("{ty} | null"),
+            Contract::Absent { value, null } => {
+                format!("{value} | {}undefined", if null { "null | " } else { "" })
+            }
             Contract::Result { ok, err } => {
                 let ok = ok.map(|ty| format!("; value: {ty}")).unwrap_or_default();
                 let err = err.map(|ty| format!("; error: {ty}")).unwrap_or_default();
@@ -34,7 +41,8 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
             Contract::Record(fields) => {
                 let mut out = String::from("{\n");
                 for (name, ty) in fields {
-                    let _ = writeln!(out, "  {name}: {ty};");
+                    let optional = if ty.ends_with("| undefined") { "?" } else { "" };
+                    let _ = writeln!(out, "  {name}{optional}: {ty};");
                 }
                 out.push('}');
                 out
@@ -88,7 +96,7 @@ fn export_result_types(names: &TsNames<'_>, function: &Function) -> Vec<String> 
     ];
     if let Some(result) = function
         .result
-        .and_then(|ty| perry_contract::result_type(names.resolve, ty))
+        .and_then(|ty| crate::result_type(names.resolve, ty))
     {
         types.push(
             result
@@ -97,15 +105,6 @@ fn export_result_types(names: &TsNames<'_>, function: &Function) -> Vec<String> 
         );
     }
     types
-}
-
-fn export_return_ts(names: &TsNames<'_>, func: &Function) -> String {
-    let ret_ty = export_result_types(names, func).join(" | ");
-    if func.kind.is_async() {
-        format!("Promise<{ret_ty}>")
-    } else {
-        ret_ty
-    }
 }
 
 fn implementation_signature(
@@ -149,7 +148,7 @@ fn wit_result_to_ts(names: &TsNames<'_>, func: &Function) -> String {
     }
 }
 
-const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\nexport type u8 = number;\nexport type s8 = number;\nexport type u16 = number;\nexport type s16 = number;\nexport type u32 = number;\nexport type s32 = number;\nexport type u64 = bigint;\nexport type s64 = bigint;\n\n";
+const SUPPORT_TYPES: &str = "/** Outbound byte lists accept UTF-8 text; inbound values remain Uint8Array. */\ndeclare const __witResourceBrand: unique symbol;\nexport interface WitResource { readonly [__witResourceBrand]: true; }\nexport type WitInput<T> = T extends WitResource ? T : T extends Uint8Array ? string | Uint8Array : T extends object ? { [K in keyof T]: WitInput<T[K]> } : T;\nexport type u8 = import(\"perry:types\").u8;\nexport type s8 = import(\"perry:types\").s8;\nexport type u16 = import(\"perry:types\").u16;\nexport type s16 = import(\"perry:types\").s16;\nexport type u32 = import(\"perry:types\").u32;\nexport type s32 = import(\"perry:types\").s32;\nexport type u64 = import(\"perry:types\").u64;\nexport type s64 = import(\"perry:types\").s64;\nexport type f32 = import(\"perry:types\").f32;\nexport type f64 = import(\"perry:types\").f64;\n\n";
 
 fn world_type_declarations(names: &TsNames<'_>) -> String {
     let mut out = String::new();
@@ -163,7 +162,7 @@ fn world_type_declarations(names: &TsNames<'_>) -> String {
 
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
-    perry_contract::export_names::validate_implementation_names(resolve, world)?;
+    crate::export_names::validate_implementation_names(resolve, world)?;
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
 
@@ -182,7 +181,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                     WorldKey::Interface(_) => &func.name,
                 };
                 let ts_func_name = to_camel_case(export_name);
-                let ret_ty = export_return_ts(names, func);
+                let ret_ty = wit_result_to_ts(names, func);
                 let _ = write!(
                     out,
                     "/**\n * WIT export: `{export_name}`\n */\nexport declare function {ts_func_name}("
@@ -209,7 +208,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 let _ = writeln!(out, "export namespace {iface_name} {{");
                 for (_, func) in &iface.functions {
                     let ts_name = to_camel_case(&func.name);
-                    let ret_ty = export_return_ts(names, func);
+                    let ret_ty = wit_result_to_ts(names, func);
                     let _ = write!(out, "  export function {ts_name}(");
                     emit_params(&mut out, names, func);
                     let _ = writeln!(out, "): {ret_ty};");
@@ -223,15 +222,14 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
     out.push_str(
         "export interface ComponentImplementation {\n  readonly [name: string]: unknown;\n",
     );
-    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
-        let opt =
-            if perry_contract::export_names::core_export_name(resolve, entry.key, entry.function)
-                == "wasi:cli/run@0.3.0#run"
-            {
-                "?"
-            } else {
-                ""
-            };
+    for entry in crate::world_functions(resolve, world.exports.iter()) {
+        let opt = if crate::export_names::core_export_name(resolve, entry.key, entry.function)
+            == "wasi:cli/run@0.3.0#run"
+        {
+            "?"
+        } else {
+            ""
+        };
         let _ = writeln!(
             out,
             "  {}{opt}: {};",
@@ -279,6 +277,7 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         declarations.dedup();
         // A JSON string literal is a valid TypeScript module specifier.
         let _ = writeln!(out, "declare module {module} {{");
+        out.push_str("  import type { u8, s8, u16, s16, u32, s32, u64, s64, f32, f64 } from 'perry:types';\n");
         for name in &declarations {
             let _ = writeln!(out, "  type {name} = import(\"./world\").{name};");
         }
@@ -344,7 +343,7 @@ fn emit_function_params(
             out.push_str(", ");
         }
         let name = to_camel_case(&param.name);
-        let name = if crate::is_identifier(&name) {
+        let name = if perry_source::ast::Ident::verify_symbol(&name).is_ok() {
             name
         } else {
             format!("_{name}")
@@ -375,7 +374,8 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
         | TypeDefKind::List(_)
         | TypeDefKind::Option(_)
         | TypeDefKind::Tuple(_)
-        | TypeDefKind::Result(_) => {
+        | TypeDefKind::Result(_)
+        | TypeDefKind::Stream(_) => {
             let value = type_to_ts(names, Input::Definition(type_id));
             if matches!(td.kind, TypeDefKind::Record(_)) {
                 let _ = write!(out, "export interface {type_name} {value}\n\n");
@@ -397,15 +397,16 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
 fn scalar_type(ty: Type) -> &'static str {
     match ty {
         Type::Bool => "boolean",
-        Type::U8
-        | Type::S8
-        | Type::U16
-        | Type::S16
-        | Type::U32
-        | Type::S32
-        | Type::F32
-        | Type::F64 => "number",
-        Type::U64 | Type::S64 => "bigint",
+        Type::U8 => "u8",
+        Type::S8 => "s8",
+        Type::U16 => "u16",
+        Type::S16 => "s16",
+        Type::U32 => "u32",
+        Type::S32 => "s32",
+        Type::U64 => "u64",
+        Type::S64 => "s64",
+        Type::F32 => "f32",
+        Type::F64 => "f64",
         Type::Char | Type::String => "string",
         Type::ErrorContext => "Error | unknown",
         Type::Id(_) => "unknown",

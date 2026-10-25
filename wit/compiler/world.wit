@@ -85,7 +85,8 @@ interface api {
   /// Raw TypeScript exports without WIT. This differs from compile with core-only,
   /// which still checks a WIT world and emits its canonical ABI.
   compile-core: func(program: program) -> result<list<u8>, list<diagnostic>>;
-  generate-sdk: func(wit: wit-input, %world: option<string>) -> result<list<artifact>, list<diagnostic>>;
+  generate-wit: func(program: program, %world: option<string>) -> result<list<artifact>, list<diagnostic>>;
+  generate-sdk: func(wit: option<wit-input>, %world: option<string>) -> result<list<artifact>, list<diagnostic>>;
 }
 
 world compiler {

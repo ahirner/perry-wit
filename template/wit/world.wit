@@ -1,5 +1,0 @@
-package example:task@0.1.0;
-
-world task {
-    export run-task: func(input: string) -> string;
-}

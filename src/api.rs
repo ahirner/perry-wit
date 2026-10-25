@@ -18,105 +18,17 @@
 //! # }
 //! ```
 
-use anyhow::{Context, Result, ensure};
-use std::collections::BTreeMap;
+use anyhow::Result;
 
-#[derive(Clone, Debug, Default)]
-pub struct Source {
-    /// Optional diagnostic name. For a TypeScript entrypoint, this also serves as its logical identity.
-    pub name: Option<String>,
-    pub contents: Vec<u8>,
-}
-
-impl From<&[u8]> for Source {
-    fn from(contents: &[u8]) -> Self {
-        Self {
-            contents: contents.to_vec(),
-            name: None,
-        }
-    }
-}
-
-/// A supplied dependency module resolved from in-memory contents by package-relative name.
-#[derive(Clone, Debug)]
-pub struct Module {
-    pub name: String,
-    pub contents: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Program {
-    pub source: Source,
-    pub modules: Vec<Module>,
-}
-
-#[derive(Clone, Debug)]
-pub enum Package {
-    Sources(Vec<Source>),
-    Encoded(Vec<u8>),
-}
-
-impl From<&[u8]> for Package {
-    fn from(contents: &[u8]) -> Self {
-        Self::Sources(vec![contents.into()])
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Wit {
-    pub application: Package,
-    pub dependencies: Vec<Package>,
-}
+pub use perry_contract::{Artifact, Package, Wit};
+use perry_source::program;
+pub use perry_source::{Module, Program, Source};
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub world: Option<String>,
     /// Emit the linked core Wasm module directly while preserving the selected WIT world's ABI.
     pub core_only: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Artifact {
-    pub name: String,
-    pub contents: Vec<u8>,
-}
-
-pub(crate) fn text<'a>(contents: &'a [u8], name: Option<&str>) -> Result<&'a str> {
-    std::str::from_utf8(contents)
-        .with_context(|| format!("{} is not UTF-8", name.unwrap_or("input")))
-}
-
-fn module_name(name: &str) -> Result<&str> {
-    ensure!(
-        !name.is_empty()
-            && !name.contains(['\\', '\0', ':'])
-            && name
-                .split('/')
-                .all(|part| !part.is_empty() && part != "." && part != ".."),
-        "module identity must be package-relative: {name:?}"
-    );
-    Ok(name)
-}
-
-pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, String>)> {
-    let identity = module_name(input.source.name.as_deref().unwrap_or("input.ts"))?;
-    let mut modules = BTreeMap::new();
-    for source in &input.modules {
-        let name = module_name(&source.name)?;
-        ensure!(
-            name != identity && !modules.contains_key(name),
-            "duplicate module identity: {name}"
-        );
-        modules.insert(
-            name.to_owned(),
-            text(&source.contents, Some(name))?.to_owned(),
-        );
-    }
-    Ok((
-        text(&input.source.contents, Some(identity))?,
-        identity,
-        modules,
-    ))
 }
 
 /// Compile supplied TypeScript and WIT contents with the embedded standard packages.
@@ -139,13 +51,6 @@ fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::
 fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
     let (source, identity, modules) = program(input)?;
     crate::compiler::compile_core_sources(source, identity, &modules, false)
-}
-
-/// Generate declaration contents. Project layout and writing belong to the caller.
-fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
-    let world = crate::component::wit::select_world(&resolve, package, world)?;
-    crate::sdk::declarations(&resolve, world)
 }
 
 /// Compile in-memory TypeScript source modules and WIT package definitions into a
@@ -201,10 +106,35 @@ pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::Comp
 }
 
 pub fn generate_sdk(
-    wit: &Wit,
+    wit: Option<&Wit>,
     world: Option<&str>,
 ) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
-    generate_sdk_impl(wit, world).map_err(|error| {
+    perry_contract::sdk::generate(wit, world).map_err(|error| {
         crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+    })
+}
+
+/// Infer a WIT package from in-memory TypeScript sources.
+///
+/// ```
+/// # fn main() -> Result<(), perry_wit::CompileError> {
+/// use perry_wit::api::{self, Options, Program, Wit};
+/// let program = Program {
+///     source: b"export function twice(n: number): number { return n * 2; }".as_slice().into(),
+///     ..Default::default()
+/// };
+/// let files = api::generate_wit(&program, None)?;
+/// let contract = Wit::from(files);
+/// let compiled = api::compile(&program, &contract, &Options::default())?;
+/// # assert!(compiled.component.is_some());
+/// # Ok(())
+/// # }
+/// ```
+pub fn generate_wit(
+    input: &Program,
+    world: Option<&str>,
+) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
+    perry_contract::generate_wit(input, world).map_err(|error| {
+        crate::CompileError::from_error(error, crate::DiagnosticCode::UnsupportedType)
     })
 }

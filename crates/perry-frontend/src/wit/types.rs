@@ -92,6 +92,11 @@ pub(super) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
             .entry(wit_key.to_string())
             .or_insert(Foreign::Integer { width, signedness });
     }
+    for name in ["f32", "f64"] {
+        types
+            .entry(name.into())
+            .or_insert(Foreign::Type(HirType::Number));
+    }
     types
 }
 
@@ -161,6 +166,13 @@ pub(super) fn ty(resolve: &Resolve, input: Input) -> Option<HirType> {
                         .collect::<Option<_>>()?,
                 ),
                 Contract::Option(ty) => HirType::Union(vec![ty?, HirType::Null]),
+                Contract::Absent { value, null } => {
+                    let mut types = vec![value?, HirType::Void];
+                    if null {
+                        types.push(HirType::Null);
+                    }
+                    HirType::Union(types)
+                }
                 Contract::Bytes => HirType::Named("Uint8Array".into()),
                 Contract::List(ty) => HirType::Array(Box::new(ty?)),
                 Contract::Tuple(items) => HirType::Tuple(items.collect::<Option<_>>()?),

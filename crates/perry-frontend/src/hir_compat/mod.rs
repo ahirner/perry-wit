@@ -17,16 +17,12 @@ mod constructors;
 pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
-mod locations;
-pub use locations::Locations;
-mod methods;
-mod parser;
-pub(crate) use parser::parse;
+pub use perry_source::Locations;
 mod iteration;
+mod methods;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
-mod source;
-pub(crate) use source::validate;
+use perry_source::validate;
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
@@ -46,7 +42,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
     locations.collect(&ast);
-    let spans = source::validate(&ast, &locations)?;
+    let spans = validate(&ast, &locations)?;
     let mut constructors = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));

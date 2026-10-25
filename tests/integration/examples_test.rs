@@ -1,4 +1,4 @@
-//! Execute checked-in sources against their checked-in WIT contracts.
+//! Execute checked-in sources with authored and inferred contracts.
 use anyhow::Result;
 use http_body_util::{BodyExt, Full};
 use std::{
@@ -237,14 +237,9 @@ fn checked_in_markdown_and_template_examples_execute() -> Result<()> {
         assert_eq!(count.call(&mut store, (text,))?.0, expected);
     }
 
-    let template = perry_wit::compile_file(
-        std::path::Path::new("template/src/index.ts"),
-        &perry_wit::CompileOptions {
-            wit_dir: "template/wit".into(),
-            world: Some("task".into()),
-            core_only: false,
-        },
-    )?;
+    let program = perry_source::files::read_program(std::path::Path::new("template/src/index.ts"))?;
+    let wit = perry_wit::api::Wit::from(perry_wit::api::generate_wit(&program, None)?);
+    let template = perry_wit::api::compile(&program, &wit, &Default::default())?;
     let component = Component::new(&engine, template.component.unwrap().stripped)?;
     let mut store = Store::new(&engine, ());
     let instance = linker.instantiate(&mut store, &component)?;

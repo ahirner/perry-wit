@@ -43,7 +43,9 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Expr::Sequence(parts) = expr {
             let (last, effects) = parts.split_last().context("empty sequence expression")?;
-            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+            if let [Expr::String(token), _] = parts.as_slice()
+                && let Some(span) = self.shapes.metadata.locations.operator_span(token)
+            {
                 return self
                     .expression_with(ctx, last, expected)
                     .map_err(|error| crate::diagnostics::annotate(error, Some(span)));

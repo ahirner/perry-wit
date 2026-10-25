@@ -10,6 +10,7 @@ pub enum Contract<'a, T> {
     ByteStream,
     List(T),
     Option(T),
+    Absent { value: T, null: bool },
     Result { ok: Option<T>, err: Option<T> },
     Tuple(Children<'a, T>),
     Record(Children<'a, (String, T)>),
@@ -40,6 +41,12 @@ pub fn convert<T>(
         Input::Definition(id) => id,
     };
     let child = |ty: &Type| convert(resolve, Input::Reference(*ty), reference, construct);
+    if let Some((value, null)) = absence_type(resolve, id) {
+        return construct(Contract::Absent {
+            value: child(&value),
+            null,
+        });
+    }
     construct(match &resolve.types[id].kind {
         TypeDefKind::Type(ty) => return child(ty),
         TypeDefKind::Resource => Contract::Resource { id, owned: true },
@@ -80,4 +87,41 @@ pub fn convert<T>(
         TypeDefKind::Stream(Some(Type::U8)) => Contract::ByteStream,
         other => Contract::Unsupported(other.as_str()),
     })
+}
+
+/// Compiler-defined presence variants retain native null and undefined states.
+pub(crate) fn absence_type(resolve: &Resolve, id: TypeId) -> Option<(Type, bool)> {
+    let definition = &resolve.types[id];
+    let name = definition.name.as_deref()?;
+    let null = if name.starts_with("perry-nullish-") {
+        true
+    } else if name.starts_with("perry-undefined-") {
+        false
+    } else {
+        return None;
+    };
+    let TypeDefKind::Variant(variant) = &definition.kind else {
+        return None;
+    };
+    let names = if null {
+        &["null", "undefined", "value"][..]
+    } else {
+        &["undefined", "value"][..]
+    };
+    if variant.cases.len() != names.len()
+        || !variant
+            .cases
+            .iter()
+            .zip(names)
+            .all(|(case, name)| case.name == *name)
+    {
+        return None;
+    }
+    if variant.cases[..names.len() - 1]
+        .iter()
+        .any(|case| case.ty.is_some())
+    {
+        return None;
+    }
+    Some((variant.cases.last()?.ty?, null))
 }

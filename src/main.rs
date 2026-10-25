@@ -15,22 +15,23 @@ Usage: perry-wit [OPTIONS] <input.ts>
        perry-wit gen-types [OPTIONS]
 
 Commands:
-  gen-types             Generate TypeScript declarations (.d.ts) and tsconfig.json from WIT
+  gen-types            Generate runtime and optional WIT declarations and tsconfig.json
 
 Options:
   -o, --out <PATH>      Output WebAssembly file path (default: 'dist/<stem>.wasm')
-      --wit <PATH>      WIT definition directory (default: 'wit')
+      --wit <PATH>      WIT directory (default: 'wit')
       --world <NAME>    WIT world (required when the package has multiple worlds)
-      --core-only       Output the selected WIT world's core module
+      --gen-wit        Generate WIT and compile (default world: 'app')
+      --core-only      Output the selected WIT world's core module
       --explain-tiers   Explain allocation lifetimes and stream reuse
       --keep-names      Preserve function names for guest profiling
-  -h, --help            Print help information
+  -h, --help           Print help information
 ";
 
 const GEN_TYPES_HELP: &str = "\
 Usage: perry-wit gen-types [OPTIONS]
 
-Generates TypeScript declarations (.d.ts) and tsconfig.json from WIT definitions.
+Generates runtime declarations and tsconfig.json, plus contract declarations when WIT exists.
 
 Options:
       --wit <PATH>      WIT definition directory (default: 'wit')
@@ -91,6 +92,8 @@ fn run() -> Result<()> {
         world: None,
         core_only: false,
     };
+    let mut generate_wit = false;
+    let mut explicit_wit = false;
     let mut explain_tiers = false;
     let mut keep_names = false;
 
@@ -100,7 +103,11 @@ fn run() -> Result<()> {
         let mut val = |ph| take_value(arg, inline, &mut iter, ph, "perry-wit --help");
         match (flag, inline) {
             ("-o" | "--out", _) => out_file_path = Some(val("<PATH>")?),
-            ("--wit", _) => options.wit_dir = PathBuf::from(val("<PATH>")?),
+            ("--wit", _) => {
+                options.wit_dir = PathBuf::from(val("<PATH>")?);
+                explicit_wit = true;
+            }
+            ("--gen-wit", None) => generate_wit = true,
             ("--world", _) => options.world = Some(val("<NAME>")?),
             ("--explain-tiers", None) => explain_tiers = true,
             ("--keep-names", None) => keep_names = true,
@@ -139,7 +146,31 @@ fn run() -> Result<()> {
 
     let ts_file = Path::new(ts_file_path);
     println!("Compiling {}...", ts_file.display());
-    let compiled = compile_file(ts_file, &options)?;
+    let compiled = if generate_wit {
+        let program = perry_source::files::read_program(ts_file)?;
+        let artifacts = perry_wit::api::generate_wit(&program, options.world.as_deref())?;
+        fs::create_dir_all(&options.wit_dir)?;
+        for artifact in &artifacts {
+            fs::write(options.wit_dir.join(&artifact.name), &artifact.contents)?;
+        }
+        let wit = perry_wit::api::Wit::from(artifacts);
+        perry_wit::api::compile(
+            &program,
+            &wit,
+            &perry_wit::api::Options {
+                world: options.world.clone(),
+                core_only: options.core_only,
+            },
+        )?
+    } else {
+        if explicit_wit && !options.wit_dir.exists() {
+            bail!(
+                "WIT directory does not exist: {}",
+                options.wit_dir.display()
+            );
+        }
+        compile_file(ts_file, &options)?
+    };
     if explain_tiers {
         print!("{}", compiled.allocation_report);
     }

@@ -8,6 +8,7 @@ mod resources;
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
+use perry_source::files::load as load_source_files;
 use pliron::{context::Context, op::Op, pass::AnalysisManager, printable::Printable};
 use std::{
     collections::BTreeMap,
@@ -70,9 +71,29 @@ fn compile_typescript_impl(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
+    let modules = load_source_files(source, file_name)?;
+    let (resolve, package) = if !options.wit_dir.exists() && options.wit_dir == Path::new("wit") {
+        let artifacts = perry_contract::generate_sources(
+            source,
+            file_name,
+            &modules,
+            options.world.as_deref(),
+        )?;
+        let wit = crate::api::Wit::from(artifacts);
+        component::wit::resolve_contents(&wit)?
+    } else {
+        component::wit::resolve_wit(&options.wit_dir)?
+    };
     let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
+    compile_sources(
+        source,
+        file_name,
+        &modules,
+        &resolve,
+        world,
+        !options.core_only,
+        false,
+    )
 }
 
 /// Compile against a resolved world, wrapping the output in a component when `componentize`
@@ -96,10 +117,6 @@ fn compile_for_world_with_memory_checks_impl(
     world: wit_parser::WorldId,
 ) -> Result<Compiled> {
     compile_world(source, file_name, resolve, world, true, true)
-}
-
-fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
-    perry_frontend::source_files::load(source, file_name)
 }
 
 fn compile_world(

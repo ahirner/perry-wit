@@ -104,7 +104,8 @@ const examples = [];
 for (const program of packagePrograms(exampleFiles)) {
   const files = new Map([...exampleFiles].filter(([name]) => name.startsWith(program.root + '/')));
   const request = compileRequest(files, program.entry, program.wit, program.world);
-  const compiled = api.compile(request.program, request.wit, request.options);
+  const wit = request.wit || { application: { tag: 'sources', val: api.generateWit(request.program, request.options.world).map(file => ({ name: file.name, contents: file.contents })) }, dependencies: [] };
+  const compiled = api.compile(request.program, wit, request.options);
   const generated = await transpileBytes(compiled.component.stripped, { name: 'example', instantiation: 'async', emitTypescriptDeclarations: false, nodejsCompat: false, noComponentErrorWrapping: false });
   const exports = generated.exports.filter(([, type]) => type === 'function').map(([name]) => name).sort();
   if (program.export && !exports.includes(program.export)) throw new Error(`${program.id}: default function ${program.export} is not exported`);

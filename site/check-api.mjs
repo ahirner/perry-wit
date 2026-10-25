@@ -34,6 +34,12 @@ const declaration = await readFile(new URL('./.generated/compiler/interfaces/per
 assert.match(declaration, /interface Module\s*\{\s*name: string[,;]/);
 assert.match(declaration, /component\?: ComponentOutput/);
 assert.match(declaration, /allocationReport: string/);
+const inferred = api.generateWit(program);
+assert.deepEqual(inferred.map(file => file.name), ['world.wit']);
+assert.match(new TextDecoder().decode(inferred[0].contents), /%n: f64/);
+const inferredWit = { application: { tag: 'sources', val: inferred.map(file => ({ name: file.name, contents: file.contents })) }, dependencies: [] };
+assert(api.compile(program, inferredWit, { coreOnly: false }).component.stripped.length > 0);
+assert.deepEqual(api.generateSdk(undefined).map(file => file.name), ['runtime.d.ts']);
 const sdk = api.generateSdk(wit);
 assert.deepEqual(sdk.map(file => file.name), ['world.d.ts', 'imports.d.ts', 'runtime.d.ts']);
 for (const bytes of [new Uint8Array([255]), encode('export function {')]) {
@@ -121,6 +127,21 @@ if (process.env.PERRY_NATIVE_COMPILER && process.env.PERRY_COMPILER_WASM) {
         for (const file of fixture.sdk) assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-sdk`, file.name))), file.contents);
       }
     }
-    console.log('Native CLI / Wasm CLI / Wasm library: identical component, core and SDK artifacts');
+    await writeFile(join(directory, 'input.ts'), source);
+    const generated = api.generateWit(program, 'custom');
+    const generatedWit = { application: { tag: 'sources', val: generated.map(file => ({ name: file.name, contents: file.contents })) }, dependencies: [] };
+    const generatedComponent = api.compile(program, generatedWit, { world: 'custom', coreOnly: false }).component.stripped;
+    for (const [name, command, prefix] of [
+      ['native', native, []],
+      ['wasm', process.env.PERRY_WASMTIME || 'wasmtime', ['run', '--dir', '.', wasm]],
+    ]) {
+      const run = args => execFileSync(command, [...prefix, ...args], { cwd: directory, stdio: 'pipe' });
+      run(['input.ts', '--gen-wit', '--wit', `${name}-wit`, '--world', 'custom', '-o', `${name}-inferred.wasm`]);
+      for (const file of generated) assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-wit`, file.name))), file.contents);
+      assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-inferred.wasm`))), generatedComponent);
+      run(['gen-types', '--wit', 'absent', '--out', `${name}-builtins`, '--no-tsconfig']);
+      for (const file of api.generateSdk(undefined)) assert.deepEqual(new Uint8Array(await readFile(join(directory, `${name}-builtins`, file.name))), file.contents);
+    }
+    console.log('Native CLI / Wasm CLI / Wasm library: identical component, core, generated WIT and SDK artifacts');
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

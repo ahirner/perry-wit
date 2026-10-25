@@ -6,7 +6,7 @@ export const decode = bytes => decoder.decode(bytes);
 export const directory = name => name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '';
 
 export function worldNames(source) {
-  return [...source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').matchAll(/\bworld\s+([\w-]+)/g)].map(match => match[1]);
+  return [...source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').matchAll(/\bworld\s+%?([\w-]+)/g)].map(match => match[1]);
 }
 
 export async function readFolder(selected) {
@@ -33,8 +33,9 @@ export async function readFolder(selected) {
 }
 
 export function compileRequest(files, entry, witFile, world) {
-  if (!files.has(entry) || !files.has(witFile)) throw new Error('Select a TypeScript entrypoint and WIT package.');
-  const root = directory(witFile);
+  if (!files.has(entry)) throw new Error('Select a TypeScript entrypoint.');
+  if (witFile && !files.has(witFile)) throw new Error('The selected WIT package is missing.');
+  const root = directory(witFile || '');
   const dependencyRoot = root ? `${root}/deps/` : 'deps/';
   const packages = new Map();
   const encoded = [];
@@ -54,7 +55,7 @@ export function compileRequest(files, entry, witFile, world) {
   }
   return {
     program: { source: { name: entry, contents: files.get(entry) }, modules },
-    wit: { application: { tag: 'sources', val: application }, dependencies: [...packages.values()].map(val => ({ tag: 'sources', val })).concat(encoded) },
+    wit: witFile ? { application: { tag: 'sources', val: application }, dependencies: [...packages.values()].map(val => ({ tag: 'sources', val })).concat(encoded) } : undefined,
     options: { world: world || undefined, coreOnly: false },
   };
 }
@@ -77,9 +78,9 @@ export function packagePrograms(files) {
     const settings = pkg.perryWit || {};
     const entry = pkg.main ? path(pkg.main) : ['src/index.ts', 'index.ts'].map(path).find(file => files.has(file));
     const wit = settings.wit ? path(settings.wit) : ['wit/world.wit', 'world.wit'].map(path).find(file => files.has(file));
-    if (!pkg.perryWit && (!entry?.endsWith('.ts') || !wit)) continue;
+    if (!pkg.perryWit && !entry?.endsWith('.ts')) continue;
     if (!entry || !files.has(entry)) throw new Error(`${name}: TypeScript entrypoint ${entry || 'main'} is missing from the selected folder`);
-    if (!wit || !files.has(wit)) throw new Error(`${name}: WIT contract ${wit || 'perryWit.wit'} is missing from the selected folder`);
+    if (settings.wit && !files.has(wit)) throw new Error(`${name}: WIT contract ${wit || 'perryWit.wit'} is missing from the selected folder`);
     if (typeof pkg.name !== 'string' || !pkg.name) throw new Error(`${name}: a package name is required`);
     if (pkg.description !== undefined && typeof pkg.description !== 'string') throw new Error(`${name}: description must be text`);
     const functions = settings.functions || {};

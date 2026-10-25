@@ -66,6 +66,10 @@ pub enum AbiType {
     /// Fields in WIT order, named as the TypeScript record fields.
     Record(Vec<(String, AbiType)>),
     Option(Box<AbiType>),
+    Absent {
+        value: Box<AbiType>,
+        null: bool,
+    },
     Result {
         ok: Option<Box<AbiType>>,
         err: Option<Box<AbiType>>,
@@ -201,6 +205,7 @@ impl AbiType {
             AbiType::String | AbiType::List(_) => out.extend([Flat::I32, Flat::I32]),
             AbiType::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
             AbiType::Option(_)
+            | AbiType::Absent { .. }
             | AbiType::Result { .. }
             | AbiType::Enum(_)
             | AbiType::Variant(_) => out.extend(self.sum_flat()),
@@ -227,6 +232,7 @@ impl AbiType {
             AbiType::String | AbiType::List(_) => 4,
             AbiType::Record(fields) => fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
             AbiType::Option(_)
+            | AbiType::Absent { .. }
             | AbiType::Result { .. }
             | AbiType::Enum(_)
             | AbiType::Variant(_) => self.sum_alignment(),
@@ -246,6 +252,7 @@ impl AbiType {
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 8,
             AbiType::Option(_)
+            | AbiType::Absent { .. }
             | AbiType::Result { .. }
             | AbiType::Enum(_)
             | AbiType::Variant(_) => self.sum_size(),

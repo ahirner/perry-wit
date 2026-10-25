@@ -1,15 +1,13 @@
 //! Parse TypeScript with diagnostics before HIR lowering.
-use super::*;
+use crate::Locations;
+use anyhow::{Result, anyhow};
 use perry_parser::swc_ecma_ast as ast;
 use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 /// Validate string literals / `String.fromCodePoint` and collect untyped variable bindings in one pass.
-pub(crate) fn validate(
-    module: &ast::Module,
-    locations: &locations::Locations<'_>,
-) -> Result<HashSet<(u32, u32)>> {
+pub fn validate(module: &ast::Module, locations: &Locations<'_>) -> Result<HashSet<(u32, u32)>> {
     #[derive(Default)]
     struct Analyzer {
         invalid: Option<Span>,

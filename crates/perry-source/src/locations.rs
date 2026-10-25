@@ -1,5 +1,4 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
 use std::{collections::HashMap, path::PathBuf};
@@ -28,7 +27,7 @@ pub struct Locations<'s> {
 
 impl<'s> Locations<'s> {
     /// Preserve spans for unsupported binary operators as inert sequences before HIR erases binary spans.
-    pub(super) fn preserve_operators(&mut self, module: &mut ast::Module) {
+    pub fn preserve_operators(&mut self, module: &mut ast::Module) {
         struct Preserver<'a>(&'a mut Vec<Span>);
         impl VisitMut for Preserver<'_> {
             // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
@@ -68,10 +67,7 @@ impl<'s> Locations<'s> {
         module.visit_mut_with(&mut Preserver(&mut self.operators));
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
-        let [Expr::String(token), _] = parts else {
-            return None;
-        };
+    pub fn operator_span(&self, token: &str) -> Option<SourceSpan> {
         let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
         self.operators.get(index).and_then(|span| self.span(*span))
     }
@@ -84,7 +80,7 @@ impl<'s> Locations<'s> {
         self.async_init
     }
 
-    pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
+    pub fn has_explicit_return(&self, name: &str) -> bool {
         self.functions
             .get(name)
             .is_some_and(|info| info.explicit_return)
@@ -125,11 +121,11 @@ impl<'s> Locations<'s> {
         self.imports.get(source).and_then(|span| self.span(*span))
     }
 
-    pub(crate) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+    pub fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
         Self::attach(error, self.call_span(byte_offset))
     }
 
-    fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub fn span(&self, span: Span) -> Option<SourceSpan> {
         self.files.iter().find_map(|(file, source, offset)| {
             let start = span.lo.0.checked_sub(offset + 1)? as usize;
             let end = span.hi.0.checked_sub(offset + 1)? as usize;
@@ -138,7 +134,7 @@ impl<'s> Locations<'s> {
         })
     }
 
-    pub(crate) fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
+    pub fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
         Self::attach(error, self.span(span))
     }
 
@@ -151,7 +147,7 @@ impl<'s> Locations<'s> {
         diagnostic.into()
     }
 
-    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
+    pub fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
             locations: &'a mut Locations<'s>,
             in_fn: bool,

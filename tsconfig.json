@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": []
   },
-  "include": ["examples/**/*.ts", "crates/perry-frontend/src/sdk/runtime.d.ts"]
+  "include": ["examples/**/*.ts", "crates/perry-contract/src/sdk/runtime.d.ts"]
 }

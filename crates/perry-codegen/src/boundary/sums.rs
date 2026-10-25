@@ -56,7 +56,11 @@ impl AbiType {
     pub(super) fn is_sum(&self) -> bool {
         matches!(
             self,
-            Self::Option(_) | Self::Result { .. } | Self::Enum(_) | Self::Variant(_)
+            Self::Option(_)
+                | Self::Absent { .. }
+                | Self::Result { .. }
+                | Self::Enum(_)
+                | Self::Variant(_)
         )
     }
 
@@ -64,12 +68,22 @@ impl AbiType {
         let count = match self {
             Self::Variant(cases) => cases.len(),
             Self::Option(_) | Self::Result { .. } => 2,
+            Self::Absent { null, .. } => {
+                if *null {
+                    3
+                } else {
+                    2
+                }
+            }
             Self::Enum(names) => names.len(),
             _ => 0,
         };
         (0..count).map(|case| match self {
             Self::Variant(cases) => cases[case].1.as_ref(),
             Self::Option(inner) => (case == 1).then_some(inner.as_ref()),
+            Self::Absent { value, null } => {
+                (case == if *null { 2 } else { 1 }).then_some(value.as_ref())
+            }
             Self::Result { ok, err } => {
                 if case == 0 {
                     ok.as_deref()
@@ -271,7 +285,7 @@ impl FunctionLowering<'_, '_> {
         abi: &AbiType,
     ) -> Result<NativePayload> {
         let (offset, field) = match ty {
-            AbiType::Option(_) => {
+            AbiType::Option(_) | AbiType::Absent { .. } => {
                 return Ok(NativePayload {
                     mir: optional_value(ctx, mir)
                         .ok_or_else(|| anyhow!("WIT option needs a nullable TypeScript value"))?,
@@ -299,7 +313,9 @@ impl FunctionLowering<'_, '_> {
             }
             _ => bail!("sum has no payload"),
         };
-        let mir = if matches!(ty, AbiType::Result { .. }) && !matches!(abi, AbiType::Option(_)) {
+        let mir = if matches!(ty, AbiType::Result { .. })
+            && !matches!(abi, AbiType::Option(_) | AbiType::Absent { .. })
+        {
             present_type(ctx, field)
         } else {
             field
@@ -319,6 +335,11 @@ impl FunctionLowering<'_, '_> {
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Value> {
         match ty {
+            AbiType::Absent { null, .. } => match payload {
+                Some((_, value)) => Ok(value),
+                None if *null && case == 0 => self.null(ctx, mir),
+                None => self.undefined(ctx, mir),
+            },
             AbiType::Variant(cases) => self.variant_new(ctx, &cases[case].0, payload),
             AbiType::Enum(names) => {
                 ensure!(
@@ -468,6 +489,19 @@ impl FunctionLowering<'_, '_> {
         value: Carriers<Value>,
     ) -> Result<Value> {
         Ok(match ty {
+            AbiType::Absent { null, .. } => {
+                let missing = self.is_absent(ctx, value, mir)?;
+                let present = self.i32_const(ctx, if *null { 2 } else { 1 });
+                let absent = if *null {
+                    let is_null = self.absence_test(ctx, value, mir, true)?;
+                    let zero = self.i32_const(ctx, 0);
+                    let one = self.i32_const(ctx, 1);
+                    self.select(ctx, is_null, zero, one)
+                } else {
+                    self.i32_const(ctx, 0)
+                };
+                self.select(ctx, missing, absent, present)
+            }
             AbiType::Option(_) => {
                 ensure!(
                     optional_value(ctx, mir).is_some(),

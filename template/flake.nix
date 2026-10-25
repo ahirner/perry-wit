@@ -10,8 +10,6 @@
         name = "my-task";
         src = ./.;
         entry = "src/index.ts";
-        wit = "wit";
-        world = "task";
       };
     in {
       packages = builtins.mapAttrs (_: sdk: {

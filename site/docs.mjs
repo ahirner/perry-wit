@@ -23,13 +23,13 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
     for (const [, lang, id, body] of text.matchAll(/^```(wit|ts) check=([\w-]+)\n([\s\S]*?)^```$/gm)) {
       if (!groups.has(id)) groups.set(id, { page, files: {} });
       const group = groups.get(id);
-      if (group.page !== page || group.files[lang]) throw new Error(`${page}: check=${id} needs exactly one wit and one ts block on one page`);
+      if (group.page !== page || group.files[lang]) throw new Error(`${page}: check=${id} needs one ts block and at most one wit block on one page`);
       group.files[lang] = await expandIncludes(body, dirname(page));
     }
   }
   const compiled = new Map();
   for (const [id, { page, files }] of groups) {
-    if (!files.wit || !files.ts) throw new Error(`${page}: check=${id} needs both a wit and a ts block`);
+    if (!files.ts) throw new Error(`${page}: check=${id} needs a ts block`);
     compiled.set(id, compile(api, `${page}#${id}`, files.ts, files.wit));
   }
 
@@ -168,12 +168,11 @@ async function expandIncludes(body, base) {
 
 /** Compile one snippet pair through the compiler component, naming the snippet on failure. */
 function compile(api, label, ts, wit, coreOnly = false) {
-  const worlds = [...wit.matchAll(/^world ([\w-]+)/gm)].map(match => match[1]);
-  if (worlds.length !== 1) throw new Error(`${label}: expected one world, found ${worlds.length}`);
-  const files = new Map([['src/index.ts', encode(ts)], ['wit/world.wit', encode(wit)]]);
-  const request = compileRequest(files, 'src/index.ts', 'wit/world.wit', worlds[0]);
+  const program = { source: { name: 'src/index.ts', contents: encode(ts) }, modules: [] };
   try {
-    return api.compile(request.program, request.wit, { ...request.options, coreOnly });
+    const files = wit ? [{ name: 'world.wit', contents: encode(wit) }] : api.generateWit(program);
+    const contract = { application: { tag: 'sources', val: files }, dependencies: [] };
+    return api.compile(program, contract, { coreOnly });
   } catch (error) {
     throw new Error(`${label} failed to compile: ${error.message || JSON.stringify(error.payload || error)}`);
   }

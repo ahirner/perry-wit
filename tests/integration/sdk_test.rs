@@ -203,7 +203,7 @@ fn generated_contract_checks_the_selected_implementation_module() {
             initialize_tsconfig: true,
         })
         .unwrap();
-        assert!(result.check_path.exists());
+        assert!(result.check_path.as_ref().unwrap().exists());
         for (source, valid) in [
             (
                 "export function runTask(input: string): string { return input; }",
@@ -463,16 +463,10 @@ fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
             .output()
             .unwrap()
     };
-    let missing_wit = String::from_utf8_lossy(&run_gen().stderr).into_owned();
-    assert!(
-        missing_wit.contains("WIT directory 'wit' does not exist"),
-        "{missing_wit}"
-    );
-    assert_eq!(
-        missing_wit.matches("WitResolution:").count(),
-        1,
-        "{missing_wit}"
-    );
+    let missing_wit = run_gen();
+    assert!(missing_wit.status.success());
+    assert!(missing_wit.stderr.is_empty());
+    assert!(dir.path().join(".perry/types/runtime.d.ts").exists());
 
     fs::create_dir(dir.path().join("wit")).unwrap();
     fs::write(
@@ -496,5 +490,118 @@ fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
     assert!(
         missing_pkg.contains("help: Add a package header"),
         "{missing_pkg}"
+    );
+}
+
+#[test]
+fn optional_wit_generation_and_edited_contracts() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_perry-wit"))
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [&["gen-types"][..], &["gen-types", "--wit", "absent"][..]] {
+        let output = cli(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join(".perry/types/implementation-check.ts").exists());
+        let (ok, diagnostics) = tsc_check(root, &[]);
+        assert!(ok, "{diagnostics}");
+    }
+    fs::write(
+        root.join("main.ts"),
+        "export function double(value: number): number {return value*2;}",
+    )
+    .unwrap();
+    let output = cli(&["main.ts"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join("dist/main.wasm").exists());
+    assert!(!root.join("wit").exists());
+    assert!(!cli(&["main.ts", "--wit", "missing"]).status.success());
+    assert!(!cli(&["main.ts", "--wit", "wit"]).status.success());
+    fs::write(root.join("invalid.ts"), "const bad: number = 'text';").unwrap();
+    let (success, _) = tsc_check(root, &["-p", ".perry/types"]);
+    assert!(
+        !success,
+        "WIT-free SDK configuration must include project sources"
+    );
+    fs::remove_file(root.join("invalid.ts")).unwrap();
+    assert!(
+        cli(&["gen-types", "--entry", "custom/entry.ts"])
+            .status
+            .success()
+    );
+    fs::create_dir(root.join("custom")).unwrap();
+    fs::write(root.join("custom/entry.ts"), "const bad: number = 'text';").unwrap();
+    let (success, _) = tsc_check(root, &["-p", ".perry/types"]);
+    assert!(
+        !success,
+        "WIT-free SDK configuration must check a custom entry"
+    );
+    fs::remove_file(root.join("custom/entry.ts")).unwrap();
+    fs::create_dir(root.join("interfaces")).unwrap();
+    fs::write(root.join("interfaces/world.wit"), "malformed").unwrap();
+    fs::write(root.join("interfaces/keep.txt"), "keep").unwrap();
+    let output = cli(&[
+        "main.ts",
+        "--gen-wit",
+        "--wit",
+        "interfaces",
+        "--world",
+        "custom",
+        "-o",
+        "custom.wasm",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = fs::read_to_string(root.join("interfaces/world.wit")).unwrap();
+    assert!(generated.contains("world %custom"));
+    assert!(generated.contains("package local:app;"));
+    assert_eq!(
+        fs::read_to_string(root.join("interfaces/keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(root.join("custom.wasm").exists());
+    fs::write(
+        root.join("interfaces/world.wit"),
+        generated.replace("f64", "s32"),
+    )
+    .unwrap();
+    let output = cli(&["main.ts", "--wit", "interfaces", "--world", "custom"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::write(root.join("wit/world.wit"), "malformed").unwrap();
+    assert!(!cli(&["main.ts"]).status.success());
+    assert!(!cli(&["gen-types"]).status.success());
+    let output = cli(&["main.ts", "--gen-wit"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(root.join("empty.ts"), "").unwrap();
+    let output = cli(&["empty.ts", "--gen-wit", "--wit", "empty-contract"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

@@ -62,3 +62,51 @@ pub fn result_type(
     }
     None
 }
+
+pub mod resolution;
+pub mod sdk;
+pub use perry_source::{Module, Program, Source};
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+#[derive(Clone, Debug)]
+pub enum Package {
+    Sources(Vec<Source>),
+    Encoded(Vec<u8>),
+}
+
+impl From<&[u8]> for Package {
+    fn from(contents: &[u8]) -> Self {
+        Self::Sources(vec![contents.into()])
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Wit {
+    pub application: Package,
+    pub dependencies: Vec<Package>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Artifact {
+    pub name: String,
+    pub contents: Vec<u8>,
+}
+
+mod generate;
+pub use generate::{generate_sources, generate_wit};
+
+impl From<Vec<Artifact>> for Wit {
+    fn from(artifacts: Vec<Artifact>) -> Self {
+        Self {
+            application: Package::Sources(
+                artifacts
+                    .into_iter()
+                    .map(|artifact| Source {
+                        name: Some(artifact.name),
+                        contents: artifact.contents,
+                    })
+                    .collect(),
+            ),
+            dependencies: vec![],
+        }
+    }
+}

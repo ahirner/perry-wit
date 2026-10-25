@@ -8,6 +8,7 @@ let program;
 let operation;
 let selectedTab = 'result';
 let artifact;
+let generatedWit;
 let selectedFunction = '';
 let failed = false;
 const savedArguments = new Map();
@@ -57,9 +58,10 @@ function selectTab(name) {
   showOutput();
 }
 function refreshWorlds(preferred = $('world').value) {
+  const inferred = !$('wit-file').value;
   const root = directory($('wit-file').value);
   const sources = [...workspace].filter(([name]) => name.endsWith('.wit') && directory(name) === root).map(([, bytes]) => decode(bytes));
-  const names = worldNames(sources.join('\n'));
+  const names = inferred ? [] : worldNames(sources.join('\n'));
   selectOptions($('world'), names, preferred);
   if (names.length > 1 && !names.includes(preferred)) {
     $('world').prepend(new Option('Choose a world…', '', true, true));
@@ -67,7 +69,7 @@ function refreshWorlds(preferred = $('world').value) {
   }
   $('world-picker').hidden = names.length < 2;
   $('world-help').hidden = names.length < 2;
-  $('world-description').textContent = names.length === 1 ? `World: ${names[0]}` : names.length ? '' : 'Add a WIT world to describe this component’s interface.';
+  $('world-description').textContent = names.length === 1 ? `World: ${names[0]}` : names.length ? '' : 'Inferred from TypeScript when compiling.';
 }
 function setEditor(id, bytes) {
   const editor = $(id);
@@ -86,14 +88,23 @@ function displayWorkspace(preferred = {}) {
   const sources = names.filter(name => name.endsWith('.ts'));
   selectOptions($('source-file'), sources, preferred.entry);
   selectOptions($('entry'), sources.filter(name => !name.endsWith('.d.ts')), preferred.entry);
-  selectOptions($('wit-file'), names.filter(name => name.endsWith('.wit')), preferred.wit);
+  selectOptions($('wit-file'), ['', ...names.filter(name => name.endsWith('.wit'))], preferred.wit || '');
+  $('wit-file').options[0].textContent = 'Infer from TypeScript';
   for (const id of ['source-file', 'wit-file', 'entry']) $(id + '-picker').hidden = $(id).options.length < 2;
   setEditor('source', workspace.get($('source-file').value));
-  setEditor('wit', workspace.get($('wit-file').value));
+  displayContract();
   refreshWorlds(preferred.world || '');
+}
+function displayContract() {
+  const inferred = !$('wit-file').value;
+  $('wit').readOnly = inferred;
+  setEditor('wit', inferred ? generatedWit?.contents || encode('') : workspace.get($('wit-file').value));
 }
 function clearOutput(message = 'Compile & run to see the result.') {
   artifact = undefined;
+  generatedWit = undefined;
+  $('adopt-wit').disabled = $('download-wit').disabled = true;
+  if (!$('wit-file').value) displayContract();
   failed = false;
   for (const key of Object.keys(views)) views[key] = '';
   views.result = message;
@@ -156,7 +167,7 @@ function fail(error, phase = 'compile') {
 function compile(run) {
   if (operation || !workspace) return;
   $('args').removeAttribute('aria-invalid');
-  if (!$('world').value) return fail($('world').options.length ? 'Select a WIT world above the WIT source. A world defines which functions this program must implement.' : 'Add a WIT contract to the WIT field, or open the project folder containing it.', 'input');
+  if ($('wit-file').value && !$('world').value) return fail($('world').options.length ? 'Select a WIT world above the WIT source. A world defines which functions this program must implement.' : 'Add a WIT contract to the WIT field, or open the project folder containing it.', 'input');
   let args = [];
   if (run) {
     try { args = JSON.parse($('args').value); if (!Array.isArray(args)) throw new Error(); }
@@ -175,6 +186,11 @@ function compile(run) {
     worker.onmessage = ({ data }) => {
       if (operation !== running) return;
       if (data.kind === 'progress') status(data.message, 'busy');
+      if (data.kind === 'generated-wit') {
+        generatedWit = data.artifacts[0];
+        $('adopt-wit').disabled = $('download-wit').disabled = false;
+        displayContract();
+      }
       if (data.kind === 'compiled') {
         artifact = data;
         $('download-wasm').disabled = false;
@@ -209,7 +225,7 @@ $('cancel').addEventListener('click', () => { finish(); views.result = 'Operatio
 $('source').addEventListener('input', () => { workspace.set($('source-file').value, encode($('source').value)); edited(); });
 $('wit').addEventListener('input', () => { workspace.set($('wit-file').value, encode($('wit').value)); refreshWorlds(); selectExports([]); edited(); });
 $('source-file').addEventListener('change', () => { setEditor('source', workspace.get($('source-file').value)); });
-$('wit-file').addEventListener('change', () => { setEditor('wit', workspace.get($('wit-file').value)); refreshWorlds(''); selectExports([]); edited(); });
+$('wit-file').addEventListener('change', () => { displayContract(); refreshWorlds(''); selectExports([]); edited(); });
 $('world').addEventListener('change', () => { selectExports([]); edited('Interface changed'); });
 $('entry').addEventListener('change', () => {
   const selected = snapshot.programs?.find(program => program.entry === $('entry').value);
@@ -246,14 +262,13 @@ $('folder-input').addEventListener('change', async event => {
     const programs = packagePrograms(files);
     const names = [...files.keys()].sort();
     const missingWit = !names.some(name => name.endsWith('.wit'));
-    if (missingWit) files.set('world.wit', encode(''));
-    const preferred = programs[0] || { entry: ['index.ts', 'src/index.ts'].find(name => files.has(name)) || names.find(name => name.endsWith('/index.ts')) || names.find(name => !name.endsWith('.d.ts') && name.endsWith('.ts')), wit: names.find(name => name.endsWith('world.wit')) || 'world.wit' };
+    const preferred = programs[0] || { entry: ['index.ts', 'src/index.ts'].find(name => files.has(name)) || names.find(name => name.endsWith('/index.ts')) || names.find(name => !name.endsWith('.d.ts') && name.endsWith('.ts')), wit: names.find(name => name.endsWith('world.wit')) || '' };
     snapshot = { kind: 'folder', files, programs, ...preferred }; workspace = new Map(files);
     displayWorkspace(preferred);
     configureProgram(programs[0]);
     $('close-folder').hidden = false;
     selectExports([]);
-    if (missingWit) $('folder-description').textContent = 'No WIT contract was included. Paste it into WIT, or open a parent folder containing the contract.';
+    if (missingWit) $('folder-description').textContent = 'The contract will be inferred from TypeScript. Compile to inspect, download, or edit the generated WIT.';
     edited('Folder loaded');
   } catch (error) { fail(error, 'folder'); }
   finally { finish(); event.target.value = ''; }
@@ -272,6 +287,20 @@ for (const button of document.querySelectorAll('[data-tab]')) {
 for (const extension of ['wasm', 'wat']) $('download-' + extension).addEventListener('click', () => {
   const url = URL.createObjectURL(new Blob([extension === 'wasm' ? artifact.bytes : artifact.wat], { type: extension === 'wasm' ? 'application/wasm' : 'text/plain' }));
   const link = document.createElement('a'); link.href = url; link.download = `component.${extension}`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('adopt-wit').addEventListener('click', () => {
+  if (!generatedWit) return;
+  let name = 'wit/world.wit';
+  for (let index = 2; workspace.has(name); index++) name = `generated-${index}/world.wit`;
+  workspace.set(name, generatedWit.contents);
+  displayWorkspace({ entry: $('entry').value, wit: name });
+  edited('Generated contract ready to edit');
+});
+$('download-wit').addEventListener('click', () => {
+  if (!generatedWit) return;
+  const url = URL.createObjectURL(new Blob([generatedWit.contents], { type: 'text/plain' }));
+  const link = document.createElement('a'); link.href = url; link.download = generatedWit.name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 document.addEventListener('keydown', event => {

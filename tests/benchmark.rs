@@ -668,24 +668,24 @@ fn compile_time() -> Result<Row> {
 /// Stripped sizes of the example components.
 fn examples() -> Result<Vec<Row>> {
     let mut rows = Vec::new();
-    for (workload, source, wit, world) in [
+    for (workload, source, contract) in [
         (
             "example: merge_task",
             "examples/merge_task/index.ts",
-            "examples/merge_task",
-            "merge-task",
+            Some(("examples/merge_task", "merge-task")),
         ),
-        (
-            "example: template task",
-            "template/src/index.ts",
-            "template/wit",
-            "task",
-        ),
+        ("example: template task", "template/src/index.ts", None),
     ] {
-        let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
-        let world = resolve.select_world(&[package], Some(world))?;
-        let source_text = std::fs::read_to_string(source)?;
-        let compiled = compile_for_world(&source_text, source, &resolve, world, true)?;
+        let compiled = if let Some((wit, world)) = contract {
+            let (resolve, package) = resolve_wit(std::path::Path::new(wit))?;
+            let world = resolve.select_world(&[package], Some(world))?;
+            let source_text = std::fs::read_to_string(source)?;
+            compile_for_world(&source_text, source, &resolve, world, true)?
+        } else {
+            let program = perry_source::files::read_program(std::path::Path::new(source))?;
+            let wit = perry_wit::api::Wit::from(perry_wit::api::generate_wit(&program, None)?);
+            perry_wit::api::compile(&program, &wit, &Default::default())?
+        };
         rows.push(Row {
             workload: workload.into(),
             bytes: Some(

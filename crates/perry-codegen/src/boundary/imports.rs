@@ -310,6 +310,7 @@ impl FunctionLowering<'_, '_> {
                 }
             }
             AbiType::Option(_)
+            | AbiType::Absent { .. }
             | AbiType::Result { .. }
             | AbiType::Enum(_)
             | AbiType::Variant(_) => {
