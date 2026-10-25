@@ -1,9 +1,8 @@
 //! Infer a component contract from resolved TypeScript declarations.
 use crate::{Artifact, DiagnosticCode, PerryDiagnostic, Program};
-use anyhow::{Result, bail, ensure};
-use perry_source::{Locations, Spanned, ast};
+use anyhow::{Context as _, Result, bail, ensure};
+use perry_source::{Locations, Span, Spanned, Visit, VisitWith, ast};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use swc_common::Span;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Type {
@@ -34,31 +33,29 @@ struct Declarations<'a> {
     locations: &'a Locations<'a>,
 }
 
-fn scalar(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "u8" => "u8",
-        "s8" => "s8",
-        "u16" => "u16",
-        "s16" => "s16",
-        "u32" => "u32",
-        "s32" => "s32",
-        "u64" => "u64",
-        "s64" => "s64",
-        "f32" => "f32",
-        "f64" => "f64",
-        _ => return None,
-    })
+struct Signature<'a> {
+    function: &'a ast::FnDecl,
+    params: Vec<(&'a str, Type)>,
+    result: Type,
 }
 
-impl<'a> Declarations<'a> {
+fn scalar(name: &str) -> Option<&'static str> {
+    [
+        "u8", "s8", "u16", "s16", "u32", "s32", "u64", "s64", "f32", "f64",
+    ]
+    .into_iter()
+    .find(|candidate| *candidate == name)
+}
+
+impl Declarations<'_> {
     fn error(&self, span: Span, message: impl Into<String>) -> anyhow::Error {
         PerryDiagnostic::error(DiagnosticCode::UnsupportedType, message)
             .with_optional_span(self.locations.span(span))
             .into()
     }
 
-    fn ty(
-        &self,
+    fn ty<'a>(
+        &'a self,
         ty: &'a ast::TsType,
         bindings: &HashMap<&'a str, &'a ast::TsType>,
         depth: usize,
@@ -201,8 +198,8 @@ impl<'a> Declarations<'a> {
         })
     }
 
-    fn bind(
-        &self,
+    fn bind<'a>(
+        &'a self,
         params: Option<&'a ast::TsTypeParamDecl>,
         args: &'a [Box<ast::TsType>],
         outer: &HashMap<&'a str, &'a ast::TsType>,
@@ -235,46 +232,49 @@ impl<'a> Declarations<'a> {
         Ok(bindings)
     }
 
-    fn fields(
-        &self,
+    fn fields<'a>(
+        &'a self,
         members: &'a [ast::TsTypeElement],
         bindings: &HashMap<&'a str, &'a ast::TsType>,
         depth: usize,
     ) -> Result<Vec<(String, Type)>> {
-        let mut seen = HashSet::new();
-        members
-            .iter()
-            .map(|member| {
-                let ast::TsTypeElement::TsPropertySignature(property) = member else {
-                    return Err(self.error(
-                        member.span(),
-                        "Boundary records contain data properties only",
-                    ));
-                };
-                let name = property_name(&property.key).ok_or_else(|| {
-                    self.error(property.span, "Boundary properties need static names")
-                })?;
-                ensure!(
-                    seen.insert(name.clone()),
-                    "Duplicate boundary property '{name}'"
-                );
-                let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                    self.error(
-                        property.span,
-                        "Boundary properties require a type annotation",
-                    )
-                })?;
-                let mut ty = self.ty(&annotation.type_ann, bindings, depth + 1)?;
-                if property.optional {
-                    ty = absent(ty);
-                }
-                Ok((name, ty))
+        self.properties(members)
+            .map(|property| {
+                let (name, annotation, optional) = property?;
+                let ty = self.ty(annotation, bindings, depth + 1)?;
+                Ok((name.to_owned(), if optional { absent(ty) } else { ty }))
             })
             .collect()
     }
 
-    fn union_members(
-        &self,
+    fn properties<'a>(
+        &'a self,
+        members: &'a [ast::TsTypeElement],
+    ) -> impl Iterator<Item = Result<(&'a str, &'a ast::TsType, bool)>> {
+        let mut seen = HashSet::new();
+        members.iter().map(move |member| {
+            let ast::TsTypeElement::TsPropertySignature(property) = member else {
+                return Err(self.error(
+                    member.span(),
+                    "Boundary records contain data properties only",
+                ));
+            };
+            let name = property_name(&property.key).ok_or_else(|| {
+                self.error(property.span, "Boundary properties need static names")
+            })?;
+            ensure!(seen.insert(name), "Duplicate boundary property '{name}'");
+            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                self.error(
+                    property.span,
+                    "Boundary properties require a type annotation",
+                )
+            })?;
+            Ok((name, &*annotation.type_ann, property.optional))
+        })
+    }
+
+    fn union_members<'a>(
+        &'a self,
         ty: &'a ast::TsType,
         bindings: &HashMap<&'a str, &'a ast::TsType>,
         depth: usize,
@@ -312,8 +312,8 @@ impl<'a> Declarations<'a> {
         Ok(())
     }
 
-    fn union(
-        &self,
+    fn union<'a>(
+        &'a self,
         members: &'a [Box<ast::TsType>],
         bindings: &HashMap<&'a str, &'a ast::TsType>,
         depth: usize,
@@ -361,16 +361,19 @@ impl<'a> Declarations<'a> {
         Ok(if undefined { absent(value) } else { value })
     }
 
-    fn union_values(
-        &self,
+    fn union_values<'a>(
+        &'a self,
         values: &[&'a ast::TsType],
         bindings: &HashMap<&'a str, &'a ast::TsType>,
         depth: usize,
     ) -> Result<Type> {
+        enum Discriminant<'a> {
+            Variant(&'a ast::Str),
+            Result(bool),
+        }
         let mut cases = Vec::new();
         let mut strings = Vec::new();
         let mut result = [None, None];
-        let mut result_count = 0;
         for &member in values {
             if let ast::TsType::TsLitType(literal) = member
                 && let ast::TsLit::Str(value) = &literal.lit
@@ -384,75 +387,49 @@ impl<'a> Declarations<'a> {
                     "Unions need string literals or explicit tag/val or ok/value/error cases",
                 ));
             };
-            let properties = object
-                .members
-                .iter()
-                .map(|member| {
-                    let ast::TsTypeElement::TsPropertySignature(property) = member else {
-                        bail!("Union cases contain data properties only");
-                    };
-                    let name = property_name(&property.key).ok_or_else(|| {
-                        self.error(property.span, "Union case properties need static names")
-                    })?;
-                    let ty = property.type_ann.as_ref().ok_or_else(|| {
-                        self.error(property.span, "Union case properties require annotations")
-                    })?;
-                    if property.optional && matches!(name.as_str(), "tag" | "ok") {
-                        return Err(
-                            self.error(property.span, "Union discriminants must be required")
-                        );
-                    }
-                    Ok((name, &*ty.type_ann, property.optional))
-                })
+            let properties = self
+                .properties(&object.members)
                 .collect::<Result<Vec<_>>>()?;
-            if let Some((_, ast::TsType::TsLitType(tag), _)) =
-                properties.iter().find(|(name, _, _)| name == "tag")
-                && let ast::TsLit::Str(tag) = &tag.lit
-            {
-                ensure!(
-                    properties
-                        .iter()
-                        .all(|(name, _, _)| name == "tag" || name == "val"),
-                    "Variant cases use tag and optional val properties"
-                );
-                let payload = properties
-                    .iter()
-                    .find(|(name, _, _)| name == "val")
-                    .map(|(_, ty, optional)| {
-                        self.ty(ty, bindings, depth + 1)
-                            .map(|ty| if *optional { absent(ty) } else { ty })
-                    })
-                    .transpose()?;
-                cases.push((tag.value.to_string_lossy().into_owned(), payload));
-            } else if let Some((_, ast::TsType::TsLitType(tag), _)) =
-                properties.iter().find(|(name, _, _)| name == "ok")
-                && let ast::TsLit::Bool(tag) = &tag.lit
-            {
-                let field = if tag.value { "value" } else { "error" };
-                ensure!(
-                    properties
-                        .iter()
-                        .all(|(name, _, _)| name == "ok" || name == field),
-                    "Result cases use ok and value/error properties"
-                );
-                let index = usize::from(!tag.value);
-                ensure!(result[index].is_none(), "Duplicate result case");
-                result[index] = Some(
-                    properties
-                        .iter()
-                        .find(|(name, _, _)| name == field)
-                        .map(|(_, ty, optional)| {
-                            self.ty(ty, bindings, depth + 1)
-                                .map(|ty| Box::new(if *optional { absent(ty) } else { ty }))
-                        })
-                        .transpose()?,
-                );
-                result_count += 1;
-            } else {
+            let Some(&(name, ast::TsType::TsLitType(literal), false)) = properties
+                .iter()
+                .find(|(name, _, _)| matches!(*name, "tag" | "ok"))
+            else {
                 return Err(self.error(
                     member.span(),
-                    "Union cases need literal tag or ok discriminants",
+                    "Union cases need required literal tag or ok discriminants",
                 ));
+            };
+            let (discriminant, field) = match (name, &literal.lit) {
+                ("tag", ast::TsLit::Str(tag)) => (Discriminant::Variant(tag), "val"),
+                ("ok", ast::TsLit::Bool(tag)) => (
+                    Discriminant::Result(tag.value),
+                    if tag.value { "value" } else { "error" },
+                ),
+                _ => return Err(self.error(literal.span, "Invalid union discriminant")),
+            };
+            ensure!(
+                properties
+                    .iter()
+                    .all(|(property, _, _)| *property == name || *property == field),
+                "Union case requires '{name}' and optional '{field}' properties"
+            );
+            let payload = properties
+                .iter()
+                .find(|(name, _, _)| *name == field)
+                .map(|(_, ty, optional)| {
+                    self.ty(ty, bindings, depth + 1)
+                        .map(|ty| if *optional { absent(ty) } else { ty })
+                })
+                .transpose()?;
+            match discriminant {
+                Discriminant::Variant(tag) => {
+                    cases.push((tag.value.to_string_lossy().into_owned(), payload));
+                }
+                Discriminant::Result(ok) => {
+                    let index = usize::from(!ok);
+                    ensure!(result[index].is_none(), "Duplicate result case");
+                    result[index] = Some(payload.map(Box::new));
+                }
             }
         }
         if strings.len() == values.len() {
@@ -461,20 +438,18 @@ impl<'a> Declarations<'a> {
         if cases.len() == values.len() {
             return Ok(Type::Variant(cases));
         }
-        if result_count == 2 && values.len() == 2 {
-            let [ok, err] = result;
-            return Ok(Type::Result {
-                ok: ok.flatten(),
-                err: err.flatten(),
-            });
+        if values.len() == 2
+            && let [Some(ok), Some(err)] = result
+        {
+            return Ok(Type::Result { ok, err });
         }
         bail!("Mixed union representations are not supported at a component boundary")
     }
 
     fn return_type(
         &self,
-        function: &'a ast::Function,
-        parameters: &HashMap<String, Type>,
+        function: &ast::Function,
+        parameters: &[(&str, Type)],
         depth: usize,
     ) -> Result<Type> {
         if depth > 64 {
@@ -494,53 +469,12 @@ impl<'a> Declarations<'a> {
             }
             return self.ty(ty, &HashMap::new(), 0);
         }
-        struct Returns<'a> {
-            values: Vec<Option<&'a ast::Expr>>,
-        }
-        // Traverse explicitly so nested functions do not contribute their returns.
-        fn returns<'a>(statement: &'a ast::Stmt, output: &mut Returns<'a>) {
-            match statement {
-                ast::Stmt::Return(ret) => output.values.push(ret.arg.as_deref()),
-                ast::Stmt::Block(block) => {
-                    for statement in &block.stmts {
-                        returns(statement, output);
-                    }
-                }
-                ast::Stmt::If(branch) => {
-                    returns(&branch.cons, output);
-                    if let Some(other) = &branch.alt {
-                        returns(other, output);
-                    }
-                }
-                ast::Stmt::While(loop_) => returns(&loop_.body, output),
-                ast::Stmt::DoWhile(loop_) => returns(&loop_.body, output),
-                ast::Stmt::For(loop_) => returns(&loop_.body, output),
-                ast::Stmt::ForIn(loop_) => returns(&loop_.body, output),
-                ast::Stmt::ForOf(loop_) => returns(&loop_.body, output),
-                ast::Stmt::Labeled(label) => returns(&label.body, output),
-                ast::Stmt::Switch(switch) => {
-                    for case in &switch.cases {
-                        for stmt in &case.cons {
-                            returns(stmt, output);
-                        }
-                    }
-                }
-                ast::Stmt::Try(try_) => {
-                    for stmt in &try_.block.stmts {
-                        returns(stmt, output);
-                    }
-                    if let Some(handler) = &try_.handler {
-                        for stmt in &handler.body.stmts {
-                            returns(stmt, output);
-                        }
-                    }
-                    if let Some(finalizer) = &try_.finalizer {
-                        for stmt in &finalizer.stmts {
-                            returns(stmt, output);
-                        }
-                    }
-                }
-                _ => {}
+        struct Returns<F>(F);
+        impl<F: FnMut(Option<&ast::Expr>)> Visit for Returns<F> {
+            fn visit_decl(&mut self, _: &ast::Decl) {}
+            fn visit_expr(&mut self, _: &ast::Expr) {}
+            fn visit_return_stmt(&mut self, statement: &ast::ReturnStmt) {
+                (self.0)(statement.arg.as_deref());
             }
         }
         fn exits(statement: &ast::Stmt) -> bool {
@@ -557,27 +491,27 @@ impl<'a> Declarations<'a> {
                 _ => false,
             }
         }
-        let mut returned = Returns { values: Vec::new() };
+        let mut result = Ok(None);
         if let Some(body) = &function.body {
-            for statement in &body.stmts {
-                returns(statement, &mut returned);
-            }
+            body.visit_with(&mut Returns(|value: Option<&ast::Expr>| {
+                if let Ok(previous) = &mut result {
+                    let inferred = value
+                        .map(|value| self.expression(value, parameters, depth + 1))
+                        .transpose()
+                        .map(|ty| ty.unwrap_or(Type::Void));
+                    match inferred {
+                        Ok(ty) if previous.as_ref().is_none_or(|previous| *previous == ty) => {
+                            *previous = Some(ty);
+                        }
+                        Ok(_) => result = Err(self.error(function.span,
+                            "Exported function has different return types; add an explicit annotation")),
+                        Err(error) => result = Err(error),
+                    }
+                }
+            }));
         }
-        let mut result = None;
-        for value in returned.values {
-            let ty = value
-                .map(|value| self.expression(value, parameters, depth + 1))
-                .transpose()?
-                .unwrap_or(Type::Void);
-            if let Some(previous) = &result {
-                ensure!(
-                    previous == &ty,
-                    "Exported function has different return types; add an explicit annotation"
-                );
-            }
-            result = Some(ty);
-        }
-        if result.as_ref().is_some_and(|ty| *ty != Type::Void)
+        let result = result?.unwrap_or(Type::Void);
+        if result != Type::Void
             && !function
                 .body
                 .as_ref()
@@ -588,13 +522,13 @@ impl<'a> Declarations<'a> {
                 "A public function that may fall through needs an explicit return annotation",
             ));
         }
-        Ok(result.unwrap_or(Type::Void))
+        Ok(result)
     }
 
     fn expression(
         &self,
-        value: &'a ast::Expr,
-        parameters: &HashMap<String, Type>,
+        value: &ast::Expr,
+        parameters: &[(&str, Type)],
         depth: usize,
     ) -> Result<Type> {
         Ok(match value {
@@ -602,14 +536,16 @@ impl<'a> Declarations<'a> {
             ast::Expr::Lit(ast::Lit::BigInt(_)) => Type::Scalar("s64"),
             ast::Expr::Lit(ast::Lit::Bool(_)) => Type::Scalar("bool"),
             ast::Expr::Lit(ast::Lit::Str(_)) | ast::Expr::Tpl(_) => Type::Scalar("string"),
-            ast::Expr::Ident(name) => {
-                parameters.get(name.sym.as_ref()).cloned().ok_or_else(|| {
+            ast::Expr::Ident(name) => parameters
+                .iter()
+                .find(|(parameter, _)| *parameter == name.sym.as_ref())
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| {
                     self.error(
                         value.span(),
                         "Add a return annotation to this exported function",
                     )
-                })?
-            }
+                })?,
             ast::Expr::Paren(value) => self.expression(&value.expr, parameters, depth + 1)?,
             ast::Expr::Await(value) => self.expression(&value.arg, parameters, depth + 1)?,
             ast::Expr::TsAs(value) => self.ty(&value.type_ann, &HashMap::new(), 0)?,
@@ -646,7 +582,7 @@ impl<'a> Declarations<'a> {
                             self.error(value.span(), "Add a return annotation for a host call")
                         })?;
                         {
-                            let mut arguments = HashMap::new();
+                            let mut arguments = Vec::new();
                             for (param, arg) in function.function.params.iter().zip(&call.args) {
                                 let ast::Pat::Ident(binding) = &param.pat else {
                                     return Err(self.error(
@@ -659,7 +595,7 @@ impl<'a> Declarations<'a> {
                                 } else {
                                     self.expression(&arg.expr, parameters, depth + 1)?
                                 };
-                                arguments.insert(binding.id.sym.to_string(), ty);
+                                arguments.push((binding.id.sym.as_ref(), ty));
                             }
                             self.return_type(&function.function, &arguments, depth + 1)?
                         }
@@ -672,6 +608,47 @@ impl<'a> Declarations<'a> {
                     "Add a return annotation to this exported function",
                 ));
             }
+        })
+    }
+
+    fn signature<'a>(&self, function: &'a ast::FnDecl) -> Result<Signature<'a>> {
+        ensure!(
+            function.function.type_params.is_none(),
+            "Exported generic functions need a concrete wrapper"
+        );
+        let params = function
+            .function
+            .params
+            .iter()
+            .map(|parameter| {
+                let (binding, optional) = match &parameter.pat {
+                    ast::Pat::Ident(binding) => (binding, binding.id.optional),
+                    ast::Pat::Assign(assign) if let ast::Pat::Ident(binding) = &*assign.left => {
+                        (binding, true)
+                    }
+                    _ => {
+                        return Err(self
+                            .error(parameter.span, "Boundary parameters need named identifiers"));
+                    }
+                };
+                let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                    self.error(
+                        parameter.span,
+                        "Exported parameters require type annotations",
+                    )
+                })?;
+                let ty = self.ty(&annotation.type_ann, &HashMap::new(), 0)?;
+                Ok((
+                    binding.id.sym.as_ref(),
+                    if optional { absent(ty) } else { ty },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let result = self.return_type(&function.function, &params, 0)?;
+        Ok(Signature {
+            function,
+            params,
+            result,
         })
     }
 }
@@ -691,10 +668,10 @@ fn absent(ty: Type) -> Type {
         },
     }
 }
-fn property_name(expression: &ast::Expr) -> Option<String> {
+fn property_name(expression: &ast::Expr) -> Option<&str> {
     match expression {
-        ast::Expr::Ident(name) => Some(name.sym.to_string()),
-        ast::Expr::Lit(ast::Lit::Str(name)) => name.value.as_str().map(str::to_owned),
+        ast::Expr::Ident(name) => Some(name.sym.as_ref()),
+        ast::Expr::Lit(ast::Lit::Str(name)) => name.value.as_str(),
         _ => None,
     }
 }
@@ -717,13 +694,52 @@ fn kebab(name: &str) -> String {
 }
 
 #[derive(Default)]
-struct Writer {
-    declarations: Vec<String>,
-    names: HashMap<Type, String>,
+struct Writer<'a> {
+    items: Vec<String>,
+    names: HashMap<&'a Type, String>,
     used: HashSet<String>,
+    exports: HashSet<&'a str>,
 }
-impl Writer {
-    fn ty(&mut self, ty: &Type, hint: &str) -> Result<String> {
+impl<'a> Writer<'a> {
+    fn function(&mut self, signature: &'a Signature<'_>) -> Result<()> {
+        let source_name = signature.function.ident.sym.as_ref();
+        let name = kebab(source_name);
+        ensure!(
+            crate::names::to_camel_case(&name) == source_name && self.exports.insert(source_name),
+            "Export '{source_name}' cannot round-trip through a WIT name"
+        );
+        let params = signature
+            .params
+            .iter()
+            .map(|(param, ty)| {
+                let param = kebab(param);
+                Ok(format!(
+                    "%{param}: {}",
+                    self.ty(ty, &format!("{name}-{param}"))?
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let result = if signature.result == Type::Void {
+            String::new()
+        } else {
+            format!(
+                " -> {}",
+                self.ty(&signature.result, &format!("{name}-result"))?
+            )
+        };
+        self.items.push(format!(
+            "export %{name}: {}func({}){result};",
+            if is_async(&signature.function.function) {
+                "async "
+            } else {
+                ""
+            },
+            params.join(", ")
+        ));
+        Ok(())
+    }
+
+    fn ty(&mut self, ty: &'a Type, hint: &str) -> Result<String> {
         if let Some(name) = self.names.get(ty) {
             return Ok(format!("%{name}"));
         }
@@ -753,8 +769,7 @@ impl Writer {
                 for (field, value) in fields {
                     let field_name = kebab(field);
                     ensure!(
-                        crate::names::to_camel_case(&field_name) == *field
-                            && names.insert(field_name.clone()),
+                        crate::names::to_camel_case(&field_name) == *field && names.insert(field),
                         "Property '{field}' cannot round-trip through a WIT name"
                     );
                     members.push(format!(
@@ -824,8 +839,8 @@ impl Writer {
             name = format!("{base}-{index}");
             index += 1;
         }
-        self.declarations.push(format!("{kind} %{name}{body}"));
-        self.names.insert(ty.clone(), name.clone());
+        self.items.push(format!("{kind} %{name}{body}"));
+        self.names.insert(ty, name.clone());
         Ok(format!("%{name}"))
     }
 }
@@ -920,94 +935,36 @@ pub fn generate_sources(
         }
     }
     command |= exports.is_empty();
+    let annotate = |function: &ast::FnDecl, error| -> anyhow::Error {
+        let mut diagnostic = PerryDiagnostic::from_error(error, DiagnosticCode::UnsupportedType);
+        if diagnostic.span.is_none() {
+            diagnostic.span = loaded.locations.span(function.function.span);
+        }
+        diagnostic.into()
+    };
+    let signatures = exports
+        .into_iter()
+        .map(|function| {
+            declarations
+                .signature(function)
+                .map_err(|error| annotate(function, error))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut writer = Writer::default();
-    let mut functions = Vec::new();
-    let mut names = HashSet::new();
-    for exported in exports {
-        let function = &exported.function;
-        let signature = (|| -> Result<()> {
-            ensure!(
-                function.type_params.is_none(),
-                "Exported generic functions need a concrete wrapper"
-            );
-            let name = kebab(&exported.ident.sym);
-            ensure!(
-                crate::names::to_camel_case(&name) == exported.ident.sym.as_ref()
-                    && names.insert(name.clone()),
-                "Export '{}' cannot round-trip through a WIT name",
-                exported.ident.sym
-            );
-            let mut params = Vec::new();
-            let mut parameters = HashMap::new();
-            for parameter in &function.params {
-                let (binding, optional) = match &parameter.pat {
-                    ast::Pat::Ident(binding) => (binding, binding.id.optional),
-                    ast::Pat::Assign(assign) => {
-                        let ast::Pat::Ident(binding) = &*assign.left else {
-                            return Err(declarations.error(
-                                parameter.span,
-                                "Boundary parameters need named identifiers",
-                            ));
-                        };
-                        (binding, true)
-                    }
-                    _ => {
-                        return Err(declarations
-                            .error(parameter.span, "Boundary parameters need named identifiers"));
-                    }
-                };
-                let annotation = binding.type_ann.as_ref().ok_or_else(|| {
-                    declarations.error(
-                        parameter.span,
-                        "Exported parameters require type annotations",
-                    )
-                })?;
-                let mut ty = declarations.ty(&annotation.type_ann, &HashMap::new(), 0)?;
-                if optional {
-                    ty = absent(ty);
-                }
-                let param = kebab(&binding.id.sym);
-                let wit = writer.ty(&ty, &format!("{name}-{param}"))?;
-                parameters.insert(binding.id.sym.to_string(), ty);
-                params.push(format!("%{param}: {wit}"));
-            }
-            let result = declarations.return_type(function, &parameters, 0)?;
-            let result = if result == Type::Void {
-                String::new()
-            } else {
-                format!(" -> {}", writer.ty(&result, &format!("{name}-result"))?)
-            };
-            functions.push(format!(
-                "export %{name}: {}func({}){result};",
-                if is_async(function) { "async " } else { "" },
-                params.join(", ")
-            ));
-            Ok(())
-        })();
-        signature.map_err(|error| {
-            let mut diagnostic =
-                PerryDiagnostic::from_error(error, DiagnosticCode::UnsupportedType);
-            if diagnostic.span.is_none() {
-                diagnostic.span = loaded.locations.span(function.span);
-            }
-            diagnostic
-        })?;
+    for signature in &signatures {
+        writer
+            .function(signature)
+            .map_err(|error| annotate(signature.function, error))?;
     }
     let world = world.unwrap_or("app");
-    ensure!(
-        !world.is_empty()
-            && world.split('-').all(|part| !part.is_empty()
-                && part.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && part.chars().all(|c| c.is_ascii_alphanumeric())),
-        "Invalid generated world name '{world}'"
-    );
+    wit_parser::validate_id(world).context("Invalid generated world name")?;
     let mut output = format!(
         "package local:app;\n\nworld %{world} {{\n  include wasi:cli/{}@0.3.0;\n  import wasi:http/client@0.3.0;\n",
         if command { "command" } else { "imports" }
     );
-    for item in writer.declarations.iter().chain(&functions) {
+    for item in writer.items {
         output.push_str("  ");
-        output.push_str(item);
+        output.push_str(&item);
         output.push('\n');
     }
     output.push_str("}\n");

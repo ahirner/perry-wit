@@ -1371,7 +1371,6 @@ dependencies = [
  "perry-source",
  "perry-wit-diagnostics",
  "serde_json",
- "swc_common",
  "wit-parser 0.261.0",
 ]
 

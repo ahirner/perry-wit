@@ -19,8 +19,15 @@ fn generated(source: &str) -> Result<(Resolve, WorldId, String)> {
 #[test]
 fn scalar_defaults_aliases_and_declarations_round_trip() -> Result<()> {
     let source = "import type {u8, s8, u16, s16, u32, s32, u64, s64, f32, f64} from 'perry:types';
-        export function numbers(a: number, b: bigint, c: u8, d: s8, e: u16, f: s16, g: u32, h: s32, i: u64, j: s64, k: f32, l: f64): bigint {return b;}";
-    let (resolve, world, _) = generated(source)?;
+        export function numbers(a: number, b: bigint, c: u8, d: s8, e: u16, f: s16, g: u32, h: s32, i: u64, j: s64, k: f32, l: f64): bigint {return b;}
+        function helper(n: bigint) { return n + 1n; }
+        export function inferred(n: bigint, flag: boolean) {
+            function nested() { return 'ignored'; }
+            const arrow = () => true;
+            try { if (flag) return helper(n); } finally {}
+            return n;
+        }";
+    let (resolve, world, text) = generated(source)?;
     let function = resolve.worlds[world]
         .exports
         .values()
@@ -51,7 +58,11 @@ fn scalar_defaults_aliases_and_declarations_round_trip() -> Result<()> {
         ]
     );
     assert_eq!(function.result, Some(Type::S64));
-    assert_round_trip(&resolve, world)
+    let inferred = perry_contract::world_functions(&resolve, resolve.worlds[world].exports.iter())
+        .find(|entry| entry.function.name == "inferred")
+        .unwrap();
+    assert_eq!(inferred.function.result, Some(Type::S64));
+    assert_round_trip(&resolve, world, &text)
 }
 
 #[test]
@@ -74,7 +85,7 @@ fn structures_preserve_presence_tagged_unions_and_async_signatures() -> Result<(
     ] {
         assert!(text.contains(shape), "Missing {shape}: {text}");
     }
-    assert_round_trip(&resolve, world)
+    assert_round_trip(&resolve, world, &text)
 }
 
 #[test]
@@ -87,6 +98,7 @@ fn entry_reexports_share_module_resolution_and_report_source_locations() -> Resu
     assert!(text.contains("world %custom"));
     assert!(text.contains("export %run: func(%n: u32) -> u32"), "{text}");
     assert!(!text.contains("export %helper"));
+    assert!(generate_wit(&input, Some("bad world")).is_err());
     input.modules[0].contents =
         b"export function increment(n: unknown): number {return 1;}".to_vec();
     let error = generate_wit(&input, None).unwrap_err();
@@ -97,7 +109,6 @@ fn entry_reexports_share_module_resolution_and_report_source_locations() -> Resu
         diagnostic.span.as_ref().unwrap().file.to_string_lossy(),
         "math.ts"
     );
-    assert!(generate_wit(&input, Some("bad world")).is_err());
     Ok(())
 }
 
@@ -109,84 +120,16 @@ fn unsupported_public_values_and_ambiguous_types_are_diagnosed() {
         "export function maybe(x:boolean){if(x)return 1;}",
         "export function f(x: number | string): void {}",
         "export function f<T>(x:T):T{return x;}",
+        "export function f(x: {tag?:'a'} | {tag:'b'}):void {}",
+        "export function f(x: {tag:'a',tag:'b'} | {tag:'c'}):void {}",
     ] {
         assert!(generated(source).is_err(), "{source}");
     }
 }
 
-fn normalized_exports(resolve: &Resolve, world: WorldId) -> Vec<String> {
-    fn shape(resolve: &Resolve, ty: Type) -> String {
-        use wit_parser::TypeDefKind;
-        let Type::Id(id) = ty else {
-            return format!("{ty:?}");
-        };
-        let item = |ty| shape(resolve, ty);
-        match &resolve.types[id].kind {
-            TypeDefKind::Type(ty) => item(*ty),
-            TypeDefKind::List(ty) => format!("list({})", item(*ty)),
-            TypeDefKind::Option(ty) => format!("option({})", item(*ty)),
-            TypeDefKind::Tuple(tuple) => format!(
-                "tuple{:?}",
-                tuple.types.iter().map(|ty| item(*ty)).collect::<Vec<_>>()
-            ),
-            TypeDefKind::Record(record) => format!(
-                "record{:?}",
-                record
-                    .fields
-                    .iter()
-                    .map(|field| (&field.name, item(field.ty)))
-                    .collect::<Vec<_>>()
-            ),
-            TypeDefKind::Variant(variant) => format!(
-                "variant{:?}",
-                variant
-                    .cases
-                    .iter()
-                    .map(|case| (&case.name, case.ty.map(item)))
-                    .collect::<Vec<_>>()
-            ),
-            TypeDefKind::Enum(enumeration) => format!(
-                "enum{:?}",
-                enumeration
-                    .cases
-                    .iter()
-                    .map(|case| &case.name)
-                    .collect::<Vec<_>>()
-            ),
-            TypeDefKind::Result(result) => {
-                format!("result{:?}{:?}", result.ok.map(item), result.err.map(item))
-            }
-            TypeDefKind::Stream(element) => format!("stream{:?}", element.map(item)),
-            kind => panic!("unexpected public type {kind:?}"),
-        }
-    }
-    resolve.worlds[world]
-        .exports
-        .values()
-        .filter_map(|item| match item {
-            WorldItem::Function(function) => Some(format!(
-                "{}:{}:{:?}:{:?}",
-                function.name,
-                function.kind.is_async(),
-                function
-                    .params
-                    .iter()
-                    .map(|p| (&p.name, shape(resolve, p.ty)))
-                    .collect::<Vec<_>>(),
-                function.result.map(|ty| shape(resolve, ty))
-            )),
-            WorldItem::Interface { .. } => Some("interface export".into()),
-            WorldItem::Type { .. } => None,
-        })
-        .collect()
-}
-
-fn assert_round_trip(resolve: &Resolve, world: WorldId) -> Result<()> {
+fn assert_round_trip(resolve: &Resolve, world: WorldId, original: &str) -> Result<()> {
     let declarations = sdk::declarations(resolve, world)?;
-    let (again, next_world, _) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
-    assert_eq!(
-        normalized_exports(resolve, world),
-        normalized_exports(&again, next_world)
-    );
+    let (_, _, regenerated) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
+    assert_eq!(original, regenerated);
     Ok(())
 }

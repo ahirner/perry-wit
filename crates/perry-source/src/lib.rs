@@ -6,6 +6,8 @@ pub use parser::parse;
 pub use perry_parser::Spanned;
 pub use perry_parser::swc_ecma_ast as ast;
 use std::collections::BTreeMap;
+pub use swc_common::Span;
+pub use swc_ecma_visit::{Visit, VisitWith};
 pub use validation::validate;
 pub mod files;
 mod locations;
