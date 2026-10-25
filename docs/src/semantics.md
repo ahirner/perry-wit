@@ -14,11 +14,12 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 - Arrays (`T[]`) are dense and homogeneous.
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
+- Fresh empty arrays (`[]`, including `any[]`) infer a static element type from uniform `push` calls and numeric-indexed writes across branches, loops and non-reassigned local aliases, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, primitive index reads and `JSON.stringify` without a replacer; other uses, conflicting writes or no writes require an explicit element type.
 
 ## Strings
 
-- Strings are UTF-8 and index by Unicode scalar value, not UTF-16 code unit. Indices agree with Node.js for text in the Basic Multilingual Plane. Characters outside it count as one scalar value.
-- `charCodeAt`, `String.fromCharCode` and lone surrogate escapes (`\uD800` to `\uDFFF`) are compile errors. Use `codePointAt` and `String.fromCodePoint`.
+- Strings are UTF-8. Length and indexing count Unicode scalar values and agree with Node.js for text in the Basic Multilingual Plane. Only `charCodeAt` indexes UTF-16 code units, so past a character outside that plane its positions differ from `length` and `indexOf`: `'😀x'.length` is 2, yet `'😀x'.charCodeAt(2)` reads the `x`.
+- `String.fromCharCode` and lone surrogate escapes (`\uD800` to `\uDFFF`) are compile errors. Use `String.fromCodePoint`.
 - Text arriving through the Canonical ABI, `JSON.parse` or `TextDecoder` is validated as UTF-8.
 
 ## Regular Expressions

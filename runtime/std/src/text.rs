@@ -1,4 +1,4 @@
-//! UTF-8 string methods indexed by Unicode scalar values.
+//! UTF-8 string methods with scalar indices, except `charCodeAt`'s UTF-16 code units.
 mod normalize;
 use crate::runtime::{bytes, from_static, scalars_length};
 use perry_rt_sys::whitespace::{trim_bytes, trim_end_bytes, trim_start_bytes};
@@ -171,6 +171,21 @@ pub(crate) extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) ->
         .chars()
         .next()
         .map_or(-1, |c| c as i32)
+}
+
+/// `s.charCodeAt(position)`, indexed by UTF-16 code unit.
+#[unsafe(no_mangle)]
+extern "C" fn std_string_char_code_at(string: *mut u8, position: f64) -> f64 {
+    let view = view(string);
+    let Ok(position) = usize::try_from(integer(position)) else {
+        return f64::NAN;
+    };
+    let unit = if view.ascii {
+        view.text.as_bytes().get(position).copied().map(u16::from)
+    } else {
+        view.text.encode_utf16().nth(position)
+    };
+    unit.map_or(f64::NAN, f64::from)
 }
 
 /// The scalar at `position`, or undefined outside the string.
