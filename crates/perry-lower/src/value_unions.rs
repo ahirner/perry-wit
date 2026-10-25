@@ -2,8 +2,9 @@ use super::*;
 use perry_mir::{VariantPayloadOp, VariantTagOp};
 
 pub(super) fn is_value_union(ctx: &Context, ty: TypeHandle) -> bool {
-    let ty = present_type(ctx, ty).deref(ctx);
-    ty.is::<perry_mir::ValueUnionType>() || ty.is::<perry_mir::NumberStringType>()
+    present_type(ctx, ty)
+        .deref(ctx)
+        .is::<perry_mir::ValueUnionType>()
 }
 
 impl<'s> FunctionBuilder<'s> {

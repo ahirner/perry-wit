@@ -544,7 +544,7 @@
   (func $decode (param $schema i32) (param $bits i64) (param $mode i32) (param $tag i32) (param $position i32)
     (result i64 i32 i32)
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
-    (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $string i32)
+    (local $done i32) (local $first i32) (local $array i32) (local $open i32)
     (local $count i32) (local $index i32) (local $entry i32) (local $child i32) (local $child-kind i32) (local $byte i32) (local $matches i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
     @input.GRAPH@
@@ -584,20 +584,6 @@
     (if (i32.or (i32.le_u (local.get $kind) (i32.const @descriptor.STRING@))
         (i32.and (i32.ge_u (local.get $kind) (i32.const @descriptor.SIGNED_INT@)) (i32.le_u (local.get $kind) (i32.const @descriptor.JSON_NUMERIC@))))
       (then (return (call $scalar (local.get $kind) (local.get $source) (local.get $mode)))))
-    (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMBER_STRING@))
-      (then
-        @input.CURSOR@
-        (local.set $string (i32.eq (call $cursor-byte (local.get $source)) (i32.const 34)))
-        @input.END_CURSOR@
-        @input.GRAPH@
-        (local.set $string (call $string-compare (call $graph-type (local.get $source)) (i32.load offset=8 (local.get $schema))))
-        @input.END_GRAPH@
-        (call $scalar (select (i32.const @descriptor.STRING@) (i32.const @descriptor.NUMBER@) (local.get $string)) (local.get $source) (local.get $mode))
-        drop local.set $failed local.set $bits
-        (return (call $variant-object (i32.load offset=4 (local.get $schema))
-            (i32.load (i32.add (local.get $schema) (select (i32.const 12) (i32.const 8) (local.get $string))))
-            (local.get $bits) (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (local.get $string)) (i32.const 0))
-          (local.get $failed) (i32.const 0))))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_VALUE_UNION@))
       (then
         (local.set $count (i32.load offset=4 (local.get $schema)))

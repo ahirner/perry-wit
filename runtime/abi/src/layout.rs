@@ -180,7 +180,6 @@ pub mod descriptor {
     pub const JSON_NUMERIC: u32 = 11;
     pub const JSON_TUPLE: u32 = 12;
     pub const JSON_VARIANT: u32 = 13;
-    pub const JSON_NUMBER_STRING: u32 = 14;
     pub const JSON_DICTIONARY: u32 = 15;
     pub const JSON_DATE: u32 = 16;
     pub const JSON_BIGINT: u32 = 17;

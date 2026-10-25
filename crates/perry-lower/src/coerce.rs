@@ -111,7 +111,6 @@ impl KindExt for Kind {
             Encoder => EncoderType,
             Decoder => DecoderType,
             Regex => RegexType,
-            NumberString => NumberStringType,
             ValueUnion => ValueUnionType,
             Array => ArrayType,
             Record => RecordType,
@@ -476,7 +475,7 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         Ok(match kind(ctx, value)? {
-            Kind::NumberString | Kind::ValueUnion => {
+            Kind::ValueUnion => {
                 let result = StringType::get(ctx).into();
                 self.dispatch_value(ctx, value, result, &|b, ctx, value| {
                     let value = b.value_primitive(ctx, value)?;
@@ -521,7 +520,7 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         let name = match kind(ctx, value)? {
-            Kind::NumberString | Kind::ValueUnion => {
+            Kind::ValueUnion => {
                 return Ok(self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value)));
             }
             Kind::BigInt => "bigint",

@@ -154,9 +154,6 @@ impl Shapes<'_> {
         }
         let mut defined = Vec::with_capacity(members.len());
         let mut absence = None;
-        let mut has_num = false;
-        let mut has_str = false;
-        let mut all_num_or_str = true;
         for &ty in members {
             match ty.hir(ctx) {
                 HirType::Null => {
@@ -166,22 +163,7 @@ impl Shapes<'_> {
                     absence =
                         crate::coerce::merge_absence(absence, Some(perry_mir::Absence::Undefined));
                 }
-                HirType::String => {
-                    has_str = true;
-                    defined.push(ty);
-                }
-                hir => {
-                    if matches!(hir, HirType::Number)
-                        || self
-                            .integer_type(ctx, hir)
-                            .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
-                    {
-                        has_num = true;
-                    } else {
-                        all_num_or_str = false;
-                    }
-                    defined.push(ty);
-                }
+                _ => defined.push(ty),
             }
         }
         if let Some(absence) = absence {
@@ -192,18 +174,25 @@ impl Shapes<'_> {
             };
             return Ok(OptionalType::get_with(ctx, inner, absence).into());
         }
-        if has_num && has_str && all_num_or_str {
-            return Ok(perry_mir::NumberStringType::get(ctx).into());
-        }
-        if has_num
-            || has_str
-            || defined
-                .iter()
-                .any(|ty| matches!(ty.hir(ctx), HirType::Boolean))
-        {
+        // Integers up to 32 bits are exact JavaScript numbers.
+        let number = |hir: &HirType| {
+            matches!(hir, HirType::Number)
+                || self
+                    .integer_type(ctx, hir)
+                    .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
+        };
+        if defined.iter().any(|ty| {
+            let hir = ty.hir(ctx);
+            number(hir) || matches!(hir, HirType::String | HirType::Boolean)
+        }) {
             let mut cases = Vec::with_capacity(defined.len());
             for member in defined {
-                let ty = self.value_type(ctx, member.hir(ctx))?;
+                let hir = member.hir(ctx);
+                let ty = if number(hir) {
+                    FP64Type::get(ctx).into()
+                } else {
+                    self.value_type(ctx, hir)?
+                };
                 ensure!(
                     self.class_of_type(ctx, ty).is_none(),
                     "finite value unions require plain record alternatives"

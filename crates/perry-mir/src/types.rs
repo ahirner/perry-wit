@@ -459,6 +459,19 @@ impl ValueUnionType {
     pub fn variants(&self) -> TypeHandle {
         self.variants
     }
+
+    /// `number | string`.
+    pub fn number_string(ctx: &Context) -> TypedHandle<Self> {
+        let cases = vec![
+            (
+                "number".into(),
+                Some(pliron::builtin::types::FP64Type::get(ctx).into()),
+            ),
+            ("string".into(), Some(StringType::get(ctx).into())),
+        ];
+        let variants = VariantType::get(ctx, cases).into();
+        Self::get(ctx, variants)
+    }
 }
 
 impl Verify for ValueUnionType {

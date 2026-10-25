@@ -7,8 +7,8 @@ use crate::{
 };
 use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::descriptor::{
-    JSON_DATE, JSON_DICTIONARY, JSON_NUMBER_STRING, JSON_NUMERIC, JSON_TUPLE, JSON_VALUE,
-    JSON_VARIANT, NULL_ALLOWED, UNDEFINED_ALLOWED,
+    JSON_DATE, JSON_DICTIONARY, JSON_NUMERIC, JSON_TUPLE, JSON_VALUE, JSON_VARIANT, NULL_ALLOWED,
+    UNDEFINED_ALLOWED,
 };
 use perry_abi::layout::{descriptor, record};
 use perry_mir::{ArrayType, DateType, ExceptionType, JsonSchema, JsonType, RecordType, StringType};
@@ -106,8 +106,6 @@ impl FunctionLowering<'_, '_> {
             28 + 20 * count
         } else if let Some(variant) = variant_schema {
             20 + 12 * variant.deref(ctx).cases().len()
-        } else if definition.is::<perry_mir::NumberStringType>() {
-            16
         } else if definition.is::<ArrayType>() {
             12
         } else {
@@ -202,9 +200,7 @@ impl FunctionLowering<'_, '_> {
                 kind,
             ]
         } else {
-            let kind = if ty.deref(ctx).is::<perry_mir::NumberStringType>() {
-                JSON_NUMBER_STRING
-            } else if ty.deref(ctx).is::<perry_mir::NumericType>() {
+            let kind = if ty.deref(ctx).is::<perry_mir::NumericType>() {
                 JSON_NUMERIC
             } else if ty.deref(ctx).is::<JsonType>() {
                 JSON_VALUE
@@ -233,19 +229,7 @@ impl FunctionLowering<'_, '_> {
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()
                 .map_or(0, |ty| ty.width());
-            if kind == JSON_NUMBER_STRING {
-                vec![
-                    kind,
-                    self.pointer_shape(&[
-                        perry_abi::layout::variant::OWNER,
-                        perry_abi::layout::variant::JSON,
-                    ]),
-                    self.state.data.string("number"),
-                    self.state.data.string("string"),
-                ]
-            } else {
-                vec![kind, width]
-            }
+            vec![kind, width]
         };
         self.write_data_words(address, words);
         Ok(address)

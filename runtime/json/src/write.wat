@@ -204,12 +204,6 @@
           (local.set $index (i32.add (local.get $index) (i32.const 1)))
           (br $union-cases)))
         (return)))
-    (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMBER_STRING@))
-      (then
-        (if (i32.eq (i32.load offset=@variant.TAG@ (local.get $object)) (i32.load offset=8 (local.get $schema)))
-          (then (call $write-number (local.get $writer) (f64.load offset=@variant.VALUE@ (local.get $object))))
-          (else (call $write-quote (local.get $writer) (i32.load offset=@variant.VALUE@ (local.get $object)))))
-        (return)))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_DATE@))
       (then
         ;; The formatter has no callbacks or safepoints; this buffer is consumed before recursion resumes.

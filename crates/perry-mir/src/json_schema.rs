@@ -6,10 +6,7 @@ use pliron::{
 };
 use std::collections::HashSet;
 
-use crate::{
-    ArrayType, JsonType, NumberStringType, OptionalType, RecordKind, RecordType, StringType,
-    VariantType,
-};
+use crate::{ArrayType, JsonType, OptionalType, RecordKind, RecordType, StringType, VariantType};
 
 /// Handles keep schema classification independent of mutable IR construction.
 #[derive(Clone, Copy)]
@@ -22,7 +19,6 @@ pub enum JsonSchema {
     },
     Boolean,
     String,
-    NumberString,
     Optional(TypeHandle),
     Record(TypedHandle<RecordType>),
     Array(TypeHandle),
@@ -59,8 +55,7 @@ impl JsonSchema {
             }
             match Self::of(ctx, ty) {
                 Some(JsonSchema::Number | JsonSchema::Boolean | JsonSchema::String) => {}
-                Some(JsonSchema::Value | JsonSchema::NumberString)
-                    if usage != Usage::Reflection => {}
+                Some(JsonSchema::Value) if usage != Usage::Reflection => {}
                 Some(JsonSchema::Integer { width, .. })
                     if width == 64 || usage == Usage::Reflection => {}
                 Some(JsonSchema::Array(element) | JsonSchema::Optional(element)) => {
@@ -123,8 +118,6 @@ impl JsonSchema {
             }
         } else if definition.is::<StringType>() {
             Self::String
-        } else if definition.is::<NumberStringType>() {
-            Self::NumberString
         } else if let Some(optional) = definition.downcast_ref::<OptionalType>() {
             Self::Optional(optional.value())
         } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx)

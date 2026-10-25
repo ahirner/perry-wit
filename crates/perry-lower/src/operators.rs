@@ -32,18 +32,11 @@ impl<'s> FunctionBuilder<'s> {
         let may_be_number = |value: Value| {
             matches!(
                 kind_of(value),
-                Some(
-                    Kind::Number
-                        | Kind::NumberString
-                        | Kind::ValueUnion
-                        | Kind::Json
-                        | Kind::Exception
-                )
+                Some(Kind::Number | Kind::ValueUnion | Kind::Json | Kind::Exception)
             )
         };
         if !numbers
-            && !(equality == Equality::SameValueZero
-                && matches!(kind_of(lhs), Some(Kind::NumberString | Kind::ValueUnion)))
+            && !(equality == Equality::SameValueZero && kind_of(lhs) == Some(Kind::ValueUnion))
             && !(equality == Equality::SameValue && may_be_number(lhs) && may_be_number(rhs))
         {
             return Ok(equal);
@@ -105,11 +98,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let value = self.defined(ctx, value)?;
         let f64_ty = FP64Type::get(ctx).into();
-        if value
-            .get_type(ctx)
-            .deref(ctx)
-            .is::<perry_mir::NumberStringType>()
-        {
+        if crate::value_unions::is_value_union(ctx, value.get_type(ctx)) {
             return Ok(self.emit_value(ctx, |ctx| {
                 perry_mir::VariantPayloadOp::new(ctx, value, f64_ty)
             }));
@@ -141,7 +130,7 @@ impl<'s> FunctionBuilder<'s> {
             || crate::value_unions::is_value_union(ctx, rhs.get_type(ctx))
         {
             let result = if matches!(op, BinaryOp::Add) {
-                perry_mir::NumberStringType::get(ctx).into()
+                perry_mir::ValueUnionType::number_string(ctx).into()
             } else {
                 FP64Type::get(ctx).into()
             };
@@ -347,24 +336,10 @@ impl<'s> FunctionBuilder<'s> {
                 let equal = self.json_scalar_equal(ctx, json, scalar)?;
                 return Ok(self.equality_result(ctx, equality, equal));
             }
-            let union = |value: Value| {
-                present_type(ctx, value.get_type(ctx))
-                    .deref(ctx)
-                    .is::<perry_mir::NumberStringType>()
-            };
             let states = merge_absence(
                 absence(ctx, lhs.get_type(ctx)),
                 absence(ctx, rhs.get_type(ctx)),
             );
-            if union(lhs) || union(rhs) {
-                let base = perry_mir::NumberStringType::get(ctx).into();
-                let target = states.map_or(base, |a| {
-                    perry_mir::OptionalType::get_with(ctx, base, a).into()
-                });
-                let lhs = self.fit(ctx, lhs, target)?;
-                let rhs = self.fit(ctx, rhs, target)?;
-                return Ok(self.compare(ctx, equality, lhs, rhs));
-            }
             if let Some(states) = states {
                 // Strict equality with `undefined` in play: compare as `T | undefined`.
                 let left_inner = present_type(ctx, lhs.get_type(ctx));
@@ -756,7 +731,7 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(self.compare(ctx, CompareKind::Gt, absolute, zero))
             }
             Kind::Json => Ok(self.intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])),
-            Kind::NumberString | Kind::ValueUnion => {
+            Kind::ValueUnion => {
                 let result = IntegerType::get(ctx, 1, Signedness::Signless).into();
                 self.dispatch_value(ctx, value, result, &|b, ctx, value| b.truthy(ctx, value))
             }

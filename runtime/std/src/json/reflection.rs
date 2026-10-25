@@ -256,14 +256,6 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
                 }
                 core::ptr::null_mut()
             }
-            descriptor::JSON_NUMBER_STRING => {
-                let value = node(bits as u32);
-                if word(value, 0) == word(desc, 8) {
-                    std_json_from_number(*value.add(8).cast::<f64>())
-                } else {
-                    std_json_from_string(node(word(value, 8)))
-                }
-            }
             descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),
             _ => core::ptr::null_mut(),
         }

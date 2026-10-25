@@ -25,15 +25,6 @@ pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Optio
     if let Some(variant) = ty.downcast_ref::<VariantType>() {
         return Ok(variant.cases().to_vec());
     }
-    if ty.is::<crate::types::NumberStringType>() {
-        return Ok(vec![
-            (
-                "number".into(),
-                Some(pliron::builtin::types::FP64Type::get(ctx).into()),
-            ),
-            ("string".into(), Some(StringType::get(ctx).into())),
-        ]);
-    }
     verify_err!(pliron::location::Location::Unknown, InvalidVariant)
 }
 

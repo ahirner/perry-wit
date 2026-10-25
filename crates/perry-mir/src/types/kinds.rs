@@ -97,8 +97,6 @@ value_types! {
         DecoderType("perry.decoder", ["TextDecoder"]);
         /// Immutable, statically compiled regular expression program.
         RegexType("perry.regex", ["RegExp"]);
-        /// The finite primitive union `number | string`, with an exact owner slot for its string case.
-        NumberStringType("perry.number_string", []);
     }
     internal {
         /// Suspended JSON serialization between replacer calls.

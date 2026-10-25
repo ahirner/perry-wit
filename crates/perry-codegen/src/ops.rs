@@ -194,9 +194,7 @@ impl FunctionLowering<'_, '_> {
                 return Ok(());
             }
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
-            let value = if inner.deref(ctx).is::<perry_mir::NumberStringType>()
-                || inner.deref(ctx).is::<perry_mir::ValueUnionType>()
-            {
+            let value = if inner.deref(ctx).is::<perry_mir::ValueUnionType>() {
                 let equal = self.value_union_equal(ctx, mir_ty, operands[0], operands[1])?;
                 match kind {
                     CompareKind::Eq => equal,
