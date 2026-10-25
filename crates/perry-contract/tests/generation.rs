@@ -91,7 +91,7 @@ fn entry_reexports_share_module_resolution_and_report_source_locations() -> Resu
         b"export function increment(n: unknown): number {return 1;}".to_vec();
     let error = generate_wit(&input, None).unwrap_err();
     let diagnostic = error
-        .downcast_ref::<perry_contract::PerryDiagnostic>()
+        .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
         .unwrap();
     assert_eq!(
         diagnostic.span.as_ref().unwrap().file.to_string_lossy(),

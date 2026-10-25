@@ -66,7 +66,7 @@ pub fn result_type(
 pub mod resolution;
 pub mod sdk;
 pub use perry_source::{Module, Program, Source};
-pub use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
 #[derive(Clone, Debug)]
 pub enum Package {
     Sources(Vec<Source>),
