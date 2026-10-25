@@ -97,6 +97,10 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, result);
             return Ok(());
         }
+        if let Some(value) = self.bitwise_intrinsic(ctx, op, intrinsic)? {
+            self.define_value(ctx, op, value);
+            return Ok(());
+        }
         if let Some(value) = self.numeric_intrinsic(ctx, op, intrinsic)? {
             self.define_value(ctx, op, value);
             return Ok(());

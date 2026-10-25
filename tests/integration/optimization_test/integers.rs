@@ -406,3 +406,27 @@ export function parse(flag: number): number {
     }
     Ok(())
 }
+
+/// Bitwise operators read only the low 32 bits of their operands, so integer arithmetic
+/// feeding them computes in `i32`; other uses of the same value keep its full width.
+#[test]
+fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
+    let compiled = compile(
+        "export function run(a:number,b:number):number { return (a * b) | 0; }",
+        "func(a:u32,b:u32)->s32",
+    )?;
+    let wat = wasmprinter::print_bytes(&compiled.core)?;
+    assert!(!wat.contains("i64."), "{wat}");
+    let mut program = Program::from_wasm(compiled.core);
+    let max = [Val::I32(-1), Val::I32(-1)];
+    assert_eq!(program.call("run", &max).0[0].unwrap_i32(), 1);
+
+    let compiled = compile(
+        "export function run(a:number,b:number):number { const p = a * b; return (p | 0) + p; }",
+        "func(a:u32,b:u32)->f64",
+    )?;
+    let mut program = Program::from_wasm(compiled.core);
+    let result = program.call("run", &[Val::I32(65536), Val::I32(65536)]).0[0];
+    assert_eq!(result.unwrap_f64(), 4294967296.0);
+    Ok(())
+}

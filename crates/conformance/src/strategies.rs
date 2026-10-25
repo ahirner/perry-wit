@@ -30,6 +30,7 @@ pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
     prop_oneof![
         4 => leaf,
         3 => (prop::sample::select(vec![Binary::Add, Binary::Sub, Binary::Mul, Binary::Div, Binary::Rem]), child.clone(), child.clone()).prop_map(|(op,a,b)| Number::Binary(op,Box::new(a),Box::new(b))),
+        1 => bitwise(child.clone()),
         1 => (condition, child.clone(), child.clone()).prop_map(|(c,a,b)| Number::Choose(Box::new(c),Box::new(a),Box::new(b))),
         1 => child.clone().prop_map(|v| Number::Mark(Box::new(v))),
         1 => (child.clone(),child.clone(),child.clone(),0u8..3).prop_map(|(a,b,c,i)| Number::Array(Box::new(a),Box::new(b),Box::new(c),i)),
@@ -48,6 +49,29 @@ pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
         1 => text.clone().prop_map(|v| Number::JsonLength(Box::new(v))),
         1 => text.prop_map(|v| Number::JsonStoredLength(Box::new(v))),
     ].boxed()
+}
+
+pub(crate) fn bitwise(number: BoxedStrategy<Number>) -> BoxedStrategy<Number> {
+    prop_oneof![
+        (
+            prop::sample::select(vec![
+                Binary::BitAnd,
+                Binary::BitOr,
+                Binary::BitXor,
+                Binary::Shl,
+                Binary::Shr,
+                Binary::UShr
+            ]),
+            number.clone(),
+            number.clone(),
+        )
+            .prop_map(|(op, a, b)| Number::Binary(op, Box::new(a), Box::new(b))),
+        number
+            .clone()
+            .prop_map(|value| Number::BitNot(Box::new(value))),
+        (number.clone(), number).prop_map(|(a, b)| Number::Imul(Box::new(a), Box::new(b))),
+    ]
+    .boxed()
 }
 
 pub(crate) fn conditions(depth: u32) -> BoxedStrategy<Condition> {

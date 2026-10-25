@@ -111,7 +111,9 @@ jobs:
 
   bench-perry:
     needs: flake-build
-    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:

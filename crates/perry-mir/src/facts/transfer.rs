@@ -273,19 +273,34 @@ impl Solver {
                     });
                 let range = match range {
                     Some(Range::Bottom) => Range::Bottom,
-                    Some(Range::Bounds(interval)) if contract == BuiltinContract::Abs => {
-                        Range::clamp(interval.abs(), fact.integer())
-                    }
+                    Some(Range::Bounds(interval)) if contract == BuiltinContract::Abs => interval
+                        .checked_abs()
+                        .map_or(Range::of(fact.integer()), |interval| {
+                            Range::clamp(interval, fact.integer())
+                        }),
                     Some(Range::Bounds(interval)) => Range::clamp(interval, fact.integer()),
                     None | Some(Range::Unknown) => Range::of(fact.integer()),
                 };
                 (fact, range)
             }
-            BuiltinContract::UnsignedCount | BuiltinContract::ByteValue => {
-                let integer = if contract == BuiltinContract::ByteValue {
-                    Integer::U8
-                } else {
-                    Integer::U32
+            BuiltinContract::UnsignedCount
+            | BuiltinContract::ByteValue
+            | BuiltinContract::Signed32 => {
+                if intrinsic.int32_operands() {
+                    // Only the low 32 bits of each operand reach the result.
+                    for input in inputs {
+                        let unsigned = self.analysis.states[id]
+                            .fact(input)
+                            .integer()
+                            .is_some_and(|integer| !integer.signed);
+                        let required = if unsigned { Integer::U32 } else { Integer::I32 };
+                        self.demand(id, input, Some(required), true);
+                    }
+                }
+                let integer = match contract {
+                    BuiltinContract::ByteValue => Integer::U8,
+                    BuiltinContract::Signed32 => Integer::I32,
+                    _ => Integer::U32,
                 };
                 (Fact::Integer(integer), Range::of(Some(integer)))
             }

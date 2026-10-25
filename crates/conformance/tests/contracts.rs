@@ -132,6 +132,41 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
     assert_ne!(number(f64::INFINITY), number(f64::NEG_INFINITY));
     assert_eq!(number(f64::NAN), number(-f64::NAN));
     let directory = tempfile::tempdir()?;
+    let executor = Executor::new(Limits::default());
+    let mut baseline = None;
+    for expression in ["x", "identity(0,x)", "identity(0, x)"] {
+        let case = Case::Function {
+            asynchronous: false,
+            source: format!(
+                "function identity(unused:number,value:number):number {{ return value; }}
+                 export function run(x:number):{{value:number,trace:number[]}} {{
+                     return {{value:{expression},trace:[]}};
+                 }}"
+            ),
+        };
+        let artifacts = tempfile::tempdir_in(directory.path())?;
+        let evidence = executor.check(&case, artifacts.path())?;
+        let evidence = serde_json::to_value(&evidence[0])?;
+        let observations = &evidence["oracle"]["detail"]["observations"];
+        for boundary in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 4294967295.0] {
+            ensure!(
+                observations
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["value"] == number(boundary)),
+                "function case missed boundary {boundary}"
+            );
+        }
+        if let Some(baseline) = &baseline {
+            assert_eq!(
+                observations, baseline,
+                "source formatting changed the input domain"
+            );
+        } else {
+            baseline = Some(observations.clone());
+        }
+    }
     let exited = command(
         Command::new("node").args(["-e", "process.exit(7)"]),
         directory.path(),

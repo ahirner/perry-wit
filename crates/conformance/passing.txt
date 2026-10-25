@@ -8,6 +8,7 @@ web.performance.monotonic
 node.process.exit_status
 node.process.environment
 ecma.number.arithmetic
+ecma.number.bitwise
 ecma.math.rounding
 ecma.string.operations
 ecma.array.dense

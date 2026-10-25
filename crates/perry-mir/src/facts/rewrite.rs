@@ -142,6 +142,7 @@ pub(in crate::facts) fn integral_intrinsic(
     use crate::intrinsics::Intrinsic;
     match intrinsic {
         Intrinsic::BigIntNegate | Intrinsic::BytesAt | Intrinsic::ParseInt => true,
+        _ if intrinsic.int32_operands() => true,
         _ if intrinsic.preserves_integers() => op.deref(ctx).operands().all(integral),
         _ => false,
     }

@@ -28,7 +28,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert!(std::error::Error::source(&error).is_some());
 
     let helper =
-        "// é🙂\r\nexport function helper(value:number):number {\r\n return value << 1;\r\n}";
+        "// é🙂\r\nexport function helper(value:number):number {\r\n return value ** 1;\r\n}";
     let mut program = program;
     program.modules[0].contents = helper.as_bytes().to_vec();
     let error = api::compile_core(&program).unwrap_err();
@@ -38,7 +38,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     );
     let span = error.diagnostics[0].span.as_ref().unwrap();
     assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
-    assert_eq!(&helper[span.start_byte..span.end_byte], "value << 1");
+    assert_eq!(&helper[span.start_byte..span.end_byte], "value ** 1");
     assert_eq!((span.start_line, span.start_column), (3, 9));
 
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
