@@ -55,6 +55,7 @@ wasi.streams.incoming_bytes
 web.fetch.bounded_body
 wasi.http.handler
 ecma.error.values
+ecma.array.inferred_storage
 web.streams.byob_reader
 web.fetch.bounded_byob_body
 ecma.aggregate.specialization

@@ -2,8 +2,8 @@
 
 `perry-conformance` tests Perry-WIT differentially against Node.js.
 A contract names one capability, such as `ecma.string.operations`, and supplies directed cases plus a property-based generator (`proptest`) of TypeScript programs and inputs.
-Every case runs twice: under Node.js, and as a compiled component in a Wasmtime host with WASI 0.3, fuel metering and memory limits.
-The runner compares return values, standard streams and exceptions across each seed case and its metamorphic variants (such as reordered independent declarations).
+Executable cases and their metamorphic variants run as compiled components in a Wasmtime host with WASI 0.3, fuel metering and memory limits, and under Node.js, except aggregate cases with exact integers beyond 2^53, which use an expected-value model.
+The runner checks that each variant matches its oracle and that transformations preserve return values, evaluation traces and standard streams. Rejection cases and their variants must report the required diagnostic.
 
 ## Expected Outcomes
 

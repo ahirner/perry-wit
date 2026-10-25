@@ -192,10 +192,12 @@ fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &P
             .contains(&case.expected_outcome()),
         "generated input changes the contract's declared expected outcome"
     );
-    for evidence in executor.check(case, directory)? {
-        (contract.check)(case, &evidence)?;
+    let (variants, evidence): (Vec<_>, Vec<_>) =
+        executor.check(case, directory)?.into_iter().unzip();
+    for (variant, evidence) in variants.iter().zip(&evidence) {
+        (contract.check)(variant, evidence)?;
     }
-    Ok(())
+    check_metamorphic(&evidence)
 }
 fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Result<()> {
     let source = case.source();
@@ -308,7 +310,7 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
         let artifacts = directory.join(contract.id);
         fs::create_dir_all(&artifacts)?;
         eprintln!("Checking {}", contract.id);
-        executor.begin_typecheck_batch();
+        executor.begin_typecheck_batch()?;
         for (witness, partition) in contract.witnesses.iter().zip(result.partitions.iter_mut()) {
             let outcome = evaluate(
                 contract,
