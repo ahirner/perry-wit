@@ -128,8 +128,8 @@ jobs:
       env:
         ARTIFACT_URL: ${{ steps.perry-bench-artifact.outputs.artifact-url }}
       run: |
+        printf '[Download benchmark report and logs](%s)\n\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
         cat artifacts/perry-bench/summary.md >> "$GITHUB_STEP_SUMMARY"
-        printf '\n[Download benchmark report and logs](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: [flake-build, site]
