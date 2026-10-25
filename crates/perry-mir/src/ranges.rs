@@ -14,7 +14,12 @@
 //!   access cannot shrink the array, using converged mutation and object-identity facts for calls.
 //! - A `Uint8Array` shrinks to length 0 only when its buffer is transferred during a BYOB read,
 //!   which requires a call or an `await`. The proof holds when the path between the length read
-//!   and the element read is free of calls, awaits, and view reads.
+//!   and the element read is free of calls, awaits, and BYOB reads.
+//!
+//! Without a length comparison, an index is in bounds when its integral range lies below the
+//! array's minimum length, or within the constructor or subview extent of a view that stays
+//! attached. Dominating comparisons of integral operands narrow those ranges, also through
+//! `+`, `-`, `*` and numeric casts.
 //!
 //! The unchecked read's result is wrapped back into `T | undefined`, and `fold` subsequently
 //! eliminates redundant `undefined` tests and coercions on the wrapped value.
@@ -24,13 +29,12 @@
 //! `string_char_at_index`.
 use crate::{
     aggregates::functions,
-    attrs::CompareKind,
     calls::{AsyncCallOp, AwaitOp, CallOp},
     collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArraySetOp, ArrayStoreOp, StringLenOp},
-    control::CondBrOp,
+    facts::guards::{GuardedRanges, orders},
     intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
-    scalar::{CompareOp, NumericCastOp},
+    scalar::NumericCastOp,
     types::ArrayType,
 };
 use pliron::{
@@ -53,6 +57,8 @@ use pliron::{
     value::Value,
 };
 use std::collections::HashMap;
+
+mod bytes;
 
 /// What a length is the length of.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,6 +133,7 @@ pub(crate) fn prove_bounds(
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
         let facts = facts(ctx, numeric, &function);
+        let mut intervals = GuardedRanges::new(ctx, numeric, &function);
         let mut lengths = Vec::new();
         let mut accesses = Vec::new();
         let region = function.get_region(ctx);
@@ -162,11 +169,29 @@ pub(crate) fn prove_bounds(
                     continue;
                 }
             }
-            if !numeric.is_count(ctx, &function, index) {
+            let index_bounds = if kind != Object::String {
+                intervals.at(dominance, op, index)
+            } else {
+                None
+            };
+            if !numeric.is_count(ctx, &function, index)
+                && !index_bounds.is_some_and(|(lower, _)| lower >= 0)
+            {
                 continue;
             }
             let proven = (kind == Object::Array
-                && numeric.array_in_bounds(ctx, &function, object, index))
+                && index_bounds.is_some_and(|(lower, upper)| {
+                    lower >= 0
+                        && numeric
+                            .array_length(&function, object)
+                            .is_some_and(|(length, _)| upper < i128::from(length))
+                }))
+                || (kind == Object::Bytes
+                    && index_bounds.is_some_and(|(lower, upper)| {
+                        lower >= 0
+                            && bytes::extent(ctx, numeric, object, op, 32)
+                                .is_some_and(|(length, _)| upper < length)
+                    }))
                 || facts
                     .get(&(object, index, kind))
                     .into_iter()
@@ -208,45 +233,24 @@ fn facts(
     numeric: &crate::facts::ProgramFacts,
     function: &FuncOp,
 ) -> HashMap<(Value, Value, Object), Vec<Fact>> {
-    let mut facts = HashMap::new();
+    let mut facts: HashMap<_, Vec<_>> = HashMap::new();
     for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
-            continue;
-        };
-        let Some(cond_br) = Operation::get_op::<CondBrOp>(terminator, ctx) else {
-            continue;
-        };
-        let condition = cond_br.get_operand_condition(ctx);
-        let Some(compare) = condition
-            .defining_op()
-            .and_then(|op| Operation::get_op::<CompareOp>(op, ctx))
-        else {
-            continue;
-        };
-        let operation = compare.get_operation().deref(ctx);
-        let (x, y) = (operation.get_operand(0), operation.get_operand(1));
-        // (successor, index, length): counts and lengths are never NaN, so the false edge of
-        // `x >= y` proves `x < y` too.
-        let (succ, index, len) = match compare.kind(ctx) {
-            CompareKind::Lt => (0, x, y),
-            CompareKind::Gt => (0, y, x),
-            CompareKind::Ge => (1, x, y),
-            CompareKind::Le => (1, y, x),
-            CompareKind::Eq | CompareKind::Ne => continue,
-        };
-        let target = terminator.deref(ctx).get_successor(succ);
-        let other = terminator.deref(ctx).get_successor(1 - succ);
-        let single = target.num_preds(ctx) == 1;
-        if target == other || !single || !numeric.is_count(ctx, function, index) {
-            continue;
+        // Counts and lengths are never NaN, so false edges order them too.
+        for order in orders(ctx, block).into_iter().flatten() {
+            if !order.strict || !numeric.is_count(ctx, function, order.smaller) {
+                continue;
+            }
+            let Some(length) = length(ctx, order.larger) else {
+                continue;
+            };
+            facts
+                .entry((length.object(), order.smaller, length.kind()))
+                .or_default()
+                .push(Fact {
+                    target: order.target,
+                    length,
+                });
         }
-        let Some(length) = length(ctx, len) else {
-            continue;
-        };
-        facts
-            .entry((length.object(), index, length.kind()))
-            .or_insert_with(Vec::new)
-            .push(Fact { target, length });
     }
     facts
 }

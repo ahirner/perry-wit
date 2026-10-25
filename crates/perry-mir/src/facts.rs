@@ -29,6 +29,7 @@ use std::{
 };
 
 mod domains;
+pub(crate) mod guards;
 mod heap;
 pub(crate) mod paths;
 mod rewrite;
@@ -451,17 +452,23 @@ impl ProgramFacts {
     /// A bounded value is integral even if its type is a number: intervals start from integer
     /// constants and grow only through `+`, `-` and `*` of bounded operands.
     pub fn integral_interval(&self, ctx: &Context, value: Value) -> Option<(i128, i128)> {
-        let mut parent = value.get_parent_block(ctx)?.deref(ctx).get_parent_op(ctx);
+        match self.range(ctx, value) {
+            Range::Bounds(Interval { lower, upper }) => Some((lower, upper)),
+            Range::Bottom | Range::Unknown => None,
+        }
+    }
+
+    fn range(&self, ctx: &Context, value: Value) -> Range {
+        let mut parent = value
+            .get_parent_block(ctx)
+            .and_then(|block| block.deref(ctx).get_parent_op(ctx));
         while let Some(op) = parent {
             if let Some(&context) = self.generic.get(&op) {
-                return match self.states.get(context)?.range(value) {
-                    Range::Bounds(Interval { lower, upper }) => Some((lower, upper)),
-                    Range::Bottom | Range::Unknown => None,
-                };
+                return self.states[context].range(value);
             }
             parent = op.deref(ctx).get_parent_op(ctx);
         }
-        None
+        Range::Unknown
     }
 
     /// Non-negative integral values, including loop-carried counts after range widening.

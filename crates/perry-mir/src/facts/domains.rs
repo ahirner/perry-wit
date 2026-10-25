@@ -184,6 +184,22 @@ impl Interval {
 }
 
 impl Range {
+    pub(super) fn intersect(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bottom, _) | (_, Self::Bottom) => Self::Bottom,
+            (Self::Unknown, range) | (range, Self::Unknown) => range,
+            (Self::Bounds(a), Self::Bounds(b)) => {
+                let lower = a.lower.max(b.lower);
+                let upper = a.upper.min(b.upper);
+                if lower <= upper {
+                    Self::Bounds(Interval { lower, upper })
+                } else {
+                    Self::Bottom
+                }
+            }
+        }
+    }
+
     pub(super) fn fits_exact_number(self) -> bool {
         matches!(
             self,
@@ -450,24 +466,34 @@ pub(super) fn arithmetic_range(
         (Range::Bounds(a), Range::Bounds(b)) => (a, b),
         _ => return Range::of(domain),
     };
+    let b = if kind == BinaryKind::Sub {
+        Interval {
+            lower: negate_end(b.upper),
+            upper: negate_end(b.lower),
+        }
+    } else {
+        b
+    };
     let interval = match kind {
+        BinaryKind::Add | BinaryKind::Sub
+            if domain.is_none()
+                && ((a.lower == i128::MIN && b.upper == i128::MAX)
+                    || (a.upper == i128::MAX && b.lower == i128::MIN)) =>
+        {
+            // Opposite infinities can produce NaN, which branch comparisons cannot bound.
+            return Range::Unknown;
+        }
+        BinaryKind::Add | BinaryKind::Sub => Interval {
+            lower: add_end(a.lower, b.lower, i128::MIN),
+            upper: add_end(a.upper, b.upper, i128::MAX),
+        },
         _ if domain.is_none()
             && [a.lower, a.upper, b.lower, b.upper]
                 .iter()
-                .any(|&bound| bound == i128::MIN || bound == i128::MAX)
-            && !(kind == BinaryKind::Add
-                && ((a.lower >= 0 && b.lower >= 0) || (a.upper <= 0 && b.upper <= 0))) =>
+                .any(|&bound| bound == i128::MIN || bound == i128::MAX) =>
         {
             return Range::Unknown;
         }
-        BinaryKind::Add => Interval {
-            lower: a.lower.saturating_add(b.lower),
-            upper: a.upper.saturating_add(b.upper),
-        },
-        BinaryKind::Sub => Interval {
-            lower: a.lower.saturating_sub(b.upper),
-            upper: a.upper.saturating_sub(b.lower),
-        },
         BinaryKind::Mul => {
             let [Some(ll), Some(lu), Some(ul), Some(uu)] = [
                 a.lower.checked_mul(b.lower),
@@ -485,6 +511,25 @@ pub(super) fn arithmetic_range(
         _ => return Range::Unknown,
     };
     Range::clamp(interval, domain)
+}
+
+/// The sum of two interval ends. Without a domain, `unbounded` (`i128::MIN` for lower ends,
+/// `i128::MAX` for upper ends) stands for no bound and absorbs any addend.
+fn add_end(a: i128, b: i128, unbounded: i128) -> i128 {
+    if a == unbounded || b == unbounded {
+        unbounded
+    } else {
+        a.saturating_add(b)
+    }
+}
+
+/// The negation of an interval end, mapping each unbounded end to the opposite one.
+fn negate_end(end: i128) -> i128 {
+    match end {
+        i128::MIN => i128::MAX,
+        i128::MAX => i128::MIN,
+        end => -end,
+    }
 }
 
 /// The kind of `op` when it is integer-domain arithmetic: `+`, `-`, `*`, or BigInt `/` and `%`.

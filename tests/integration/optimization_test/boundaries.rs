@@ -2,7 +2,7 @@
 use super::{compile, inspect_wasm};
 use crate::core_program::Program;
 use crate::world::Compiler::Standard;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use wasmtime::Val;
 
 #[test]
@@ -162,8 +162,8 @@ export function run(n: number): number {{ let sum = 0; {calls} return sum; }}
 /// Projections through resolved generic shapes and in-bounds character loops cannot throw, so
 /// their exports carry no exception status result.
 #[test]
-fn proven_non_throwing_exports_have_no_status_result() {
-    let mut program = Program::new(
+fn proven_non_throwing_exports_have_no_status_result() -> Result<()> {
+    let mut program = Program::from_wasm(perry_wit::compile_core(
         r#"
 interface Item { n:number }
 interface Pair<Item,Other=Item> { a:Item; b:Other }
@@ -181,18 +181,101 @@ export function run():number {
  const link:Link<number> = {value:3,next:null};
  return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
 }
+
 export function charLoop(s: string): number {
  let count = 0;
  for (let i = 0; i < s.length; i++) { if (s[i] === '-') count++; }
  return count;
 }
 "#,
-    );
+        "projections.ts",
+    )?);
     for export in ["run", "charLoop"] {
         let function = program
             .instance
             .get_func(&mut program.store, export)
-            .expect("export");
+            .with_context(|| format!("missing export {export}"))?;
         assert_eq!(function.ty(&program.store).results().len(), 1, "{export}");
     }
+    Ok(())
+}
+
+#[test]
+fn byte_extents_preserve_subview_and_index_semantics() -> Result<()> {
+    for (view, start, limit, step, index, expected, checked) in [
+        ("bytes", "0", "8", "1", "i", 36.0, false),
+        ("bytes", "-1", "2", "1", "i + 1", 6.0, false),
+        ("bytes", "-1", "3", "2", "i + 1", 4.0, false),
+        ("bytes.subarray(2, 6)", "0", "4", "1", "i", 18.0, false),
+        ("bytes.subarray(-6, -2)", "0", "4", "1", "i", 18.0, false),
+        (
+            "bytes.subarray(1, 7).subarray(1, 5)",
+            "0",
+            "4",
+            "1",
+            "i",
+            18.0,
+            false,
+        ),
+        ("bytes.subarray(4, 4)", "0", "1", "1", "i", 1000.0, true),
+        ("bytes", "0", "4", "1", "i * 2", 16.0, false),
+        ("bytes", "0", "5", "1", "i * 2", 1016.0, true),
+        ("bytes", "0", "8", "1", "i / 2", 4010.0, true),
+        ("bytes", "0", "2", "1", "i + 7", 1008.0, true),
+        ("bytes", "0", "2", "1", "i - 1", 1001.0, true),
+        ("new Uint8Array(0)", "0", "1", "1", "i", 1000.0, true),
+        ("new Uint8Array(3.5)", "0", "4", "1", "i", 1000.0, true),
+    ] {
+        let source = format!(
+            r#"
+export function run(): number {{
+    const bytes = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) bytes[i] = i + 1;
+    const view = {view}; const alias = view;
+    let sum = 0;
+    for (let i = {start}; i < {limit}; i += {step}) {{
+        const value = alias[{index}];
+        sum += value === undefined ? 1000 : value;
+    }}
+    return sum;
+}}
+"#
+        );
+        let core = perry_wit::compile_core(&source, "extents.ts")?;
+        assert_eq!(
+            crate::world::function_names(&core)?.contains(&"std_bytes_get"),
+            checked,
+            "checked byte read: {view}, {start}..{limit}, {index}"
+        );
+        let mut program = Program::from_wasm(core);
+        let (results, _) = program.call("run", &[]);
+        assert_eq!(results[0].f64(), Some(expected), "{view}: {limit}: {index}");
+        assert!(results.get(1).is_none_or(|status| status.i32() == Some(0)));
+    }
+    Ok(())
+}
+
+#[test]
+fn nonfinite_arithmetic_cannot_prove_byte_bounds() -> Result<()> {
+    for expression in ["positive-positive", "positive+negative"] {
+        let source = format!(
+            r#"
+export function run(limit:number):number {{
+    const bytes=new Uint8Array(2); bytes[0]=7;
+    let positive=0; let negative=0;
+    for(let i=0;i<limit;i++) {{ positive+=1e308; negative-=1e308; }}
+    const index={expression};
+    if(index<0)return -1;
+    if(index>=2)return -2;
+    return bytes[index]===undefined?42:bytes[index];
+}}
+"#
+        );
+        let core = perry_wit::compile_core(&source, "nonfinite-bounds.ts")?;
+        assert!(crate::world::function_names(&core)?.contains(&"std_bytes_get"));
+        let mut program = Program::from_wasm(core);
+        assert_eq!(program.number("run", 1.0), 7.0, "{expression}");
+        assert_eq!(program.number("run", 2.0), 42.0, "{expression}");
+    }
+    Ok(())
 }
