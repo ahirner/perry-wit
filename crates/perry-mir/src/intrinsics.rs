@@ -144,6 +144,12 @@ impl Intrinsic {
             )
         )
     }
+
+    /// Bitwise operators and `Math.imul`: operands convert with `ToInt32` or `ToUint32`, so
+    /// the result is a 32-bit integer whatever the operand types.
+    pub(crate) fn int32_operands(self) -> bool {
+        self.policy().numeric == Some(BuiltinContract::Signed32) || self == Self::ShiftRightUnsigned
+    }
 }
 
 /// Builtin numeric and value-range contract for `ProgramFacts`.
@@ -157,8 +163,10 @@ pub(crate) enum BuiltinContract {
     Min,
     /// `Math.max`: preserves common integer domain and elementwise maximum bounds.
     Max,
-    /// Non-negative 32-bit byte/buffer length or offset (`0..=u32::MAX`).
+    /// Unsigned 32-bit result, such as a byte/buffer length, offset or unsigned shift.
     UnsignedCount,
+    /// Signed 32-bit result of bitwise operations or `Math.imul`.
+    Signed32,
     /// Unsigned byte read (`0..=255`).
     ByteValue,
     /// Produces or consumes an IEEE-754 `f64` number (`Math.sqrt`, `parseInt`, `parseFloat`, `Number(s)`).

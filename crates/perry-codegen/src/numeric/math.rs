@@ -5,14 +5,65 @@ use anyhow::Result;
 use perry_abi::layout::numeric::{FLOAT, SIGNED, UNSIGNED};
 use perry_mir::{CompareKind, Intrinsic};
 use pliron::{
+    builtin::types::{FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},
     operation::Operation,
-    r#type::Typed,
+    r#type::{TypeHandle, Typed},
     value::Value,
 };
 use pliron_wasm::attrs::NumOpcode;
 
 impl FunctionLowering<'_, '_> {
+    pub(crate) fn bitwise_intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        intrinsic: Intrinsic,
+    ) -> Result<Option<Carriers<Value>>> {
+        let opcode = match intrinsic {
+            Intrinsic::MathImul => NumOpcode::I32Mul,
+            Intrinsic::BitAnd => NumOpcode::I32And,
+            Intrinsic::BitOr => NumOpcode::I32Or,
+            Intrinsic::BitXor | Intrinsic::BitNot => NumOpcode::I32Xor,
+            Intrinsic::ShiftLeft => NumOpcode::I32Shl,
+            Intrinsic::ShiftRight => NumOpcode::I32ShrS,
+            Intrinsic::ShiftRightUnsigned => NumOpcode::I32ShrU,
+            _ => return Ok(None),
+        };
+        let signedness = if intrinsic == Intrinsic::ShiftRightUnsigned {
+            Signedness::Unsigned
+        } else {
+            Signedness::Signed
+        };
+        let integer_ty: TypeHandle = IntegerType::get(ctx, 32, signedness).into();
+        let mut args = Vec::with_capacity(2);
+        let count = op.deref(ctx).get_num_operands();
+        for index in 0..count {
+            let operand = op.deref(ctx).get_operand(index);
+            let source = operand.get_type(ctx);
+            let value = self.operand(ctx, op, index)?;
+            let bits = if source.deref(ctx).is::<FP64Type>() {
+                let bounds = self.state.program_facts.integral_interval(ctx, operand);
+                self.int32_bits(ctx, value, signedness == Signedness::Signed, bounds)
+            } else {
+                self.numeric_cast(ctx, value, source, integer_ty)?
+            };
+            args.push(bits);
+        }
+        if intrinsic == Intrinsic::BitNot {
+            args.push(self.i32_const(ctx, -1));
+        }
+        // Wasm shifts mask their count to five bits, as JavaScript requires.
+        let bits = self.num(ctx, opcode, args);
+        let result_ty = op.deref(ctx).get_result(0).get_type(ctx);
+        Ok(Some(self.cast_value(
+            ctx,
+            Carriers::Scalar(bits),
+            integer_ty,
+            result_ty,
+        )?))
+    }
+
     pub(crate) fn numeric_intrinsic(
         &mut self,
         ctx: &mut Context,

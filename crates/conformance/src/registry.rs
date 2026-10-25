@@ -116,8 +116,8 @@ impl Case {
             _ => vec![Cow::Borrowed(self)],
         }
     }
-    /// Boundary inputs evaluated for this case: all 24 IEEE-754 boundary inputs when the case
-    /// depends on `x`, or 3 instance-reuse calls when `x` is only echoed back.
+    /// Arbitrary function sources receive the full boundary corpus. Structured cases can
+    /// prove the input irrelevant and use three calls to exercise instance reuse instead.
     pub(crate) fn inputs(&self) -> &'static [f64] {
         let uses_all = match self {
             Self::Lifecycle(_)
@@ -125,9 +125,6 @@ impl Case {
             | Self::Fetch(_)
             | Self::Handler(_)
             | Self::Scaling { .. } => false,
-            Self::Function { source, .. } => {
-                source.contains("produce(x)") || source.contains(",x)")
-            }
             Self::Program(program) | Self::Fault { program, .. } => program.expression.uses_input(),
             _ => true,
         };
@@ -255,6 +252,98 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     let t = strategies::texts(depth);
     let input = || Box::new(Number::Input);
     let literal = || Box::new(Text::Literal("é\0漢".into()));
+    let mut bitwise = expression_contract(
+        "ecma.number.bitwise",
+        strategies::bitwise(n.clone()),
+        vec![
+            (
+                "and",
+                Number::Binary(
+                    Binary::BitAnd,
+                    input(),
+                    Box::new(Number::Integer(0x81234567)),
+                ),
+            ),
+            (
+                "or",
+                Number::Binary(Binary::BitOr, input(), Box::new(Number::Integer(0))),
+            ),
+            (
+                "xor",
+                Number::Binary(Binary::BitXor, input(), Box::new(Number::Integer(-1))),
+            ),
+            ("not", Number::BitNot(input())),
+            (
+                "left",
+                Number::Binary(Binary::Shl, input(), Box::new(Number::Integer(31))),
+            ),
+            (
+                "right",
+                Number::Binary(Binary::Shr, input(), Box::new(Number::Integer(1))),
+            ),
+            (
+                "unsigned-right",
+                Number::Binary(Binary::UShr, input(), Box::new(Number::Integer(0))),
+            ),
+            (
+                "imul",
+                Number::Imul(input(), Box::new(Number::Integer(0x01000193))),
+            ),
+            (
+                "trace",
+                Number::Imul(
+                    Box::new(Number::Mark(Box::new(Number::Binary(
+                        Binary::BitXor,
+                        input(),
+                        Box::new(Number::Integer(7)),
+                    )))),
+                    Box::new(Number::Mark(Box::new(Number::Integer(0xffffffff)))),
+                ),
+            ),
+        ],
+    );
+    bitwise.witnesses.push(Witness {
+        partition: "counts-and-compound-assignments",
+        case: Case::Function {
+            asynchronous: false,
+            source: r#"
+export function run(x: number): {value: number, trace: number[]} {
+    const trace: number[] = [];
+    const counts = [-1, 0, 1, 31, 32, 33, 63, 64, 4294967295, 4294967296, x];
+    for (const count of counts) {
+        trace.push(x << count, x >> count, x >>> count);
+        trace.push(0x81234567 << count, 0x81234567 >> count, 0x81234567 >>> count);
+        trace.push(Math.imul(x, count), Math.imul(count, x));
+    }
+    const boundaries = [
+        -4294967297.75, -4294967296.75, -4294967295.75,
+        -2147483649.75, -2147483648.75, -2147483647.75,
+        2147483647.75, 2147483648.75, 2147483649.75,
+        4294967295.75, 4294967296.75, 4294967297.75,
+    ];
+    for (const boundary of boundaries) {
+        trace.push(boundary | 0, boundary >>> 0, ~boundary);
+        trace.push(boundary ^ x, Math.imul(boundary, x), Math.imul(x, boundary));
+    }
+    let value = x;
+    value |= 0; trace.push(value);
+    value &= 0xfedcba98; trace.push(value);
+    value ^= 0x81234567; trace.push(value);
+    value <<= 33; trace.push(value);
+    value >>= 31; trace.push(value);
+    value >>>= 0; trace.push(value);
+    let checksum = 0x811c9dc5 ^ x;
+    for (let i = 0; i < 100; i++) {
+        checksum = Math.imul(checksum ^ i, 0x01000193);
+        trace.push(checksum, checksum >>> 0);
+    }
+    trace.push(checksum, checksum >>> 0);
+    return {value, trace};
+}
+"#
+            .into(),
+        },
+    });
     let mut contracts = vec![
         expression_contract(
             "ecma.number.arithmetic",
@@ -276,6 +365,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ("handled-throw", Number::Handled(input())),
             ],
         ),
+        bitwise,
         expression_contract(
             "ecma.math.rounding",
             (
@@ -294,6 +384,23 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 .into_iter()
                 .zip(["floor", "ceil", "trunc", "abs", "round"])
                 .map(|(op, id)| (id, Number::Math(op, input())))
+                .chain(std::iter::once((
+                    "abs-widened-loop",
+                    Number::Array(
+                        Box::new(Number::Mark(Box::new(Number::Integer(0)))),
+                        Box::new(Number::Mark(Box::new(Number::Integer(3)))),
+                        Box::new(Number::Math(
+                            Math::Abs,
+                            Box::new(Number::ClosedLoop(
+                                Box::new(Number::Mark(Box::new(Number::Mark(Box::new(
+                                    Number::Integer(-472),
+                                ))))),
+                                1,
+                            )),
+                        )),
+                        2,
+                    ),
+                )))
                 .collect(),
         ),
         expression_contract(

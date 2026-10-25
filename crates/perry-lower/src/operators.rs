@@ -142,6 +142,18 @@ impl<'s> FunctionBuilder<'s> {
                 self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs))
             }
             (op, Kind::Number, Kind::Number) => {
+                let intrinsic = match op {
+                    BinaryOp::BitAnd => Some(Intrinsic::BitAnd),
+                    BinaryOp::BitOr => Some(Intrinsic::BitOr),
+                    BinaryOp::BitXor => Some(Intrinsic::BitXor),
+                    BinaryOp::Shl => Some(Intrinsic::ShiftLeft),
+                    BinaryOp::Shr => Some(Intrinsic::ShiftRight),
+                    BinaryOp::UShr => Some(Intrinsic::ShiftRightUnsigned),
+                    _ => None,
+                };
+                if let Some(intrinsic) = intrinsic {
+                    return Ok(self.intrinsic(ctx, intrinsic, vec![lhs, rhs]));
+                }
                 let kind = match op {
                     BinaryOp::Add => BinaryKind::Add,
                     BinaryOp::Sub => BinaryKind::Sub,
@@ -593,7 +605,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(value)
     }
 
-    /// `!x`, `-x` and `+x`.
+    /// `!x`, `-x`, `+x` and `~x`.
     pub(super) fn unary(
         &mut self,
         ctx: &mut Context,
@@ -616,6 +628,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.binary(ctx, BinaryKind::Mul, minus_one, value)
             }
             (UnaryOp::Pos, Kind::Number) => value,
+            (UnaryOp::BitNot, Kind::Number) => self.intrinsic(ctx, Intrinsic::BitNot, vec![value]),
             (UnaryOp::Pos, Kind::String) => {
                 self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
             }

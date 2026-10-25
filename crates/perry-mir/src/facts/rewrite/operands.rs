@@ -184,6 +184,14 @@ fn intrinsic_operand_types(
     };
     let res_ty = || op.deref(ctx).get_result(0).get_type(ctx);
     match intrinsic {
+        _ if intrinsic.int32_operands() => {
+            for (expected, arg) in expected.iter_mut().zip(op.deref(ctx).operands()) {
+                let ty = arg.get_type(ctx);
+                if Integer::from_type(ctx, ty).is_some() {
+                    *expected = ty;
+                }
+            }
+        }
         _ if intrinsic.preserves_integers() => {
             let res_ty = res_ty();
             if Integer::from_type(ctx, res_ty).is_some()

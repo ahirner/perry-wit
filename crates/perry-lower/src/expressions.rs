@@ -169,6 +169,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::MathAbs(value) => self.math_unary(ctx, Intrinsic::MathAbs, value)?,
             Expr::MathRound(value) => self.math_unary(ctx, Intrinsic::MathRound, value)?,
             Expr::MathSqrt(value) => self.math_unary(ctx, Intrinsic::MathSqrt, value)?,
+            Expr::MathImul(left, right) => {
+                let left = self.number_operand(ctx, left)?;
+                let right = self.number_operand(ctx, right)?;
+                self.intrinsic(ctx, Intrinsic::MathImul, vec![left, right])
+            }
             Expr::MathMin(values) => {
                 self.math_extremum(ctx, Intrinsic::MathMin, f64::INFINITY, values)?
             }
