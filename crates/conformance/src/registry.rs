@@ -76,10 +76,11 @@ impl Case {
     /// The case followed by its metamorphic forms, which must observe identically.
     pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
         match self {
-            Self::InferredArray(case) => case
-                .forms()
-                .into_iter()
-                .map(|case| Cow::Owned(Self::InferredArray(case)))
+            Self::InferredArray(case) => std::iter::once(Cow::Borrowed(self))
+                .chain(
+                    case.variants()
+                        .map(|case| Cow::Owned(Self::InferredArray(case))),
+                )
                 .collect(),
             Self::Reject {
                 diagnostic,

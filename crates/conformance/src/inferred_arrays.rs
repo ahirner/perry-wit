@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 const REQUIRES_ELEMENT_TYPE: &str = "an empty array literal needs a declared element type";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Element {
+enum Element {
     Number,
     Text,
     Boolean,
@@ -43,7 +43,7 @@ impl Element {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Form {
+enum Form {
     Annotated,
     Aliased,
     Branches,
@@ -54,18 +54,18 @@ pub enum Form {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Write {
-    pub value: i16,
-    pub index: Option<u8>,
+struct Write {
+    value: i16,
+    index: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArrayCase {
-    pub element: Element,
-    pub seed: i16,
-    pub writes: Vec<Write>,
-    pub aliases: u8,
-    pub form: Form,
+    element: Element,
+    seed: i16,
+    writes: Vec<Write>,
+    aliases: u8,
+    form: Form,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -76,12 +76,8 @@ enum Conflict {
 }
 
 impl ArrayCase {
-    pub(crate) fn forms(&self) -> Vec<Self> {
-        if self.form != Form::Annotated {
-            return vec![self.clone()];
-        }
+    pub(crate) fn variants(&self) -> impl Iterator<Item = Self> + '_ {
         [
-            Form::Annotated,
             Form::Aliased,
             Form::Branches,
             Form::Loop,
@@ -90,14 +86,14 @@ impl ArrayCase {
             Form::AppendIndex,
         ]
         .into_iter()
+        .filter(|_| self.form == Form::Annotated)
         .map(|form| Self {
             form,
             ..self.clone()
         })
-        .collect()
     }
 
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         self.emit(self.form, None)
     }
 
@@ -242,12 +238,12 @@ impl ArrayCase {
     }
 
     fn rejection(&self, conflict: Conflict) -> Case {
-        let mut sources = [Form::Aliased, Form::Branches, Form::Loop, Form::Temporaries]
-            .into_iter()
-            .map(|form| self.emit(form, Some(conflict)));
         Case::Reject {
-            source: sources.next().unwrap(),
-            variants: sources.collect(),
+            source: self.emit(Form::Aliased, Some(conflict)),
+            variants: [Form::Branches, Form::Loop, Form::Temporaries]
+                .into_iter()
+                .map(|form| self.emit(form, Some(conflict)))
+                .collect(),
             diagnostic: REQUIRES_ELEMENT_TYPE.into(),
         }
     }

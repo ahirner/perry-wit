@@ -25,7 +25,7 @@ impl Constraints {
 
     fn bindings(self) -> HashMap<LocalId, HirType> {
         let escaped: HashSet<_> = self.escaped.iter().map(|id| self.root(*id)).collect();
-        let mut elements: HashMap<LocalId, Option<HirType>> = HashMap::new();
+        let mut elements: HashMap<LocalId, Option<&HirType>> = HashMap::new();
         for (id, writes) in &self.writes {
             let root = self.root(*id);
             if !self.fresh.contains(&root) || escaped.contains(&root) {
@@ -35,11 +35,11 @@ impl Constraints {
                 elements
                     .entry(root)
                     .and_modify(|element| {
-                        if element.as_ref() != Some(ty) {
+                        if *element != Some(ty) {
                             *element = None;
                         }
                     })
-                    .or_insert_with(|| is_resolvable_type(ty).then(|| ty.clone()));
+                    .or_insert_with(|| is_resolvable_type(ty).then_some(ty));
             }
         }
         for id in &self.element_reads {
@@ -56,7 +56,7 @@ impl Constraints {
             .iter()
             .chain(self.aliases.keys())
             .filter_map(|id| {
-                let ty = elements.get(&self.root(*id))?.as_ref()?;
+                let ty = (*elements.get(&self.root(*id))?)?;
                 Some((*id, HirType::Array(Box::new(ty.clone()))))
             })
             .collect()
@@ -214,13 +214,12 @@ impl Visitor for Collect<'_, '_> {
                 object,
                 index,
                 value,
-            } if matches!(**object, Expr::LocalGet(_)) => {
-                let Expr::LocalGet(id) = **object else {
-                    unreachable!()
-                };
-                self.write(id, value);
-                self.expression(index)?;
-                return self.expression(value);
+            } => {
+                if let Expr::LocalGet(id) = **object {
+                    self.write(id, value);
+                    self.expression(index)?;
+                    return self.expression(value);
+                }
             }
             Expr::PutValueSet {
                 target,
@@ -228,18 +227,18 @@ impl Visitor for Collect<'_, '_> {
                 value,
                 receiver,
                 ..
-            } if matches!((&**target, &**receiver), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b)
-                && matches!(
-                    expression(key, &mut self.env),
-                    HirType::Number | HirType::Int32
-                ) =>
-            {
-                let Expr::LocalGet(id) = **target else {
-                    unreachable!()
-                };
-                self.write(id, value);
-                self.expression(key)?;
-                return self.expression(value);
+            } => {
+                if let (Expr::LocalGet(id), Expr::LocalGet(receiver)) = (&**target, &**receiver)
+                    && id == receiver
+                    && matches!(
+                        expression(key, &mut self.env),
+                        HirType::Number | HirType::Int32
+                    )
+                {
+                    self.write(*id, value);
+                    self.expression(key)?;
+                    return self.expression(value);
+                }
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::PropertyGet {
@@ -267,12 +266,11 @@ impl Visitor for Collect<'_, '_> {
             } if property == "length" && matches!(**object, Expr::LocalGet(_)) => {
                 return Ok(());
             }
-            Expr::IndexGet { object, index } if matches!(**object, Expr::LocalGet(_)) => {
-                let Expr::LocalGet(id) = **object else {
-                    unreachable!()
-                };
-                self.constraints.element_reads.insert(id);
-                return self.expression(index);
+            Expr::IndexGet { object, index } => {
+                if let Expr::LocalGet(id) = **object {
+                    self.constraints.element_reads.insert(id);
+                    return self.expression(index);
+                }
             }
             Expr::Closure { captures, .. } => {
                 let mut references = Vec::new();
@@ -335,24 +333,17 @@ pub(super) fn resolve(
     }
     for class_index in 0..classes.len() {
         base.set_current_class(Some(classes[class_index].name.clone()));
-        for index in 0..shapes::class_functions(&classes[class_index]).count() {
-            let mut body = std::mem::take(
-                &mut shapes::class_functions_mut(&mut classes[class_index])
-                    .nth(index)
-                    .unwrap()
-                    .body,
-            );
-            let function = shapes::class_functions(&classes[class_index])
-                .nth(index)
-                .unwrap();
+        let mut bodies: Vec<_> = shapes::class_functions_mut(&mut classes[class_index])
+            .map(|function| std::mem::take(&mut function.body))
+            .collect();
+        for (function, body) in shapes::class_functions(&classes[class_index]).zip(&mut bodies) {
             collect(
-                &mut body,
+                body,
                 inference.function_with_params(&base, classes, &mut locals, &function.params),
             );
-            shapes::class_functions_mut(&mut classes[class_index])
-                .nth(index)
-                .unwrap()
-                .body = body;
+        }
+        for (function, body) in shapes::class_functions_mut(&mut classes[class_index]).zip(bodies) {
+            function.body = body;
         }
     }
     let mut escaped = Vec::new();
@@ -385,11 +376,11 @@ pub(super) fn resolve(
         collect_local_refs_expr(init, &mut escaped, &mut HashSet::new());
     }
     constraints.escaped.extend(escaped);
-    let bindings = constraints.bindings();
+    let mut bindings = constraints.bindings();
     let changed = !bindings.is_empty();
     let mut apply = |id: LocalId, ty: &mut HirType| {
-        if let Some(inferred) = bindings.get(&id) {
-            *ty = inferred.clone();
+        if let Some(inferred) = bindings.remove(&id) {
+            *ty = inferred;
         }
     };
     walk::locals_mut(init, &mut apply);

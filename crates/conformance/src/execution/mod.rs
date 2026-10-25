@@ -376,15 +376,19 @@ impl Executor {
         }
     }
 
-    pub(crate) fn begin_typecheck_batch(&self) {
-        *self.batch_tsc.lock().expect("tsc batch lock") = Some(Vec::new());
+    pub(crate) fn begin_typecheck_batch(&self) -> Result<()> {
+        *self
+            .batch_tsc
+            .lock()
+            .map_err(|_| anyhow::anyhow!("typecheck batch lock poisoned"))? = Some(Vec::new());
+        Ok(())
     }
 
     pub(crate) fn flush_typecheck_batch(&self, directory: &Path) -> Result<()> {
         let pending = self
             .batch_tsc
             .lock()
-            .expect("tsc batch lock")
+            .map_err(|_| anyhow::anyhow!("typecheck batch lock poisoned"))?
             .take()
             .unwrap_or_default();
         if pending.is_empty() {
@@ -482,7 +486,10 @@ impl Executor {
         }
         // Non-module Command scripts share global scope if batched, so check them individually.
         if !matches!(case, Case::Command { .. })
-            && let Some(batch) = &mut *self.batch_tsc.lock().expect("tsc batch lock")
+            && let Some(batch) = &mut *self
+                .batch_tsc
+                .lock()
+                .map_err(|_| anyhow::anyhow!("typecheck batch lock poisoned"))?
         {
             if !batch.iter().any(|(_, s)| s == source) {
                 if !matches!(case, Case::Handler(_)) {

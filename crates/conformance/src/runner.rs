@@ -308,7 +308,7 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
         let artifacts = directory.join(contract.id);
         fs::create_dir_all(&artifacts)?;
         eprintln!("Checking {}", contract.id);
-        executor.begin_typecheck_batch();
+        executor.begin_typecheck_batch()?;
         for (witness, partition) in contract.witnesses.iter().zip(result.partitions.iter_mut()) {
             let outcome = evaluate(
                 contract,

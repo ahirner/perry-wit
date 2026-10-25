@@ -2,7 +2,6 @@
 pub mod aggregates;
 pub mod collections;
 pub mod execution;
-pub mod inferred_arrays;
 pub mod program;
 pub mod registry;
 pub mod runner;
@@ -13,6 +12,7 @@ mod catalog;
 mod emit;
 mod fetch;
 mod handler;
+mod inferred_arrays;
 mod scaling;
 mod strategies;
 mod streams;
