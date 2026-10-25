@@ -21,8 +21,20 @@ use crate::attrs::ErrorKind;
 use crate::operation_schema::op_schema;
 use crate::signatures::{ResultType, Ty};
 use pliron::{
-    builtin::op_interfaces::IsTerminatorInterface, common_traits::Verify, context::Context,
-    linked_list::LinkedList, op::Op, operation::Operation, result::Result, r#type::Typed,
+    builtin::{
+        attributes::IntegerAttr,
+        op_interfaces::{IsTerminatorInterface, OneResultInterface},
+        ops::ConstantOp,
+        types::{IntegerType, Signedness},
+    },
+    common_traits::Verify,
+    context::{Context, Ptr},
+    linked_list::LinkedList,
+    op::Op,
+    operation::Operation,
+    result::Result,
+    r#type::Typed,
+    utils::apint::{APInt, bw},
     value::Value,
 };
 
@@ -125,6 +137,28 @@ op_schema! {
     result(ctx): Ty = Ty::Exception;
     error = ExceptionErr::Result("perry.catch");
     check_before Ty::Status.matches(ctx, status.get_type(ctx)) => ExceptionErr::Status("perry.catch");
+}
+
+/// Replace the status observation when `op` is removed or proven not to throw.
+pub(crate) fn clear_caught(ctx: &mut Context, op: Ptr<Operation>) {
+    let Some(caught) = op
+        .deref(ctx)
+        .get_next()
+        .and_then(|next| Operation::get_op::<CaughtOp>(next, ctx))
+    else {
+        return;
+    };
+    let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+    let zero = ConstantOp::new(
+        ctx,
+        Box::new(IntegerAttr::new(ty, APInt::from_u64(0, bw(32)))),
+    );
+    zero.get_operation()
+        .insert_before(ctx, caught.get_operation());
+    caught
+        .get_result(ctx)
+        .replace_all_uses_with(ctx, &zero.get_result(ctx));
+    Operation::erase(caught.get_operation(), ctx);
 }
 
 op_schema! {

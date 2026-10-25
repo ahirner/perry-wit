@@ -797,6 +797,11 @@ export function callbacks():number {
  if(optional[0]!=='yes' || optional[1]!==undefined || bare[0]!==undefined || bare[1]!=='value')return 6;
  const nested=numbers.map(n=>{const adjust=(v:number)=>v+n;const inner=small.map(adjust);return inner[0]+adjust(1);});
  if(nested[0]!==4 || nested[3]!==10 || small[0]!==1)return 8;
+ for(let i=0;i<optional.length;i++)optional[i]=i===1?undefined:'new';
+ if(optional[0]!=='new' || optional[1]!==undefined || optional[2]!=='new')return 9;
+ const retained=[{label:'old'},{label:'old'}];
+ for(let i=0;i<retained.length;i++)retained[i]={label:'cell'+i};
+ if(retained[0].label!=='cell0' || retained[1].label!=='cell1')return 10;
  return small.filter(nothing).length;
 }
 export function iteration():number {

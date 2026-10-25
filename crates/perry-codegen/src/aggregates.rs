@@ -9,9 +9,9 @@ use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp,
-    FieldSetOp, JsonSchema, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp,
-    VariantTagOp,
+    ArrayStoreOp, ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp,
+    FieldPresentOp, FieldSetOp, JsonSchema, RecordOrderOp, RecordType, VariantNewOp,
+    VariantPayloadOp, VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -367,8 +367,7 @@ impl FunctionLowering<'_, '_> {
             let (i, ok, _) = self.element_index(ctx, index, len)?;
             let zero = self.i32_const(ctx, 0);
             let slot = self.select(ctx, ok, i, zero);
-            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, slot, element);
+            let address = self.element_address(ctx, array, slot, element);
             let loaded = self.load_slot_value(ctx, address, 0, element)?;
             let target = op.deref(ctx).get_result(0).get_type(ctx);
             if optional_inner(ctx, element).is_some() {
@@ -382,13 +381,13 @@ impl FunctionLowering<'_, '_> {
         if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let operands = self.operands(ctx, op)?;
-            let data = self.load(ctx, MemKind::I32, operands[0], layout::DATA);
-            let address = self.slot_address(ctx, data, operands[1], element);
+            let address = self.element_address(ctx, operands[0], operands[1], element);
             let value = self.load_slot_value(ctx, address, 0, element)?;
             self.define_value(ctx, op, value);
             return Ok(true);
         }
-        if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
+        let store = Operation::get_op::<ArrayStoreOp>(op, ctx).is_some();
+        if store || Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
             let arr_opd = op.deref(ctx).get_operand(0);
             let idx_opd = op.deref(ctx).get_operand(1);
             let val_opd = op.deref(ctx).get_operand(2);
@@ -396,6 +395,10 @@ impl FunctionLowering<'_, '_> {
             let array = self.mapped(ctx, arr_opd)?;
             let index = self.mapped(ctx, idx_opd)?;
             let value = self.mapped_value(ctx, val_opd)?;
+            if store {
+                self.store_element(ctx, array, index, element, value)?;
+                return Ok(true);
+            }
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             let (i, ok, integral) = self.element_index(ctx, index, len)?;
             let write = self.new_block(ctx, vec![]);
@@ -403,9 +406,7 @@ impl FunctionLowering<'_, '_> {
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
-            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, i, element);
-            self.store_slot_value(ctx, address, 0, element, value)?;
+            self.store_element(ctx, array, i, element, value)?;
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -494,13 +495,35 @@ impl FunctionLowering<'_, '_> {
         }
         self.br(ctx, write, vec![]);
         self.block = write;
-        let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-        let address = self.slot_address(ctx, data, len, element);
-        self.store_slot_value(ctx, address, 0, element, value)?;
+        self.store_element(ctx, array, len, element, value)?;
         let one = self.i32_const(ctx, 1);
         let next = self.num(ctx, NumOpcode::I32Add, vec![len, one]);
         self.store(ctx, MemKind::I32, array, layout::LEN, next);
         Ok(())
+    }
+
+    /// Address of element `index` of `array`, whose storage holds `element` slots.
+    fn element_address(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+        element: TypeHandle,
+    ) -> Value {
+        let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+        self.slot_address(ctx, data, index, element)
+    }
+
+    fn store_element(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+        element: TypeHandle,
+        value: Carriers<Value>,
+    ) -> Result<()> {
+        let address = self.element_address(ctx, array, index, element);
+        self.store_slot_value(ctx, address, 0, element, value)
     }
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {

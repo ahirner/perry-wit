@@ -7,7 +7,6 @@ use pliron::irbuild::{
     listener::DummyListener,
     rewriter::{IRRewriter, Rewriter},
 };
-use pliron::linked_list::LinkedList;
 use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::pass::{AnalysisManager, PassResult};
@@ -19,17 +18,9 @@ use crate::JsonSchema;
 use crate::attrs::Absence;
 use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
-use crate::exceptions::CaughtOp;
 use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
 use crate::optional::{UnwrapOp, absence, present_type};
 use crate::types::VariantType;
-
-use pliron::builtin::{
-    attributes::IntegerAttr,
-    ops::ConstantOp,
-    types::{IntegerType, Signedness},
-};
-use pliron::utils::apint::{APInt, bw};
 
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy and normalization helper.
@@ -530,29 +521,9 @@ fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
     .into_iter()
     .flatten()
     {
-        erase_op_and_caught(ctx, &mut rewriter, op);
+        crate::exceptions::clear_caught(ctx, op);
+        rewriter.erase_operation(ctx, op);
     }
-}
-
-fn erase_op_and_caught(
-    ctx: &mut Context,
-    rewriter: &mut IRRewriter<DummyListener>,
-    op: Ptr<Operation>,
-) {
-    let next = op.deref(ctx).get_next();
-    if let Some(next) = next
-        && Operation::get_op::<CaughtOp>(next, ctx).is_some()
-    {
-        rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(next));
-        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-        let zero = ConstantOp::new(
-            ctx,
-            Box::new(IntegerAttr::new(ty, APInt::from_u64(0, bw(32)))),
-        );
-        rewriter.insert_operation(ctx, zero.get_operation());
-        rewriter.replace_operation(ctx, next, zero.get_operation());
-    }
-    rewriter.erase_operation(ctx, op);
 }
 
 #[cfg(test)]
