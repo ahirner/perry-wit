@@ -166,6 +166,7 @@ impl LocalEffects {
 pub(crate) enum Mutation {
     Field { slot: Option<usize> },
     Element { index: Option<usize> },
+    InBoundsElement,
     Extend,
     Truncate,
     Local,
@@ -174,7 +175,7 @@ pub(crate) enum Mutation {
 impl Mutation {
     pub(crate) fn stored_operand(self) -> Option<usize> {
         match self {
-            Self::Element { index: Some(_) } => Some(2),
+            Self::Element { index: Some(_) } | Self::InBoundsElement => Some(2),
             Self::Truncate => None,
             _ => Some(1),
         }

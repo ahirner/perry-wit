@@ -175,8 +175,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
             .try_get_analysis_mut::<DomInfo>(root)
             .expect("dominance");
         let mut result = PassResult::default();
-        result.ir_changed = crate::ranges::prove_bounds(root, ctx, &numeric, &mut dominance);
-        result.set_preserved::<crate::facts::ProgramFacts>();
+        result.ir_changed = crate::ranges::prove_bounds(root, ctx, &numeric, &mut dominance)?;
         result.set_preserved::<DomInfo>();
         Ok(result)
     }));

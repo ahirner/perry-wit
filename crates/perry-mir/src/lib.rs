@@ -101,8 +101,8 @@ pub use calls::{
 };
 pub use collections::{
     ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp,
-    StringConstOp, StringLenOp,
+    ArrayStoreOp, ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp,
+    NativeJsonOp, StringConstOp, StringLenOp,
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{SourceSpan, set_source_span, source_span};

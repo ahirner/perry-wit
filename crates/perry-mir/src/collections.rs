@@ -169,6 +169,19 @@ op_schema! {
 }
 
 op_schema! {
+    /// Store an element at an `i32` index proven in `[0, length)` without growing the array.
+    pub ArrayStoreOp(array, index, value) -> infallible;
+    name = "perry.array_store";
+    format = "$0 `[` $1 `] = ` $2";
+    constructors { pub(crate) new(array: Value, index: Value, value: Value) => empty(); }
+    result(ctx): () = ();
+    error = CollectionErr::Element("perry.array_store");
+    check_before element(ctx, array, "perry.array_store")? == value.get_type(ctx)
+        => CollectionErr::Element("perry.array_store");
+    check Ty::Index.matches(ctx, index.get_type(ctx)) => CollectionErr::Index("perry.array_store");
+}
+
+op_schema! {
     /// Append one element.
     pub ArrayPushOp(array, value) -> infallible;
     name = "perry.array_push";

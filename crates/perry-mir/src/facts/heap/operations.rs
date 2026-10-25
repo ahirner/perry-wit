@@ -119,8 +119,11 @@ impl Solver {
                 }
             }
             OperationKind::Read { .. }
-            | OperationKind::Mutate(Mutation::Field { slot: Some(_) } | Mutation::Element { .. }) =>
-            {
+            | OperationKind::Mutate(
+                Mutation::Field { slot: Some(_) }
+                | Mutation::Element { .. }
+                | Mutation::InBoundsElement,
+            ) => {
                 let position = match kind {
                     OperationKind::Read { slot }
                     | OperationKind::Mutate(Mutation::Field { slot: Some(slot) }) => slot,

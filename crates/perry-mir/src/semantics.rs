@@ -4,8 +4,8 @@ use crate::{
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp},
     collections::{
         ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp,
-        StringConstOp, StringLenOp,
+        ArrayStoreOp, ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp,
+        NativeJsonOp, StringConstOp, StringLenOp,
     },
     control::ReturnOp,
     effects::{Allocation, Mutation},
@@ -153,6 +153,7 @@ primitive_semantics! { _ctx, _this;
     (Allocation::None, None, true) {
         AsyncCallOp => OperationKind::Call { asynchronous: true };
         ArrayTruncateOp => OperationKind::Mutate(Mutation::Truncate);
+        ArrayStoreOp => OperationKind::Mutate(Mutation::InBoundsElement);
         StoreOp => OperationKind::Mutate(Mutation::Local);
         ReturnOp => OperationKind::Return;
         CaughtOp, ExitOp => OperationKind::Unknown;

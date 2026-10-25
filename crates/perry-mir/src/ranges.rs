@@ -1,4 +1,4 @@
-//! Integer range analysis for eliding bounds checks on proven in-bounds reads.
+//! Integer range analysis for eliding bounds checks on proven in-bounds accesses.
 //!
 //! The shared numeric analysis supplies non-negative integer ranges, including widened
 //! loop-carried counts. This pass retains object bounds and buffer-detachment legality.
@@ -8,28 +8,30 @@
 //! by that edge's target when the target has a single predecessor. On every path to such a
 //! block, the last execution of the target follows the last definition of `i`, so the proof
 //! holds for the current value of `i`. Within those blocks, `a[i]` rewrites to an unchecked
-//! element read under these conditions:
+//! element access under these conditions:
 //!
 //! - Arrays retain a proven index when every operation between the length read and the element
-//!   read preserves the array length, using converged mutation and object-identity facts for calls.
+//!   access cannot shrink the array, using converged mutation and object-identity facts for calls.
 //! - A `Uint8Array` shrinks to length 0 only when its buffer is transferred during a BYOB read,
 //!   which requires a call or an `await`. The proof holds when the path between the length read
 //!   and the element read is free of calls, awaits, and view reads.
 //!
 //! The unchecked read's result is wrapped back into `T | undefined`, and `fold` subsequently
 //! eliminates redundant `undefined` tests and coercions on the wrapped value.
+//! Proven stores cannot append or throw and need no allocation safe point.
 //!
 //! Strings are immutable, so `s.charAt(i)` under a proof of `i < s.length` rewrites to
 //! `string_char_at_index`.
 use crate::{
-    aggregates::{functions, operations},
+    aggregates::functions,
     attrs::CompareKind,
     calls::{AsyncCallOp, AwaitOp, CallOp},
-    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, StringLenOp},
+    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArraySetOp, ArrayStoreOp, StringLenOp},
     control::CondBrOp,
     intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
     scalar::{CompareOp, NumericCastOp},
+    types::ArrayType,
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -45,7 +47,8 @@ use pliron::{
     linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
-    r#type::Typed,
+    result::Result,
+    r#type::{Typed, TypedHandle},
     utils::apint::{APInt, bw},
     value::Value,
 };
@@ -61,7 +64,7 @@ enum Length {
     String(Value),
 }
 
-/// What an indexed read reads: facts and reads match by kind and object.
+/// Facts and indexed accesses match by kind and object.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Object {
     Array,
@@ -114,23 +117,29 @@ struct Fact {
     length: Length,
 }
 
-/// Fold stable array lengths and replace reads proven in bounds with unchecked reads.
+/// Fold stable array lengths and replace accesses proven in bounds with unchecked operations.
 pub(crate) fn prove_bounds(
     root: Ptr<Operation>,
     ctx: &mut Context,
     numeric: &crate::facts::ProgramFacts,
     dominance: &mut DomInfo,
-) -> IRStatus {
+) -> Result<IRStatus> {
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
         let facts = facts(ctx, numeric, &function);
         let mut lengths = Vec::new();
-        for op in operations(ctx, &function) {
+        let mut accesses = Vec::new();
+        let region = function.get_region(ctx);
+        for (block, op) in region
+            .deref(ctx)
+            .iter(ctx)
+            .flat_map(|block| block.deref(ctx).iter(ctx).map(move |op| (block, op)))
+        {
             if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
                 lengths.push(op);
                 continue;
             }
-            let kind = if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+            let kind = if crate::is_any::<(ArrayGetOp, ArraySetOp)>(ctx, op) {
                 Object::Array
             } else if intrinsic(ctx, op) == Some(Intrinsic::BytesGet) {
                 Object::Bytes
@@ -146,13 +155,9 @@ pub(crate) fn prove_bounds(
                 let operation = op.deref(ctx);
                 (operation.get_operand(0), operation.get_operand(1))
             };
-            if kind == Object::Array {
-                let array = object.get_type(ctx);
-                let array = array.deref(ctx);
-                let element = array
-                    .downcast_ref::<crate::types::ArrayType>()
-                    .expect("array")
-                    .element();
+            if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+                let array = TypedHandle::<ArrayType>::from_handle(object.get_type(ctx), ctx)?;
+                let element = array.deref(ctx).element();
                 if crate::optional::optional_value(ctx, element).is_some() {
                     continue;
                 }
@@ -160,7 +165,6 @@ pub(crate) fn prove_bounds(
             if !numeric.is_count(ctx, &function, index) {
                 continue;
             }
-            let block = op.deref(ctx).get_parent_block().expect("in a block");
             let proven = (kind == Object::Array
                 && numeric.array_in_bounds(ctx, &function, object, index))
                 || facts
@@ -173,9 +177,12 @@ pub(crate) fn prove_bounds(
                             && stable_length(ctx, numeric, &function, fact, op)
                     });
             if proven {
-                unchecked(ctx, op, object, index, kind);
-                status = IRStatus::Changed;
+                accesses.push((op, object, index, kind));
             }
+        }
+        for (op, object, index, kind) in accesses {
+            unchecked(ctx, op, object, index, kind)?;
+            status = IRStatus::Changed;
         }
         for op in lengths {
             let array = op.deref(ctx).get_operand(0);
@@ -193,7 +200,7 @@ pub(crate) fn prove_bounds(
             }
         }
     }
-    status
+    Ok(status)
 }
 
 fn facts(
@@ -244,7 +251,7 @@ fn facts(
     facts
 }
 
-/// Array mutation and byte detachment invalidate the length observed by a branch.
+/// Array shrinking and byte detachment invalidate the length observed by a branch.
 fn stable_length(
     ctx: &Context,
     numeric: &crate::facts::ProgramFacts,
@@ -266,13 +273,26 @@ fn stable_length(
     })
 }
 
-/// Turn the checked read `op` into an unchecked one, wrapped back into `T | undefined`
-/// (a character is a plain string).
-fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value, kind: Object) {
+/// Replace an access, preserving the checked read's optional result type.
+fn unchecked(
+    ctx: &mut Context,
+    op: Ptr<Operation>,
+    object: Value,
+    index: Value,
+    kind: Object,
+) -> Result<()> {
     let target = IntegerType::get(ctx, 32, Signedness::Unsigned).into();
     let convert = NumericCastOp::new(ctx, index, target).get_operation();
     convert.insert_before(ctx, op);
     let index = convert.deref(ctx).get_result(0);
+    if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
+        let value = op.deref(ctx).get_operand(2);
+        let store = ArrayStoreOp::new(ctx, object, index, value).get_operation();
+        store.insert_before(ctx, op);
+        crate::exceptions::clear_caught(ctx, op);
+        Operation::erase(op, ctx);
+        return Ok(());
+    }
     if kind == Object::String {
         let read = IntrinsicOp::new(ctx, Intrinsic::StringCharAtIndex, vec![object, index])
             .get_operation();
@@ -286,14 +306,12 @@ fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value,
         }
         result.replace_all_uses_with(ctx, &character);
         Operation::erase(op, ctx);
-        return;
+        return Ok(());
     }
     let read = if kind == Object::Bytes {
         IntrinsicOp::new(ctx, Intrinsic::BytesAt, vec![object, index]).get_operation()
     } else {
-        ArrayAtOp::new(ctx, object, index)
-            .expect("an array")
-            .get_operation()
+        ArrayAtOp::new(ctx, object, index)?.get_operation()
     };
     read.insert_before(ctx, op);
     let element = read.deref(ctx).get_result(0);
@@ -304,6 +322,7 @@ fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value,
     let result = op.deref(ctx).get_result(0);
     result.replace_all_uses_with(ctx, &wrapped);
     Operation::erase(op, ctx);
+    Ok(())
 }
 
 #[cfg(test)]

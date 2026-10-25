@@ -44,7 +44,7 @@ fn reuse_candidates(
     use crate::{
         collections::{
             ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-            ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp,
+            ArrayStoreOp, ConcatOp, ConcatReuseOp, StringConstOp, StringLenOp,
         },
         control::ReturnOp,
         intrinsics::Intrinsic,
@@ -70,11 +70,14 @@ fn reuse_candidates(
         is_concat(ctx, op)
             || Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
             || Operation::get_op::<ArrayExtendOp>(op, ctx).is_some()
-            || ((Operation::get_op::<ArrayLenOp>(op, ctx).is_some()
-                || Operation::get_op::<ArrayGetOp>(op, ctx).is_some()
-                || Operation::get_op::<ArrayAtOp>(op, ctx).is_some()
-                || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-                || Operation::get_op::<ArraySetOp>(op, ctx).is_some())
+            || (crate::is_any::<(
+                ArrayLenOp,
+                ArrayGetOp,
+                ArrayAtOp,
+                ArrayPushOp,
+                ArraySetOp,
+                ArrayStoreOp,
+            )>(ctx, op)
                 && op.deref(ctx).get_operand(0) == value
                 && !op.deref(ctx).operands().skip(1).any(|v| v == value))
             || Operation::get_op::<StringLenOp>(op, ctx).is_some()

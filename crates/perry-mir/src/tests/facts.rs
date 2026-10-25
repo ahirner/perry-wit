@@ -1,5 +1,5 @@
 use super::*;
-use crate::{RecordType, heap::AllocOp};
+use crate::{ArraySetOp, RecordType, heap::AllocOp};
 
 /// The returned value of a single-return function.
 fn returned(ctx: &Context, function: &FuncOp, index: usize) -> Value {
@@ -294,6 +294,7 @@ builtin.module @bounds { ^module():
       perry.cond_br if more ^body() else ^empty()
     ^body():
       DURING
+      perry.array_set items[zero] = zero;
       value = perry.array_get items[zero] : perry.optional <builtin.fp64,Undefined>;
       AFTER
       perry.return value
@@ -353,11 +354,14 @@ builtin.module @bounds { ^module():
         set_exported(ctx, &run);
         let numeric = facts(ctx, module)?;
         let mut dominance = DomInfo::default();
-        crate::ranges::prove_bounds(module, ctx, &numeric, &mut dominance);
-        let retained = crate::aggregates::operations(ctx, &run)
-            .into_iter()
-            .any(|op| Operation::is_op::<ArrayGetOp>(op, ctx));
-        assert_eq!(retained, checked, "{position}: {mutation}");
+        crate::ranges::prove_bounds(module, ctx, &numeric, &mut dominance)?;
+        let operations = crate::aggregates::operations(ctx, &run);
+        for checked_op in [ArrayGetOp::get_opid_static(), ArraySetOp::get_opid_static()] {
+            let retained = operations
+                .iter()
+                .any(|&op| Operation::get_opid(op, ctx) == checked_op);
+            assert_eq!(retained, checked, "{checked_op}: {position}: {mutation}");
+        }
         verify_operation(module, ctx)?;
     }
     Ok(())
