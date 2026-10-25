@@ -291,8 +291,8 @@ impl Visitor for Collect<'_, '_> {
                 }
             }
             Expr::Closure { captures, .. } => {
+                self.constraints.escaped.extend(captures.iter().copied());
                 let mut references = Vec::new();
-                references.extend(captures.iter().copied());
                 collect_local_refs_expr(expr, &mut references, &mut HashSet::new());
                 self.constraints.escaped.extend(references);
                 return Ok(());

@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -401,7 +402,7 @@ impl Executor {
         &self,
         case: &'c Case,
         directory: &Path,
-    ) -> Result<Vec<(std::borrow::Cow<'c, Case>, Evidence)>> {
+    ) -> Result<Vec<(Cow<'c, Case>, Evidence)>> {
         let variants = case.variants();
         let evidence = self.check_variants(&variants, directory)?;
         Ok(variants.into_iter().zip(evidence).collect())
@@ -409,7 +410,7 @@ impl Executor {
 
     fn check_variants(
         &self,
-        variants: &[std::borrow::Cow<'_, Case>],
+        variants: &[Cow<'_, Case>],
         directory: &Path,
     ) -> Result<Vec<Evidence>> {
         thread::scope(|scope| -> Result<Vec<Evidence>> {
@@ -591,7 +592,6 @@ pub fn number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::borrow::Cow;
 
     #[test]
     fn transformed_commands_use_their_own_node_observations() -> Result<()> {
@@ -604,7 +604,9 @@ mod tests {
             })
         });
         let evidence = executor.check_variants(&variants, directory.path())?;
-        let error = check_metamorphic(&evidence).unwrap_err();
+        let Err(error) = check_metamorphic(&evidence) else {
+            bail!("differing Node observations passed the metamorphic check")
+        };
         ensure!(
             error
                 .to_string()
