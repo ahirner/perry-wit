@@ -37,6 +37,28 @@ export function run(x: number): number {
 }
 
 #[test]
+fn surplus_method_arguments_are_evaluated_in_order() -> anyhow::Result<()> {
+    let source = r#"
+let trace = 0;
+function step(digit: number): number { trace = trace * 10 + digit; return 0; }
+export function run(): number {
+    // @ts-expect-error surplus argument
+    const code = 'abc'.charCodeAt(step(1), step(2));
+    // @ts-expect-error surplus argument
+    const text = 'abc'.toString(step(3));
+    // @ts-expect-error surplus argument
+    const href = new URL('https://a.example/').toString(step(4));
+    const bytes = new Uint8Array(2);
+    // @ts-expect-error surplus argument
+    bytes.set([7], step(5), step(6));
+    if (code !== 97 || text !== 'abc' || href !== 'https://a.example/' || bytes[0] !== 7) return -1;
+    return trace;
+}
+"#;
+    assert_numbers(source, &[("run", &[], 123456.0)])
+}
+
+#[test]
 fn record_enumeration_preserves_instance_order_and_presence() -> anyhow::Result<()> {
     let source = r#"
 interface Pair { z: number; a: number; missing?: number }

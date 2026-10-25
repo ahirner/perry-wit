@@ -69,7 +69,12 @@ macro_rules! lower_calls {
         IntrinsicCall { intrinsic: Intrinsic::$intrinsic, arguments: &[$($argument),*], result: Return::$result }
             .lower($b, $ctx, $receiver, $args)
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) receiver ()) => { Ok(Some($receiver)) };
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident) receiver ($args:expr)) => {{
+        for arg in $args {
+            $b.expression($ctx, arg)?;
+        }
+        Ok(Some($receiver))
+    }};
     (@invoke ($b:ident, $ctx:ident, $receiver:ident) reject ($message:literal)) => { bail!($message) };
 }
 
@@ -320,6 +325,9 @@ impl<'s> FunctionBuilder<'s> {
             _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
         };
         let offset = self.number_or(ctx, args.get(1), 0.0)?;
+        for arg in args.iter().skip(2) {
+            self.expression(ctx, arg)?;
+        }
         self.intrinsic_void(ctx, Intrinsic::BytesSetFrom, vec![bytes, source, offset]);
         Ok(None)
     }
