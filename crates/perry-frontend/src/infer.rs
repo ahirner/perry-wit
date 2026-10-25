@@ -356,15 +356,6 @@ pub(crate) fn unresolved_types(
     }
     module_env.set_current_class(None);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
-    arrays::resolve(
-        &mut hir.init,
-        &mut hir.functions,
-        &mut hir.classes,
-        &hir.globals,
-        module_env,
-        &inference,
-    );
-    module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let env = inference.function(&module_env, &hir.classes, &mut locals);
         walk::resolve_locals(&mut hir.init, env);
@@ -372,7 +363,15 @@ pub(crate) fn unresolved_types(
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     let max_iters = hir.functions.len() + hir.classes.len();
     for _ in 0..=max_iters {
-        let mut changed = false;
+        let mut changed = arrays::resolve(
+            &mut hir.init,
+            &mut hir.functions,
+            &mut hir.classes,
+            &hir.globals,
+            module_env,
+            &inference,
+        );
+        module_env = perry_hir::HirTypeEnv::from_module(hir);
         for function in &mut hir.functions {
             if locations.has_explicit_return(&function.name) {
                 continue;

@@ -169,6 +169,20 @@ impl Visitor for Collect<'_, '_> {
         if let Stmt::Let {
             id,
             ty,
+            mutable: false,
+            init: Some(init),
+            ..
+        } = statement
+            && (self.env.metadata.inferred_bindings.contains(id)
+                || matches!(ty, HirType::Any | HirType::Unknown))
+            && !matches!(init, Expr::Array(values, _) if values.is_empty())
+        {
+            let inferred = element_type(init, &mut self.env);
+            self.env.locals.insert(*id, inferred);
+        }
+        if let Stmt::Let {
+            id,
+            ty,
             init: Some(init),
             ..
         } = statement
@@ -299,7 +313,7 @@ pub(super) fn resolve(
     globals: &[perry_hir::ir::Global],
     mut base: perry_hir::HirTypeEnv,
     inference: &Inference<'_>,
-) {
+) -> bool {
     let mut constraints = Constraints::default();
     let mut locals = HashMap::new();
     let mut collect = |body: &mut [Stmt], mut env: FunctionEnv<'_>| {
@@ -372,6 +386,7 @@ pub(super) fn resolve(
     }
     constraints.escaped.extend(escaped);
     let bindings = constraints.bindings();
+    let changed = !bindings.is_empty();
     let mut apply = |id: LocalId, ty: &mut HirType| {
         if let Some(inferred) = bindings.get(&id) {
             *ty = inferred.clone();
@@ -386,4 +401,5 @@ pub(super) fn resolve(
             walk::locals_mut(&mut function.body, &mut apply);
         }
     }
+    changed
 }

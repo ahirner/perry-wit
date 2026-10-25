@@ -563,7 +563,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         id: "ecma.array.inferred_storage",
         description: "Fresh empty arrays infer one static element type from all visible writes",
         specification: "https://www.typescriptlang.org/docs/handbook/type-inference.html",
-        domain: "Generated push and overwrite sequences over numbers, strings, booleans, records and nested arrays; explicit annotations versus alias chains, branches, loops, extracted values and inferred helper returns; exact serialized contents and evaluation traces; conflicting push, index and conditional writes remain rejected across transformations; conservative escape boundaries",
+        domain: "Up to seven writes and four aliases over numbers, strings, booleans, records and nested arrays; annotations versus alias chains, branches, loops, temporaries, helper-return chains and indexed appends; three calls compare exact serialized contents and evaluation traces; conflicting writes remain rejected through temporaries and control flow; conservative escape boundaries",
         partitions: &[
             "uniform-records-and-aliases",
             "mixed-index-writes",
@@ -579,6 +579,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
             "mutable-element-alias",
             "returned-alias",
             "no-writes",
+            "conditional-temporary",
             "number-writes",
             "string-writes",
             "boolean-writes",

@@ -50,6 +50,7 @@ pub enum Form {
     Loop,
     Temporaries,
     Helper,
+    AppendIndex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +87,7 @@ impl ArrayCase {
             Form::Loop,
             Form::Temporaries,
             Form::Helper,
+            Form::AppendIndex,
         ]
         .into_iter()
         .map(|form| Self {
@@ -150,6 +152,7 @@ impl ArrayCase {
                     };
                     let assignment = |receiver: &str, value: &str| match index {
                         Some(index) => format!("{receiver}[{index}]={value};"),
+                        None if form == Form::AppendIndex => format!("{receiver}[{receiver}.length]={value};"),
                         None => format!("{receiver}.push({value});"),
                     };
                     let statement = match form {
@@ -176,13 +179,21 @@ impl ArrayCase {
                         format!("alias{}", self.aliases - 1)
                     };
                     let bad = "{incompatible:true}";
-                    let statement = match conflict {
-                        Conflict::Push => format!("{receiver}.push({bad});"),
-                        Conflict::Index => format!("{receiver}[0]={bad};"),
+                    let value = match conflict {
+                        Conflict::Push | Conflict::Index => bad.into(),
                         Conflict::Conditional => format!(
-                            "{receiver}.push(x<0?{}:{bad});",
+                            "x<0?{}:{bad}",
                             self.element.value(&self.seed.to_string())
                         ),
+                    };
+                    let (prefix, value) = if form == Form::Temporaries {
+                        (format!("const incompatible={value};"), "incompatible".into())
+                    } else {
+                        (String::new(), value)
+                    };
+                    let statement = match conflict {
+                        Conflict::Push | Conflict::Conditional => format!("{prefix}{receiver}.push({value});"),
+                        Conflict::Index => format!("{prefix}{receiver}[0]={value};"),
                     };
                     statements.push(if form == Form::Branches {
                         format!("if(x<0){{{statement}}}")
@@ -218,9 +229,13 @@ impl ArrayCase {
             },
         );
         if form == Form::Helper {
+            e.line(format_args!("function make(trace:number[],n:number) {{const item=forward(trace,n);return item;}}"));
             e.line(format_args!(
-                "function make(trace:number[],n:number) {{return {};}}",
+                "function produce(trace:number[],n:number) {{return {};}}",
                 self.element.value("n")
+            ));
+            e.line(format_args!(
+                "function forward(trace:number[],n:number) {{return produce(trace,n);}}"
             ));
         }
         e.finish()
@@ -347,6 +362,18 @@ pub(crate) fn contract() -> Contract {
             },
         });
     }
+
+    witnesses.push(Witness {
+        partition: "conditional-temporary",
+        case: ArrayCase {
+            element: Element::Number,
+            seed: 0,
+            writes: vec![],
+            aliases: 1,
+            form: Form::Annotated,
+        }
+        .rejection(Conflict::Conditional),
+    });
 
     for (partition, element) in [
         ("number-writes", Element::Number),
