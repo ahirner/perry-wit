@@ -26,10 +26,15 @@ use pliron::{
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
+    graph::{
+        ControlFlowGraph,
+        traversals::region::{DFSTraversal, sccs_in_topological_order},
+    },
     op::Op,
     operation::Operation,
     region::Region,
     r#type::{TypeHandle, Typed},
+    utils::table::ISet,
     value::Value,
 };
 use std::collections::{HashMap, HashSet};
@@ -45,15 +50,22 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
     let entry = function.get_entry_block(ctx);
     let region = function.get_region(ctx);
     let mut guards = 0;
-    let mut work = vec![reachable(ctx, entry)];
+    let mut work = vec![DFSTraversal::new(ctx, &region).pre_order().collect()];
     while let Some(nodes) = work.pop() {
-        let set: HashSet<_> = nodes.iter().copied().collect();
-        for component in components(ctx, &nodes, &set) {
-            if !is_cycle(ctx, &component) {
+        let subgraph = RegionSubset(nodes);
+        for component in sccs_in_topological_order(ctx, &subgraph).into_iter().rev() {
+            if !component.is_cyclic {
                 continue;
             }
+            let mut component = component.nodes;
+            component.sort_by_key(|block| {
+                subgraph
+                    .0
+                    .get_index_of(block)
+                    .expect("components contain only subgraph blocks")
+            });
             let members: HashSet<_> = component.iter().copied().collect();
-            let preds = predecessors(ctx, entry);
+            let preds = predecessors(ctx, region);
             let entries: Vec<_> = component
                 .iter()
                 .copied()
@@ -74,7 +86,7 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
             } else {
                 entries[0]
             };
-            let inner: Vec<_> = component.into_iter().filter(|b| *b != header).collect();
+            let inner: ISet<_> = component.into_iter().filter(|b| *b != header).collect();
             if !inner.is_empty() {
                 work.push(inner);
             }
@@ -83,27 +95,12 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
     guards
 }
 
-fn reachable(ctx: &Context, entry: Ptr<BasicBlock>) -> Vec<Ptr<BasicBlock>> {
-    let mut seen = HashSet::from([entry]);
-    let mut order = vec![entry];
-    let mut stack = vec![entry];
-    while let Some(block) = stack.pop() {
-        for succ in block.deref(ctx).succs(ctx) {
-            if seen.insert(succ) {
-                order.push(succ);
-                stack.push(succ);
-            }
-        }
-    }
-    order
-}
-
 fn predecessors(
     ctx: &Context,
-    entry: Ptr<BasicBlock>,
+    region: Ptr<Region>,
 ) -> HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>> {
     let mut preds: HashMap<_, Vec<_>> = HashMap::new();
-    for block in reachable(ctx, entry) {
+    for block in DFSTraversal::new(ctx, &region).pre_order() {
         for succ in block.deref(ctx).succs(ctx) {
             preds.entry(succ).or_default().push(block);
         }
@@ -111,79 +108,51 @@ fn predecessors(
     preds
 }
 
-fn is_cycle(ctx: &Context, component: &[Ptr<BasicBlock>]) -> bool {
-    component.len() > 1 || component[0].deref(ctx).succs(ctx).contains(&component[0])
-}
+/// The induced CFG after removing an outer loop's header.
+struct RegionSubset(ISet<Ptr<BasicBlock>>);
 
-/// Strongly connected components of the subgraph induced by `nodes` (Tarjan), each in the
-/// order of `nodes`.
-fn components(
-    ctx: &Context,
-    nodes: &[Ptr<BasicBlock>],
-    set: &HashSet<Ptr<BasicBlock>>,
-) -> Vec<Vec<Ptr<BasicBlock>>> {
-    struct Tarjan<'a> {
-        ctx: &'a Context,
-        set: &'a HashSet<Ptr<BasicBlock>>,
-        index: HashMap<Ptr<BasicBlock>, usize>,
-        low: HashMap<Ptr<BasicBlock>, usize>,
-        stack: Vec<Ptr<BasicBlock>>,
-        on_stack: HashSet<Ptr<BasicBlock>>,
-        out: Vec<Vec<Ptr<BasicBlock>>>,
+impl ControlFlowGraph<Context> for RegionSubset {
+    type Node = Ptr<BasicBlock>;
+
+    fn num_successors(&self, ctx: &Context, node: &Self::Node) -> usize {
+        node.deref(ctx)
+            .succs(ctx)
+            .iter()
+            .filter(|next| self.0.contains(*next))
+            .count()
     }
-    impl Tarjan<'_> {
-        fn visit(&mut self, block: Ptr<BasicBlock>) {
-            let next = self.index.len();
-            self.index.insert(block, next);
-            self.low.insert(block, next);
-            self.stack.push(block);
-            self.on_stack.insert(block);
-            for succ in block.deref(self.ctx).succs(self.ctx) {
-                if !self.set.contains(&succ) {
-                    continue;
-                }
-                if !self.index.contains_key(&succ) {
-                    self.visit(succ);
-                    let low = self.low[&block].min(self.low[&succ]);
-                    self.low.insert(block, low);
-                } else if self.on_stack.contains(&succ) {
-                    let low = self.low[&block].min(self.index[&succ]);
-                    self.low.insert(block, low);
-                }
-            }
-            if self.low[&block] == self.index[&block] {
-                // `block` is on the stack, so this pops exactly its component.
-                let mut component = Vec::new();
-                while let Some(member) = self.stack.pop() {
-                    self.on_stack.remove(&member);
-                    component.push(member);
-                    if member == block {
-                        break;
-                    }
-                }
-                self.out.push(component);
-            }
-        }
+
+    fn get_successor(&self, ctx: &Context, node: &Self::Node, index: usize) -> Self::Node {
+        node.deref(ctx)
+            .succs(ctx)
+            .into_iter()
+            .filter(|next| self.0.contains(next))
+            .nth(index)
+            .expect("successor index below num_successors")
     }
-    let mut tarjan = Tarjan {
-        ctx,
-        set,
-        index: HashMap::new(),
-        low: HashMap::new(),
-        stack: Vec::new(),
-        on_stack: HashSet::new(),
-        out: Vec::new(),
-    };
-    for &node in nodes {
-        if !tarjan.index.contains_key(&node) {
-            tarjan.visit(node);
-        }
+
+    fn num_predecessors(&self, ctx: &Context, node: &Self::Node) -> usize {
+        node.preds(ctx)
+            .iter()
+            .filter(|previous| self.0.contains(*previous))
+            .count()
     }
-    let position: HashMap<_, _> = nodes.iter().enumerate().map(|(i, b)| (*b, i)).collect();
-    for component in &mut tarjan.out {
-        component.sort_by_key(|b| position[b]);
+
+    fn get_predecessor(&self, ctx: &Context, node: &Self::Node, index: usize) -> Self::Node {
+        node.preds(ctx)
+            .into_iter()
+            .filter(|previous| self.0.contains(previous))
+            .nth(index)
+            .expect("predecessor index below num_predecessors")
     }
-    tarjan.out
+
+    fn entry_node(&self, _ctx: &Context) -> Option<Self::Node> {
+        self.0.first().copied()
+    }
+
+    fn nodes<'a>(&'a self, _ctx: &'a Context) -> Box<dyn Iterator<Item = Self::Node> + 'a> {
+        Box::new(self.0.iter().copied())
+    }
 }
 
 fn i32_type(ctx: &mut Context) -> TypeHandle {

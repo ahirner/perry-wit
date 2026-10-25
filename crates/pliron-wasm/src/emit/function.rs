@@ -10,7 +10,10 @@ use pliron::{
     },
     common_traits::Named,
     context::{Context, Ptr},
-    graph::dominance::{DomTree, compute_dominator_tree},
+    graph::{
+        dominance::{DomTree, compute_dominator_tree},
+        traversals::region::DFSTraversal,
+    },
     identifier::Identifier,
     operation::Operation,
     region::Region,
@@ -76,22 +79,7 @@ impl<'a> FunctionEmitter<'a> {
         let region = function.get_region(ctx);
         let entry = function.get_entry_block(ctx);
 
-        // Reverse postorder over reachable blocks.
-        let mut postorder = Vec::new();
-        let mut seen = HashSet::from([entry]);
-        let mut stack = vec![(entry, successors(ctx, entry), 0usize)];
-        while let Some((block, succs, next)) = stack.last_mut() {
-            if let Some(&succ) = succs.get(*next) {
-                *next += 1;
-                if seen.insert(succ) {
-                    let succs = successors(ctx, succ);
-                    stack.push((succ, succs, 0));
-                }
-            } else {
-                postorder.push(*block);
-                stack.pop();
-            }
-        }
+        let postorder: Vec<_> = DFSTraversal::new(ctx, &region).post_order().collect();
         let order: HashMap<_, _> = postorder
             .iter()
             .rev()
