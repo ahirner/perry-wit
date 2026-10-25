@@ -15,6 +15,10 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
 
+Fresh empty arrays, including `any[]`, infer a static element type from uniform `push` arguments and indexed writes across branches, loops and direct aliases. Nested records and arrays retain their structure; string literals widen to `string`. Serialization with `JSON.stringify` without a replacer preserves this inference.
+
+Conflicting writes or an absence of writes leave the element type unresolved. Add an explicit element type when returning the array, passing it to a function, capturing it in a closure, reassigning an alias, using other array methods, or reading mutable aggregate elements. These uses require information beyond the mutation scan.
+
 ## Strings
 
 - Strings are UTF-8 and index by Unicode scalar value, not UTF-16 code unit. Indices agree with Node.js for text in the Basic Multilingual Plane. Characters outside it count as one scalar value.

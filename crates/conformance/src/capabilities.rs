@@ -127,6 +127,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
     let callback_timer = Case::Reject {
         source: "import {setTimeout} from 'node:timers';setTimeout(()=>{},1);".into(),
         diagnostic: "Unsupported capability import".into(),
+        variants: vec![],
     };
     contracts.push(Contract::new(
         "node.timers.callbacks.unsupported",
@@ -140,6 +141,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
     let unawaited_initialization = Case::Reject {
         source: "import {readFile} from 'node:fs/promises';let text='';async function load():Promise<void>{text=await readFile('a.txt','utf8');}load();export function size():number{return text.length;}".into(),
         diagnostic: "top-level statements leave asynchronous work pending".into(),
+        variants: vec![],
     };
     contracts.push(Contract::new(
         "ecma.module.unawaited_initialization",
@@ -169,6 +171,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
             .boxed(),
         check_equivalence,
     ));
+    contracts.push(crate::inferred_arrays::contract());
     contracts
 }
 

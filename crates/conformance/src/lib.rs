@@ -2,6 +2,7 @@
 pub mod aggregates;
 pub mod collections;
 pub mod execution;
+pub mod inferred_arrays;
 pub mod program;
 pub mod registry;
 pub mod runner;

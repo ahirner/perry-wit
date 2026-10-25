@@ -222,50 +222,41 @@ pub fn check_fault(case: &Case, evidence: &Evidence) -> Result<()> {
     Ok(())
 }
 pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
-    if let Some((first, rest)) = evidence.split_first()
-        && let Outcome::Values {
-            observations: baseline,
-            stdout,
-            stderr,
-            ..
-        } = &first.oracle
-    {
-        for result in rest {
-            if let Outcome::Values {
-                observations,
-                stdout: output,
-                stderr: errors,
-                ..
-            } = &result.oracle
-            {
-                ensure!(
-                    observations == baseline && output == stdout && errors == stderr,
-                    "metamorphic form changed Node observations"
-                );
-            }
+    fn same_observations(left: &Outcome, right: &Outcome) -> bool {
+        match (left, right) {
+            (
+                Outcome::Values {
+                    observations: a,
+                    stdout: a_out,
+                    stderr: a_err,
+                    ..
+                },
+                Outcome::Values {
+                    observations: b,
+                    stdout: b_out,
+                    stderr: b_err,
+                    ..
+                },
+            ) => a == b && a_out == b_out && a_err == b_err,
+            (Outcome::Command(a), Outcome::Command(b)) => a == b,
+            (Outcome::Compile(_), Outcome::Compile(_)) => true,
+            _ => false,
         }
     }
-    if let Some((first, rest)) = evidence.split_first()
-        && let Outcome::Values {
-            observations: baseline,
-            stdout,
-            stderr,
-            ..
-        } = &first.component
-    {
+    if let Some((first, rest)) = evidence.split_first() {
         for result in rest {
-            if let Outcome::Values {
-                observations,
-                stdout: output,
-                stderr: errors,
-                ..
-            } = &result.component
-            {
-                ensure!(
-                    observations == baseline && output == stdout && errors == stderr,
-                    "metamorphic form changed component observations"
-                );
-            }
+            ensure!(
+                same_observations(&first.oracle, &result.oracle),
+                "metamorphic form changed Node observations: {:?} != {:?}",
+                first.oracle,
+                result.oracle
+            );
+            ensure!(
+                same_observations(&first.component, &result.component),
+                "metamorphic form changed component observations: {:?} != {:?}",
+                first.component,
+                result.component
+            );
         }
     }
     Ok(())
@@ -403,84 +394,34 @@ impl Executor {
     }
 
     pub fn check(&self, case: &Case, directory: &Path) -> Result<Vec<Evidence>> {
-        let variants = case.variants();
-        let Some((first_variant, rest_variants)) = variants.split_first() else {
-            return Ok(Vec::new());
-        };
-        if rest_variants.is_empty() {
-            let evidence =
-                self.execute_source(first_variant, &first_variant.source(), &directory.join("0"))?;
-            return Ok(vec![evidence]);
-        }
-        // Variant 0 establishes the oracle observation and schedules TypeScript verification;
-        // metamorphic variants 1..N share Variant 0's oracle outcome and compile/run in parallel.
-        let first_dir = directory.join("0");
-        let first_source = first_variant.source();
-        self.prepare_directory(first_variant, &first_source, &first_dir, true)?;
-        let rest_prepared = rest_variants
-            .iter()
-            .enumerate()
-            .map(|(i, variant)| {
-                let dir = directory.join((i + 1).to_string());
-                let src = variant.source();
-                self.prepare_directory(variant, &src, &dir, false)?;
-                Ok((variant, src, dir))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        self.check_variants(&case.variants(), directory)
+    }
 
-        let (first_oracle, first_component, rest_components) =
-            thread::scope(|scope| -> Result<_> {
-                let oracle_handle =
-                    spawn_worker(scope, || self.run_oracle(first_variant, &first_dir))?;
-                let first_comp_handle = spawn_worker(scope, || {
-                    self.run_component(first_variant, &first_source, &first_dir)
-                })?;
-                let rest_handles = rest_prepared
-                    .iter()
-                    .map(|(variant, src, dir)| {
-                        spawn_worker(scope, move || self.run_component(variant, src, dir))
+    fn check_variants(
+        &self,
+        variants: &[std::borrow::Cow<'_, Case>],
+        directory: &Path,
+    ) -> Result<Vec<Evidence>> {
+        let evidence = thread::scope(|scope| -> Result<Vec<Evidence>> {
+            let handles = variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| {
+                    let directory = directory.join(index.to_string());
+                    spawn_worker(scope, move || {
+                        self.execute_source(variant, &variant.source(), &directory)
                     })
-                    .collect::<Result<Vec<_>>>()?;
-
-                let oracle = oracle_handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("oracle thread panicked"))??;
-                let (first_comp, first_ctrl) = first_comp_handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("component thread panicked"))??;
-                let mut rest_results = Vec::with_capacity(rest_handles.len());
-                for handle in rest_handles {
-                    rest_results.push(
-                        handle
-                            .join()
-                            .map_err(|_| anyhow::anyhow!("variant thread panicked"))??,
-                    );
-                }
-                Ok((oracle, (first_comp, first_ctrl), rest_results))
-            })?;
-
-        let mut evidence = Vec::with_capacity(variants.len());
-        let first_ev = Evidence {
-            oracle: first_oracle.clone(),
-            component: first_component.0,
-            control: first_component.1,
-        };
-        fs::write(
-            first_dir.join("evidence.json"),
-            serde_json::to_vec(&first_ev)?,
-        )?;
-        evidence.push(first_ev);
-
-        for ((_, _, dir), (component, control)) in rest_prepared.into_iter().zip(rest_components) {
-            let ev = Evidence {
-                oracle: first_oracle.clone(),
-                component,
-                control,
-            };
-            fs::write(dir.join("evidence.json"), serde_json::to_vec(&ev)?)?;
-            evidence.push(ev);
-        }
-
+                })
+                .collect::<Result<Vec<_>>>()?;
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("variant thread panicked"))?
+                })
+                .collect()
+        })?;
         check_metamorphic(&evidence)?;
         Ok(evidence)
     }
@@ -491,7 +432,7 @@ impl Executor {
         source: &str,
         directory: &Path,
     ) -> Result<Evidence> {
-        self.prepare_directory(case, source, directory, true)?;
+        self.prepare_directory(case, source, directory)?;
         let (oracle, (component, control)) = thread::scope(|scope| -> Result<_> {
             let oracle_handle = spawn_worker(scope, || self.run_oracle(case, directory))?;
             let comp_handle = spawn_worker(scope, || self.run_component(case, source, directory))?;
@@ -515,13 +456,7 @@ impl Executor {
         Ok(evidence)
     }
 
-    fn prepare_directory(
-        &self,
-        case: &Case,
-        source: &str,
-        directory: &Path,
-        check_ts: bool,
-    ) -> Result<()> {
+    fn prepare_directory(&self, case: &Case, source: &str, directory: &Path) -> Result<()> {
         fs::create_dir_all(directory)?;
         let path = directory.join("case.ts");
         fs::write(&path, source)?;
@@ -529,7 +464,7 @@ impl Executor {
             link_handler_types(directory)?;
         }
         crate::scaling::override_inputs(case, directory)?;
-        if check_ts && !matches!(case, Case::Reject { .. }) {
+        if !matches!(case, Case::Reject { .. }) {
             self.schedule_typecheck(case, &path, source, directory)?;
         }
         Ok(())
@@ -639,5 +574,33 @@ pub fn number(value: f64) -> String {
         "NaN".into()
     } else {
         format!("{:016x}", value.to_bits())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    #[test]
+    fn transformed_commands_use_their_own_node_observations() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executor = Executor::new(Limits::default());
+        let variants = [0, 1].map(|value| {
+            Cow::Owned(Case::Command {
+                source: format!("console.log({value});"),
+                exit: crate::registry::ExitStatus::Success,
+            })
+        });
+        let error = executor
+            .check_variants(&variants, directory.path())
+            .unwrap_err();
+        ensure!(
+            error
+                .to_string()
+                .contains("metamorphic form changed Node observations"),
+            "wrong failure: {error:#}"
+        );
+        Ok(())
     }
 }

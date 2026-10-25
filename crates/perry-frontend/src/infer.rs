@@ -18,6 +18,7 @@ pub(crate) fn contains_type_var(ty: &HirType) -> bool {
 }
 
 mod absence;
+mod arrays;
 mod closures;
 mod environment;
 mod functions;
@@ -354,6 +355,15 @@ pub(crate) fn unresolved_types(
         }
     }
     module_env.set_current_class(None);
+    module_env = perry_hir::HirTypeEnv::from_module(hir);
+    arrays::resolve(
+        &mut hir.init,
+        &mut hir.functions,
+        &mut hir.classes,
+        &hir.globals,
+        module_env,
+        &inference,
+    );
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let env = inference.function(&module_env, &hir.classes, &mut locals);
