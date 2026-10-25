@@ -410,6 +410,23 @@ export function run():number { return caught+(probe()?1:0); }
 }
 
 #[test]
+fn string_spread_and_array_from_yield_scalars() -> anyhow::Result<()> {
+    crate::node_oracle::assert_numbers(
+        r#"
+export function run(): number {
+  const text = 'aé😀';
+  const spread = [...text, ...''];
+  if (spread.join('|') !== 'a|é|😀') return 1;
+  if (Array.from(text).join('|') !== 'a|é|😀') return 2;
+  if (Array.from(text, (character, index) => character + index).join('') !== 'a0é1😀2') return 3;
+  return spread.length;
+}
+"#,
+        &[("run", &[], 3.0)],
+    )
+}
+
+#[test]
 fn ascii_split_and_casing_sharing_avoid_allocations() {
     let mut program = Program::checked(
         r#"
