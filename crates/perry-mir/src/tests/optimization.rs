@@ -187,13 +187,6 @@ builtin.module @columns { ^module():
         let mut analyses = AnalysisManager::default();
         assert_eq!(pass.run(module, ctx, &mut analyses)?.ir_changed, expected);
         verify_operation(module, ctx)?;
-        let printed = print(ctx, module);
-        if expected == IRStatus::Changed {
-            assert!(!printed.contains("perry.alloc"), "{printed}");
-            assert!(!printed.contains("dict_tuple"), "{printed}");
-            assert_eq!(printed.matches("perry.array_new").count(), 2, "{printed}");
-            assert!(printed.contains("perry.array_store"), "{printed}");
-        }
         assert_eq!(
             pass.run(module, ctx, &mut analyses)?.ir_changed,
             IRStatus::Unchanged

@@ -78,12 +78,16 @@ JSON, array and object conformance all pass: six contracts, 208 executions, with
 
 ```sh
 nix develop -c cargo build --locked -p perry-wit -p perry-conformance
-nix develop -c sh -c 'PATH="$PWD/target/debug:$PATH" python3 scripts/bench-perry.py'
+nix run .#bench-perry
 nix develop -c target/debug/perry-conformance check --select ecma.array --cases 32
 nix develop -c target/debug/perry-conformance check --select ecma.json --cases 32
 nix develop -c target/debug/perry-conformance check --select ecma.object --cases 32
 ```
 
-The benchmark runner uses `BENCH_PERRY_SOURCE` and `BENCH_PERRY_REVISION` from the Nix development shell. For comparisons, freeze each compiler, prepend its directory to `PATH`, and run the unchanged runner from separate output directories. Repeat the resulting object components with alternating build order and upstream's stdout verifier. Compilation and process startup stay outside the guest timer.
+The `bench-perry` Nix app sets `BENCH_PERRY_SOURCE` and `BENCH_PERRY_REVISION` for the benchmark runner. For comparisons, freeze each compiler, prepend its directory to `PATH`, and run the unchanged runner from separate output directories. Repeat the resulting object components with alternating build order and upstream's stdout verifier. Compilation and process startup stay outside the guest timer.
 
 Compact prefixes, key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. Mixed arrays still need an explicit element representation and read semantics; this layout change does not choose a heterogeneous inference strategy.
+
+The ownership cleanup resolves field accesses to indices before rewriting, borrows field names, removes the record pass's name map and reads allocation operands in place. Dictionary eligibility is planned once per rewrite. Both passes keep only their crate-level entry points; the shared field-access helper is private. Eligibility and identity-safety tests remain, while duplicate assertions about the exact emitted layout are removed.
+
+A [nine-run recheck](quality-columns.json) measured the original entries at **25 ms** median, columns before cleanup at **22 ms**, and columns after cleanup at **22 ms**. The two column compilers emit byte-identical object benchmark components. This confirms the layout gain (12% in this campaign); it does not claim a guest speedup from the Rust ownership cleanup. Workspace tests and strict Clippy pass.
