@@ -286,6 +286,17 @@ impl Solver {
             BuiltinContract::UnsignedCount
             | BuiltinContract::ByteValue
             | BuiltinContract::Signed32 => {
+                if intrinsic.int32_operands() {
+                    // Only the low 32 bits of each operand reach the result.
+                    for input in inputs {
+                        let unsigned = self.analysis.states[id]
+                            .fact(input)
+                            .integer()
+                            .is_some_and(|integer| !integer.signed);
+                        let required = if unsigned { Integer::U32 } else { Integer::I32 };
+                        self.demand(id, input, Some(required), true);
+                    }
+                }
                 let integer = match contract {
                     BuiltinContract::ByteValue => Integer::U8,
                     BuiltinContract::Signed32 => Integer::I32,
