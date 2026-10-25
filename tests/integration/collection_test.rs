@@ -206,6 +206,24 @@ export function tupleCallbacks():number {
  return 0;
 }
 
+export function dictionaryKeyPrefixes():number {
+ const keys=['','\0','a','a\0','a\0\0','abcdefgh','abcdefgha','abcdefghb','ABCDABCD','EFGHEFGH','é','雪','😀','abcdé雪a','abcdé雪b'];
+ for(let n=1;n<12;n++)keys.push('x'.repeat(n));
+ const dictionary:Record<string,number>={};
+ for(let i=0;i<keys.length;i++){
+   const key=('!'+keys[i]+'?').slice(1,-1);
+   dictionary[key]=i+1;
+ }
+ dictionary['abcdefgha']=99;
+ for(let i=keys.length-1;i>=0;i--){
+   const key=(':'+keys[i]).slice(1);
+   if(dictionary[key] !== (key==='abcdefgha' ? 99 : i+1))return 1;
+ }
+ if(dictionary['abcdefghc']!==undefined || dictionary['abcdé雪c']!==undefined)return 2;
+ if(Object.keys(dictionary).join('|')!==keys.join('|'))return 3;
+ return 0;
+}
+
 export function dictionaryColumns(size:number):number {
  const dictionary:Record<string,Item>={};
  const alias=dictionary;
@@ -233,6 +251,7 @@ export function dictionaryColumns(size:number):number {
             ("liveGrouping", &[], 0.0),
             ("unknownAbsence", &[], 0.0),
             ("tupleCallbacks", &[], 0.0),
+            ("dictionaryKeyPrefixes", &[], 0.0),
             ("dictionaryColumns", &[0.0], 0.0),
             ("dictionaryColumns", &[1.0], 0.0),
             ("dictionaryColumns", &[128.0], 0.0),

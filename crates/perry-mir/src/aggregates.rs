@@ -359,16 +359,16 @@ impl FieldAccess {
     fn resolve(
         ctx: &Context,
         op: Ptr<Operation>,
-        record: TypedHandle<RecordType>,
+        field_index: impl FnOnce(&str) -> Option<usize>,
     ) -> Option<(usize, Self)> {
         if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
             let field = get.get_attr_perry_get_field(ctx)?;
-            let (index, _) = record.deref(ctx).field(field.as_ref())?;
+            let index = field_index(field.as_ref())?;
             Some((index, Self::Read(get)))
         } else {
             let set = Operation::get_op::<FieldSetOp>(op, ctx)?;
             let field = set.get_attr_perry_set_field(ctx)?;
-            let (index, _) = record.deref(ctx).field(field.as_ref())?;
+            let index = field_index(field.as_ref())?;
             Some((index, Self::Write(set)))
         }
     }
@@ -402,29 +402,41 @@ impl MatchRewrite for DecomposeRecords {
         };
         let reference = allocation.get_result(ctx);
         let record = TypedHandle::<RecordType>::from_handle(reference.get_type(ctx), ctx)?;
-        let mut accesses = Vec::new();
-        let mut metadata = Vec::new();
-        for usage in reference.uses(ctx) {
-            let user = usage.user_op();
-            if usage.find_index(ctx) != 0 {
-                return Ok(());
+        let (accesses, metadata) = {
+            let definition = record.deref(ctx);
+            let field_indices: HashMap<_, _> = definition
+                .fields()?
+                .iter()
+                .enumerate()
+                .map(|(index, (name, _))| (name.as_str(), index))
+                .collect();
+            let mut accesses = Vec::new();
+            let mut metadata = Vec::new();
+            for usage in reference.uses(ctx) {
+                let user = usage.user_op();
+                if usage.find_index(ctx) != 0 {
+                    return Ok(());
+                }
+                if let Some(access) =
+                    FieldAccess::resolve(ctx, user, |field| field_indices.get(field).copied())
+                {
+                    accesses.push(access);
+                } else if crate::intrinsics::intrinsic_of(ctx, user).is_some_and(|intrinsic| {
+                    matches!(
+                        intrinsic,
+                        crate::Intrinsic::JsonSpread
+                            | crate::Intrinsic::JsonExclude
+                            | crate::Intrinsic::JsonInsert
+                            | crate::Intrinsic::JsonOrderCopy
+                    )
+                }) {
+                    metadata.push(user);
+                } else {
+                    return Ok(());
+                }
             }
-            if let Some(access) = FieldAccess::resolve(ctx, user, record) {
-                accesses.push(access);
-            } else if crate::intrinsics::intrinsic_of(ctx, user).is_some_and(|intrinsic| {
-                matches!(
-                    intrinsic,
-                    crate::Intrinsic::JsonSpread
-                        | crate::Intrinsic::JsonExclude
-                        | crate::Intrinsic::JsonInsert
-                        | crate::Intrinsic::JsonOrderCopy
-                )
-            }) {
-                metadata.push(user);
-            } else {
-                return Ok(());
-            }
-        }
+            (accesses, metadata)
+        };
         let field_count = record.deref(ctx).fields()?.len();
         let mut slots = Vec::with_capacity(field_count);
         rewriter.set_insertion_point_to_block_start(function.get_entry_block(ctx));

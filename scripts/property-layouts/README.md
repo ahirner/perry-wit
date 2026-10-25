@@ -86,8 +86,28 @@ nix develop -c target/debug/perry-conformance check --select ecma.object --cases
 
 The `bench-perry` Nix app sets `BENCH_PERRY_SOURCE` and `BENCH_PERRY_REVISION` for the benchmark runner. For comparisons, freeze each compiler, prepend its directory to `PATH`, and run the unchanged runner from separate output directories. Repeat the resulting object components with alternating build order and upstream's stdout verifier. Compilation and process startup stay outside the guest timer.
 
-Compact prefixes, key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. Mixed arrays still need an explicit element representation and read semantics; this layout change does not choose a heterogeneous inference strategy.
+Key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. Mixed arrays still need an explicit element representation and read semantics; this layout change does not choose a heterogeneous inference strategy.
 
-The ownership cleanup resolves field accesses to indices before rewriting, borrows field names, removes the record pass's name map and reads allocation operands in place. Dictionary eligibility is planned once per rewrite. Both passes keep only their crate-level entry points; the shared field-access helper is private. Eligibility and identity-safety tests remain, while duplicate assertions about the exact emitted layout are removed.
+The ownership cleanup resolves field accesses to indices before rewriting, borrows field names, uses a borrowed-name index for record fields and reads allocation operands in place. Dictionary eligibility is planned once per rewrite. Both passes keep only their crate-level entry points; the shared field-access helper is private. Eligibility and identity-safety tests remain, while duplicate assertions about the exact emitted layout are removed.
 
 A [nine-run recheck](quality-columns.json) measured the original entries at **25 ms** median, columns before cleanup at **22 ms**, and columns after cleanup at **22 ms**. The two column compilers emit byte-identical object benchmark components. This confirms the layout gain (12% in this campaign); it does not claim a guest speedup from the Rust ownership cleanup. Workspace tests and strict Clippy pass.
+
+## Compact keys
+
+Eligible private dictionaries now store a 32-bit fingerprint beside each key pointer in the existing eight-byte reference slot. It folds the first eight UTF-8 bytes by XORing the two 32-bit halves, padding short views through bounded loads. The query fingerprint is computed at the string's definition and reused across the lookup loop. Appends and key overwrites refresh the stored fingerprint. A mismatch skips string comparison; every match still compares the original strings, so collisions, embedded NULs and long common prefixes preserve equality.
+
+The collector already traces the lower pointer half, and array growth copies the entire slot. This representation adds no arrays or per-key allocations. Enumeration keeps the original strings, and the metadata operations preserve array-element aliases and JSON openness facts. Directly serialized or escaping dictionaries retain the existing fallback representation. There is no key interner or shape table.
+
+The unchanged upstream suite again passes **23/24** for both frozen builds. The heterogeneous-array inference failure remains. Only `bench_object_property` changes its Wasm; the other 22 passing components are byte-identical. The object component grows from 36,784 to 37,436 bytes (+1.8%).
+
+| Build | Nine alternating guest-millisecond samples | Median |
+| --- | --- | ---: |
+| Separate columns | 23, 23, 22, 23, 22, 23, 22, 22, 23 | 23 ms |
+| Compact fingerprints | 21, 21, 21, 21, 21, 21, 21, 21, 21 | 21 ms |
+| Node | 9, 9, 10, 9, 9, 9, 9, 9, 9 | 9 ms |
+
+The candidate is faster in all nine pairs, with an **8.7% median reduction**. The separate three-run full-suite medians are 22 → 21 ms. Millisecond resolution limits precision; these results establish the benefit for this workload. An earlier experiment using a separate 64-bit prefix array showed no gain in a preliminary run and was not retained.
+
+The [compact-key measurements](compact-keys.json) record frozen compiler hashes, source hashes, component hashes, every paired timing and conformance outcomes. They compare the quality-cleaned column compiler at `3f30eec6` with this change, using the same pinned upstream source, Node 26.10.0 and Wasmtime 50.0.0. Local artifacts and logs are in `artifacts/compact-keys/final/`.
+
+JSON, array and object conformance pass all six contracts and **208 executions**. The existing forced-GC collection oracle now also covers short string views of every prefix width, empty and NUL-containing keys, Unicode, long common prefixes, deliberate fingerprint collisions, overwrites and enumeration. Workspace tests, MIR tests, formatting and strict all-target/all-feature Clippy pass. The final record-field lookup keeps a borrowed-name index so removing string clones preserves indexed lookup for large records.

@@ -3,6 +3,7 @@ use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use perry_abi::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
 use perry_mir::{CompareKind, StringConstOp};
 use pliron::{
+    builtin::types::{IntegerType, Signedness},
     context::{Context, Ptr},
     operation::Operation,
     value::Value,
@@ -16,6 +17,97 @@ pub(super) enum Character {
 }
 
 impl FunctionLowering<'_, '_> {
+    /// Fold the first eight UTF-8 bytes into 32 bits without reading past the string view.
+    pub(super) fn string_key_fingerprint(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        string: Value,
+    ) -> Value {
+        let constant = op
+            .deref(ctx)
+            .get_operand(0)
+            .defining_op()
+            .and_then(|definition| Operation::get_op::<StringConstOp>(definition, ctx))
+            .and_then(|literal| literal.get_attr_perry_string_value(ctx))
+            .map(|text| {
+                let text: &str = text.as_ref();
+                let mut bytes = [0; 8];
+                let length = text.len().min(8);
+                bytes[..length].copy_from_slice(&text.as_bytes()[..length]);
+                let prefix = u64::from_le_bytes(bytes);
+                (prefix ^ (prefix >> 32)) & u64::from(u32::MAX)
+            });
+        if let Some(prefix) = constant {
+            return self.i32_const(ctx, prefix as i32);
+        }
+        let word = IntegerType::get(ctx, 64, Signedness::Signless).into();
+        let done = self.new_block(ctx, vec![word]);
+        let wide = self.new_block(ctx, vec![]);
+        let short = self.new_block(ctx, vec![]);
+        let length = self.load(ctx, MemKind::I32, string, LEN);
+        let data = self.load(ctx, MemKind::I32, string, DATA);
+        let eight = self.i32_const(ctx, 8);
+        let enough = self.num(ctx, NumOpcode::I32GeU, vec![length, eight]);
+        self.cond_br(ctx, enough, (wide, vec![]), (short, vec![]));
+        self.block = wide;
+        let prefix = self.load(ctx, MemKind::I64, data, 0);
+        self.br(ctx, done, vec![prefix]);
+        self.block = short;
+        let mut prefix = self.i64_const(ctx, 0);
+        for (width, memory) in [
+            (4, MemKind::I64U32),
+            (2, MemKind::I32U16),
+            (1, MemKind::I32U8),
+        ] {
+            let present = self.i32_const(ctx, width);
+            let present = self.num(ctx, NumOpcode::I32And, vec![length, present]);
+            let read = self.new_block(ctx, vec![]);
+            let next = self.new_block(ctx, vec![word]);
+            self.cond_br(ctx, present, (read, vec![]), (next, vec![prefix]));
+            self.block = read;
+            let mask = self.i32_const(ctx, 8 - width * 2);
+            let offset = self.num(ctx, NumOpcode::I32And, vec![length, mask]);
+            let address = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+            let loaded = self.load(ctx, memory, address, 0);
+            let loaded = if width == 4 {
+                loaded
+            } else {
+                self.num(ctx, NumOpcode::I64ExtendI32U, vec![loaded])
+            };
+            let shift = self.num(ctx, NumOpcode::I32Mul, vec![offset, eight]);
+            let shift = self.num(ctx, NumOpcode::I64ExtendI32U, vec![shift]);
+            let shifted = self.num(ctx, NumOpcode::I64Shl, vec![loaded, shift]);
+            let combined = self.num(ctx, NumOpcode::I64Or, vec![prefix, shifted]);
+            self.br(ctx, next, vec![combined]);
+            self.block = next;
+            prefix = next.deref(ctx).get_argument(0);
+        }
+        self.br(ctx, done, vec![prefix]);
+        self.block = done;
+        let prefix = done.deref(ctx).get_argument(0);
+        let shift = self.i64_const(ctx, 32);
+        let high = self.num(ctx, NumOpcode::I64ShrU, vec![prefix, shift]);
+        let folded = self.num(ctx, NumOpcode::I64Xor, vec![prefix, high]);
+        self.num(ctx, NumOpcode::I32WrapI64, vec![folded])
+    }
+
+    /// Fingerprints reject unequal keys; every match still compares the complete strings.
+    pub(super) fn string_key_equal(&mut self, ctx: &mut Context, args: &[Value]) -> Value {
+        let boolean = i32_type(ctx);
+        let done = self.new_block(ctx, vec![boolean]);
+        let full = self.new_block(ctx, vec![]);
+        let no = self.i32_const(ctx, 0);
+        let same_fingerprint = self.num(ctx, NumOpcode::I32Eq, vec![args[1], args[3]]);
+        self.cond_br(ctx, same_fingerprint, (full, vec![]), (done, vec![no]));
+        self.block = full;
+        let order = self.runtime(ctx, Runtime::StringCompare, vec![args[0], args[2]]);
+        let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
+        self.br(ctx, done, vec![equal]);
+        self.block = done;
+        done.deref(ctx).get_argument(0)
+    }
+
     /// Inline comparison of a string with a literal operand: (in)equality with at most eight
     /// bytes, or ordering against one ASCII byte. `None` leaves the comparison to the runtime.
     pub(super) fn string_literal_comparison(

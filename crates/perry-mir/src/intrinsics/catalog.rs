@@ -43,6 +43,10 @@ macro_rules! intrinsic_catalog {
                 DateJson = "date_json" (Date) -> (NullString), Effectful, Conservative;
                 StringCharAtIndex = "string_char_at_index" (String, Index) -> (String), Pure, Atomic;
                 StringScalarAtIndex = "string_scalar_at_index" (String, Index) -> (Scalar), Pure, None;
+                StringKeyFingerprint = "string_key_fingerprint" (String) -> (KeyFingerprint), Pure, None;
+                KeyFingerprintAt = "key_fingerprint_at" (StringArray, Index) -> (KeyFingerprint), Pure, None;
+                KeyFingerprintStore = "key_fingerprint_store" (StringArray, Index, KeyFingerprint) -> (), Effectful, None;
+                StringKeyEqual = "string_key_equal" (String, KeyFingerprint, String, KeyFingerprint) -> (Bool), Pure, None;
                 StringScalarLength = "string_scalar_length" (Scalar) -> (Index), Pure, None;
                 StringTryAppend = "string_try_append" (String, String) -> (Bool), Effectful, None;
                 StringScalarTryAppend = "string_scalar_try_append" (String, Scalar) -> (Bool), Effectful, None;

@@ -59,6 +59,8 @@ Bindings lower to the existing MIR arrays and records. Dictionaries use arrays o
 
 After bounds proofs, private append-only dictionaries can split into parallel key and value arrays. Each entry must be allocated freshly beside its append and used solely through field reads and writes. Paired appends keep column lengths equal, so proven entry indices remain valid for either column. The rewrite preserves referenced values and feeds the existing heap and lifetime analysis. Direct serialization, calls, escaping entries and structural edits keep the entry representation.
 
+Private string-key columns cache a 32-bit fingerprint in the upper half of each eight-byte reference slot. The lower half retains the string pointer and its existing tracing shape. The fingerprint folds the first eight UTF-8 bytes, with bounded loads for shorter views; mismatches reject equality, while matches compare the complete strings. Appends and key overwrites update the fingerprint. This metadata changes neither array elements nor their JSON openness facts, and adds no arrays or per-key allocations. Key interning and shared shapes remain independent representation choices.
+
 Future mixed storage needs an explicit representation and read semantics in addition to the observed type set. Index-dependent narrowing must account for aliases, calls and intervening writes. Packed storage with widening transitions and tagged storage from allocation remain separate representation choices; neither follows automatically from heterogeneous writes.
 
 ## Memory
