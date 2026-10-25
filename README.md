@@ -92,7 +92,7 @@ To benchmark an already-built compiler inside `nix develop`:
 python3 scripts/perry-bench.py suite/05_fibonacci --compiler ./target/debug/perry-wit
 ```
 
-The development shell supplies the locked source. `--source` selects another checkout; `--compile-only` probes compilation. CI runs the full catalog after Linux Nix builds for non-draft PRs, including `ready_for_review`. This reporting step is non-blocking: failures remain in the job-summary table and linked `perry-bench` artifact. Local untracked sources require `nix run path:.#perry-bench` or `nix develop path:.`.
+The development shell supplies the locked source. `--source` selects another checkout; `--compile-only` probes compilation. A separate CI job depends on successful `flake-build` jobs and restores their outputs from Cachix. It runs all entries for non-draft PRs, including `ready_for_review`. Benchmark failures are non-blocking and remain in the job-summary table and linked `perry-bench` artifact. Local untracked sources require `nix run path:.#perry-bench` or `nix develop path:.`.
 
 ## Contributing
 
