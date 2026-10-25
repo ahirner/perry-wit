@@ -57,14 +57,14 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
             if !component.is_cyclic {
                 continue;
             }
-            let mut component = component.nodes;
-            component.sort_by_key(|block| {
-                subgraph
-                    .0
-                    .get_index_of(block)
-                    .expect("components contain only subgraph blocks")
-            });
-            let members: HashSet<_> = component.iter().copied().collect();
+            let members: HashSet<_> = component.nodes.into_iter().collect();
+            // Subgraph order keeps entry and guard selection deterministic.
+            let component: Vec<_> = subgraph
+                .0
+                .iter()
+                .copied()
+                .filter(|block| members.contains(block))
+                .collect();
             let preds = predecessors(ctx, region);
             let entries: Vec<_> = component
                 .iter()
