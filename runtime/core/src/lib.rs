@@ -115,7 +115,7 @@ mod tests {
             perry_promise_wait(p, f2, unsafe { f2.add(16) });
             assert!(host::mock::completed_reactions().is_empty());
             perry_subtask_register(7, p, 42);
-            perry_task_set_set(3);
+            current().set = 3;
             assert_eq!(perry_task_suspend(), 3);
             // Another task runs to completion while `a` waits on the host.
             let b = perry_task_enter();

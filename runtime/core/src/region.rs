@@ -378,18 +378,6 @@ pub extern "C" fn perry_task_free() {
     runtime.current = ptr::null_mut();
 }
 
-/// The current task's waitable set, or 0.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_task_set() -> u32 {
-    current().set
-}
-
-/// Record the waitable set created for the current task.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_task_set_set(set: u32) {
-    current().set = set;
-}
-
 /// The promise the current async export settles.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_task_result() -> *mut u8 {

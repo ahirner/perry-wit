@@ -131,11 +131,6 @@ impl Intrinsic {
         self.policy().effect == ServiceEffect::Throws
     }
 
-    /// Whether the service produces a value (all services have at most one result).
-    pub fn has_result(self) -> bool {
-        !self.types().1.is_empty()
-    }
-
     /// `Math.floor`, `ceil`, `trunc`, `round`, `abs`, `min` and `max`: an integer (or lossless
     /// numeric) operand type carries over to the result.
     pub(crate) fn preserves_integers(self) -> bool {

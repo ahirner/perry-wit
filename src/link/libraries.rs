@@ -138,7 +138,7 @@ impl HelperMemory {
     }
 
     /// The end of the placed static data, where the shared shadow-stack reservation starts.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn data_end(&self) -> u32 {
         self.end
     }

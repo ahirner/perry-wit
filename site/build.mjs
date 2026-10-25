@@ -14,6 +14,8 @@ const compiler = process.env.PERRY_COMPILER_WASM;
 if (!compiler) throw new Error('Run nix run .#site from the repository root to build the complete site, including its compiler.');
 const rustdoc = process.env.PERRY_RUSTDOC;
 if (!rustdoc) throw new Error('Run nix run .#site from the repository root to build the complete site, including Rust API documentation.');
+const conformanceDocPath = process.env.PERRY_CONFORMANCE_DOC;
+if (!conformanceDocPath) throw new Error('Run nix run .#site from the repository root to build the complete site, including the conformance catalog.');
 const metadata = execFileSync('python3', [join(repository, 'scripts/compiler-metadata.py'), compiler], { encoding: 'utf8' });
 const packageVersion = JSON.parse(metadata).version;
 const contract = await readFile(join(repository, 'wit/compiler/world.wit'), 'utf8');
@@ -34,14 +36,7 @@ const bookDir = join(generated, 'book');
 await cp(join(repository, 'docs'), bookDir, { recursive: true });
 await cp(join(repository, 'template'), join(generated, 'template'), { recursive: true });
 for (const wit of ['compiler', 'http-handler']) await cp(join(repository, 'wit', wit), join(generated, 'wit', wit), { recursive: true });
-let conformanceDoc;
-if (process.env.PERRY_CONFORMANCE_DOC) {
-  conformanceDoc = await readFile(process.env.PERRY_CONFORMANCE_DOC, 'utf8');
-} else {
-  const catalogBin = join(generated, 'perry-conformance-doc');
-  execFileSync('rustc', ['--edition=2024', '--check-cfg', 'cfg(conformance_doc_bin)', '--cfg', 'conformance_doc_bin', join(repository, 'crates/conformance/src/catalog.rs'), '-o', catalogBin], { stdio: 'inherit' });
-  conformanceDoc = execFileSync(catalogBin, { encoding: 'utf8' });
-}
+const conformanceDoc = await readFile(conformanceDocPath, 'utf8');
 const contractCount = conformanceDoc.match(/\*\*(\d+)\*\* capability contracts/)?.[1];
 if (!contractCount) throw new Error('Failed to extract capability contract count from conformance catalog');
 const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
