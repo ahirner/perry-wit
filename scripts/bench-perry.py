@@ -49,20 +49,28 @@ def execute(command, directory, log):
 
 def markdown(report):
     counts = ", ".join(f"{count} {status}" for status, count in sorted(Counter(row["status"] for row in report["results"]).items()))
-    lines = ["## Perry benchmarks", "",
+    lines = ["## Upstream benchmarks", "",
              f"Perry `{report['revision']}` · Node `{report['node']}` · `{report['wasmtime']}`.", "",
-             f"Official `compare.sh --full` suite: {len(report['results'])}/{report['selected']} attempted; {counts}.", "",
-             f"Times are medians of {RUNS} fresh processes using upstream internal timings and warmups; **W/N < 1 favors Wasmtime**. Correctness uses upstream's stdout verifier. Ratios require matching outputs and positive timings in every sample; short timings have millisecond resolution. Peak RSS is the maximum whole-process memory in MiB, including runtime/JIT. Each process has a {TIMEOUT}s timeout; an engine stops after its first failure.", "",
+             f"Official `compare.sh --full` suite: {len(report['results'])}/{report['selected']} attempted. {counts}.", "",
+             f"Times are medians of {RUNS} fresh processes using upstream internal timings and warmups. **W/N < 1 favors Wasmtime**. Correctness uses upstream's stdout verifier. Ratios require matching outputs and positive timings in every sample. Short timings have millisecond resolution. Peak RSS is the maximum whole-process memory in MiB, including runtime/JIT. Each process has a {TIMEOUT}s timeout. An engine stops after its first failure. Summary rows aggregate available values in each column.", "",
              "| Benchmark | Status | Node ms | Wasmtime ms | W/N | Node MiB | Wasmtime MiB |",
              "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+    table = []
     for row in report["results"]:
         times = row.get("median_ms", {})
         memory = row.get("peak_rss_bytes", {})
-        values = [f"{times[runtime]:.2f}" if runtime in times else "—" for runtime in ("node", "wasmtime")]
-        ratio = f"{row['ratio']:.2f}" if "ratio" in row else "—"
-        peaks = [f"{memory[runtime] / 2**20:.1f}" if runtime in memory else "—" for runtime in ("node", "wasmtime")]
+        values = [times.get("node"), times.get("wasmtime"), row.get("ratio"),
+                  *[memory[runtime] / 2**20 if runtime in memory else None for runtime in ("node", "wasmtime")]]
         status = row["status"] + (f" ({', '.join(row['errors'])})" if row.get("errors") else "")
-        lines.append("| " + " | ".join([row["benchmark"], status, *values, ratio, *peaks]) + " |")
+        table.append((row["benchmark"], status, values))
+    columns = [[value for value in column if value is not None] for column in zip(*(values for _, _, values in table))]
+    passed = sum(row["status"] == "pass" for row in report["results"])
+    for label, aggregate in (("mean", statistics.mean), ("median", statistics.median)):
+        status = f"{passed} / {report['selected']} pass" if label == "mean" else "—"
+        table.append((f"**{label}**", status, [aggregate(column) if column else None for column in columns]))
+    for benchmark, status, values in table:
+        cells = [f"{value:.{2 if index < 3 else 1}f}" if value is not None else "—" for index, value in enumerate(values)]
+        lines.append("| " + " | ".join([benchmark, status, *cells]) + " |")
     for row in report["results"]:
         if row.get("reason"):
             lines.extend(["", f"<details><summary>{row['benchmark']}: {row['status']}</summary>", "",

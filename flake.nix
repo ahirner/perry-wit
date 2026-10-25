@@ -97,14 +97,17 @@
           wasm-tools component wit probe -o "$out"
         '';
 
-        authoredSourceFilter = path: type:
-          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" ".generated" "test-results" "node_modules" "target" "dist" "artifacts" "result" ])
-          && pkgs.lib.cleanSourceFilter path type;
+        cleanSource = source: pkgs.lib.cleanSourceWith {
+          src = source;
+          filter = pkgs.nix-gitignore.gitignoreFilterPure pkgs.lib.cleanSourceFilter
+            (pkgs.lib.optional (builtins.pathExists (source + "/.gitignore")) (source + "/.gitignore"))
+            source;
+        };
+        repoSource = cleanSource ./.;
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
-          authoredSourceFilter path type
-          && path != toString ./scripts && (
+          path != toString ./scripts && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
@@ -116,7 +119,7 @@
           (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
-          src = ./.;
+          src = repoSource;
           filter = commonFilter;
         };
         cargoVendorDir = craneLib.vendorMultipleCargoDeps {
@@ -217,16 +220,15 @@
           ./conformance-doc > "$out"
         '';
 
-        siteSource = pkgs.lib.cleanSourceWith { src = ./.; filter = authoredSourceFilter; };
         site = pkgs.buildNpmPackage {
           pname = "perry-wit-site";
           inherit nodejs;
           version = cargoManifest.package.version;
           dontFixup = true;
-          src = siteSource;
+          src = repoSource;
           npmRoot = "site";
           npmDeps = pkgs.fetchNpmDeps {
-            src = pkgs.lib.cleanSourceWith { src = ./site; filter = authoredSourceFilter; };
+            src = "${repoSource}/site";
             hash = "sha256-HVyTUkc1wePoDWyDEgC34ozTNiFK/mJJWBqPXVPTDzs=";
           };
           npmFlags = [ "--ignore-scripts" ];
@@ -281,7 +283,7 @@
         }: pkgs.stdenv.mkDerivation {
           pname = name;
           version = "0.1.0";
-          src = pkgs.lib.cleanSourceWith { inherit src; filter = authoredSourceFilter; };
+          src = cleanSource src;
           nativeBuildInputs = [ perryWitBin pkgs.typescript pkgs.wasm-tools ];
           buildPhase = ''
             export WASI_WIT_PATH="${wasiP3Wit}"

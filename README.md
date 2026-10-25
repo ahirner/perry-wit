@@ -72,7 +72,7 @@ nix build .#template-component  # starter template component
 nix build .#example-merge-task  # reference component
 ```
 
-### Perry benchmarks
+### Upstream benchmarks
 
 Compare Node and Wasmtime on Perry's official benchmark suite from the revision pinned in `Cargo.lock`.
 `artifacts/bench-perry/` contains a correctness and performance table, peak memory measurements, and per-workload diagnostics.
