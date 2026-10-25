@@ -78,6 +78,9 @@ impl<'s> FunctionBuilder<'s> {
         // Property access on `undefined` throws TypeError, in ECMAScript and here.
         let value = self.defined(ctx, value)?;
         let ty = value.get_type(ctx);
+        if crate::value_unions::is_value_union(ctx, ty) {
+            return self.value_union_member(ctx, value, property);
+        }
         Ok(match (kind(ctx, value)?, property) {
             (Kind::Url, field) => self.url_field(ctx, value, field)?,
             (Kind::Encoder | Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),

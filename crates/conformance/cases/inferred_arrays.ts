@@ -53,3 +53,30 @@ class Counter {
   }
 }
 console.log(new Counter().count());
+
+interface Row { value: number }
+function buildMixed(n: number): any[] {
+  const values: any[] = [];
+  for (let i = 0; i < n; i++) values.push(i);
+  values[1] = 'snow 雪';
+  values[2] = { value: 7 };
+  return values;
+}
+const values = buildMixed(6);
+values[0] = values[0] + 1;
+values[1] = values[1] + 1;
+console.log(JSON.stringify(values));
+console.log(values[0], values[1], values[2].value, values[0].value);
+console.log(values[99] === undefined, values[99] + 1, values[1] !== '', values[2] === values[2]);
+const row: Row = JSON.parse('{"value":4,"extra":{"keep":[1,"雪"]}}');
+const boxed: (number | string | Row)[] = [1, 'x', row];
+const held = boxed[2] as Row;
+row.value = 8;
+console.log(JSON.stringify(boxed), held.value, held === row);
+held.value = 9;
+console.log(row.value, JSON.stringify(boxed));
+const copied: (number | string | Row)[] = JSON.parse(JSON.stringify(boxed));
+console.log(JSON.stringify(copied));
+const graph: unknown = JSON.parse('[1,"雪",{"value":3,"extra":true}]');
+const decoded: (number | string | Row)[] = graph as (number | string | Row)[];
+console.log(JSON.stringify(decoded));

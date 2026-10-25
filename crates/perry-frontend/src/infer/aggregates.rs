@@ -30,9 +30,12 @@ impl ObservedValues {
         }
     }
 
-    fn uniform(&self) -> Option<&HirType> {
+    fn inferred(&self, kind: AggregateKind) -> Option<HirType> {
         match self {
-            Self::Known(types) if types.len() == 1 => types.first(),
+            Self::Known(types) if types.len() == 1 => types.first().cloned(),
+            Self::Known(types) if kind == AggregateKind::Array => {
+                Some(HirType::Union(types.clone()))
+            }
             _ => None,
         }
     }
@@ -86,8 +89,9 @@ impl Constraints {
             .chain(self.aliases.keys())
             .filter_map(|id| {
                 let root = self.root(*id);
-                let value = elements.get(&root)?.uniform()?;
+                let value = elements.get(&root)?.inferred(*self.fresh.get(&root)?)?;
                 if read_roots.contains(&root)
+                    && self.fresh.get(&root) == Some(&AggregateKind::Dictionary)
                     && !matches!(
                         value,
                         HirType::Number | HirType::String | HirType::Boolean | HirType::BigInt
@@ -95,7 +99,6 @@ impl Constraints {
                 {
                     return None;
                 }
-                let value = value.clone();
                 let ty = match self.fresh.get(&root)? {
                     AggregateKind::Array => HirType::Array(Box::new(value)),
                     AggregateKind::Dictionary => HirType::Object(perry_hir::types::ObjectType {
@@ -249,6 +252,12 @@ impl Visitor for Collect<'_, '_> {
     type Error = Infallible;
 
     fn statement(&mut self, statement: &mut Stmt) -> Result<(), Infallible> {
+        if let Stmt::Return(Some(Expr::LocalGet(id))) = statement
+            && self.constraints.fresh.get(&self.constraints.root(*id))
+                == Some(&AggregateKind::Array)
+        {
+            return Ok(());
+        }
         if let Stmt::Let {
             id,
             ty,

@@ -32,11 +32,18 @@ impl<'s> FunctionBuilder<'s> {
         let may_be_number = |value: Value| {
             matches!(
                 kind_of(value),
-                Some(Kind::Number | Kind::NumberString | Kind::Json | Kind::Exception)
+                Some(
+                    Kind::Number
+                        | Kind::NumberString
+                        | Kind::ValueUnion
+                        | Kind::Json
+                        | Kind::Exception
+                )
             )
         };
         if !numbers
-            && !(equality == Equality::SameValueZero && kind_of(lhs) == Some(Kind::NumberString))
+            && !(equality == Equality::SameValueZero
+                && matches!(kind_of(lhs), Some(Kind::NumberString | Kind::ValueUnion)))
             && !(equality == Equality::SameValue && may_be_number(lhs) && may_be_number(rhs))
         {
             return Ok(equal);
@@ -120,6 +127,45 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
+        self.binary_values(ctx, op, lhs, rhs)
+    }
+
+    fn binary_values(
+        &mut self,
+        ctx: &mut Context,
+        op: &BinaryOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value> {
+        if crate::value_unions::is_value_union(ctx, lhs.get_type(ctx))
+            || crate::value_unions::is_value_union(ctx, rhs.get_type(ctx))
+        {
+            let result = if matches!(op, BinaryOp::Add) {
+                perry_mir::NumberStringType::get(ctx).into()
+            } else {
+                FP64Type::get(ctx).into()
+            };
+            return self.dispatch_value(ctx, lhs, result, &|b, ctx, lhs| {
+                b.dispatch_value(ctx, rhs, result, &|b, ctx, rhs| {
+                    let lhs = b.value_primitive(ctx, lhs)?;
+                    let rhs = b.value_primitive(ctx, rhs)?;
+                    let numeric = |b: &mut Self, ctx: &mut Context, value: Value| {
+                        if !matches!(op, BinaryOp::Add)
+                            && Kind::of(ctx, present_type(ctx, value.get_type(ctx)))
+                                == Some(Kind::String)
+                        {
+                            let value = b.arithmetic(ctx, value);
+                            b.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
+                        } else {
+                            value
+                        }
+                    };
+                    let lhs = numeric(b, ctx, lhs);
+                    let rhs = numeric(b, ctx, rhs);
+                    b.binary_values(ctx, op, lhs, rhs)
+                })
+            });
+        }
         let string = |value: Value| {
             present_type(ctx, value.get_type(ctx))
                 .deref(ctx)
@@ -130,6 +176,21 @@ impl<'s> FunctionBuilder<'s> {
             let rhs = self.display(ctx, rhs)?;
             return Ok(self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs)));
         }
+        let boolean_number = |b: &mut Self, ctx: &mut Context, value: Value| -> Result<Value> {
+            if Kind::of(ctx, value.get_type(ctx)) == Some(Kind::Boolean) {
+                b.choose(
+                    ctx,
+                    FP64Type::get(ctx).into(),
+                    value,
+                    |b, ctx| Ok(b.number(ctx, 1.0)),
+                    |b, ctx| Ok(b.number(ctx, 0.0)),
+                )
+            } else {
+                Ok(value)
+            }
+        };
+        let lhs = boolean_number(self, ctx, lhs)?;
+        let rhs = boolean_number(self, ctx, rhs)?;
         let lhs = self.arithmetic(ctx, lhs);
         let rhs = self.arithmetic(ctx, rhs);
         Ok(match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
@@ -229,6 +290,23 @@ impl<'s> FunctionBuilder<'s> {
         lhs: Value,
         rhs: Value,
     ) -> Result<Value> {
+        if crate::value_unions::is_value_union(ctx, lhs.get_type(ctx))
+            || crate::value_unions::is_value_union(ctx, rhs.get_type(ctx))
+        {
+            let result = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.dispatch_value(ctx, lhs, result, &|b, ctx, lhs| {
+                b.dispatch_value(ctx, rhs, result, &|b, ctx, rhs| {
+                    if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                        && present_type(ctx, lhs.get_type(ctx))
+                            != present_type(ctx, rhs.get_type(ctx))
+                    {
+                        Ok(b.boolean(ctx, matches!(op, CompareOp::Ne)))
+                    } else {
+                        b.comparison_values(ctx, op, lhs, rhs)
+                    }
+                })
+            });
+        }
         let equality = match op {
             CompareOp::Eq => Some(CompareKind::Eq),
             CompareOp::Ne => Some(CompareKind::Ne),
@@ -678,7 +756,11 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(self.compare(ctx, CompareKind::Gt, absolute, zero))
             }
             Kind::Json => Ok(self.intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])),
-            Kind::BigInt | Kind::NumberString => {
+            Kind::NumberString | Kind::ValueUnion => {
+                let result = IntegerType::get(ctx, 1, Signedness::Signless).into();
+                self.dispatch_value(ctx, value, result, &|b, ctx, value| b.truthy(ctx, value))
+            }
+            Kind::BigInt => {
                 bail!("narrow this scalar before testing truthiness")
             }
             _ => Ok(self.boolean(ctx, true)),

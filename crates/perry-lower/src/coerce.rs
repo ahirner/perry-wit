@@ -112,6 +112,7 @@ impl KindExt for Kind {
             Decoder => DecoderType,
             Regex => RegexType,
             NumberString => NumberStringType,
+            ValueUnion => ValueUnionType,
             Array => ArrayType,
             Record => RecordType,
             Variant => VariantType,
@@ -231,18 +232,67 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let ty = value.get_type(ctx);
         let wanted = present_type(ctx, target);
-        if wanted.deref(ctx).is::<perry_mir::NumberStringType>()
-            && (ty.deref(ctx).is::<FP64Type>() || ty.deref(ctx).is::<StringType>())
+        if ty != target
+            && self.is_optional(ctx, value)
+            && (crate::value_unions::is_value_union(ctx, ty)
+                || crate::value_unions::is_value_union(ctx, target))
         {
-            let tag = if ty.deref(ctx).is::<FP64Type>() {
-                "number"
-            } else {
-                "string"
+            let Some(states) = absence(ctx, target) else {
+                let value = self.defined(ctx, value)?;
+                return self.fit(ctx, value, target);
             };
+            return self.match_optional(
+                ctx,
+                value,
+                target,
+                |b, ctx| {
+                    if states.admits_undefined() {
+                        Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target)))
+                    } else {
+                        let value = b.defined(ctx, value)?;
+                        b.fit(ctx, value, target)
+                    }
+                },
+                |b, ctx| {
+                    if states.admits_null() {
+                        Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target)))
+                    } else {
+                        let value = b.defined(ctx, value)?;
+                        b.fit(ctx, value, target)
+                    }
+                },
+                |b, ctx, value| b.fit(ctx, value, target),
+            );
+        }
+        if ty != target
+            && crate::value_unions::is_value_union(ctx, wanted)
+            && let Some(tag) = perry_mir::value_tag(ctx, ty)
+        {
+            let payload = perry_mir::variant_cases(ctx, wanted)?
+                .into_iter()
+                .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
+                .context("value is outside the finite union")?;
+            ensure!(
+                tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
+                "record alternatives must preserve their layout and identity"
+            );
+            let value = self.fit(ctx, value, payload)?;
             let boxed = self.emit_value(ctx, |ctx| {
                 perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value))
             });
             return self.fit(ctx, boxed, target);
+        }
+        if !crate::value_unions::is_value_union(ctx, wanted)
+            && crate::value_unions::is_value_union(ctx, ty)
+            && perry_mir::variant_cases(ctx, present_type(ctx, ty))?
+                .iter()
+                .any(|(_, payload)| *payload == Some(wanted))
+        {
+            let value = self.defined(ctx, value)?;
+            let payload = self.emit_value(ctx, |ctx| {
+                perry_mir::VariantPayloadOp::new(ctx, value, wanted)
+            });
+            return self.fit(ctx, payload, target);
         }
         if target.deref(ctx).is::<perry_mir::ByteInputType>() {
             let convert = if ty.deref(ctx).is::<StringType>() {
@@ -426,27 +476,12 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         Ok(match kind(ctx, value)? {
-            Kind::NumberString => {
-                let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value));
-                let number = self.string(ctx, "number");
-                let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
-                self.choose_string(
-                    ctx,
-                    is_number,
-                    |b, ctx| {
-                        let ty = FP64Type::get(ctx).into();
-                        let payload = b.emit_value(ctx, |ctx| {
-                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
-                        });
-                        b.display_as(ctx, payload, mode)
-                    },
-                    |b, ctx| {
-                        let ty = StringType::get(ctx).into();
-                        Ok(b.emit_value(ctx, |ctx| {
-                            perry_mir::VariantPayloadOp::new(ctx, value, ty)
-                        }))
-                    },
-                )?
+            Kind::NumberString | Kind::ValueUnion => {
+                let result = StringType::get(ctx).into();
+                self.dispatch_value(ctx, value, result, &|b, ctx, value| {
+                    let value = b.value_primitive(ctx, value)?;
+                    b.display_as(ctx, value, mode)
+                })?
             }
             Kind::BigInt => {
                 let value = self.bigint_view(ctx, value);
@@ -486,7 +521,7 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         let name = match kind(ctx, value)? {
-            Kind::NumberString => {
+            Kind::NumberString | Kind::ValueUnion => {
                 return Ok(self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value)));
             }
             Kind::BigInt => "bigint",

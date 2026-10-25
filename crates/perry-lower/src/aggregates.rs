@@ -69,6 +69,18 @@ impl<'s> FunctionBuilder<'s> {
         }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        let record = if crate::value_unions::is_value_union(ctx, record.get_type(ctx)) {
+            let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))?
+                .into_iter()
+                .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
+                .context("property write requires a record alternative")?;
+            self.emit_value(ctx, |ctx| {
+                perry_mir::VariantPayloadOp::new(ctx, record, payload)
+            })
+        } else {
+            record
+        };
+
         if let Some((_, v_ty, _)) = crate::collections::dict_entry_types(ctx, record.get_type(ctx))
         {
             let key = self.string(ctx, field);

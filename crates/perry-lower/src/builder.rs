@@ -102,7 +102,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// branches they select are not lowered.
     pub(super) iteration: hir_compat::Iteration,
     /// Active tag guards appended as conditions narrow and truncated when branches exit.
-    pub(super) variant_guards: Vec<(variants::Path<'s>, &'s str, bool)>,
+    pub(super) variant_guards: Vec<variants::Guard<'s>>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_returns: Vec<inline::ReturnFrame>,
     pub(super) class_expansions: Vec<crate::classes::ClassExpansion<'s>>,

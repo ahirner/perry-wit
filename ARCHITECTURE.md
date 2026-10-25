@@ -53,7 +53,7 @@ The frontend returns a read-only program and metadata. Record identity and funct
 
 ## Aggregate inference
 
-The frontend collects writes and aliases for fresh empty arrays and dictionaries in one pass. Numeric indices select array storage; string keys and named properties select dictionary storage. Observations distinguish no writes, a finite set of value types and unknown contents. Representation selection currently accepts one uniform value type. Conflicting types remain distinct observations; they do not imply a particular tagged representation.
+The frontend collects writes and aliases for fresh empty arrays and dictionaries in one pass. Numeric indices select array storage; string keys and named properties select dictionary storage. Observations distinguish no writes, a finite set of value types and unknown contents. Uniform writes retain their element representation. Finite mixed array writes select a value union; unresolved `any` placeholders in local bindings and helper returns carry the inferred type across calls. Unknown writes and unmodelled mutations remain outside this inference.
 
 Bindings lower to the existing MIR arrays and records. Dictionaries use arrays of typed key-value entries, so their values participate in the same allocation identities, alias propagation and slot facts as array elements. The MIR heap analysis tracks openness independently of the declared type: typed JSON records can retain undeclared fields, and storing them inside an inferred aggregate preserves that provenance. Unknown JSON sources cannot become fresh inferred dictionaries merely because later writes are typed.
 
@@ -61,7 +61,9 @@ After bounds proofs, private append-only dictionaries can split into parallel ke
 
 Private string-key columns cache a 32-bit fingerprint in the upper half of each eight-byte reference slot. The lower half retains the string pointer and its existing tracing shape. The fingerprint folds the first eight UTF-8 bytes, with bounded loads for shorter views; mismatches reject equality, while matches compare the complete strings. Appends and key overwrites update the fingerprint. This metadata changes neither array elements nor their JSON openness facts, and adds no arrays or per-key allocations. Key interning and shared shapes remain independent representation choices.
 
-Future mixed storage needs an explicit representation and read semantics in addition to the observed type set. Index-dependent narrowing must account for aliases, calls and intervening writes. Packed storage with widening transitions and tagged storage from allocation remain separate representation choices; neither follows automatically from heterogeneous writes.
+Finite value unions support numbers, strings, booleans and one plain record shape, with null and undefined represented independently. They reuse variant storage: an immutable tag, an eight-byte payload and a traced owner for references. Addition, equality, truthiness and property reads dispatch on the active type; checked payload access also supports `typeof` narrowing. Record alternatives preserve identity and mutation through aliases. JSON descriptors encode the active value directly and preserve unknown fields on record payloads; copy analysis treats these payloads conservatively.
+
+Mixed arrays allocate tagged storage from the start. Numeric arrays retain their existing representation and bounds analysis. Packed storage with widening transitions, key interning and shared object shapes remain separate optimizations.
 
 ## Memory
 

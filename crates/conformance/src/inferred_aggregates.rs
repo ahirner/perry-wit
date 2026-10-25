@@ -80,7 +80,7 @@ pub struct AggregateCase {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Conflict {
+enum UnresolvedWrite {
     Push,
     Index,
     Conditional,
@@ -108,7 +108,7 @@ impl AggregateCase {
         self.emit(self.form, None)
     }
 
-    fn emit(&self, form: Form, conflict: Option<Conflict>) -> String {
+    fn emit(&self, form: Form, conflict: Option<UnresolvedWrite>) -> String {
         let mut e = Emitter::default();
         e.line(format_args!(
             "function mark(trace:number[],n:number):number {{trace.push(n);return n;}}"
@@ -191,10 +191,10 @@ impl AggregateCase {
                     } else {
                         format!("alias{}", self.aliases - 1)
                     };
-                    let bad = "{incompatible:true}";
+                    let bad = "JSON.parse('{\"incompatible\":true}')";
                     let value = match conflict {
-                        Conflict::Push | Conflict::Index => bad.into(),
-                        Conflict::Conditional => format!(
+                        UnresolvedWrite::Push | UnresolvedWrite::Index => bad.into(),
+                        UnresolvedWrite::Conditional => format!(
                             "x<0?{}:{bad}",
                             self.element.value(&self.seed.to_string())
                         ),
@@ -206,8 +206,8 @@ impl AggregateCase {
                     };
                     let statement = match (self.storage, conflict) {
                         (Storage::Dictionary, _) => format!("{prefix}{receiver}['field_0']={value};"),
-                        (Storage::Array, Conflict::Push | Conflict::Conditional) => format!("{prefix}{receiver}.push({value});"),
-                        (Storage::Array, Conflict::Index) => format!("{prefix}{receiver}[0]={value};"),
+                        (Storage::Array, UnresolvedWrite::Push | UnresolvedWrite::Conditional) => format!("{prefix}{receiver}.push({value});"),
+                        (Storage::Array, UnresolvedWrite::Index) => format!("{prefix}{receiver}[0]={value};"),
                     };
                     statements.push(if form == Form::Branches {
                         format!("if(x<0){{{statement}}}")
@@ -259,7 +259,7 @@ impl AggregateCase {
         e.finish()
     }
 
-    fn rejection(&self, conflict: Conflict) -> Case {
+    fn rejection(&self, conflict: UnresolvedWrite) -> Case {
         Case::Reject {
             source: self.emit(Form::Aliased, Some(conflict)),
             form_sources: [Form::Branches, Form::Loop, Form::Temporaries]
@@ -288,9 +288,9 @@ fn strategy(storage: Storage) -> BoxedStrategy<Case> {
         prop::collection::vec((-20i16..=20, prop::option::of(any::<u8>())), 0..=6),
         1..=4u8,
         prop::option::of(prop_oneof![
-            Just(Conflict::Push),
-            Just(Conflict::Index),
-            Just(Conflict::Conditional)
+            Just(UnresolvedWrite::Push),
+            Just(UnresolvedWrite::Index),
+            Just(UnresolvedWrite::Conditional)
         ]),
     )
         .prop_map(move |(element, seed, writes, aliases, conflict)| {
@@ -334,17 +334,35 @@ pub(crate) fn contract() -> Contract {
     for (partition, source) in [
         (
             "mixed-index-writes",
-            "const a:any[]=[];for(let i=0;i<4;i++)a.push(i);a[0]={value:7};a[1]='payload';",
+            "const a:any[]=[];for(let i=0;i<4;i++)a.push(i);a[0]={value:7};a[1]='payload';console.log(JSON.stringify(a));",
         ),
+        (
+            "mixed-alias",
+            "const a:any[]=[];const alias=a;a.push(1);alias.push('text');console.log(JSON.stringify(a),JSON.stringify(alias));",
+        ),
+        (
+            "mixed-branch",
+            "function run(flag:boolean):void{const a:any[]=[];if(flag)a.push(1);else a.push('text');console.log(JSON.stringify(a));}run(true);run(false);",
+        ),
+        (
+            "returned-alias",
+            "function make():number[]{const a:any[]=[];a.push(1);return a;}console.log(make().length);",
+        ),
+        (
+            "mixed-function-write",
+            "const a:any[]=[];a.push(1);function mutate():void{a.push('text');}mutate();console.log(JSON.stringify(a));",
+        ),
+    ] {
+        witnesses.push(Witness {
+            partition,
+            case: Case::Command {
+                source: source.into(),
+                exit: ExitStatus::Success,
+            },
+        });
+    }
+    for (partition, source) in [
         ("string-key-write", "const a:any[]=[];a.push(1);a['k']=2;"),
-        (
-            "conflicting-alias",
-            "const a:any[]=[];const alias=a;a.push(1);alias.push('bad');",
-        ),
-        (
-            "conflicting-branch",
-            "const a:any[]=[];if(Date.now()>0)a.push(1);else a.push('bad');",
-        ),
         (
             "conflicting-conditional-field",
             "const a:any[]=[];a.push({value:Date.now()>0?1:'bad'});",
@@ -352,10 +370,6 @@ pub(crate) fn contract() -> Contract {
         (
             "conflicting-nested-array",
             "const a:any[]=[];a.push({values:[1,'bad']});",
-        ),
-        (
-            "conflicting-function-write",
-            "const a:any[]=[];a.push(1);function mutate():void{a.push('bad');}mutate();",
         ),
         (
             "unknown-call",
@@ -378,10 +392,6 @@ pub(crate) fn contract() -> Contract {
             "const a:any[]=[];a.push({tags:['ok']});a[0].tags.push(1);",
         ),
         (
-            "returned-alias",
-            "function make():number[]{const a:any[]=[];a.push(1);return a;}console.log(make().length);",
-        ),
-        (
             "no-writes",
             "const a:any[]=[];console.log(JSON.stringify(a));",
         ),
@@ -390,7 +400,12 @@ pub(crate) fn contract() -> Contract {
             partition,
             case: Case::Reject {
                 source: source.into(),
-                diagnostic: REQUIRES_ELEMENT_TYPE.into(),
+                diagnostic: if partition == "mutable-element-alias" {
+                    "differs from the expected type"
+                } else {
+                    REQUIRES_ELEMENT_TYPE
+                }
+                .into(),
                 form_sources: vec![],
             },
         });
@@ -406,7 +421,7 @@ pub(crate) fn contract() -> Contract {
             aliases: 1,
             form: Form::Annotated,
         }
-        .rejection(Conflict::Conditional),
+        .rejection(UnresolvedWrite::Conditional),
     });
 
     witnesses.extend(uniform_witnesses(Storage::Array));

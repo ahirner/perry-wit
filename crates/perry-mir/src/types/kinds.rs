@@ -1,5 +1,5 @@
 //! Opaque MIR types and reference-representation queries.
-use super::{ArrayType, RecordType, ResourceType, SettledType, VariantType};
+use super::{ArrayType, RecordType, ResourceType, SettledType, ValueUnionType, VariantType};
 use pliron::{context::Context, derive::pliron_type, r#type::TypeHandle};
 
 macro_rules! value_types {
@@ -115,6 +115,7 @@ value_types! {
         ArrayType;
         RecordType;
         VariantType;
+        ValueUnionType;
         ResourceType;
         SettledType;
     }

@@ -67,6 +67,38 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         );
     }
     let ty = match expr {
+        Expr::Binary {
+            op: perry_hir::ir::BinaryOp::Add,
+            left,
+            right,
+        } => {
+            let left = expression(left, env);
+            let right = expression(right, env);
+            let mixed = |ty: &HirType| {
+                let HirType::Union(members) = ty else {
+                    return false;
+                };
+                members.iter().any(|ty| {
+                    !matches!(
+                        ty,
+                        HirType::Number
+                            | HirType::Int32
+                            | HirType::Boolean
+                            | HirType::Null
+                            | HirType::Void
+                    )
+                })
+            };
+            if matches!(left, HirType::String | HirType::StringLiteral(_))
+                || matches!(right, HirType::String | HirType::StringLiteral(_))
+            {
+                HirType::String
+            } else if mixed(&left) || mixed(&right) {
+                HirType::Union(vec![HirType::Number, HirType::String])
+            } else {
+                perry_hir::infer_expr_type(expr, env)
+            }
+        }
         Expr::ScopedTemp { id, value, body } => {
             let val_ty = expression(value, env);
             let prev = if !matches!(val_ty, HirType::Any | HirType::Unknown) {

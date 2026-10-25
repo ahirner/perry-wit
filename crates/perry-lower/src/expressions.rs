@@ -60,7 +60,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         if let Some(value) = self.collection_expression(ctx, expr, expected)? {
-            return self.narrow_primitive(ctx, expr, value);
+            return self.narrow_value(ctx, expr, value);
         }
         if let Some((receiver, call)) = Call::expression(expr) {
             let receiver = match receiver {
@@ -74,7 +74,7 @@ impl<'s> FunctionBuilder<'s> {
             let value = call
                 .lower(self, ctx, receiver)?
                 .context("method expression produces no value")?;
-            return self.narrow_primitive(ctx, expr, value);
+            return self.narrow_value(ctx, expr, value);
         }
         let value = match expr {
             Expr::RegExp { pattern, flags } => {
@@ -509,7 +509,7 @@ impl<'s> FunctionBuilder<'s> {
             } => self.set_index(ctx, object, index, value)?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };
-        self.narrow_primitive(ctx, expr, value)
+        self.narrow_value(ctx, expr, value)
     }
 
     /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.
@@ -543,7 +543,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// Emit an absent literal in an optional or unknown type, defaulting to an optional number when unconstrained.
-    fn absent_literal(
+    pub(super) fn absent_literal(
         &mut self,
         ctx: &mut Context,
         null: bool,

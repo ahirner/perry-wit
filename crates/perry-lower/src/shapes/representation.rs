@@ -195,6 +195,33 @@ impl Shapes<'_> {
         if has_num && has_str && all_num_or_str {
             return Ok(perry_mir::NumberStringType::get(ctx).into());
         }
+        if has_num
+            || has_str
+            || defined
+                .iter()
+                .any(|ty| matches!(ty.hir(ctx), HirType::Boolean))
+        {
+            let mut cases = Vec::with_capacity(defined.len());
+            for member in defined {
+                let ty = self.value_type(ctx, member.hir(ctx))?;
+                ensure!(
+                    self.class_of_type(ctx, ty).is_none(),
+                    "finite value unions require plain record alternatives"
+                );
+                let tag = perry_mir::value_tag(ctx, ty)
+                    .context("finite value unions support numbers, strings, booleans and one plain record shape")?;
+                if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
+                    ensure!(
+                        *payload == Some(ty),
+                        "finite value unions require one shape per JavaScript type"
+                    );
+                } else {
+                    cases.push((tag.to_owned(), Some(ty)));
+                }
+            }
+            let variants = perry_mir::VariantType::get(ctx, cases).into();
+            return Ok(perry_mir::ValueUnionType::get(ctx, variants).into());
+        }
         let records = members
             .iter()
             .map(|&ty| {

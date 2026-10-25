@@ -1,6 +1,6 @@
 # Property storage experiments
 
-Fresh empty dictionaries now use the same frontend write and alias analysis as empty arrays. The unchanged upstream `bench_object_property.ts` compiles through the existing typed dictionary representation. JSON values keep the existing MIR heap provenance, including undeclared fields carried by typed parsed records.
+Fresh empty dictionaries use the same frontend write and alias analysis as empty arrays. The unchanged upstream suite now passes **24/24**, including `bench_object_property.ts` and `bench_numeric_array_downgrade.ts`. JSON values keep the existing MIR heap provenance, including undeclared fields carried by typed parsed records. The measurements below record each incremental implementation.
 
 ## Reproduction
 
@@ -29,11 +29,11 @@ The [BBTree article](https://bbtree.xiangpeng.systems/post/) explores inlining k
 
 ## Mixed arrays
 
-The aggregate pass distinguishes no observations, known value types and unknown contents. It currently selects storage only for uniform writes. Different known write types remain distinct observations, but conditional-expression inference and interprocedural heterogeneous returns still need extension. Escaping aliases and unknown JSON sources remain conservative. This change does not implement mixed arrays.
+The aggregate pass distinguishes no observations, known value types and unknown contents. Arrays can now infer a finite union from visible writes and carry it through helper returns. Dictionaries retain uniform-value inference. Unknown writes and escaping mutations remain conservative.
 
-The next design decision is how to represent mixed elements and execute their reads. [Storage strategies](https://tratt.net/laurie/research/pubs/html/bolz_diekmann_tratt__storage_strategies_for_collections_in_dynamically_typed_languages/) provide a precedent for specialized homogeneous storage with a general fallback. [V8 elements kinds](https://v8.dev/blog/elements-kinds) distinguish integer, double and general tagged storage. These designs motivate measuring packed storage with transitions alongside allocating a tagged representation from the start.
+Finite mixed arrays allocate tagged elements from the start, reusing variant payload storage and reference tracing. Supported alternatives are numbers, strings, booleans and one plain record shape, with optional null and undefined states. Reads dispatch on the stored tag; no index-specific assumptions are needed. Record payloads preserve identity and unknown JSON fields. Typed JSON decoding and serialization use the same alternatives.
 
-Index-sensitive narrowing is another independent question: proving that a read is numeric requires accounting for index relations, aliases, calls and intervening writes. A finite set of written types alone does not prove which type occupies a given index. Any mixed representation must preserve reference tracing, unknown JSON fields, and the supported semantics of addition, comparison and property access. Numeric indexing needs no property-key interner.
+Packed storage with a transition remains a separate performance experiment. [Storage strategies](https://tratt.net/laurie/research/pubs/html/bolz_diekmann_tratt__storage_strategies_for_collections_in_dynamically_typed_languages/) and [V8 elements kinds](https://v8.dev/blog/elements-kinds) provide precedents for specialized homogeneous storage with a general fallback. Index-sensitive narrowing would additionally require proofs about aliases, calls and intervening writes. Numeric indexing needs no property-key interner.
 
 ## Results
 
@@ -86,7 +86,7 @@ nix develop -c target/debug/perry-conformance check --select ecma.object --cases
 
 The `bench-perry` Nix app sets `BENCH_PERRY_SOURCE` and `BENCH_PERRY_REVISION` for the benchmark runner. For comparisons, freeze each compiler, prepend its directory to `PATH`, and run the unchanged runner from separate output directories. Repeat the resulting object components with alternating build order and upstream's stdout verifier. Compilation and process startup stay outside the guest timer.
 
-Key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. Mixed arrays still need an explicit element representation and read semantics; this layout change does not choose a heterogeneous inference strategy.
+Key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. The dictionary layout change is independent of the mixed-array representation described above.
 
 The ownership cleanup resolves field accesses to indices before rewriting, borrows field names, uses a borrowed-name index for record fields and reads allocation operands in place. Dictionary eligibility is planned once per rewrite. Both passes keep only their crate-level entry points; the shared field-access helper is private. Eligibility and identity-safety tests remain, while duplicate assertions about the exact emitted layout are removed.
 
@@ -111,3 +111,21 @@ The candidate is faster in all nine pairs, with an **8.7% median reduction**. Th
 The [compact-key measurements](compact-keys.json) record frozen compiler hashes, source hashes, component hashes, every paired timing and conformance outcomes. They compare the quality-cleaned column compiler at `3f30eec6` with this change, using the same pinned upstream source, Node 26.10.0 and Wasmtime 50.0.0. Local artifacts and logs are in `artifacts/compact-keys/final/`.
 
 JSON, array and object conformance pass all six contracts and **208 executions**. The existing forced-GC collection oracle now also covers short string views of every prefix width, empty and NUL-containing keys, Unicode, long common prefixes, deliberate fingerprint collisions, overwrites and enumeration. Workspace tests, MIR tests, formatting and strict all-target/all-feature Clippy pass. The final record-field lookup keeps a borrowed-name index so removing string clones preserves indexed lookup for large records.
+
+## Mixed array validation
+
+The finite-union compiler passes **24/24 unchanged upstream benchmarks**, compared with 23/24 at compact-key baseline `889f183a`. `bench_numeric_array_downgrade` produces `checksum:6500875` in every run. Its component is 48,653 bytes. The array's element type is inferred across writes and the builder's return; each read uses its runtime tag for arithmetic, equality or property access.
+
+| Benchmark / build | Seven fresh-process guest-millisecond samples | Median |
+| --- | --- | ---: |
+| Mixed array / candidate | 96, 95, 94, 98, 96, 95, 95 | 95 ms |
+| Mixed array / Node | 3, 3, 3, 3, 3, 3, 3 | 3 ms |
+| Object properties / compact-key baseline | 21, 21, 21, 21, 21, 21, 21 | 21 ms |
+| Object properties / candidate | 20, 21, 21, 21, 21, 21, 21 | 21 ms |
+| Object properties / Node | 9, 9, 9, 10, 9, 9, 9 | 9 ms |
+
+Tagged allocation establishes correctness but remains substantially slower than Node on the mixed-array workload. Packed numeric storage with a later transition is still unimplemented. The object-property improvement is preserved: its emitted component is byte-identical to the baseline. Overall, 22 of the 23 previously passing components are byte-identical. Only `bench_json_roundtrip` changes, growing from 95,111 to 95,321 bytes for the union codec; its full-suite median stays at 330 ms. The numeric-only array benchmark stays at 5 ms with identical Wasm.
+
+The [mixed-array measurements](heterogeneous-arrays.json) record compiler and source hashes, all samples, component sizes and conformance results. They use the same pinned upstream revision, Node 26.10.0 and Wasmtime 50.0.0. Object comparisons alternate baseline/candidate order, with a fresh Node reference each round. Frozen executables, complete upstream reports and process logs are in `artifacts/heterogeneous-arrays/final/`.
+
+JSON, array and object conformance pass six contracts and **208 executions**. Mixed-write witnesses now check Node equivalence; unresolved writes and escaping mutations retain rejection coverage. The existing forced-GC collection oracle covers growth, record identity and mutation, null/undefined, NaN and signed zero, typeof narrowing, and unknown JSON fields. All 153 integration tests, the workspace tests, formatting and strict all-target/all-feature Clippy pass. No upstream benchmark source was edited.

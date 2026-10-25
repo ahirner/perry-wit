@@ -92,6 +92,10 @@ impl FunctionLowering<'_, '_> {
             return Ok(address);
         }
         let definition = ty.deref(ctx);
+        let variant_schema = match JsonSchema::of(ctx, ty) {
+            Some(JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant)) => Some(variant),
+            _ => None,
+        };
         let record = definition.downcast_ref::<RecordType>();
         let record_fields = record
             .map(|r| Ok::<_, anyhow::Error>((r.is_tuple(), r.fields()?)))
@@ -100,8 +104,8 @@ impl FunctionLowering<'_, '_> {
         let count = record_fields.map_or(0, |(_, fields)| fields.len());
         let bytes = if record_fields.is_some() {
             28 + 20 * count
-        } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
-            20 + 12 * variant.cases().len()
+        } else if let Some(variant) = variant_schema {
+            20 + 12 * variant.deref(ctx).cases().len()
         } else if definition.is::<perry_mir::NumberStringType>() {
             16
         } else if definition.is::<ArrayType>() {
@@ -152,8 +156,14 @@ impl FunctionLowering<'_, '_> {
                 words.extend([self.state.data.string(&json_key(name)), next]);
             }
             words
-        } else if let Some(variant) = definition.downcast_ref::<perry_mir::VariantType>() {
-            let mut words = vec![JSON_VARIANT, variant.cases().len() as u32];
+        } else if let Some(variant) = variant_schema {
+            let variant = variant.deref(ctx);
+            let kind = if definition.is::<perry_mir::ValueUnionType>() {
+                descriptor::JSON_VALUE_UNION
+            } else {
+                JSON_VARIANT
+            };
+            let mut words = vec![kind, variant.cases().len() as u32];
             for (name, payload) in variant.cases() {
                 ensure!(
                     payload.is_none_or(|ty| slot_size(ctx, ty) <= 8),

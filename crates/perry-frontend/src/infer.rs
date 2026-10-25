@@ -205,6 +205,7 @@ fn infer_body_return(
         {
             HirType::Union(types)
         }
+        _ if types.iter().all(is_resolvable_type) => HirType::Union(types),
         _ => return false,
     };
     let inferred = if is_async {
@@ -376,7 +377,11 @@ pub(crate) fn unresolved_types(
             module_env = perry_hir::HirTypeEnv::from_module(hir);
         }
         for function in &mut hir.functions {
-            if locations.has_explicit_return(&function.name) {
+            if locations.has_explicit_return(&function.name)
+                && !function
+                    .return_type
+                    .any(&mut |ty| matches!(ty, HirType::Any))
+            {
                 continue;
             }
             let mut env = inference.function_with_params(

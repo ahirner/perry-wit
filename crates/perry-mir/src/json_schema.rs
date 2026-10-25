@@ -32,6 +32,7 @@ pub enum JsonSchema {
         value: TypeHandle,
     },
     Variant(TypedHandle<VariantType>),
+    ValueUnion(TypedHandle<VariantType>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,7 +81,9 @@ impl JsonSchema {
                 Some(JsonSchema::Dictionary { entry, .. }) if usage != Usage::Cursor => {
                     pending.push(entry.into())
                 }
-                Some(JsonSchema::Variant(variant)) if usage != Usage::Reflection => {
+                Some(JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant))
+                    if usage != Usage::Reflection =>
+                {
                     for (_, payload) in variant.deref(ctx).cases() {
                         if let Some(payload) = payload {
                             // Variant payload storage has one scalar slot, unlike record/array slots.
@@ -144,6 +147,8 @@ impl JsonSchema {
                 }
                 _ => Self::Array(element),
             }
+        } else if let Some(union) = definition.downcast_ref::<crate::ValueUnionType>() {
+            Self::ValueUnion(TypedHandle::<VariantType>::from_handle(union.variants(), ctx).ok()?)
         } else if let Ok(variant) = TypedHandle::<VariantType>::from_handle(ty, ctx) {
             Self::Variant(variant)
         } else {

@@ -545,6 +545,7 @@
     (result i64 i32 i32)
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
     (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $string i32)
+    (local $count i32) (local $index i32) (local $entry i32) (local $child i32) (local $child-kind i32) (local $byte i32) (local $matches i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
     @input.GRAPH@
     (local.set $tag (i32.const @numeric.OMITTED@))
@@ -597,6 +598,47 @@
             (i32.load (i32.add (local.get $schema) (select (i32.const 12) (i32.const 8) (local.get $string))))
             (local.get $bits) (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (local.get $string)) (i32.const 0))
           (local.get $failed) (i32.const 0))))
+    (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_VALUE_UNION@))
+      (then
+        (local.set $count (i32.load offset=4 (local.get $schema)))
+        (local.set $entry (i32.add (local.get $schema) (i32.const 8)))
+        (block $union-missing (loop $union-cases
+          (br_if $union-missing (i32.ge_u (local.get $index) (local.get $count)))
+          (local.set $child (i32.load offset=4 (local.get $entry)))
+          @input.GRAPH@
+          (local.set $matches (i32.eqz (call $string-compare (call $graph-type (local.get $source)) (i32.load (local.get $entry)))))
+          @input.END_GRAPH@
+          @input.CURSOR@
+          (local.set $byte (call $cursor-byte (local.get $source)))
+          (local.set $child-kind (i32.load (local.get $child)))
+          (local.set $matches (i32.or
+            (i32.or
+              (i32.and (i32.eq (local.get $child-kind) (i32.const @descriptor.STRING@)) (i32.eq (local.get $byte) (i32.const 34)))
+              (i32.and (i32.eq (local.get $child-kind) (i32.const @descriptor.RECORD@)) (i32.eq (local.get $byte) (i32.const 123))))
+            (i32.or
+              (i32.and (i32.eq (local.get $child-kind) (i32.const @descriptor.BOOLEAN@))
+                (i32.or (i32.eq (local.get $byte) (i32.const 116)) (i32.eq (local.get $byte) (i32.const 102))))
+              (i32.and (i32.eq (local.get $child-kind) (i32.const @descriptor.NUMBER@))
+                (i32.or (i32.eq (local.get $byte) (i32.const 45))
+                  (i32.and (i32.ge_u (local.get $byte) (i32.const 48)) (i32.le_u (local.get $byte) (i32.const 57))))))))
+          @input.END_CURSOR@
+          (if (local.get $matches)
+            (then
+              (call $decode (local.get $child) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
+              drop local.set $failed local.set $bits
+              (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
+              (return (call $variant-object
+                (i32.load (i32.add (local.get $schema) (i32.add (i32.const 8) (i32.mul (local.get $count) (i32.const 12)))))
+                (i32.load (local.get $entry)) (local.get $bits)
+                (select (i32.wrap_i64 (local.get $bits)) (i32.const 0) (i32.load offset=8 (local.get $entry)))
+                (i32.const 0)) (i32.const 0) (i32.const 0))))
+          (local.set $entry (i32.add (local.get $entry) (i32.const 12)))
+          (local.set $index (i32.add (local.get $index) (i32.const 1)))
+          (br $union-cases)))
+        @input.CURSOR@
+        (call $cursor-discard (local.get $source))
+        @input.END_CURSOR@
+        (return (i64.const 0) (i32.const 1) (i32.const 0))))
     @input.END_PARSED@
     (local.set $array (i32.or (i32.eq (local.get $kind) (i32.const @descriptor.ARRAY@)) (i32.eq (local.get $kind) (i32.const @descriptor.JSON_TUPLE@))))
     (local.set $first (local.get $source))

@@ -6,6 +6,9 @@ use std::collections::HashSet;
 fn type_may_contain_heap_aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);
     let inner_ref = inner.deref(ctx);
+    if let Some(union) = inner_ref.downcast_ref::<crate::ValueUnionType>() {
+        return type_may_contain_heap_aggregate(ctx, union.variants());
+    }
     if inner_ref.is::<RecordType>()
         || inner_ref.is::<ArrayType>()
         || inner_ref.is::<crate::types::JsonType>()

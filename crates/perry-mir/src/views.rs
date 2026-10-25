@@ -26,6 +26,18 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             return true;
         }
         let (a, b) = (source.deref(ctx), target.deref(ctx));
+        let value_union = |ty: &dyn pliron::r#type::Type| {
+            ty.is::<crate::ValueUnionType>() || ty.is::<crate::NumberStringType>()
+        };
+        if value_union(&*a) && value_union(&*b) {
+            let (Ok(a), Ok(b)) = (
+                crate::variant_cases(ctx, source),
+                crate::variant_cases(ctx, target),
+            ) else {
+                return false;
+            };
+            return a.iter().all(|case| b.contains(case));
+        }
         if a.is::<BytesType>() && b.is::<ByteInputType>() {
             return true;
         }
@@ -80,7 +92,9 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
     }
     let aggregate = source.deref(ctx).is::<RecordType>()
         || source.deref(ctx).is::<ArrayType>()
-        || source.deref(ctx).is::<VariantType>();
+        || source.deref(ctx).is::<VariantType>()
+        || source.deref(ctx).is::<crate::ValueUnionType>()
+        || source.deref(ctx).is::<crate::NumberStringType>();
     aggregate && compatible(ctx, source, target, &mut HashSet::new())
 }
 

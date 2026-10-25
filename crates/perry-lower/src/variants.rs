@@ -19,6 +19,19 @@ pub(super) fn path(expr: &Expr) -> Option<Path<'_>> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Discriminant {
+    TypeOf,
+    Tag,
+}
+
+pub(super) struct Guard<'s> {
+    path: Path<'s>,
+    tag: &'s str,
+    equal: bool,
+    discriminant: Discriminant,
+}
+
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn variant_condition(&mut self, condition: &'s Expr, truth: bool) {
         if let Expr::Unary {
@@ -56,7 +69,7 @@ impl<'s> FunctionBuilder<'s> {
     /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a
     /// path and the other a string.
     pub(super) fn variant_equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
-        let (object, tag) = match (left, right) {
+        let (object, tag, discriminant) = match (left, right) {
             (
                 Expr::PropertyGet {
                     object, property, ..
@@ -68,54 +81,67 @@ impl<'s> FunctionBuilder<'s> {
                 Expr::PropertyGet {
                     object, property, ..
                 },
-            ) if property == "tag" => (object, tag),
+            ) if property == "tag" => (object, tag, Discriminant::Tag),
             (Expr::TypeOf(object), Expr::String(tag))
-            | (Expr::String(tag), Expr::TypeOf(object)) => (object, tag),
+            | (Expr::String(tag), Expr::TypeOf(object)) => (object, tag, Discriminant::TypeOf),
             _ => return,
         };
         if let Some(path) = path(object) {
-            self.variant_guards.push((path, tag.as_str(), equal));
+            self.variant_guards.push(Guard {
+                path,
+                tag: tag.as_str(),
+                equal,
+                discriminant,
+            });
         }
     }
 
     /// The guards in effect for `path`: each tag and whether the value equals it.
-    fn guards<'a>(&'a self, path: &'a Path<'s>) -> impl Iterator<Item = (&'s str, bool)> + 'a {
+    fn guards<'a>(
+        &'a self,
+        path: &'a Path<'s>,
+        discriminant: Discriminant,
+    ) -> impl Iterator<Item = (&'s str, bool)> + 'a {
         self.variant_guards
             .iter()
-            .filter(move |(guarded, _, _)| guarded == path)
-            .map(|(_, tag, equal)| (*tag, *equal))
+            .filter(move |guard| &guard.path == path && guard.discriminant == discriminant)
+            .map(|guard| (guard.tag, guard.equal))
     }
 
-    pub(super) fn narrow_primitive(
+    pub(super) fn narrow_value(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
         value: Value,
     ) -> Result<Value> {
         let ty = present_type(ctx, value.get_type(ctx));
-        if !ty.deref(ctx).is::<perry_mir::NumberStringType>() {
+        if !crate::value_unions::is_value_union(ctx, ty) {
             return Ok(value);
         }
         let Some(path) = path(expr) else {
             return Ok(value);
         };
-        let mut has_guard = false;
-        let mut number = (true, false);
-        let mut string = (true, false);
-        for (guard, equal) in self.guards(&path) {
-            has_guard = true;
-            number.0 &= (guard == "number") == equal;
-            number.1 |= equal && guard == "number";
-            string.0 &= (guard == "string") == equal;
-            string.1 |= equal && guard == "string";
-        }
-        let (result, asserted) = match (has_guard, number.0, string.0) {
-            (true, true, false) => (FP64Type::get(ctx).into(), number.1),
-            (true, false, true) => (StringType::get(ctx).into(), string.1),
-            _ => return Ok(value),
+        let cases = perry_mir::variant_cases(ctx, ty)?;
+        let mut possible = cases.iter().filter(|(tag, _)| {
+            self.guards(&path, Discriminant::TypeOf)
+                .all(|(guard, equal)| (tag == guard) == equal)
+        });
+        let Some((tag, Some(result))) = possible.next() else {
+            return Ok(value);
         };
+        if possible.next().is_some() {
+            return Ok(value);
+        }
+        let result = *result;
+        let asserted = self
+            .guards(&path, Discriminant::TypeOf)
+            .any(|(guard, equal)| equal && guard == tag);
         // Negative typeof guards alone do not remove null or undefined.
-        if !asserted && self.is_optional(ctx, value) {
+        if self.is_optional(ctx, value)
+            && (!asserted
+                || (tag == "object"
+                    && absence(ctx, value.get_type(ctx)).is_some_and(|state| state.admits_null())))
+        {
             return Ok(value);
         }
         let value = self.defined(ctx, value)?;
@@ -141,7 +167,7 @@ impl<'s> FunctionBuilder<'s> {
         for (tag, ty) in variant.deref(ctx).cases() {
             if let Some(path) = &path
                 && !self
-                    .guards(path)
+                    .guards(path, Discriminant::Tag)
                     .all(|(guard, equal)| (tag == guard) == equal)
             {
                 continue;

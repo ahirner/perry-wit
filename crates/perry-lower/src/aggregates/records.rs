@@ -274,6 +274,15 @@ impl<'s> FunctionBuilder<'s> {
         kind: RecordKind,
     ) -> Result<Value> {
         let expected = expected.map(|ty| present_type(ctx, ty));
+        let expected = if let Some(ty) =
+            expected.filter(|ty| ty.deref(ctx).is::<perry_mir::ValueUnionType>())
+        {
+            perry_mir::variant_cases(ctx, ty)?
+                .into_iter()
+                .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
+        } else {
+            expected
+        };
         if kind == RecordKind::Object {
             if let Some(ty) = expected
                 && ty.deref(ctx).is::<perry_mir::VariantType>()
