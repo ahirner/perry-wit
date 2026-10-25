@@ -205,6 +205,25 @@ export function tupleCallbacks():number {
  if(optional.map(([key,value=7])=>key+String(value)).join(',')!=='a7,b0')return 4;
  return 0;
 }
+
+export function dictionaryColumns(size:number):number {
+ const dictionary:Record<string,Item>={};
+ const alias=dictionary;
+ for(let i=0;i<size;i++)alias['key_'+i]={value:i};
+ if(dictionary['absent']!==undefined)return 1;
+ const keys=Object.keys(dictionary);
+ if(keys.length!==size)return 2;
+ if(size===0)return 0;
+ const first=dictionary['key_0'];
+ const last=dictionary['key_'+(size-1)];
+ if(first.value!==0 || last.value!==size-1)return 3;
+ alias['shared']=first;
+ dictionary['key_0']={value:-1};
+ first.value=42;
+ if(alias['shared']!==first || alias['shared'].value!==42 || dictionary['key_0'].value!==-1)return 4;
+ if(keys.length!==size || Object.keys(dictionary).length!==size+1)return 5;
+ return 0;
+}
 "#,
         &[
             ("argumentOrder", &[], 0.0),
@@ -214,6 +233,9 @@ export function tupleCallbacks():number {
             ("liveGrouping", &[], 0.0),
             ("unknownAbsence", &[], 0.0),
             ("tupleCallbacks", &[], 0.0),
+            ("dictionaryColumns", &[0.0], 0.0),
+            ("dictionaryColumns", &[1.0], 0.0),
+            ("dictionaryColumns", &[128.0], 0.0),
         ],
     )
 }

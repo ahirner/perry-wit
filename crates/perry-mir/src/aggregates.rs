@@ -42,6 +42,9 @@ use pliron::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+mod dictionaries;
+pub(crate) use dictionaries::DecomposeDictionaries;
+
 /// Callees with at most this many operations are inlined at every call site. Larger leaf
 /// functions are inlined only when they have a single caller and are private to the module.
 const SMALL: usize = 25;

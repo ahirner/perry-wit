@@ -57,6 +57,8 @@ The frontend collects writes and aliases for fresh empty arrays and dictionaries
 
 Bindings lower to the existing MIR arrays and records. Dictionaries use arrays of typed key-value entries, so their values participate in the same allocation identities, alias propagation and slot facts as array elements. The MIR heap analysis tracks openness independently of the declared type: typed JSON records can retain undeclared fields, and storing them inside an inferred aggregate preserves that provenance. Unknown JSON sources cannot become fresh inferred dictionaries merely because later writes are typed.
 
+After bounds proofs, private append-only dictionaries can split into parallel key and value arrays. Each entry must be allocated freshly beside its append and used solely through field reads and writes. Paired appends keep column lengths equal, so proven entry indices remain valid for either column. The rewrite preserves referenced values and feeds the existing heap and lifetime analysis. Direct serialization, calls, escaping entries and structural edits keep the entry representation.
+
 Future mixed storage needs an explicit representation and read semantics in addition to the observed type set. Index-dependent narrowing must account for aliases, calls and intervening writes. Packed storage with widening transitions and tagged storage from allocation remain separate representation choices; neither follows automatically from heterogeneous writes.
 
 ## Memory

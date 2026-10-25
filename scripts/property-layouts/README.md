@@ -56,4 +56,34 @@ These Wasmtime probes favor parallel key/value arrays: the 20-field ordered case
 
 The [recorded samples](measurements.json) include all seven timings per engine, provenance and the unchanged upstream result. At 20 ordered fields, Wasmtime ranges are dictionary 24–25 ms, separate arrays 21–23 ms, prefixes 39–40 ms, interning 39 ms, and shapes 34–35 ms. Millisecond resolution limits the smaller comparisons.
 
-The production change keeps the existing dictionary representation. The next layout experiment should measure flat entries or parallel arrays inside the compiler, including allocation counts and JSON enumeration. Native prefix loads and a hash-based interner need to remove the costs left in these probes before measuring cached shape lookup. Each representation must reuse the existing heap identities and JSON openness facts and preserve key equality, insertion/enumeration order, aliases and reference tracing.
+## Compiler arrays
+
+The compiler now splits eligible private dictionaries into ordinary typed key and value arrays after bounds proofs. Paired appends preserve equal lengths; field reads and overwrites use the proven index directly. Each appended entry must be freshly allocated in the append's block, with no observable entry identity. Direct serialization, calls, escaping entries and structural edits retain the existing entry representation. Referenced values still use the existing array heap analysis, JSON openness facts and collector.
+
+The unchanged upstream suite passes **23/24** with both frozen compilers. The existing `bench_numeric_array_downgrade` inference failure remains. Only `bench_object_property` changes its emitted component; the other 22 passing benchmarks produce byte-identical Wasm. Its component grows from 36,494 to 36,784 bytes (+0.8%).
+
+Nine fresh-process object benchmark comparisons alternate baseline/candidate order, with a fresh Node reference each round. Every output passes upstream verification with checksum `1999990000`.
+
+| Build | Guest milliseconds | Median |
+| --- | --- | ---: |
+| Baseline | 29, 27, 26, 29, 27, 27, 26, 27, 26 | 27 ms |
+| Separate arrays | 24, 26, 25, 28, 26, 25, 24, 25, 25 | 25 ms |
+| Node | 10, 11, 10, 10, 10, 9, 10, 10, 10 | 10 ms |
+
+The candidate is faster in all nine pairs; the median falls **7.4%**. These are millisecond-resolution measurements on a shared host, so the paired comparison is more useful than comparing absolute times with the earlier guest-prototype campaign. The separate three-run full-suite medians are 30 → 27 ms for this benchmark; timing variation elsewhere occurs despite identical emitted code.
+
+Measurements use Node 26.10.0 and Wasmtime 50.0.0 on macOS arm64, with the same upstream revision and source hash recorded above. Baseline production source matches `b443ff73`; its frozen executable was built at `96e5dd43`, before documentation and test-only changes. [Compiler measurements](compiler-columns.json) record both executable hashes, all paired samples, per-benchmark timings, component hashes and conformance results. Local logs and frozen executables are in `artifacts/dictionary-columns/`.
+
+JSON, array and object conformance all pass: six contracts, 208 executions, with 32 generated cases per selected contract where supported. Extended witnesses cover growth, overwrites, missing keys, enumeration snapshots, aliased record payloads and nested undeclared JSON fields. The integration oracle also runs with forced garbage collection. Workspace tests and strict all-target/all-feature Clippy pass.
+
+```sh
+nix develop -c cargo build --locked -p perry-wit -p perry-conformance
+nix develop -c sh -c 'PATH="$PWD/target/debug:$PATH" python3 scripts/bench-perry.py'
+nix develop -c target/debug/perry-conformance check --select ecma.array --cases 32
+nix develop -c target/debug/perry-conformance check --select ecma.json --cases 32
+nix develop -c target/debug/perry-conformance check --select ecma.object --cases 32
+```
+
+The benchmark runner uses `BENCH_PERRY_SOURCE` and `BENCH_PERRY_REVISION` from the Nix development shell. For comparisons, freeze each compiler, prepend its directory to `PATH`, and run the unchanged runner from separate output directories. Repeat the resulting object components with alternating build order and upstream's stdout verifier. Compilation and process startup stay outside the guest timer.
+
+Compact prefixes, key interning and shapes remain separate experiments. Their compiler implementations must preserve key equality, insertion/enumeration order, aliases and reference tracing. Mixed arrays still need an explicit element representation and read semantics; this layout change does not choose a heterogeneous inference strategy.
