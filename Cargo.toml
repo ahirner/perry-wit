@@ -98,6 +98,7 @@ wit-bindgen = "0.62"
 perry-rt-build = { path = "crates/perry-rt-build" }
 
 [dev-dependencies]
+perry-abi.workspace = true
 serde = { workspace = true, features = ["derive"] }
 wat.workspace = true
 bytes.workspace = true

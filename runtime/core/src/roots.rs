@@ -74,15 +74,8 @@ impl RootStack {
         if self.length == 0 {
             return &[];
         }
-        // SAFETY: generated code and `push` initialize every slot before publishing length.
+        // SAFETY: generated code initializes every slot before publishing length.
         unsafe { core::slice::from_raw_parts(self.data, self.length as usize) }
-    }
-
-    fn push(&mut self, object: *mut u8) {
-        self.reserve(1);
-        // SAFETY: reserve ensured space; no reference into the buffer survives this call.
-        unsafe { self.data.add(self.length as usize).write(object) };
-        self.length += 1;
     }
 }
 
@@ -285,26 +278,6 @@ pub extern "C" fn perry_roots_state() -> *mut RootStack {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_roots_reserve(additional: u32) {
     roots().stack.reserve(additional);
-}
-
-/// The current stack boundary, used to release exactly one generated activation's roots.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_roots_mark() -> u32 {
-    roots().stack.length
-}
-
-/// Keep an exact compiled pointer live across calls. Null and static pointers are accepted.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_roots_push(object: *mut u8) {
-    roots().stack.push(object);
-}
-
-/// Release roots established after `mark`, including roots of unwound activations.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_roots_reset(mark: u32) {
-    let roots = roots();
-    assert!(mark <= roots.stack.length, "invalid root stack boundary");
-    roots.stack.length = mark;
 }
 
 /// Collect at a generated safe point when allocation volume reaches the live-size threshold.

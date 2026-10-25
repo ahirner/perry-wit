@@ -1,6 +1,7 @@
 //! Collector-aware non-moving growth, exercised through the actual linked Wasm allocator.
 use crate::link;
 use anyhow::Result;
+use perry_abi::layout::roots;
 use wasmtime::{Engine, Instance, Memory, Module, Store};
 
 struct Heap {
@@ -14,8 +15,8 @@ impl Heap {
             r#"(module
           (import "__perry_helper" "perry_gc_alloc" (func $alloc (param i32 i32) (result i32)))
           (import "__perry_helper" "perry_buffer_resize" (func $resize (param i32 i32 i32 i32 i32) (result i32)))
-          (import "__perry_helper" "perry_roots_push" (func $push (param i32)))
-          (import "__perry_helper" "perry_roots_reset" (func $reset (param i32)))
+          (import "__perry_helper" "perry_roots_state" (func $roots (result i32)))
+          (import "__perry_helper" "perry_roots_reserve" (func $reserve (param i32)))
           (import "__perry_helper" "perry_gc_debug" (func $debug (param i32)))
           (import "__perry_helper" "perry_gc_check" (func $collect))
           (import "__perry_helper" "perry_gc_counter" (func $counter (param i32) (result i64)))
@@ -23,11 +24,25 @@ impl Heap {
           (import "__perry_helper" "perry_gc_unpin" (func $unpin (param i32)))
           (memory (export "memory") 1 64)
           (data (i32.const 1024) "{padding}")
+          (func $push (param $pointer i32) (local $stack i32) (local $length i32)
+            (local.set $stack (call $roots))
+            (local.set $length (i32.load offset={length} (local.get $stack)))
+            (call $reserve (i32.const 1))
+            (i32.store
+              (i32.add (i32.load offset={data} (local.get $stack))
+                (i32.mul (local.get $length) (i32.const 4)))
+              (local.get $pointer))
+            (i32.store offset={length} (local.get $stack)
+              (i32.add (local.get $length) (i32.const 1))))
+          (func $reset (param $mark i32)
+            (i32.store offset={length} (call $roots) (local.get $mark)))
           (export "alloc" (func $alloc)) (export "resize" (func $resize))
           (export "push" (func $push)) (export "reset" (func $reset))
           (export "debug" (func $debug)) (export "collect" (func $collect))
           (export "counter" (func $counter)) (export "pin" (func $pin)) (export "unpin" (func $unpin)))"#,
             padding = r"\00".repeat(static_padding),
+            data = roots::DATA,
+            length = roots::LENGTH,
         ))?;
         let engine = Engine::default();
         let module = Module::new(&engine, link::link_helpers(core)?)?;
