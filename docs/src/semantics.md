@@ -52,13 +52,13 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 WIT provides fixed-width integers (`u8`..`u64`, `s8`..`s64`) alongside `f32` and `f64`, while TypeScript provides `number` (IEEE 754 `f64`) and `bigint`.
 
-| WIT type | `.d.ts` type | Guest representation |
+| WIT type | `.d.ts` alias (`perry:types`) | Guest representation |
 | :--- | :--- | :--- |
 | `u8`, `u16`, `u32`, `s8`, `s16`, `s32` | `number` | Refined `number` (`i32`, `i64` or `f64`) |
 | `u64`, `s64` | `bigint` | `i64` at boundaries, arbitrary-width `bigint` in guest |
 | `f32`, `f64` | `number` | `f64` |
 
-Keeping `u8`..`s32` as `number` in generated `.d.ts` files lets guest code use standard TypeScript arithmetic while giving the compiler range information to emit integer instructions.
+Defining `u8`..`s32` as `number` aliases in generated `.d.ts` files lets guest code use standard TypeScript arithmetic while giving the compiler range information to emit integer instructions.
 
 ### Refinement Analysis
 

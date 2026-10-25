@@ -1,4 +1,4 @@
-//! TypeScript parsing, Perry HIR compatibility, specialization and source metadata.
+//! WIT import binding, Perry HIR compatibility, specialization and source metadata.
 use anyhow::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};

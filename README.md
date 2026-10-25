@@ -17,8 +17,6 @@ An integer `add` export compiles to 100 bytes, and a string `trim` export stays 
 
 ## Quickstart
 
-Save a TypeScript entrypoint as `main.ts`:
-
 ```ts check=quickstart
 export function greet(name: string): string {
   return "Hello, " + name;
@@ -30,19 +28,9 @@ perry-wit main.ts
 wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'greet("World")' dist/main.wasm
 ```
 
-Compilation discovers `./wit` when present and otherwise derives the contract in memory. Top-level scripts become CLI commands; modules expose their named function exports. `number` maps to `f64`, and `bigint` maps to `s64` with range checks at the boundary.
+When `./wit` is absent, `perry-wit` infers the WIT world from the module's exported functions and top-level statements. Pass `--gen-wit` to write `wit/world.wit` (world `app`, or `--wit <dir> --world <name>`) when you want to edit the contract and check the module against it with `perry-wit gen-types`.
 
-To save a contract for editing, generate it while compiling:
-
-```sh
-perry-wit main.ts --gen-wit --wit interfaces --world app
-# Edit interfaces/world.wit, then compile against it:
-perry-wit main.ts --wit interfaces --world app
-```
-
-`--gen-wit` defaults to `wit/world.wit` and world `app`.
-
-The handbook's Authoring chapter covers commands, HTTP handlers and the project template.
+The handbook's [Authoring](https://ahirner.github.io/perry-wit/docs/authoring.html) chapter covers WIT contracts, commands, HTTP handlers and the project template.
 
 ## Development
 

@@ -114,7 +114,7 @@ pub fn generate_sdk(
     })
 }
 
-/// Derive named WIT contents without accessing the filesystem or compiling Wasm.
+/// Infer a WIT package from in-memory TypeScript sources.
 ///
 /// ```
 /// # fn main() -> Result<(), perry_wit::CompileError> {

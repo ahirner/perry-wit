@@ -1,10 +1,10 @@
 # Authoring
 
-A component starts with a TypeScript entry module. Perry-WIT derives its contract from public signatures or reads an authored WIT world.
+A component is built from a TypeScript entry module, with its WIT contract either inferred from exported signatures or read from `wit/`.
 
 ## Typed Components
 
-Named exported functions form the component interface. Local helpers stay internal, and supported local re-exports expose functions from other modules. The starter template contains:
+Named exported functions (and local `export { ... } from` re-exports) form the component interface; remaining module functions stay internal. The starter template contains:
 
 ```ts check=task
 {{#include ../../template/src/index.ts}}
@@ -15,65 +15,51 @@ perry-wit src/index.ts -o dist/task.wasm
 wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("hello")' dist/task.wasm
 ```
 
-TypeScript `camelCase` names map to WIT `kebab-case`. Exported parameters need concrete type annotations. Return annotations support structured signatures; simple scalar returns can be inferred.
+TypeScript `camelCase` export names map to `kebab-case` WIT functions. Exported parameters require type annotations; return types can be annotated or inferred for scalar expressions:
 
 | TypeScript | Generated WIT |
-| --- | --- |
+| :--- | :--- |
 | `number`, `bigint` | `f64`, `s64` |
-| Integer and float aliases from `perry:types` | The corresponding numeric type |
-| `boolean`, `string`, return `void` | `bool`, `string`, no result |
-| Arrays, `Uint8Array`, tuples, records | Lists, `list<u8>`, tuples, records |
+| `u8`..`u64`, `s8`..`s64`, `f32`, `f64` (`perry:types`) | Matching WIT numeric type |
+| `boolean`, `string`, `void` | `bool`, `string`, no result |
+| `T[]`, `Uint8Array`, `[A, B, ...]`, object types | `list<T>`, `list<u8>`, `tuple<A, B, ...>`, `record` |
 | `T \| null` | `option<T>` |
-| `T \| undefined`, optional fields | Presence variants |
-| `T \| null \| undefined` | Presence variants with distinct null and undefined cases |
-| String-literal unions, supported tagged unions | Enums, variants, results |
-| Async functions, `ReadableStream<Uint8Array>` | Async functions, `stream<u8>` |
-
-Bare `bigint` retains its internal arithmetic semantics and is checked against `s64` when crossing the boundary. Explicit numeric aliases or authored WIT select other numeric domains. An inferred contract preserves declared result unions; thrown exceptions alone do not define an error channel.
+| `T \| undefined`, optional property `field?: T` | `variant` (`undefined`, `value(T)`) |
+| `T \| null \| undefined` | `variant` (`null`, `undefined`, `value(T)`) |
+| `"a" \| "b"` | `enum` |
+| `{ tag: "a", val?: T } \| ...` | `variant` |
+| `{ ok: true, value?: T } \| { ok: false, error?: E }` | `result<T, E>` |
+| `async` function, `ReadableStream<Uint8Array>` | `async func`, `stream<u8>` |
 
 ## Contract Files
 
-Compilation reads `./wit` when it exists. `--wit` and `--world` select an authored input contract. An explicitly requested missing directory or a malformed existing contract produces an error.
+When `./wit` exists (or `--wit <dir>` is passed), `perry-wit` compiles against that WIT package instead of inferring a contract. `--world <name>` selects the world when the package defines more than one.
 
-Generate a contract for editing while compiling:
-
-```sh
-perry-wit src/index.ts --gen-wit --wit interfaces --world app -o dist/task.wasm
-```
-
-This writes `interfaces/world.wit` with package identity `local:app`, using the generated contract for that compilation. Generation defaults to directory `wit` and world `app`. Existing input WIT is ignored during generation; unrelated files and dependency packages are retained.
-
-After editing the generated contract, compile against it:
+Pass `--gen-wit` to write the inferred contract to `<wit-dir>/world.wit` (`package local:<world>`, defaulting to `wit/world.wit` and world `app`) and compile against it:
 
 ```sh
-perry-wit src/index.ts --wit interfaces --world app -o dist/task.wasm
+perry-wit src/index.ts --gen-wit -o dist/task.wasm
 ```
 
-Each authored WIT export binds to its corresponding TypeScript export. A `result<T, E>` export accepts explicit tagged results or completion-style implementations that return `T` and throw `E`. Builtin host requirements resolve from embedded WASI definitions; custom host interfaces use authored WIT.
-
-`--core-only` emits the selected world's core module. `--keep-names` preserves guest function names for profiling. `-o` controls the Wasm output independently of WIT generation.
+In an authored WIT world:
+- A `result<T, E>` export accepts either a `{ ok: true, value } | { ok: false, error }` return value or a function that returns `T` directly and throws `E` on failure.
+- Standard WASI 0.3 interfaces resolve from the embedded packages; packages in `<wit-dir>/deps` take precedence over them or add custom host interfaces.
+- `--core-only` emits the world-bound core WebAssembly module. `--keep-names` preserves function names in the custom `name` section for guest profiling.
 
 ## Generated Types
 
-`gen-types` emits builtin runtime declarations and a TypeScript configuration even before an entry file exists:
+`perry-wit gen-types` writes `.d.ts` declarations and a `tsconfig.json` into `.perry/types` (or `-o <dir>`), plus a root `tsconfig.json` when none exists:
 
 ```sh
 perry-wit gen-types
-tsc --noEmit
-```
-
-When the selected WIT directory exists, it also emits contract declarations and an implementation check:
-
-```sh
-perry-wit gen-types --wit interfaces --world app --entry src/index.ts
 tsc --noEmit -p .perry/types
 ```
 
-Generated declarations preserve numeric distinctions through aliases. Export declarations describe exact contracts; `ComponentImplementation` also accepts completion-style implementations and supported outbound byte conveniences.
+Without a WIT directory, `gen-types` writes `runtime.d.ts` (the supported Node.js, Web, `Temporal` and `perry:types` declarations). When `./wit` (or `--wit <dir>`) exists, it also writes `world.d.ts`, `imports.d.ts` and an `implementation-check.ts` that checks `--entry` (default `src/index.ts`) against `ComponentImplementation`. Outbound `list<u8>` parameters and results in `WitInput<T>` accept both `Uint8Array` and UTF-8 `string` values.
 
 ## Commands
 
-Top-level scripts receive a `wasi:cli/run` entrypoint, including scripts with top-level `await`:
+Top-level statements become the `wasi:cli/run` export, including top-level `await`:
 
 ```ts check=command
 import { readFile } from "node:fs/promises";
@@ -91,7 +77,7 @@ wasmtime run -S p3=y -W component-model-async=y --dir . app.wasm
 
 `console` writes to WASI standard output and error, `process.env` reads the WASI environment, and `process.exitCode` or `process.exit(code)` sets the exit status.
 
-In modules that also export functions, top-level statements initialize state once before the command or any function runs. Such initialization must await asynchronous work that it starts.
+If the module also exports functions, its top-level statements initialize state once instead, and `wasi:cli/run` and every export wait for that initialization. Top-level statements that start asynchronous work must `await` it.
 
 ## HTTP Handlers
 
@@ -138,4 +124,4 @@ nix develop
 nix build
 ```
 
-The template starts with TypeScript only. Generate WIT when you need an editable interface, then run `gen-types` again after contract edits.
+Run `perry-wit src/index.ts --gen-wit` to materialize `wit/world.wit` when you want to edit the contract, and re-run `perry-wit gen-types` after editing `wit/*.wit`.

@@ -15,7 +15,7 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
-| 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
+| 1. Source analysis | TypeScript AST | Resolves local modules, infers the WIT world when none is supplied, and binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
 | 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, types WIT imports under their SDK declaration names, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
 | 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
@@ -39,20 +39,18 @@ The compiler workspace separates these responsibilities:
 
 | Crate | Responsibility |
 | --- | --- |
-| `perry-source` | Parses TypeScript, resolves local modules, and retains declaration locations. |
-| `perry-contract` | Resolves WIT packages, derives contracts from source signatures, serializes WIT, and generates TypeScript declarations. |
-| `perry-frontend` | Consumes shared source analysis, reads Perry HIR, applies compatibility rewrites, resolves types, and specializes instances. |
+| `perry-source` | Parses TypeScript, resolves local modules and records declaration locations. |
+| `perry-contract` | Resolves WIT packages, infers WIT from TypeScript signatures and generates TypeScript declarations. |
+| `perry-frontend` | Binds WIT imports, reads Perry HIR, applies compatibility rewrites, resolves types and specializes instances. |
 | `perry-lower` | Elaborates the frontend program into eager MIR, completes types from context and chooses representations. |
 | `perry-mir` | Defines typed executable IR and its analyses. |
 | `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
 | `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
 | `pliron-control`, `pliron-wasm` | Provide control-flow and Wasm dialect infrastructure. |
 | `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
-| `perry-wit` | Adapts contract descriptions to compiler representations, binds exports, links runtime artifacts, and encodes components. |
+| `perry-wit` | Drives compilation, binds exports, links runtime artifacts and encodes components. |
 
 The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
-
-`perry-contract` depends on shared source analysis and portable diagnostics. Its dependency graph excludes frontend, lowering, MIR, code generation, and runtime build crates. Content functions operate on source buffers and return named artifacts; filesystem adapters acquire and write those contents.
 
 ## Memory
 
@@ -85,7 +83,7 @@ Readable stream readers decouple public read promises from native transfer compl
 
 `runtime/` is a separate Cargo workspace containing the freestanding `#![no_std]` runtime and standard libraries. `perry-abi` supplies layouts, pure algorithms and the Wasm panic handler. `perry-rt-sys` supplies imports, guest-memory access and native stand-ins. `perry-runtime` owns allocation and instance state.
 
-Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. The compiler build script embeds runtime artifacts, and the independent contract crate embeds the pinned WASI WIT packages, so compiling TypeScript requires no Rust or LLVM toolchain. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
+Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. Build scripts embed the resulting artifacts and the pinned WASI WIT packages, so compiling TypeScript requires no Rust or LLVM toolchain. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
 
 Runtime release builds optimize each artifact as one unit: optimization level 2, fat LTO, one codegen unit and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
 
