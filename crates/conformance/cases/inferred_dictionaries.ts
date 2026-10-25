@@ -41,23 +41,6 @@ console.log(JSON.stringify(rows));
 console.log(JSON.stringify(byKey));
 const copied: Record<string, Row> = JSON.parse(JSON.stringify(byKey));
 console.log(JSON.stringify(copied));
-
-function privateRows(): void {
-  const columns: Record<string, Row> = {};
-  const alias = columns;
-  for (let i = 0; i < 64; i++) {
-    const row: Row = JSON.parse('{"value":7,"extra":{"keep":[1,"雪"]}}');
-    alias["row_" + i] = row;
-  }
-  const first = columns["row_0"];
-  first.value = 23;
-  alias["row_1"] = first;
-  const keys = Object.keys(columns);
-  columns["late"] = first;
-  columns["row_0"] = { value: 31 };
-  console.log(keys.length, Object.keys(columns).length, columns["missing"] === undefined);
-  console.log(columns["row_1"] === first, columns["late"] === first);
-  console.log(JSON.stringify(first), JSON.stringify(columns["row_0"]));
-  console.log(JSON.stringify(columns["row_1"]), JSON.stringify(columns["row_63"]));
-}
-privateRows();
+const keys = Object.keys(byKey);
+byKey["late"] = parsed;
+console.log(keys.length, Object.keys(byKey).length);

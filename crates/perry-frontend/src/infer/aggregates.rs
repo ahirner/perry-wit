@@ -18,13 +18,13 @@ enum ObservedValues {
 }
 
 impl ObservedValues {
-    fn observe(&mut self, ty: &HirType) {
-        if !is_resolvable_type(ty) {
+    fn observe(&mut self, ty: HirType) {
+        if !is_resolvable_type(&ty) {
             *self = Self::Unknown;
         } else {
             match self {
-                Self::Empty => *self = Self::Known(vec![ty.clone()]),
-                Self::Known(types) if !types.contains(ty) => types.push(ty.clone()),
+                Self::Empty => *self = Self::Known(vec![ty]),
+                Self::Known(types) if !types.contains(&ty) => types.push(ty),
                 _ => {}
             }
         }
@@ -66,11 +66,11 @@ impl Constraints {
         id
     }
 
-    fn bindings(self) -> HashMap<LocalId, HirType> {
+    fn bindings(mut self) -> HashMap<LocalId, HirType> {
         let escaped: HashSet<_> = self.escaped.iter().map(|id| self.root(*id)).collect();
         let mut elements: HashMap<LocalId, ObservedValues> = HashMap::new();
-        for (id, writes) in &self.writes {
-            let root = self.root(*id);
+        for (id, writes) in std::mem::take(&mut self.writes) {
+            let root = self.root(id);
             let Some(kind) = self.fresh.get(&root) else {
                 continue;
             };
@@ -79,7 +79,7 @@ impl Constraints {
                 if escaped.contains(&root) || write.kind != *kind {
                     *values = ObservedValues::Unknown;
                 } else {
-                    values.observe(&write.value);
+                    values.observe(write.value);
                 }
             }
         }
@@ -89,9 +89,10 @@ impl Constraints {
             .chain(self.aliases.keys())
             .filter_map(|id| {
                 let root = self.root(*id);
-                let value = elements.get(&root)?.inferred(*self.fresh.get(&root)?)?;
+                let kind = *self.fresh.get(&root)?;
+                let value = elements.get(&root)?.inferred(kind)?;
                 if read_roots.contains(&root)
-                    && self.fresh.get(&root) == Some(&AggregateKind::Dictionary)
+                    && kind == AggregateKind::Dictionary
                     && !matches!(
                         value,
                         HirType::Number | HirType::String | HirType::Boolean | HirType::BigInt
@@ -99,7 +100,7 @@ impl Constraints {
                 {
                     return None;
                 }
-                let ty = match self.fresh.get(&root)? {
+                let ty = match kind {
                     AggregateKind::Array => HirType::Array(Box::new(value)),
                     AggregateKind::Dictionary => HirType::Object(perry_hir::types::ObjectType {
                         index_signature: Some(Box::new(value)),
