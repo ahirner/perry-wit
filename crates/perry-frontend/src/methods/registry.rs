@@ -59,6 +59,7 @@ macro_rules! method_catalog {
             }
             Receiver::Value(Kind::String), "String" {
                 StringCharAt "charAt" String Upstream Method [args:rest] => intrinsic(StringCharAt, args, [Number(0.0)], Value), "accepts method arguments";
+                StringCharCodeAt "charCodeAt" Number Upstream Method [args:rest] => intrinsic(StringCharCodeAt, args, [Number(0.0)], Value), "accepts method arguments";
                 StringCodePointAt "codePointAt" OptionalNumber Upstream Method [args:rest] => intrinsic(StringCodePointAt, args, [Number(0.0)], Value), "accepts method arguments";
                 StringAt "at" At Always Method [args:rest] => intrinsic(StringAt, args, [Number(0.0)], Value), "accepts method arguments";
                 StringPadStart "padStart" String Always Method [args:rest] => intrinsic(StringPadStart, args, [Number(0.0), Padding], Value), "accepts method arguments";
@@ -118,8 +119,7 @@ macro_rules! method_catalog {
                 StringReplaceAll "replaceAll" String Always Method [search, replacement] => optional(replace_string(search, replacement, true)), "requires a search pattern and replacement string";
                 StringMatch "match" NullableStrings Always Method [regex] => optional(string_match(regex)), "requires one literal regex";
                 StringSearch "search" Number Upstream Method [regex] => optional(string_search(regex)), "requires one literal regex";
-                StringCharCodeAt "charCodeAt" Number Upstream Method [_args:rest] => reject("charCodeAt uses UTF-16 code units; use codePointAt with scalar indices"), "accepts method arguments";
-                StringToString "toString" String Upstream Method [_args:rest] => receiver(), "accepts method arguments";
+                StringToString "toString" String Upstream Method [args:rest] => receiver(args), "accepts method arguments";
             }
             Receiver::Value(Kind::Regex), "method" {
                 RegexTest "test" Boolean Upstream Method [text] => value(regex_test_text(text)), "requires one string";
@@ -129,7 +129,7 @@ macro_rules! method_catalog {
                 DecoderDecode "decode" String Upstream Method [bytes:optional, options:optional] => value(decode(bytes, options)), "takes bytes and stream options";
             }
             Receiver::Value(Kind::Url), "method" {
-                UrlString "toString" | "toJSON" String Upstream Method [_args:rest] => value(url_field("href")), "accepts method arguments";
+                UrlString "toString" | "toJSON" String Upstream Method [args:rest] => intrinsic(UrlGet, args, [Constant(0.0)], Value), "accepts method arguments";
             }
             Receiver::Value(Kind::SearchParams), "method" {
                 SearchParamsAppend "append" Void Upstream Method [name, value] => value(search_params_append(name, value)), "needs a name and value";

@@ -305,6 +305,7 @@ macro_rules! intrinsic_catalog {
                 StdAsciiStrings = "std_ascii_strings" () -> I32;
                 StdStringAt = "std_string_at" [StringAt = "string_at" (String, Number) -> (OptString), Pure, Atomic;];
                 StdStringCharAt = "std_string_char_at" [StringCharAt = "string_char_at" (String, Number) -> (String), Pure, Atomic;];
+                StdStringCharCodeAt = "std_string_char_code_at" [StringCharCodeAt = "string_char_code_at" (String, Number) -> (Number), Pure, None;];
                 StdStringCodePointAt = "std_string_code_point_at" [StringCodePointAt = "string_code_point_at" (String, Number) -> (OptNumber), Pure, None;] -> F64;
                 StdStringEndsWith = "std_string_ends_with" [StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), Pure, None;];
                 StdStringFromCodePoint = "std_string_from_code_point" [StringFromCodePoint = "string_from_code_point" (Number) -> (String), Throws, Atomic;];

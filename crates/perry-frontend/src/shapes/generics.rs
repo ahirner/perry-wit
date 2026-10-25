@@ -256,11 +256,11 @@ pub fn optional_property(ty: HirType, optional: bool) -> HirType {
     }
 }
 
-/// What iterating `ty` yields: an array element, a `Set` value, a live view's item, or a
-/// `Map` entry pair. Any other type is handed back unchanged.
+/// The element type yielded by iteration. Unsupported types are returned unchanged.
 pub fn iterated_element(ty: HirType) -> Result<HirType, HirType> {
     let HirType::Generic { base, type_args } = ty else {
         return match ty {
+            HirType::String => Ok(HirType::String),
             HirType::Array(element) => Ok(*element),
             other => Err(other),
         };

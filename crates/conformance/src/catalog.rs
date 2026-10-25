@@ -263,9 +263,9 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "ecma.command.text",
-        description: "CLI UTF-8 string formatting and regular expressions",
+        description: "CLI UTF-8 string formatting, UTF-16 code units and regular expressions",
         specification: "https://nodejs.org/api/",
-        domain: "Standard CLI source; exact output bytes and successful exit",
+        domain: "Standard CLI source; charCodeAt over ASCII/NUL, BMP and supplementary text with omitted, undefined and IEEE-754 boundary positions; exact output bytes and successful exit",
         partitions: &["standard-source"],
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },

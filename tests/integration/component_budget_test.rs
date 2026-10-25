@@ -1,5 +1,5 @@
 //! Small-component and core-module size budgets and initial-memory limits.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use perry_wit::compile_for_world;
 use wasmparser::{Parser, Payload};
 
@@ -18,6 +18,11 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
             3123,
         ),
         (
+            "discarded-code-unit",
+            "export function run(input: string): string { input.charCodeAt(0); return input; }",
+            3123,
+        ),
+        (
             "append",
             "export function run(input: string): string { return \"TASK_PROCESSED: \" + input; }",
             3522,
@@ -30,7 +35,11 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         ),
     ] {
         let compiled = compile_for_world(source, name, &resolve, world, true)?;
-        let bytes = compiled.component.as_ref().unwrap().stripped.len() as u64;
+        let bytes = compiled
+            .component
+            .context("compiler emitted no component")?
+            .stripped
+            .len() as u64;
         assert!(
             bytes <= max_bytes,
             "{name}: {bytes} bytes exceeds {max_bytes}-byte limit"
@@ -57,7 +66,11 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
     let world = resolve.select_world(&[package], Some("adder"))?;
     let source = "export function add(a: number, b: number): number { return a + b; }";
     let compiled = compile_for_world(source, "add", &resolve, world, true)?;
-    let bytes = compiled.component.as_ref().unwrap().stripped.len();
+    let bytes = compiled
+        .component
+        .context("compiler emitted no component")?
+        .stripped
+        .len();
     for (file, text, claim) in [
         (
             "README.md",

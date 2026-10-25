@@ -1,4 +1,4 @@
-// String splitting, joining, replacement, padding, casing, regex search and scalar iteration.
+// String operations, UTF-16 code units, regex search and scalar iteration.
 
 function present(value: string | undefined): number {
   return !value ? 0 : value.length;
@@ -68,6 +68,20 @@ captures();
 const scalarText = "é漢abc  ";
 for (const x of [0, 1, -0.5, 2.5, -2.5, 7, NaN]) {
   console.log("positions", x, scalarText.charAt(x), scalarText.indexOf("a", x), scalarText.slice(-4, x), scalarText.substring(x, 1), scalarText.toUpperCase().codePointAt(0), scalarText.trim().length, scalarText.lastIndexOf("b"), scalarText.includes("漢"));
+}
+
+function codeUnit(text: string, position: number | undefined): number {
+  // @ts-expect-error JavaScript accepts undefined and defaults its position to zero.
+  return text.charCodeAt(position);
+}
+const codeUnitInputs = ["", "A\0z", "é漢", "😀", "😀x", "Aé😀z𐀀\u{10ffff}", "\u007f\u0080\u07ff\u0800\ud7ff\ue000\uffff\u{10000}\u{10ffff}"];
+for (const text of codeUnitInputs) {
+  // @ts-expect-error JavaScript also accepts an omitted position.
+  console.log("code-unit-default", JSON.stringify(text), text.charCodeAt(), text.charCodeAt(undefined), codeUnit(text, undefined));
+  for (const position of [-Infinity, -1e300, -4294967296, -1.5, -1, -0.5, -0, 0, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 4294967296, 1e300, Infinity, NaN]) {
+    const unit: number | undefined = codeUnit(text, position);
+    console.log("code-unit", position, unit, unit === undefined, Number.isNaN(unit));
+  }
 }
 
 // Literal search over BMP text: `search` index and `test` per pattern and input.

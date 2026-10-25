@@ -276,6 +276,15 @@ impl<'s> FunctionBuilder<'s> {
         let map_fn = map_fn.filter(|f| !matches!(f, Expr::Undefined));
         let src_val = self.expression(ctx, source)?;
         let src_val = self.defined(ctx, src_val)?;
+        let src_val = if src_val.get_type(ctx).deref(ctx).is::<StringType>() {
+            let characters = self.string_characters(ctx, src_val);
+            if map_fn.is_none() {
+                return Ok(characters);
+            }
+            characters
+        } else {
+            src_val
+        };
         let src_ty = src_val.get_type(ctx);
         let input = if crate::collections::is_collection_or_view_record(ctx, src_ty)
             || TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok()
@@ -295,7 +304,7 @@ impl<'s> FunctionBuilder<'s> {
             let zero = self.number(ctx, 0.0);
             Input::UndefinedCount(self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]))
         } else {
-            bail!("Array.from source must be an array, Set, Map, or {{ length }} object");
+            bail!("Array.from source must be a string, array, Set, Map, or {{ length }} object");
         };
         let expected_elem = if matches!(input, Input::UndefinedCount(_)) {
             expected

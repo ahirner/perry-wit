@@ -63,6 +63,9 @@ impl IntrinsicCall {
                 },
             });
         }
+        for extra in args {
+            builder.expression(ctx, extra)?;
+        }
         let value = builder.call_intrinsic(ctx, self.intrinsic, values);
         Ok(match self.result {
             Return::Value => value,

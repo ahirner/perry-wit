@@ -4,6 +4,12 @@ use crate::control_flow::{ArrayOutput, Input};
 use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
 
 impl<'s> FunctionBuilder<'s> {
+    /// `[...text]` and `Array.from(text)`: one string per Unicode scalar value.
+    pub(crate) fn string_characters(&mut self, ctx: &mut Context, text: Value) -> Value {
+        let empty = self.string(ctx, "");
+        self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, empty])
+    }
+
     fn spread_value(
         &mut self,
         ctx: &mut Context,
@@ -17,6 +23,10 @@ impl<'s> FunctionBuilder<'s> {
         };
         let val = self.expression_with(ctx, source, expected)?;
         let val_ty = optional_value(ctx, val.get_type(ctx)).unwrap_or_else(|| val.get_type(ctx));
+        if val_ty.deref(ctx).is::<StringType>() {
+            let val = self.defined(ctx, val)?;
+            return Ok(self.string_characters(ctx, val));
+        }
         if crate::collections::is_collection_or_view_record(ctx, val_ty)
             || crate::collections::set_entry_type(ctx, val_ty).is_some()
             || crate::collections::map_entry_types(ctx, val_ty).is_some()
