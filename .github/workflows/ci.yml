@@ -2,6 +2,7 @@ name: "CI"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
@@ -37,6 +38,7 @@ jobs:
     - name: Run tests, benchmarks, conformance, and clippy
       run: |
         nix develop -c bash -euo pipefail -c '
+          python3 scripts/test_perry_bench.py
           cargo fetch --manifest-path runtime/Cargo.toml --locked
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
@@ -107,6 +109,27 @@ jobs:
         name: perry-wit-compiler
         path: dist/compiler/
         if-no-files-found: error
+    - name: Run upstream Perry benchmarks
+      id: perry-bench
+      if: matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' && !github.event.pull_request.draft
+      continue-on-error: true
+      timeout-minutes: 60
+      run: nix run -L .#perry-bench -- --all --out artifacts/perry-bench
+    - name: Upload benchmark report
+      id: perry-bench-artifact
+      if: ${{ !cancelled() && steps.perry-bench.outcome != 'skipped' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: perry-bench
+        path: artifacts/perry-bench/
+        if-no-files-found: error
+    - name: Summarize benchmarks
+      if: ${{ !cancelled() && steps.perry-bench.outcome != 'skipped' }}
+      env:
+        ARTIFACT_URL: ${{ steps.perry-bench-artifact.outputs.artifact-url }}
+      run: |
+        cat artifacts/perry-bench/summary.md >> "$GITHUB_STEP_SUMMARY"
+        printf '\n[Download benchmark report and logs](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: [flake-build, site]

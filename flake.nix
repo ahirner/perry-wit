@@ -65,6 +65,14 @@
 
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+        cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+        perryLock = pkgs.lib.findFirst (package: package.name == "perry-hir")
+          (throw "Cargo.lock must contain perry-hir") cargoLock.package;
+        perryRevision = pkgs.lib.last (pkgs.lib.splitString "#" perryLock.source);
+        perrySource = (craneLib.downloadCargoPackageFromGit {
+          git = builtins.head (pkgs.lib.splitString "?" (pkgs.lib.removePrefix "git+" perryLock.source));
+          rev = perryRevision;
+        }).src;
 
         wasiP3Wit = pkgs.runCommand "wasi-preview3-wit" {} ''
           mkdir -p "$out"
@@ -90,12 +98,13 @@
         '';
 
         authoredSourceFilter = path: type:
-          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" ".generated" "test-results" "node_modules" "target" "dist" "result" ])
+          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" ".generated" "test-results" "node_modules" "target" "dist" "artifacts" "result" ])
           && pkgs.lib.cleanSourceFilter path type;
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
-          authoredSourceFilter path type && (
+          authoredSourceFilter path type
+          && !(builtins.elem path (map toString [ ./scripts/perry-bench.py ./scripts/test_perry_bench.py ])) && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
@@ -380,8 +389,23 @@
           }}/bin/build-site";
         };
 
+        apps.perry-bench = {
+          type = "app";
+          meta.description = "Compare locked upstream Perry benchmarks in Node and Wasmtime";
+          program = "${pkgs.writeShellApplication {
+            name = "perry-bench";
+            runtimeInputs = [ perryWitBin nodejs wasmtimeCli pkgs.python3 ];
+            text = ''
+              export PERRY_BENCHMARK_SOURCE=${perrySource}
+              export PERRY_BENCHMARK_REVISION=${perryRevision}
+              export WASI_WIT_PATH=${wasiP3Wit}
+              exec python3 ${./scripts/perry-bench.py} "$@"
+            '';
+          }}/bin/perry-bench";
+        };
+
         lib = {
-          inherit buildComponent mkSdkShell;
+          inherit buildComponent mkSdkShell perrySource perryRevision;
         };
 
         checks = {
@@ -412,6 +436,8 @@
           ];
 
           WASI_WIT_PATH = wasiP3Wit;
+          PERRY_BENCHMARK_SOURCE = perrySource;
+          PERRY_BENCHMARK_REVISION = perryRevision;
 
           shellHook = ''
             export CARGO_TARGET_DIR="$PWD/target"
