@@ -632,14 +632,10 @@ impl<'a> Declarations<'a> {
                     left
                 }
             },
-            ast::Expr::Call(call) if matches!(&call.callee, ast::Callee::Expr(callee) if matches!(&**callee,ast::Expr::Ident(_))) =>
+            ast::Expr::Call(call)
+                if let ast::Callee::Expr(callee) = &call.callee
+                    && let ast::Expr::Ident(name) = &**callee =>
             {
-                let ast::Callee::Expr(callee) = &call.callee else {
-                    unreachable!()
-                };
-                let ast::Expr::Ident(name) = &**callee else {
-                    unreachable!()
-                };
                 match name.sym.as_ref() {
                     "String" => Type::Scalar("string"),
                     "Number" => Type::Scalar("f64"),
@@ -728,35 +724,19 @@ struct Writer {
 }
 impl Writer {
     fn ty(&mut self, ty: &Type, hint: &str) -> Result<String> {
-        if let Type::Scalar(name) = ty {
-            return Ok((*name).into());
-        }
-        if matches!(ty, Type::Void) {
-            bail!("void is only valid as a function result");
-        }
         if let Some(name) = self.names.get(ty) {
             return Ok(format!("%{name}"));
         }
-        let prefix = match ty {
-            Type::Absent { null: false, .. } => "perry-undefined-",
-            Type::Absent { null: true, .. } => "perry-nullish-",
-            _ => "",
-        };
-        let base = format!("{prefix}{}", kebab(hint));
-        let mut name = base.clone();
-        let mut index = 2;
-        while !self.used.insert(name.clone()) {
-            name = format!("{base}-{index}");
-            index += 1;
-        }
-        let item = match ty {
-            Type::List(value) => format!(
-                "type %{name} = list<{}>;",
-                self.ty(value, &format!("{hint}-item"))?
+        let (kind, body) = match ty {
+            Type::Scalar(name) => return Ok((*name).into()),
+            Type::Void => bail!("void is only valid as a function result"),
+            Type::List(value) => (
+                "type",
+                format!(" = list<{}>;", self.ty(value, &format!("{hint}-item"))?),
             ),
-            Type::Option(value) => format!(
-                "type %{name} = option<{}>;",
-                self.ty(value, &format!("{hint}-value"))?
+            Type::Option(value) => (
+                "type",
+                format!(" = option<{}>;", self.ty(value, &format!("{hint}-value"))?),
             ),
             Type::Absent { value, null } => {
                 let payload = self.ty(value, &format!("{hint}-value"))?;
@@ -765,7 +745,7 @@ impl Writer {
                 } else {
                     "undefined"
                 };
-                format!("variant %{name} {{ {cases}, value({payload}) }}")
+                ("variant", format!(" {{ {cases}, value({payload}) }}"))
             }
             Type::Record(fields) => {
                 let mut names = HashSet::new();
@@ -782,7 +762,7 @@ impl Writer {
                         self.ty(value, &format!("{hint}-{field_name}"))?
                     ));
                 }
-                format!("record %{name} {{ {} }}", members.join(", "))
+                ("record", format!(" {{ {} }}", members.join(", ")))
             }
             Type::Tuple(values) => {
                 let items = values
@@ -790,15 +770,18 @@ impl Writer {
                     .enumerate()
                     .map(|(i, ty)| self.ty(ty, &format!("{hint}-item-{i}")))
                     .collect::<Result<Vec<_>>>()?;
-                format!("type %{name} = tuple<{}>;", items.join(", "))
+                ("type", format!(" = tuple<{}>;", items.join(", ")))
             }
-            Type::Enum(cases) => format!(
-                "enum %{name} {{ {} }}",
-                cases
-                    .iter()
-                    .map(|case| format!("%{case}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            Type::Enum(cases) => (
+                "enum",
+                format!(
+                    " {{ {} }}",
+                    cases
+                        .iter()
+                        .map(|case| format!("%{case}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ),
             Type::Variant(cases) => {
                 let values = cases
@@ -812,7 +795,7 @@ impl Writer {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                format!("variant %{name} {{ {} }}", values.join(", "))
+                ("variant", format!(" {{ {} }}", values.join(", ")))
             }
             Type::Result { ok, err } => {
                 let ok = ok
@@ -825,12 +808,23 @@ impl Writer {
                     .map(|ty| self.ty(ty, &format!("{hint}-error")))
                     .transpose()?
                     .unwrap_or("_".into());
-                format!("type %{name} = result<{ok}, {err}>;")
+                ("type", format!(" = result<{ok}, {err}>;"))
             }
-            Type::Stream => format!("type %{name} = stream<u8>;"),
-            Type::Scalar(_) | Type::Void => unreachable!(),
+            Type::Stream => ("type", " = stream<u8>;".into()),
         };
-        self.declarations.push(item);
+        let prefix = match ty {
+            Type::Absent { null: false, .. } => "perry-undefined-",
+            Type::Absent { null: true, .. } => "perry-nullish-",
+            _ => "",
+        };
+        let base = format!("{prefix}{}", kebab(hint));
+        let mut name = base.clone();
+        let mut index = 2;
+        while !self.used.insert(name.clone()) {
+            name = format!("{base}-{index}");
+            index += 1;
+        }
+        self.declarations.push(format!("{kind} %{name}{body}"));
         self.names.insert(ty.clone(), name.clone());
         Ok(format!("%{name}"))
     }

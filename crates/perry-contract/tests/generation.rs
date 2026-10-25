@@ -51,36 +51,30 @@ fn scalar_defaults_aliases_and_declarations_round_trip() -> Result<()> {
         ]
     );
     assert_eq!(function.result, Some(Type::S64));
-    let declarations = sdk::declarations(&resolve, world)?;
-    let (_, _, regenerated) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
-    assert!(
-        regenerated.contains("%a: f64, %b: s64, %c: u8, %d: s8"),
-        "{regenerated}"
-    );
-    assert!(
-        regenerated.contains("%i: u64, %j: s64, %k: f32, %l: f64"),
-        "{regenerated}"
-    );
-    Ok(())
+    assert_round_trip(&resolve, world)
 }
 
 #[test]
-fn structures_preserve_presence_and_async_signatures() -> Result<()> {
+fn structures_preserve_presence_tagged_unions_and_async_signatures() -> Result<()> {
     let (resolve, world, text) = generated(
-        "type Data<T> = { value: T; optional?: string; both: number | null | undefined; nil: bigint | null; bytes: Uint8Array; pair: [boolean, string] }; export async function echo(value: Data<number[]>): Promise<Data<number[]>> {return value;}",
+        "import type {f32,u16} from 'perry:types';
+        type Choice = 'first' | 'second';
+        type Data<T> = {value:T; optional?:string; both:number|null|undefined; nil:bigint|null; bytes:Uint8Array; pair:[f32,u16]; nested:(string|null)[]};
+        type Ok = {ok:true,value:Data<number[]>}; type Err = {ok:false,error:string}; type Outcome = Ok | Err;
+        type Tagged = {tag:'text',val:string|undefined} | {tag:'empty'};
+        export async function echo(value:Data<number[]>, choice:Choice|null|undefined, tagged:Tagged, stream:ReadableStream<Uint8Array>):Promise<Outcome> {return {ok:true,value};}",
     )?;
-    assert!(
-        text.contains("perry-undefined-echo-value-optional"),
-        "{text}"
-    );
-    assert!(text.contains("perry-nullish-echo-value-both"), "{text}");
-    assert!(text.contains("option<s64>"), "{text}");
-    assert!(text.contains("export %echo: async func"), "{text}");
-    let declarations = sdk::declarations(&resolve, world)?;
-    let (_, _, again) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
-    assert!(again.contains("null, undefined, value(f64)"), "{again}");
-    assert!(again.contains("undefined, value(string)"), "{again}");
-    Ok(())
+    for shape in [
+        "null, undefined, value(f64)",
+        "undefined, value(string)",
+        "option<s64>",
+        "result<",
+        "stream<u8>",
+        "export %echo: async func",
+    ] {
+        assert!(text.contains(shape), "Missing {shape}: {text}");
+    }
+    assert_round_trip(&resolve, world)
 }
 
 #[test]
@@ -118,20 +112,6 @@ fn unsupported_public_values_and_ambiguous_types_are_diagnosed() {
     ] {
         assert!(generated(source).is_err(), "{source}");
     }
-}
-
-#[test]
-fn aliases_and_tagged_unions_round_trip_through_declarations() -> Result<()> {
-    let (resolve, world, text) = generated(
-        "type Choice = 'first' | 'second'; type Ok = {ok:true,value:Choice}; type Err = {ok:false,error:string}; type Outcome = Ok | Err; type Value = {tag:'text',val:string} | {tag:'empty'}; export function run(input: Choice | null | undefined, tagged: Value): Outcome {return {ok:true,value:'first'};}",
-    )?;
-    assert!(text.contains("result<"), "{text}");
-    let declarations = sdk::declarations(&resolve, world)?;
-    let (_, _, again) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
-    assert!(again.contains("result<"), "{again}");
-    assert!(again.contains("null, undefined, value("), "{again}");
-    assert!(again.contains("%text(string), %empty"), "{again}");
-    Ok(())
 }
 
 fn normalized_exports(resolve: &Resolve, world: WorldId) -> Vec<String> {
@@ -201,14 +181,11 @@ fn normalized_exports(resolve: &Resolve, world: WorldId) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn supported_contracts_are_equivalent_after_typescript_round_trip() -> Result<()> {
-    let source = "import type {f32,u16} from 'perry:types'; type Value = {tag:'text',val:string|undefined} | {tag:'empty'}; type Data = {field?: number; nested: (string|null)[]; pair: [f32,u16]; mode:'on'|'off'; bytes:Uint8Array}; export function run(data:Data,tagged:Value): {ok:true,value:Data}|{ok:false,error:string} {return {ok:true,value:data};}";
-    let (resolve, world, _) = generated(source)?;
-    let declarations = sdk::declarations(&resolve, world)?;
+fn assert_round_trip(resolve: &Resolve, world: WorldId) -> Result<()> {
+    let declarations = sdk::declarations(resolve, world)?;
     let (again, next_world, _) = generated(std::str::from_utf8(&declarations[0].contents)?)?;
     assert_eq!(
-        normalized_exports(&resolve, world),
+        normalized_exports(resolve, world),
         normalized_exports(&again, next_world)
     );
     Ok(())

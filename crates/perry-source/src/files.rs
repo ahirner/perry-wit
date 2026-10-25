@@ -58,10 +58,14 @@ pub fn read_program(entry: &Path) -> Result<crate::Program> {
         .with_context(|| format!("Reading {}", entry.display()))?;
     let source = fs::read_to_string(&entry)?;
     let modules = load(&source, &entry.to_string_lossy())?;
-    let mut root = entry.parent().expect("source file has a parent");
+    let mut root = entry
+        .parent()
+        .context("Source file has no parent directory")?;
     for name in modules.keys() {
         while !Path::new(name).starts_with(root) {
-            root = root.parent().expect("absolute paths share a root");
+            root = root
+                .parent()
+                .context("Source modules have no common root")?;
         }
     }
     let name = |path: &Path| -> Result<String> {

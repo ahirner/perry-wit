@@ -96,25 +96,25 @@ impl<'a> NamedType<'a> {
     }
 }
 
-pub struct TsNames<'a> {
-    pub resolve: &'a Resolve,
-    pub types: HashSet<TypeId>,
+pub(crate) struct TsNames<'a> {
+    pub(crate) resolve: &'a Resolve,
+    pub(crate) types: HashSet<TypeId>,
 }
 
 impl<'a> TsNames<'a> {
-    pub fn new(resolve: &'a Resolve, world: &World) -> Self {
+    pub(crate) fn new(resolve: &'a Resolve, world: &World) -> Self {
         Self {
             resolve,
             types: collect_world_types(resolve, world),
         }
     }
 
-    pub fn name(&self, id: TypeId) -> Option<String> {
+    pub(crate) fn name(&self, id: TypeId) -> Option<String> {
         Some(NamedType::get(self.resolve, id)?.in_scope(self.types.iter().copied()))
     }
 }
 
-pub fn collect_types(resolve: &Resolve, ty: &Type, ids: &mut HashSet<TypeId>) {
+pub(crate) fn collect_types(resolve: &Resolve, ty: &Type, ids: &mut HashSet<TypeId>) {
     let Type::Id(id) = ty else {
         return;
     };
@@ -152,7 +152,7 @@ pub fn collect_world_types(resolve: &Resolve, world: &World) -> HashSet<TypeId> 
     seen
 }
 
-pub fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
+pub(crate) fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
     match kind {
         TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
             visit(&Type::Id(*id))

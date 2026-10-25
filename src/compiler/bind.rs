@@ -1,5 +1,5 @@
 //! Binding WIT world exports to exported TypeScript functions.
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
@@ -194,7 +194,8 @@ pub(crate) fn constrain_numbers(
         };
         let existing =
             perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
-        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx)
+            .with_context(|| format!("Invalid function type for '{}'", export.function))?;
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if !export.is_command() && args.len() != export.params.len() {
             return Err(crate::PerryDiagnostic::from(BindError::ArityMismatch {

@@ -72,7 +72,7 @@ fn compile_typescript_impl(
 ) -> Result<Compiled> {
     if !options.wit_dir.exists() && options.wit_dir == Path::new("wit") {
         let modules = load_source_files(source, file_name)?;
-        let artifacts = perry_contract::generate::generate_sources(
+        let artifacts = perry_contract::generate_sources(
             source,
             file_name,
             &modules,

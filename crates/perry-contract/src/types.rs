@@ -90,7 +90,7 @@ pub fn convert<T>(
 }
 
 /// Compiler-defined presence variants retain native null and undefined states.
-pub fn absence_type(resolve: &Resolve, id: TypeId) -> Option<(Type, bool)> {
+pub(crate) fn absence_type(resolve: &Resolve, id: TypeId) -> Option<(Type, bool)> {
     let definition = &resolve.types[id];
     let name = definition.name.as_deref()?;
     let null = if name.starts_with("perry-nullish-") {

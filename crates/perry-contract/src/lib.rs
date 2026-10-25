@@ -91,8 +91,8 @@ pub struct Artifact {
     pub contents: Vec<u8>,
 }
 
-pub mod generate;
-pub use generate::generate_wit;
+mod generate;
+pub use generate::{generate_sources, generate_wit};
 
 impl From<Vec<Artifact>> for Wit {
     fn from(artifacts: Vec<Artifact>) -> Self {

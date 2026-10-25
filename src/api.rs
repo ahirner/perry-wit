@@ -21,7 +21,7 @@
 use anyhow::Result;
 
 pub use perry_contract::{Artifact, Package, Wit};
-pub(crate) use perry_source::program;
+use perry_source::program;
 pub use perry_source::{Module, Program, Source};
 
 #[derive(Clone, Debug, Default)]

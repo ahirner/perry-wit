@@ -72,7 +72,7 @@ impl<'s> Locations<'s> {
         self.operators.get(index).and_then(|span| self.span(*span))
     }
 
-    pub fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
+    pub(crate) fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
         self.files.push((file, source, offset));
     }
 
