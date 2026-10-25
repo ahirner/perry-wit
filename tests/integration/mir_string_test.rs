@@ -413,12 +413,14 @@ export function run():number { return caught+(probe()?1:0); }
 fn string_spread_and_array_from_yield_scalars() -> anyhow::Result<()> {
     crate::node_oracle::assert_numbers(
         r#"
+function first<T>(items: T[]): T { return items[0]; }
 export function run(): number {
   const text = 'aé😀';
   const spread = [...text, ...''];
-  if (spread.join('|') !== 'a|é|😀') return 1;
-  if (Array.from(text).join('|') !== 'a|é|😀') return 2;
-  if (Array.from(text, (character, index) => character + index).join('') !== 'a0é1😀2') return 3;
+  if (spread.join('|') !== 'a|é|😀') return -1;
+  if (Array.from(text).join('|') !== 'a|é|😀') return -2;
+  if (Array.from(text, (character, index) => character + index).join('') !== 'a0é1😀2') return -3;
+  if (first(Array.from(text)) !== 'a') return -4;
   return spread.length;
 }
 "#,
