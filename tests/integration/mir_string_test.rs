@@ -509,9 +509,9 @@ export function casing_aliases(n: number): number {
     assert_eq!(program.number("prepare_codes", 4096.0), 4096.0);
     let before = program.counter(Counter::Allocations);
     let fuel = [0.0_f64, 1.0, 63.0, 4095.0].map(|index| {
-        program
-            .call("read_code", &[wasmtime::Val::F64(index.to_bits())])
-            .1
+        let (code, fuel) = program.call("read_code", &[wasmtime::Val::F64(index.to_bits())]);
+        assert_eq!(code[0].unwrap_f64(), f64::from(b'x'));
+        fuel
     });
     assert!(fuel.iter().all(|&used| used == fuel[0]), "{fuel:?}");
     assert_eq!(program.counter(Counter::Allocations), before);

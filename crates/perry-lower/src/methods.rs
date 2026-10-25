@@ -75,7 +75,6 @@ macro_rules! lower_calls {
         }
         Ok(Some($receiver))
     }};
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) reject ($message:literal)) => { bail!($message) };
 }
 
 perry_frontend::method_catalog!(lower_calls);

@@ -173,26 +173,19 @@ pub(crate) extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) ->
         .map_or(-1, |c| c as i32)
 }
 
+/// `s.charCodeAt(position)`, indexed by UTF-16 code unit.
 #[unsafe(no_mangle)]
 extern "C" fn std_string_char_code_at(string: *mut u8, position: f64) -> f64 {
     let view = view(string);
-    let position = integer(position);
-    // UTF-16 has at most as many units as UTF-8 has bytes; bound before narrowing to usize.
-    if position < 0 || position as u64 >= view.text.len() as u64 {
+    let Ok(position) = usize::try_from(integer(position)) else {
         return f64::NAN;
-    }
-    let position = position as usize;
-    if view.ascii {
-        view.text
-            .as_bytes()
-            .get(position)
-            .map_or(f64::NAN, |&byte| f64::from(byte))
+    };
+    let unit = if view.ascii {
+        view.text.as_bytes().get(position).copied().map(u16::from)
     } else {
-        view.text
-            .encode_utf16()
-            .nth(position)
-            .map_or(f64::NAN, f64::from)
-    }
+        view.text.encode_utf16().nth(position)
+    };
+    unit.map_or(f64::NAN, f64::from)
 }
 
 /// The scalar at `position`, or undefined outside the string.
