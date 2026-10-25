@@ -673,6 +673,7 @@ impl Solver {
         }
         if Operation::get_op::<CompareOp>(op, ctx).is_some()
             && let Some(domain) = comparison_domain(
+                ctx,
                 &self.analysis.states[id],
                 &[operation.get_operand(0), operation.get_operand(1)],
             )

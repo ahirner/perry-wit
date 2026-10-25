@@ -546,7 +546,13 @@ pub(super) fn integer_arithmetic(ctx: &Context, op: Ptr<Operation>) -> Option<Bi
         .then_some(kind)
 }
 
-pub(super) fn comparison_domain(state: &State, inputs: &[Value]) -> Option<Integer> {
+pub(super) fn comparison_domain(ctx: &Context, state: &State, inputs: &[Value]) -> Option<Integer> {
+    if inputs
+        .iter()
+        .any(|value| crate::optional::absence(ctx, value.get_type(ctx)).is_some())
+    {
+        return None;
+    }
     let mut domain = inputs
         .iter()
         .filter_map(|&value| state.fact(value).integer())
