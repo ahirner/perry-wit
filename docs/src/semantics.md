@@ -17,8 +17,8 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Strings
 
-- Strings are UTF-8 and index by Unicode scalar value, not UTF-16 code unit. Indices agree with Node.js for text in the Basic Multilingual Plane. Characters outside it count as one scalar value.
-- `charCodeAt`, `String.fromCharCode` and lone surrogate escapes (`\uD800` to `\uDFFF`) are compile errors. Use `codePointAt` and `String.fromCodePoint`.
+- Strings are UTF-8. Length and indexing count Unicode scalar values, except `charCodeAt`, which indexes UTF-16 code units and returns `NaN` out of bounds.
+- `String.fromCharCode` and lone surrogate escapes (`\uD800` to `\uDFFF`) are compile errors. Use `String.fromCodePoint`.
 - Text arriving through the Canonical ABI, `JSON.parse` or `TextDecoder` is validated as UTF-8.
 
 ## Regular Expressions

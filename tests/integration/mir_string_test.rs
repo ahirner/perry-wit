@@ -110,6 +110,7 @@ export function retained_run(n: number): number {
   saved = text.slice(0, 2);
   for (let i = 0; i < n; i++) text += '漢';
   if (saved !== 'é🙂' || text.charAt(text.length - 1) !== '漢') return -1;
+  if (saved.charCodeAt(1) !== 55357 || saved.charCodeAt(2) !== 56898 || !Number.isNaN(saved.charCodeAt(3))) return -2;
   return text.length;
 }
 export function retained(n: number): number { return saved.length + saved.codePointAt(1) + n; }
@@ -164,7 +165,10 @@ export function owned(n: number): number {
 
 export function exclusive(n: number): number {
   let text = '';
-  for (let i = 0; i < n; i++) text = text + 'é😀x';
+  for (let i = 0; i < n; i++) {
+    text = text + 'é😀x';
+    if (text.charCodeAt(0) !== 233) return -1;
+  }
   return text.length;
 }
 
@@ -409,6 +413,12 @@ export function run():number { return caught+(probe()?1:0); }
 fn ascii_split_and_casing_sharing_avoid_allocations() {
     let mut program = Program::checked(
         r#"
+let codeText = '';
+export function prepare_codes(n: number): number {
+  codeText = n === 0 ? 'é😀z' : 'x'.repeat(n);
+  return codeText.length;
+}
+export function read_code(n: number): number { return codeText.charCodeAt(n); }
 export function ascii(n: number): number {
   const text = 'é' + 'x'.repeat(n) + '😀';
   let sum = 0;
@@ -478,6 +488,23 @@ export function casing_aliases(n: number): number {
     for n in 0..3 {
         assert_eq!(program.number("casing_aliases", f64::from(n)), 1.0);
     }
+
+    assert_eq!(program.number("prepare_codes", 4096.0), 4096.0);
+    let before = program.counter(Counter::Allocations);
+    let fuel = [0.0_f64, 1.0, 63.0, 4095.0].map(|index| {
+        program
+            .call("read_code", &[wasmtime::Val::F64(index.to_bits())])
+            .1
+    });
+    assert!(fuel.iter().all(|&used| used == fuel[0]), "{fuel:?}");
+    assert_eq!(program.counter(Counter::Allocations), before);
+
+    assert_eq!(program.number("prepare_codes", 0.0), 3.0);
+    let before = program.counter(Counter::Allocations);
+    for index in 0..=4 {
+        program.number("read_code", f64::from(index));
+    }
+    assert_eq!(program.counter(Counter::Allocations), before);
 }
 
 #[test]

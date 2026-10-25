@@ -84,6 +84,7 @@ fn reuse_candidates(
                 crate::intrinsics::intrinsic_of(ctx, op),
                 Some(
                     Intrinsic::StringCharAt
+                        | Intrinsic::StringCharCodeAt
                         | Intrinsic::StringCharAtIndex
                         | Intrinsic::StringIndex
                         | Intrinsic::StringCodePointAt
