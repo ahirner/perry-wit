@@ -6,6 +6,7 @@ publish = false
 description = "TypeScript source resolution and specialized Perry HIR"
 
 [dependencies]
+perry-source.workspace = true
 perry-hir.workspace = true
 perry-parser.workspace = true
 perry-wit-diagnostics.workspace = true
@@ -13,9 +14,7 @@ perry-contract.workspace = true
 wit-parser.workspace = true
 pliron.workspace = true
 anyhow.workspace = true
-serde_json.workspace = true
 swc_ecma_visit = "29.0"
-swc_ecma_parser = "45.1"
 swc_common = "26.0"
 swc_ecma_transforms_base = "49.0"
 

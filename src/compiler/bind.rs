@@ -212,10 +212,16 @@ pub(crate) fn constrain_numbers(
             continue;
         }
         let mut constrained = false;
-        for (source, abi) in args
+        for (source, abi, result) in args
             .iter_mut()
             .zip(&export.params)
-            .chain(results.iter_mut().zip(export.result.iter()))
+            .map(|(source, abi)| (source, abi, false))
+            .chain(
+                results
+                    .iter_mut()
+                    .zip(export.result.iter())
+                    .map(|(source, abi)| (source, abi, true)),
+            )
         {
             let Some(integer) = abi.integer_type(ctx) else {
                 continue;
@@ -234,6 +240,9 @@ pub(crate) fn constrain_numbers(
                     })
                     .into(),
                 );
+            }
+            if result && wide && source.deref(ctx).is::<perry_mir::BigIntType>() {
+                continue;
             }
             if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
                 || (!wide
@@ -470,6 +479,10 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             Contract::ByteStream => AbiType::ByteStream,
             Contract::List(ty) => AbiType::List(Box::new(ty?)),
             Contract::Option(ty) => AbiType::Option(Box::new(ty?)),
+            Contract::Absent { value, null } => AbiType::Absent {
+                value: Box::new(value?),
+                null,
+            },
             Contract::Result { ok, err } => AbiType::Result {
                 ok: ok.transpose()?.map(Box::new),
                 err: err.transpose()?.map(Box::new),

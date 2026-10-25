@@ -1,6 +1,6 @@
 [package]
 name = "perry-wit"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 default-run = "perry-wit"
 description = "Compile TypeScript into WASI 0.3 WebAssembly components"
@@ -20,6 +20,7 @@ members = [
   "crates/perry-lower",
   "crates/perry-frontend",
   "crates/perry-contract",
+  "crates/perry-source",
   "crates/pliron-wasm",
   "crates/pliron-control",
   "crates/perry-codegen",
@@ -39,6 +40,7 @@ http = "1"
 http-body-util = "0.1"
 perry-abi = { path = "runtime/abi" }
 perry-contract = { path = "crates/perry-contract" }
+perry-source = { path = "crates/perry-source" }
 perry-frontend = { path = "crates/perry-frontend" }
 perry-hir = { git = "https://github.com/PerryTS/perry", rev = "be6740f46e85db2ab5524bc11cd5af53f29f7846" }
 perry-mir = { path = "crates/perry-mir" }
@@ -77,6 +79,7 @@ panic = "abort"
 strip = true
 
 [dependencies]
+perry-source.workspace = true
 perry-contract.workspace = true
 perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }

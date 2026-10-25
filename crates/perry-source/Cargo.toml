@@ -1,0 +1,17 @@
+[package]
+name = "perry-source"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+perry-parser.workspace = true
+perry-wit-diagnostics.workspace = true
+anyhow.workspace = true
+swc_ecma_visit = "29.0"
+swc_ecma_parser = "45.1"
+swc_common = "26.0"
+swc_ecma_transforms_base = "49.0"
+
+[lints]
+workspace = true

@@ -11,9 +11,9 @@ pub mod hir_compat;
 mod infer;
 pub mod methods;
 mod modules;
-pub mod sdk;
+pub use perry_contract::sdk;
 pub mod shapes;
-pub mod source_files;
+pub use perry_source::files as source_files;
 pub mod wit;
 pub use absence::{Absence, merge_absence};
 /// HIR types and structural foreign (WIT) symbol descriptors.

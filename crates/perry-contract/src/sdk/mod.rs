@@ -6,10 +6,7 @@ use wit_parser::{Resolve, WorldId};
 
 pub const RUNTIME_DECLARATIONS: &str = include_str!("runtime.d.ts");
 
-pub struct Declaration {
-    pub name: String,
-    pub contents: Vec<u8>,
-}
+pub use crate::Artifact as Declaration;
 
 pub fn declarations(resolve: &Resolve, world: WorldId) -> Result<Vec<Declaration>> {
     let world = &resolve.worlds[world];
@@ -28,4 +25,18 @@ pub fn declarations(resolve: &Resolve, world: WorldId) -> Result<Vec<Declaration
             contents: RUNTIME_DECLARATIONS.as_bytes().to_vec(),
         },
     ])
+}
+
+/// Generate the runtime surface and, when supplied, declarations for a contract.
+pub fn generate(wit: Option<&crate::Wit>, world: Option<&str>) -> Result<Vec<crate::Artifact>> {
+    if let Some(wit) = wit {
+        let (resolve, package) = crate::resolution::resolve_contents(wit)?;
+        let world = crate::resolution::select_world(&resolve, package, world)?;
+        declarations(&resolve, world)
+    } else {
+        Ok(vec![crate::Artifact {
+            name: "runtime.d.ts".into(),
+            contents: RUNTIME_DECLARATIONS.as_bytes().to_vec(),
+        }])
+    }
 }

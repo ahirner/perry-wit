@@ -21,7 +21,7 @@ test('folder import skips generated files and rejects excess input', async () =>
 });
 
 test('world picker excludes comments', () => {
-  assert.deepEqual(worldNames('// world ignored {}\nworld app {} /* world other {} */'), ['app']);
+  assert.deepEqual(worldNames('// world ignored {}\nworld %app {} /* world other {} */'), ['app']);
 });
 
 
@@ -38,6 +38,11 @@ test('package descriptions and compiler settings come from supplied manifests', 
   assert.equal(packagePrograms(files)[0].description, manifest.description);
   files.delete('custom/wit/world.wit');
   assert.throws(() => packagePrograms(files), /WIT contract .* is missing/);
+  delete manifest.perryWit.wit;
+  files.set('custom/package.json', encode(JSON.stringify(manifest)));
+  const inferred = packagePrograms(files)[0];
+  assert.equal(inferred.wit, undefined);
+  assert.equal(compileRequest(files, inferred.entry, inferred.wit).wit, undefined);
   manifest.main = '../outside.ts';
   files.set('custom/package.json', encode(JSON.stringify(manifest)));
   assert.throws(() => packagePrograms(files), /stay inside the package/);

@@ -52,7 +52,7 @@
 <pre><code>export function greet(name: string): string {
   return "Hello, " + name;
 }</code></pre></div>
-<div data-language="wit"><h2><span>WIT</span><span class="note">world.wit</span></h2>
+<div data-language="wit"><h2><span>Generated WIT</span><span class="note">Optional contract</span></h2>
 <pre><code>package example:greeting;
 world greeting {
   export greet: func(name: string) -&gt; string;
@@ -61,7 +61,7 @@ world greeting {
 <h2 id="what-to-build">What to build</h2>
 <section class="cards">
 <article class="card"><h3>HTTP services</h3><p>Serve <code>handle(request)</code> as <code>wasi:http/handler@0.3.0</code>. <code>fetch</code>, streams, timers and Promise combinators suspend through WASI 0.3 callbacks and resume directly from host events.</p><a href="docs/authoring.html#http-handlers">HTTP handlers</a></article>
-<article class="card"><h3>Type-safe components</h3><p>Generated <code>.d.ts</code> brings editor completion and <code>tsc</code> checks for WIT records, lists, variants and results. Write library functions or CLI commands with top-level <code>await</code>. Start with a Nix template.</p><a href="docs/authoring.html">Authoring</a></article>
+<article class="card"><h3>Type-safe components</h3><p>Generated <code>.d.ts</code> brings editor completion and <code>tsc</code> checks for WIT records, lists, variants and results. Start from TypeScript alone: export library functions or write CLI commands with top-level <code>await</code>. Generate an editable WIT contract when needed.</p><a href="docs/authoring.html">Authoring</a></article>
 <article class="card"><h3>Integer types</h3><p>Use ordinary TypeScript syntax for native signed and unsigned arithmetic. WIT ranges let the compiler widen only when needed and eliminate redundant array bounds checks.</p><a href="docs/semantics.html#numbers">Numbers</a></article>
 <article class="card"><h3>Compile on the fly</h3><p>Compile tenant TypeScript in memory through Rust's <code>perry_wit::api</code>, or run the WASI 0.2 compiler with fuel and memory limits. The compiler embeds the precompiled runtime and standard libraries, so compilation needs neither Rust nor LLVM.</p><a href="docs/embedding.html">Embedding</a></article>
 </section>

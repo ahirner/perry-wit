@@ -70,9 +70,31 @@ fn compile_typescript_impl(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
-    let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
+    if !options.wit_dir.exists() && options.wit_dir == Path::new("wit") {
+        let modules = load_source_files(source, file_name)?;
+        let artifacts = perry_contract::generate::generate_sources(
+            source,
+            file_name,
+            &modules,
+            options.world.as_deref(),
+        )?;
+        let wit = crate::api::Wit::from(artifacts);
+        let (resolve, package) = component::wit::resolve_contents(&wit)?;
+        let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
+        compile_sources(
+            source,
+            file_name,
+            &modules,
+            &resolve,
+            world,
+            !options.core_only,
+            false,
+        )
+    } else {
+        let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
+        let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
+        compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
+    }
 }
 
 /// Compile against a resolved world, wrapping the output in a component when `componentize`

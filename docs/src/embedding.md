@@ -11,6 +11,8 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 {{#include embedding-example.rs}}
 ```
 
+[`generate_wit`](../rust/perry_wit/api/fn.generate_wit.html) derives named WIT artifacts from a `Program`. Convert those artifacts with `Wit::from(artifacts)` and pass the resulting contract to `compile`. Both operations use caller-supplied contents entirely in memory. `generate_sdk(None, None)` returns builtin declarations; supplying a contract adds its declarations.
+
 Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
 
 ## WebAssembly Component

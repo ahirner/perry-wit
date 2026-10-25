@@ -79,8 +79,8 @@ try {
       }
       for (const [docPage, expectedText] of [
         ['docs/index.html', 'Memory stays flat across calls'],
-        ['docs/authoring.html', 'wasi:cli/command@0.3.0'],
-        ['docs/embedding.html', 'package perry:compiler@0.1.1;'],
+        ['docs/authoring.html', 'perry-wit src/index.ts --gen-wit --wit interfaces --world app'],
+        ['docs/embedding.html', 'package perry:compiler@0.2.0;'],
         ['docs/semantics.html', 'i64.mul'],
         ['docs/stdlib.html', 'Number.isSafeInteger'],
         ['docs/conformance.html', 'ecma.number.arithmetic'],
@@ -128,7 +128,7 @@ try {
       await page.waitForFunction(() => document.getElementById('source').value.length > 0);
       assert.equal(await page.locator('footer').innerText(), footerText);
       assert.deepEqual(await page.locator('footer a').evaluateAll(links => links.map(link => link.href)), footerLinks);
-      for (const id of ['source-file-picker', 'wit-file-picker', 'entry-picker']) assert.equal(await page.locator(`#${id}`).isVisible(), false);
+      for (const id of ['source-file-picker', 'entry-picker']) assert.equal(await page.locator(`#${id}`).isVisible(), false);
       assert.deepEqual(await page.locator('#function option').evaluateAll(options => options.map(option => option.value)), ['countCodePoints', 'renderMarkdown']);
       assert.equal(await page.locator('#world-picker').isVisible(), false);
       assert.match(await page.locator('#world-description').textContent(), /merge-task/);
@@ -247,15 +247,23 @@ try {
       await page.locator('#folder-input').setInputFiles(join(fixtures, 'source-only'));
       await page.waitForFunction(() => document.getElementById('status').textContent === 'Folder loaded');
       assert.equal(await page.locator('#wit').inputValue(), '');
-      assert.match(await page.locator('#folder-description').textContent(), /No WIT contract was included/);
-      await page.locator('#wit').fill('package test:source; world app { export run: func(n: f64) -> f64; }');
+      assert.match(await page.locator('#folder-description').textContent(), /inferred from TypeScript/);
       await page.locator('#args').fill('[21]');
+      assert.equal(await run(), '42');
+      assert.match(await page.locator('#wit').inputValue(), /package local:app;/);
+      const generatedDownload = page.waitForEvent('download');
+      await page.locator('#download-wit').click();
+      assert.equal((await generatedDownload).suggestedFilename(), 'world.wit');
+      await page.locator('#adopt-wit').click();
+      assert.equal(await page.locator('#wit').getAttribute('readonly'), null);
+      const generatedContract = await page.locator('#wit').inputValue();
+      await page.locator('#wit').fill(generatedContract.replaceAll('f64', 's32'));
       assert.equal(await run(), '42');
       await page.locator('#folder-input').setInputFiles(fixtures);
       await page.waitForFunction(() => document.getElementById('status').textContent === 'Folder loaded');
       assert.equal(await page.locator('#source-file-picker').isVisible(), true);
       assert.equal(await page.locator('#entry-picker').isVisible(), true);
-      assert.equal(await page.locator('#wit-file-picker').isVisible(), false);
+      assert.equal(await page.locator('#wit-file-picker').isVisible(), true);
       assert.equal(await page.locator('#function').isDisabled(), true);
       assert.equal(await page.locator('#world-picker').isVisible(), true);
       assert.equal(await page.locator('#world').inputValue(), '');

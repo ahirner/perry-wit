@@ -32,7 +32,7 @@ impl Default for SdkOptions {
 #[derive(Debug, Clone)]
 pub struct SdkResult {
     pub types_path: PathBuf,
-    pub check_path: PathBuf,
+    pub check_path: Option<PathBuf>,
     pub tsconfig_path: Option<PathBuf>,
 }
 
@@ -45,11 +45,15 @@ pub fn generate_sdk_files(
 }
 
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
-    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
-    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    let artifacts = declarations(&resolve, world).map_err(|error| {
-        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::WitResolution)
-    })?;
+    let has_contract = options.wit_dir.exists();
+    let artifacts = if has_contract {
+        let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
+        let world =
+            crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
+        perry_contract::sdk::declarations(&resolve, world)?
+    } else {
+        perry_contract::sdk::generate(None, None)?
+    };
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
             "Failed to create SDK output directory at {}",
@@ -62,7 +66,11 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         fs::write(&path, artifact.contents)
             .with_context(|| format!("Failed to write declaration file at {}", path.display()))?;
     }
-    let dts_path = options.out_dir.join("world.d.ts");
+    let dts_path = options.out_dir.join(if has_contract {
+        "world.d.ts"
+    } else {
+        "runtime.d.ts"
+    });
 
     // Determine project root for tsconfig.json
     let project_root = options.project_root.clone().unwrap_or_else(|| {
@@ -80,14 +88,32 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     });
 
     let tsconfig_path = project_root.join("tsconfig.json");
-    let entry = project_root.join(&options.entry);
-    let entry_import = relative_path(&options.out_dir, &entry.with_extension(""))?;
-    let check_path = options.out_dir.join("implementation-check.ts");
-    let check = format!(
-        "import * as implementation from {};\nimport type {{ ComponentImplementation }} from './world';\nconst checked: ComponentImplementation = implementation;\nexport {{ checked }};\n",
-        serde_json::to_string(&entry_import)?
-    );
-    fs::write(&check_path, check)?;
+    let check_path = if has_contract {
+        let entry = project_root.join(&options.entry);
+        let entry_import = relative_path(&options.out_dir, &entry.with_extension(""))?;
+        let path = options.out_dir.join("implementation-check.ts");
+        let check = format!(
+            "import * as implementation from {};\nimport type {{ ComponentImplementation }} from './world';\nconst checked: ComponentImplementation = implementation;\nexport {{ checked }};\n",
+            serde_json::to_string(&entry_import)?
+        );
+        fs::write(&path, check)?;
+        Some(path)
+    } else {
+        for name in ["world.d.ts", "imports.d.ts", "implementation-check.ts"] {
+            let path = options.out_dir.join(name);
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        None
+    };
+    let declaration_entry = check_path.as_ref().unwrap_or(&dts_path);
+    let source_patterns = [
+        Path::new("src/**/*"),
+        Path::new("examples/**/*"),
+        Path::new("*.ts"),
+        &options.entry,
+    ];
     let compiler_options = || {
         serde_json::json!({
             "target": "ES2022",
@@ -105,8 +131,8 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let generated_tsconfig = if !tsconfig_path.exists() && options.initialize_tsconfig {
         let config = serde_json::json!({
             "compilerOptions": compiler_options(),
-            "include": ["src/**/*", "examples/**/*", "*.ts", ".perry/types/**/*"],
-            "files": [relative_path(&project_root, &check_path)?]
+            "include": source_patterns,
+            "files": [relative_path(&project_root, declaration_entry)?]
         });
         fs::write(&tsconfig_path, serde_json::to_string_pretty(&config)?).with_context(|| {
             format!(
@@ -123,8 +149,10 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
 
     let mut check_config = serde_json::json!({
         "compilerOptions": compiler_options(),
-        "files": ["implementation-check.ts"],
-        "include": [],
+        "files": [relative_path(&options.out_dir, declaration_entry)?],
+        "include": if has_contract { Vec::new() } else {
+            source_patterns.into_iter().map(|pattern| relative_path(&options.out_dir, &project_root.join(pattern))).collect::<Result<Vec<_>>>()?
+        },
         "exclude": []
     });
     if let Some(path) = &generated_tsconfig {
@@ -142,26 +170,12 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     })
 }
 
-/// Generate portable declaration contents independently of a project layout.
-pub(crate) fn declarations(
-    resolve: &wit_parser::Resolve,
-    world: wit_parser::WorldId,
-) -> Result<Vec<crate::api::Artifact>> {
-    Ok(perry_frontend::sdk::declarations(resolve, world)?
-        .into_iter()
-        .map(|declaration| crate::api::Artifact {
-            name: declaration.name,
-            contents: declaration.contents,
-        })
-        .collect())
-}
-
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
 pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
     fs::create_dir_all(out_dir)?;
     fs::write(
         out_dir.join("runtime.d.ts"),
-        perry_frontend::sdk::RUNTIME_DECLARATIONS,
+        perry_contract::sdk::RUNTIME_DECLARATIONS,
     )?;
     Ok(())
 }

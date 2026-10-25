@@ -5,6 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
+perry-source.workspace = true
+perry-wit-diagnostics.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+swc_common = "26.0"
 wit-parser.workspace = true
 
 [lints]

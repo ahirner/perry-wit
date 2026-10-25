@@ -1367,6 +1367,11 @@ dependencies = [
 name = "perry-contract"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "perry-source",
+ "perry-wit-diagnostics",
+ "serde_json",
+ "swc_common",
  "wit-parser 0.261.0",
 ]
 
@@ -1392,11 +1397,10 @@ dependencies = [
  "perry-contract",
  "perry-hir",
  "perry-parser",
+ "perry-source",
  "perry-wit-diagnostics",
  "pliron",
- "serde_json",
  "swc_common",
- "swc_ecma_parser",
  "swc_ecma_transforms_base",
  "swc_ecma_visit",
  "wit-parser 0.261.0",
@@ -1495,13 +1499,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-source"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "perry-parser",
+ "perry-wit-diagnostics",
+ "swc_common",
+ "swc_ecma_parser",
+ "swc_ecma_transforms_base",
+ "swc_ecma_visit",
+]
+
+[[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
 source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
 
 [[package]]
 name = "perry-wit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1516,6 +1533,7 @@ dependencies = [
  "perry-lower",
  "perry-mir",
  "perry-rt-build",
+ "perry-source",
  "perry-wit-diagnostics",
  "pliron",
  "serde",

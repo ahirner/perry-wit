@@ -2,7 +2,7 @@
 
 **Perry-WIT** compiles a static subset of TypeScript ahead-of-time into WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
-Rather than embedding a JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
+Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime and standard-library functions a program reaches.
 An integer `add` export compiles to 100 bytes, and a string `trim` export stays under 6 KiB.
 
@@ -17,30 +17,31 @@ An integer `add` export compiles to 100 bytes, and a string `trim` export stays 
 
 ## Quickstart
 
-A WIT world declares the exports. `kebab-case` WIT names map to `camelCase` TypeScript functions:
-
-```wit check=quickstart
-package example:filter@0.1.0;
-
-world auth-filter {
-  export verify-token: func(header: string) -> result<string, string>;
-}
-```
+Save a TypeScript entrypoint as `main.ts`:
 
 ```ts check=quickstart
-export function verifyToken(header: string): string {
-  if (!header.startsWith("Bearer ")) {
-    throw new Error("missing bearer prefix");
-  }
-  return header.slice(7).trim();
+export function greet(name: string): string {
+  return "Hello, " + name;
 }
 ```
 
 ```sh
-perry-wit gen-types --wit wit --world auth-filter --entry src/index.ts -o .perry/types
-perry-wit src/index.ts --wit wit --world auth-filter -o dist/auth.wasm
-wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'verify-token("Bearer tok_live_98a")' dist/auth.wasm
+perry-wit gen-types
+perry-wit main.ts
+wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'greet("World")' dist/main.wasm
 ```
+
+Compilation discovers `./wit` when present and otherwise derives the contract in memory. Top-level scripts become CLI commands; modules expose their named function exports. `number` maps to `f64`, and `bigint` maps to `s64` with range checks at the boundary.
+
+To save a contract for editing, generate it while compiling:
+
+```sh
+perry-wit main.ts --gen-wit --wit interfaces --world app
+# Edit interfaces/world.wit, then compile against it:
+perry-wit main.ts --wit interfaces --world app
+```
+
+`--gen-wit` defaults to `wit/world.wit` and world `app`. The Wasm output remains controlled by `-o` and defaults to `dist/<stem>.wasm`.
 
 The handbook's Authoring chapter covers commands, HTTP handlers and the project template.
 

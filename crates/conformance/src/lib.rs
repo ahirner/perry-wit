@@ -12,6 +12,7 @@ mod catalog;
 mod emit;
 mod fetch;
 mod handler;
+mod inference;
 mod scaling;
 mod strategies;
 mod streams;

@@ -278,7 +278,7 @@
           name ? "component",
           src,
           entry ? "src/index.ts",
-          wit ? "wit",
+          wit ? null,
           world ? null,
         }: pkgs.stdenv.mkDerivation {
           pname = name;
@@ -288,13 +288,13 @@
           buildPhase = ''
             export WASI_WIT_PATH="${wasiP3Wit}"
             perry-wit gen-types --no-tsconfig \
-              --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+              ${pkgs.lib.optionalString (wit != null) ("--wit " + pkgs.lib.escapeShellArg (toString wit))} \
               --entry ${pkgs.lib.escapeShellArg entry} \
               ${pkgs.lib.optionalString (world != null) ("--world " + pkgs.lib.escapeShellArg world)}
             tsc --noEmit -p .perry/types
             mkdir -p dist
             perry-wit ${pkgs.lib.escapeShellArg entry} \
-              --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+              ${pkgs.lib.optionalString (wit != null) ("--wit " + pkgs.lib.escapeShellArg (toString wit))} \
               ${if world != null then "--world " + pkgs.lib.escapeShellArg world else ""} \
               -o "dist/${name}.wasm"
           '';
@@ -304,14 +304,14 @@
           '';
         };
 
-        mkSdkShell = { wit ? "wit", world ? null, entry ? "src/index.ts", ... }:
+        mkSdkShell = { wit ? null, world ? null, entry ? "src/index.ts", ... }:
           pkgs.mkShell {
             name = "perry-wit-sdk";
             packages = [ perryWitBin nodejs pkgs.typescript wasmtimeCli pkgs.wasm-tools ];
             WASI_WIT_PATH = wasiP3Wit;
             shellHook = ''
               ${perryWitBin}/bin/perry-wit gen-types --no-tsconfig \
-                --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+                ${pkgs.lib.optionalString (wit != null) ("--wit " + pkgs.lib.escapeShellArg (toString wit))} \
                 --entry ${pkgs.lib.escapeShellArg entry} \
                 ${pkgs.lib.optionalString (world != null) ("--world " + pkgs.lib.escapeShellArg world)} \
                 || exit "$?"
@@ -324,8 +324,6 @@
           name = "template-task";
           src = ./template;
           entry = "src/index.ts";
-          wit = "wit";
-          world = "task";
         };
 
         # Check: Verify template component builds and can be invoked directly

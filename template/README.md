@@ -1,32 +1,20 @@
-# WASI 0.3 TypeScript Component Template
+# TypeScript Component Template
 
-Starter project for building WASI 0.3 WebAssembly components in TypeScript with Perry-WIT.
+Set `inputs.perry-wit.url` in `flake.nix` to a pinned compiler revision, such as `github:ahirner/perry-wit/<commit>`.
 
-Set `inputs.perry-wit.url` in `flake.nix` to a pinned compiler flake reference (for example `github:ahirner/perry-wit/<commit>` or `git+file:///absolute/path/to/perry-wit`). The flake inherits the compiler's pinned toolchain and WASI 0.3 WIT definitions directly, keeping consumer repositories limited to `flake.nix`, `tsconfig.json`, `wit/`, and `src/`.
+```sh
+nix develop --no-write-lock-file
+tsc --noEmit -p .perry/types
+nix build --no-write-lock-file
+wasmtime run -S p3=y -W component-model-async=y --invoke 'run-task("hello-world")' result/lib/my-task.wasm
+```
 
-## Quickstart
+The SDK shell provides the compiler, Node.js, TypeScript, Wasmtime, and `wasm-tools`. It generates runtime declarations for the editor. `nix build` type-checks `src/index.ts` and compiles its exported function using an inferred contract.
 
-1. **Enter the SDK shell:**
-   ```bash
-   nix develop --no-write-lock-file
-   ```
-   `mkSdkShell` provides Node.js, `perry-wit`, `tsc`, Wasmtime, and `wasm-tools`, and generates `.perry/types` for `wit/world.wit` and `src/index.ts` on entry.
+Compile directly with:
 
-2. **Type-check with `tsc`:**
-   ```bash
-   tsc --noEmit -p .perry/types
-   ```
+```sh
+perry-wit src/index.ts -o dist/my-task.wasm
+```
 
-3. **Build the component:**
-   ```bash
-   nix build --no-write-lock-file
-   ```
-   Or compile directly with `perry-wit`:
-   ```bash
-   perry-wit src/index.ts --wit wit --world task -o dist/my_task.wasm
-   ```
-
-4. **Run with Wasmtime:**
-   ```bash
-   wasmtime run -S p3=y -W component-model-async=y --invoke 'run-task("hello-world")' result/lib/my-task.wasm
-   ```
+To create an editable contract, run `perry-wit src/index.ts --gen-wit`. Edit `wit/world.wit`, then run `perry-wit gen-types` and compile again. Ordinary compilation discovers the authored `wit` directory automatically.

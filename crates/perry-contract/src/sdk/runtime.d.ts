@@ -95,6 +95,8 @@ declare module "node:fs/promises" {
 }
 
 declare module "perry:types" {
+  export type f32 = number;
+  export type f64 = number;
   export type u8 = number;
   export type s8 = number;
   export type u16 = number;

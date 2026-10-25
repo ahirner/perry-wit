@@ -141,11 +141,27 @@ impl Guest for Compiler {
         api::compile_core(&program.into())
             .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
     }
-    fn generate_sdk(
-        wit: WitInput,
+    fn generate_wit(
+        program: Program,
         world: Option<String>,
     ) -> Result<Vec<Artifact>, Vec<Diagnostic>> {
-        api::generate_sdk(&wit.into(), world.as_deref())
+        api::generate_wit(&program.into(), world.as_deref())
+            .map(|artifacts| {
+                artifacts
+                    .into_iter()
+                    .map(|artifact| Artifact {
+                        name: artifact.name,
+                        contents: artifact.contents,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+    }
+    fn generate_sdk(
+        wit: Option<WitInput>,
+        world: Option<String>,
+    ) -> Result<Vec<Artifact>, Vec<Diagnostic>> {
+        api::generate_sdk(wit.map(Into::into).as_ref(), world.as_deref())
             .map(|artifacts| {
                 artifacts
                     .into_iter()

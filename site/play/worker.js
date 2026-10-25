@@ -65,7 +65,13 @@ self.onmessage = async ({ data }) => {
     phase = 'compile';
     const started = performance.now();
     const api = compiler.api;
-    const compiled = api.compile(data.program, data.wit, data.options);
+    let wit = data.wit;
+    if (!wit) {
+      const artifacts = api.generateWit(data.program, data.options.world);
+      send('generated-wit', { artifacts });
+      wit = { application: { tag: 'sources', val: artifacts.map(file => ({ name: file.name, contents: file.contents })) }, dependencies: [] };
+    }
+    const compiled = api.compile(data.program, wit, data.options);
     const bytes = compiled.component.stripped;
     send('compiled', { bytes, coreSize: compiled.core.length, allocationReport: compiled.allocationReport, elapsed: performance.now() - started });
     progress('Inspecting component…');

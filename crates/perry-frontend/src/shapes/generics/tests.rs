@@ -11,7 +11,7 @@ fn unproductive_alias_expansion_is_bounded() -> Result<()> {
         };
         source.push_str(&format!("type Chain{index} = {next};"));
     }
-    let ast = crate::hir_compat::parse(&source, "resolution.ts")?;
+    let ast = perry_source::parse(&source, "resolution.ts")?;
     let module = perry_hir::lower_module(&ast, "main", "resolution.ts")?;
     let ctx = Context::new();
     let foreign = HashMap::new();
