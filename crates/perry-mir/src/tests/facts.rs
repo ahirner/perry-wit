@@ -229,7 +229,6 @@ builtin.module @lengths { ^module():
         set_exported(ctx, &run);
         let read = first::<ArrayGetOp>(ctx, &run);
         let array = read.deref(ctx).get_operand(0);
-        let index = read.deref(ctx).get_operand(1);
         let mut analyses = AnalysisManager::default();
         {
             let cached = analyses.get_analysis::<ProgramFacts>(module, ctx)?;
@@ -238,11 +237,6 @@ builtin.module @lengths { ^module():
                 assert_eq!(
                     facts.array_length(&run, array),
                     Some(expected),
-                    "{mutation}"
-                );
-                assert_eq!(
-                    facts.array_in_bounds(ctx, &run, array, index),
-                    expected.0 > 0,
                     "{mutation}"
                 );
             }

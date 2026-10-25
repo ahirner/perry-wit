@@ -144,7 +144,7 @@ export async function recheckAliases(input: ReadableStream<Uint8Array>): Promise
     const reader = input.getReader({mode: "byob"});
     const first = new Uint8Array(8);
     const alias = first.subarray(0);
-    for (let i = 0; i < first.length; i++) {
+    for (let i = 0; i < 8; i++) {
         const pending = consume(reader, alias);
         if (first[i] !== undefined) throw 1;
         await pending;
@@ -153,11 +153,29 @@ export async function recheckAliases(input: ReadableStream<Uint8Array>): Promise
     }
     const second = new Uint8Array(8);
     const other = second.subarray(0);
-    for (let i = 0; i < second.length; i++) {
+    for (let i = 0; i < 8; i++) {
         const pending = reader.read(other);
         if (second[i] !== undefined) throw 3;
         await pending;
         if (second[i] !== undefined) throw 4;
+        break;
+    }
+    const third = new Uint8Array(8);
+    const view = third.subarray(0);
+    for (let i = 0; i < third.length; i++) {
+        const pending = consume(reader, view);
+        if (third[i] !== undefined) throw 5;
+        await pending;
+        if (third[i] !== undefined) throw 6;
+        break;
+    }
+    const fourth = new Uint8Array(8);
+    const last = fourth.subarray(0);
+    for (let i = 0; i < fourth.length; i++) {
+        const pending = reader.read(last);
+        if (fourth[i] !== undefined) throw 8;
+        await pending;
+        if (fourth[i] !== undefined) throw 9;
         break;
     }
     await reader.cancel(); reader.releaseLock(); return 7;

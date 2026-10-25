@@ -70,8 +70,9 @@ Each numeric SSA value carries an optional integer type (width, signedness) and 
 - **Bitwise results**: `&`, `|`, `^`, `~`, `<<`, `>>` and `Math.imul` produce `s32` values and `>>>` produces `u32`, so they lower to `i32` instructions even when their operands are unrefined `f64` values, which convert with `ToInt32`. When every use needs only the low bits, refined arithmetic feeding them, such as `(a * b) | 0` on `u32` values, computes in `i32`. This deliberately preserves integer wrapping before conversion: at `a = b = 4294967295`, the result is `1`, whereas JavaScript rounds the product before converting and returns `0`. A use that observes the full value, such as arithmetic or a comparison, requires a wider register when the result does not fit; a bitwise consumer then truncates at its own use.
 - **Register-width intermediates**: Required widths stay at register size (32 or 64 bits) during computation. Narrowing to 8 or 16 bits happens only at the WIT boundary.
 - **Literals**: An integer literal adopts a required width only when its value fits. Larger literals stay in `f64` until converted at the boundary.
-- **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type. A specialized loop counter wraps at 32 or 64 bits on overflow.
-- **Bounds checks**: When an index interval proves `0 <= i < length`, the array read elides its bounds check.
+- **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type, or to unbounded endpoints for unrefined numbers. A specialized loop counter wraps at 32 or 64 bits on overflow.
+- **Guarded ranges**: Dominating comparisons of integral operands refine index ranges through the numeric solver’s shared arithmetic and integer bounds. Derived arithmetic and cast ranges must fit the result type. Addition and subtraction preserve one-sided bounds; arithmetic that may produce `NaN` stays unknown.
+- **Bounds checks**: A proof of `0 <= i < length` permits unchecked array reads and stores, and `Uint8Array` reads. Array proofs account for mutations through aliases. Byte-view proofs use length comparisons or constructor, copy and subarray extents, and require the view to stay attached on every path to the access. Calls, awaits, foreign operations and BYOB reads invalidate these byte-view proofs.
 
 #### Type Join
 

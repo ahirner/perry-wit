@@ -88,21 +88,6 @@ impl ProgramFacts {
         };
         Some((length.lower.try_into().ok()?, length.upper.try_into().ok()?))
     }
-
-    pub(crate) fn array_in_bounds(
-        &self,
-        ctx: &Context,
-        function: &FuncOp,
-        array: Value,
-        index: Value,
-    ) -> bool {
-        let Some((minimum, _)) = self.array_length(function, array) else {
-            return false;
-        };
-        let state = &self.states[self.generic[&function.get_operation()]];
-        crate::optional::optional_value(ctx, index.get_type(ctx)).is_none()
-            && matches!(state.range(index), Range::Bounds(Interval { lower: 0.., upper }) if upper < i128::from(minimum))
-    }
 }
 
 fn payload(ctx: &Context, mut ty: TypeHandle) -> TypeHandle {

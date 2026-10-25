@@ -1,10 +1,10 @@
 use super::{
     ArgumentDomain, Constraint, Demand, Fact, Integer, Interval, Key, Outcomes, Range,
     Representation, ResultDomain, Solver, ValueFacts, Work, arithmetic_range, comparison_domain,
-    constant_range, declared, integer_arithmetic, literal,
+    constant_range, declared, guards::orders, integer_arithmetic, literal,
 };
 use crate::{
-    attrs::{BinaryKind, CompareKind},
+    attrs::BinaryKind,
     calls::AsyncCallOp,
     control::CondBrOp,
     foreign::Phase,
@@ -17,7 +17,7 @@ use pliron::{
     builtin::{op_interfaces::BranchOpInterface, types::IntegerType},
     context::{Context, Ptr},
     identifier::Identifier,
-    op::{Op, op_cast},
+    op::op_cast,
     operation::Operation,
     result::Result,
     r#type::Typed,
@@ -210,7 +210,7 @@ impl Solver {
             return ranges;
         };
         let mut block = origin;
-        let (branch, on_true) = loop {
+        let order = loop {
             if block.num_preds(ctx) != 1 {
                 return ranges;
             }
@@ -221,61 +221,36 @@ impl Solver {
                 return ranges;
             };
             let operation = terminator.deref(ctx);
-            if let Some(branch) = Operation::get_op::<CondBrOp>(terminator, ctx) {
-                if operation.get_successor(0) == operation.get_successor(1) {
+            if Operation::get_op::<CondBrOp>(terminator, ctx).is_some() {
+                let Some(order) = orders(ctx, predecessor)
+                    .into_iter()
+                    .flatten()
+                    .find(|order| order.target == block)
+                else {
                     return ranges;
-                }
-                break (branch, operation.get_successor(0) == block);
+                };
+                break order;
             }
             if operation.get_num_successors() != 1 || predecessor == origin {
                 return ranges;
             }
             block = predecessor;
         };
-        let Some(compare) = branch
-            .get_operand_condition(ctx)
-            .defining_op()
-            .and_then(|op| Operation::get_op::<CompareOp>(op, ctx))
-        else {
-            return ranges;
-        };
-        let comparison = compare.get_operation().deref(ctx);
         for (input, range) in inputs.into_iter().zip(&mut ranges) {
-            let Range::Bounds(interval) = range else {
+            if !matches!(range, Range::Bounds(_)) {
                 continue;
-            };
-            let (bound, reversed) = if input == comparison.get_operand(0) {
-                (comparison.get_operand(1), false)
-            } else if input == comparison.get_operand(1) {
-                (comparison.get_operand(0), true)
+            }
+            let bound = if input == order.smaller {
+                order.larger
+            } else if input == order.larger {
+                order.smaller
             } else {
                 continue;
             };
             let Some(bound) = bound.defining_op().and_then(|op| constant_range(ctx, op)) else {
                 continue;
             };
-            if bound.lower != bound.upper {
-                continue;
-            }
-            let (upper, strict) = match (compare.kind(ctx), on_true) {
-                (CompareKind::Lt, true) | (CompareKind::Ge, false) => (!reversed, true),
-                (CompareKind::Le, true) | (CompareKind::Gt, false) => (!reversed, false),
-                (CompareKind::Gt, true) | (CompareKind::Le, false) => (reversed, true),
-                (CompareKind::Ge, true) | (CompareKind::Lt, false) => (reversed, false),
-                _ => continue,
-            };
-            if upper {
-                interval.upper = interval
-                    .upper
-                    .min(bound.upper.saturating_sub(i128::from(strict)));
-            } else {
-                interval.lower = interval
-                    .lower
-                    .max(bound.lower.saturating_add(i128::from(strict)));
-            }
-            if interval.lower > interval.upper {
-                *range = Range::Bottom;
-            }
+            *range = order.constrain(input, *range, bound);
         }
         ranges
     }
