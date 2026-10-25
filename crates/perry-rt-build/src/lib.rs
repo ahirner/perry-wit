@@ -85,7 +85,7 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
 }
 
 fn cargo(runtime: &Path) -> Command {
-    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let mut command = Command::new(env::var_os("CARGO").expect("Cargo did not set CARGO"));
     command
         .current_dir(runtime)
         .env_remove("RUSTFLAGS")

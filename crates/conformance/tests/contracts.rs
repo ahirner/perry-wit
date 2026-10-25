@@ -11,7 +11,7 @@ use proptest::{
     test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunner},
 };
 use proptest_state_machine::ReferenceStateMachine;
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{fs, process::Command, time::Duration};
 
 #[test]
 fn registry_owns_regressions_and_partition_witnesses() -> Result<()> {
@@ -71,8 +71,7 @@ fn state_machine_shrinking_preserves_valid_serializable_traces() {
 #[test]
 fn injected_faults_shrink_and_replay_through_the_execution_adapter() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
-    let executor = Executor::new(executable.clone(), Limits::default());
+    let executor = Executor::new(Limits::default());
     for (id, fault) in [
         ("wasi.execution.detect_value_fault", Fault::Value),
         ("wasi.execution.detect_trace_fault", Fault::Trace),
@@ -122,7 +121,7 @@ fn injected_faults_shrink_and_replay_through_the_execution_adapter() -> Result<(
                 versions: serde_json::json!({}),
             })?,
         )?;
-        runner::replay(&replay, executable.clone())?;
+        runner::replay(&replay)?;
     }
     Ok(())
 }
@@ -146,7 +145,6 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
         Duration::from_millis(100),
     )?;
     assert!(stalled.timed_out && !stalled.success());
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
     let case = Case::Program(Program {
         expression: Number::Integer(0),
         form: Form::Timer,
@@ -168,7 +166,7 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
         })?,
     )?;
     let start = std::time::Instant::now();
-    let error = runner::replay(&slow_path, executable.clone()).unwrap_err();
+    let error = runner::replay(&slow_path).unwrap_err();
     ensure!(
         error
             .to_string()
@@ -190,7 +188,7 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
             versions: serde_json::json!({}),
         })?,
     )?;
-    runner::replay(&ok_path, executable)?;
+    runner::replay(&ok_path)?;
     Ok(())
 }
 
@@ -220,11 +218,7 @@ fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Re
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("metamorphic.json");
     fs::write(&path, serde_json::to_vec(&saved)?)?;
-    let error = runner::replay(
-        &path,
-        PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance")),
-    )
-    .unwrap_err();
+    let error = runner::replay(&path).unwrap_err();
     ensure!(
         error
             .to_string()
@@ -236,23 +230,19 @@ fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Re
 
 #[test]
 fn orthogonal_aggregate_and_collection_generators_and_metamorphic_invariants() -> Result<()> {
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance"));
     for (select, seed) in [
         ("ecma.aggregate.specialization", 42),
         ("ecma.aggregate.specialization", 43),
         ("ecma.collection.iterators", 42),
     ] {
-        runner::campaign(
-            Settings {
-                select: select.into(),
-                cases: 6,
-                depth: 3,
-                seed,
-                shrink_limit: 32,
-                limits: Limits::default(),
-            },
-            executable.clone(),
-        )?;
+        runner::campaign(Settings {
+            select: select.into(),
+            cases: 6,
+            depth: 3,
+            seed,
+            shrink_limit: 32,
+            limits: Limits::default(),
+        })?;
     }
     Ok(())
 }

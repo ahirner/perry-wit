@@ -235,7 +235,7 @@ fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Re
     )
 }
 
-pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
+pub fn campaign(settings: Settings) -> Result<PathBuf> {
     settings.validate()?;
     let contracts = registry::contracts(settings.depth)?;
     ensure!(
@@ -291,7 +291,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
             })
             .collect::<Result<_>>()?,
     };
-    let executor = Executor::new(executable, settings.limits);
+    let executor = Executor::new(settings.limits);
     write_json(&output.join("report.json"), &report)?;
     for (index, contract) in contracts.iter().enumerate() {
         let result = &mut report.contracts[index];
@@ -430,7 +430,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
     Ok(directory)
 }
 
-pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
+pub fn replay(path: &Path) -> Result<()> {
     let saved: SavedCase = serde_json::from_slice(&fs::read(path)?)?;
     saved.settings.validate()?;
     let contracts = registry::contracts(saved.settings.depth)?;
@@ -444,7 +444,7 @@ pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
         .prefix("replay-")
         .tempdir_in(output)?
         .keep();
-    let executor = Executor::new(executable, saved.settings.limits);
+    let executor = Executor::new(saved.settings.limits);
     let outcome = std::iter::once((&saved.case, &saved.source))
         .chain(saved.metamorphic.iter().map(|v| (&v.case, &v.source)))
         .enumerate()

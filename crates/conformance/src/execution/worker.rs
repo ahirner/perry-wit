@@ -1,5 +1,5 @@
-//! The isolated worker adapter: compiles one case and runs the component under wasmtime.
-use super::{FactLimits, Fault, Limits, Observation, Outcome, Request, async_wit, command, number};
+//! Compiles cases and executes components under Wasmtime.
+use super::{FactLimits, Fault, Limits, Observation, Outcome, async_wit, command, number};
 use crate::{
     fetch::FetchCase,
     handler::HandlerCase,
@@ -29,16 +29,6 @@ const OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 type ResolvedWorld = Arc<(wit_parser::Resolve, wit_parser::WorldId)>;
 type ComponentCacheKey = (String, FactLimits, String);
 type ComponentCacheValue = std::result::Result<(Component, usize), Outcome>;
-
-pub fn worker(request: &Path, destination: &Path) -> Result<()> {
-    let Request { case, limits } = serde_json::from_slice(&fs::read(request)?)?;
-    let directory = request.parent().context("worker directory")?;
-    let path = directory.join("case.ts");
-    let source = fs::read_to_string(&path)?;
-    let outcome = execute_in_process(&case, &source, directory, &path, &limits)?;
-    fs::write(destination, serde_json::to_vec_pretty(&outcome)?)?;
-    Ok(())
-}
 
 pub(super) fn execute_in_process(
     case: &Case,

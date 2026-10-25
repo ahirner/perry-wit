@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use perry_conformance::{
-    execution, registry,
+    registry,
     runner::{self, Settings},
 };
 use std::{env, path::PathBuf};
@@ -9,15 +9,9 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let action = args.next().unwrap_or_else(|| "check".into());
     match action.as_str() {
-        "worker" => {
-            let request = PathBuf::from(args.next().context("worker request")?);
-            let destination = PathBuf::from(args.next().context("worker destination")?);
-            execution::worker(&request, &destination)
-        }
-        "replay" => runner::replay(
-            &PathBuf::from(args.next().context("replay requires a saved case")?),
-            env::current_exe()?,
-        ),
+        "replay" => runner::replay(&PathBuf::from(
+            args.next().context("replay requires a saved case")?,
+        )),
         "list" => {
             println!(
                 "{}",
@@ -52,7 +46,7 @@ fn main() -> Result<()> {
                     _ => bail!("unknown option {flag}"),
                 }
             }
-            runner::campaign(settings, env::current_exe()?)?;
+            runner::campaign(settings)?;
             Ok(())
         }
         _ => bail!(

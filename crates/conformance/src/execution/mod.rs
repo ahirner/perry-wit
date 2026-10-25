@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow,
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,7 +19,6 @@ use std::{
 mod oracle;
 mod worker;
 use oracle::{encoded_inputs, is_typechecked, link_handler_types, run_node_oracle, run_tsc_batch};
-pub use worker::worker;
 
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -81,7 +79,7 @@ pub(crate) struct Observation {
     pub(crate) value: String,
     pub(crate) trace: Vec<String>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "stage", content = "detail", rename_all = "snake_case")]
 pub(crate) enum Outcome {
     Values {
@@ -91,7 +89,6 @@ pub(crate) enum Outcome {
         max_fuel_used: u64,
         component_bytes: usize,
         /// Fuel consumed by each call in input order, populated for component executions.
-        #[serde(default)]
         fuel_used: Vec<u64>,
     },
     Command(Captured),
@@ -147,7 +144,7 @@ impl std::fmt::Debug for Outcome {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Captured {
     pub exit: Option<i32>,
     pub(crate) stdout: Vec<u8>,
@@ -159,7 +156,7 @@ impl Captured {
         !self.timed_out && self.exit == Some(0)
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct Evidence {
     pub(crate) oracle: Outcome,
     pub(crate) component: Outcome,
@@ -224,13 +221,6 @@ pub fn check_fault(case: &Case, evidence: &Evidence) -> Result<()> {
     }
     Ok(())
 }
-/// Input payload for the worker, borrowed during serialization and owned on deserialization.
-#[derive(Serialize, Deserialize)]
-struct Request<'a> {
-    case: Cow<'a, Case>,
-    limits: Limits,
-}
-
 pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
     if let Some((first, rest)) = evidence.split_first()
         && let Outcome::Values {
@@ -388,7 +378,7 @@ pub struct Executor {
     batch_tsc: Mutex<Option<Vec<(PathBuf, String)>>>,
 }
 impl Executor {
-    pub fn new(_executable: PathBuf, limits: Limits) -> Self {
+    pub fn new(limits: Limits) -> Self {
         Self {
             limits,
             batch_tsc: Mutex::new(None),
@@ -439,9 +429,8 @@ impl Executor {
 
         let (first_oracle, first_component, rest_components) =
             thread::scope(|scope| -> Result<_> {
-                let oracle_handle = spawn_worker(scope, || {
-                    self.run_oracle(first_variant, &first_source, &first_dir)
-                })?;
+                let oracle_handle =
+                    spawn_worker(scope, || self.run_oracle(first_variant, &first_dir))?;
                 let first_comp_handle = spawn_worker(scope, || {
                     self.run_component(first_variant, &first_source, &first_dir)
                 })?;
@@ -507,7 +496,7 @@ impl Executor {
     ) -> Result<Evidence> {
         self.prepare_directory(case, source, directory, true)?;
         let (oracle, (component, control)) = thread::scope(|scope| -> Result<_> {
-            let oracle_handle = spawn_worker(scope, || self.run_oracle(case, source, directory))?;
+            let oracle_handle = spawn_worker(scope, || self.run_oracle(case, directory))?;
             let comp_handle = spawn_worker(scope, || self.run_component(case, source, directory))?;
             let oracle = oracle_handle
                 .join()
@@ -577,7 +566,7 @@ impl Executor {
         run_tsc_batch(&[(path.to_path_buf(), source.to_owned())], directory)
     }
 
-    fn run_oracle(&self, case: &Case, _source: &str, directory: &Path) -> Result<Outcome> {
+    fn run_oracle(&self, case: &Case, directory: &Path) -> Result<Outcome> {
         let path = directory.join("case.ts");
         if matches!(case, Case::Reject { .. }) {
             Ok(Outcome::Compile("expected source-domain rejection".into()))
