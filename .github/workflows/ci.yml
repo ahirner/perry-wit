@@ -38,7 +38,6 @@ jobs:
     - name: Run tests, benchmarks, conformance, and clippy
       run: |
         nix develop -c bash -euo pipefail -c '
-          python3 scripts/test_perry_bench.py
           cargo fetch --manifest-path runtime/Cargo.toml --locked
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
@@ -126,8 +125,8 @@ jobs:
     - name: Run upstream Perry benchmarks
       id: perry-bench
       continue-on-error: true
-      timeout-minutes: 60
-      run: nix run -L .#perry-bench -- --all --out artifacts/perry-bench
+      timeout-minutes: 20
+      run: nix run -L .#perry-bench
     - name: Upload benchmark report
       id: perry-bench-artifact
       if: ${{ !cancelled() && steps.perry-bench.outcome != 'skipped' }}

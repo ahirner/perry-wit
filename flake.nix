@@ -104,7 +104,7 @@
         # Common source filter for Rust crate builds
         commonFilter = path: type:
           authoredSourceFilter path type
-          && !(builtins.elem path (map toString [ ./scripts/perry-bench.py ./scripts/test_perry_bench.py ])) && (
+          && path != toString ./scripts/perry-bench.py && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
@@ -399,13 +399,13 @@
               export PERRY_BENCHMARK_SOURCE=${perrySource}
               export PERRY_BENCHMARK_REVISION=${perryRevision}
               export WASI_WIT_PATH=${wasiP3Wit}
-              exec python3 ${./scripts/perry-bench.py} "$@"
+              exec python3 ${./scripts/perry-bench.py}
             '';
           }}/bin/perry-bench";
         };
 
         lib = {
-          inherit buildComponent mkSdkShell perrySource perryRevision;
+          inherit buildComponent mkSdkShell;
         };
 
         checks = {
@@ -436,8 +436,6 @@
           ];
 
           WASI_WIT_PATH = wasiP3Wit;
-          PERRY_BENCHMARK_SOURCE = perrySource;
-          PERRY_BENCHMARK_REVISION = perryRevision;
 
           shellHook = ''
             export CARGO_TARGET_DIR="$PWD/target"

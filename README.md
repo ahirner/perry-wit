@@ -74,25 +74,17 @@ nix build .#example-merge-task  # reference component
 
 ### Upstream benchmarks
 
-The benchmark app reads Perry's original TypeScript entry files from the same Git revision as `perry-hir` in `Cargo.lock`. It compiles each entry as a WASI command and compares it with Node, using Perry's timing contracts and stdout verifier. No sibling checkout or separate Perry flake input is required.
+The benchmark app runs the official full regression suite selected by Perry's `benchmarks/compare.sh`, using the same Git revision as `perry-hir` in `Cargo.lock`. It compiles the original TypeScript as WASI commands and compares them with Node, importing Perry's timing and stdout verification functions.
 
 ```sh
-nix run .#perry-bench -- --list
-nix run .#perry-bench -- bench_fibonacci suite/05_fibonacci --runs 3
-nix run .#perry-bench -- --all
+nix run .#perry-bench
 ```
 
-Every `.ts` file under upstream `benchmarks/` gets a report row, including specialized directories, helper fixtures, compilation failures, crashes and timeouts. Node and Wasmtime are attempted independently. Entries without upstream timing/output contracts use process wall time and remain unchecked. Unchecked outputs and zero timings have no speedup claims.
+Every suite entry gets a report row, including compilation failures, crashes and timeouts. Node runs even if compilation fails. The command takes no options and writes `summary.md`, `results.json`, logs and components to `artifacts/perry-bench/`.
 
-`summary.md`, `results.json`, logs and components go under `artifacts/perry-benchmarks/` (`--out` selects a new directory). Each engine gets three fresh processes, alternating order and stopping after its first failure. Node runs the original TypeScript, preserving relative imports; process wall times include type stripping. Internal timings preserve upstream warmups. Wasmtime's compilation cache is disabled. Peak RSS measures the whole process, including runtime/JIT memory. `--timeout` bounds each subprocess to 60 seconds. Fuel is omitted because the Wasmtime CLI does not report consumed fuel.
+Each engine gets three fresh processes, alternating order, with a 60-second timeout per process. Internal timings preserve upstream warmups; Wasmtime's compilation cache is disabled. Ratios require matching outputs and positive timings. Peak RSS measures the whole process, including runtime/JIT memory. Fuel is omitted because the Wasmtime CLI does not report consumed fuel.
 
-To benchmark an already-built compiler inside `nix develop`:
-
-```sh
-python3 scripts/perry-bench.py suite/05_fibonacci --compiler ./target/debug/perry-wit
-```
-
-The development shell supplies the locked source. `--source` selects another checkout; `--compile-only` probes compilation. A separate CI job depends on successful `flake-build` jobs and restores their outputs from Cachix. It runs all entries for non-draft PRs, including `ready_for_review`. Benchmark failures are non-blocking and remain in the job-summary table and linked `perry-bench` artifact. Local untracked sources require `nix run path:.#perry-bench` or `nix develop path:.`.
+A separate CI job depends on successful `flake-build` jobs and restores their outputs from Cachix. It runs for non-draft PRs, including `ready_for_review`. Benchmark failures are non-blocking and remain in the job-summary table and linked `perry-bench` artifact.
 
 ## Contributing
 
