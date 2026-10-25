@@ -2,9 +2,8 @@
 
 `perry-conformance` tests Perry-WIT differentially against Node.js.
 A contract names one capability, such as `ecma.string.operations`, and supplies directed cases plus a property-based generator (`proptest`) of TypeScript programs and inputs.
-Executable cases and each of their metamorphic variants run independently as compiled components in a Wasmtime host with WASI 0.3, fuel metering and memory limits. Each variant also runs under Node.js, except exact-integer aggregate cases beyond 2^53, which use an explicit expected-value model.
-The runner checks both that each component agrees with its own oracle and that transformations preserve return values, evaluation traces and standard streams. Rejection cases must retain the required diagnostic across transformations.
-Numeric programs use extracted-temporary, reordered-declaration, branch, loop, loop-carried and exception forms; aggregate and collection cases also reorder declarations that affect specialization or iterator state. Array inference uses seven forms: annotated storage, alias chains, branches, loops, extracted values, helper-return chains and indexed appends. Cases use at most seven writes and four aliases, with three calls per form. Conflicting writes must remain rejected when moved through temporaries or control flow.
+Executable cases and their metamorphic variants run as compiled components in a Wasmtime host with WASI 0.3, fuel metering and memory limits, and under Node.js, except aggregate cases with exact integers beyond 2^53, which use an expected-value model.
+The runner checks that each variant matches its oracle and that transformations preserve return values, evaluation traces and standard streams. Rejection cases and their variants must report the required diagnostic.
 
 ## Expected Outcomes
 

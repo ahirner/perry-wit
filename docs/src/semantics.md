@@ -14,10 +14,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 - Arrays (`T[]`) are dense and homogeneous.
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
-
-Fresh empty arrays, including `any[]`, infer a static element type from uniform `push` arguments and indexed writes across branches, loops and direct aliases. Nested records and arrays retain their structure; string literals widen to `string`. Serialization with `JSON.stringify` without a replacer preserves this inference.
-
-Conflicting writes or an absence of writes leave the element type unresolved. Add an explicit element type when returning the array, passing it to a function, capturing it in a closure, reassigning an alias, using other array methods, or reading mutable aggregate elements. These uses require information beyond the mutation scan.
+- Fresh empty arrays (`[]`, including `any[]`) infer a static element type from uniform `push` calls and numeric-indexed writes across branches, loops and non-reassigned local aliases, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, primitive index reads and `JSON.stringify` without a replacer; other uses, conflicting writes or no writes require an explicit element type.
 
 ## Strings
 
