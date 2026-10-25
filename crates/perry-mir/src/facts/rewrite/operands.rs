@@ -184,14 +184,7 @@ fn intrinsic_operand_types(
     };
     let res_ty = || op.deref(ctx).get_result(0).get_type(ctx);
     match intrinsic {
-        crate::intrinsics::Intrinsic::MathImul
-        | crate::intrinsics::Intrinsic::BitAnd
-        | crate::intrinsics::Intrinsic::BitOr
-        | crate::intrinsics::Intrinsic::BitXor
-        | crate::intrinsics::Intrinsic::BitNot
-        | crate::intrinsics::Intrinsic::ShiftLeft
-        | crate::intrinsics::Intrinsic::ShiftRight
-        | crate::intrinsics::Intrinsic::ShiftRightUnsigned => {
+        _ if intrinsic.int32_operands() => {
             for (expected, arg) in expected.iter_mut().zip(op.deref(ctx).operands()) {
                 let ty = arg.get_type(ctx);
                 if Integer::from_type(ctx, ty).is_some() {

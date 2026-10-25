@@ -144,6 +144,12 @@ impl Intrinsic {
             )
         )
     }
+
+    /// Bitwise operators and `Math.imul`: operands convert with `ToInt32` or `ToUint32`, so
+    /// the result is a 32-bit integer whatever the operand types.
+    pub(crate) fn int32_operands(self) -> bool {
+        self.policy().numeric == Some(BuiltinContract::Signed32) || self == Self::ShiftRightUnsigned
+    }
 }
 
 /// Builtin numeric and value-range contract for `ProgramFacts`.
