@@ -12,10 +12,10 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Arrays
 
-- Arrays (`T[]`) are dense and homogeneous.
+- Arrays (`T[]`) are dense. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape.
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
-- Fresh empty arrays (`[]`, including `any[]`) infer a static element type from uniform `push` calls and numeric-indexed writes across branches, loops and non-reassigned local aliases, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, primitive index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer; other uses, conflicting writes or no writes require an explicit element type.
+- Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer; other uses, unresolved writes or no writes require an explicit element type.
 
 ## Strings
 

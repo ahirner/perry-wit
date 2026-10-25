@@ -53,13 +53,11 @@ The frontend returns a read-only program and metadata. Record identity and funct
 
 ## Aggregate inference
 
-The frontend collects writes and aliases for fresh empty arrays and dictionaries in one pass. Numeric indices select array storage; string keys and named properties select dictionary storage. Observations distinguish no writes, a finite set of value types and unknown contents. Uniform writes retain their element representation. Finite mixed array writes select a value union; unresolved `any` placeholders in local bindings and helper returns carry the inferred type across calls. Unknown writes and unmodelled mutations remain outside this inference.
+Fresh empty arrays and dictionaries share one write and alias analysis in the frontend. Numeric indices select array storage; string keys and named properties select dictionary storage. Writes resolve to no observations, a finite set of value types or unknown contents. Arrays with several value types, and the `any` bindings and helper returns that carry them, become value unions; dictionaries need uniform values.
 
-Bindings lower to the existing MIR arrays and records. Dictionaries use arrays of typed key-value entries, so their values participate in the same allocation identities, alias propagation and slot facts as array elements. The MIR heap analysis tracks openness independently of the declared type: typed JSON records can retain undeclared fields, and storing them inside an inferred aggregate preserves that provenance. Unknown JSON sources cannot become fresh inferred dictionaries merely because later writes are typed.
+Dictionaries lower to arrays of typed key-value entries, so their values share the allocation identities, alias propagation and slot facts of array elements. Heap analysis tracks JSON openness independently of the declared type: a typed JSON record stored in an inferred aggregate keeps its undeclared fields.
 
-Finite value unions support numbers, strings, booleans and one plain record shape, with null and undefined represented independently. They reuse variant storage: an immutable tag, an eight-byte payload and a traced owner for references. Addition, equality, truthiness and property reads dispatch on the active type; checked payload access also supports `typeof` narrowing. Record alternatives preserve identity and mutation through aliases. JSON descriptors encode the active value directly and preserve unknown fields on record payloads; copy analysis treats these payloads conservatively.
-
-Mixed arrays allocate tagged storage from the start. Numeric arrays retain their existing representation and bounds analysis. Packed storage with widening transitions, key interning and shared object shapes remain separate optimizations.
+A value union is a variant whose cases are numbers, strings, booleans and at most one plain record shape, with null and undefined as absence states; `number | string` is the common case. Each value stores an immutable tag, an eight-byte payload and a traced owner. Operators, property reads and `typeof` narrowing dispatch on the tag, record cases keep their identity, and JSON descriptors encode the active case. Mixed arrays box every element; packed numeric storage with widening transitions is not implemented.
 
 ## Memory
 
