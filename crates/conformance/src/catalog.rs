@@ -566,6 +566,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         domain: "Up to seven writes and four aliases over numbers, strings, booleans, records and nested arrays; annotations versus alias chains, branches, loops, temporaries, helper-return chains and indexed appends; three calls compare exact serialized contents and evaluation traces; conflicting writes remain rejected through temporaries and control flow; conservative escape boundaries",
         partitions: &[
             "uniform-records-and-aliases",
+            "dependent-arrays",
             "mixed-index-writes",
             "conflicting-alias",
             "conflicting-branch",

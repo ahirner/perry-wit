@@ -309,7 +309,7 @@ pub(super) fn resolve(
     functions: &mut [perry_hir::ir::Function],
     classes: &mut [perry_hir::ir::Class],
     globals: &[perry_hir::ir::Global],
-    mut base: perry_hir::HirTypeEnv,
+    base: &mut perry_hir::HirTypeEnv,
     inference: &Inference<'_>,
 ) -> bool {
     let mut constraints = Constraints::default();
@@ -324,11 +324,11 @@ pub(super) fn resolve(
             },
         );
     };
-    collect(init, inference.function(&base, classes, &mut locals));
+    collect(init, inference.function(base, classes, &mut locals));
     for function in &mut *functions {
         collect(
             &mut function.body,
-            inference.function_with_params(&base, classes, &mut locals, &function.params),
+            inference.function_with_params(base, classes, &mut locals, &function.params),
         );
     }
     for class_index in 0..classes.len() {
@@ -339,13 +339,14 @@ pub(super) fn resolve(
         for (function, body) in shapes::class_functions(&classes[class_index]).zip(&mut bodies) {
             collect(
                 body,
-                inference.function_with_params(&base, classes, &mut locals, &function.params),
+                inference.function_with_params(base, classes, &mut locals, &function.params),
             );
         }
         for (function, body) in shapes::class_functions_mut(&mut classes[class_index]).zip(bodies) {
             function.body = body;
         }
     }
+    base.set_current_class(None);
     let mut escaped = Vec::new();
     for init in globals
         .iter()
@@ -377,10 +378,11 @@ pub(super) fn resolve(
     }
     constraints.escaped.extend(escaped);
     let mut bindings = constraints.bindings();
-    let changed = !bindings.is_empty();
+    let mut changed = false;
     let mut apply = |id: LocalId, ty: &mut HirType| {
         if let Some(inferred) = bindings.remove(&id) {
             *ty = inferred;
+            changed = true;
         }
     };
     walk::locals_mut(init, &mut apply);

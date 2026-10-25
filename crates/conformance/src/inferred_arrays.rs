@@ -291,10 +291,19 @@ pub(crate) fn contract() -> Contract {
         source: include_str!("../cases/inferred_arrays.ts").into(),
         exit: ExitStatus::Success,
     };
-    let mut witnesses = vec![Witness {
-        partition: "uniform-records-and-aliases",
-        case: inferred_arrays,
-    }];
+    let mut witnesses = vec![
+        Witness {
+            partition: "uniform-records-and-aliases",
+            case: inferred_arrays,
+        },
+        Witness {
+            partition: "dependent-arrays",
+            case: Case::Command {
+                source: "const a:any[]=[];a.push(1);const b:any[]=[];b.push(a[0]);const c:any[]=[];c.push(b[0]+a.length);console.log(JSON.stringify(c));".into(),
+                exit: ExitStatus::Success,
+            },
+        },
+    ];
     for (partition, source) in [
         (
             "mixed-index-writes",

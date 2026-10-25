@@ -363,15 +363,18 @@ pub(crate) fn unresolved_types(
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     let max_iters = hir.functions.len() + hir.classes.len();
     for _ in 0..=max_iters {
-        let mut changed = arrays::resolve(
+        let mut changed = false;
+        while arrays::resolve(
             &mut hir.init,
             &mut hir.functions,
             &mut hir.classes,
             &hir.globals,
-            module_env,
+            &mut module_env,
             &inference,
-        );
-        module_env = perry_hir::HirTypeEnv::from_module(hir);
+        ) {
+            changed = true;
+            module_env = perry_hir::HirTypeEnv::from_module(hir);
+        }
         for function in &mut hir.functions {
             if locations.has_explicit_return(&function.name) {
                 continue;
