@@ -72,19 +72,14 @@ nix build .#template-component  # starter template component
 nix build .#example-merge-task  # reference component
 ```
 
-### Upstream benchmarks
+### Perry benchmarks
 
-The benchmark app runs the official full regression suite selected by Perry's `benchmarks/compare.sh`, using the same Git revision as `perry-hir` in `Cargo.lock`. It compiles the original TypeScript as WASI commands and compares them with Node, importing Perry's timing and stdout verification functions.
+Compare Node and Wasmtime on Perry's official benchmark suite from the revision pinned in `Cargo.lock`.
+`artifacts/bench-perry/` contains a correctness and performance table, peak memory measurements, and per-workload diagnostics.
 
 ```sh
-nix run .#perry-bench
+nix run .#bench-perry
 ```
-
-Every suite entry gets a report row, including compilation failures, crashes and timeouts. Node runs even if compilation fails. The command takes no options and writes `summary.md`, `results.json`, logs and components to `artifacts/perry-bench/`.
-
-Each engine gets three fresh processes, alternating order, with a 60-second timeout per process. Internal timings preserve upstream warmups; Wasmtime's compilation cache is disabled. Ratios require matching outputs and positive timings. Peak RSS measures the whole process, including runtime/JIT memory. Fuel is omitted because the Wasmtime CLI does not report consumed fuel.
-
-A separate CI job depends on successful `flake-build` jobs and restores their outputs from Cachix. It runs for non-draft PRs, including `ready_for_review`. Benchmark failures are non-blocking and remain in the job-summary table and linked `perry-bench` artifact.
 
 ## Contributing
 

@@ -104,12 +104,11 @@
         # Common source filter for Rust crate builds
         commonFilter = path: type:
           authoredSourceFilter path type
-          && path != toString ./scripts/perry-bench.py && (
+          && path != toString ./scripts && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
           (pkgs.lib.hasSuffix ".mjs" path) ||
-          (pkgs.lib.hasSuffix ".py" path) ||
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
@@ -202,7 +201,8 @@
           cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
           PERRY_PREBUILT_RUNTIME_DIR = "${runtimeLibraries}/lib";
           installPhaseCommand = ''
-            mkdir -p "$out/lib" "$out/share/perry-wit"
+            mkdir -p "$out/lib" "$out/share/perry-wit" scripts
+            cp ${./scripts/compiler-metadata.py} scripts/compiler-metadata.py
             python3 scripts/compiler-metadata.py target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm" \
               --revision ${pkgs.lib.escapeShellArg (self.rev or (self.dirtyRev or ("source:" + self.narHash)))} \
               > "$out/share/perry-wit/metadata.json"
@@ -389,19 +389,19 @@
           }}/bin/build-site";
         };
 
-        apps.perry-bench = {
+        apps.bench-perry = {
           type = "app";
           meta.description = "Compare locked upstream Perry benchmarks in Node and Wasmtime";
           program = "${pkgs.writeShellApplication {
-            name = "perry-bench";
+            name = "bench-perry";
             runtimeInputs = [ perryWitBin nodejs wasmtimeCli pkgs.python3 ];
             text = ''
-              export PERRY_BENCHMARK_SOURCE=${perrySource}
-              export PERRY_BENCHMARK_REVISION=${perryRevision}
+              export BENCH_PERRY_SOURCE=${perrySource}
+              export BENCH_PERRY_REVISION=${perryRevision}
               export WASI_WIT_PATH=${wasiP3Wit}
-              exec python3 ${./scripts/perry-bench.py}
+              exec python3 ${./scripts/bench-perry.py}
             '';
-          }}/bin/perry-bench";
+          }}/bin/bench-perry";
         };
 
         lib = {

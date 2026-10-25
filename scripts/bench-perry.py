@@ -71,7 +71,7 @@ def markdown(report):
 
 
 def main():
-    benchmarks = Path(os.environ["PERRY_BENCHMARK_SOURCE"]) / "benchmarks"
+    benchmarks = Path(os.environ["BENCH_PERRY_SOURCE"]) / "benchmarks"
     sys.path.insert(0, str(benchmarks))
     from benchmark_time import extract_time_ms
     from verify_benchmark_output import compare_stdout_files
@@ -81,13 +81,13 @@ def main():
     if selection is None:
         raise RuntimeError("cannot read the official full suite from upstream compare.sh")
     selected = selection[1].split()
-    output = Path("artifacts/perry-bench").resolve()
+    output = Path("artifacts/bench-perry").resolve()
     output.mkdir(parents=True, exist_ok=True)
     wit = output / "wit"
     wit.mkdir(exist_ok=True)
     (wit / "world.wit").write_text("package perry:benchmark; world benchmark { include wasi:cli/command@0.3.0; }\n")
     report = {
-        "revision": os.environ["PERRY_BENCHMARK_REVISION"],
+        "revision": os.environ["BENCH_PERRY_REVISION"],
         "runs": RUNS,
         "selected": len(selected),
         "timeout_seconds": TIMEOUT,

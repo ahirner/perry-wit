@@ -109,10 +109,14 @@ jobs:
         path: dist/compiler/
         if-no-files-found: error
 
-  perry-bench:
+  bench-perry:
     needs: flake-build
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v7
     - uses: cachix/install-nix-action@v31
@@ -123,25 +127,25 @@ jobs:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - name: Run upstream Perry benchmarks
-      id: perry-bench
+      id: bench-perry
       continue-on-error: true
       timeout-minutes: 20
-      run: nix run -L .#perry-bench
+      run: nix run -L .#bench-perry
     - name: Upload benchmark report
-      id: perry-bench-artifact
-      if: ${{ !cancelled() && steps.perry-bench.outcome != 'skipped' }}
+      id: bench-perry-artifact
+      if: ${{ !cancelled() && steps.bench-perry.outcome != 'skipped' }}
       uses: actions/upload-artifact@v7
       with:
-        name: perry-bench
-        path: artifacts/perry-bench/
+        name: bench-perry-${{ matrix.os }}
+        path: artifacts/bench-perry/
         if-no-files-found: error
     - name: Summarize benchmarks
-      if: ${{ !cancelled() && steps.perry-bench.outcome != 'skipped' }}
+      if: ${{ !cancelled() && steps.bench-perry.outcome != 'skipped' }}
       env:
-        ARTIFACT_URL: ${{ steps.perry-bench-artifact.outputs.artifact-url }}
+        ARTIFACT_URL: ${{ steps.bench-perry-artifact.outputs.artifact-url }}
       run: |
         printf '[Download benchmark report and logs](%s)\n\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
-        cat artifacts/perry-bench/summary.md >> "$GITHUB_STEP_SUMMARY"
+        cat artifacts/bench-perry/summary.md >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: [flake-build, site]
