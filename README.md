@@ -72,6 +72,15 @@ nix build .#template-component  # starter template component
 nix build .#example-merge-task  # reference component
 ```
 
+### Upstream benchmarks
+
+Compare Node and Wasmtime on Perry's official benchmark suite from the revision pinned in `Cargo.lock`.
+`artifacts/bench-perry/` contains a correctness and performance table, peak memory measurements, and per-workload diagnostics.
+
+```sh
+nix run .#bench-perry
+```
+
 ## Contributing
 
 Human and AI contributors are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).

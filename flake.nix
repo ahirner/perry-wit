@@ -65,6 +65,14 @@
 
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+        cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+        perryLock = pkgs.lib.findFirst (package: package.name == "perry-hir")
+          (throw "Cargo.lock must contain perry-hir") cargoLock.package;
+        perryRevision = pkgs.lib.last (pkgs.lib.splitString "#" perryLock.source);
+        perrySource = (craneLib.downloadCargoPackageFromGit {
+          git = builtins.head (pkgs.lib.splitString "?" (pkgs.lib.removePrefix "git+" perryLock.source));
+          rev = perryRevision;
+        }).src;
 
         wasiP3Wit = pkgs.runCommand "wasi-preview3-wit" {} ''
           mkdir -p "$out"
@@ -89,18 +97,21 @@
           wasm-tools component wit probe -o "$out"
         '';
 
-        authoredSourceFilter = path: type:
-          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" ".generated" "test-results" "node_modules" "target" "dist" "result" ])
-          && pkgs.lib.cleanSourceFilter path type;
+        cleanSource = source: pkgs.lib.cleanSourceWith {
+          src = source;
+          filter = pkgs.nix-gitignore.gitignoreFilterPure pkgs.lib.cleanSourceFilter
+            (pkgs.lib.optional (builtins.pathExists (source + "/.gitignore")) (source + "/.gitignore"))
+            source;
+        };
+        repoSource = cleanSource ./.;
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
-          authoredSourceFilter path type && (
+          path != toString ./scripts && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
           (pkgs.lib.hasSuffix ".mjs" path) ||
-          (pkgs.lib.hasSuffix ".py" path) ||
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
@@ -108,7 +119,7 @@
           (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
-          src = ./.;
+          src = repoSource;
           filter = commonFilter;
         };
         cargoVendorDir = craneLib.vendorMultipleCargoDeps {
@@ -193,7 +204,8 @@
           cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
           PERRY_PREBUILT_RUNTIME_DIR = "${runtimeLibraries}/lib";
           installPhaseCommand = ''
-            mkdir -p "$out/lib" "$out/share/perry-wit"
+            mkdir -p "$out/lib" "$out/share/perry-wit" scripts
+            cp ${./scripts/compiler-metadata.py} scripts/compiler-metadata.py
             python3 scripts/compiler-metadata.py target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm" \
               --revision ${pkgs.lib.escapeShellArg (self.rev or (self.dirtyRev or ("source:" + self.narHash)))} \
               > "$out/share/perry-wit/metadata.json"
@@ -208,16 +220,15 @@
           ./conformance-doc > "$out"
         '';
 
-        siteSource = pkgs.lib.cleanSourceWith { src = ./.; filter = authoredSourceFilter; };
         site = pkgs.buildNpmPackage {
           pname = "perry-wit-site";
           inherit nodejs;
           version = cargoManifest.package.version;
           dontFixup = true;
-          src = siteSource;
+          src = repoSource;
           npmRoot = "site";
           npmDeps = pkgs.fetchNpmDeps {
-            src = pkgs.lib.cleanSourceWith { src = ./site; filter = authoredSourceFilter; };
+            src = "${repoSource}/site";
             hash = "sha256-HVyTUkc1wePoDWyDEgC34ozTNiFK/mJJWBqPXVPTDzs=";
           };
           npmFlags = [ "--ignore-scripts" ];
@@ -272,7 +283,7 @@
         }: pkgs.stdenv.mkDerivation {
           pname = name;
           version = "0.1.0";
-          src = pkgs.lib.cleanSourceWith { inherit src; filter = authoredSourceFilter; };
+          src = cleanSource src;
           nativeBuildInputs = [ perryWitBin pkgs.typescript pkgs.wasm-tools ];
           buildPhase = ''
             export WASI_WIT_PATH="${wasiP3Wit}"
@@ -378,6 +389,21 @@
               echo "Built site/dist. Refresh the existing preview to load it."
             '';
           }}/bin/build-site";
+        };
+
+        apps.bench-perry = {
+          type = "app";
+          meta.description = "Compare locked upstream Perry benchmarks in Node and Wasmtime";
+          program = "${pkgs.writeShellApplication {
+            name = "bench-perry";
+            runtimeInputs = [ perryWitBin nodejs wasmtimeCli pkgs.python3 ];
+            text = ''
+              export BENCH_PERRY_SOURCE=${perrySource}
+              export BENCH_PERRY_REVISION=${perryRevision}
+              export WASI_WIT_PATH=${wasiP3Wit}
+              exec python3 ${./scripts/bench-perry.py}
+            '';
+          }}/bin/bench-perry";
         };
 
         lib = {
