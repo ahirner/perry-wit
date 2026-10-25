@@ -610,14 +610,6 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         ],
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
-    CatalogEntry {
-        id: "wit.inferred.signatures",
-        description: "Inferred component signatures preserve source semantics",
-        specification: "https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md",
-        domain: "Synchronous and asynchronous functions with numeric parameters, record/list results, optional fields, distinct null/undefined states, and internal bigint arithmetic",
-        partitions: &["synchronous-aggregates", "asynchronous-aggregates"],
-        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
-    },
 ];
 
 /// The catalog entry of contract `id`.
@@ -627,12 +619,11 @@ pub(crate) fn entry(id: &str) -> Option<&'static CatalogEntry> {
 }
 
 /// Contract id prefixes and the catalog headings they appear under, in page order.
-const NAMESPACES: [(&str, &str); 5] = [
+const NAMESPACES: [(&str, &str); 4] = [
     ("ecma", "ECMAScript"),
     ("web", "Web Platform"),
     ("node", "Node.js"),
     ("wasi", "WASI 0.3 Host"),
-    ("wit", "Component Contracts"),
 ];
 
 /// The position in [NAMESPACES] of the namespace contract `id` belongs to.

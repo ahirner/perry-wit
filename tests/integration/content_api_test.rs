@@ -270,20 +270,22 @@ fn content_api_resolves_only_supplied_files_and_packages() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn inferred_boundaries_preserve_bigints_and_absence_inside_aggregates() -> Result<()> {
+#[tokio::test]
+async fn inferred_boundaries_preserve_bigints_and_absence_inside_aggregates() -> Result<()> {
     use wasmtime::component::Val;
     let input = program(
         r#"
         import type {u64, f32} from 'perry:types';
         type Data = { absent: string | undefined; both: number | null | undefined; nested: (bigint | null)[]; optional?: boolean };
         export function echo(value: Data): Data { return value; }
+        export async function asyncEcho(value: Data): Promise<Data> { return value; }
         export function state(value: number | null | undefined): string {
             if (value === null) return 'null';
             if (value === undefined) return 'undefined';
             return 'present';
         }
         export function wide(value: bigint): bigint { return value; }
+        export function calculate(value: number): bigint { return 9007199254740993n + BigInt(value); }
         export function unsigned(value: u64): u64 { return value; }
         export function narrow(value: f32): f32 { return value; }
         export function overflow(): bigint { return 9223372036854775808n; }
@@ -291,10 +293,14 @@ fn inferred_boundaries_preserve_bigints_and_absence_inside_aggregates() -> Resul
     );
     let contract = Wit::from(api::generate_wit(&input, None)?);
     let compiled = api::compile(&input, &contract, &Options::default())?;
-    let engine = wasmtime::Engine::default();
-    let (mut store, instance) =
-        crate::world::instantiate(&engine, &compiled.component.unwrap().stripped)?;
-    let echo = instance.get_func(&mut store, "echo").unwrap();
+    let engine = crate::engine::async_engine()?;
+    let (mut store, instance) = crate::wasi_host::instantiate(
+        &engine,
+        &compiled.component.unwrap().stripped,
+        crate::wasi_host::Host::default(),
+    )
+    .await?;
+    let echoes = ["echo", "async-echo"].map(|name| instance.get_func(&mut store, name).unwrap());
     let state = instance.get_func(&mut store, "state").unwrap();
     let presence = |case: &str, value: Option<Val>| Val::Variant(case.into(), value.map(Box::new));
     for (case, payload) in [
@@ -315,9 +321,14 @@ fn inferred_boundaries_preserve_bigints_and_absence_inside_aggregates() -> Resul
             ("optional".into(), presence("undefined", None)),
         ]);
         let mut result = [Val::Bool(false)];
-        echo.call(&mut store, std::slice::from_ref(&value), &mut result)?;
-        assert_eq!(result[0], value);
-        state.call(&mut store, &[presence(case, payload)], &mut result)?;
+        for echo in &echoes {
+            echo.call_async(&mut store, std::slice::from_ref(&value), &mut result)
+                .await?;
+            assert_eq!(result[0], value);
+        }
+        state
+            .call_async(&mut store, &[presence(case, payload)], &mut result)
+            .await?;
         assert_eq!(
             result[0],
             Val::String(if case == "value" { "present" } else { case }.into())
@@ -325,13 +336,26 @@ fn inferred_boundaries_preserve_bigints_and_absence_inside_aggregates() -> Resul
     }
     let wide = instance.get_typed_func::<(i64,), (i64,)>(&mut store, "wide")?;
     for value in [i64::MIN, -1, 0, 9007199254740993, i64::MAX] {
-        assert_eq!(wide.call(&mut store, (value,))?.0, value);
+        assert_eq!(wide.call_async(&mut store, (value,)).await?.0, value);
+    }
+    let calculate = instance.get_typed_func::<(f64,), (i64,)>(&mut store, "calculate")?;
+    for value in [-1000, -1, 0, 1, 1000] {
+        assert_eq!(
+            calculate
+                .call_async(&mut store, (f64::from(value),))
+                .await?
+                .0,
+            9007199254740993 + i64::from(value),
+        );
     }
     let unsigned = instance.get_typed_func::<(u64,), (u64,)>(&mut store, "unsigned")?;
-    assert_eq!(unsigned.call(&mut store, (u64::MAX,))?.0, u64::MAX);
+    assert_eq!(
+        unsigned.call_async(&mut store, (u64::MAX,)).await?.0,
+        u64::MAX
+    );
     let narrow = instance.get_typed_func::<(f32,), (f32,)>(&mut store, "narrow")?;
-    assert_eq!(narrow.call(&mut store, (1.25,))?.0, 1.25);
+    assert_eq!(narrow.call_async(&mut store, (1.25,)).await?.0, 1.25);
     let overflow = instance.get_typed_func::<(), (i64,)>(&mut store, "overflow")?;
-    assert!(overflow.call(&mut store, ()).is_err());
+    assert!(overflow.call_async(&mut store, ()).await.is_err());
     Ok(())
 }

@@ -253,7 +253,6 @@ fn compile_component_cached(
     };
     let wit_source = match case {
         Case::Handler(_) => "@handler".to_owned(),
-        Case::Inferred { .. } => "@inferred".to_owned(),
         Case::Aggregate(agg) => agg.wit_signature.wit_world(),
         Case::Stream(_) => async_wit().replace("x: f64", "input: stream<u8>"),
         Case::Fetch(_) => async_wit().replace("x: f64", "url: string").replace(
@@ -273,16 +272,7 @@ fn compile_component_cached(
         return cached.clone();
     }
     let built = (|| -> ComponentCacheValue {
-        let compiled = if matches!(case, Case::Inferred { .. }) {
-            let program = perry_wit::api::Program {
-                source: source.as_bytes().into(),
-                modules: vec![],
-            };
-            let files = perry_wit::api::generate_wit(&program, None)
-                .map_err(|error| Outcome::Compile(error.to_string()))?;
-            perry_wit::api::compile(&program, &files.into(), &Default::default())
-                .map_err(|error| Outcome::Compile(error.to_string()))?
-        } else if matches!(case, Case::Handler(_)) {
+        let compiled = if matches!(case, Case::Handler(_)) {
             let (resolve, world) =
                 resolve_handler_world().map_err(|e| Outcome::Compile(format!("{e:#}")))?;
             fact_limits
@@ -695,11 +685,7 @@ async fn number_calls(
         }
         calls.1.push(settle(store, fuel, "run")?);
         let [result] = result;
-        calls.0.push(if matches!(case, Case::Inferred { .. }) {
-            observation_payload(result)?
-        } else {
-            lifted_observation(result)?
-        });
+        calls.0.push(lifted_observation(result)?);
         Ok(())
     };
     if let Some(encoded_inputs) = custom_inputs {
@@ -721,11 +707,7 @@ fn lifted_observation(result: Val) -> Result<Observation> {
     let Val::Result(Ok(Some(payload))) = result else {
         bail!("case failed through its declared WIT result error: {result:?}")
     };
-    observation_payload(*payload)
-}
-
-fn observation_payload(payload: Val) -> Result<Observation> {
-    let (value, trace) = match payload {
+    let (value, trace) = match *payload {
         Val::List(items) => {
             let mut items = items.into_iter().map(float);
             let value = items.next().context("direct list return was empty")??;

@@ -1,6 +1,6 @@
 [package]
 name = "perry-wit"
-version = "0.2.0"
+version = "0.1.1"
 edition = "2024"
 default-run = "perry-wit"
 description = "Compile TypeScript into WASI 0.3 WebAssembly components"
@@ -51,6 +51,10 @@ pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
 sha2 = "0.10"
+swc_common = "26.0"
+swc_ecma_parser = "45.1"
+swc_ecma_transforms_base = "49.0"
+swc_ecma_visit = "29.0"
 tempfile = "3.27.0"
 tokio = "1"
 wasm-encoder = "0.261"

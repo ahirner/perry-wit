@@ -26,7 +26,6 @@ export function greet(name: string): string {
 ```
 
 ```sh
-perry-wit gen-types
 perry-wit main.ts
 wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'greet("World")' dist/main.wasm
 ```
@@ -41,7 +40,7 @@ perry-wit main.ts --gen-wit --wit interfaces --world app
 perry-wit main.ts --wit interfaces --world app
 ```
 
-`--gen-wit` defaults to `wit/world.wit` and world `app`. The Wasm output remains controlled by `-o` and defaults to `dist/<stem>.wasm`.
+`--gen-wit` defaults to `wit/world.wit` and world `app`.
 
 The handbook's Authoring chapter covers commands, HTTP handlers and the project template.
 

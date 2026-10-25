@@ -44,10 +44,6 @@ pub enum Case {
         source: String,
         asynchronous: bool,
     },
-    Inferred {
-        source: String,
-        asynchronous: bool,
-    },
     Command {
         source: String,
         exit: ExitStatus,
@@ -129,7 +125,7 @@ impl Case {
             | Self::Fetch(_)
             | Self::Handler(_)
             | Self::Scaling { .. } => false,
-            Self::Function { source, .. } | Self::Inferred { source, .. } => {
+            Self::Function { source, .. } => {
                 source.contains("produce(x)") || source.contains(",x)")
             }
             Self::Program(program) | Self::Fault { program, .. } => program.expression.uses_input(),
@@ -147,7 +143,6 @@ impl Case {
             Self::Program(program) | Self::Fault { program, .. } => program.source(),
             Self::Lifecycle(actions) => crate::transitions::source(actions),
             Self::Function { source, .. }
-            | Self::Inferred { source, .. }
             | Self::Command { source, .. }
             | Self::Reject { source, .. }
             | Self::Scaling { source, .. } => source.clone(),
@@ -156,9 +151,7 @@ impl Case {
     pub(crate) fn asynchronous(&self) -> bool {
         match self {
             Self::Program(program) | Self::Fault { program, .. } => program.form.is_async(),
-            Self::Function { asynchronous, .. } | Self::Inferred { asynchronous, .. } => {
-                *asynchronous
-            }
+            Self::Function { asynchronous, .. } => *asynchronous,
             Self::Lifecycle(_) | Self::Stream(_) | Self::Fetch(_) | Self::Handler(_) => true,
             _ => false,
         }
@@ -573,7 +566,6 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.extend(crate::scaling::contracts());
     contracts.push(crate::aggregates::contract());
     contracts.push(crate::collections::contract());
-    contracts.push(crate::inference::contract());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(

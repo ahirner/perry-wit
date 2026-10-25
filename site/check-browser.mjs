@@ -80,7 +80,7 @@ try {
       for (const [docPage, expectedText] of [
         ['docs/index.html', 'Memory stays flat across calls'],
         ['docs/authoring.html', 'perry-wit src/index.ts --gen-wit --wit interfaces --world app'],
-        ['docs/embedding.html', 'package perry:compiler@0.2.0;'],
+        ['docs/embedding.html', 'package perry:compiler@0.1.1;'],
         ['docs/semantics.html', 'i64.mul'],
         ['docs/stdlib.html', 'Number.isSafeInteger'],
         ['docs/conformance.html', 'ecma.number.arithmetic'],

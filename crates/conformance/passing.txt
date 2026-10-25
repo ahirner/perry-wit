@@ -58,5 +58,3 @@ web.streams.byob_reader
 web.fetch.bounded_byob_body
 ecma.aggregate.specialization
 ecma.collection.iterators
-
-wit.inferred.signatures

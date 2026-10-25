@@ -1,4 +1,4 @@
-package perry:compiler@0.2.0;
+package perry:compiler@0.1.1;
 
 interface api {
   /// Optional diagnostic name; for an entrypoint, also its logical module identity.
