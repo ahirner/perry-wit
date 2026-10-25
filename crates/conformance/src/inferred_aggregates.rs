@@ -42,6 +42,14 @@ impl Element {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Storage {
+    #[default]
+    Array,
+    Dictionary,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Form {
     Annotated,
@@ -60,7 +68,10 @@ struct Write {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArrayCase {
+#[serde(rename_all = "snake_case")]
+pub struct AggregateCase {
+    #[serde(default)]
+    storage: Storage,
     element: Element,
     seed: i16,
     writes: Vec<Write>,
@@ -75,7 +86,7 @@ enum Conflict {
     Conditional,
 }
 
-impl ArrayCase {
+impl AggregateCase {
     pub(crate) fn variants(&self) -> impl Iterator<Item = Self> + '_ {
         [
             Form::Aliased,
@@ -114,7 +125,13 @@ impl ArrayCase {
                 } else {
                     "any"
                 };
-                e.line(format_args!("const values:({ty})[]=[];"));
+                match self.storage {
+                    Storage::Array => e.line(format_args!("const values:({ty})[]=[];")),
+                    Storage::Dictionary => {
+                        let ty = if form == Form::Annotated { format!("Record<string,{ty}>") } else { "any".into() };
+                        e.line(format_args!("const values:{ty}={{}};"));
+                    }
+                }
                 for i in 0..self.aliases {
                     let source = if i == 0 {
                         "values".into()
@@ -145,10 +162,11 @@ impl ArrayCase {
                     } else {
                         format!("alias{}", (step - 1) % usize::from(self.aliases))
                     };
-                    let assignment = |receiver: &str, value: &str| match index {
-                        Some(index) => format!("{receiver}[{index}]={value};"),
-                        None if form == Form::AppendIndex => format!("{receiver}[{receiver}.length]={value};"),
-                        None => format!("{receiver}.push({value});"),
+                    let assignment = |receiver: &str, value: &str| match (self.storage, index) {
+                        (Storage::Dictionary, index) => format!("{receiver}['field_'+{}]={value};", index.unwrap_or(len)),
+                        (Storage::Array, Some(index)) => format!("{receiver}[{index}]={value};"),
+                        (Storage::Array, None) if form == Form::AppendIndex => format!("{receiver}[{receiver}.length]={value};"),
+                        (Storage::Array, None) => format!("{receiver}.push({value});"),
                     };
                     let statement = match form {
                         Form::Temporaries => format!(
@@ -186,9 +204,10 @@ impl ArrayCase {
                     } else {
                         (String::new(), value)
                     };
-                    let statement = match conflict {
-                        Conflict::Push | Conflict::Conditional => format!("{prefix}{receiver}.push({value});"),
-                        Conflict::Index => format!("{prefix}{receiver}[0]={value};"),
+                    let statement = match (self.storage, conflict) {
+                        (Storage::Dictionary, _) => format!("{prefix}{receiver}['field_0']={value};"),
+                        (Storage::Array, Conflict::Push | Conflict::Conditional) => format!("{prefix}{receiver}.push({value});"),
+                        (Storage::Array, Conflict::Index) => format!("{prefix}{receiver}[0]={value};"),
                     };
                     statements.push(if form == Form::Branches {
                         format!("if(x<0){{{statement}}}")
@@ -217,8 +236,12 @@ impl ArrayCase {
                 } else {
                     format!("alias{}", self.aliases - 1)
                 };
+                let length = match self.storage {
+                    Storage::Array => "values.length",
+                    Storage::Dictionary => "Object.keys(values).length",
+                };
                 e.line(format_args!(
-                    "observe(trace,JSON.stringify(values));observe(trace,JSON.stringify({alias}));trace.push(values.length);"
+                    "observe(trace,JSON.stringify(values));observe(trace,JSON.stringify({alias}));trace.push({length});"
                 ));
                 e.line(format_args!("return {{value:x,trace}};"));
             },
@@ -243,12 +266,16 @@ impl ArrayCase {
                 .into_iter()
                 .map(|form| self.emit(form, Some(conflict)))
                 .collect(),
-            diagnostic: REQUIRES_ELEMENT_TYPE.into(),
+            diagnostic: match self.storage {
+                Storage::Array => REQUIRES_ELEMENT_TYPE,
+                Storage::Dictionary => "subset rule R1",
+            }
+            .into(),
         }
     }
 }
 
-fn strategy() -> BoxedStrategy<Case> {
+fn strategy(storage: Storage) -> BoxedStrategy<Case> {
     (
         prop_oneof![
             Just(Element::Number),
@@ -266,8 +293,9 @@ fn strategy() -> BoxedStrategy<Case> {
             Just(Conflict::Conditional)
         ]),
     )
-        .prop_map(|(element, seed, writes, aliases, conflict)| {
-            let case = ArrayCase {
+        .prop_map(move |(element, seed, writes, aliases, conflict)| {
+            let case = AggregateCase {
+                storage,
                 element,
                 seed,
                 aliases,
@@ -279,7 +307,7 @@ fn strategy() -> BoxedStrategy<Case> {
             };
             match conflict {
                 Some(conflict) => case.rejection(conflict),
-                None => Case::InferredArray(case),
+                None => Case::InferredAggregate(case),
             }
         })
         .boxed()
@@ -370,7 +398,8 @@ pub(crate) fn contract() -> Contract {
 
     witnesses.push(Witness {
         partition: "conditional-temporary",
-        case: ArrayCase {
+        case: AggregateCase {
+            storage: Storage::Array,
             element: Element::Number,
             seed: 0,
             writes: vec![],
@@ -380,41 +409,107 @@ pub(crate) fn contract() -> Contract {
         .rejection(Conflict::Conditional),
     });
 
-    for (partition, element) in [
+    witnesses.extend(uniform_witnesses(Storage::Array));
+    Contract::new(
+        "ecma.array.inferred_storage",
+        witnesses,
+        strategy(Storage::Array),
+        check_equivalence,
+    )
+}
+
+pub(crate) fn dictionary_contract() -> Contract {
+    let mut witnesses = vec![Witness {
+        partition: "computed-keys-and-json-residue",
+        case: Case::Command {
+            source: include_str!("../cases/inferred_dictionaries.ts").into(),
+            exit: ExitStatus::Success,
+        },
+    }];
+    for (partition, source) in [
+        (
+            "conflicting-alias",
+            "const d:any={};const alias=d;d['field_'+1]=1;alias['field_'+2]='bad';",
+        ),
+        (
+            "conflicting-branch",
+            "const d:any={};if(Date.now()>0)d['field_'+1]=1;else d['field_'+1]='bad';",
+        ),
+        ("numeric-key", "const d:any={};d['field_'+1]=1;d[2]=3;"),
+        (
+            "unknown-call",
+            "function mutate(d:Record<string,number>):void{d.x=2;}const d:any={};d['field_'+1]=1;mutate(d);",
+        ),
+        (
+            "reassigned-alias",
+            "const d:any={};let alias=d;d['field_'+1]=1;alias={};alias['field_'+1]=2;",
+        ),
+        (
+            "stored-alias",
+            "const d:any={};d['field_'+1]=1;const holder={d};holder.d.x='bad';",
+        ),
+        (
+            "returned-alias",
+            "function make(){const d:any={};d['field_'+1]=1;return d;}console.log(JSON.stringify(make()));",
+        ),
+        (
+            "mutable-element-alias",
+            "const d:any={};d['field_'+1]={tags:['ok']};d['field_'+1].tags.push(1);",
+        ),
+        (
+            "open-json-source",
+            "const d:any=JSON.parse('{}');d['field_'+1]=1;",
+        ),
+    ] {
+        witnesses.push(Witness {
+            partition,
+            case: Case::Reject {
+                source: source.into(),
+                diagnostic: "subset rule R1".into(),
+                form_sources: vec![],
+            },
+        });
+    }
+    witnesses.extend(uniform_witnesses(Storage::Dictionary));
+    Contract::new(
+        "ecma.object.inferred_storage",
+        witnesses,
+        strategy(Storage::Dictionary),
+        check_equivalence,
+    )
+}
+
+fn uniform_witnesses(storage: Storage) -> impl Iterator<Item = Witness> {
+    [
         ("number-writes", Element::Number),
         ("string-writes", Element::Text),
         ("boolean-writes", Element::Boolean),
         ("record-writes", Element::Record),
         ("nested-array-writes", Element::Array),
-    ] {
-        witnesses.push(Witness {
-            partition,
-            case: Case::InferredArray(ArrayCase {
-                element,
-                seed: 0,
-                aliases: 3,
-                form: Form::Annotated,
-                writes: vec![
-                    Write {
-                        value: 1,
-                        index: None,
-                    },
-                    Write {
-                        value: -2,
-                        index: Some(0),
-                    },
-                    Write {
-                        value: 3,
-                        index: Some(1),
-                    },
-                ],
-            }),
-        });
-    }
-    Contract::new(
-        "ecma.array.inferred_storage",
-        witnesses,
-        strategy(),
-        check_equivalence,
-    )
+    ]
+    .into_iter()
+    .map(move |(partition, element)| Witness {
+        partition,
+        case: Case::InferredAggregate(AggregateCase {
+            storage,
+            element,
+            seed: 0,
+            aliases: 3,
+            form: Form::Annotated,
+            writes: vec![
+                Write {
+                    value: 1,
+                    index: None,
+                },
+                Write {
+                    value: -2,
+                    index: Some(0),
+                },
+                Write {
+                    value: 3,
+                    index: Some(1),
+                },
+            ],
+        }),
+    })
 }

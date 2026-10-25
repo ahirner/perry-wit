@@ -46,7 +46,8 @@ impl<'s> FunctionBuilder<'s> {
             let key = self.fit(ctx, key, k_ty)?;
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             let val = self.fit(ctx, val, v_ty)?;
-            return self.kv_set(ctx, array, key, val);
+            self.kv_set(ctx, array, key, val)?;
+            return Ok(val);
         }
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
@@ -73,7 +74,8 @@ impl<'s> FunctionBuilder<'s> {
             let key = self.string(ctx, field);
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             let val = self.fit(ctx, val, v_ty)?;
-            return self.kv_set(ctx, record, key, val);
+            self.kv_set(ctx, record, key, val)?;
+            return Ok(val);
         }
         if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
             && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)

@@ -3,11 +3,51 @@ use perry_hir::analysis::{collect_local_refs_expr, collect_local_refs_stmt};
 use std::convert::Infallible;
 use walk::{Node, Visitor};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AggregateKind {
+    Array,
+    Dictionary,
+}
+
+#[derive(Default)]
+enum ObservedValues {
+    #[default]
+    Empty,
+    Known(Vec<HirType>),
+    Unknown,
+}
+
+impl ObservedValues {
+    fn observe(&mut self, ty: &HirType) {
+        if !is_resolvable_type(ty) {
+            *self = Self::Unknown;
+        } else {
+            match self {
+                Self::Empty => *self = Self::Known(vec![ty.clone()]),
+                Self::Known(types) if !types.contains(ty) => types.push(ty.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    fn uniform(&self) -> Option<&HirType> {
+        match self {
+            Self::Known(types) if types.len() == 1 => types.first(),
+            _ => None,
+        }
+    }
+}
+
+struct Write {
+    kind: AggregateKind,
+    value: HirType,
+}
+
 #[derive(Default)]
 struct Constraints {
-    fresh: HashSet<LocalId>,
+    fresh: HashMap<LocalId, AggregateKind>,
     aliases: HashMap<LocalId, LocalId>,
-    writes: HashMap<LocalId, Vec<HirType>>,
+    writes: HashMap<LocalId, Vec<Write>>,
     escaped: HashSet<LocalId>,
     element_reads: HashSet<LocalId>,
 }
@@ -25,39 +65,45 @@ impl Constraints {
 
     fn bindings(self) -> HashMap<LocalId, HirType> {
         let escaped: HashSet<_> = self.escaped.iter().map(|id| self.root(*id)).collect();
-        let mut elements: HashMap<LocalId, Option<&HirType>> = HashMap::new();
+        let mut elements: HashMap<LocalId, ObservedValues> = HashMap::new();
         for (id, writes) in &self.writes {
             let root = self.root(*id);
-            if !self.fresh.contains(&root) || escaped.contains(&root) {
+            let Some(kind) = self.fresh.get(&root) else {
                 continue;
-            }
-            for ty in writes {
-                elements
-                    .entry(root)
-                    .and_modify(|element| {
-                        if *element != Some(ty) {
-                            *element = None;
-                        }
-                    })
-                    .or_insert_with(|| is_resolvable_type(ty).then_some(ty));
+            };
+            let values = elements.entry(root).or_default();
+            for write in writes {
+                if escaped.contains(&root) || write.kind != *kind {
+                    *values = ObservedValues::Unknown;
+                } else {
+                    values.observe(&write.value);
+                }
             }
         }
-        for id in &self.element_reads {
-            if let Some(element) = elements.get_mut(&self.root(*id))
-                && !matches!(
-                    element,
-                    Some(HirType::Number | HirType::String | HirType::Boolean | HirType::BigInt)
-                )
-            {
-                *element = None;
-            }
-        }
+        let read_roots: HashSet<_> = self.element_reads.iter().map(|id| self.root(*id)).collect();
         self.fresh
-            .iter()
+            .keys()
             .chain(self.aliases.keys())
             .filter_map(|id| {
-                let ty = (*elements.get(&self.root(*id))?)?;
-                Some((*id, HirType::Array(Box::new(ty.clone()))))
+                let root = self.root(*id);
+                let value = elements.get(&root)?.uniform()?;
+                if read_roots.contains(&root)
+                    && !matches!(
+                        value,
+                        HirType::Number | HirType::String | HirType::Boolean | HirType::BigInt
+                    )
+                {
+                    return None;
+                }
+                let value = value.clone();
+                let ty = match self.fresh.get(&root)? {
+                    AggregateKind::Array => HirType::Array(Box::new(value)),
+                    AggregateKind::Dictionary => HirType::Object(perry_hir::types::ObjectType {
+                        index_signature: Some(Box::new(value)),
+                        ..Default::default()
+                    }),
+                };
+                Some((*id, ty))
             })
             .collect()
     }
@@ -165,19 +211,37 @@ struct Collect<'a, 'e> {
 }
 
 impl Collect<'_, '_> {
-    fn write(&mut self, id: LocalId, value: &Expr) {
-        self.constraints
-            .writes
-            .entry(id)
-            .or_default()
-            .push(element_type(value, &mut self.env));
+    fn write(&mut self, id: LocalId, kind: AggregateKind, value: &Expr) {
+        self.constraints.writes.entry(id).or_default().push(Write {
+            kind,
+            value: element_type(value, &mut self.env),
+        });
     }
 
-    fn is_numeric(&mut self, key: &Expr) -> bool {
-        matches!(
-            expression(key, &mut self.env),
-            HirType::Number | HirType::Int32
-        )
+    fn key_kind(&mut self, key: &Expr) -> Option<AggregateKind> {
+        match expression(key, &mut self.env) {
+            HirType::Number | HirType::Int32 => Some(AggregateKind::Array),
+            HirType::String | HirType::StringLiteral(_) => Some(AggregateKind::Dictionary),
+            _ => None,
+        }
+    }
+
+    fn empty_object(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Object(fields) => fields.is_empty(),
+            Expr::New {
+                class_name, args, ..
+            } => {
+                args.is_empty()
+                    && hir_compat::is_object_literal(class_name)
+                    && self
+                        .env
+                        .classes
+                        .iter()
+                        .any(|class| class.name == *class_name && class.fields.is_empty())
+            }
+            _ => false,
+        }
     }
 }
 
@@ -195,6 +259,7 @@ impl Visitor for Collect<'_, '_> {
             && (self.env.metadata.inferred_bindings.contains(id)
                 || matches!(ty, HirType::Any | HirType::Unknown))
             && !matches!(init, Expr::Array(values, _) if values.is_empty())
+            && !self.empty_object(init)
         {
             let inferred = element_type(init, &mut self.env);
             self.env.locals.insert(*id, inferred);
@@ -205,11 +270,17 @@ impl Visitor for Collect<'_, '_> {
             init: Some(init),
             ..
         } = statement
-            && unresolved_array(ty)
+            && (unresolved_array(ty)
+                || matches!(ty, HirType::Object(object) if object.properties.is_empty() && object.index_signature.is_none()))
         {
             match init {
                 Expr::Array(values, _) if values.is_empty() => {
-                    self.constraints.fresh.insert(*id);
+                    self.constraints.fresh.insert(*id, AggregateKind::Array);
+                }
+                init if self.empty_object(init) => {
+                    self.constraints
+                        .fresh
+                        .insert(*id, AggregateKind::Dictionary);
                 }
                 Expr::LocalGet(source) => {
                     self.constraints.aliases.insert(*id, *source);
@@ -226,7 +297,7 @@ impl Visitor for Collect<'_, '_> {
             Expr::ArrayPush {
                 array_id, value, ..
             } => {
-                self.write(*array_id, value);
+                self.write(*array_id, AggregateKind::Array, value);
                 return self.expression(value);
             }
             Expr::IndexSet {
@@ -235,9 +306,9 @@ impl Visitor for Collect<'_, '_> {
                 value,
             } => {
                 if let Expr::LocalGet(id) = **object
-                    && self.is_numeric(index)
+                    && let Some(kind) = self.key_kind(index)
                 {
-                    self.write(id, value);
+                    self.write(id, kind, value);
                     self.expression(index)?;
                     return self.expression(value);
                 }
@@ -251,12 +322,16 @@ impl Visitor for Collect<'_, '_> {
             } => {
                 if let (Expr::LocalGet(id), Expr::LocalGet(receiver)) = (&**target, &**receiver)
                     && id == receiver
-                    && self.is_numeric(key)
+                    && let Some(kind) = self.key_kind(key)
                 {
-                    self.write(*id, value);
+                    self.write(*id, kind, value);
                     self.expression(key)?;
                     return self.expression(value);
                 }
+            }
+            Expr::PropertySet { object, value, .. } if let Expr::LocalGet(id) = **object => {
+                self.write(id, AggregateKind::Dictionary, value);
+                return self.expression(value);
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::PropertyGet {
@@ -266,11 +341,16 @@ impl Visitor for Collect<'_, '_> {
                     && hir_compat::method(property).name() == "push"
                 {
                     for arg in args {
-                        self.write(id, arg);
+                        self.write(id, AggregateKind::Array, arg);
                         self.expression(arg)?;
                     }
                     return Ok(());
                 }
+            }
+            Expr::ObjectKeys(value) | Expr::ArrayIsArray(value)
+                if matches!(**value, Expr::LocalGet(_)) =>
+            {
+                return Ok(());
             }
             Expr::JsonStringify(value) if matches!(**value, Expr::LocalGet(_)) => return Ok(()),
             Expr::JsonStringifyFull(value, replacer, space)
@@ -281,12 +361,30 @@ impl Visitor for Collect<'_, '_> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if property == "length" && matches!(**object, Expr::LocalGet(_)) => {
+            } if let Expr::LocalGet(id) = **object => {
+                if property != "length"
+                    || self.constraints.fresh.get(&self.constraints.root(id))
+                        != Some(&AggregateKind::Array)
+                {
+                    self.constraints.element_reads.insert(id);
+                }
                 return Ok(());
             }
             Expr::IndexGet { object, index } => {
                 if let Expr::LocalGet(id) = **object {
                     self.constraints.element_reads.insert(id);
+                    if let Some(kind) = self.key_kind(index) {
+                        if self
+                            .constraints
+                            .fresh
+                            .get(&self.constraints.root(id))
+                            .is_some_and(|expected| *expected != kind)
+                        {
+                            self.constraints.escaped.insert(id);
+                        }
+                    } else {
+                        self.constraints.escaped.insert(id);
+                    }
                     return self.expression(index);
                 }
             }

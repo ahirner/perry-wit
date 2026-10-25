@@ -33,7 +33,8 @@ pub enum Case {
     Program(Program),
     Aggregate(crate::aggregates::AggregateCase),
     Collection(crate::collections::CollectionCase),
-    InferredArray(crate::inferred_arrays::ArrayCase),
+    #[serde(alias = "inferred_array")]
+    InferredAggregate(crate::inferred_aggregates::AggregateCase),
     Stream(crate::streams::StreamCase),
     Fetch(crate::fetch::FetchCase),
     Handler(crate::handler::HandlerCase),
@@ -76,10 +77,10 @@ impl Case {
     /// The case followed by its metamorphic forms, which must observe identically.
     pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
         match self {
-            Self::InferredArray(case) => std::iter::once(Cow::Borrowed(self))
+            Self::InferredAggregate(case) => std::iter::once(Cow::Borrowed(self))
                 .chain(
                     case.variants()
-                        .map(|case| Cow::Owned(Self::InferredArray(case))),
+                        .map(|case| Cow::Owned(Self::InferredAggregate(case))),
                 )
                 .collect(),
             Self::Reject {
@@ -147,7 +148,7 @@ impl Case {
             | Self::Fetch(_)
             | Self::Handler(_)
             | Self::Scaling { .. }
-            | Self::InferredArray(_) => false,
+            | Self::InferredAggregate(_) => false,
             Self::Program(program) | Self::Fault { program, .. } => program.expression.uses_input(),
             _ => true,
         };
@@ -157,7 +158,7 @@ impl Case {
         match self {
             Self::Aggregate(case) => case.source(),
             Self::Collection(case) => case.source(),
-            Self::InferredArray(case) => case.source(),
+            Self::InferredAggregate(case) => case.source(),
             Self::Stream(case) => case.source(),
             Self::Fetch(case) => case.source(),
             Self::Handler(case) => case.source(),

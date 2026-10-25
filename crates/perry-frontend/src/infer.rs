@@ -18,7 +18,7 @@ pub(crate) fn contains_type_var(ty: &HirType) -> bool {
 }
 
 mod absence;
-mod arrays;
+mod aggregates;
 mod closures;
 mod environment;
 mod functions;
@@ -364,7 +364,7 @@ pub(crate) fn unresolved_types(
     let max_iters = hir.functions.len() + hir.classes.len();
     for _ in 0..=max_iters {
         let mut changed = false;
-        while arrays::resolve(
+        while aggregates::resolve(
             &mut hir.init,
             &mut hir.functions,
             &mut hir.classes,

@@ -51,6 +51,14 @@ The compiler workspace separates these responsibilities:
 
 The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
 
+## Aggregate inference
+
+The frontend collects writes and aliases for fresh empty arrays and dictionaries in one pass. Numeric indices select array storage; string keys and named properties select dictionary storage. Observations distinguish no writes, a finite set of value types and unknown contents. Representation selection currently accepts one uniform value type. Conflicting types remain distinct observations; they do not imply a particular tagged representation.
+
+Bindings lower to the existing MIR arrays and records. Dictionaries use arrays of typed key-value entries, so their values participate in the same allocation identities, alias propagation and slot facts as array elements. The MIR heap analysis tracks openness independently of the declared type: typed JSON records can retain undeclared fields, and storing them inside an inferred aggregate preserves that provenance. Unknown JSON sources cannot become fresh inferred dictionaries merely because later writes are typed.
+
+Future mixed storage needs an explicit representation and read semantics in addition to the observed type set. Index-dependent narrowing must account for aliases, calls and intervening writes. Packed storage with widening transitions and tagged storage from allocation remain separate representation choices; neither follows automatically from heterogeneous writes.
+
 ## Memory
 
 A component has one linear memory, and the compiler picks its heap strategy per module from the effect summaries of `ProgramFacts`.
