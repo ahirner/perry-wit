@@ -408,7 +408,8 @@ impl Executor {
             return Ok(Vec::new());
         };
         if rest_variants.is_empty() {
-            let evidence = self.execute(first_variant, &directory.join("0"))?;
+            let evidence =
+                self.execute_source(first_variant, &first_variant.source(), &directory.join("0"))?;
             return Ok(vec![evidence]);
         }
         // Variant 0 establishes the oracle observation and schedules TypeScript verification;
@@ -482,10 +483,6 @@ impl Executor {
 
         check_metamorphic(&evidence)?;
         Ok(evidence)
-    }
-
-    fn execute(&self, case: &Case, directory: &Path) -> Result<Evidence> {
-        self.execute_source(case, &case.source(), directory)
     }
 
     pub(crate) fn execute_source(
