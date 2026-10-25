@@ -469,7 +469,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
         assert_eq!(program.number("run", input).to_bits(), expected.to_bits());
     }
 
-    for expression in ["1 | 0", "-1 >>> 0"] {
+    for expression in ["0 | 0", "1 | 0", "-1 >>> 0"] {
         let core = perry_wit::compile_core(
             &format!(
                 "export function run(index:number):number {{
