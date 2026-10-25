@@ -539,11 +539,11 @@ fn verify_lossless_context(
         }
     }
     if let Some(mapping) = mapping {
-        let values = state.facts.keys().chain(
+        let values = state.values.keys().chain(
             state
                 .heap_values
                 .keys()
-                .filter(|value| !state.facts.contains_key(value)),
+                .filter(|value| !state.values.contains_key(value)),
         );
         for &orig_val in values {
             if body.parameters.contains(&orig_val) {

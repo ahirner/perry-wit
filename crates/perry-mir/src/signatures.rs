@@ -81,7 +81,9 @@ type_kinds! {
     OptStringArray = ArrayType::get(ctx, Ty::OptString.get(ctx)).into();
     NullOptStringArray = OptionalType::get_with(ctx, Ty::OptStringArray.get(ctx), crate::attrs::Absence::Null).into();
     StringArray = ArrayType::get(ctx, Ty::String.get(ctx)).into();
-    NumberArray = ArrayType::get(ctx, Ty::Number.get(ctx)).into();
+    NumberArray = ArrayType::get(ctx, Ty::Number.get(ctx)).into(),
+        accepts ty.deref(ctx).downcast_ref::<ArrayType>()
+            .is_some_and(|array| Ty::Numeric.matches(ctx, array.element()));
     Bytes = BytesType::get(ctx).into();
     ByteBuffer = crate::types::ByteBufferType::get(ctx).into();
     ByobReader = crate::types::ByobReaderType::get(ctx).into();

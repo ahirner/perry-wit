@@ -7,11 +7,11 @@
     "helper_functions": 42,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 32,
+      "constraint_visits": 38,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
-      "range_widenings": 1,
+      "range_widenings": 2,
       "specializations": 0,
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
@@ -53,7 +53,7 @@
     "helper_functions": 112,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 134,
+      "constraint_visits": 129,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -76,7 +76,7 @@
     "helper_functions": 137,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 297,
+      "constraint_visits": 339,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -99,7 +99,7 @@
     "helper_functions": 137,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 297,
+      "constraint_visits": 339,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -122,7 +122,7 @@
     "helper_functions": 141,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 37,
+      "constraint_visits": 40,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -145,7 +145,7 @@
     "helper_functions": 10,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 42,
+      "constraint_visits": 48,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -180,7 +180,7 @@
     "helper_functions": 10,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 74,
+      "constraint_visits": 78,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -215,7 +215,7 @@
     "helper_functions": 47,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 102,
+      "constraint_visits": 112,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -250,7 +250,7 @@
     "helper_functions": 46,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 89,
+      "constraint_visits": 99,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -285,7 +285,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 55,
+      "constraint_visits": 65,
       "numeric_contexts": 3,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -320,7 +320,7 @@
     "helper_functions": 43,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 74,
+      "constraint_visits": 80,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -355,7 +355,7 @@
     "helper_functions": 37,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 36,
+      "constraint_visits": 44,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -390,7 +390,7 @@
     "helper_functions": 11,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 262,
+      "constraint_visits": 264,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -402,17 +402,17 @@
   },
   {
     "workload": "example: merge_task",
-    "bytes": 20272,
-    "core_bytes": 19880,
+    "bytes": 20273,
+    "core_bytes": 19881,
     "defined_functions": 56,
     "helper_functions": 49,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 271,
+      "constraint_visits": 322,
       "numeric_contexts": 3,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
-      "range_widenings": 5,
+      "range_widenings": 7,
       "specializations": 1,
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
@@ -426,7 +426,7 @@
     "helper_functions": 23,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 5,
+      "constraint_visits": 6,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -444,7 +444,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -466,7 +466,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -488,7 +488,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -510,7 +510,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -532,7 +532,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -554,7 +554,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -576,7 +576,7 @@
     "helper_functions": 24,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 6,
+      "constraint_visits": 8,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -598,7 +598,7 @@
     "helper_functions": 24,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 6,
+      "constraint_visits": 8,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -620,7 +620,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 8,
+      "constraint_visits": 10,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -642,8 +642,8 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 56,
-      "numeric_contexts": 7,
+      "constraint_visits": 75,
+      "numeric_contexts": 8,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
       "range_widenings": 0,
@@ -664,7 +664,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 2,
-      "constraint_visits": 44,
+      "constraint_visits": 49,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -686,7 +686,7 @@
     "helper_functions": 19,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 34,
+      "constraint_visits": 35,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -708,7 +708,7 @@
     "helper_functions": 61,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 42,
+      "constraint_visits": 43,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,

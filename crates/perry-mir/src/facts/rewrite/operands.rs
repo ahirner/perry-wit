@@ -184,6 +184,9 @@ fn intrinsic_operand_types(
     };
     let res_ty = || op.deref(ctx).get_result(0).get_type(ctx);
     match intrinsic {
+        crate::intrinsics::Intrinsic::BytesFromArray => {
+            expected[0] = op.deref(ctx).get_operand(0).get_type(ctx);
+        }
         _ if intrinsic.int32_operands() => {
             for (expected, arg) in expected.iter_mut().zip(op.deref(ctx).operands()) {
                 let ty = arg.get_type(ctx);

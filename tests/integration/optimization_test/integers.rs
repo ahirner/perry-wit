@@ -176,11 +176,15 @@ fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
          export function run(a:number,b:number):number { return a+b; } \
          export function wide(a:number,b:number):number { return a+b; } \
          export function chained(a:number,b:number):number { return add(a+b,b); } \
+         export function product(a:number,b:number):number { return a*b; } \
+         export function scaled(a:number,b:number):number { return Math.trunc((a*b)/1024); } \
          export function big(a:bigint,b:bigint):bigint { return a+b; } \
          export function neg(value:bigint):bigint { return -value; }",
         "func(a:s8,b:u8)->s16; \
          export wide: func(a:u32,b:u32)->f64; \
          export chained: func(a:u32,b:u32)->f64; \
+         export product: func(a:u32,b:u32)->f64; \
+         export scaled: func(a:u32,b:u32)->u32; \
          export big: func(a:s64,b:u64)->u64; \
          export neg: func(value:u64)->s64",
     )?;
@@ -198,6 +202,12 @@ fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
             &[Val::I32(-1), Val::I32(-1)],
             Val::F64(12884901885f64.to_bits()),
         ),
+        (
+            "product",
+            &[Val::I32(-1), Val::I32(-1)],
+            Val::F64(((u32::MAX as u64).pow(2) as f64).to_bits()),
+        ),
+        ("scaled", &[Val::I32(-1), Val::I32(-1)], Val::I32(-8388608)),
         ("big", &[Val::I64(-1), Val::I64(-1)], Val::I64(-2)),
         ("neg", &unary, Val::I64(-1)),
     ] {
@@ -407,26 +417,185 @@ export function parse(flag: number): number {
     Ok(())
 }
 
-/// Bitwise operators read only the low 32 bits of their operands, so integer arithmetic
-/// feeding them computes in `i32`; other uses of the same value keep its full width.
+/// Truncating consumers permit wrapping integer instructions;
+/// other uses of the same value retain the full Number result.
 #[test]
 fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
+    for (expression, expected) in [
+        ("(sum + i) | 0", 4950),
+        (
+            "Math.imul(sum + i, 3)",
+            (0i32..100).fold(0i32, |sum, i| sum.wrapping_add(i).wrapping_mul(3)),
+        ),
+    ] {
+        let core = perry_wit::compile_core(
+            &format!(
+                "export function run():number {{ let sum=0; for(let i=0;i<100;i++) sum={expression}; return sum; }}"
+            ),
+            "unconstrained-bitwise.ts",
+        )?;
+        assert!(
+            !inspect_wasm(&core)?
+                .instructions()
+                .any(|op| matches!(op, Operator::F64Add)),
+            "{expression}: integer loops specialize without a WIT signature"
+        );
+        let mut program = Program::from_wasm(core);
+        assert_eq!(program.call("run", &[]).0[0].f64(), Some(expected as f64));
+    }
+
+    let core = perry_wit::compile_core(
+        "export function run(x:number):number { let value=x>>>0; for(let i=0;i<4;i++) value=-value; return value; }",
+        "unsigned-negation.ts",
+    )?;
+    let mut program = Program::from_wasm(core);
+    for (input, expected) in [
+        (-1.0, 4294967295.0),
+        (2147483648.0, 2147483648.0),
+        (0.0, 0.0),
+    ] {
+        assert_eq!(program.number("run", input), expected);
+    }
+    for (expression, input, expected) in [
+        ("(x>>>0)-1", 0.0, -1.0f64),
+        ("-(x>>>0)", 0.0, -0.0),
+        ("((x>>>0)*-1)>>>0", 1.0, 4294967295.0),
+    ] {
+        let core = perry_wit::compile_core(
+            &format!("export function run(x:number):number {{ return {expression}; }}"),
+            "unsigned-number-arithmetic.ts",
+        )?;
+        let mut program = Program::from_wasm(core);
+        assert_eq!(program.number("run", input).to_bits(), expected.to_bits());
+    }
+
     let compiled = compile(
         "export function run(a:number,b:number):number { return (a * b) | 0; }",
         "func(a:u32,b:u32)->s32",
     )?;
-    let wat = wasmprinter::print_bytes(&compiled.core)?;
-    assert!(!wat.contains("i64."), "{wat}");
     let mut program = Program::from_wasm(compiled.core);
     let max = [Val::I32(-1), Val::I32(-1)];
-    assert_eq!(program.call("run", &max).0[0].unwrap_i32(), 1);
+    assert_eq!(program.call("run", &max).0[0].i32(), Some(1));
 
+    // A truncating use leaves the product exact for uses that read its high bits.
+    for (body, wit, expected) in [
+        (
+            "return (p | 0) + p;",
+            "func(a:u32,b:u32)->f64",
+            4294967296.0,
+        ),
+        (
+            "return (p | 0) + p;",
+            "func(a:s32,b:s32)->f64",
+            4294967296.0,
+        ),
+        (
+            "return (p >>> 0) + p;",
+            "func(a:u32,b:u32)->f64",
+            4294967296.0,
+        ),
+        ("return p > 5 ? p | 0 : 1;", "func(a:s32,b:s32)->f64", 0.0),
+    ] {
+        let compiled = compile(
+            &format!("export function run(a:number,b:number):number {{ const p = a * b; {body} }}"),
+            wit,
+        )?;
+        let mut program = Program::from_wasm(compiled.core);
+        let result = program.call("run", &[Val::I32(65536), Val::I32(65536)]).0[0];
+        assert_eq!(result.f64(), Some(expected), "{wit}: {body}");
+    }
+    for (body, input, expected) in [
+        (
+            "const p = (x | 0) * (x | 0); return (p | 0) + p;",
+            65536.0,
+            4294967296.0,
+        ),
+        (
+            "const p = (x >>> 0) * (x >>> 0); return (p >>> 0) + p;",
+            65536.0,
+            4294967296.0,
+        ),
+        (
+            "const p = (x | 0) * (x | 0); const q = p | 0; return q === 0 ? p : -1;",
+            65536.0,
+            4294967296.0,
+        ),
+        (
+            "const t = (x >>> 0) * -1; return low(t) + t;",
+            1.0,
+            4294967294.0,
+        ),
+        (
+            "const p = Math.trunc(x); return (p | 0) + p;",
+            4294967296.0,
+            4294967296.0,
+        ),
+        (
+            "const p = (x | 0) * 0; return (p | 0) + 1 / p;",
+            -1.0,
+            f64::NEG_INFINITY,
+        ),
+    ] {
+        let core = perry_wit::compile_core(
+            &format!(
+                "function low(v:number):number {{ return v >>> 0; }} export function run(x:number):number {{ {body} }}"
+            ),
+            "observed-high-bits.ts",
+        )?;
+        let mut program = Program::from_wasm(core);
+        assert_eq!(program.number("run", input), expected, "{body}");
+    }
+    Ok(())
+}
+
+#[test]
+fn integer_multiplication_preserves_wrapping_before_bitwise_conversion() -> Result<()> {
+    for (body, a, b, expected) in [
+        (
+            "return ((a >>> 0) * (b >>> 0)) | 0;",
+            4294967295.0,
+            4294967295.0,
+            1.0,
+        ),
+        (
+            "const p = (a >>> 0) + (b | 0); return (p * p) | 0;",
+            4294967295.0,
+            0.0,
+            1.0,
+        ),
+        (
+            "const values = [(a >>> 0) * (b >>> 0), -1.5, NaN, Infinity]; \
+             const alias = values; alias[1] -= 1; const bytes = new Uint8Array(values); \
+             return bytes[0] + bytes[1] + bytes[2] + bytes[3];",
+            4294967295.0,
+            4294967295.0,
+            255.0,
+        ),
+    ] {
+        let core = perry_wit::compile_core(
+            &format!("export function run(a:number,b:number):number {{ {body} }}"),
+            "wrapping-bitwise-product.ts",
+        )?;
+        let mut program = Program::from_wasm(core);
+        let result = program
+            .call(
+                "run",
+                &[Val::F64(f64::to_bits(a)), Val::F64(f64::to_bits(b))],
+            )
+            .0[0];
+        assert_eq!(result.f64(), Some(expected), "{body}");
+    }
+    Ok(())
+}
+
+#[test]
+fn wit_integer_results_preserve_intermediate_comparisons() -> Result<()> {
     let compiled = compile(
-        "export function run(a:number,b:number):number { const p = a * b; return (p | 0) + p; }",
-        "func(a:u32,b:u32)->f64",
+        "export function run(a:number,b:number):number { const p = a * b; return p > 5 ? p : 1; }",
+        "func(a:s32,b:s32)->s32",
     )?;
     let mut program = Program::from_wasm(compiled.core);
     let result = program.call("run", &[Val::I32(65536), Val::I32(65536)]).0[0];
-    assert_eq!(result.unwrap_f64(), 4294967296.0);
+    assert_eq!(result.i32(), Some(0));
     Ok(())
 }

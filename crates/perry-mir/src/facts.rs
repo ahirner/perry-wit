@@ -25,7 +25,7 @@ use pliron::{
 };
 use std::{
     cell::Cell,
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
 };
 
 mod domains;
@@ -41,7 +41,7 @@ use domains::{
 pub(crate) use rewrite::verify_lossless_module;
 pub(crate) use rewrite::{specialize, verify_lossless_operations};
 mod value;
-use value::{Representation, ValueFacts};
+use value::{Demand, Representation, ValueFacts, ValueState};
 mod outcomes;
 use outcomes::Outcomes;
 
@@ -221,8 +221,10 @@ impl Body {
                 && ((Operation::get_op::<NumericCastOp>(op, ctx).is_some()
                     && Integer::from_type(ctx, op.deref(ctx).get_result(0).get_type(ctx))
                         .is_some())
-                    || crate::intrinsics::intrinsic_of(ctx, op)
-                        == Some(crate::intrinsics::Intrinsic::ParseInt)
+                    || crate::intrinsics::intrinsic_of(ctx, op).is_some_and(|intrinsic| {
+                        intrinsic == crate::intrinsics::Intrinsic::ParseInt
+                            || intrinsic.int32_operands()
+                    })
                     || op
                         .deref(ctx)
                         .operands()
@@ -322,10 +324,7 @@ pub fn with_fact_limits<R>(
 
 #[derive(Default)]
 struct State {
-    facts: HashMap<Value, ValueFacts>,
-    required: HashMap<Value, Integer>,
-    constrained: HashSet<Value>,
-    original_payloads: HashSet<Value>,
+    values: HashMap<Value, ValueState>,
     calls: HashMap<Ptr<Operation>, usize>,
     results: Vec<ResultFact>,
     callers: BTreeSet<(usize, usize)>,
@@ -341,22 +340,14 @@ struct ResultFact {
 }
 
 impl State {
-    /// Record that `value` must be representable as `required`, merged with earlier demands.
-    fn demand(&mut self, value: Value, required: Option<Integer>, constrained: bool) -> bool {
-        let mut changed = constrained && self.constrained.insert(value);
-        if let Some(required) = required {
-            let old = self.required.get(&value).copied();
-            let new = old.map_or(required, |old| old.common(required));
-            if old != Some(new) {
-                self.required.insert(value, new);
-                changed = true;
-            }
-        }
-        changed
+    fn demand(&mut self, value: Value, incoming: Demand) -> bool {
+        incoming != Demand::None && self.values.entry(value).or_default().require(incoming)
     }
 
     fn value(&self, value: Value) -> ValueFacts {
-        self.facts.get(&value).copied().unwrap_or_default()
+        self.values
+            .get(&value)
+            .map_or(ValueFacts::default(), ValueState::facts)
     }
     fn fact(&self, value: Value) -> Fact {
         self.value(value).domain
@@ -364,14 +355,19 @@ impl State {
     fn range(&self, value: Value) -> Range {
         self.value(value).range
     }
-    fn is_constrained(&self, value: Value) -> bool {
-        self.constrained.contains(&value)
+    fn usage(&self, value: Value) -> Demand {
+        self.values
+            .get(&value)
+            .map_or(Demand::None, ValueState::demand)
     }
-    /// The width demands put on `value`, at register size (32 or 64 bits): values compute in
-    /// registers, and only explicit casts narrow them further, so a narrow consumer never
-    /// changes what other uses of the value observe.
+    fn is_constrained(&self, value: Value) -> bool {
+        matches!(self.usage(value), Demand::Truncated(_))
+    }
+    fn preserves_original(&self, value: Value) -> bool {
+        self.usage(value) == Demand::Original
+    }
     fn width(&self, value: Value) -> Option<Integer> {
-        self.required.get(&value).copied().map(Integer::register)
+        self.usage(value).width().map(Integer::register)
     }
 
     fn representation(&self, value: Value) -> Option<Integer> {
@@ -527,7 +523,6 @@ struct Solver {
     precise_counts: HashMap<Identifier, usize>,
     summary_contexts: HashMap<Identifier, usize>,
     work: Worklist,
-    width_defaults: Vec<(usize, usize, Value)>,
 }
 
 impl Solver {
@@ -619,28 +614,6 @@ impl Solver {
             },
             ..State::default()
         };
-        for &op in &body.returns {
-            for (position, value) in op.deref(ctx).operands().enumerate() {
-                if let Some(required) = key.results.get(position).and_then(|r| r.integer()) {
-                    state.demand(value, Some(required), true);
-                }
-            }
-        }
-        loop {
-            let mut progressed = false;
-            for constraint in &body.constraints {
-                if let Constraint::Edge { from, to } = *constraint {
-                    progressed |= state.demand(
-                        from,
-                        state.required.get(&to).copied(),
-                        state.is_constrained(to),
-                    );
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
         for (position, (&parameter, domain)) in body.parameters.iter().zip(&key.args).enumerate() {
             if crate::types::is_reference(ctx, parameter.get_type(ctx)) {
                 state.origins.insert(parameter, BTreeSet::from([position]));
@@ -664,7 +637,7 @@ impl Solver {
             if body.external {
                 facts.outcome = Outcomes::unknown(ctx, parameter.get_type(ctx));
             }
-            state.facts.insert(parameter, facts);
+            state.values.insert(parameter, ValueState::new(facts));
         }
         let constraints = body.constraints.len();
         self.analysis.keys.push(key);
@@ -759,7 +732,6 @@ impl Analysis for ProgramFacts {
             precise_counts: HashMap::new(),
             summary_contexts: HashMap::new(),
             work: Worklist::default(),
-            width_defaults: Vec::new(),
         };
         let has_integer_constraints = solver
             .analysis
@@ -805,42 +777,12 @@ impl Analysis for ProgramFacts {
             let id = solver.context(ctx, key)?;
             solver.analysis.roots.push((function, id));
         }
-        loop {
-            while let Some(item) = solver.work.pop() {
-                solver.analysis.constraint_visits += 1;
-                match item {
-                    Work::Operation(id, index) => solver.process(ctx, id, index)?,
-                    Work::OpenObject(object) => solver.open_object(ctx, object)?,
-                    Work::ReconcileCell(cell) => solver.reconcile_cell(ctx, cell),
-                }
-            }
-            // Every default is applied after propagation settles, before the next queue drain.
-            solver
-                .width_defaults
-                .sort_unstable_by_key(|&(id, index, _)| std::cmp::Reverse((id, index)));
-            let mut defaulted = false;
-            while let Some((id, _, value)) = solver.width_defaults.pop() {
-                solver.analysis.constraint_visits += 1;
-                if !solver.analysis.states[id].required.contains_key(&value) {
-                    let default_int = solver.analysis.states[id]
-                        .fact(value)
-                        .integer()
-                        .map(Integer::unconstrained)
-                        .or_else(|| {
-                            value
-                                .get_type(ctx)
-                                .deref(ctx)
-                                .is::<crate::types::BigIntType>()
-                                .then_some(Integer::I64)
-                        });
-                    if let Some(integer) = default_int {
-                        solver.demand(id, value, Some(integer), false);
-                        defaulted = true;
-                    }
-                }
-            }
-            if !defaulted {
-                break;
+        while let Some(item) = solver.work.pop() {
+            solver.analysis.constraint_visits += 1;
+            match item {
+                Work::Operation(id, index) => solver.process(ctx, id, index)?,
+                Work::OpenObject(object) => solver.open_object(ctx, object)?,
+                Work::ReconcileCell(cell) => solver.reconcile_cell(ctx, cell),
             }
         }
         Ok(solver.analysis)

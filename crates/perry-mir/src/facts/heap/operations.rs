@@ -198,6 +198,7 @@ impl Solver {
                 while let Some(object) = self.next_object(target, previous) {
                     previous = Some(object);
                     let output = self.analysis.heap.objects[object].contents.slots()[0];
+                    self.analysis.heap.cells[output].readers.insert(reader);
                     for &input in &slots[..sources] {
                         self.copy_slot(ctx, input, output, reader)?;
                     }
