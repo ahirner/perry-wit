@@ -192,10 +192,12 @@ fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &P
             .contains(&case.expected_outcome()),
         "generated input changes the contract's declared expected outcome"
     );
-    for evidence in executor.check(case, directory)? {
-        (contract.check)(case, &evidence)?;
+    let (variants, evidence): (Vec<_>, Vec<_>) =
+        executor.check(case, directory)?.into_iter().unzip();
+    for (variant, evidence) in variants.iter().zip(&evidence) {
+        (contract.check)(variant, evidence)?;
     }
-    Ok(())
+    check_metamorphic(&evidence)
 }
 fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Result<()> {
     let source = case.source();

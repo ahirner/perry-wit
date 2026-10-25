@@ -397,8 +397,14 @@ impl Executor {
         run_tsc_batch(&pending, directory)
     }
 
-    pub fn check(&self, case: &Case, directory: &Path) -> Result<Vec<Evidence>> {
-        self.check_variants(&case.variants(), directory)
+    pub fn check<'c>(
+        &self,
+        case: &'c Case,
+        directory: &Path,
+    ) -> Result<Vec<(std::borrow::Cow<'c, Case>, Evidence)>> {
+        let variants = case.variants();
+        let evidence = self.check_variants(&variants, directory)?;
+        Ok(variants.into_iter().zip(evidence).collect())
     }
 
     fn check_variants(
@@ -406,7 +412,7 @@ impl Executor {
         variants: &[std::borrow::Cow<'_, Case>],
         directory: &Path,
     ) -> Result<Vec<Evidence>> {
-        let evidence = thread::scope(|scope| -> Result<Vec<Evidence>> {
+        thread::scope(|scope| -> Result<Vec<Evidence>> {
             let handles = variants
                 .iter()
                 .enumerate()
@@ -425,9 +431,7 @@ impl Executor {
                         .map_err(|_| anyhow::anyhow!("variant thread panicked"))?
                 })
                 .collect()
-        })?;
-        check_metamorphic(&evidence)?;
-        Ok(evidence)
+        })
     }
 
     pub(crate) fn execute_source(
@@ -599,9 +603,8 @@ mod tests {
                 exit: crate::registry::ExitStatus::Success,
             })
         });
-        let error = executor
-            .check_variants(&variants, directory.path())
-            .unwrap_err();
+        let evidence = executor.check_variants(&variants, directory.path())?;
+        let error = check_metamorphic(&evidence).unwrap_err();
         ensure!(
             error
                 .to_string()
