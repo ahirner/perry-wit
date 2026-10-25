@@ -19,6 +19,14 @@ macro_rules! intrinsic_catalog {
                 MathAbs = "math_abs" (Number) -> (Number), Pure, None => Abs;
                 MathRound = "math_round" (Number) -> (Number), Pure, None => Round;
                 MathSqrt = "math_sqrt" (Number) -> (Number), Pure, None => NumberOnly;
+                MathImul = "math_imul" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                BitAnd = "bit_and" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                BitOr = "bit_or" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                BitXor = "bit_xor" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                BitNot = "bit_not" (NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                ShiftLeft = "shift_left" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                ShiftRight = "shift_right" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => Signed32;
+                ShiftRightUnsigned = "shift_right_unsigned" (NumberOrInteger, NumberOrInteger) -> (NumberOrInteger), Pure, None => UnsignedCount;
                 MathMin = "math_min" (Number, Number) -> (Number), Pure, None => Min;
                 MathMax = "math_max" (Number, Number) -> (Number), Pure, None => Max;
                 ParseInt = "parse_int" (String, Numeric) -> (Numeric), Pure, None => NumberOnly;

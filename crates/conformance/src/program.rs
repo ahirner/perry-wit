@@ -43,6 +43,8 @@ pub enum Number {
     NegativeZero,
     Input,
     Binary(Binary, Box<Self>, Box<Self>),
+    BitNot(Box<Self>),
+    Imul(Box<Self>, Box<Self>),
     Choose(Box<Condition>, Box<Self>, Box<Self>),
     Mark(Box<Self>),
     Array(Box<Self>, Box<Self>, Box<Self>, u8),
@@ -69,6 +71,12 @@ pub enum Binary {
     Mul,
     Div,
     Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +343,8 @@ impl Display for Number {
             Self::NegativeZero => f.write_str("(-0)"),
             Self::Input => f.write_str("x"),
             Self::Binary(op, a, b) => write!(f, "({a} {op} {b})"),
+            Self::BitNot(value) => write!(f, "(~{value})"),
+            Self::Imul(a, b) => write!(f, "Math.imul({a}, {b})"),
             Self::Choose(c, a, b) => write!(f, "({c} ? {a} : {b})"),
             Self::Mark(value) => write!(f, "mark(trace, {value})"),
             Self::Array(a, b, c, index) => write!(f, "([{a}, {b}, {c}][{index}])"),
@@ -375,6 +385,12 @@ impl Display for Binary {
             Self::Mul => "*",
             Self::Div => "/",
             Self::Rem => "%",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::Shl => "<<",
+            Self::Shr => ">>",
+            Self::UShr => ">>>",
         })
     }
 }
@@ -412,15 +428,17 @@ impl Number {
             Self::Input => true,
             Self::Integer(_) | Self::NegativeZero => false,
             Self::Mark(a)
+            | Self::BitNot(a)
             | Self::Call(a)
             | Self::Math(_, a)
             | Self::DateTime(a)
             | Self::TypedJson(a)
             | Self::ClosedLoop(a, _)
             | Self::Handled(a) => a.uses_input(),
-            Self::Binary(_, a, b) | Self::Field(a, b) | Self::ByteAlias(a, b) => {
-                a.uses_input() || b.uses_input()
-            }
+            Self::Binary(_, a, b)
+            | Self::Imul(a, b)
+            | Self::Field(a, b)
+            | Self::ByteAlias(a, b) => a.uses_input() || b.uses_input(),
             Self::Choose(c, a, b) => c.uses_input() || a.uses_input() || b.uses_input(),
             Self::Array(a, b, c, _) | Self::ByteGet(a, b, c, _) => {
                 a.uses_input() || b.uses_input() || c.uses_input()

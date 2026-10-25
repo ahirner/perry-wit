@@ -281,11 +281,13 @@ impl Solver {
                 };
                 (fact, range)
             }
-            BuiltinContract::UnsignedCount | BuiltinContract::ByteValue => {
-                let integer = if contract == BuiltinContract::ByteValue {
-                    Integer::U8
-                } else {
-                    Integer::U32
+            BuiltinContract::UnsignedCount
+            | BuiltinContract::ByteValue
+            | BuiltinContract::Signed32 => {
+                let integer = match contract {
+                    BuiltinContract::ByteValue => Integer::U8,
+                    BuiltinContract::Signed32 => Integer::I32,
+                    _ => Integer::U32,
                 };
                 (Fact::Integer(integer), Range::of(Some(integer)))
             }
