@@ -5,9 +5,9 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Objects
 
-- Non-recursive interfaces, type aliases and object literals compile to closed layouts with fixed field offsets, and types with the same fields share one structural layout. Nominal classes and recursive types allocate distinct record layouts.
-- Closed records keep their declared fields. `Record<string, V>` dictionaries accept string-keyed additions; `delete` works on optional record properties and dictionary keys. Prototype mutation is rejected.
-- Fresh empty objects, including `const object: any = {}`, infer dictionary storage from uniform string-keyed or named writes. The shared aggregate analysis follows non-reassigned local aliases, branches and loops. Primitive property reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer preserve inference. Unknown mutations, escaping aliases and conflicting writes require an explicit supported type.
+- Interfaces, type aliases and object literals compile to records with fixed field offsets. Types with the same fields share a layout; classes and recursive types get their own.
+- Records keep their declared fields, and prototype mutation is rejected. `Record<string, V>` dictionaries accept new keys, and `delete` removes dictionary keys and optional properties.
+- An empty object, including `const object: any = {}`, becomes a dictionary when every write stores the same value type. Writes through local aliases, branches and loops count. An object that escapes, or whose writes store different types, needs a type annotation.
 - Unions of literals, records and WIT variants narrow through `typeof`, equality and discriminant properties.
 
 ## Arrays

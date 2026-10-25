@@ -53,11 +53,11 @@ The frontend returns a read-only program and metadata. Record identity and funct
 
 ## Aggregate inference
 
-Fresh empty arrays and dictionaries share one write and alias analysis in the frontend. Numeric indices select array storage; string keys and named properties select dictionary storage. Writes resolve to no observations, a finite set of value types or unknown contents. Arrays with several value types, and the `any` bindings and helper returns that carry them, become value unions; dictionaries need uniform values.
+The frontend infers the contents of empty arrays and objects from the writes it can see, including writes through local aliases. Numeric indices make an array, and string keys or property names make a dictionary. An array that stores several types gets a value union, while a dictionary needs a single value type.
 
-Dictionaries lower to arrays of typed key-value entries, so their values share the allocation identities, alias propagation and slot facts of array elements. Heap analysis tracks JSON openness independently of the declared type: a typed JSON record stored in an inferred aggregate keeps its undeclared fields.
+A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, and storing such a record in a dictionary keeps them.
 
-A value union is a variant whose cases are numbers, strings, booleans and at most one plain record shape, with null and undefined as absence states; `number | string` is the common case. Each value stores an immutable tag, an eight-byte payload and a traced owner. Operators, property reads and `typeof` narrowing dispatch on the tag, record cases keep their identity, and JSON descriptors encode the active case. Mixed arrays box every element; packed numeric storage with widening transitions is not implemented.
+A value union holds a number, string, boolean or one plain record shape, with `number | string` as the common case. Each value stores a tag, an eight-byte payload and a traced reference, and operators, property reads and `typeof` checks branch on the tag. Mixed arrays box every element, because packed numeric storage with type transitions is not implemented.
 
 ## Memory
 
