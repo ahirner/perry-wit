@@ -46,7 +46,8 @@ impl<'s> FunctionBuilder<'s> {
             let key = self.fit(ctx, key, k_ty)?;
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             let val = self.fit(ctx, val, v_ty)?;
-            return self.kv_set(ctx, array, key, val);
+            self.kv_set(ctx, array, key, val)?;
+            return Ok(val);
         }
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
@@ -68,12 +69,25 @@ impl<'s> FunctionBuilder<'s> {
         }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        let record = if crate::value_unions::is_value_union(ctx, record.get_type(ctx)) {
+            let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))?
+                .into_iter()
+                .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
+                .context("property write requires a record alternative")?;
+            self.emit_value(ctx, |ctx| {
+                perry_mir::VariantPayloadOp::new(ctx, record, payload)
+            })
+        } else {
+            record
+        };
+
         if let Some((_, v_ty, _)) = crate::collections::dict_entry_types(ctx, record.get_type(ctx))
         {
             let key = self.string(ctx, field);
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             let val = self.fit(ctx, val, v_ty)?;
-            return self.kv_set(ctx, record, key, val);
+            self.kv_set(ctx, record, key, val)?;
+            return Ok(val);
         }
         if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
             && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)

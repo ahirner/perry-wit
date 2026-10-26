@@ -19,19 +19,34 @@ use pliron::{
 
 pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Option<TypeHandle>)>> {
     let ty = ty.deref(ctx);
+    if let Some(union) = ty.downcast_ref::<crate::ValueUnionType>() {
+        return variant_cases(ctx, union.variants());
+    }
     if let Some(variant) = ty.downcast_ref::<VariantType>() {
         return Ok(variant.cases().to_vec());
     }
-    if ty.is::<crate::types::NumberStringType>() {
-        return Ok(vec![
-            (
-                "number".into(),
-                Some(pliron::builtin::types::FP64Type::get(ctx).into()),
-            ),
-            ("string".into(), Some(StringType::get(ctx).into())),
-        ]);
-    }
     verify_err!(pliron::location::Location::Unknown, InvalidVariant)
+}
+
+pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
+    let ty = ty.deref(ctx);
+    if ty.is::<pliron::builtin::types::FP64Type>() {
+        Some("number")
+    } else if ty.is::<StringType>() {
+        Some("string")
+    } else if ty
+        .downcast_ref::<pliron::builtin::types::IntegerType>()
+        .is_some_and(|ty| ty.width() == 1)
+    {
+        Some("boolean")
+    } else if ty
+        .downcast_ref::<crate::RecordType>()
+        .is_some_and(|ty| ty.kind() == crate::RecordKind::Object)
+    {
+        Some("object")
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]

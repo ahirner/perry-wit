@@ -3,6 +3,7 @@ use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use perry_abi::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
 use perry_mir::{CompareKind, StringConstOp};
 use pliron::{
+    builtin::types::{IntegerType, Signedness},
     context::{Context, Ptr},
     operation::Operation,
     value::Value,
@@ -16,6 +17,90 @@ pub(super) enum Character {
 }
 
 impl FunctionLowering<'_, '_> {
+    /// The first `min(length, 8)` bytes of a string, zero-padded, without reading past its view.
+    fn string_prefix(&mut self, ctx: &mut Context, string: Value, length: Value) -> Value {
+        let word = IntegerType::get(ctx, 64, Signedness::Signless).into();
+        let done = self.new_block(ctx, vec![word]);
+        let wide = self.new_block(ctx, vec![]);
+        let short = self.new_block(ctx, vec![]);
+        let data = self.load(ctx, MemKind::I32, string, DATA);
+        let eight = self.i32_const(ctx, 8);
+        let enough = self.num(ctx, NumOpcode::I32GeU, vec![length, eight]);
+        self.cond_br(ctx, enough, (wide, vec![]), (short, vec![]));
+        self.block = wide;
+        let prefix = self.load(ctx, MemKind::I64, data, 0);
+        self.br(ctx, done, vec![prefix]);
+        self.block = short;
+        // Lengths below eight split into 4-, 2- and 1-byte chunks at offsets given by their bits.
+        let mut prefix = self.i64_const(ctx, 0);
+        for (width, memory) in [
+            (4, MemKind::I64U32),
+            (2, MemKind::I32U16),
+            (1, MemKind::I32U8),
+        ] {
+            let present = self.i32_const(ctx, width);
+            let present = self.num(ctx, NumOpcode::I32And, vec![length, present]);
+            let read = self.new_block(ctx, vec![]);
+            let next = self.new_block(ctx, vec![word]);
+            self.cond_br(ctx, present, (read, vec![]), (next, vec![prefix]));
+            self.block = read;
+            let mask = self.i32_const(ctx, 8 - width * 2);
+            let offset = self.num(ctx, NumOpcode::I32And, vec![length, mask]);
+            let address = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+            let loaded = self.load(ctx, memory, address, 0);
+            let loaded = if width == 4 {
+                loaded
+            } else {
+                self.num(ctx, NumOpcode::I64ExtendI32U, vec![loaded])
+            };
+            let shift = self.num(ctx, NumOpcode::I32Mul, vec![offset, eight]);
+            let shift = self.num(ctx, NumOpcode::I64ExtendI32U, vec![shift]);
+            let shifted = self.num(ctx, NumOpcode::I64Shl, vec![loaded, shift]);
+            let combined = self.num(ctx, NumOpcode::I64Or, vec![prefix, shifted]);
+            self.br(ctx, next, vec![combined]);
+            self.block = next;
+            prefix = next.deref(ctx).get_argument(0);
+        }
+        self.br(ctx, done, vec![prefix]);
+        self.block = done;
+        done.deref(ctx).get_argument(0)
+    }
+
+    /// String equality decided inline by identity, length and the first eight bytes; only
+    /// longer strings with equal lengths and prefixes call the runtime.
+    pub(super) fn string_equality(&mut self, ctx: &mut Context, a: Value, b: Value) -> Value {
+        let boolean = i32_type(ctx);
+        let done = self.new_block(ctx, vec![boolean]);
+        let distinct = self.new_block(ctx, vec![]);
+        let measured = self.new_block(ctx, vec![]);
+        let prefixed = self.new_block(ctx, vec![]);
+        let long = self.new_block(ctx, vec![]);
+        let yes = self.i32_const(ctx, 1);
+        let no = self.i32_const(ctx, 0);
+        let same = self.num(ctx, NumOpcode::I32Eq, vec![a, b]);
+        self.cond_br(ctx, same, (done, vec![yes]), (distinct, vec![]));
+        self.block = distinct;
+        let length = self.load(ctx, MemKind::I32, a, LEN);
+        let other = self.load(ctx, MemKind::I32, b, LEN);
+        let same = self.num(ctx, NumOpcode::I32Eq, vec![length, other]);
+        self.cond_br(ctx, same, (measured, vec![]), (done, vec![no]));
+        self.block = measured;
+        let left = self.string_prefix(ctx, a, length);
+        let right = self.string_prefix(ctx, b, length);
+        let same = self.num(ctx, NumOpcode::I64Eq, vec![left, right]);
+        self.cond_br(ctx, same, (prefixed, vec![]), (done, vec![no]));
+        self.block = prefixed;
+        let eight = self.i32_const(ctx, 8);
+        let short = self.num(ctx, NumOpcode::I32LeU, vec![length, eight]);
+        self.cond_br(ctx, short, (done, vec![yes]), (long, vec![]));
+        self.block = long;
+        let order = self.runtime(ctx, Runtime::StringCompare, vec![a, b]);
+        let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
+        self.br(ctx, done, vec![equal]);
+        self.block = done;
+        done.deref(ctx).get_argument(0)
+    }
+
     /// Inline comparison of a string with a literal operand: (in)equality with at most eight
     /// bytes, or ordering against one ASCII byte. `None` leaves the comparison to the runtime.
     pub(super) fn string_literal_comparison(

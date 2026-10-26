@@ -1,5 +1,5 @@
 //! Opaque MIR types and reference-representation queries.
-use super::{ArrayType, RecordType, ResourceType, SettledType, VariantType};
+use super::{ArrayType, RecordType, ResourceType, SettledType, ValueUnionType, VariantType};
 use pliron::{context::Context, derive::pliron_type, r#type::TypeHandle};
 
 macro_rules! value_types {
@@ -97,8 +97,6 @@ value_types! {
         DecoderType("perry.decoder", ["TextDecoder"]);
         /// Immutable, statically compiled regular expression program.
         RegexType("perry.regex", ["RegExp"]);
-        /// The finite primitive union `number | string`, with an exact owner slot for its string case.
-        NumberStringType("perry.number_string", []);
     }
     internal {
         /// Suspended JSON serialization between replacer calls.
@@ -115,6 +113,7 @@ value_types! {
         ArrayType;
         RecordType;
         VariantType;
+        ValueUnionType;
         ResourceType;
         SettledType;
     }

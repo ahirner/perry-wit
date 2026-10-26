@@ -18,7 +18,7 @@ pub(crate) fn contains_type_var(ty: &HirType) -> bool {
 }
 
 mod absence;
-mod arrays;
+mod aggregates;
 mod closures;
 mod environment;
 mod functions;
@@ -205,6 +205,7 @@ fn infer_body_return(
         {
             HirType::Union(types)
         }
+        _ if types.iter().all(is_resolvable_type) => HirType::Union(types),
         _ => return false,
     };
     let inferred = if is_async {
@@ -364,7 +365,7 @@ pub(crate) fn unresolved_types(
     let max_iters = hir.functions.len() + hir.classes.len();
     for _ in 0..=max_iters {
         let mut changed = false;
-        while arrays::resolve(
+        while aggregates::resolve(
             &mut hir.init,
             &mut hir.functions,
             &mut hir.classes,
@@ -376,7 +377,11 @@ pub(crate) fn unresolved_types(
             module_env = perry_hir::HirTypeEnv::from_module(hir);
         }
         for function in &mut hir.functions {
-            if locations.has_explicit_return(&function.name) {
+            if locations.has_explicit_return(&function.name)
+                && !function
+                    .return_type
+                    .any(&mut |ty| matches!(ty, HirType::Any))
+            {
                 continue;
             }
             let mut env = inference.function_with_params(

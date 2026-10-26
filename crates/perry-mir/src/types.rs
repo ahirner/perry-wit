@@ -444,6 +444,52 @@ impl OptionalType {
     }
 }
 
+/// A finite union of JavaScript values, using variant storage without exposing tag/val properties.
+#[pliron_type(
+    name = "perry.value_union",
+    generate_get = true,
+    format = "`<` $variants `>`"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ValueUnionType {
+    variants: TypeHandle,
+}
+
+impl ValueUnionType {
+    pub fn variants(&self) -> TypeHandle {
+        self.variants
+    }
+
+    /// `number | string`.
+    pub fn number_string(ctx: &Context) -> TypedHandle<Self> {
+        let cases = vec![
+            (
+                "number".into(),
+                Some(pliron::builtin::types::FP64Type::get(ctx).into()),
+            ),
+            ("string".into(), Some(StringType::get(ctx).into())),
+        ];
+        let variants = VariantType::get(ctx, cases).into();
+        Self::get(ctx, variants)
+    }
+}
+
+impl Verify for ValueUnionType {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let ty = self.variants.deref(ctx);
+        let Some(variants) = ty.downcast_ref::<VariantType>() else {
+            return input_err_noloc!(RecordErr::InvalidVariant);
+        };
+        variants.verify(ctx)?;
+        for (tag, payload) in variants.cases() {
+            if payload.and_then(|ty| crate::variants::value_tag(ctx, ty)) != Some(tag.as_str()) {
+                return input_err_noloc!(RecordErr::InvalidVariant);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A closed tagged union. Only its active payload owns storage.
 #[pliron_type(name = "perry.variant")]
 #[derive(Hash, PartialEq, Eq, Debug)]

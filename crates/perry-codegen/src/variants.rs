@@ -4,14 +4,14 @@ use crate::{
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use perry_abi::layout::variant;
 use perry_mir::admits_payload;
 use pliron::{context::Context, r#type::TypeHandle, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
-    pub(super) fn number_string_equal(
+    pub(super) fn value_union_equal(
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
@@ -36,23 +36,41 @@ impl FunctionLowering<'_, '_> {
         let no = self.i32_const(ctx, 0);
         self.cond_br(ctx, same_tag, (same, vec![]), (done, vec![no]));
         self.block = same;
-        let number = self.state.data.string("number");
-        let number = self.i32_const(ctx, number as i32);
-        let is_number = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, number]);
-        let numbers = self.new_block(ctx, vec![]);
-        let strings = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, is_number, (numbers, vec![]), (strings, vec![]));
-        self.block = numbers;
-        let a_number = self.load(ctx, MemKind::F64, a, variant::VALUE);
-        let b_number = self.load(ctx, MemKind::F64, b, variant::VALUE);
-        let equal = self.num(ctx, NumOpcode::F64Eq, vec![a_number, b_number]);
-        self.br(ctx, done, vec![equal]);
-        self.block = strings;
-        let a_string = self.load(ctx, MemKind::I32, a, variant::VALUE);
-        let b_string = self.load(ctx, MemKind::I32, b, variant::VALUE);
-        let order = self.runtime(ctx, Runtime::StringCompare, vec![a_string, b_string]);
-        let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
-        self.br(ctx, done, vec![equal]);
+        let inner = optional_inner(ctx, ty).unwrap_or(ty);
+        let cases = perry_mir::variant_cases(ctx, inner)?;
+        for (index, (tag, payload)) in cases.iter().enumerate() {
+            let payload = payload.context("value union without a payload")?;
+            let next = if index + 1 < cases.len() {
+                let tag = self.state.data.string(tag);
+                let tag = self.i32_const(ctx, tag as i32);
+                let matches = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, tag]);
+                let active = self.new_block(ctx, vec![]);
+                let next = self.new_block(ctx, vec![]);
+                self.cond_br(ctx, matches, (active, vec![]), (next, vec![]));
+                self.block = active;
+                Some(next)
+            } else {
+                None
+            };
+            let kind = slot_kind(ctx, payload)?;
+            let a = self.load(ctx, kind, a, variant::VALUE);
+            let b = self.load(ctx, kind, b, variant::VALUE);
+            let equal = if payload.deref(ctx).is::<perry_mir::StringType>() {
+                let order = self.runtime(ctx, Runtime::StringCompare, vec![a, b]);
+                self.num(ctx, NumOpcode::I32Eqz, vec![order])
+            } else {
+                let opcode = if repr(ctx, payload)? == Repr::F64 {
+                    NumOpcode::F64Eq
+                } else {
+                    NumOpcode::I32Eq
+                };
+                self.num(ctx, opcode, vec![a, b])
+            };
+            self.br(ctx, done, vec![equal]);
+            if let Some(next) = next {
+                self.block = next;
+            }
+        }
         self.block = done;
         Ok(done.deref(ctx).get_argument(0))
     }

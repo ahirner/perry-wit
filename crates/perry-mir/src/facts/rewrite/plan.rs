@@ -88,7 +88,7 @@ impl ContextPlan {
             }
             if Operation::get_op::<CompareOp>(op, ctx).is_some() {
                 let inputs = [op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1)];
-                let domain = comparison_domain(state, &inputs);
+                let domain = comparison_domain(ctx, state, &inputs);
                 compares.push((
                     domain,
                     inputs

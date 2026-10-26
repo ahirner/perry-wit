@@ -219,8 +219,8 @@ impl<'s> FunctionBuilder<'s> {
         let value = self.expression(ctx, expr)?;
         let value = self.arithmetic(ctx, value);
         ensure!(
-            kind(ctx, value)? != Kind::NumberString,
-            "narrow number | string before numeric conversion"
+            kind(ctx, value)? != Kind::ValueUnion,
+            "narrow the value union before numeric conversion"
         );
         Ok(match kind(ctx, value)? {
             Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value]),

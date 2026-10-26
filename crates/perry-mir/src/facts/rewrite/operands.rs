@@ -365,7 +365,7 @@ fn operand_types(
             original.deref(ctx).get_operand(0),
             original.deref(ctx).get_operand(1),
         ];
-        if let Some(domain) = comparison_domain(state, &inputs) {
+        if let Some(domain) = comparison_domain(ctx, state, &inputs) {
             expected.fill(domain.ty(ctx));
         } else if inputs[0]
             .get_type(ctx)

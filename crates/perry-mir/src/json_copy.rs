@@ -229,7 +229,7 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     if let Some(element) = schema.and_then(JsonSchema::storage_element) {
         return type_may_contain_record(ctx, element, seen);
     }
-    if let Some(JsonSchema::Variant(var)) = schema {
+    if let Some(JsonSchema::Variant(var) | JsonSchema::ValueUnion(var)) = schema {
         return var.deref(ctx).cases().iter().any(|(_, payload)| {
             payload.is_some_and(|payload| type_may_contain_record(ctx, payload, seen))
         });

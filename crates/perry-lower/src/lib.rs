@@ -36,6 +36,7 @@ mod spread;
 mod statements;
 mod temporal;
 mod url;
+mod value_unions;
 mod variants;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_frontend::hir::{

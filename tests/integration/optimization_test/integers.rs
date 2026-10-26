@@ -469,6 +469,26 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
         assert_eq!(program.number("run", input).to_bits(), expected.to_bits());
     }
 
+    for expression in ["0 | 0", "1 | 0", "-1 >>> 0"] {
+        let core = perry_wit::compile_core(
+            &format!(
+                "export function run(index:number):number {{
+                    const values:number[]=[];
+                    values.push({expression});
+                    const value=values[index];
+                    return (value === ({expression}) ? 1 : 0)
+                         + (value !== ({expression}) ? 2 : 0)
+                         + (value === undefined ? 4 : 0);
+                }}"
+            ),
+            "optional-bitwise-comparison.ts",
+        )?;
+        let mut program = Program::from_wasm(core);
+        assert_eq!(program.number("run", 0.0), 1.0);
+        assert_eq!(program.number("run", 1.0), 6.0);
+        assert_eq!(program.number("run", -1.0), 6.0);
+    }
+
     let compiled = compile(
         "export function run(a:number,b:number):number { return (a * b) | 0; }",
         "func(a:u32,b:u32)->s32",

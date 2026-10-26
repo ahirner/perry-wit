@@ -51,6 +51,14 @@ The compiler workspace separates these responsibilities:
 
 The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
 
+## Aggregate inference
+
+The frontend infers the contents of empty arrays and objects from the writes it can see, including writes through local aliases. Numeric indices make an array, and string keys or property names make a dictionary. An array that stores several types gets a value union, while a dictionary needs a single value type.
+
+A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, and storing such a record in a dictionary keeps them.
+
+A value union holds a number, string, boolean or one plain record shape, with `number | string` as the common case. Each value stores a tag, an eight-byte payload and a traced reference, and operators, property reads and `typeof` checks branch on the tag. Mixed arrays box every element, because packed numeric storage with type transitions is not implemented.
+
 ## Memory
 
 A component has one linear memory, and the compiler picks its heap strategy per module from the effect summaries of `ProgramFacts`.

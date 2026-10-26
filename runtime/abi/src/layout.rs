@@ -180,10 +180,10 @@ pub mod descriptor {
     pub const JSON_NUMERIC: u32 = 11;
     pub const JSON_TUPLE: u32 = 12;
     pub const JSON_VARIANT: u32 = 13;
-    pub const JSON_NUMBER_STRING: u32 = 14;
     pub const JSON_DICTIONARY: u32 = 15;
     pub const JSON_DATE: u32 = 16;
     pub const JSON_BIGINT: u32 = 17;
+    pub const JSON_VALUE_UNION: u32 = 18;
     pub const UNDEFINED_ALLOWED: u32 = 1;
     pub const NULL_ALLOWED: u32 = 2;
     pub const ABSENCE_MASK: u32 = UNDEFINED_ALLOWED | NULL_ALLOWED;

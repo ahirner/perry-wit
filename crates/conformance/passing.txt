@@ -13,6 +13,7 @@ ecma.math.rounding
 ecma.string.operations
 ecma.array.dense
 ecma.object.records
+ecma.object.inferred_storage
 ecma.date.epoch
 ecma.temporal.iso
 ecma.uint8array.conversion

@@ -189,11 +189,20 @@
       (then
         (call $write-raw (local.get $writer) (i32.add (local.get $data) (i32.const @descriptor.WRITE_EMPTY_OBJECT@)) (i32.const 2))
         (return)))
-    (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_NUMBER_STRING@))
+    (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_VALUE_UNION@))
       (then
-        (if (i32.eq (i32.load offset=@variant.TAG@ (local.get $object)) (i32.load offset=8 (local.get $schema)))
-          (then (call $write-number (local.get $writer) (f64.load offset=@variant.VALUE@ (local.get $object))))
-          (else (call $write-quote (local.get $writer) (i32.load offset=@variant.VALUE@ (local.get $object)))))
+        (block $union-done (loop $union-cases
+          (br_if $union-done (i32.ge_u (local.get $index) (i32.load offset=4 (local.get $schema))))
+          (local.set $entry (i32.add (local.get $schema) (i32.add (i32.const 8) (i32.mul (local.get $index) (i32.const 12)))))
+          (if (i32.eq (i32.load offset=@variant.TAG@ (local.get $object)) (i32.load (local.get $entry)))
+            (then
+              (local.set $child (i32.load offset=4 (local.get $entry)))
+              (call $load (local.get $child) (i32.add (local.get $object) (i32.const @variant.VALUE@)))
+              local.set $payload-tag local.set $payload
+              (call $write (local.get $writer) (local.get $child) (local.get $payload) (local.get $payload-tag) (local.get $data) (i32.const 0))
+              (return)))
+          (local.set $index (i32.add (local.get $index) (i32.const 1)))
+          (br $union-cases)))
         (return)))
     (if (i32.eq (local.get $kind) (i32.const @descriptor.JSON_DATE@))
       (then

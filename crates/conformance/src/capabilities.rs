@@ -171,7 +171,8 @@ pub(crate) fn contracts() -> Vec<Contract> {
             .boxed(),
         check_equivalence,
     ));
-    contracts.push(crate::inferred_arrays::contract());
+    contracts.push(crate::inferred_aggregates::contract());
+    contracts.push(crate::inferred_aggregates::dictionary_contract());
     contracts
 }
 

@@ -290,6 +290,11 @@ pub(super) fn scan(
                 init: Some(init),
                 ..
             } if (matches!(ty, HirType::Any | HirType::Unknown)
+                || (ty.any(&mut |ty| matches!(ty, HirType::Any))
+                    && (matches!(init, Expr::LocalGet(_))
+                        || matches!(init, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::FuncRef(_)))))
+                || (env.metadata.inferred_bindings.contains(id)
+                    && matches!(expression(init, env), HirType::Union(_)))
                 || matches!(
                     ty,
                     HirType::Generic { base, type_args }

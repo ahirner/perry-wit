@@ -246,13 +246,15 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
                 set_word(value, 8, bits as u32);
                 value
             }
-            descriptor::JSON_NUMBER_STRING => {
+            descriptor::JSON_VALUE_UNION => {
                 let value = node(bits as u32);
-                if word(value, 0) == word(desc, 8) {
-                    std_json_from_number(*value.add(8).cast::<f64>())
-                } else {
-                    std_json_from_string(node(word(value, 8)))
+                for index in 0..word(desc, 4) {
+                    let case = desc.add((8 + 12 * index) as usize);
+                    if word(value, 0) == word(case, 0) {
+                        return box_slot(*value.add(8).cast::<u64>(), 0, node(word(case, 4)), view);
+                    }
                 }
+                core::ptr::null_mut()
             }
             descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),
             _ => core::ptr::null_mut(),

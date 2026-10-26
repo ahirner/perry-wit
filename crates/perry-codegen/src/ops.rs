@@ -181,13 +181,25 @@ impl FunctionLowering<'_, '_> {
                 self.define(ctx, op, value);
                 return Ok(());
             }
+            if mir_ty.deref(ctx).is::<StringType>()
+                && matches!(kind, CompareKind::Eq | CompareKind::Ne)
+            {
+                let equal = self.string_equality(ctx, operands[0], operands[1]);
+                let value = if kind == CompareKind::Ne {
+                    self.num(ctx, NumOpcode::I32Eqz, vec![equal])
+                } else {
+                    equal
+                };
+                self.define(ctx, op, value);
+                return Ok(());
+            }
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
-            let value = if inner.deref(ctx).is::<perry_mir::NumberStringType>() {
-                let equal = self.number_string_equal(ctx, mir_ty, operands[0], operands[1])?;
+            let value = if inner.deref(ctx).is::<perry_mir::ValueUnionType>() {
+                let equal = self.value_union_equal(ctx, mir_ty, operands[0], operands[1])?;
                 match kind {
                     CompareKind::Eq => equal,
                     CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![equal]),
-                    _ => bail!("narrow number | string before ordered comparisons"),
+                    _ => bail!("narrow the value union before ordered comparisons"),
                 }
             } else if let Some(inner) = optional_inner(ctx, mir_ty)
                 && repr(ctx, inner)? == Repr::F64

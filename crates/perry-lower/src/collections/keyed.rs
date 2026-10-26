@@ -26,10 +26,14 @@ enum SetSelection {
 impl<'s> FunctionBuilder<'s> {
     fn canonicalize_collection_key(&mut self, ctx: &mut Context, key: Value) -> Result<Value> {
         let ty = key.get_type(ctx);
-        if !matches!(
-            Kind::of(ctx, present_type(ctx, ty)),
-            Some(Kind::Number | Kind::NumberString)
-        ) {
+        let numeric = match Kind::of(ctx, present_type(ctx, ty)) {
+            Some(Kind::Number) => true,
+            Some(Kind::ValueUnion) => perry_mir::variant_cases(ctx, present_type(ctx, ty))?
+                .iter()
+                .any(|(tag, _)| tag == "number"),
+            _ => false,
+        };
+        if !numeric {
             return Ok(key);
         }
         let zero = self.number(ctx, 0.0);

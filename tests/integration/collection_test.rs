@@ -9,6 +9,15 @@ fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<(
     )
     .expect_err("sparse literals remain outside the dense-array profile");
     assert!(error.to_string().contains("sparse array spreads"));
+    let error = perry_wit::compile_core(
+        "export function run():number { const row={value:1,extra:2}; const mixed:(number|{value:number})[]=[row]; return mixed.length; }",
+        "union-layout.ts",
+    ).expect_err("union boxing cannot copy a record to a different layout");
+    assert!(
+        error
+            .to_string()
+            .contains("preserve their layout and identity")
+    );
     assert_numbers(
         r#"
 function append(a:number[], value:number, result:number):number {a.push(value);return result;}
@@ -205,6 +214,69 @@ export function tupleCallbacks():number {
  if(optional.map(([key,value=7])=>key+String(value)).join(',')!=='a7,b0')return 4;
  return 0;
 }
+
+function mixedPrimitive(flag:number):any {
+ if(flag>0)return '雪';
+ return 2;
+}
+export function mixedValues(size:number):number {
+ const row:Item=JSON.parse('{"value":7,"extra":{"keep":"雪"}}');
+ const values:(number|string|boolean|Item|null|undefined)[]=[];
+ const alias=values;
+ for(let i=0;i<size;i++)alias.push(i);
+ values.push(row,'x',true,null,undefined,NaN,-0);
+ const held=values[size];
+ row.value=11;
+ if(held!==row || held.value!==11)return 1;
+ held.value=13;
+ if(row.value!==13 || values.indexOf(row)!==size || !values.includes(row))return 2;
+ const sum=mixedPrimitive(size)+1;
+ if(size>0 && sum!=='雪1')return 3;
+ if(size===0 && sum!==3)return 3;
+ if(values[size+1]+true!=='xtrue' || values[size+2]+'!'!=='true!')return 4;
+ if(values[size+2]+2!==3 || values[size+3]+2!==2)return 5;
+ if(values[size+4]===null || values[size+3]===undefined)return 6;
+ if(values[size+5]===values[size+5] || !values.includes(NaN))return 7;
+ if(!Object.is(values[size+6],-0) || Object.is(values[size+6],0))return 8;
+ const copied=values.slice();
+ values[size]=99;
+ if(copied[size]!==row || JSON.stringify(copied[size])!=='{"value":13,"extra":{"keep":"雪"}}')return 9;
+ let count=0;
+ for(let i=0;i<copied.length;i++){
+   const value=copied[i];
+   if(typeof value==='number')count++;
+   if(typeof value==='string' && value.length===0)return 10;
+ }
+ if(count!==size+2)return 11;
+ const nullable=values[size+3];
+ if(typeof nullable==='object' && nullable!==null)return 12;
+ const tagged:(number|{tag:string;value:number})[]=[{tag:'number',value:5}];
+ const taggedValue=tagged[0];
+ if(taggedValue.tag==='number' && taggedValue.value!==5)return 13;
+ const numbers=[3];
+ values.push(numbers[0],numbers[9]);
+ if(values[values.length-2]!==3 || values[values.length-1]!==undefined)return 14;
+
+ return 0;
+}
+
+export function dictionaryKeyPrefixes():number {
+ const keys=['','\0','a','a\0','a\0\0','abcdefgh','abcdefgha','abcdefghb','ABCDABCD','EFGHEFGH','é','雪','😀','abcdé雪a','abcdé雪b'];
+ for(let n=1;n<12;n++)keys.push('x'.repeat(n));
+ const dictionary:Record<string,number>={};
+ for(let i=0;i<keys.length;i++){
+   const key=('!'+keys[i]+'?').slice(1,-1);
+   dictionary[key]=i+1;
+ }
+ dictionary['abcdefgha']=99;
+ for(let i=keys.length-1;i>=0;i--){
+   const key=(':'+keys[i]).slice(1);
+   if(dictionary[key] !== (key==='abcdefgha' ? 99 : i+1))return 1;
+ }
+ if(dictionary['abcdefghc']!==undefined || dictionary['abcdé雪c']!==undefined)return 2;
+ if(Object.keys(dictionary).join('|')!==keys.join('|'))return 3;
+ return 0;
+}
 "#,
         &[
             ("argumentOrder", &[], 0.0),
@@ -214,6 +286,9 @@ export function tupleCallbacks():number {
             ("liveGrouping", &[], 0.0),
             ("unknownAbsence", &[], 0.0),
             ("tupleCallbacks", &[], 0.0),
+            ("dictionaryKeyPrefixes", &[], 0.0),
+            ("mixedValues", &[0.0], 0.0),
+            ("mixedValues", &[129.0], 0.0),
         ],
     )
 }

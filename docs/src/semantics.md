@@ -5,16 +5,17 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Objects
 
-- Non-recursive interfaces, type aliases and object literals compile to closed layouts with fixed field offsets, and types with the same fields share one structural layout. Nominal classes and recursive types allocate distinct record layouts.
-- Adding properties at run time and mutating prototypes are rejected. `delete` works on optional properties and on `Record<K, V>` maps.
+- Interfaces, type aliases and object literals compile to records with fixed field offsets. Types with the same fields share a layout; classes and recursive types get their own.
+- Records keep their declared fields, and prototype mutation is rejected. `Record<string, V>` dictionaries accept new keys, and `delete` removes dictionary keys and optional properties.
+- An empty object, including `const object: any = {}`, becomes a dictionary when every write stores the same value type. Writes through local aliases, branches and loops count. An object that escapes, or whose writes store different types, needs a type annotation.
 - Unions of literals, records and WIT variants narrow through `typeof`, equality and discriminant properties.
 
 ## Arrays
 
-- Arrays (`T[]`) are dense and homogeneous.
+- Arrays (`T[]`) are dense. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape.
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
-- Fresh empty arrays (`[]`, including `any[]`) infer a static element type from uniform `push` calls and numeric-indexed writes across branches, loops and non-reassigned local aliases, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, primitive index reads and `JSON.stringify` without a replacer; other uses, conflicting writes or no writes require an explicit element type.
+- Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer; other uses, unresolved writes or no writes require an explicit element type.
 
 ## Strings
 
@@ -29,7 +30,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## JSON
 
-- `JSON.parse` decodes into the expected static target type (ignoring extra object properties not in the target shape) or into a dynamic JSON value that is validated when assigned to a typed binding. Reviver callbacks are compile errors.
+- `JSON.parse` decodes into the expected static target type (retaining extra object properties for serialization) or into a dynamic JSON value that is validated when assigned to a typed binding. Reviver callbacks are compile errors.
 - `JSON.stringify` supports synchronous replacer callbacks and property-allowlist arrays. The third indentation argument is a compile error.
 
 ## Dates

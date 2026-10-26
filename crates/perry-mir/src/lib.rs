@@ -136,5 +136,7 @@ pub use pipeline::{canonicalize, optimization_statistics};
 pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::*;
-pub use variants::{VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, variant_cases};
+pub use variants::{
+    VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, value_tag, variant_cases,
+};
 pub use views::{AggregateViewOp, can_widen};

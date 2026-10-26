@@ -12,7 +12,7 @@ mod catalog;
 mod emit;
 mod fetch;
 mod handler;
-mod inferred_arrays;
+mod inferred_aggregates;
 mod scaling;
 mod strategies;
 mod streams;

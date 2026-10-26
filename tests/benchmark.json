@@ -47,8 +47,8 @@
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 38363,
-    "core_bytes": 36515,
+    "bytes": 38359,
+    "core_bytes": 36511,
     "defined_functions": 126,
     "helper_functions": 112,
     "optimization": {
@@ -63,8 +63,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5315,
-    "invocation_fuel": 159623594,
-    "warm_fuel": 159609242,
+    "invocation_fuel": 159622570,
+    "warm_fuel": 159608218,
     "initial_memory": 65536,
     "memory": 65536
   },
@@ -86,8 +86,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5711,
-    "invocation_fuel": 13671244,
-    "warm_fuel": 13640040,
+    "invocation_fuel": 13672264,
+    "warm_fuel": 13641060,
     "initial_memory": 65536,
     "memory": 4325376
   },
@@ -109,8 +109,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5711,
-    "invocation_fuel": 13660280,
-    "warm_fuel": 13629412,
+    "invocation_fuel": 13661300,
+    "warm_fuel": 13630432,
     "initial_memory": 65536,
     "memory": 4325376
   },
