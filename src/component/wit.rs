@@ -302,30 +302,52 @@ fn resolve_with(
         None => Vec::new(),
     };
     let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
+    let mut required = Vec::new();
     for group in std::iter::once(&main).chain(deps.iter()) {
-        available.insert(group.main.name.clone());
-        available.extend(group.nested.iter().map(|package| package.name.clone()));
-    }
-    let mut push_unique = |mut group: UnresolvedPackageGroup| {
-        if available.insert(group.main.name.clone()) {
-            group
-                .nested
-                .retain(|package| available.insert(package.name.clone()));
-            deps.push(group);
+        for package in std::iter::once(&group.main).chain(group.nested.iter()) {
+            available.insert(package.name.clone());
+            required.extend(package.foreign_deps.keys().cloned());
         }
-    };
-    for group in ambient_groups {
-        push_unique(group);
     }
+    let mut candidates = ambient_groups;
     for files in embedded::PACKAGES {
         let mut map = SourceMap::new();
         for (name, source) in *files {
             map.push_str(name, *source);
         }
-        push_unique(
+        candidates.push(
             map.parse()
                 .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?,
         );
+    }
+    let mut selected = HashSet::new();
+    while let Some(name) = required.pop() {
+        if available.contains(&name) {
+            continue;
+        }
+        let Some(package) = candidates
+            .iter()
+            .flat_map(|group| std::iter::once(&group.main).chain(group.nested.iter()))
+            .find(|package| package.name == name)
+        else {
+            continue;
+        };
+        required.extend(package.foreign_deps.keys().cloned());
+        available.insert(name.clone());
+        selected.insert(name);
+    }
+    for mut group in candidates {
+        let include_main = selected.remove(&group.main.name);
+        group
+            .nested
+            .retain(|package| selected.remove(&package.name));
+        if !include_main {
+            let Some(package) = group.nested.pop() else {
+                continue;
+            };
+            group.main = package;
+        }
+        deps.push(group);
     }
     Ok(resolve.push_groups(main, deps)?)
 }

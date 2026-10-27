@@ -1,7 +1,8 @@
 use crate::world::Compiler::Standard;
+use perry_wit::api::{self, Package, Wit};
 use std::{fs, path::PathBuf};
 
-use perry_wit::component::wit::resolve_wit;
+use perry_wit::component::wit::{resolve_source, resolve_wit};
 
 #[test]
 fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
@@ -61,8 +62,56 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
     );
 }
 
+pub(super) fn source_and_encoded(source: &str) -> anyhow::Result<[Package; 2]> {
+    let group = wit_parser::UnresolvedPackageGroup::parse("fixture.wit", source)
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let mut resolve = wit_parser::Resolve::new();
+    let package = resolve.push_groups(group, Vec::new())?;
+    Ok([
+        source.as_bytes().into(),
+        Package::Encoded(wit_component::encode(&resolve, package, false)?),
+    ])
+}
+
 #[test]
-fn encoded_ambient_wasi_packages_are_not_embedded_again() -> anyhow::Result<()> {
+fn partial_supplied_packages_do_not_resolve_unrelated_standards() -> anyhow::Result<()> {
+    let source = "package test:producer@1.0.0;
+        interface api { use wasi:clocks/system-clock@0.3.0.{instant}; read: func() -> option<instant>; }
+        world producer { export api; }
+        package wasi:clocks@0.3.0 {
+            interface system-clock { record instant { seconds: s64, nanoseconds: u32 } }
+        }";
+    for dependency in source_and_encoded(source)? {
+        let generate = |interface| {
+            api::generate_sdk(
+                &Wit {
+                    application: format!(
+                        "package test:consumer; world consumer {{ import {interface}; }}"
+                    )
+                    .as_bytes()
+                    .into(),
+                    dependencies: vec![dependency.clone()],
+                },
+                Some("consumer"),
+            )
+        };
+        generate("test:producer/api@1.0.0")?;
+        let error = generate("wasi:clocks/types@0.3.0").unwrap_err();
+        assert_eq!(
+            error.diagnostics[0].code,
+            perry_wit::DiagnosticCode::WitResolution
+        );
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("types") && message.contains("wasi:clocks"),
+            "{message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ambient_packages_keep_explicit_and_transitive_precedence() -> anyhow::Result<()> {
     if let Some(directory) = std::env::var_os("PERRY_AMBIENT_WIT_PROBE") {
         let (resolve, _) = resolve_wit(&PathBuf::from(directory).join("application"))?;
         let mut random_packages = resolve
@@ -76,6 +125,35 @@ fn encoded_ambient_wasi_packages_are_not_embedded_again() -> anyhow::Result<()> 
             random.interfaces.contains_key("ambient-marker"),
             "the encoded ambient package must take precedence over embedded sources"
         );
+        for (explicit, expected) in [
+            ("", wit_parser::Type::U32),
+            (
+                "package test:n@1.0.0 { interface api { type value = u64; } }",
+                wit_parser::Type::U64,
+            ),
+        ] {
+            for imports in [
+                "import test:n/api@1.0.0; import test:b/api@1.0.0;",
+                "import test:b/api@1.0.0; import test:n/api@1.0.0;",
+                "import test:b/api@1.0.0;",
+            ] {
+                let source =
+                    format!("package test:consumer; world consumer {{ {imports} }} {explicit}");
+                let (resolve, _) = resolve_source("consumer.wit", &source)?;
+                let package = resolve
+                    .packages
+                    .iter()
+                    .find(|(_, package)| package.name.to_string() == "test:n@1.0.0")
+                    .expect("selected transitive package")
+                    .1;
+                let api = &resolve.interfaces[package.interfaces["api"]];
+                let value = &resolve.types[api.types["value"]].kind;
+                assert!(
+                    matches!(value, wit_parser::TypeDefKind::Type(found) if *found == expected),
+                    "{imports} (explicit={explicit}): {value:?}"
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -113,10 +191,22 @@ fn encoded_ambient_wasi_packages_are_not_embedded_again() -> anyhow::Result<()> 
         wit_component::encode(&resolve, package, false)?,
     )?;
 
+    fs::write(
+        ambient.join("a.wit"),
+        "package test:n@1.0.0; interface api { type value = u32; }",
+    )?;
+    fs::write(
+        ambient.join("b.wit"),
+        "package test:b@1.0.0;
+        interface api { use test:n/api@1.0.0.{value}; read: func() -> value; }
+        package test:n@1.0.0 { interface api { type value = string; } }
+        package test:unrelated@1.0.0 { interface api { use missing:dependency/api.{value}; read: func() -> value; } }",
+    )?;
+
     let result = std::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
-            "wit_resolution_test::encoded_ambient_wasi_packages_are_not_embedded_again",
+            "wit_resolution_test::ambient_packages_keep_explicit_and_transitive_precedence",
             "--nocapture",
         ])
         .env("PERRY_AMBIENT_WIT_PROBE", directory.path())
