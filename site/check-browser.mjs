@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 import { readFile, readdir, mkdir, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
 import { resolve, dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,7 @@ try {
         let path = decodeURIComponent(url.pathname.slice(prefix.length));
         if (path.endsWith('/') || !path) path += 'index.html';
         if (path.split('/').includes('..')) return route.abort();
+        if (path === 'style.css') await delay(100);
         try { await route.fulfill({ body: await readFile(join(directory, path)), contentType: mime[extname(path)] || 'application/octet-stream' }); }
         catch { await route.fulfill({ status: 404, body: `Missing ${path}` }); }
       });
@@ -124,6 +126,7 @@ try {
       await page.screenshot({ path: `site/test-results/${name}-home.png`, fullPage: true });
       const codeStyle = await page.locator('.editors pre').first().evaluate(element => { const style = getComputedStyle(element); return [style.backgroundColor, style.border, style.borderRadius, style.padding, style.font]; });
       await page.getByRole('link', { name: 'Try the playground' }).click();
+      await page.waitForURL(`${origin}${prefix}play/`, { waitUntil: 'load' });
       assert.deepEqual(await page.locator('#source').evaluate(element => { const style = getComputedStyle(element); return [style.backgroundColor, style.border, style.borderRadius, style.padding, style.font]; }), codeStyle, 'Homepage and playground code fields share the same styling');
       await page.waitForFunction(() => document.getElementById('source').value.length > 0);
       assert.equal(await page.locator('footer').innerText(), footerText);
