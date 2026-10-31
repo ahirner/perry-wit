@@ -131,6 +131,12 @@
                   # Cargo rejects Perry's checked-in packaging backups.
                   find third_party -name Cargo.toml.orig -delete
                 '';
+                postInstall = (old.postInstall or "") + ''
+                  # Perry includes shared source files through unversioned sibling paths.
+                  for crate in perry-runtime perry-runtime-manifest perry-abi; do
+                    ln -s "$out/$crate-${perryLock.version}" "$out/$crate"
+                  done
+                '';
               })
             else drv;
         };
