@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use perry_conformance::{
     registry,
-    runner::{self, RunOptions, Settings},
+    runner::{self, Settings},
 };
 use std::{env, path::PathBuf};
 
@@ -9,21 +9,9 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let action = args.next().unwrap_or_else(|| "check".into());
     match action.as_str() {
-        "replay" => {
-            let path = PathBuf::from(args.next().context("replay requires a saved case")?);
-            let mut output = None;
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--output-dir" => {
-                        output = Some(PathBuf::from(
-                            args.next().context("--output-dir needs a value")?,
-                        ))
-                    }
-                    _ => bail!("unknown option {flag}"),
-                }
-            }
-            runner::replay_with_output(&path, output.as_deref())
-        }
+        "replay" => runner::replay(&PathBuf::from(
+            args.next().context("replay requires a saved case")?,
+        )),
         "list" => {
             println!(
                 "{}",
@@ -42,7 +30,6 @@ fn main() -> Result<()> {
         }
         "check" => {
             let mut settings = Settings::default();
-            let mut options = RunOptions::default();
             while let Some(flag) = args.next() {
                 let value = args
                     .next()
@@ -56,16 +43,14 @@ fn main() -> Result<()> {
                     "--fuel" => settings.limits.fuel = value.parse()?,
                     "--memory" => settings.limits.memory_bytes = value.parse()?,
                     "--timeout" => settings.limits.timeout_seconds = value.parse()?,
-                    "--shard" => options.shard = Some(value.parse()?),
-                    "--output-dir" => options.output_dir = Some(value.into()),
                     _ => bail!("unknown option {flag}"),
                 }
             }
-            runner::campaign_with_options(settings, options)?;
+            runner::campaign(settings)?;
             Ok(())
         }
         _ => bail!(
-            "Usage: perry-conformance list | doc | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] [--shard INDEX/COUNT] [--output-dir PATH] | replay CASE.json [--output-dir PATH]"
+            "Usage: perry-conformance list | doc | check [--select ID] [--cases N] [--depth N] [--seed N] [--shrink-limit N] [--fuel N] [--memory BYTES] [--timeout SECONDS] | replay CASE.json"
         ),
     }
 }

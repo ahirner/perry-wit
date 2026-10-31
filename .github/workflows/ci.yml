@@ -20,20 +20,33 @@ jobs:
   conformance-and-tests:
     runs-on: ubuntu-latest
     steps:
+    - uses: endersonmenezes/free-disk-space@v4
+      with:
+        rm_cmd: "rmz"
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
     - uses: actions/checkout@v7
-    - uses: ./.github/actions/nix-ci
+    - uses: cachix/install-nix-action@v31
       with:
-        cargo-cache: 'true'
-        cachix-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - name: Test dependency automation
-      run: nix develop -c python3 -m unittest discover -s scripts/tests
+        nix_path: nixpkgs=channel:nixos-unstable
+    - uses: cachix/cachix-action@v17
+      with:
+        name: 'cybertreiber'
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - name: Run tests, benchmarks, conformance, and clippy
-      run: nix develop -c python3 scripts/ci_checks.py --conformance
-    - uses: actions/upload-artifact@v7
-      if: failure()
-      with:
-        name: test-logs
-        path: target/ci/
+      run: |
+        nix develop -c bash -euo pipefail -c '
+          cargo fetch --manifest-path runtime/Cargo.toml --locked
+          cargo test --workspace --locked
+          cargo test --locked --test benchmark -- --ignored --nocapture
+          cargo test --manifest-path runtime/Cargo.toml --workspace --locked
+          cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked
+          cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+          cargo run --locked -p perry-conformance -- check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        '
 
   flake-build:
     strategy:

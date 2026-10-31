@@ -5,7 +5,6 @@
 .DS_Store
 .direnv/
 .env
-__pycache__/
 result*
 
 # Resolved WIT dependencies sourced from the pinned flake
