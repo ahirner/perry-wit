@@ -341,6 +341,7 @@ pub(crate) fn unresolved_types(
                             object,
                             property,
                             value,
+                            ..
                         }) if matches!(object.as_ref(), Expr::This) && *property == field.name => {
                             Some(expression(value, &mut env)).filter(is_resolvable_type)
                         }

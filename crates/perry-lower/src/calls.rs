@@ -100,6 +100,7 @@ impl<'s> FunctionBuilder<'s> {
         callee: &'s Expr,
         args: &'s [Expr],
         byte_offset: u32,
+        byte_end: u32,
     ) -> Result<Option<Value>> {
         if let Some(call) = hir_compat::runtime_call(callee, args) {
             return match call {
@@ -252,7 +253,7 @@ impl<'s> FunctionBuilder<'s> {
                         actual: args.len(),
                     })
                     .into();
-                return Err(self.shapes.annotate_call(error, byte_offset));
+                return Err(self.shapes.annotate_call(error, byte_offset, byte_end));
             }
             let mut values = Vec::new();
             for (arg, (_, ty, _)) in args.iter().zip(&signature.params) {
@@ -320,7 +321,7 @@ impl<'s> FunctionBuilder<'s> {
                     let error = anyhow!(
                         "indirect calls through local or parameter bindings are not supported yet; call a declared module function directly"
                     );
-                    let error = self.shapes.annotate_call(error, byte_offset);
+                    let error = self.shapes.annotate_call(error, byte_offset, byte_end);
                     self.shapes.annotate_local(error, *id)
                 }
                 Expr::Closure { .. } => anyhow!(

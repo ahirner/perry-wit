@@ -262,12 +262,16 @@ impl Instances<'_> {
             args,
             type_args,
             byte_offset,
+            byte_end,
         } = expr
             && let Expr::FuncRef(id) = callee.as_mut()
             && let Some(function) = self.templates.get(id)
         {
-            let arguments = arguments(function, args, type_args, env)
-                .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
+            let arguments = arguments(function, args, type_args, env).map_err(|error| {
+                env.metadata
+                    .locations
+                    .annotate_call(error, *byte_offset, *byte_end)
+            })?;
             *id = self.request(function, arguments, env)?;
             type_args.clear();
         }
@@ -341,6 +345,7 @@ fn materialize_constructor(
         type_args: types,
         args: init.into_iter().collect(),
         byte_offset: 0,
+        byte_end: 0,
         cap_args_appended: 0,
     };
 }

@@ -158,11 +158,12 @@ impl<'s> FunctionBuilder<'s> {
                 callee,
                 args,
                 byte_offset,
+                byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset)
+                .call(ctx, callee, args, *byte_offset, *byte_end)
                 .and_then(|value| value.context("a void call has no value"))
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset, *byte_end))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
             Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
@@ -386,16 +387,21 @@ impl<'s> FunctionBuilder<'s> {
                 object,
                 property,
                 byte_offset,
+                byte_end,
             } => self.property_get(ctx, object, property).map_err(|error| {
                 crate::diagnostics::annotate(
                     error,
-                    self.shapes.metadata.locations.member_span(*byte_offset),
+                    self.shapes
+                        .metadata
+                        .locations
+                        .expression_span(*byte_offset, *byte_end),
                 )
             })?,
             Expr::PropertySet {
                 object,
                 property,
                 value,
+                ..
             } => self.set_field(ctx, object, property, value)?,
             Expr::PutValueSet {
                 target, key, value, ..
@@ -501,11 +507,12 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
-            Expr::IndexGet { object, index } => self.index_get(ctx, object, index)?,
+            Expr::IndexGet { object, index, .. } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
                 object,
                 index,
                 value,
+                ..
             } => self.set_index(ctx, object, index, value)?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };
