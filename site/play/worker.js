@@ -9,8 +9,6 @@ import * as http from '@bytecodealliance/preview3-shim/http';
 import * as random from '@bytecodealliance/preview3-shim/random';
 
 const camel = name => name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-const send = (kind, data) => postMessage({ kind, ...data });
-const progress = message => send('progress', { message });
 
 function applicationImports(names) {
   const groups = { 'wasi:cli': cli, 'wasi:clocks': clocks, 'wasi:http': http, 'wasi:random': random };
@@ -49,6 +47,8 @@ function callableExports(generated, exports) {
 }
 
 self.onmessage = async ({ data }) => {
+  const send = (kind, result) => postMessage({ kind, id: data.id, ...result });
+  const progress = message => send('progress', { message });
   let log = '';
   let phase = 'load';
   const decoder = new TextDecoder();
@@ -61,6 +61,11 @@ self.onmessage = async ({ data }) => {
     const response = await fetch(new URL(`../../downloads/perry-wit.wasm${new URL(import.meta.url).search}`, import.meta.url));
     if (!response.ok) throw new Error(`Could not load compiler: HTTP ${response.status}`);
     const compiler = await instantiateCompiler(new Uint8Array(await response.arrayBuffer()));
+    if (data.action === 'generate-sdk') {
+      phase = 'generate-sdk';
+      send('sdk', { files: compiler.api.generateSdk(data.wit, data.options?.world) });
+      return;
+    }
     progress('Compiling…');
     phase = 'compile';
     const started = performance.now();
