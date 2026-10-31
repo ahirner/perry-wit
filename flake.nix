@@ -124,6 +124,15 @@
         };
         cargoVendorDir = craneLib.vendorMultipleCargoDeps {
           cargoLockList = [ ./Cargo.lock ./runtime/Cargo.lock ];
+          overrideVendorGitCheckout = packages: drv:
+            if builtins.any (package: package.name == "perry-hir") packages then
+              drv.overrideAttrs (old: {
+                postPatch = (old.postPatch or "") + ''
+                  # Cargo rejects Perry's checked-in packaging backups.
+                  find third_party -name Cargo.toml.orig -delete
+                '';
+              })
+            else drv;
         };
         compilerArgs = {
           inherit src cargoVendorDir;
