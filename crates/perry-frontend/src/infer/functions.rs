@@ -262,16 +262,13 @@ impl Instances<'_> {
             args,
             type_args,
             byte_offset,
-            byte_end,
+            ..
         } = expr
             && let Expr::FuncRef(id) = callee.as_mut()
             && let Some(function) = self.templates.get(id)
         {
-            let arguments = arguments(function, args, type_args, env).map_err(|error| {
-                env.metadata
-                    .locations
-                    .annotate_call(error, *byte_offset, *byte_end)
-            })?;
+            let arguments = arguments(function, args, type_args, env)
+                .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
             *id = self.request(function, arguments, env)?;
             type_args.clear();
         }

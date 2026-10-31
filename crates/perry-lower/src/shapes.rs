@@ -184,18 +184,8 @@ impl<'h> Shapes<'h> {
         crate::diagnostics::annotate(error, self.metadata.locations.offset_span(byte_offset, len))
     }
 
-    pub(super) fn annotate_call(
-        &self,
-        error: anyhow::Error,
-        byte_offset: u32,
-        byte_end: u32,
-    ) -> anyhow::Error {
-        crate::diagnostics::annotate(
-            error,
-            self.metadata
-                .locations
-                .expression_span(byte_offset, byte_end),
-        )
+    pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+        crate::diagnostics::annotate(error, self.metadata.locations.call_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {

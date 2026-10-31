@@ -158,12 +158,11 @@ impl<'s> FunctionBuilder<'s> {
                 callee,
                 args,
                 byte_offset,
-                byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset, *byte_end)
+                .call(ctx, callee, args, *byte_offset)
                 .and_then(|value| value.context("a void call has no value"))
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset, *byte_end))?,
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
             Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
@@ -387,14 +386,11 @@ impl<'s> FunctionBuilder<'s> {
                 object,
                 property,
                 byte_offset,
-                byte_end,
+                ..
             } => self.property_get(ctx, object, property).map_err(|error| {
                 crate::diagnostics::annotate(
                     error,
-                    self.shapes
-                        .metadata
-                        .locations
-                        .expression_span(*byte_offset, *byte_end),
+                    self.shapes.metadata.locations.member_span(*byte_offset),
                 )
             })?,
             Expr::PropertySet {

@@ -417,12 +417,11 @@ impl<'s> FunctionBuilder<'s> {
             callee,
             args,
             byte_offset,
-            byte_end,
             ..
         } = expr
         {
-            self.call(ctx, callee, args, *byte_offset, *byte_end)
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset, *byte_end))?;
+            self.call(ctx, callee, args, *byte_offset)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
         } else if let Expr::StaticMethodCall {
             class_name,
             method_name,

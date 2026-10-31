@@ -18,6 +18,8 @@ struct FunctionInfo {
 pub struct Locations<'s> {
     files: Vec<(PathBuf, &'s str, u32)>,
     functions: HashMap<String, FunctionInfo>,
+    calls: HashMap<u32, Span>,
+    members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
@@ -101,8 +103,18 @@ impl<'s> Locations<'s> {
         ))
     }
 
-    pub fn expression_span(&self, start: u32, end: u32) -> Option<SourceSpan> {
-        self.offset_span(start, end.saturating_sub(start).max(1))
+    pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+        self.calls
+            .get(&byte_offset)
+            .and_then(|span| self.span(*span))
+            .or_else(|| self.offset_span(byte_offset, 1))
+    }
+
+    pub fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+        self.members
+            .get(&byte_offset)
+            .and_then(|span| self.span(*span))
+            .or_else(|| self.call_span(byte_offset))
     }
 
     pub fn type_span(&self, name: &str) -> Option<SourceSpan> {
@@ -113,13 +125,8 @@ impl<'s> Locations<'s> {
         self.imports.get(source).and_then(|span| self.span(*span))
     }
 
-    pub(crate) fn annotate_call(
-        &self,
-        error: anyhow::Error,
-        byte_offset: u32,
-        byte_end: u32,
-    ) -> anyhow::Error {
-        Self::attach(error, self.expression_span(byte_offset, byte_end))
+    pub(crate) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+        Self::attach(error, self.call_span(byte_offset))
     }
 
     fn span(&self, span: Span) -> Option<SourceSpan> {
@@ -181,6 +188,24 @@ impl<'s> Locations<'s> {
                     }
                 }
                 decl.visit_children_with(self);
+            }
+            fn visit_call_expr(&mut self, call: &ast::CallExpr) {
+                if call.span.lo.0 != 0 {
+                    self.locations.calls.insert(call.span.lo.0, call.span);
+                }
+                call.visit_children_with(self);
+            }
+            fn visit_member_expr(&mut self, member: &ast::MemberExpr) {
+                self.locations.members.insert(member.span.lo.0, member.span);
+                member.visit_children_with(self);
+            }
+            fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
+                if new_expr.span.lo.0 != 0 {
+                    self.locations
+                        .calls
+                        .insert(new_expr.span.lo.0, new_expr.span);
+                }
+                new_expr.visit_children_with(self);
             }
             fn visit_ts_interface_decl(&mut self, decl: &ast::TsInterfaceDecl) {
                 self.locations
