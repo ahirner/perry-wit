@@ -155,6 +155,33 @@ try {
       assert.equal(requests.filter(path => path === `${prefix}downloads/perry-wit.wasm`).length, 1, 'Compilation must load the downloadable compiler once');
       assert(!requests.some(path => path.includes('/assets/compiler/')), 'Compilation must not fetch separate compiler modules');
       assert(assetVersions.length > 1 && assetVersions.every(version => version && version === assetVersions[0]), 'Worker, compiler and engine assets must share a build version');
+      const [sdk, sdkError] = await page.evaluate(async version => {
+        const worker = new Worker(`./assets/worker.js?v=${version}`, { type: 'module' });
+        const request = data => new Promise((resolve, reject) => {
+          worker.onmessage = ({ data }) => resolve(data);
+          worker.onerror = event => reject(new Error(event.message));
+          worker.postMessage(data);
+        });
+        try {
+          const wit = { application: { tag: 'sources', val: [{ contents: new TextEncoder().encode(
+            'package test:worker; world other { export unused: func(); } world selected { export run: func() -> u32; }',
+          ) }] }, dependencies: [] };
+          const sdk = await request({ id: 'sdk', action: 'generate-sdk', wit, options: { world: 'selected' } });
+          wit.application.val[0].contents = new Uint8Array([255]);
+          const error = await request({ id: 'invalid', action: 'generate-sdk', wit });
+          return [{ ...sdk, files: sdk.files.map(file => ({ name: file.name, text: new TextDecoder().decode(file.contents) })) }, error];
+        } finally { worker.terminate(); }
+      }, assetVersions[0]);
+      assert.equal(sdk.kind, 'sdk');
+      assert.equal(sdk.id, 'sdk');
+      assert.deepEqual(sdk.files.map(file => file.name), ['world.d.ts', 'imports.d.ts', 'runtime.d.ts']);
+      assert.match(sdk.files[0].text, /\brun\b/);
+      assert.doesNotMatch(sdk.files[0].text, /\bunused\b/);
+      assert.equal(sdkError.kind, 'error');
+      assert.equal(sdkError.id, 'invalid');
+      assert.equal(sdkError.phase, 'generate-sdk');
+      assert(sdkError.diagnostics.length > 0);
+      assert.match(sdkError.message, /UTF-8/);
       await page.screenshot({ path: `site/test-results/${name}-example.png`, fullPage: true });
       compilerFailure = true;
       await page.locator('#compile').click();
