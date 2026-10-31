@@ -401,18 +401,18 @@ dependencies = [
 
 [[package]]
 name = "cranelift-assembler-x64"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3307701abcb90554ee72fdb0db36ee0334a4abe380c4d87a5b04a6942613c3a"
+checksum = "80552083a2db143c5d951debe9f59a7d9f22084c70abe450fed5220060fa26c3"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
 
 [[package]]
 name = "cranelift-assembler-x64-meta"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62d0e19f9f5fa0c4243236df1ffdf139d207600b4402ac41ceba8dbe7ca0f3d"
+checksum = "7cf84b7e5f0aa42cb0d55cabf01c520fdb70a50d8b572a841ee875083589d643"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -484,15 +484,15 @@ dependencies = [
 
 [[package]]
 name = "cranelift-codegen-shared"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5200fa877fb64cd30cabe0603f394333f88f69adf63e4db8d48a111d0c9d0dd"
+checksum = "e667a0e9ed3bbbed0e7e52cd2dea85a645745b39f547097e2fca0bf317cac9df"
 
 [[package]]
 name = "cranelift-control"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b86250e480795fbb4425ea703bca7b75282998458ce74f5360843a31949f2bbc"
+checksum = "a5fa7d5123705226a368b6b1c7b10f23036c35e8041ffdd5f6505790f5c31404"
 dependencies = [
  "arbitrary",
 ]
@@ -542,9 +542,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-srcgen"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d633ff621e7f31a943431da0d7dd37c4376766c60bd7171216de1c7ccabfb370"
+checksum = "6f34b169b8cbbaed2b4995205f1d02d7eac4b2771df5479255fe5483e1334a39"
 
 [[package]]
 name = "crc32fast"
@@ -624,9 +624,9 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.42"
+version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
 dependencies = [
  "cfg-if",
  "core_detect",
@@ -1173,9 +1173,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mach2"
@@ -1324,16 +1324,21 @@ name = "perry-abi"
 version = "0.1.0"
 
 [[package]]
+name = "perry-abi"
+version = "0.5.1663"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+
+[[package]]
 name = "perry-api-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 
 [[package]]
 name = "perry-codegen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "perry-abi",
+ "perry-abi 0.1.0",
  "perry-mir",
  "pliron",
  "pliron-wasm",
@@ -1373,7 +1378,7 @@ dependencies = [
 [[package]]
 name = "perry-diagnostics"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1382,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "perry-dispatch"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 
 [[package]]
 name = "perry-frontend"
@@ -1405,13 +1410,14 @@ dependencies = [
 [[package]]
 name = "perry-hir"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 dependencies = [
  "anyhow",
  "perry-api-manifest",
  "perry-diagnostics",
  "perry-dispatch",
  "perry-parser",
+ "perry-runtime-manifest",
  "perry-ui-model",
  "ryu-js",
  "serde",
@@ -1446,7 +1452,7 @@ dependencies = [
 name = "perry-mir"
 version = "0.1.0"
 dependencies = [
- "perry-abi",
+ "perry-abi 0.1.0",
  "perry-wit-diagnostics",
  "pliron",
  "pliron-control",
@@ -1456,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "perry-parser"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -1471,7 +1477,7 @@ dependencies = [
 name = "perry-rt-build"
 version = "0.1.0"
 dependencies = [
- "perry-abi",
+ "perry-abi 0.1.0",
  "serde_json",
  "wasmparser 0.261.0",
  "wat",
@@ -1481,7 +1487,7 @@ dependencies = [
 name = "perry-rt-sys"
 version = "0.1.0"
 dependencies = [
- "perry-abi",
+ "perry-abi 0.1.0",
  "perry-runtime",
 ]
 
@@ -1490,14 +1496,23 @@ name = "perry-runtime"
 version = "0.1.0"
 dependencies = [
  "libm",
- "perry-abi",
+ "perry-abi 0.1.0",
  "talc",
+]
+
+[[package]]
+name = "perry-runtime-manifest"
+version = "0.5.1663"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+dependencies = [
+ "perry-abi 0.5.1663",
+ "perry-dispatch",
 ]
 
 [[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=be6740f46e85db2ab5524bc11cd5af53f29f7846#be6740f46e85db2ab5524bc11cd5af53f29f7846"
+source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
 
 [[package]]
 name = "perry-wit"
@@ -1508,7 +1523,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "perry-abi",
+ "perry-abi 0.1.0",
  "perry-codegen",
  "perry-contract",
  "perry-frontend",
@@ -1592,7 +1607,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pliron"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=58797e44a51220e62bac7c91bab458c6a0e08a9b#58797e44a51220e62bac7c91bab458c6a0e08a9b"
+source = "git+https://github.com/pliron-org/pliron?rev=88ba88fca1ee566e53f23e10d7238f131ecc6662#88ba88fca1ee566e53f23e10d7238f131ecc6662"
 dependencies = [
  "awint",
  "combine",
@@ -1622,7 +1637,7 @@ version = "0.1.0"
 [[package]]
 name = "pliron-derive"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=58797e44a51220e62bac7c91bab458c6a0e08a9b#58797e44a51220e62bac7c91bab458c6a0e08a9b"
+source = "git+https://github.com/pliron-org/pliron?rev=88ba88fca1ee566e53f23e10d7238f131ecc6662#88ba88fca1ee566e53f23e10d7238f131ecc6662"
 dependencies = [
  "combine",
  "convert_case",
@@ -1906,9 +1921,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -2124,9 +2139,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.3"
+version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 dependencies = [
  "serde",
 ]
@@ -2624,9 +2639,9 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "untrusted"
@@ -2648,9 +2663,18 @@ dependencies = [
 
 [[package]]
 name = "utf8_iter"
-version = "1.0.4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+checksum = "af3bd9d3e571c26fcce9d033b87ea5ab061b8d2ffe9b7a5675d810d68f03edf0"
+dependencies = [
+ "utf_types",
+]
+
+[[package]]
+name = "utf_types"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "version_check"
