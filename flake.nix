@@ -475,6 +475,7 @@
             # Headless WPE WebKit still needs an EGL provider on Linux.
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mesa.llvmpipeHook ];
           PLAYWRIGHT_BROWSERS_PATH = pkgs.playwright-driver.browsers;
+          PLAYWRIGHT_DRIVER_PATH = "${pkgs.playwright-driver}/index.mjs";
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         };
 
