@@ -208,6 +208,50 @@ builtin.module @optional {
 }
 
 #[test]
+fn unwrap_reuse_respects_dominance_and_caught_failures() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        r#"
+builtin.module @unwraps {
+  ^module():
+    builtin.func @run: builtin.function <(builtin.integer i1, perry.optional <builtin.fp64,Undefined>) -> (builtin.fp64)> {
+      ^entry(flag: builtin.integer i1, maybe: perry.optional <builtin.fp64,Undefined>):
+        perry.cond_br if flag ^left() else ^right()
+      ^left():
+        first = perry.unwrap maybe : builtin.fp64;
+        perry.br ^deeper()
+      ^deeper():
+        second = perry.unwrap maybe : builtin.fp64;
+        perry.return second
+      ^right():
+        caught = perry.unwrap maybe : builtin.fp64;
+        status = perry.caught : builtin.integer i32;
+        retry = perry.unwrap maybe : builtin.fp64;
+        perry.return retry
+    }
+}
+"#,
+    );
+    verify_operation(module, ctx)?;
+    let mut analyses = AnalysisManager::default();
+    let result = crate::unwraps::reuse_unwraps(module, ctx, &mut analyses)?;
+    assert_eq!(result.ir_changed, IRStatus::Changed);
+    verify_operation(module, ctx)?;
+    let printed = print(ctx, module);
+    assert_eq!(printed.matches("perry.unwrap").count(), 3, "{printed}");
+    assert!(
+        normalized(&printed).contains("perry.return first"),
+        "{printed}"
+    );
+    assert_eq!(
+        crate::unwraps::reuse_unwraps(module, ctx, &mut analyses)?.ir_changed,
+        IRStatus::Unchanged
+    );
+    Ok(())
+}
+
+#[test]
 fn sccp_propagates_block_arguments_and_removes_constant_branches() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(

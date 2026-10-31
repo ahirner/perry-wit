@@ -312,7 +312,7 @@ fn reuse_candidates(
 /// Fuse unobserved array combinations while their snapshots remain unchanged.
 fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
     use crate::{collections::ConcatOp, types::ArrayType};
-    use pliron::{op::op_cast, opts::dce::SideEffects};
+    use pliron::opts::dce::has_side_effects;
     let mut changed = false;
     for function in functions(root, ctx) {
         for op in operations(ctx, &function) {
@@ -341,10 +341,8 @@ fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
                         if intermediate == op {
                             return true;
                         }
-                        let operation = Operation::get_op_dyn(intermediate, ctx);
                         if crate::semantics::exception(ctx, intermediate).is_some()
-                            || op_cast::<dyn SideEffects>(operation.as_ref())
-                                .is_none_or(|effect| effect.has_side_effects(ctx))
+                            || has_side_effects(intermediate, ctx)
                         {
                             return false;
                         }
