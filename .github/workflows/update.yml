@@ -115,7 +115,7 @@ jobs:
             Saved cases in `scripts/dependency-evidence/` are review evidence; replay with `nix develop -c cargo run --locked -p perry-conformance -- replay PATH.json`.
             Existing PR CI runs the standard suite. This branch is bot-owned; branch off it for combined upgrades and fixes.
       - name: Set draft state from conformance results
-        if: steps.pr.outputs.pull-request-number != ''
+        if: steps.pr.outputs.pull-request-number != '' && steps.pr.outputs.pull-request-operation != 'closed'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
           PR: ${{ steps.pr.outputs.pull-request-number }}
